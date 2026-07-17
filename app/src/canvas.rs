@@ -11,6 +11,7 @@ use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
 use crate::doc::AppState;
+use crate::paint::{Dab, PaintLayer};
 
 /// Default new-project resolution (the New Project dialog's starting values).
 pub const DEFAULT_PAPER_W: u32 = 1920;
@@ -79,6 +80,15 @@ pub struct CanvasView {
     dbg_none: u32,
     cur_some: u32,
     cur_none: u32,
+
+    // --- Raster brush (Phase 1: a single GPU scratch layer, not yet wired to
+    // frames/drawings/undo/persistence — that's Phase 2) ---
+    raster: bool,
+    raster_brush_px: f32,
+    /// How many of the current stroke's dabs are already on the GPU layer.
+    dabs_flushed: usize,
+    /// The stroke finished this frame; flush its last dabs, then reset.
+    raster_stroke_done: bool,
 }
 
 impl CanvasView {
@@ -102,17 +112,53 @@ impl CanvasView {
             dbg_none: 0,
             cur_some: 0,
             cur_none: 0,
+            raster: true,
+            raster_brush_px: 14.0,
+            dabs_flushed: 0,
+            raster_stroke_done: false,
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, state: &mut AppState, paint: Option<&mut PaintLayer>) {
+        let mut paint = paint;
         // ---- Toolbar ------------------------------------------------------
         ui.horizontal(|ui| {
-            ui.add(
-                egui::Slider::new(&mut self.brush_width, 0.5..=16.0)
-                    .text("brush")
-                    .fixed_decimals(1),
-            );
+            let raster_available = paint.is_some();
+            if raster_available {
+                ui.checkbox(&mut self.raster, "raster")
+                    .on_hover_text("GPU raster brush (Phase 1 preview: one scratch layer, not yet per-frame/undo/saved)");
+                ui.separator();
+            } else {
+                self.raster = false;
+            }
+
+            if self.raster {
+                ui.add(
+                    egui::Slider::new(&mut self.raster_brush_px, 1.0..=300.0)
+                        .text("px")
+                        .fixed_decimals(0),
+                );
+                if ui.button("clear layer").clicked()
+                    && let Some(p) = paint.as_deref_mut() {
+                        p.clear();
+                    }
+                if ui.button("test").on_hover_text("stamp test dabs (checks the GPU display path)").clicked()
+                    && let Some(p) = paint.as_deref_mut() {
+                        let (w, h) = p.size();
+                        let col = linear_rgba(self.brush_color);
+                        let test = vec![
+                            Dab { center: [w as f32 * 0.35, h as f32 * 0.5], radius: h as f32 * 0.18, hardness: 0.5, color: col },
+                            Dab { center: [w as f32 * 0.65, h as f32 * 0.5], radius: h as f32 * 0.10, hardness: 0.95, color: col },
+                        ];
+                        p.paint(&test);
+                    }
+            } else {
+                ui.add(
+                    egui::Slider::new(&mut self.brush_width, 0.5..=16.0)
+                        .text("brush")
+                        .fixed_decimals(1),
+                );
+            }
             ui.separator();
             for c in SWATCHES {
                 let selected = self.brush_color == c;
@@ -209,6 +255,22 @@ impl CanvasView {
             self.touch_active = false;
         }
 
+        // ---- Raster: stamp the stroke's new dabs onto the GPU layer -------
+        if self.raster
+            && let Some(p) = paint.as_deref_mut() {
+                p.ensure_size(state.engine.project.width, state.engine.project.height);
+                let dabs = self.build_stroke_dabs();
+                if dabs.len() > self.dabs_flushed {
+                    p.paint(&dabs[self.dabs_flushed..]);
+                    self.dabs_flushed = dabs.len();
+                }
+                if self.raster_stroke_done {
+                    self.current.clear();
+                    self.dabs_flushed = 0;
+                    self.raster_stroke_done = false;
+                }
+            }
+
         // ---- Render layers ------------------------------------------------
         let cut = state.cut();
         let active_col = state.active_column;
@@ -241,15 +303,27 @@ impl CanvasView {
                 draw_strokes(&painter, &d.strokes, &to_screen, scale, None);
             }
 
-        // 4. In-progress stroke preview.
-        if self.current.len() >= 2 {
+        // 3b. The GPU raster layer, drawn over the paper at the paper rect.
+        if self.raster
+            && let Some(p) = paint {
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                painter.image(p.texture_id(), paper_rect, uv, Color32::WHITE);
+            }
+
+        // 4. In-progress stroke preview (vector mode only — the raster layer
+        //    already shows the live stroke when raster is on).
+        if !self.raster && self.current.len() >= 2 {
             let c = self.brush_color;
             let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
             fill_stroke(&painter, &self.current, self.brush_width, scale, color, &to_screen);
         }
 
-        // Empty-cell hint.
-        if !state.playing && state.current_drawing().is_none() && self.current.is_empty() {
+        // Empty-cell hint (vector mode only).
+        if !self.raster
+            && !state.playing
+            && state.current_drawing().is_none()
+            && self.current.is_empty()
+        {
             painter.text(
                 paper_rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -258,6 +332,57 @@ impl CanvasView {
                 Color32::from_gray(150),
             );
         }
+    }
+
+    /// Walk the current stroke's points into evenly spaced dabs (paper space).
+    /// Deterministic prefix: appending points only extends the tail, so
+    /// `dabs[dabs_flushed..]` are always genuinely new.
+    fn build_stroke_dabs(&self) -> Vec<Dab> {
+        let pts = &self.current;
+        let mut dabs = Vec::new();
+        if pts.is_empty() {
+            return dabs;
+        }
+        let color = linear_rgba(self.brush_color);
+        let hardness = 0.85;
+        let radius_of = |pr: f32| (self.raster_brush_px * pr * 0.5).max(0.5);
+
+        if pts.len() == 1 {
+            dabs.push(Dab {
+                center: [pts[0].x, pts[0].y],
+                radius: radius_of(pts[0].pressure),
+                hardness,
+                color,
+            });
+            return dabs;
+        }
+
+        let mut carry = 0.0f32; // distance into the next segment for the next dab
+        for w in pts.windows(2) {
+            let (ax, ay, apr) = (w[0].x, w[0].y, w[0].pressure);
+            let (bx, by, bpr) = (w[1].x, w[1].y, w[1].pressure);
+            let (dx, dy) = (bx - ax, by - ay);
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-4 {
+                continue;
+            }
+            let mut d = carry;
+            while d < len {
+                let t = d / len;
+                let pr = apr + (bpr - apr) * t;
+                let r = radius_of(pr);
+                dabs.push(Dab {
+                    center: [ax + dx * t, ay + dy * t],
+                    radius: r,
+                    hardness,
+                    color,
+                });
+                let step = (0.1 * (2.0 * r)).max(0.75); // spacing 0.1 * diameter
+                d += step;
+            }
+            carry = d - len;
+        }
+        dabs
     }
 
     fn handle_pen(
@@ -298,6 +423,8 @@ impl CanvasView {
                         self.raw_history = [p0; 3];
                         self.cur_some = 0;
                         self.cur_none = 0;
+                        self.dabs_flushed = 0;
+                        self.raster_stroke_done = false;
                         self.current.clear();
                         let p = to_paper(*pos);
                         self.current.push(StrokePoint {
@@ -333,6 +460,8 @@ impl CanvasView {
         if !self.touch_active && !touch_seen && self.mouse_lockout == 0 {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 self.current.clear();
+                self.dabs_flushed = 0;
+                self.raster_stroke_done = false;
                 if let Some(p) = response.interact_pointer_pos() {
                     let p = to_paper(p);
                     self.current.push(StrokePoint {
@@ -445,6 +574,13 @@ impl CanvasView {
             self.dbg_some = self.cur_some;
             self.dbg_none = self.cur_none;
         }
+        // Raster mode: dabs are stamped incrementally in ui(); just flag the
+        // final flush + reset. No vector taper/commit needed — dab radius
+        // already follows pressure, and opaque dabs don't get the tip blob.
+        if self.raster {
+            self.raster_stroke_done = true;
+            return;
+        }
         if self.current.len() < 2 {
             self.current.clear();
             return;
@@ -474,6 +610,19 @@ impl CanvasView {
 /// Median of three values (branch-light).
 fn median3(v: [f32; 3]) -> f32 {
     v[0].max(v[1]).min(v[0].min(v[1]).max(v[2]))
+}
+
+/// sRGB u8 swatch -> straight linear f32 RGBA (the dab shader premultiplies).
+fn linear_rgba(c: [u8; 4]) -> [f32; 4] {
+    let lin = |v: u8| {
+        let s = v as f32 / 255.0;
+        if s <= 0.04045 {
+            s / 12.92
+        } else {
+            ((s + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    [lin(c[0]), lin(c[1]), lin(c[2]), c[3] as f32 / 255.0]
 }
 
 /// Previous/next distinct drawings on a column, with their ghost tints.

@@ -85,6 +85,7 @@ name = "animstudio"
 version = "0.1.0"
 dependencies = [
  "anim-core",
+ "bytemuck",
  "eframe",
  "rfd",
  "wgpu",

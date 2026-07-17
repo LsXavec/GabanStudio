@@ -6,11 +6,14 @@
 mod canvas;
 mod doc;
 mod newproject;
+mod paint;
 mod xsheet_panel;
 
 use doc::AppState;
 use eframe::egui;
+use eframe::egui_wgpu::RenderState;
 use newproject::{FormAction, NewProjectForm};
+use paint::PaintLayer;
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -31,37 +34,64 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::<App>::default())
+            Ok(Box::new(App::new(cc)))
         }),
     )
 }
 
-#[derive(Default)]
 struct App {
+    /// Shared wgpu context from eframe (for the GPU raster paint layer).
+    render_state: Option<RenderState>,
     /// The open project (None until one is created/opened).
     editor: Option<Editor>,
     /// When Some, the New Project dialog is showing (startup, or "New…").
     new_form: Option<NewProjectForm>,
 }
 
+impl App {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        Self {
+            render_state: cc.wgpu_render_state.clone(),
+            editor: None,
+            new_form: None,
+        }
+    }
+}
+
 struct Editor {
     state: AppState,
     canvas: canvas::CanvasView,
+    /// GPU raster paint layer (None if wgpu is unavailable).
+    paint: Option<PaintLayer>,
     /// Set when the user clicks "New…"; the App picks it up to show the dialog.
     request_new: bool,
 }
 
 impl Editor {
-    fn from_form(form: &NewProjectForm) -> Self {
+    fn from_form(form: &NewProjectForm, rs: Option<&RenderState>) -> Self {
+        let state = AppState::new_project(
+            form.name.clone(),
+            form.width,
+            form.height,
+            form.fps,
+            form.dpi as f32,
+        );
+        let paint = rs.map(|rs| PaintLayer::new(rs, form.width, form.height));
         Self {
-            state: AppState::new_project(
-                form.name.clone(),
-                form.width,
-                form.height,
-                form.fps,
-                form.dpi as f32,
-            ),
+            state,
             canvas: canvas::CanvasView::new(),
+            paint,
+            request_new: false,
+        }
+    }
+
+    fn from_state(state: AppState, rs: Option<&RenderState>) -> Self {
+        let (w, h) = (state.engine.project.width, state.engine.project.height);
+        let paint = rs.map(|rs| PaintLayer::new(rs, w, h));
+        Self {
+            state,
+            canvas: canvas::CanvasView::new(),
+            paint,
             request_new: false,
         }
     }
@@ -122,15 +152,11 @@ impl App {
 
         match action {
             Some(FormAction::Create) => {
-                self.editor = Some(Editor::from_form(&form));
+                self.editor = Some(Editor::from_form(&form, self.render_state.as_ref()));
             }
             Some(FormAction::Open) => match AppState::pick_and_open() {
                 Some(Ok(state)) => {
-                    self.editor = Some(Editor {
-                        state,
-                        canvas: canvas::CanvasView::new(),
-                        request_new: false,
-                    });
+                    self.editor = Some(Editor::from_state(state, self.render_state.as_ref()));
                 }
                 Some(Err(_)) | None => {
                     // Load failed or cancelled — keep the dialog open.
@@ -283,7 +309,7 @@ impl Editor {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(24, 26, 30)))
             .show(ui, |ui| {
-                self.canvas.ui(ui, &mut self.state);
+                self.canvas.ui(ui, &mut self.state, self.paint.as_mut());
             });
     }
 }
