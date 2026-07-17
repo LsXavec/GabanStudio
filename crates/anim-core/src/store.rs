@@ -15,7 +15,7 @@ use crate::ids::*;
 use crate::model::{Cut, Drawing, Project, Scene};
 use crate::xsheet::{Column, Exposure, XSheet};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -57,6 +57,9 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
     put_meta.execute(("schema_version", SCHEMA_VERSION.to_string()))?;
     put_meta.execute(("name", project.name.clone()))?;
     put_meta.execute(("fps", project.fps.to_string()))?;
+    put_meta.execute(("width", project.width.to_string()))?;
+    put_meta.execute(("height", project.height.to_string()))?;
+    put_meta.execute(("dpi", project.dpi.to_string()))?;
     put_meta.execute(("next_id", project.next_id.to_string()))?;
     drop(put_meta);
 
@@ -145,11 +148,20 @@ pub fn load(path: &Path) -> Result<Project> {
         })
         .map_err(|_| EngineError::Corrupt(format!("missing meta key '{key}'")))
     };
+    // Optional key: absent in older schema versions -> caller's default.
+    let get_meta_opt = |key: &str| -> Option<String> {
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", (key,), |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
+    };
 
     let version: i64 = get_meta("schema_version")?
         .parse()
         .map_err(|_| EngineError::Corrupt("bad schema_version".into()))?;
-    if version != SCHEMA_VERSION {
+    // Accept this version and older (fields added in later versions default);
+    // reject only future/unknown versions we can't understand.
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(EngineError::SchemaVersion(version));
     }
 
@@ -160,6 +172,16 @@ pub fn load(path: &Path) -> Result<Project> {
     project.next_id = get_meta("next_id")?
         .parse()
         .map_err(|_| EngineError::Corrupt("bad next_id".into()))?;
+    // Resolution: added in schema v3; default for older files.
+    if let Some(w) = get_meta_opt("width").and_then(|s| s.parse().ok()) {
+        project.width = w;
+    }
+    if let Some(h) = get_meta_opt("height").and_then(|s| s.parse().ok()) {
+        project.height = h;
+    }
+    if let Some(d) = get_meta_opt("dpi").and_then(|s| s.parse().ok()) {
+        project.dpi = d;
+    }
 
     // Scenes
     let mut stmt = conn.prepare("SELECT id, name FROM scenes ORDER BY ord")?;

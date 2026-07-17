@@ -26,8 +26,19 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new_default() -> Self {
-        let mut engine = Engine::new("Untitled");
+    /// Create a project with a chosen resolution (from the New Project dialog).
+    pub fn new_project(
+        name: impl Into<String>,
+        width: u32,
+        height: u32,
+        fps: u32,
+        dpi: f32,
+    ) -> Self {
+        let mut engine = Engine::new(name);
+        engine.project.width = width.max(1);
+        engine.project.height = height.max(1);
+        engine.project.fps = fps.clamp(1, 240);
+        engine.project.dpi = dpi.max(1.0);
         let scene = engine.add_scene("SC01");
         let cut = engine.add_cut(scene, "CUT01", 48).expect("fresh scene");
         let at = CutRef { scene, cut };
@@ -46,6 +57,20 @@ impl AppState {
             file_path: None,
             status: "new project — draw on the canvas to create frame 1".into(),
         }
+    }
+
+    /// Load a project file into a ready AppState (used by the startup dialog).
+    pub fn load_from(path: std::path::PathBuf) -> std::result::Result<Self, String> {
+        let engine = Engine::load(&path).map_err(|e| e.to_string())?;
+        Self::adopt(engine, path)
+    }
+
+    /// Show a file picker and load the chosen project. None = user cancelled.
+    pub fn pick_and_open() -> Option<std::result::Result<Self, String>> {
+        let path = rfd::FileDialog::new()
+            .add_filter("AnimStudio project", &["animproj"])
+            .pick_file()?;
+        Some(Self::load_from(path))
     }
 
     /// Adopt a loaded engine, pointing the UI at its first scene/cut/column.
@@ -313,18 +338,10 @@ impl AppState {
     }
 
     pub fn open(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("AnimStudio project", &["animproj"])
-            .pick_file()
-        else {
-            return;
-        };
-        match Engine::load(&path) {
-            Ok(engine) => match Self::adopt(engine, path) {
-                Ok(new_state) => *self = new_state,
-                Err(msg) => self.status = format!("open failed: {msg}"),
-            },
-            Err(e) => self.status = format!("open failed: {e}"),
+        match Self::pick_and_open() {
+            Some(Ok(new_state)) => *self = new_state,
+            Some(Err(msg)) => self.status = format!("open failed: {msg}"),
+            None => {}
         }
     }
 }

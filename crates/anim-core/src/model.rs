@@ -79,6 +79,12 @@ pub struct Scene {
 pub struct Project {
     pub name: String,
     pub fps: u32,
+    /// Frame resolution in pixels — the "paper" every cut is drawn against.
+    /// Project-wide (a film has one resolution), set at project creation.
+    pub width: u32,
+    pub height: u32,
+    /// Pixels per inch, for print/export scaling. Purely metadata for drawing.
+    pub dpi: f32,
     pub scenes: Vec<Scene>,
     /// Monotonic id counter; all entity ids come from here.
     pub next_id: u64,
@@ -89,6 +95,9 @@ impl Project {
         Self {
             name: name.into(),
             fps: 24, // anime standard
+            width: 1920,
+            height: 1080,
+            dpi: 300.0,
             scenes: Vec::new(),
             next_id: 1,
         }

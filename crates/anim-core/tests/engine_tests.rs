@@ -634,6 +634,32 @@ fn strokes_survive_sqlite_roundtrip() {
 }
 
 #[test]
+fn project_resolution_survives_roundtrip() {
+    let mut engine = Engine::new("res test");
+    engine.project.width = 2048;
+    engine.project.height = 858;
+    engine.project.fps = 12;
+    engine.project.dpi = 144.0;
+    let scene = engine.add_scene("S");
+    engine.add_cut(scene, "C", 10).unwrap();
+
+    let dir = std::env::temp_dir().join("anim_core_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("res_{}.animproj", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    engine.save(&path).unwrap();
+    let loaded = Engine::load(&path).unwrap();
+    assert_eq!(loaded.project.width, 2048);
+    assert_eq!(loaded.project.height, 858);
+    assert_eq!(loaded.project.fps, 12);
+    assert_eq!(loaded.project.dpi, 144.0);
+    assert_eq!(engine.project, loaded.project);
+
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
 fn sqlite_roundtrip_preserves_everything() {
     let f = fixture();
     let dir = std::env::temp_dir().join("anim_core_tests");

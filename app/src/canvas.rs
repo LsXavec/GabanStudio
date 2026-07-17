@@ -12,8 +12,9 @@ use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
 use crate::doc::AppState;
 
-pub const PAPER_W: f32 = 1920.0;
-pub const PAPER_H: f32 = 1080.0;
+/// Default new-project resolution (the New Project dialog's starting values).
+pub const DEFAULT_PAPER_W: u32 = 1920;
+pub const DEFAULT_PAPER_H: u32 = 1080;
 
 const SWATCHES: [[u8; 4]; 4] = [
     [25, 25, 30, 255],   // ink
@@ -69,6 +70,15 @@ pub struct CanvasView {
     /// PointerButton(Released)/drag_stopped from the pen after Touch::End; this
     /// stops a phantom flat-pressure mouse point from being appended.
     mouse_lockout: u8,
+
+    // --- Live pressure diagnostics (proves capture is real, not flat) ---
+    dbg_pressure: f32,
+    dbg_min: f32,
+    dbg_max: f32,
+    dbg_some: u32,
+    dbg_none: u32,
+    cur_some: u32,
+    cur_none: u32,
 }
 
 impl CanvasView {
@@ -85,6 +95,13 @@ impl CanvasView {
             smoothed_pressure: START_SEED,
             raw_history: [START_SEED; 3],
             mouse_lockout: 0,
+            dbg_pressure: 0.0,
+            dbg_min: 0.0,
+            dbg_max: 0.0,
+            dbg_some: 0,
+            dbg_none: 0,
+            cur_some: 0,
+            cur_none: 0,
         }
     }
 
@@ -111,6 +128,25 @@ impl CanvasView {
                 self.zoom = 1.0;
                 self.pan = egui::Vec2::ZERO;
             }
+            ui.separator();
+            // Live pressure diagnostic: current value + last stroke's range and
+            // how many samples carried real force vs None. If the range is wide,
+            // the device delivers varying pressure and the ribbon renders it; if
+            // min≈max or none≫some, the problem is capture, not rendering.
+            let total = (self.dbg_some + self.dbg_none).max(1);
+            let real_pct = 100 * self.dbg_some / total;
+            ui.label(
+                egui::RichText::new(format!(
+                    "P {:.2}   last {:.2}–{:.2}   force {}%",
+                    self.dbg_pressure, self.dbg_min, self.dbg_max, real_pct
+                ))
+                .monospace()
+                .color(if self.dbg_max - self.dbg_min > 0.15 {
+                    Color32::from_rgb(120, 200, 140)
+                } else {
+                    Color32::from_rgb(210, 180, 90)
+                }),
+            );
             if state.playing {
                 ui.separator();
                 ui.label(
@@ -125,10 +161,14 @@ impl CanvasView {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
+        // Paper size = the project's chosen resolution (set at creation).
+        let paper_w = state.engine.project.width as f32;
+        let paper_h = state.engine.project.height as f32;
+
         // View transform: fit paper into rect, then user zoom/pan on top.
-        let fit = ((rect.width() / PAPER_W).min(rect.height() / PAPER_H) * 0.94).max(0.01);
+        let fit = ((rect.width() / paper_w).min(rect.height() / paper_h) * 0.94).max(0.01);
         let scale = fit * self.zoom;
-        let origin = rect.center() - vec2(PAPER_W, PAPER_H) * scale * 0.5 + self.pan;
+        let origin = rect.center() - vec2(paper_w, paper_h) * scale * 0.5 + self.pan;
         let to_screen = |p: Pos2| -> Pos2 { origin + p.to_vec2() * scale };
         let to_paper = |s: Pos2| -> Pos2 { ((s - origin) / scale).to_pos2() };
 
@@ -140,7 +180,7 @@ impl CanvasView {
                     let before = to_paper(mouse);
                     self.zoom = (self.zoom * (scroll * 0.0015).exp()).clamp(0.2, 10.0);
                     let scale2 = fit * self.zoom;
-                    let origin2 = rect.center() - vec2(PAPER_W, PAPER_H) * scale2 * 0.5 + self.pan;
+                    let origin2 = rect.center() - vec2(paper_w, paper_h) * scale2 * 0.5 + self.pan;
                     let after = origin2 + before.to_vec2() * scale2;
                     self.pan += mouse - after;
                 }
@@ -151,7 +191,8 @@ impl CanvasView {
         }
 
         // ---- Paper --------------------------------------------------------
-        let paper_rect = Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(PAPER_W, PAPER_H)));
+        let paper_rect =
+            Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
         painter.rect_filled(paper_rect, 2, Color32::from_rgb(242, 239, 233));
         painter.rect_stroke(
             paper_rect,
@@ -204,17 +245,7 @@ impl CanvasView {
         if self.current.len() >= 2 {
             let c = self.brush_color;
             let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-            for pair in self.current.windows(2) {
-                let p = 0.5 * (pair[0].pressure + pair[1].pressure);
-                let w = (self.brush_width * p * scale).max(WIDTH_FLOOR);
-                painter.line_segment(
-                    [
-                        to_screen(pos2(pair[0].x, pair[0].y)),
-                        to_screen(pos2(pair[1].x, pair[1].y)),
-                    ],
-                    egui::Stroke::new(w, color),
-                );
-            }
+            fill_stroke(&painter, &self.current, self.brush_width, scale, color, &to_screen);
         }
 
         // Empty-cell hint.
@@ -265,6 +296,8 @@ impl CanvasView {
                         self.last_pressure = p0;
                         self.smoothed_pressure = p0;
                         self.raw_history = [p0; 3];
+                        self.cur_some = 0;
+                        self.cur_none = 0;
                         self.current.clear();
                         let p = to_paper(*pos);
                         self.current.push(StrokePoint {
@@ -343,6 +376,10 @@ impl CanvasView {
 
         // Step 3: pressure only ever from the tablet. Some(>0) is real; Some(0)
         // is an explicit taper signal; None reuses the last real value.
+        match force {
+            Some(f) if f > 0.0 => self.cur_some += 1,
+            _ => self.cur_none += 1,
+        }
         let raw = match force {
             Some(f) if f > 0.0 => f,
             Some(_) => 0.0,
@@ -375,6 +412,7 @@ impl CanvasView {
         self.raw_history = [self.raw_history[1], self.raw_history[2], raw];
         let filtered = median3(self.raw_history);
         self.smoothed_pressure += (filtered - self.smoothed_pressure) * PRESSURE_SMOOTH;
+        self.dbg_pressure = self.smoothed_pressure;
 
         // Step 5b: distance gate in screen space. Below threshold, bank the
         // sample onto the retained endpoint instead of stacking a segment.
@@ -392,6 +430,21 @@ impl CanvasView {
     }
 
     fn finish_stroke(&mut self, state: &mut AppState) {
+        // Snapshot the captured pressure range (pre-taper) for the diagnostic.
+        if !self.current.is_empty() {
+            self.dbg_min = self
+                .current
+                .iter()
+                .map(|p| p.pressure)
+                .fold(f32::INFINITY, f32::min);
+            self.dbg_max = self
+                .current
+                .iter()
+                .map(|p| p.pressure)
+                .fold(0.0, f32::max);
+            self.dbg_some = self.cur_some;
+            self.dbg_none = self.cur_none;
+        }
         if self.current.len() < 2 {
             self.current.clear();
             return;
@@ -472,16 +525,59 @@ fn draw_strokes(
         let c = stroke.color;
         let color =
             tint.unwrap_or_else(|| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]));
-        for pair in stroke.points.windows(2) {
-            let p = 0.5 * (pair[0].pressure + pair[1].pressure);
-            let w = (stroke.base_width * p * scale).max(WIDTH_FLOOR);
-            painter.line_segment(
-                [
-                    to_screen(pos2(pair[0].x, pair[0].y)),
-                    to_screen(pos2(pair[1].x, pair[1].y)),
-                ],
-                egui::Stroke::new(w, color),
-            );
+        fill_stroke(painter, &stroke.points, stroke.base_width, scale, color, to_screen);
+    }
+}
+
+/// Render a stroke as a variable-width filled ribbon — Krita's pressure→size
+/// model expressed as vector geometry. Each vertex has half-width
+/// `base * pressure * scale / 2`; between consecutive vertices we fill a
+/// trapezoid that interpolates the two half-widths, and a round dab at each
+/// vertex fills the joints. Because width follows per-vertex pressure, the full
+/// pressure range shows as continuous thick↔thin — not a uniform "solid" line —
+/// and the pressure-0 taper tip narrows to nothing.
+fn fill_stroke(
+    painter: &egui::Painter,
+    points: &[StrokePoint],
+    base_width: f32,
+    scale: f32,
+    color: Color32,
+    to_screen: &impl Fn(Pos2) -> Pos2,
+) {
+    if points.is_empty() {
+        return;
+    }
+    let half = |pr: f32| (base_width * pr * scale * 0.5).max(WIDTH_FLOOR);
+
+    // Single point (or a tap): one dab.
+    if points.len() == 1 {
+        let c = to_screen(pos2(points[0].x, points[0].y));
+        painter.circle_filled(c, half(points[0].pressure), color);
+        return;
+    }
+
+    // Round the starting cap.
+    let start = to_screen(pos2(points[0].x, points[0].y));
+    painter.circle_filled(start, half(points[0].pressure), color);
+
+    for pair in points.windows(2) {
+        let a = to_screen(pos2(pair[0].x, pair[0].y));
+        let b = to_screen(pos2(pair[1].x, pair[1].y));
+        let ha = half(pair[0].pressure);
+        let hb = half(pair[1].pressure);
+        let d = b - a;
+        let len = d.length();
+        if len > 0.001 {
+            // Perpendicular offsets → a trapezoid whose width tracks pressure.
+            let n = vec2(-d.y, d.x) / len;
+            let quad = vec![a + n * ha, b + n * hb, b - n * hb, a - n * ha];
+            painter.add(egui::Shape::convex_polygon(
+                quad,
+                color,
+                egui::Stroke::NONE,
+            ));
         }
+        // Round dab at the far vertex smooths the joint to the next segment.
+        painter.circle_filled(b, hb, color);
     }
 }

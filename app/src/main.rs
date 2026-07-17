@@ -1,12 +1,16 @@
-//! AnimStudio — app shell (M2: the X-sheet + drawing loop).
-//! Panels: top bar (files/undo/transport), left X-sheet, central canvas.
+//! AnimStudio — app shell (M2: X-sheet + drawing loop; + New Project flow).
+//!
+//! Two screens: a startup New Project dialog (sets resolution/fps), then the
+//! editor (top bar, left X-sheet, central canvas, status bar).
 
 mod canvas;
 mod doc;
+mod newproject;
 mod xsheet_panel;
 
 use doc::AppState;
 use eframe::egui;
+use newproject::{FormAction, NewProjectForm};
 
 fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
@@ -27,24 +31,123 @@ fn main() -> eframe::Result<()> {
         native_options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(App::new()))
+            Ok(Box::<App>::default())
         }),
     )
 }
 
+#[derive(Default)]
 struct App {
+    /// The open project (None until one is created/opened).
+    editor: Option<Editor>,
+    /// When Some, the New Project dialog is showing (startup, or "New…").
+    new_form: Option<NewProjectForm>,
+}
+
+struct Editor {
     state: AppState,
     canvas: canvas::CanvasView,
+    /// Set when the user clicks "New…"; the App picks it up to show the dialog.
+    request_new: bool,
+}
+
+impl Editor {
+    fn from_form(form: &NewProjectForm) -> Self {
+        Self {
+            state: AppState::new_project(
+                form.name.clone(),
+                form.width,
+                form.height,
+                form.fps,
+                form.dpi as f32,
+            ),
+            canvas: canvas::CanvasView::new(),
+            request_new: false,
+        }
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Nothing open and no dialog -> show the startup dialog.
+        if self.editor.is_none() && self.new_form.is_none() {
+            self.new_form = Some(NewProjectForm::default());
+        }
+
+        // Editor (if any) renders first as the base layer.
+        if let Some(editor) = &mut self.editor {
+            editor.ui(ui);
+            if editor.request_new {
+                editor.request_new = false;
+                self.new_form = Some(NewProjectForm::default());
+            }
+        }
+
+        // New Project dialog: full-screen when no project, modal window over one.
+        if self.new_form.is_some() {
+            self.show_new_dialog(ui);
+        }
+
+        ui.ctx().request_repaint();
+    }
 }
 
 impl App {
-    fn new() -> Self {
-        Self {
-            state: AppState::new_default(),
-            canvas: canvas::CanvasView::new(),
+    fn show_new_dialog(&mut self, ui: &mut egui::Ui) {
+        let has_editor = self.editor.is_some();
+        let mut form = self.new_form.take().expect("dialog shown with a form");
+        let mut action = None;
+
+        if has_editor {
+            egui::Window::new("New Project")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    action = newproject::form_ui(ui, &mut form, true);
+                });
+        } else {
+            egui::CentralPanel::default().show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(80.0);
+                    egui::Frame::group(ui.style())
+                        .inner_margin(24.0)
+                        .show(ui, |ui| {
+                            ui.set_max_width(440.0);
+                            action = newproject::form_ui(ui, &mut form, false);
+                        });
+                });
+            });
+        }
+
+        match action {
+            Some(FormAction::Create) => {
+                self.editor = Some(Editor::from_form(&form));
+            }
+            Some(FormAction::Open) => match AppState::pick_and_open() {
+                Some(Ok(state)) => {
+                    self.editor = Some(Editor {
+                        state,
+                        canvas: canvas::CanvasView::new(),
+                        request_new: false,
+                    });
+                }
+                Some(Err(_)) | None => {
+                    // Load failed or cancelled — keep the dialog open.
+                    self.new_form = Some(form);
+                }
+            },
+            Some(FormAction::Cancel) => {
+                // Only offered when an editor exists behind the dialog.
+            }
+            None => {
+                self.new_form = Some(form); // still editing the form
+            }
         }
     }
+}
 
+impl Editor {
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let state = &mut self.state;
         ctx.input(|i| {
@@ -78,10 +181,8 @@ impl App {
             }
         });
     }
-}
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui) {
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
         self.shortcuts(ui.ctx());
@@ -95,6 +196,9 @@ impl eframe::App for App {
                         .color(egui::Color32::from_rgb(120, 190, 255)),
                 );
                 ui.separator();
+                if ui.button("New…").clicked() {
+                    self.request_new = true;
+                }
                 if ui.button("open").clicked() {
                     self.state.open();
                 }
@@ -113,7 +217,6 @@ impl eframe::App for App {
                 }
                 ui.separator();
 
-                // Transport.
                 if ui.button("|<").clicked() {
                     self.state.goto(0);
                 }
@@ -141,6 +244,16 @@ impl eframe::App for App {
                 );
                 ui.separator();
                 ui.checkbox(&mut self.state.onion, "onion");
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}×{}  {}fps",
+                        self.state.engine.project.width,
+                        self.state.engine.project.height,
+                        self.state.fps()
+                    ))
+                    .weak(),
+                );
             });
         });
 
@@ -172,8 +285,5 @@ impl eframe::App for App {
             .show(ui, |ui| {
                 self.canvas.ui(ui, &mut self.state);
             });
-
-        // Continuous repaint: playback timing + pen latency both want it.
-        ui.ctx().request_repaint();
     }
 }
