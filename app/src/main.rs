@@ -10,23 +10,34 @@ mod newproject;
 mod paint;
 mod xsheet_panel;
 
-use config::{Action, Config};
+use config::{Action, Config, FrameLatency, SettingsCategory};
 use doc::AppState;
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use newproject::{FormAction, NewProjectForm};
 use paint::PaintLayer;
+use std::time::Duration;
 
 fn main() -> eframe::Result<()> {
+    // Load config up front so the surface (V-Sync / frame latency) reflects it.
+    let config = Config::load();
+    let surface = eframe::egui_wgpu::SurfaceConfig {
+        present_mode: if config.perf.vsync {
+            wgpu::PresentMode::AutoVsync
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        },
+        desired_maximum_frame_latency: Some(match config.perf.frame_latency {
+            FrameLatency::Low => 1,
+            FrameLatency::Throughput => 2,
+        }),
+    };
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1720.0, 960.0])
             .with_title("AnimStudio"),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
-            surface: eframe::egui_wgpu::SurfaceConfig {
-                present_mode: wgpu::PresentMode::AutoNoVsync,
-                desired_maximum_frame_latency: Some(1),
-            },
+            surface,
             ..Default::default()
         },
         ..Default::default()
@@ -34,9 +45,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "AnimStudio",
         native_options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(App::new(cc)))
+            Ok(Box::new(App::new(cc, config)))
         }),
     )
 }
@@ -48,22 +59,32 @@ struct App {
     editor: Option<Editor>,
     /// When Some, the New Project dialog is showing (startup, or "New…").
     new_form: Option<NewProjectForm>,
-    /// User config (rebindable keyboard shortcuts).
+    /// User config (rebindable keyboard shortcuts + performance).
     config: Config,
     settings_open: bool,
+    settings_category: SettingsCategory,
     /// Action awaiting a new key binding (Settings rebind capture).
     capturing: Option<Action>,
+    /// Active GPU backend name (for the Performance page's Renderer row).
+    backend: String,
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, config: Config) -> Self {
+        let backend = cc
+            .wgpu_render_state
+            .as_ref()
+            .map(|rs| format!("{:?}", rs.adapter.get_info().backend))
+            .unwrap_or_else(|| "none".to_string());
         Self {
             render_state: cc.wgpu_render_state.clone(),
             editor: None,
             new_form: None,
-            config: Config::load(),
+            config,
             settings_open: false,
+            settings_category: SettingsCategory::default(),
             capturing: None,
+            backend,
         }
     }
 
@@ -147,8 +168,17 @@ impl eframe::App for App {
             self.new_form = Some(NewProjectForm::default());
         }
 
+        // Apply live performance settings (read as locals to avoid borrowing
+        // self.config while self.editor is borrowed mutably).
+        let undo_limit = self.config.perf.undo_limit;
+        let canvas_filter = self.config.perf.canvas_filter.wgpu();
+
         // Editor (if any) renders first as the base layer.
         if let Some(editor) = &mut self.editor {
+            editor.state.engine.set_undo_limit(undo_limit);
+            if let Some(p) = &mut editor.paint {
+                p.set_filter(canvas_filter);
+            }
             editor.ui(ui);
             if editor.request_new {
                 editor.request_new = false;
@@ -175,20 +205,52 @@ impl eframe::App for App {
             }
         }
 
-        // Settings window (keyboard shortcuts editor).
+        // Settings window (Krita-style: shortcuts + performance).
         config::settings_window(
             ui.ctx(),
             &mut self.settings_open,
             &mut self.config,
             &mut self.capturing,
+            &mut self.settings_category,
+            &self.backend,
         );
+
+        // Optional FPS overlay.
+        if self.config.perf.show_fps {
+            let dt = ui.ctx().input(|i| i.stable_dt).max(1e-4);
+            egui::Area::new("fps_overlay".into())
+                .anchor(egui::Align2::RIGHT_TOP, [-10.0, 34.0])
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(egui::Color32::from_black_alpha(160))
+                        .inner_margin(4.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} fps", 1.0 / dt))
+                                    .monospace()
+                                    .color(egui::Color32::from_rgb(120, 220, 140)),
+                            );
+                        });
+                });
+        }
 
         // New Project dialog: full-screen when no project, modal window over one.
         if self.new_form.is_some() {
             self.show_new_dialog(ui);
         }
 
-        ui.ctx().request_repaint();
+        // Cap the redraw rate (playback still runs at the project frame rate).
+        let playing_fps = self
+            .editor
+            .as_ref()
+            .filter(|e| e.state.playing)
+            .map(|e| e.state.fps());
+        let target = playing_fps
+            .map(|f| f.max(self.config.perf.fps_cap))
+            .unwrap_or(self.config.perf.fps_cap)
+            .max(1);
+        ui.ctx()
+            .request_repaint_after(Duration::from_secs_f32(1.0 / target as f32));
     }
 }
 

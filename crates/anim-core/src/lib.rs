@@ -43,8 +43,11 @@ struct Applied {
 
 #[derive(Default)]
 struct History {
-    undo_stack: Vec<Applied>,
+    /// VecDeque so trimming the oldest step (when over `limit`) is O(1).
+    undo_stack: std::collections::VecDeque<Applied>,
     redo_stack: Vec<Applied>,
+    /// Max undo steps kept; 0 = unlimited. Bounds undo RAM (raster tile diffs).
+    limit: usize,
 }
 
 /// The engine facade the app shell talks to.
@@ -158,11 +161,17 @@ impl Engine {
         }
 
         self.evaluator.invalidate_nodes(&invalidate);
-        self.history.undo_stack.push(Applied {
+        self.history.undo_stack.push_back(Applied {
             label: label.into(),
             redo: commands,
             undo: inverses,
         });
+        // Bound the history: drop the oldest steps beyond the limit.
+        if self.history.limit > 0 {
+            while self.history.undo_stack.len() > self.history.limit {
+                self.history.undo_stack.pop_front();
+            }
+        }
         self.history.redo_stack.clear();
         Ok(())
     }
@@ -171,7 +180,7 @@ impl Engine {
         let step = self
             .history
             .undo_stack
-            .pop()
+            .pop_back()
             .ok_or(EngineError::NothingToUndo)?;
         self.replay(&step.undo)?;
         self.history.redo_stack.push(step);
@@ -185,8 +194,18 @@ impl Engine {
             .pop()
             .ok_or(EngineError::NothingToRedo)?;
         self.replay(&step.redo)?;
-        self.history.undo_stack.push(step);
+        self.history.undo_stack.push_back(step);
         Ok(())
+    }
+
+    /// Cap the number of undo steps kept (0 = unlimited). Trims immediately.
+    pub fn set_undo_limit(&mut self, limit: usize) {
+        self.history.limit = limit;
+        if limit > 0 {
+            while self.history.undo_stack.len() > limit {
+                self.history.undo_stack.pop_front();
+            }
+        }
     }
 
     fn replay(&mut self, commands: &[Command]) -> Result<()> {

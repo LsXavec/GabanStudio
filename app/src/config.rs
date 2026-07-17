@@ -172,9 +172,83 @@ pub struct Binding {
     pub chord: Option<Chord>,
 }
 
+// ---- Performance settings (Krita-derived; see research/performance-settings.md) ----
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FrameLatency {
+    #[default]
+    Low, // 1 frame — lowest pen latency
+    Throughput, // 2 frames — smoother under heavy GPU load
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CanvasFilter {
+    Nearest,
+    #[default]
+    Linear,
+}
+
+impl CanvasFilter {
+    pub fn wgpu(self) -> wgpu::FilterMode {
+        match self {
+            CanvasFilter::Nearest => wgpu::FilterMode::Nearest,
+            CanvasFilter::Linear => wgpu::FilterMode::Linear,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PerfConfig {
+    /// Sync to vertical refresh. Applied at startup (see note in the UI).
+    #[serde(default)]
+    pub vsync: bool,
+    #[serde(default)]
+    pub frame_latency: FrameLatency,
+    #[serde(default)]
+    pub canvas_filter: CanvasFilter,
+    /// Max redraws/sec while idle/painting (playback overrides upward).
+    #[serde(default = "default_fps_cap")]
+    pub fps_cap: u32,
+    #[serde(default)]
+    pub show_fps: bool,
+    /// Undo steps kept (0 = unlimited).
+    #[serde(default = "default_undo_limit")]
+    pub undo_limit: usize,
+}
+
+fn default_fps_cap() -> u32 {
+    100
+}
+fn default_undo_limit() -> usize {
+    200
+}
+
+impl Default for PerfConfig {
+    fn default() -> Self {
+        Self {
+            vsync: false,
+            frame_latency: FrameLatency::Low,
+            canvas_filter: CanvasFilter::Linear,
+            fps_cap: default_fps_cap(),
+            show_fps: false,
+            undo_limit: default_undo_limit(),
+        }
+    }
+}
+
+/// Which Settings page is showing (Krita-style category sidebar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsCategory {
+    #[default]
+    Shortcuts,
+    Performance,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub keybinds: Vec<Binding>,
+    #[serde(default)]
+    pub perf: PerfConfig,
 }
 
 impl Default for Config {
@@ -187,6 +261,7 @@ impl Default for Config {
                     chord: a.default_chord(),
                 })
                 .collect(),
+            perf: PerfConfig::default(),
         }
     }
 }
@@ -262,22 +337,24 @@ impl Config {
     }
 }
 
-/// The Settings window (currently: keyboard shortcuts). `capturing` holds the
-/// action whose new key we're waiting for. Returns nothing; mutates config +
-/// persists on change.
+/// The Settings window — Krita-style: a left category sidebar and a content
+/// page. `capturing` holds the action whose new key we're waiting for.
 pub fn settings_window(
     ctx: &egui::Context,
     open: &mut bool,
     config: &mut Config,
     capturing: &mut Option<Action>,
+    category: &mut SettingsCategory,
+    backend: &str,
 ) {
     if !*open {
         *capturing = None;
         return;
     }
-
-    // Capture the next key press for a pending rebind.
-    if let Some(action) = *capturing {
+    // Only the Shortcuts page captures keys.
+    if *category != SettingsCategory::Shortcuts {
+        *capturing = None;
+    } else if let Some(action) = *capturing {
         let result: Option<Option<Chord>> = ctx.input(|i| {
             for e in &i.events {
                 if let egui::Event::Key {
@@ -288,7 +365,7 @@ pub fn settings_window(
                 } = e
                 {
                     if *key == egui::Key::Escape {
-                        return Some(None); // cancel
+                        return Some(None);
                     }
                     return Some(Some(Chord::from_event(*key, *modifiers)));
                 }
@@ -307,76 +384,198 @@ pub fn settings_window(
     egui::Window::new("Settings")
         .open(open)
         .resizable(true)
-        .default_size([460.0, 520.0])
+        .default_size([640.0, 560.0])
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("Keyboard Shortcuts");
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Reset to defaults").clicked() {
-                        config.reset_to_defaults();
-                        config.save();
-                        *capturing = None;
-                    }
+            ui.horizontal_top(|ui| {
+                // Left: category sidebar (Krita's Configure-dialog nav list).
+                ui.vertical(|ui| {
+                    ui.set_min_width(150.0);
+                    ui.add_space(4.0);
+                    ui.selectable_value(
+                        category,
+                        SettingsCategory::Shortcuts,
+                        "Keyboard Shortcuts",
+                    );
+                    ui.selectable_value(category, SettingsCategory::Performance, "Performance");
+                });
+                ui.separator();
+                // Right: the selected page.
+                ui.vertical(|ui| match category {
+                    SettingsCategory::Shortcuts => shortcuts_page(ui, config, capturing),
+                    SettingsCategory::Performance => performance_page(ui, config, backend),
                 });
             });
-            ui.label(
-                egui::RichText::new("Click a shortcut to rebind it, then press the new keys (Esc cancels).")
-                    .weak(),
-            );
-            ui.separator();
-
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("keybind_grid")
-                    .num_columns(3)
-                    .striped(true)
-                    .spacing([12.0, 6.0])
-                    .show(ui, |ui| {
-                        for action in Action::ALL {
-                            let action = *action;
-                            ui.label(action.label());
-
-                            let is_capturing = *capturing == Some(action);
-                            let text = if is_capturing {
-                                "press keys…".to_string()
-                            } else {
-                                config
-                                    .chord_for(action)
-                                    .map(|c| c.label())
-                                    .unwrap_or_else(|| "—".to_string())
-                            };
-                            // Warn if this binding collides with another action.
-                            let clash = config
-                                .chord_for(action)
-                                .and_then(|c| config.conflict(action, c));
-                            let btn = egui::Button::new(text).min_size(egui::vec2(140.0, 0.0));
-                            let btn = if is_capturing {
-                                btn.fill(egui::Color32::from_rgb(70, 55, 30))
-                            } else if clash.is_some() {
-                                btn.fill(egui::Color32::from_rgb(70, 30, 30))
-                            } else {
-                                btn
-                            };
-                            let mut resp = ui.add(btn);
-                            if let Some(other) = clash {
-                                resp = resp.on_hover_text(format!(
-                                    "⚠ also bound to “{}”",
-                                    other.label()
-                                ));
-                            }
-                            if resp.clicked() {
-                                *capturing = if is_capturing { None } else { Some(action) };
-                            }
-
-                            if ui.button("✕").on_hover_text("unbind").clicked() {
-                                config.binding_mut(action).chord = None;
-                                config.save();
-                                if *capturing == Some(action) {
-                                    *capturing = None;
-                                }
-                            }
-                            ui.end_row();
-                        }
-                    });
-            });
         });
+}
+
+fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option<Action>) {
+    ui.horizontal(|ui| {
+        ui.heading("Keyboard Shortcuts");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Reset to defaults").clicked() {
+                config.reset_to_defaults();
+                config.save();
+                *capturing = None;
+            }
+        });
+    });
+    ui.label(
+        egui::RichText::new("Click a shortcut to rebind it, then press the new keys (Esc cancels).")
+            .weak(),
+    );
+    ui.separator();
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::Grid::new("keybind_grid")
+            .num_columns(3)
+            .striped(true)
+            .spacing([12.0, 6.0])
+            .show(ui, |ui| {
+                for action in Action::ALL {
+                    let action = *action;
+                    ui.label(action.label());
+
+                    let is_capturing = *capturing == Some(action);
+                    let text = if is_capturing {
+                        "press keys…".to_string()
+                    } else {
+                        config
+                            .chord_for(action)
+                            .map(|c| c.label())
+                            .unwrap_or_else(|| "—".to_string())
+                    };
+                    let clash = config
+                        .chord_for(action)
+                        .and_then(|c| config.conflict(action, c));
+                    let btn = egui::Button::new(text).min_size(egui::vec2(140.0, 0.0));
+                    let btn = if is_capturing {
+                        btn.fill(egui::Color32::from_rgb(70, 55, 30))
+                    } else if clash.is_some() {
+                        btn.fill(egui::Color32::from_rgb(70, 30, 30))
+                    } else {
+                        btn
+                    };
+                    let mut resp = ui.add(btn);
+                    if let Some(other) = clash {
+                        resp = resp.on_hover_text(format!("⚠ also bound to “{}”", other.label()));
+                    }
+                    if resp.clicked() {
+                        *capturing = if is_capturing { None } else { Some(action) };
+                    }
+                    if ui.button("✕").on_hover_text("unbind").clicked() {
+                        config.binding_mut(action).chord = None;
+                        config.save();
+                        if *capturing == Some(action) {
+                            *capturing = None;
+                        }
+                    }
+                    ui.end_row();
+                }
+            });
+    });
+}
+
+fn performance_page(ui: &mut egui::Ui, config: &mut Config, backend: &str) {
+    ui.horizontal(|ui| {
+        ui.heading("Performance");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Reset to defaults").clicked() {
+                config.perf = PerfConfig::default();
+                config.save();
+            }
+        });
+    });
+    ui.separator();
+
+    let mut changed = false;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        let p = &mut config.perf;
+
+        ui.strong("Canvas Acceleration");
+        ui.add_space(4.0);
+        egui::Grid::new("perf_accel")
+            .num_columns(2)
+            .spacing([16.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("V-Sync")
+                    .on_hover_text("Sync to the monitor's refresh. Off = lowest latency.");
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut p.vsync, "").changed();
+                    ui.label(egui::RichText::new("(applies after restart)").weak());
+                });
+                ui.end_row();
+
+                ui.label("Frame latency");
+                egui::ComboBox::from_id_salt("frame_latency")
+                    .selected_text(match p.frame_latency {
+                        FrameLatency::Low => "Low (1 frame)",
+                        FrameLatency::Throughput => "Throughput (2 frames)",
+                    })
+                    .show_ui(ui, |ui| {
+                        changed |= ui
+                            .selectable_value(&mut p.frame_latency, FrameLatency::Low, "Low (1 frame)")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(
+                                &mut p.frame_latency,
+                                FrameLatency::Throughput,
+                                "Throughput (2 frames)",
+                            )
+                            .changed();
+                    });
+                ui.end_row();
+
+                ui.label("Canvas scaling filter")
+                    .on_hover_text("How the painted layer is filtered when zoomed. Nearest = crisp pixels, Linear = smooth.");
+                egui::ComboBox::from_id_salt("canvas_filter")
+                    .selected_text(match p.canvas_filter {
+                        CanvasFilter::Nearest => "Nearest",
+                        CanvasFilter::Linear => "Linear",
+                    })
+                    .show_ui(ui, |ui| {
+                        changed |= ui
+                            .selectable_value(&mut p.canvas_filter, CanvasFilter::Nearest, "Nearest")
+                            .changed();
+                        changed |= ui
+                            .selectable_value(&mut p.canvas_filter, CanvasFilter::Linear, "Linear")
+                            .changed();
+                    });
+                ui.end_row();
+
+                ui.label("Renderer");
+                ui.add_enabled(false, egui::Label::new(backend))
+                    .on_hover_text("Active GPU backend (chosen automatically by wgpu).");
+                ui.end_row();
+            });
+
+        ui.add_space(10.0);
+        ui.strong("Performance");
+        ui.add_space(4.0);
+        egui::Grid::new("perf_general")
+            .num_columns(2)
+            .spacing([16.0, 8.0])
+            .show(ui, |ui| {
+                ui.label("Max FPS while painting")
+                    .on_hover_text("Caps idle redraws. Playback still runs at the project frame rate.");
+                changed |= ui
+                    .add(egui::Slider::new(&mut p.fps_cap, 30..=240).suffix(" fps"))
+                    .changed();
+                ui.end_row();
+
+                ui.label("Show FPS overlay");
+                changed |= ui.checkbox(&mut p.show_fps, "").changed();
+                ui.end_row();
+
+                ui.label("Undo history limit")
+                    .on_hover_text("Max undo steps kept in memory. 0 = unlimited.");
+                changed |= ui
+                    .add(egui::DragValue::new(&mut p.undo_limit).range(0..=100_000).speed(5))
+                    .changed();
+                ui.end_row();
+            });
+    });
+
+    if changed {
+        config.save();
+    }
 }

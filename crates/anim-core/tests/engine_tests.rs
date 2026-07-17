@@ -809,6 +809,50 @@ fn raster_tiles_survive_sqlite_roundtrip() {
 }
 
 #[test]
+fn undo_limit_drops_oldest_steps() {
+    let mut f = fixture();
+    f.engine.set_undo_limit(3);
+    // Five independent edits; only the last three should remain undoable.
+    for frame in 1..=5u32 {
+        f.engine
+            .apply(
+                "edit",
+                vec![Command::SetCell {
+                    at: f.at,
+                    column: f.col,
+                    frame,
+                    key: Some(Exposure::Empty),
+                }],
+            )
+            .unwrap();
+    }
+    assert!(f.engine.undo().is_ok());
+    assert!(f.engine.undo().is_ok());
+    assert!(f.engine.undo().is_ok());
+    assert!(f.engine.undo().is_err(), "oldest two steps were dropped");
+
+    // Lowering the limit below the current depth trims immediately.
+    let mut g = fixture();
+    for frame in 1..=5u32 {
+        g.engine
+            .apply(
+                "edit",
+                vec![Command::SetCell {
+                    at: g.at,
+                    column: g.col,
+                    frame,
+                    key: Some(Exposure::Empty),
+                }],
+            )
+            .unwrap();
+    }
+    g.engine.set_undo_limit(2);
+    assert!(g.engine.undo().is_ok());
+    assert!(g.engine.undo().is_ok());
+    assert!(g.engine.undo().is_err());
+}
+
+#[test]
 fn project_resolution_survives_roundtrip() {
     let mut engine = Engine::new("res test");
     engine.project.width = 2048;

@@ -54,6 +54,8 @@ pub struct PaintLayer {
     tex_id: egui::TextureId,
     width: u32,
     height: u32,
+    /// Sampler filter used to display the layer (Canvas scaling filter setting).
+    filter: wgpu::FilterMode,
 }
 
 const SHADER: &str = r#"
@@ -201,8 +203,9 @@ impl PaintLayer {
             cache: None,
         });
 
+        let filter = wgpu::FilterMode::Linear;
         let (texture, view, tex_id) =
-            Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height);
+            Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
 
         Self {
             device,
@@ -216,6 +219,7 @@ impl PaintLayer {
             tex_id,
             width,
             height,
+            filter,
         }
     }
 
@@ -228,6 +232,7 @@ impl PaintLayer {
         uniform_buf: &wgpu::Buffer,
         width: u32,
         height: u32,
+        filter: wgpu::FilterMode,
     ) -> (wgpu::Texture, wgpu::TextureView, egui::TextureId) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("paint_layer"),
@@ -275,11 +280,9 @@ impl PaintLayer {
         });
         queue.submit(Some(enc.finish()));
 
-        let tex_id = renderer.write().register_native_texture(
-            device,
-            &view,
-            wgpu::FilterMode::Linear,
-        );
+        let tex_id = renderer
+            .write()
+            .register_native_texture(device, &view, filter);
         (texture, view, tex_id)
     }
 
@@ -295,12 +298,27 @@ impl PaintLayer {
             &self.uniform_buf,
             width,
             height,
+            self.filter,
         );
         self.texture = texture;
         self.view = view;
         self.tex_id = tex_id;
         self.width = width;
         self.height = height;
+    }
+
+    /// Switch the display sampler filter (Canvas scaling filter setting), live.
+    pub fn set_filter(&mut self, filter: wgpu::FilterMode) {
+        if filter == self.filter {
+            return;
+        }
+        self.filter = filter;
+        self.renderer.write().update_egui_texture_from_wgpu_texture(
+            &self.device,
+            &self.view,
+            filter,
+            self.tex_id,
+        );
     }
 
     pub fn texture_id(&self) -> egui::TextureId {
