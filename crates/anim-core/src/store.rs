@@ -13,9 +13,10 @@ use crate::error::{EngineError, Result};
 use crate::graph::{Graph, Node, NodeKind};
 use crate::ids::*;
 use crate::model::{Cut, Drawing, Project, Scene};
+use crate::raster::{RasterLayer, TileData};
 use crate::xsheet::{Column, Exposure, XSheet};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -40,6 +41,11 @@ CREATE TABLE IF NOT EXISTS links(
     cut_id INTEGER NOT NULL, to_node INTEGER NOT NULL, to_pin INTEGER NOT NULL,
     from_node INTEGER NOT NULL, from_pin INTEGER NOT NULL,
     PRIMARY KEY(to_node, to_pin));
+CREATE TABLE IF NOT EXISTS raster_layers(
+    drawing_id INTEGER PRIMARY KEY, opacity REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS tiles(
+    drawing_id INTEGER NOT NULL, tx INTEGER NOT NULL, ty INTEGER NOT NULL,
+    bytes BLOB NOT NULL, PRIMARY KEY(drawing_id, tx, ty));
 ";
 
 pub fn save(project: &Project, path: &Path) -> Result<()> {
@@ -50,7 +56,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
     tx.execute_batch(
         "DELETE FROM meta; DELETE FROM scenes; DELETE FROM cuts;
          DELETE FROM drawings; DELETE FROM columns; DELETE FROM cells;
-         DELETE FROM nodes; DELETE FROM links;",
+         DELETE FROM nodes; DELETE FROM links;
+         DELETE FROM raster_layers; DELETE FROM tiles;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -84,6 +91,11 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
             "INSERT INTO links(cut_id, to_node, to_pin, from_node, from_pin)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
+        let mut ins_raster =
+            tx.prepare("INSERT INTO raster_layers(drawing_id, opacity) VALUES (?1, ?2)")?;
+        let mut ins_tile = tx.prepare(
+            "INSERT INTO tiles(drawing_id, tx, ty, bytes) VALUES (?1, ?2, ?3, ?4)",
+        )?;
 
         for (s_ord, scene) in project.scenes.iter().enumerate() {
             ins_scene.execute((scene.id.0 as i64, &scene.name, s_ord as i64))?;
@@ -105,6 +117,17 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                         payload,
                         d_ord as i64,
                     ))?;
+                    if let Some(raster) = &d.raster {
+                        ins_raster.execute((d.id.0 as i64, raster.opacity as f64))?;
+                        for ((tx_c, ty_c), tile) in &raster.tiles {
+                            ins_tile.execute((
+                                d.id.0 as i64,
+                                *tx_c as i64,
+                                *ty_c as i64,
+                                tile.as_bytes(),
+                            ))?;
+                        }
+                    }
                 }
                 for (col_ord, col) in cut.xsheet.columns.iter().enumerate() {
                     ins_column.execute((col.id.0 as i64, cut.id.0 as i64, &col.name, col_ord as i64))?;
@@ -222,10 +245,44 @@ pub fn load(path: &Path) -> Result<Project> {
                 .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<std::result::Result<_, _>>()?;
             for (id, name, payload) in rows {
+                // Raster layer for this drawing, if any.
+                let opacity: Option<f64> = conn
+                    .query_row(
+                        "SELECT opacity FROM raster_layers WHERE drawing_id = ?1",
+                        (id,),
+                        |r| r.get(0),
+                    )
+                    .ok();
+                let raster = if let Some(opacity) = opacity {
+                    let mut layer = RasterLayer {
+                        opacity: opacity as f32,
+                        ..RasterLayer::empty()
+                    };
+                    let mut tstmt = conn.prepare(
+                        "SELECT tx, ty, bytes FROM tiles WHERE drawing_id = ?1",
+                    )?;
+                    let tile_rows: Vec<(i64, i64, Vec<u8>)> = tstmt
+                        .query_map((id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                        .collect::<std::result::Result<_, _>>()?;
+                    for (tx_c, ty_c, bytes) in tile_rows {
+                        let tile = TileData::from_bytes(&bytes).ok_or_else(|| {
+                            EngineError::Corrupt(format!(
+                                "tile ({tx_c},{ty_c}) of drawing {id} has wrong byte length"
+                            ))
+                        })?;
+                        layer
+                            .tiles
+                            .insert((tx_c as i32, ty_c as i32), std::sync::Arc::new(tile));
+                    }
+                    Some(layer)
+                } else {
+                    None
+                };
                 cut.drawings.push(Drawing {
                     id: DrawingId(id as u64),
                     name,
                     strokes: serde_json::from_str(&payload)?,
+                    raster,
                 });
             }
 

@@ -17,6 +17,7 @@ pub mod eval;
 pub mod graph;
 pub mod ids;
 pub mod model;
+pub mod raster;
 pub mod store;
 pub mod value;
 pub mod xsheet;

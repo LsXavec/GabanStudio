@@ -50,12 +50,14 @@ fn fixture() -> Fixture {
                     id: d_a,
                     name: "luffy_a".into(),
                     strokes: vec![],
+                    raster: None,
                 },
                 Command::AddDrawing {
                     at,
                     id: d_b,
                     name: "luffy_b".into(),
                     strokes: vec![],
+                    raster: None,
                 },
                 Command::SetCell {
                     at,
@@ -629,6 +631,179 @@ fn strokes_survive_sqlite_roundtrip() {
 
     let cut = loaded.project.cut(f.scene, f.cut).unwrap();
     assert_eq!(cut.drawing(f.d_a).unwrap().strokes.len(), 2);
+
+    std::fs::remove_file(&path).unwrap();
+}
+
+// ---- Raster (Phase 2) --------------------------------------------------
+
+use anim_core::raster::{RasterLayer, TileData, TILE_LEN};
+use std::sync::Arc;
+
+/// A solid-color tile (all pixels the same premultiplied RGBA16).
+fn solid_tile(v: u16) -> Arc<TileData> {
+    Arc::new(TileData::from_vec(vec![v; TILE_LEN]))
+}
+
+/// Add a raster drawing exposed at frame 0 of a fresh cut, with a DrawingSource
+/// output node so paint edits invalidate something. Returns the fixture.
+fn raster_fixture() -> (Engine, CutRef, SceneId, CutId, ColumnId, DrawingId) {
+    let mut engine = Engine::new("raster");
+    let scene = engine.add_scene("S");
+    let cut = engine.add_cut(scene, "C", 12).unwrap();
+    let at = CutRef { scene, cut };
+    let col = engine.add_column(at, "A").unwrap();
+    let d = engine.alloc_drawing_id();
+    let src = engine.alloc_node_id();
+    engine
+        .apply(
+            "raster cel",
+            vec![
+                Command::AddDrawing {
+                    at,
+                    id: d,
+                    name: "cel".into(),
+                    strokes: vec![],
+                    raster: Some(RasterLayer::empty()),
+                },
+                Command::SetCell {
+                    at,
+                    column: col,
+                    frame: 0,
+                    key: Some(Exposure::Drawing(d)),
+                },
+                Command::AddNode {
+                    at,
+                    id: src,
+                    kind: NodeKind::DrawingSource { column: col },
+                },
+                Command::SetOutput {
+                    at,
+                    node: Some(src),
+                },
+            ],
+        )
+        .unwrap();
+    engine.clear_history();
+    (engine, at, scene, cut, col, d)
+}
+
+#[test]
+fn paint_tiles_is_undoable_and_changes_eval() {
+    let (mut engine, at, scene, cut, _col, d) = raster_fixture();
+    let baseline = engine.project.clone();
+    let v_before = engine.eval(scene, cut, 0).unwrap();
+
+    // Paint two tiles (before: absent, after: solid).
+    let diff = vec![
+        ((0, 0), None, Some(solid_tile(0x8000))),
+        ((1, 0), None, Some(solid_tile(0x4000))),
+    ];
+    engine
+        .apply("paint", vec![Command::PaintTiles { at, id: d, diff }])
+        .unwrap();
+
+    // Content changed -> eval hash changed.
+    let v_after = engine.eval(scene, cut, 0).unwrap();
+    assert_ne!(v_before.hash(), v_after.hash());
+    assert_eq!(
+        engine
+            .project
+            .cut(scene, cut)
+            .unwrap()
+            .drawing(d)
+            .unwrap()
+            .raster
+            .as_ref()
+            .unwrap()
+            .tiles
+            .len(),
+        2
+    );
+
+    // Undo restores the document byte-for-byte and the evaluated value.
+    engine.undo().unwrap();
+    assert_eq!(engine.project, baseline);
+    let v_undone = engine.eval(scene, cut, 0).unwrap();
+    assert_eq!(v_before.hash(), v_undone.hash());
+
+    // Redo re-applies.
+    engine.redo().unwrap();
+    let v_redo = engine.eval(scene, cut, 0).unwrap();
+    assert_eq!(v_after.hash(), v_redo.hash());
+}
+
+#[test]
+fn painting_over_a_tile_undoes_to_prior_pixels() {
+    let (mut engine, at, _scene, _cut, _col, d) = raster_fixture();
+
+    // First paint: tile (0,0) = A.
+    engine
+        .apply(
+            "paint A",
+            vec![Command::PaintTiles {
+                at,
+                id: d,
+                diff: vec![((0, 0), None, Some(solid_tile(0x1111)))],
+            }],
+        )
+        .unwrap();
+    let after_a = engine.project.clone();
+
+    // Second paint over the same tile: before = A, after = B.
+    engine
+        .apply(
+            "paint B",
+            vec![Command::PaintTiles {
+                at,
+                id: d,
+                diff: vec![((0, 0), Some(solid_tile(0x1111)), Some(solid_tile(0x2222)))],
+            }],
+        )
+        .unwrap();
+
+    // Undo the second paint: the tile returns to A, not empty.
+    engine.undo().unwrap();
+    assert_eq!(engine.project, after_a);
+}
+
+#[test]
+fn raster_tiles_survive_sqlite_roundtrip() {
+    let (mut engine, at, scene, cut, _col, d) = raster_fixture();
+    engine
+        .apply(
+            "paint",
+            vec![Command::PaintTiles {
+                at,
+                id: d,
+                diff: vec![
+                    ((0, 0), None, Some(solid_tile(0xABCD))),
+                    ((-2, 3), None, Some(solid_tile(0x0F0F))),
+                ],
+            }],
+        )
+        .unwrap();
+
+    let dir = std::env::temp_dir().join("anim_core_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("raster_{}.animproj", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    engine.save(&path).unwrap();
+    let loaded = Engine::load(&path).unwrap();
+    assert_eq!(engine.project, loaded.project);
+
+    let layer = loaded
+        .project
+        .cut(scene, cut)
+        .unwrap()
+        .drawing(d)
+        .unwrap()
+        .raster
+        .as_ref()
+        .unwrap();
+    assert_eq!(layer.tiles.len(), 2);
+    assert!(layer.tiles.contains_key(&(-2, 3)));
 
     std::fs::remove_file(&path).unwrap();
 }

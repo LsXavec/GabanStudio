@@ -6,6 +6,7 @@
 
 use crate::graph::Graph;
 use crate::ids::*;
+use crate::raster::RasterLayer;
 use crate::xsheet::XSheet;
 
 /// One sampled pen point in paper coordinates (resolution independent).
@@ -25,18 +26,37 @@ pub struct Stroke {
     pub color: [u8; 4],
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// A cel: vector strokes and/or one raster layer, composited raster-over-vector.
+///
+/// Hybrid model (Krita-like): raster is the primary paint surface, vector stays
+/// available for resolution-independent line work. A fuller multi-layer stack
+/// (`Vec<Layer>`) can generalize this later; one optional raster layer covers
+/// frame-by-frame raster animation now.
+///
+/// Not `serde` — the store persists drawings field-by-field (strokes as JSON,
+/// tiles as BLOBs), and `RasterLayer` holds large pixel buffers.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Drawing {
     pub id: DrawingId,
     pub name: String,
-    /// M2: vector strokes. M3+ adds raster layers alongside.
     pub strokes: Vec<Stroke>,
+    pub raster: Option<RasterLayer>,
 }
 
 impl Drawing {
+    pub fn new(id: DrawingId, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            strokes: Vec::new(),
+            raster: None,
+        }
+    }
+
     /// Stable content hash — folded into the evaluator's recipe so editing
-    /// artwork invalidates cached values naturally (and later drives
-    /// render-cache dirtiness). Canonical little-endian byte fold, no serde.
+    /// artwork (vector OR raster) invalidates cached values naturally.
+    /// Canonical little-endian byte fold; the raster part folds per-tile
+    /// hashes (see [`RasterLayer::content_hash`]), never raw pixels per eval.
     pub fn content_hash(&self) -> u64 {
         let mut bytes: Vec<u8> = Vec::with_capacity(16 + self.strokes.len() * 16);
         for stroke in &self.strokes {
@@ -48,11 +68,15 @@ impl Drawing {
                 bytes.extend_from_slice(&p.pressure.to_bits().to_le_bytes());
             }
         }
+        if let Some(raster) = &self.raster {
+            bytes.extend_from_slice(b"raster");
+            bytes.extend_from_slice(&raster.content_hash().to_le_bytes());
+        }
         crate::value::fnv1a(&bytes)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Cut {
     pub id: CutId,
     pub name: String,
@@ -68,14 +92,14 @@ impl Cut {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Scene {
     pub id: SceneId,
     pub name: String,
     pub cuts: Vec<Cut>,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Project {
     pub name: String,
     pub fps: u32,

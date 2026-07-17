@@ -74,6 +74,7 @@ dependencies = [
 name = "anim-core"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "rusqlite",
  "serde",
  "serde_json",

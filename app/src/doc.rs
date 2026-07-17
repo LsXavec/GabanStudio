@@ -163,6 +163,7 @@ impl AppState {
                             id,
                             name,
                             strokes: vec![],
+                            raster: None,
                         },
                         Command::SetCell {
                             at,
@@ -194,6 +195,7 @@ impl AppState {
                     id,
                     name,
                     strokes: vec![],
+                    raster: None,
                 },
                 Command::SetCell {
                     at,

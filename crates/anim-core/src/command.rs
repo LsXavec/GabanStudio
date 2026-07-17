@@ -11,15 +11,18 @@ use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
 use crate::model::{Cut, Drawing, Project, Stroke};
+use crate::raster::{RasterLayer, TileDiff};
 use crate::xsheet::Exposure;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+// Not `serde` — commands can carry `Arc<TileData>` (large pixel buffers), and
+// the edit history lives in memory, never persisted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CutRef {
     pub scene: SceneId,
     pub cut: CutId,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Command {
     AddDrawing {
         at: CutRef,
@@ -28,6 +31,15 @@ pub enum Command {
         /// Usually empty for user-created drawings; carries full artwork when
         /// this command is the inverse of a RemoveDrawing.
         strokes: Vec<Stroke>,
+        /// The drawing's raster layer, if any. Raster cels start with an empty
+        /// layer here; this also restores tiles when inverting a RemoveDrawing.
+        raster: Option<RasterLayer>,
+    },
+    /// Apply a tile-level raster edit (paint/erase). Inverse swaps before/after.
+    PaintTiles {
+        at: CutRef,
+        id: DrawingId,
+        diff: TileDiff,
     },
     RemoveDrawing {
         at: CutRef,
@@ -91,6 +103,7 @@ impl Command {
     pub fn cut_ref(&self) -> CutRef {
         match self {
             Command::AddDrawing { at, .. }
+            | Command::PaintTiles { at, .. }
             | Command::RemoveDrawing { at, .. }
             | Command::AddStroke { at, .. }
             | Command::PopStroke { at, .. }
@@ -144,6 +157,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             id,
             name,
             strokes,
+            raster,
         } => {
             let cut = cut_mut(project, *at)?;
             if cut.drawing(*id).is_some() {
@@ -155,10 +169,48 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 id: *id,
                 name: name.clone(),
                 strokes: strokes.clone(),
+                raster: raster.clone(),
             });
             Ok(AppliedEffect {
                 inverse: vec![Command::RemoveDrawing { at: *at, id: *id }],
                 invalidation_roots: vec![],
+            })
+        }
+
+        Command::PaintTiles { at, id, diff } => {
+            let cut = cut_mut(project, *at)?;
+            let roots = stroke_invalidation_roots(cut, *id);
+            let drawing = cut
+                .drawings
+                .iter_mut()
+                .find(|d| d.id == *id)
+                .ok_or(EngineError::UnknownDrawing(*id))?;
+            let raster = drawing.raster.as_mut().ok_or_else(|| {
+                EngineError::InvalidCommand(format!("drawing {id} has no raster layer"))
+            })?;
+            // Install the `after` tiles; remove where `after` is None.
+            for (coord, _before, after) in diff {
+                match after {
+                    Some(tile) => {
+                        raster.tiles.insert(*coord, tile.clone());
+                    }
+                    None => {
+                        raster.tiles.remove(coord);
+                    }
+                }
+            }
+            // Exact inverse: swap before/after on every entry.
+            let inverse_diff: TileDiff = diff
+                .iter()
+                .map(|(c, b, a)| (*c, a.clone(), b.clone()))
+                .collect();
+            Ok(AppliedEffect {
+                inverse: vec![Command::PaintTiles {
+                    at: *at,
+                    id: *id,
+                    diff: inverse_diff,
+                }],
+                invalidation_roots: roots,
             })
         }
 
@@ -232,6 +284,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 id: *id,
                 name: drawing.name.clone(),
                 strokes: drawing.strokes.clone(),
+                raster: drawing.raster.clone(),
             }];
             inverse.extend(restore_cells);
 
