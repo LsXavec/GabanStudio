@@ -15,7 +15,7 @@ use crate::ids::*;
 use crate::model::{Cut, Drawing, Project, Scene};
 use crate::xsheet::{Column, Exposure, XSheet};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS cuts(
     frame_count INTEGER NOT NULL, output_node INTEGER, ord INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS drawings(
     id INTEGER PRIMARY KEY, cut_id INTEGER NOT NULL, name TEXT NOT NULL,
-    ord INTEGER NOT NULL);
+    payload TEXT NOT NULL, ord INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS columns(
     id INTEGER PRIMARY KEY, cut_id INTEGER NOT NULL, name TEXT NOT NULL,
     ord INTEGER NOT NULL);
@@ -67,8 +67,9 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
             "INSERT INTO cuts(id, scene_id, name, frame_count, output_node, ord)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
-        let mut ins_drawing =
-            tx.prepare("INSERT INTO drawings(id, cut_id, name, ord) VALUES (?1, ?2, ?3, ?4)")?;
+        let mut ins_drawing = tx.prepare(
+            "INSERT INTO drawings(id, cut_id, name, payload, ord) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
         let mut ins_column =
             tx.prepare("INSERT INTO columns(id, cut_id, name, ord) VALUES (?1, ?2, ?3, ?4)")?;
         let mut ins_cell = tx.prepare(
@@ -93,7 +94,14 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                     c_ord as i64,
                 ))?;
                 for (d_ord, d) in cut.drawings.iter().enumerate() {
-                    ins_drawing.execute((d.id.0 as i64, cut.id.0 as i64, &d.name, d_ord as i64))?;
+                    let payload = serde_json::to_string(&d.strokes)?;
+                    ins_drawing.execute((
+                        d.id.0 as i64,
+                        cut.id.0 as i64,
+                        &d.name,
+                        payload,
+                        d_ord as i64,
+                    ))?;
                 }
                 for (col_ord, col) in cut.xsheet.columns.iter().enumerate() {
                     ins_column.execute((col.id.0 as i64, cut.id.0 as i64, &col.name, col_ord as i64))?;
@@ -187,14 +195,15 @@ pub fn load(path: &Path) -> Result<Project> {
             };
 
             let mut stmt = conn
-                .prepare("SELECT id, name FROM drawings WHERE cut_id = ?1 ORDER BY ord")?;
-            let rows: Vec<(i64, String)> = stmt
-                .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?)))?
+                .prepare("SELECT id, name, payload FROM drawings WHERE cut_id = ?1 ORDER BY ord")?;
+            let rows: Vec<(i64, String, String)> = stmt
+                .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<std::result::Result<_, _>>()?;
-            for (id, name) in rows {
+            for (id, name, payload) in rows {
                 cut.drawings.push(Drawing {
                     id: DrawingId(id as u64),
                     name,
+                    strokes: serde_json::from_str(&payload)?,
                 });
             }
 

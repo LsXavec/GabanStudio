@@ -74,13 +74,17 @@ impl Evaluator {
                     .column(*column)
                     .ok_or(EngineError::UnknownColumn(*column))?;
                 match col.resolve(frame) {
-                    Some(d) => {
-                        let name = cut
-                            .drawing(d)
-                            .map(|dr| dr.name.as_str())
-                            .unwrap_or("?");
-                        Value::image(format!("drawing({}:'{}')", d, name))
-                    }
+                    Some(d) => match cut.drawing(d) {
+                        // Content hash in the recipe: editing artwork changes
+                        // the value (and its hash) without any extra plumbing.
+                        Some(dr) => Value::image(format!(
+                            "drawing({}:'{}'#{:016x})",
+                            d,
+                            dr.name,
+                            dr.content_hash()
+                        )),
+                        None => Value::image(format!("drawing({d}:?)")),
+                    },
                     None => Value::image("empty".to_string()),
                 }
             }

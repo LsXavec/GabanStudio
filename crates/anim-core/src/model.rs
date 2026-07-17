@@ -8,11 +8,48 @@ use crate::graph::Graph;
 use crate::ids::*;
 use crate::xsheet::XSheet;
 
+/// One sampled pen point in paper coordinates (resolution independent).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StrokePoint {
+    pub x: f32,
+    pub y: f32,
+    /// 0..1 tablet pressure (0.5 for mouse input).
+    pub pressure: f32,
+}
+
+/// A single pen stroke. Rendered width = base_width * point pressure.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Stroke {
+    pub points: Vec<StrokePoint>,
+    pub base_width: f32,
+    pub color: [u8; 4],
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Drawing {
     pub id: DrawingId,
     pub name: String,
-    // M2: raster/vector layers live here (content-addressed blobs on disk).
+    /// M2: vector strokes. M3+ adds raster layers alongside.
+    pub strokes: Vec<Stroke>,
+}
+
+impl Drawing {
+    /// Stable content hash — folded into the evaluator's recipe so editing
+    /// artwork invalidates cached values naturally (and later drives
+    /// render-cache dirtiness). Canonical little-endian byte fold, no serde.
+    pub fn content_hash(&self) -> u64 {
+        let mut bytes: Vec<u8> = Vec::with_capacity(16 + self.strokes.len() * 16);
+        for stroke in &self.strokes {
+            bytes.extend_from_slice(&stroke.base_width.to_bits().to_le_bytes());
+            bytes.extend_from_slice(&stroke.color);
+            for p in &stroke.points {
+                bytes.extend_from_slice(&p.x.to_bits().to_le_bytes());
+                bytes.extend_from_slice(&p.y.to_bits().to_le_bytes());
+                bytes.extend_from_slice(&p.pressure.to_bits().to_le_bytes());
+            }
+        }
+        crate::value::fnv1a(&bytes)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

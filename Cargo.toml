@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["m0_spike", "crates/anim-core"]
+members = ["app", "m0_spike", "crates/anim-core"]
 
 # Fast iteration: our crates compile quick, dependencies stay optimized
 [profile.dev]

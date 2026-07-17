@@ -49,11 +49,13 @@ fn fixture() -> Fixture {
                     at,
                     id: d_a,
                     name: "luffy_a".into(),
+                    strokes: vec![],
                 },
                 Command::AddDrawing {
                     at,
                     id: d_b,
                     name: "luffy_b".into(),
+                    strokes: vec![],
                 },
                 Command::SetCell {
                     at,
@@ -213,12 +215,20 @@ fn xsheet_empty_key_ends_hold_and_pre_first_key_is_empty() {
 #[test]
 fn eval_produces_exact_recipes_and_respects_timing() {
     let mut f = fixture();
+    let hash_a = f
+        .engine
+        .project
+        .cut(f.scene, f.cut)
+        .unwrap()
+        .drawing(f.d_a)
+        .unwrap()
+        .content_hash();
     let v0 = f.engine.eval(f.scene, f.cut, 0).unwrap();
     assert_eq!(
         v0.recipe(),
         format!(
-            "out(blend(Normal, xform(t=(2.000,0.000),s=1.000,r=0.000, drawing({}:'luffy_a')), solid(#102030ff)))",
-            f.d_a
+            "out(blend(Normal, xform(t=(2.000,0.000),s=1.000,r=0.000, drawing({}:'luffy_a'#{:016x})), solid(#102030ff)))",
+            f.d_a, hash_a
         )
     );
     let v6 = f.engine.eval(f.scene, f.cut, 6).unwrap();
@@ -503,6 +513,124 @@ fn removing_a_drawing_clears_and_restores_its_exposures() {
     assert_eq!(f.engine.project, baseline);
     let v6_back = f.engine.eval(f.scene, f.cut, 6).unwrap();
     assert!(v6_back.recipe().contains("luffy_b"));
+}
+
+fn test_stroke(seed: f32) -> anim_core::model::Stroke {
+    anim_core::model::Stroke {
+        points: vec![
+            anim_core::model::StrokePoint {
+                x: seed,
+                y: 10.0,
+                pressure: 0.4,
+            },
+            anim_core::model::StrokePoint {
+                x: seed + 5.0,
+                y: 12.0,
+                pressure: 0.9,
+            },
+        ],
+        base_width: 3.0,
+        color: [20, 20, 25, 255],
+    }
+}
+
+#[test]
+fn strokes_are_undoable_and_change_eval_content() {
+    let mut f = fixture();
+    let baseline = f.engine.project.clone();
+    let v_before = f.engine.eval(f.scene, f.cut, 0).unwrap();
+
+    f.engine
+        .apply(
+            "draw",
+            vec![Command::AddStroke {
+                at: f.at,
+                id: f.d_a,
+                stroke: test_stroke(1.0),
+            }],
+        )
+        .unwrap();
+
+    // Artwork edit shows up in the evaluated value (content hash changed)...
+    let v_after = f.engine.eval(f.scene, f.cut, 0).unwrap();
+    assert_ne!(v_before.hash(), v_after.hash(), "content edit must be seen");
+
+    // ...and undo restores both the document and the evaluated value exactly.
+    f.engine.undo().unwrap();
+    assert_eq!(f.engine.project, baseline);
+    let v_undone = f.engine.eval(f.scene, f.cut, 0).unwrap();
+    assert_eq!(v_before.hash(), v_undone.hash());
+
+    // Popping an empty drawing is rejected without corrupting anything.
+    let err = f.engine.apply(
+        "bad pop",
+        vec![Command::PopStroke { at: f.at, id: f.d_a }],
+    );
+    assert!(err.is_err());
+    assert_eq!(f.engine.project, baseline);
+}
+
+#[test]
+fn stroke_edits_invalidate_only_the_source_chain() {
+    let mut f = fixture();
+    for frame in 0..24 {
+        f.engine.eval(f.scene, f.cut, frame).unwrap();
+    }
+    let before = f.engine.evaluator.stats;
+
+    // Drawing A is exposed on the column: editing it recomputes Source,
+    // Transform, Blend, Output (4 nodes); Solid stays cached.
+    f.engine
+        .apply(
+            "draw on A",
+            vec![Command::AddStroke {
+                at: f.at,
+                id: f.d_a,
+                stroke: test_stroke(2.0),
+            }],
+        )
+        .unwrap();
+    for frame in 0..24 {
+        f.engine.eval(f.scene, f.cut, frame).unwrap();
+    }
+    let after = f.engine.evaluator.stats;
+    assert_eq!(after.computed - before.computed, 4 * 24);
+}
+
+#[test]
+fn strokes_survive_sqlite_roundtrip() {
+    let mut f = fixture();
+    f.engine
+        .apply(
+            "draw",
+            vec![
+                Command::AddStroke {
+                    at: f.at,
+                    id: f.d_a,
+                    stroke: test_stroke(1.0),
+                },
+                Command::AddStroke {
+                    at: f.at,
+                    id: f.d_a,
+                    stroke: test_stroke(7.0),
+                },
+            ],
+        )
+        .unwrap();
+
+    let dir = std::env::temp_dir().join("anim_core_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("strokes_{}.animproj", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    f.engine.save(&path).unwrap();
+    let loaded = Engine::load(&path).unwrap();
+    assert_eq!(f.engine.project, loaded.project);
+
+    let cut = loaded.project.cut(f.scene, f.cut).unwrap();
+    assert_eq!(cut.drawing(f.d_a).unwrap().strokes.len(), 2);
+
+    std::fs::remove_file(&path).unwrap();
 }
 
 #[test]

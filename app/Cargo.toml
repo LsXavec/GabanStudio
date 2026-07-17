@@ -1,0 +1,11 @@
+[package]
+name = "animstudio"
+version = "0.1.0"
+edition = "2024"
+description = "Node-graph 2D animation studio - app shell"
+
+[dependencies]
+anim-core = { path = "../crates/anim-core" }
+eframe = { version = "0.35.0", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+wgpu = "29"
+rfd = "0.15"

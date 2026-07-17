@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
-use crate::model::{Cut, Drawing, Project};
+use crate::model::{Cut, Drawing, Project, Stroke};
 use crate::xsheet::Exposure;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -25,8 +25,22 @@ pub enum Command {
         at: CutRef,
         id: DrawingId,
         name: String,
+        /// Usually empty for user-created drawings; carries full artwork when
+        /// this command is the inverse of a RemoveDrawing.
+        strokes: Vec<Stroke>,
     },
     RemoveDrawing {
+        at: CutRef,
+        id: DrawingId,
+    },
+    /// Append one pen stroke to a drawing.
+    AddStroke {
+        at: CutRef,
+        id: DrawingId,
+        stroke: Stroke,
+    },
+    /// Remove a drawing's most recent stroke (the exact inverse of AddStroke).
+    PopStroke {
         at: CutRef,
         id: DrawingId,
     },
@@ -78,6 +92,8 @@ impl Command {
         match self {
             Command::AddDrawing { at, .. }
             | Command::RemoveDrawing { at, .. }
+            | Command::AddStroke { at, .. }
+            | Command::PopStroke { at, .. }
             | Command::SetCell { at, .. }
             | Command::AddNode { at, .. }
             | Command::RemoveNode { at, .. }
@@ -99,6 +115,18 @@ pub struct AppliedEffect {
     pub invalidation_roots: Vec<NodeId>,
 }
 
+/// Nodes to invalidate when a drawing's artwork changes: the DrawingSource
+/// nodes of every column that currently exposes it.
+fn stroke_invalidation_roots(cut: &Cut, id: DrawingId) -> Vec<NodeId> {
+    let mut roots = Vec::new();
+    for col in &cut.xsheet.columns {
+        if !col.keys_referencing(id).is_empty() {
+            roots.extend(cut.graph.sources_of_column(col.id));
+        }
+    }
+    roots
+}
+
 fn cut_mut(project: &mut Project, at: CutRef) -> Result<&mut Cut> {
     project
         .scene_mut(at.scene)
@@ -111,7 +139,12 @@ fn cut_mut(project: &mut Project, at: CutRef) -> Result<&mut Cut> {
 
 pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffect> {
     match cmd {
-        Command::AddDrawing { at, id, name } => {
+        Command::AddDrawing {
+            at,
+            id,
+            name,
+            strokes,
+        } => {
             let cut = cut_mut(project, *at)?;
             if cut.drawing(*id).is_some() {
                 return Err(EngineError::InvalidCommand(format!(
@@ -121,10 +154,47 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             cut.drawings.push(Drawing {
                 id: *id,
                 name: name.clone(),
+                strokes: strokes.clone(),
             });
             Ok(AppliedEffect {
                 inverse: vec![Command::RemoveDrawing { at: *at, id: *id }],
                 invalidation_roots: vec![],
+            })
+        }
+
+        Command::AddStroke { at, id, stroke } => {
+            let cut = cut_mut(project, *at)?;
+            let roots = stroke_invalidation_roots(cut, *id);
+            let drawing = cut
+                .drawings
+                .iter_mut()
+                .find(|d| d.id == *id)
+                .ok_or(EngineError::UnknownDrawing(*id))?;
+            drawing.strokes.push(stroke.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::PopStroke { at: *at, id: *id }],
+                invalidation_roots: roots,
+            })
+        }
+
+        Command::PopStroke { at, id } => {
+            let cut = cut_mut(project, *at)?;
+            let roots = stroke_invalidation_roots(cut, *id);
+            let drawing = cut
+                .drawings
+                .iter_mut()
+                .find(|d| d.id == *id)
+                .ok_or(EngineError::UnknownDrawing(*id))?;
+            let stroke = drawing.strokes.pop().ok_or_else(|| {
+                EngineError::InvalidCommand(format!("drawing {id} has no strokes to pop"))
+            })?;
+            Ok(AppliedEffect {
+                inverse: vec![Command::AddStroke {
+                    at: *at,
+                    id: *id,
+                    stroke,
+                }],
+                invalidation_roots: roots,
             })
         }
 
@@ -161,6 +231,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 at: *at,
                 id: *id,
                 name: drawing.name.clone(),
+                strokes: drawing.strokes.clone(),
             }];
             inverse.extend(restore_cells);
 
