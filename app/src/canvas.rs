@@ -222,7 +222,15 @@ impl CanvasView {
                     }
                     egui::TouchPhase::End | egui::TouchPhase::Cancel => {
                         if self.touch_active {
-                            self.current.push(pt);
+                            // Pen-lift events usually report no/zero force.
+                            // Adding a default-pressure point here stamps a
+                            // blob on the end of a tapered stroke — only keep
+                            // the lift point if it carries real pressure.
+                            if let Some(f) = force {
+                                if *f > 0.0 {
+                                    self.current.push(pt);
+                                }
+                            }
                             self.finish_stroke(state);
                         }
                         self.touch_active = false;
