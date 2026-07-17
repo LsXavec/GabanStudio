@@ -41,9 +41,6 @@ const MIN_SAMPLE_DIST: f32 = 1.5;
 /// EMA factor toward each new pressure sample (weak stabilizer). NOT trusted to
 /// reach 0 at the tail — the end taper overwrites the tail regardless.
 const PRESSURE_SMOOTH: f32 = 0.5;
-/// Reject an upward pressure jump larger than this when the pen is basically
-/// stationary (a release/contact spike, not a real press).
-const SPIKE_DELTA: f32 = 0.35;
 /// Number of trailing points whose pressure is ramped to 0 at pen-up, so the
 /// stroke narrows to a clean tip instead of ending on a full-pressure disc.
 const END_TAPER_POINTS: usize = 5;
@@ -551,30 +548,24 @@ impl CanvasView {
             .map(|last| ((p.x - last.x).powi(2) + (p.y - last.y).powi(2)).sqrt() * scale)
             .unwrap_or(f32::INFINITY);
 
-        // Step 3: pressure only ever from the tablet. Some(>0) is real; Some(0)
-        // is an explicit taper signal; None reuses the last real value.
+        // Pressure comes ONLY from the tablet. Some(>0) is real (a stroke start
+        // is a rapid pressure rise while nearly stationary — that is normal, NOT
+        // a spike to reject); Some(0)/None reuse the last real value.
         match force {
             Some(f) if f > 0.0 => self.cur_some += 1,
             _ => self.cur_none += 1,
         }
         let raw = match force {
-            Some(f) if f > 0.0 => f,
+            Some(f) if f > 0.0 => {
+                self.last_pressure = f;
+                f
+            }
             Some(_) => 0.0,
             None => self.last_pressure,
         };
 
-        // Step 4: reject an upward spike that coincides with a near-stationary
-        // pen (release/contact artifact). Don't let it poison last_pressure.
-        let is_spike = raw - self.smoothed_pressure > SPIKE_DELTA && moved < MIN_SAMPLE_DIST;
-        let raw = if is_spike { self.smoothed_pressure } else { raw };
-        if let Some(f) = force
-            && f > 0.0
-            && !is_spike
-        {
-            self.last_pressure = f;
-        }
-
-        // First real Move overwrites the provisional Start seed.
+        // First real Move adopts the pressure immediately (no seed lag), so the
+        // stroke has correct width from the moment the pen presses down.
         if self.seed_pending && matches!(force, Some(f) if f > 0.0) {
             self.smoothed_pressure = raw;
             self.raw_history = [raw; 3];
@@ -584,18 +575,18 @@ impl CanvasView {
             self.seed_pending = false;
         }
 
-        // Step 5a: median-of-3 on raw (kills single-packet noise, no EMA lag),
-        // then EMA smooth.
+        // Median-of-3 kills single-packet noise; a gentle EMA smooths. No spike
+        // rejection — that was starving the stroke start of pressure.
         self.raw_history = [self.raw_history[1], self.raw_history[2], raw];
         let filtered = median3(self.raw_history);
         self.smoothed_pressure += (filtered - self.smoothed_pressure) * PRESSURE_SMOOTH;
         self.dbg_pressure = self.smoothed_pressure;
 
-        // Step 5b: distance gate in screen space. Below threshold, bank the
-        // sample onto the retained endpoint instead of stacking a segment.
+        // Distance gate: bank a near-stationary sample onto the last point,
+        // tracking the LATEST pressure (min biased pressure downward → jumpy).
         if moved < MIN_SAMPLE_DIST {
             if let Some(lp) = self.current.last_mut() {
-                lp.pressure = lp.pressure.min(self.smoothed_pressure);
+                lp.pressure = self.smoothed_pressure;
             }
             return;
         }
