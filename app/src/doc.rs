@@ -310,6 +310,41 @@ impl AppState {
         self.report(r, "cel cleared");
     }
 
+    /// Nearest distinct drawings before / after the current frame on the active
+    /// column (for onion skin). [0] = previous, [1] = next.
+    pub fn onion_neighbors(&self) -> [Option<DrawingId>; 2] {
+        let cur = self.current_drawing();
+        let Some(col) = self.cut().xsheet.column(self.active_column) else {
+            return [None, None];
+        };
+        let mut prev = None;
+        for f in (0..self.frame).rev() {
+            if let Some(d) = col.resolve(f)
+                && Some(d) != cur {
+                    prev = Some(d);
+                    break;
+                }
+        }
+        let mut next = None;
+        for f in (self.frame + 1)..self.frame_count() {
+            if let Some(d) = col.resolve(f)
+                && Some(d) != cur {
+                    next = Some(d);
+                    break;
+                }
+        }
+        [prev, next]
+    }
+
+    /// Raster tiles + content hash of a specific drawing (for onion upload).
+    pub fn drawing_raster(
+        &self,
+        id: DrawingId,
+    ) -> Option<(&BTreeMap<TileCoord, Arc<TileData>>, u64)> {
+        let r = self.cut().drawing(id)?.raster.as_ref()?;
+        Some((&r.tiles, r.content_hash()))
+    }
+
     /// The raster tiles of the current cel (for uploading to the GPU layer).
     pub fn current_raster_tiles(&self) -> Option<&BTreeMap<TileCoord, Arc<TileData>>> {
         let id = self.current_drawing()?;

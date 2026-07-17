@@ -42,6 +42,16 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
+/// An onion-skin ghost texture (adjacent cel), drawn tinted under the current.
+struct OnionSlot {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    tex_id: egui::TextureId,
+    hash: u64,
+    width: u32,
+    height: u32,
+}
+
 pub struct PaintLayer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -56,6 +66,8 @@ pub struct PaintLayer {
     height: u32,
     /// Sampler filter used to display the layer (Canvas scaling filter setting).
     filter: wgpu::FilterMode,
+    /// Onion ghosts: [0]=previous cel, [1]=next cel.
+    onion: [Option<OnionSlot>; 2],
 }
 
 const SHADER: &str = r#"
@@ -220,7 +232,25 @@ impl PaintLayer {
             width,
             height,
             filter,
+            onion: [None, None],
         }
+    }
+
+    /// Create a blank Rgba16Float layer texture with the paint-layer usages.
+    fn create_layer_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("layer"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
     }
 
     /// Create the layer texture, clear it, register it with egui, and push the
@@ -305,6 +335,7 @@ impl PaintLayer {
         self.tex_id = tex_id;
         self.width = width;
         self.height = height;
+        self.onion = [None, None]; // stale size
     }
 
     /// Switch the display sampler filter (Canvas scaling filter setting), live.
@@ -396,19 +427,51 @@ impl PaintLayer {
     /// the current drawing changes — frame switch, undo, redo). Tiles carry the
     /// exact texel bytes, so this is a bit-for-bit restore.
     pub fn sync_from(&mut self, tiles: &BTreeMap<TileCoord, Arc<TileData>>) {
-        self.clear();
+        let texture = self.texture.clone();
+        let view = self.view.clone();
+        self.fill_texture(&texture, &view, tiles);
+    }
+
+    /// Clear a texture and upload the given tiles into it (shared by the main
+    /// layer sync and the onion-skin slots).
+    fn fill_texture(
+        &self,
+        texture: &wgpu::Texture,
+        view: &wgpu::TextureView,
+        tiles: &BTreeMap<TileCoord, Arc<TileData>>,
+    ) {
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("clear_layer"),
+        });
+        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.queue.submit(Some(enc.finish()));
+
         for ((tx, ty), tile) in tiles {
             let px = tx * TILE as i32;
             let py = ty * TILE as i32;
             if px < 0 || py < 0 || px as u32 >= self.width || py as u32 >= self.height {
-                continue; // tiles fully outside the canvas can't be displayed
+                continue;
             }
-            // Clamp partial edge tiles to the canvas bounds.
             let w = (self.width - px as u32).min(TILE as u32);
             let h = (self.height - py as u32).min(TILE as u32);
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
-                    texture: &self.texture,
+                    texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d { x: px as u32, y: py as u32, z: 0 },
                     aspect: wgpu::TextureAspect::All,
@@ -422,6 +485,54 @@ impl PaintLayer {
                 wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             );
         }
+    }
+
+    /// Upload an onion-skin cel into slot 0 (previous) or 1 (next). `hash` is the
+    /// cel's raster content hash (skip re-upload if unchanged); `None` tiles
+    /// clears the slot. Returns the egui texture id to draw, if any.
+    pub fn set_onion(
+        &mut self,
+        slot: usize,
+        tiles: Option<&BTreeMap<TileCoord, Arc<TileData>>>,
+        hash: u64,
+    ) {
+        let Some(tiles) = tiles else {
+            self.onion[slot] = None;
+            return;
+        };
+        // Reuse the existing slot texture if the content is unchanged.
+        if let Some(s) = &self.onion[slot]
+            && s.hash == hash && s.width == self.width && s.height == self.height {
+                return;
+            }
+        let (texture, view, tex_id) = match self.onion[slot].take() {
+            Some(s) if s.width == self.width && s.height == self.height => {
+                (s.texture, s.view, s.tex_id)
+            }
+            _ => {
+                let texture = Self::create_layer_texture(&self.device, self.width, self.height);
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let tex_id = self.renderer.write().register_native_texture(
+                    &self.device,
+                    &view,
+                    wgpu::FilterMode::Linear,
+                );
+                (texture, view, tex_id)
+            }
+        };
+        self.fill_texture(&texture, &view, tiles);
+        self.onion[slot] = Some(OnionSlot {
+            texture,
+            view,
+            tex_id,
+            hash,
+            width: self.width,
+            height: self.height,
+        });
+    }
+
+    pub fn onion_id(&self, slot: usize) -> Option<egui::TextureId> {
+        self.onion[slot].as_ref().map(|s| s.tex_id)
     }
 
     /// Read the whole layer back into tiles (called once at pen-up). Blocking

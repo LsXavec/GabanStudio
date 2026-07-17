@@ -324,6 +324,20 @@ impl CanvasView {
                     self.raster_stroke_done = false;
                 }
             }
+
+            // ---- Raster onion: upload the neighbour cels into ghost slots.
+            if state.onion && self.current.is_empty() {
+                let neighbors = state.onion_neighbors();
+                for (slot, nid) in neighbors.iter().enumerate() {
+                    match nid.and_then(|id| state.drawing_raster(id)) {
+                        Some((tiles, hash)) => p.set_onion(slot, Some(tiles), hash),
+                        None => p.set_onion(slot, None, 0),
+                    }
+                }
+            } else {
+                p.set_onion(0, None, 0);
+                p.set_onion(1, None, 0);
+            }
         }
 
         // ---- Render layers ------------------------------------------------
@@ -365,10 +379,18 @@ impl CanvasView {
                 draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
             }
 
-        // 3b. The GPU raster layer, drawn over the paper at the paper rect.
+        // 3b. Raster onion ghosts (under) + the current GPU raster layer (over).
         if self.raster
             && let Some(p) = paint {
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                // Previous cel tinted warm, next cel tinted cool, both faded.
+                if let Some(id) = p.onion_id(0) {
+                    painter.image(id, paper_rect, uv, Color32::from_rgba_unmultiplied(255, 180, 180, 110));
+                }
+                if let Some(id) = p.onion_id(1) {
+                    painter.image(id, paper_rect, uv, Color32::from_rgba_unmultiplied(180, 235, 190, 110));
+                }
+                // Current cel on top, full strength.
                 painter.image(p.texture_id(), paper_rect, uv, Color32::WHITE);
             }
 
