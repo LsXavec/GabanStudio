@@ -112,12 +112,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             let frame_count = state.frame_count();
             let fps = state.fps();
             let mut clicked_frame: Option<u32> = None;
+            // Content origin (top-left of frame 0's row) for handle geometry.
+            let mut geom: Option<(f32, f32)> = None;
 
             for frame in 0..frame_count {
                 let (row_rect, resp) = ui.allocate_exact_size(
                     vec2(sheet_w.max(ui.available_width()), ROW_H),
                     Sense::click(),
                 );
+                if frame == 0 {
+                    geom = Some((row_rect.top(), row_rect.left()));
+                }
                 if resp.clicked() {
                     clicked_frame = Some(frame);
                 }
@@ -180,8 +185,127 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             }
 
+            // ---- Continuation-frame-line handles ---------------------------
+            // Each held drawing that has room before the next drawing gets a
+            // draggable handle to shorten its exposure (placing an Empty key);
+            // the frames after it then go blank until the next drawing.
+            if let Some((ctop, cleft)) = geom {
+                continuation_handles(ui, state, ctop, cleft, frame_count);
+            }
+
             if let Some(f) = clicked_frame {
                 state.goto(f);
             }
         });
+}
+
+/// One drawing's exposure span and its optional early-end terminator.
+struct Cont {
+    column: anim_core::ids::ColumnId,
+    ci: usize,
+    n: u32,           // the drawing key's frame
+    max_end: u32,     // next drawing frame, or frame_count (the natural end)
+    terminator: Option<u32>, // Empty key ending it early, if edited
+}
+
+fn continuation_handles(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    ctop: f32,
+    cleft: f32,
+    frame_count: u32,
+) {
+    // Gather spans (owned, so we can mutate state afterwards).
+    let mut conts: Vec<Cont> = Vec::new();
+    for (ci, col) in state.cut().xsheet.columns.iter().enumerate() {
+        let keys: Vec<(u32, Exposure)> = col.keys().collect();
+        for (i, (n, exp)) in keys.iter().enumerate() {
+            if !matches!(exp, Exposure::Drawing(_)) {
+                continue;
+            }
+            let n = *n;
+            let mut max_end = frame_count;
+            let mut terminator = None;
+            for (m, e) in &keys[i + 1..] {
+                match e {
+                    Exposure::Drawing(_) => {
+                        max_end = *m;
+                        break;
+                    }
+                    Exposure::Empty => {
+                        if terminator.is_none() {
+                            terminator = Some(*m);
+                        }
+                    }
+                }
+            }
+            // Only when there's a gap to control (not adjacent to a drawing).
+            if max_end > n + 1 {
+                conts.push(Cont { column: col.id, ci, n, max_end, terminator });
+            }
+        }
+    }
+
+    let painter = ui.painter();
+    let hover = ui.input(|i| i.pointer.hover_pos());
+    let mut pending: Vec<(anim_core::ids::ColumnId, Option<u32>, Option<u32>)> = Vec::new();
+
+    for c in &conts {
+        let col_x = cleft + FRAME_NUM_W + c.ci as f32 * COL_W;
+        let x = col_x + COL_W - 10.0;
+        let hold_end = c.terminator.unwrap_or(c.max_end);
+        let handle_y = ctop + hold_end as f32 * ROW_H;
+        let start_y = ctop + (c.n as f32 + 1.0) * ROW_H;
+        let handle_center = pos2(x, handle_y);
+
+        // Interact first (so the handle wins over the row click).
+        let id = ui.id().with(("cont", c.column.0, c.n));
+        let hr = ui.interact(
+            Rect::from_center_size(handle_center, vec2(16.0, 16.0)),
+            id,
+            Sense::drag(),
+        );
+
+        // Show if edited, hovered within the span, or being dragged.
+        let span_rect = Rect::from_min_max(
+            pos2(col_x, ctop + c.n as f32 * ROW_H),
+            pos2(col_x + COL_W, ctop + c.max_end as f32 * ROW_H),
+        );
+        let hovered_span = hover.is_some_and(|p| span_rect.contains(p));
+        let edited = c.terminator.is_some();
+        let show = edited || hovered_span || hr.dragged();
+
+        if show {
+            let col = if hr.dragged() || hr.hovered() {
+                Color32::WHITE
+            } else if edited {
+                Color32::from_rgb(230, 160, 90)
+            } else {
+                Color32::from_gray(150)
+            };
+            painter.line_segment(
+                [pos2(x, start_y), pos2(x, handle_y)],
+                egui::Stroke::new(1.5, col),
+            );
+            painter.circle_stroke(handle_center, 4.0, egui::Stroke::new(1.5, col));
+        }
+
+        if hr.dragged()
+            && let Some(p) = hr.interact_pointer_pos() {
+                let raw = ((p.y - ctop) / ROW_H).round() as i32;
+                let new_end = raw.clamp(c.n as i32 + 1, c.max_end as i32) as u32;
+                let new_term = if new_end >= c.max_end {
+                    None // dragged to/past the natural end → no terminator
+                } else {
+                    Some(new_end)
+                };
+                if new_term != c.terminator {
+                    pending.push((c.column, c.terminator, new_term));
+                }
+            }
+    }
+
+    for (column, old, new) in pending {
+        state.set_hold_terminator(column, old, new);
+    }
 }

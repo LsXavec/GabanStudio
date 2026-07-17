@@ -421,6 +421,39 @@ impl AppState {
         self.report(r, "exposed");
     }
 
+    /// Move/place/remove a hold-length terminator (an Exposure::Empty key) that
+    /// ends a drawing's exposure early — the frames between it and the next
+    /// drawing then show blank. `old`/`new` are the terminator frames; None =
+    /// no terminator (holds to the next drawing). Undoable + saved.
+    pub fn set_hold_terminator(&mut self, column: ColumnId, old: Option<u32>, new: Option<u32>) {
+        if old == new {
+            return;
+        }
+        let at = self.at();
+        let mut cmds = Vec::new();
+        if let Some(o) = old
+            && Some(o) != new {
+                cmds.push(Command::SetCell {
+                    at,
+                    column,
+                    frame: o,
+                    key: None,
+                });
+            }
+        if let Some(n) = new {
+            cmds.push(Command::SetCell {
+                at,
+                column,
+                frame: n,
+                key: Some(Exposure::Empty),
+            });
+        }
+        if !cmds.is_empty() {
+            let r = self.engine.apply("hold length", cmds);
+            self.report(r, "hold length");
+        }
+    }
+
     /// Clear the key at the current frame (previous hold extends over it).
     pub fn clear_key_at_frame(&mut self) {
         let at = self.at();
