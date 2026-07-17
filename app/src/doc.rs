@@ -182,7 +182,7 @@ impl AppState {
                             id,
                             name,
                             strokes: vec![],
-                            raster: None,
+                            raster: Some(RasterLayer::empty()),
                         },
                         Command::SetCell {
                             at,
@@ -277,9 +277,10 @@ impl AppState {
         }
     }
 
-    /// Clear the current cel's raster layer (undoable).
+    /// Clear this frame's own cel raster (undoable). No-op on a held frame that
+    /// doesn't own a cel, so clearing never wipes a drawing shared by others.
     pub fn clear_current_raster(&mut self) {
-        let Some(id) = self.current_drawing() else {
+        let Some(id) = self.own_key_drawing() else {
             return;
         };
         let at = self.at();
@@ -319,7 +320,7 @@ impl AppState {
         }
     }
 
-    /// Create an empty drawing and expose it at the current frame.
+    /// Create an empty raster cel and expose it at the current frame.
     pub fn new_drawing_at_frame(&mut self) {
         let at = self.at();
         let name = self.next_drawing_name();
@@ -332,7 +333,7 @@ impl AppState {
                     id,
                     name,
                     strokes: vec![],
-                    raster: None,
+                    raster: Some(RasterLayer::empty()),
                 },
                 Command::SetCell {
                     at,

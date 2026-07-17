@@ -77,12 +77,12 @@ impl Action {
         };
         match self {
             PlayPause => Some(k("Space")),
-            NextFrame => Some(k("Period")),
-            PrevFrame => Some(k("Comma")),
+            NextFrame => Some(k("F")),
+            PrevFrame => Some(k("S")),
             FirstFrame => Some(k("Home")),
             LastFrame => Some(k("End")),
-            NewDrawing => Some(k("N")),
-            ClearCel => None,
+            NewDrawing => Some(k("E")),
+            ClearCel => Some(k("D")),
             ToggleOnion => Some(k("O")),
             Undo => Some(ctrl("Z")),
             Redo => Some(ctrl("Y")),

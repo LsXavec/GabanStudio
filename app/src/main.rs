@@ -327,7 +327,7 @@ impl Editor {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(
-                            "space play · , . step frames · O onion · N new cel · ctrl+Z undo · wheel zoom · mid-drag pan · ⚙ settings to rebind",
+                            "space play · S/F prev/next frame · E new cel · D clear · O onion · ctrl+Z undo · wheel zoom · mid-drag pan · ⚙ settings to rebind",
                         )
                         .weak()
                         .size(10.5),
