@@ -4,11 +4,13 @@
 //! editor (top bar, left X-sheet, central canvas, status bar).
 
 mod canvas;
+mod config;
 mod doc;
 mod newproject;
 mod paint;
 mod xsheet_panel;
 
+use config::{Action, Config};
 use doc::AppState;
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
@@ -46,6 +48,11 @@ struct App {
     editor: Option<Editor>,
     /// When Some, the New Project dialog is showing (startup, or "New…").
     new_form: Option<NewProjectForm>,
+    /// User config (rebindable keyboard shortcuts).
+    config: Config,
+    settings_open: bool,
+    /// Action awaiting a new key binding (Settings rebind capture).
+    capturing: Option<Action>,
 }
 
 impl App {
@@ -54,6 +61,38 @@ impl App {
             render_state: cc.wgpu_render_state.clone(),
             editor: None,
             new_form: None,
+            config: Config::load(),
+            settings_open: false,
+            capturing: None,
+        }
+    }
+
+    /// Run an action bound to a keyboard shortcut.
+    fn perform(&mut self, action: Action) {
+        if action == Action::NewProject {
+            self.new_form = Some(NewProjectForm::default());
+            return;
+        }
+        let Some(ed) = &mut self.editor else { return };
+        let s = &mut ed.state;
+        match action {
+            Action::PlayPause => s.toggle_play(),
+            Action::NextFrame => s.step(1),
+            Action::PrevFrame => s.step(-1),
+            Action::FirstFrame => s.goto(0),
+            Action::LastFrame => {
+                let last = s.frame_count() - 1;
+                s.goto(last);
+            }
+            Action::NewDrawing => s.new_drawing_at_frame(),
+            Action::ClearCel => s.clear_current_raster(),
+            Action::ToggleOnion => s.onion = !s.onion,
+            Action::Undo => s.undo(),
+            Action::Redo => s.redo(),
+            Action::Save => s.save(false),
+            Action::SaveAs => s.save(true),
+            Action::Open => s.open(),
+            Action::NewProject => {}
         }
     }
 }
@@ -65,6 +104,8 @@ struct Editor {
     paint: Option<PaintLayer>,
     /// Set when the user clicks "New…"; the App picks it up to show the dialog.
     request_new: bool,
+    /// Set when the user clicks "settings".
+    request_settings: bool,
 }
 
 impl Editor {
@@ -82,6 +123,7 @@ impl Editor {
             canvas: canvas::CanvasView::new(),
             paint,
             request_new: false,
+            request_settings: false,
         }
     }
 
@@ -93,6 +135,7 @@ impl Editor {
             canvas: canvas::CanvasView::new(),
             paint,
             request_new: false,
+            request_settings: false,
         }
     }
 }
@@ -111,7 +154,34 @@ impl eframe::App for App {
                 editor.request_new = false;
                 self.new_form = Some(NewProjectForm::default());
             }
+            if editor.request_settings {
+                editor.request_settings = false;
+                self.settings_open = true;
+            }
         }
+
+        // Keyboard-shortcut dispatch — skipped while a dialog is up or while
+        // capturing a rebind (so the captured key doesn't also fire an action).
+        if self.editor.is_some() && self.new_form.is_none() && self.capturing.is_none() {
+            let fired: Vec<Action> = ui.ctx().input(|i| {
+                Action::ALL
+                    .iter()
+                    .copied()
+                    .filter(|a| self.config.triggered(*a, i))
+                    .collect()
+            });
+            for action in fired {
+                self.perform(action);
+            }
+        }
+
+        // Settings window (keyboard shortcuts editor).
+        config::settings_window(
+            ui.ctx(),
+            &mut self.settings_open,
+            &mut self.config,
+            &mut self.capturing,
+        );
 
         // New Project dialog: full-screen when no project, modal window over one.
         if self.new_form.is_some() {
@@ -174,44 +244,9 @@ impl App {
 }
 
 impl Editor {
-    fn shortcuts(&mut self, ctx: &egui::Context) {
-        let state = &mut self.state;
-        ctx.input(|i| {
-            let ctrl = i.modifiers.ctrl || i.modifiers.command;
-            if i.key_pressed(egui::Key::Space) {
-                state.toggle_play();
-            }
-            if i.key_pressed(egui::Key::ArrowLeft) {
-                state.step(-1);
-            }
-            if i.key_pressed(egui::Key::ArrowRight) {
-                state.step(1);
-            }
-            if !ctrl && i.key_pressed(egui::Key::O) {
-                state.onion = !state.onion;
-            }
-            if !ctrl && i.key_pressed(egui::Key::N) {
-                state.new_drawing_at_frame();
-            }
-            if ctrl && i.key_pressed(egui::Key::Z) {
-                state.undo();
-            }
-            if ctrl && i.key_pressed(egui::Key::Y) {
-                state.redo();
-            }
-            if ctrl && i.key_pressed(egui::Key::S) {
-                state.save(i.modifiers.shift);
-            }
-            if ctrl && i.key_pressed(egui::Key::O) {
-                state.open();
-            }
-        });
-    }
-
     fn ui(&mut self, ui: &mut egui::Ui) {
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
-        self.shortcuts(ui.ctx());
 
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -227,6 +262,9 @@ impl Editor {
                 }
                 if ui.button("open").clicked() {
                     self.state.open();
+                }
+                if ui.button("⚙ settings").on_hover_text("keyboard shortcuts & config").clicked() {
+                    self.request_settings = true;
                 }
                 if ui.button("save").clicked() {
                     self.state.save(false);
@@ -289,7 +327,7 @@ impl Editor {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         egui::RichText::new(
-                            "space play · ←→ step · O onion · N new drawing · ctrl+Z undo · wheel zoom · mid-drag pan",
+                            "space play · , . step frames · O onion · N new cel · ctrl+Z undo · wheel zoom · mid-drag pan · ⚙ settings to rebind",
                         )
                         .weak()
                         .size(10.5),

@@ -89,6 +89,8 @@ dependencies = [
  "bytemuck",
  "eframe",
  "rfd",
+ "serde",
+ "serde_json",
  "wgpu",
 ]
 
