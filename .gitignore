@@ -1,5 +1,5 @@
-# Rust build artifacts
-/target/
+# Rust build artifacts (any crate's)
+target/
 
 # Editor/OS noise
 .vscode/
