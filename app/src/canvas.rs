@@ -22,6 +22,33 @@ const SWATCHES: [[u8; 4]; 4] = [
     [245, 245, 245, 255],// white
 ];
 
+// Pen-input tuning derived from Krita's tablet pipeline (see
+// research/krita-pen-tuning.md). The load-bearing insight: egui/winit on
+// Windows Ink never delivers the decreasing-pressure samples Krita relies on
+// at lift-off, so we must SYNTHESIZE the taper ourselves (END_TAPER_POINTS)
+// rather than trust the release event or the EMA to reach zero.
+
+/// Provisional pressure for the Start point (Windows Ink Start force is usually
+/// None/0). Overwritten by the first real Move sample; a pure tap keeps it, so
+/// a dot is modest, not full width.
+const START_SEED: f32 = 0.3;
+/// Minimum screen-space distance between committed samples — banks a
+/// decelerating pen onto one point instead of stacking overlapping AA
+/// segments. Screen space = constant physical dead-zone (Krita Scalable Distance).
+const MIN_SAMPLE_DIST: f32 = 1.5;
+/// EMA factor toward each new pressure sample (weak stabilizer). NOT trusted to
+/// reach 0 at the tail — the end taper overwrites the tail regardless.
+const PRESSURE_SMOOTH: f32 = 0.5;
+/// Reject an upward pressure jump larger than this when the pen is basically
+/// stationary (a release/contact spike, not a real press).
+const SPIKE_DELTA: f32 = 0.35;
+/// Number of trailing points whose pressure is ramped to 0 at pen-up, so the
+/// stroke narrows to a clean tip instead of ending on a full-pressure disc.
+const END_TAPER_POINTS: usize = 5;
+/// Interior-only width floor: avoids sub-pixel invisibility mid-stroke without
+/// re-creating a minimum-radius dot at the (now zero-pressure) tip.
+const WIDTH_FLOOR: f32 = 0.1;
+
 pub struct CanvasView {
     zoom: f32,
     pan: egui::Vec2,
@@ -29,6 +56,19 @@ pub struct CanvasView {
     pub brush_color: [u8; 4],
     current: Vec<StrokePoint>,
     touch_active: bool,
+    /// Start point still holds the provisional seed (no real Move yet).
+    seed_pending: bool,
+    /// Last REAL (>0) pressure the tablet reported; reused for force:None
+    /// packets instead of a fabricated default.
+    last_pressure: f32,
+    smoothed_pressure: f32,
+    /// Last 3 raw pressures for a median pre-filter (kills single-packet noise
+    /// without EMA lag).
+    raw_history: [f32; 3],
+    /// Frames remaining in the post-lift mouse lockout: egui synthesizes a
+    /// PointerButton(Released)/drag_stopped from the pen after Touch::End; this
+    /// stops a phantom flat-pressure mouse point from being appended.
+    mouse_lockout: u8,
 }
 
 impl CanvasView {
@@ -40,6 +80,11 @@ impl CanvasView {
             brush_color: SWATCHES[0],
             current: Vec::new(),
             touch_active: false,
+            seed_pending: false,
+            last_pressure: START_SEED,
+            smoothed_pressure: START_SEED,
+            raw_history: [START_SEED; 3],
+            mouse_lockout: 0,
         }
     }
 
@@ -117,7 +162,7 @@ impl CanvasView {
 
         // ---- Pen input (edit mode only) -----------------------------------
         if !state.playing {
-            self.handle_pen(ui, &response, rect, &to_paper, state);
+            self.handle_pen(ui, &response, rect, &to_paper, scale, state);
         } else {
             self.current.clear();
             self.touch_active = false;
@@ -160,7 +205,8 @@ impl CanvasView {
             let c = self.brush_color;
             let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
             for pair in self.current.windows(2) {
-                let w = (self.brush_width * pair[1].pressure * scale).max(0.5);
+                let p = 0.5 * (pair[0].pressure + pair[1].pressure);
+                let w = (self.brush_width * p * scale).max(WIDTH_FLOOR);
                 painter.line_segment(
                     [
                         to_screen(pos2(pair[0].x, pair[0].y)),
@@ -189,8 +235,13 @@ impl CanvasView {
         response: &egui::Response,
         rect: Rect,
         to_paper: &impl Fn(Pos2) -> Pos2,
+        scale: f32,
         state: &mut AppState,
     ) {
+        if self.mouse_lockout > 0 {
+            self.mouse_lockout -= 1;
+        }
+
         let events = ui.input(|i| i.events.clone());
         let mut touch_seen = false;
 
@@ -199,48 +250,54 @@ impl CanvasView {
                 pos, force, phase, ..
             } = event
             {
-                if !rect.contains(*pos) && !self.touch_active {
-                    continue;
-                }
                 touch_seen = true;
-                let p = to_paper(*pos);
-                let pt = StrokePoint {
-                    x: p.x,
-                    y: p.y,
-                    pressure: force.unwrap_or(0.5).max(0.05),
-                };
                 match phase {
+                    // Step 2: distrust the Start force (WM_POINTERDOWN pressure
+                    // is usually 0 -> None). Seed provisionally; the first real
+                    // Move overwrites it so strokes don't begin with a fat dot.
                     egui::TouchPhase::Start => {
+                        if !rect.contains(*pos) {
+                            continue;
+                        }
+                        let p0 = force.filter(|f| *f > 0.0).unwrap_or(START_SEED);
                         self.touch_active = true;
+                        self.seed_pending = force.filter(|f| *f > 0.0).is_none();
+                        self.last_pressure = p0;
+                        self.smoothed_pressure = p0;
+                        self.raw_history = [p0; 3];
                         self.current.clear();
-                        self.current.push(pt);
+                        let p = to_paper(*pos);
+                        self.current.push(StrokePoint {
+                            x: p.x,
+                            y: p.y,
+                            pressure: p0,
+                        });
                     }
                     egui::TouchPhase::Move => {
-                        if self.touch_active {
-                            self.current.push(pt);
+                        if !self.touch_active {
+                            continue;
                         }
+                        self.process_move(*pos, *force, to_paper, scale);
                     }
+                    // Step 6: the release event's own pos/force are unreliable
+                    // (End force is None on Windows). Discard them; synthesize
+                    // the taper from the committed points instead.
                     egui::TouchPhase::End | egui::TouchPhase::Cancel => {
                         if self.touch_active {
-                            // Pen-lift events usually report no/zero force.
-                            // Adding a default-pressure point here stamps a
-                            // blob on the end of a tapered stroke — only keep
-                            // the lift point if it carries real pressure.
-                            if let Some(f) = force {
-                                if *f > 0.0 {
-                                    self.current.push(pt);
-                                }
-                            }
                             self.finish_stroke(state);
+                            self.mouse_lockout = 1;
                         }
                         self.touch_active = false;
+                        self.seed_pending = false;
                     }
                 }
             }
         }
 
-        // Mouse fallback (pressure 0.5), suppressed while a pen stream is live.
-        if !self.touch_active && !touch_seen {
+        // Mouse fallback (flat pressure) — only when NO pen stream is present,
+        // and not during the post-lift lockout that suppresses egui's
+        // synthesized primary-drag for the pen that just finished.
+        if !self.touch_active && !touch_seen && self.mouse_lockout == 0 {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 self.current.clear();
                 if let Some(p) = response.interact_pointer_pos() {
@@ -263,15 +320,94 @@ impl CanvasView {
             } else if response.drag_stopped_by(egui::PointerButton::Primary)
                 && !self.current.is_empty()
             {
+                // Mouse has no pressure, so no taper is synthesized here.
                 self.finish_stroke(state);
             }
         }
+    }
+
+    /// One pen Move sample: pressure derivation (Steps 3-5) + distance banking.
+    fn process_move(
+        &mut self,
+        pos: Pos2,
+        force: Option<f32>,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        scale: f32,
+    ) {
+        let p = to_paper(pos);
+        let moved = self
+            .current
+            .last()
+            .map(|last| ((p.x - last.x).powi(2) + (p.y - last.y).powi(2)).sqrt() * scale)
+            .unwrap_or(f32::INFINITY);
+
+        // Step 3: pressure only ever from the tablet. Some(>0) is real; Some(0)
+        // is an explicit taper signal; None reuses the last real value.
+        let raw = match force {
+            Some(f) if f > 0.0 => f,
+            Some(_) => 0.0,
+            None => self.last_pressure,
+        };
+
+        // Step 4: reject an upward spike that coincides with a near-stationary
+        // pen (release/contact artifact). Don't let it poison last_pressure.
+        let is_spike = raw - self.smoothed_pressure > SPIKE_DELTA && moved < MIN_SAMPLE_DIST;
+        let raw = if is_spike { self.smoothed_pressure } else { raw };
+        if let Some(f) = force
+            && f > 0.0
+            && !is_spike
+        {
+            self.last_pressure = f;
+        }
+
+        // First real Move overwrites the provisional Start seed.
+        if self.seed_pending && matches!(force, Some(f) if f > 0.0) {
+            self.smoothed_pressure = raw;
+            self.raw_history = [raw; 3];
+            if let Some(first) = self.current.first_mut() {
+                first.pressure = raw;
+            }
+            self.seed_pending = false;
+        }
+
+        // Step 5a: median-of-3 on raw (kills single-packet noise, no EMA lag),
+        // then EMA smooth.
+        self.raw_history = [self.raw_history[1], self.raw_history[2], raw];
+        let filtered = median3(self.raw_history);
+        self.smoothed_pressure += (filtered - self.smoothed_pressure) * PRESSURE_SMOOTH;
+
+        // Step 5b: distance gate in screen space. Below threshold, bank the
+        // sample onto the retained endpoint instead of stacking a segment.
+        if moved < MIN_SAMPLE_DIST {
+            if let Some(lp) = self.current.last_mut() {
+                lp.pressure = lp.pressure.min(self.smoothed_pressure);
+            }
+            return;
+        }
+        self.current.push(StrokePoint {
+            x: p.x,
+            y: p.y,
+            pressure: self.smoothed_pressure,
+        });
     }
 
     fn finish_stroke(&mut self, state: &mut AppState) {
         if self.current.len() < 2 {
             self.current.clear();
             return;
+        }
+        // Step 6: ramp the trailing points' pressure to 0 (smoothstep) so the
+        // stroke narrows to a clean tip. Our platform never sends the decaying
+        // Move samples Krita gets from the driver, so we produce the taper here.
+        let n = END_TAPER_POINTS.min(self.current.len());
+        let len = self.current.len();
+        for k in 0..n {
+            let idx = len - 1 - k;
+            // k=0 (endpoint) -> 0; k=n-1 -> ~1 (unchanged). smoothstep for a
+            // soft narrowing rather than a linear wedge.
+            let t = if n > 1 { k as f32 / (n - 1) as f32 } else { 0.0 };
+            let factor = t * t * (3.0 - 2.0 * t);
+            self.current[idx].pressure *= factor;
         }
         let stroke = Stroke {
             points: std::mem::take(&mut self.current),
@@ -280,6 +416,11 @@ impl CanvasView {
         };
         state.commit_stroke(stroke);
     }
+}
+
+/// Median of three values (branch-light).
+fn median3(v: [f32; 3]) -> f32 {
+    v[0].max(v[1]).min(v[0].min(v[1]).max(v[2]))
 }
 
 /// Previous/next distinct drawings on a column, with their ghost tints.
@@ -332,7 +473,8 @@ fn draw_strokes(
         let color =
             tint.unwrap_or_else(|| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]));
         for pair in stroke.points.windows(2) {
-            let w = (stroke.base_width * pair[1].pressure * scale).max(0.5);
+            let p = 0.5 * (pair[0].pressure + pair[1].pressure);
+            let w = (stroke.base_width * p * scale).max(WIDTH_FLOOR);
             painter.line_segment(
                 [
                     to_screen(pos2(pair[0].x, pair[0].y)),
