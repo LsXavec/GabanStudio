@@ -1,0 +1,8 @@
+[package]
+name = "m0_spike"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.35.0", default-features = false, features = ["wgpu", "default_fonts", "wayland", "x11"] }
+wgpu = "29"

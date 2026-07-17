@@ -1,0 +1,12 @@
+# Rust build artifacts
+/target/
+
+# Editor/OS noise
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
+# Local scratch files
+*.tmp
+*.bak
