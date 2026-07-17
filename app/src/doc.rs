@@ -131,9 +131,25 @@ impl AppState {
             .and_then(|c| c.resolve(frame))
     }
 
-    /// The drawing under the pen right now (active column @ current frame).
+    /// The drawing under the pen right now (active column @ current frame),
+    /// following holds — this is what's *displayed*.
     pub fn current_drawing(&self) -> Option<DrawingId> {
         self.resolve_at(self.active_column, self.frame)
+    }
+
+    /// The drawing keyed at *exactly* this frame (not a hold from an earlier
+    /// frame). Editing targets this: drawing on a held/empty frame makes a NEW
+    /// cel here rather than editing the held drawing — standard frame-by-frame.
+    pub fn own_key_drawing(&self) -> Option<DrawingId> {
+        match self
+            .cut()
+            .xsheet
+            .column(self.active_column)?
+            .key_at(self.frame)
+        {
+            Some(Exposure::Drawing(d)) => Some(d),
+            _ => None,
+        }
     }
 
     fn next_drawing_name(&self) -> String {
@@ -148,7 +164,7 @@ impl AppState {
     /// no orphan drawing behind.
     pub fn commit_stroke(&mut self, stroke: Stroke) {
         let at = self.at();
-        match self.current_drawing() {
+        match self.own_key_drawing() {
             Some(id) => {
                 let r = self
                     .engine
@@ -191,7 +207,7 @@ impl AppState {
     /// drawing the paint landed on (None if it couldn't be committed).
     pub fn commit_raster(&mut self, new_tiles: Vec<(TileCoord, Arc<TileData>)>) -> Option<DrawingId> {
         let at = self.at();
-        match self.current_drawing() {
+        match self.own_key_drawing() {
             None => {
                 let name = self.next_drawing_name();
                 let id = self.engine.alloc_drawing_id();

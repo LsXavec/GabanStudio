@@ -92,6 +92,10 @@ pub struct CanvasView {
     /// (drawing id, raster hash) currently uploaded to the GPU layer — when it
     /// no longer matches the current cel, re-sync from the engine.
     synced: (u64, u64),
+    /// This stroke will create a NEW cel (the frame had no own key) — clear the
+    /// GPU layer at the first dab so the new cel is blank, not a copy of the
+    /// held drawing that was on display.
+    raster_new_cel: bool,
 }
 
 impl CanvasView {
@@ -120,6 +124,7 @@ impl CanvasView {
             dabs_flushed: 0,
             raster_stroke_done: false,
             synced: (u64::MAX, u64::MAX), // force an initial sync
+            raster_new_cel: false,
         }
     }
 
@@ -281,6 +286,11 @@ impl CanvasView {
                     self.synced = key;
                 }
             } else {
+                // Starting a new cel: wipe the held drawing off the GPU layer
+                // so the new cel is blank, not a copy of what was displayed.
+                if self.raster_new_cel && self.dabs_flushed == 0 {
+                    p.clear();
+                }
                 // Drawing (or finishing this frame): stamp the new dabs.
                 let dabs = self.build_stroke_dabs();
                 if dabs.len() > self.dabs_flushed {
@@ -461,6 +471,7 @@ impl CanvasView {
                         self.cur_none = 0;
                         self.dabs_flushed = 0;
                         self.raster_stroke_done = false;
+                        self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
                         self.current.clear();
                         let p = to_paper(*pos);
                         self.current.push(StrokePoint {
@@ -498,6 +509,7 @@ impl CanvasView {
                 self.current.clear();
                 self.dabs_flushed = 0;
                 self.raster_stroke_done = false;
+                self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
                 if let Some(p) = response.interact_pointer_pos() {
                     let p = to_paper(p);
                     self.current.push(StrokePoint {
