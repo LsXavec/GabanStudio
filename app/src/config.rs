@@ -236,12 +236,79 @@ impl Default for PerfConfig {
     }
 }
 
+// ---- Pen / Tablet (Krita-derived; see research below) ----
+
+/// Pressure response curve: remaps raw pen pressure 0..1 before it drives line
+/// width. Points sorted ascending by x, endpoints pinned at (0,0)/(1,1).
+/// Piecewise-linear (never overshoots [0,1], unlike a cubic spline).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PressureCurve {
+    pub points: Vec<[f32; 2]>,
+}
+
+impl PressureCurve {
+    pub fn linear() -> Self {
+        Self { points: vec![[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]] }
+    }
+    /// Above the diagonal: light touches produce more width (boosts a weak pen).
+    pub fn soft() -> Self {
+        Self { points: vec![[0.0, 0.0], [0.5, 0.7], [1.0, 1.0]] }
+    }
+    /// Below the diagonal: must press harder for width (thinner light strokes).
+    pub fn hard() -> Self {
+        Self { points: vec![[0.0, 0.0], [0.5, 0.3], [1.0, 1.0]] }
+    }
+
+    /// Remap `x` (0..1) through the curve.
+    pub fn apply(&self, x: f32) -> f32 {
+        let x = x.clamp(0.0, 1.0);
+        let p = &self.points;
+        if p.len() < 2 {
+            return x;
+        }
+        if x <= p[0][0] {
+            return p[0][1];
+        }
+        if x >= p[p.len() - 1][0] {
+            return p[p.len() - 1][1];
+        }
+        let (mut lo, mut hi) = (0usize, p.len() - 1);
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            if p[mid][0] <= x {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let (x0, y0, x1, y1) = (p[lo][0], p[lo][1], p[hi][0], p[hi][1]);
+        let dx = x1 - x0;
+        if dx <= 1e-6 {
+            return y0;
+        }
+        (y0 + (y1 - y0) * (x - x0) / dx).clamp(0.0, 1.0)
+    }
+}
+
+impl Default for PressureCurve {
+    fn default() -> Self {
+        Self::linear()
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PenConfig {
+    #[serde(default)]
+    pub pressure_curve: PressureCurve,
+}
+
 /// Which Settings page is showing (Krita-style category sidebar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsCategory {
     #[default]
     Shortcuts,
     Performance,
+    Pen,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -249,6 +316,8 @@ pub struct Config {
     pub keybinds: Vec<Binding>,
     #[serde(default)]
     pub perf: PerfConfig,
+    #[serde(default)]
+    pub pen: PenConfig,
 }
 
 impl Default for Config {
@@ -262,6 +331,7 @@ impl Default for Config {
                 })
                 .collect(),
             perf: PerfConfig::default(),
+            pen: PenConfig::default(),
         }
     }
 }
@@ -397,12 +467,14 @@ pub fn settings_window(
                         "Keyboard Shortcuts",
                     );
                     ui.selectable_value(category, SettingsCategory::Performance, "Performance");
+                    ui.selectable_value(category, SettingsCategory::Pen, "Pen / Tablet");
                 });
                 ui.separator();
                 // Right: the selected page.
                 ui.vertical(|ui| match category {
                     SettingsCategory::Shortcuts => shortcuts_page(ui, config, capturing),
                     SettingsCategory::Performance => performance_page(ui, config, backend),
+                    SettingsCategory::Pen => pen_page(ui, config),
                 });
             });
         });
@@ -578,4 +650,150 @@ fn performance_page(ui: &mut egui::Ui, config: &mut Config, backend: &str) {
     if changed {
         config.save();
     }
+}
+
+fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
+    ui.horizontal(|ui| {
+        ui.heading("Pen / Tablet");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button("Reset to defaults").clicked() {
+                config.pen = PenConfig::default();
+                config.save();
+            }
+        });
+    });
+    ui.separator();
+
+    let mut changed = false;
+    ui.strong("Input Pressure Curve");
+    ui.label(
+        egui::RichText::new(
+            "Remap pen pressure before it sets line width. Drag the curve up to make light touches thicker.",
+        )
+        .weak(),
+    );
+    ui.add_space(6.0);
+
+    changed |= pressure_curve_editor(ui, &mut config.pen.pressure_curve);
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("Linear").clicked() {
+            config.pen.pressure_curve = PressureCurve::linear();
+            changed = true;
+        }
+        if ui
+            .button("Soft")
+            .on_hover_text("Light touches produce more width — boosts a pen that feels weak")
+            .clicked()
+        {
+            config.pen.pressure_curve = PressureCurve::soft();
+            changed = true;
+        }
+        if ui
+            .button("Hard")
+            .on_hover_text("Must press harder for the same width — thinner light strokes")
+            .clicked()
+        {
+            config.pen.pressure_curve = PressureCurve::hard();
+            changed = true;
+        }
+    });
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.label(
+        egui::RichText::new("Not available on this stack:")
+            .weak()
+            .italics(),
+    );
+    ui.label(
+        egui::RichText::new(
+            "• Tablet Input API (WinTab / Windows Ink) — the window toolkit delivers Windows Ink \
+             pointer events only.\n• Use-mouse-events-for-right/middle-click — managed by the \
+             window toolkit.",
+        )
+        .weak()
+        .size(11.0),
+    );
+
+    if changed {
+        config.save();
+    }
+}
+
+/// Draggable pressure-curve editor in a 0..1 box. Returns whether it changed.
+fn pressure_curve_editor(ui: &mut egui::Ui, curve: &mut PressureCurve) -> bool {
+    use egui::{Color32, Pos2, Rect, pos2, vec2};
+    let mut changed = false;
+    let (rect, _r) = ui.allocate_exact_size(vec2(220.0, 220.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4, Color32::from_gray(30));
+    painter.rect_stroke(
+        rect,
+        4,
+        egui::Stroke::new(1.0, Color32::from_gray(70)),
+        egui::StrokeKind::Inside,
+    );
+    for i in 1..4 {
+        let f = i as f32 / 4.0;
+        painter.line_segment(
+            [
+                pos2(rect.left() + rect.width() * f, rect.top()),
+                pos2(rect.left() + rect.width() * f, rect.bottom()),
+            ],
+            egui::Stroke::new(1.0, Color32::from_gray(45)),
+        );
+        painter.line_segment(
+            [
+                pos2(rect.left(), rect.top() + rect.height() * f),
+                pos2(rect.right(), rect.top() + rect.height() * f),
+            ],
+            egui::Stroke::new(1.0, Color32::from_gray(45)),
+        );
+    }
+    let to_screen =
+        |p: [f32; 2]| pos2(rect.left() + p[0] * rect.width(), rect.bottom() - p[1] * rect.height());
+    let to_curve = |s: Pos2| {
+        [
+            ((s.x - rect.left()) / rect.width()).clamp(0.0, 1.0),
+            ((rect.bottom() - s.y) / rect.height()).clamp(0.0, 1.0),
+        ]
+    };
+    // Plot the true (clamped) transfer function by sampling apply().
+    let line: Vec<Pos2> = (0..=64)
+        .map(|i| {
+            let x = i as f32 / 64.0;
+            to_screen([x, curve.apply(x)])
+        })
+        .collect();
+    painter.add(egui::Shape::line(
+        line,
+        egui::Stroke::new(2.0, Color32::from_rgb(120, 190, 255)),
+    ));
+    let n = curve.points.len();
+    for i in 1..n.saturating_sub(1) {
+        let center = to_screen(curve.points[i]);
+        let hr = ui.interact(
+            Rect::from_center_size(center, vec2(16.0, 16.0)),
+            ui.id().with(("pcurve", i)),
+            egui::Sense::drag(),
+        );
+        if hr.dragged() {
+            let np = to_curve(center + hr.drag_delta());
+            let xmin = curve.points[i - 1][0] + 0.02;
+            let xmax = curve.points[i + 1][0] - 0.02;
+            curve.points[i] = [np[0].clamp(xmin, xmax), np[1].clamp(0.0, 1.0)];
+            changed = true;
+        }
+        let col = if hr.hovered() || hr.dragged() {
+            Color32::WHITE
+        } else {
+            Color32::from_rgb(120, 190, 255)
+        };
+        painter.circle_filled(center, 5.0, col);
+    }
+    painter.circle_filled(to_screen(curve.points[0]), 4.0, Color32::from_gray(160));
+    painter.circle_filled(to_screen(curve.points[n - 1]), 4.0, Color32::from_gray(160));
+    changed
 }

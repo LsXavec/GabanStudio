@@ -10,7 +10,7 @@ mod newproject;
 mod paint;
 mod xsheet_panel;
 
-use config::{Action, Config, FrameLatency, SettingsCategory};
+use config::{Action, Config, FrameLatency, PenConfig, SettingsCategory};
 use doc::AppState;
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
@@ -168,10 +168,11 @@ impl eframe::App for App {
             self.new_form = Some(NewProjectForm::default());
         }
 
-        // Apply live performance settings (read as locals to avoid borrowing
-        // self.config while self.editor is borrowed mutably).
+        // Apply live settings (read as locals to avoid borrowing self.config
+        // while self.editor is borrowed mutably).
         let undo_limit = self.config.perf.undo_limit;
         let canvas_filter = self.config.perf.canvas_filter.wgpu();
+        let pen = self.config.pen.clone();
 
         // Editor (if any) renders first as the base layer.
         if let Some(editor) = &mut self.editor {
@@ -179,7 +180,7 @@ impl eframe::App for App {
             if let Some(p) = &mut editor.paint {
                 p.set_filter(canvas_filter);
             }
-            editor.ui(ui);
+            editor.ui(ui, &pen);
             if editor.request_new {
                 editor.request_new = false;
                 self.new_form = Some(NewProjectForm::default());
@@ -306,7 +307,7 @@ impl App {
 }
 
 impl Editor {
-    fn ui(&mut self, ui: &mut egui::Ui) {
+    fn ui(&mut self, ui: &mut egui::Ui, pen: &PenConfig) {
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
 
@@ -409,7 +410,7 @@ impl Editor {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(24, 26, 30)))
             .show(ui, |ui| {
-                self.canvas.ui(ui, &mut self.state, self.paint.as_mut());
+                self.canvas.ui(ui, &mut self.state, self.paint.as_mut(), pen);
             });
     }
 }

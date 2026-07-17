@@ -10,6 +10,7 @@ use anim_core::model::{Stroke, StrokePoint};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
+use crate::config::{PenConfig, PressureCurve};
 use crate::doc::AppState;
 use crate::paint::{Dab, PaintLayer};
 
@@ -93,6 +94,9 @@ pub struct CanvasView {
     /// GPU layer at the first dab so the new cel is blank, not a copy of the
     /// held drawing that was on display.
     raster_new_cel: bool,
+    /// Pressure response curve (from Pen/Tablet settings); remaps pressure to
+    /// width at render time. Stored pressure stays raw.
+    pen_curve: PressureCurve,
 }
 
 impl CanvasView {
@@ -122,10 +126,18 @@ impl CanvasView {
             raster_stroke_done: false,
             synced: (u64::MAX, u64::MAX), // force an initial sync
             raster_new_cel: false,
+            pen_curve: PressureCurve::linear(),
         }
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, state: &mut AppState, paint: Option<&mut PaintLayer>) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        paint: Option<&mut PaintLayer>,
+        pen: &PenConfig,
+    ) {
+        self.pen_curve = pen.pressure_curve.clone();
         let mut paint = paint;
         // ---- Toolbar ------------------------------------------------------
         ui.horizontal(|ui| {
@@ -326,7 +338,7 @@ impl CanvasView {
             }
             if let Some(id) = col.resolve(frame)
                 && let Some(d) = cut.drawing(id) {
-                    draw_strokes(&painter, &d.strokes, &to_screen, scale, None);
+                    draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
                 }
         }
 
@@ -335,7 +347,14 @@ impl CanvasView {
             let ghosts = onion_ghosts(state, active_col, frame);
             for (id, tint) in ghosts {
                 if let Some(d) = cut.drawing(id) {
-                    draw_strokes(&painter, &d.strokes, &to_screen, scale, Some(tint));
+                    draw_strokes(
+                        &painter,
+                        &d.strokes,
+                        &to_screen,
+                        scale,
+                        Some(tint),
+                        &self.pen_curve,
+                    );
                 }
             }
         }
@@ -343,7 +362,7 @@ impl CanvasView {
         // 3. Active column's current drawing on top.
         if let Some(id) = state.resolve_at(active_col, frame)
             && let Some(d) = state.cut().drawing(id) {
-                draw_strokes(&painter, &d.strokes, &to_screen, scale, None);
+                draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
             }
 
         // 3b. The GPU raster layer, drawn over the paper at the paper rect.
@@ -358,7 +377,15 @@ impl CanvasView {
         if !self.raster && self.current.len() >= 2 {
             let c = self.brush_color;
             let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
-            fill_stroke(&painter, &self.current, self.brush_width, scale, color, &to_screen);
+            fill_stroke(
+                &painter,
+                &self.current,
+                self.brush_width,
+                scale,
+                color,
+                &to_screen,
+                &self.pen_curve,
+            );
         }
 
         // Empty-cell hint (vector mode only).
@@ -388,7 +415,8 @@ impl CanvasView {
         }
         let color = linear_rgba(self.brush_color);
         let hardness = 0.85;
-        let radius_of = |pr: f32| (self.raster_brush_px * pr * 0.5).max(0.5);
+        let radius_of =
+            |pr: f32| (self.raster_brush_px * self.pen_curve.apply(pr) * 0.5).max(0.5);
 
         if pts.len() == 1 {
             dabs.push(Dab {
@@ -708,12 +736,21 @@ fn draw_strokes(
     to_screen: &impl Fn(Pos2) -> Pos2,
     scale: f32,
     tint: Option<Color32>,
+    curve: &PressureCurve,
 ) {
     for stroke in strokes {
         let c = stroke.color;
         let color =
             tint.unwrap_or_else(|| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]));
-        fill_stroke(painter, &stroke.points, stroke.base_width, scale, color, to_screen);
+        fill_stroke(
+            painter,
+            &stroke.points,
+            stroke.base_width,
+            scale,
+            color,
+            to_screen,
+            curve,
+        );
     }
 }
 
@@ -731,11 +768,12 @@ fn fill_stroke(
     scale: f32,
     color: Color32,
     to_screen: &impl Fn(Pos2) -> Pos2,
+    curve: &PressureCurve,
 ) {
     if points.is_empty() {
         return;
     }
-    let half = |pr: f32| (base_width * pr * scale * 0.5).max(WIDTH_FLOOR);
+    let half = |pr: f32| (base_width * curve.apply(pr) * scale * 0.5).max(WIDTH_FLOOR);
 
     // Single point (or a tap): one dab.
     if points.len() == 1 {
