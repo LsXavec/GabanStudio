@@ -3,12 +3,15 @@
 //! All document mutations route through Engine commands — undo covers
 //! everything the artist does here.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anim_core::Engine;
 use anim_core::command::{Command, CutRef};
 use anim_core::ids::*;
 use anim_core::model::{Cut, Stroke};
+use anim_core::raster::{RasterLayer, TileCoord, TileData, TileDiff};
 use anim_core::xsheet::Exposure;
 
 pub struct AppState {
@@ -179,6 +182,124 @@ impl AppState {
                 }
                 self.report(r, "new drawing");
             }
+        }
+    }
+
+    /// Commit a finished raster stroke: the readback tiles become a `PaintTiles`
+    /// edit (undoable + persisted). If the current cell is empty, a new raster
+    /// cel is created and exposed here first — all as ONE undo step. Returns the
+    /// drawing the paint landed on (None if it couldn't be committed).
+    pub fn commit_raster(&mut self, new_tiles: Vec<(TileCoord, Arc<TileData>)>) -> Option<DrawingId> {
+        let at = self.at();
+        match self.current_drawing() {
+            None => {
+                let name = self.next_drawing_name();
+                let id = self.engine.alloc_drawing_id();
+                let diff: TileDiff = new_tiles
+                    .into_iter()
+                    .map(|(c, t)| (c, None, Some(t)))
+                    .collect();
+                let r = self.engine.apply(
+                    "paint (new cel)",
+                    vec![
+                        Command::AddDrawing {
+                            at,
+                            id,
+                            name,
+                            strokes: vec![],
+                            raster: Some(RasterLayer::empty()),
+                        },
+                        Command::SetCell {
+                            at,
+                            column: self.active_column,
+                            frame: self.frame,
+                            key: Some(Exposure::Drawing(id)),
+                        },
+                        Command::PaintTiles { at, id, diff },
+                    ],
+                );
+                if r.is_ok() {
+                    self.selected_drawing = Some(id);
+                }
+                self.report(r, "painted (new cel)");
+                Some(id)
+            }
+            Some(id) => {
+                // Snapshot the drawing's current tiles as the diff "before".
+                let before: BTreeMap<TileCoord, Arc<TileData>> = match self
+                    .cut()
+                    .drawing(id)
+                    .and_then(|d| d.raster.as_ref())
+                {
+                    Some(raster) => raster.tiles.clone(),
+                    None => {
+                        self.status =
+                            "this cel is vector-only; raster paint isn't wired here yet".into();
+                        return None;
+                    }
+                };
+                let after: BTreeMap<TileCoord, Arc<TileData>> = new_tiles.into_iter().collect();
+
+                let mut diff: TileDiff = Vec::new();
+                for (coord, a) in &after {
+                    if before.get(coord).map(|t| t.hash) != Some(a.hash) {
+                        diff.push((*coord, before.get(coord).cloned(), Some(a.clone())));
+                    }
+                }
+                for (coord, b) in &before {
+                    if !after.contains_key(coord) {
+                        diff.push((*coord, Some(b.clone()), None));
+                    }
+                }
+                if diff.is_empty() {
+                    return Some(id);
+                }
+                let r = self.engine.apply("paint", vec![Command::PaintTiles { at, id, diff }]);
+                self.report(r, "painted");
+                Some(id)
+            }
+        }
+    }
+
+    /// Clear the current cel's raster layer (undoable).
+    pub fn clear_current_raster(&mut self) {
+        let Some(id) = self.current_drawing() else {
+            return;
+        };
+        let at = self.at();
+        let before: BTreeMap<TileCoord, Arc<TileData>> =
+            match self.cut().drawing(id).and_then(|d| d.raster.as_ref()) {
+                Some(raster) if !raster.tiles.is_empty() => raster.tiles.clone(),
+                _ => return,
+            };
+        let diff: TileDiff = before
+            .into_iter()
+            .map(|(c, b)| (c, Some(b), None))
+            .collect();
+        let r = self.engine.apply("clear cel", vec![Command::PaintTiles { at, id, diff }]);
+        self.report(r, "cel cleared");
+    }
+
+    /// The raster tiles of the current cel (for uploading to the GPU layer).
+    pub fn current_raster_tiles(&self) -> Option<&BTreeMap<TileCoord, Arc<TileData>>> {
+        let id = self.current_drawing()?;
+        self.cut().drawing(id)?.raster.as_ref().map(|r| &r.tiles)
+    }
+
+    /// Identity of the current cel's raster (drawing id, raster content hash) —
+    /// used to decide when the GPU layer needs re-syncing.
+    pub fn current_raster_key(&self) -> (u64, u64) {
+        match self.current_drawing() {
+            Some(id) => {
+                let h = self
+                    .cut()
+                    .drawing(id)
+                    .and_then(|d| d.raster.as_ref())
+                    .map(|r| r.content_hash())
+                    .unwrap_or(0);
+                (id.0, h)
+            }
+            None => (0, 0),
         }
     }
 

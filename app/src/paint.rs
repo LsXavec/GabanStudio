@@ -1,19 +1,28 @@
-//! GPU raster paint layer — Phase 1 of the raster brush engine.
+//! GPU raster paint layer of the raster brush engine.
 //!
 //! Owns one `Rgba16Float` layer texture at the project resolution and an
-//! instanced soft-round-dab pipeline. Brush strokes are walked into dabs
-//! (elsewhere) and stamped here with premultiplied "over" blending; the layer
-//! is registered as an egui native texture and drawn into the canvas rect.
+//! instanced soft-round-dab pipeline. This texture always mirrors the CURRENT
+//! drawing's raster cel:
+//! * `sync_from` uploads the engine's stored tiles into it (on frame switch /
+//!   undo);
+//! * `paint` stamps live dabs during a stroke;
+//! * `read_tiles` reads it back at pen-up so the app can commit a `PaintTiles`
+//!   command to the engine (undo + persistence).
 //!
-//! Deliberately minimal per the derivation (research/raster-brush-engine.md):
-//! ink at opacity 1 (no wet buffer / anti-darkening yet — Phase 3), no tiles,
-//! no engine integration, no undo (Phase 2). This proves the wgpu+egui path.
+//! Premultiplied "over" blending, ink at opacity 1 (wet-buffer anti-darkening
+//! is Phase 3). The texel bytes ARE the engine's tile bytes — opaque to the
+//! headless engine, round-tripped bit-for-bit.
 
+use anim_core::raster::{TileCoord, TileData, TILE};
 use eframe::egui;
 use eframe::egui_wgpu::{RenderState, Renderer};
 use egui::mutex::RwLock;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
+
+/// Bytes per RGBA16 pixel.
+const BPP: u32 = 8;
 
 /// One brush dab in layer texel space (= project pixel space).
 #[repr(C)]
@@ -40,6 +49,7 @@ pub struct PaintLayer {
     pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     tex_id: egui::TextureId,
     width: u32,
@@ -191,7 +201,7 @@ impl PaintLayer {
             cache: None,
         });
 
-        let (view, tex_id) =
+        let (texture, view, tex_id) =
             Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height);
 
         Self {
@@ -201,6 +211,7 @@ impl PaintLayer {
             pipeline,
             uniform_buf,
             bind_group,
+            texture,
             view,
             tex_id,
             width,
@@ -209,7 +220,7 @@ impl PaintLayer {
     }
 
     /// Create the layer texture, clear it, register it with egui, and push the
-    /// matching size uniform. Returns the view + egui texture id.
+    /// matching size uniform. Returns the texture + view + egui texture id.
     fn make_target(
         device: &wgpu::Device,
         renderer: &Arc<RwLock<Renderer>>,
@@ -217,7 +228,7 @@ impl PaintLayer {
         uniform_buf: &wgpu::Buffer,
         width: u32,
         height: u32,
-    ) -> (wgpu::TextureView, egui::TextureId) {
+    ) -> (wgpu::Texture, wgpu::TextureView, egui::TextureId) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("paint_layer"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -227,7 +238,8 @@ impl PaintLayer {
             format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC   // readback at pen-up
+                | wgpu::TextureUsages::COPY_DST,  // upload engine tiles (sync_from)
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -268,7 +280,7 @@ impl PaintLayer {
             &view,
             wgpu::FilterMode::Linear,
         );
-        (view, tex_id)
+        (texture, view, tex_id)
     }
 
     /// Recreate the layer if the project resolution changed (clears content).
@@ -276,7 +288,7 @@ impl PaintLayer {
         if width == self.width && height == self.height {
             return;
         }
-        let (view, tex_id) = Self::make_target(
+        let (texture, view, tex_id) = Self::make_target(
             &self.device,
             &self.renderer,
             &self.queue,
@@ -284,6 +296,7 @@ impl PaintLayer {
             width,
             height,
         );
+        self.texture = texture;
         self.view = view;
         self.tex_id = tex_id;
         self.width = width;
@@ -359,5 +372,122 @@ impl PaintLayer {
             pass.draw(0..4, 0..dabs.len() as u32);
         }
         self.queue.submit(Some(enc.finish()));
+    }
+
+    /// Replace the layer's contents with the engine's stored tiles (called when
+    /// the current drawing changes — frame switch, undo, redo). Tiles carry the
+    /// exact texel bytes, so this is a bit-for-bit restore.
+    pub fn sync_from(&mut self, tiles: &BTreeMap<TileCoord, Arc<TileData>>) {
+        self.clear();
+        for ((tx, ty), tile) in tiles {
+            let px = tx * TILE as i32;
+            let py = ty * TILE as i32;
+            if px < 0 || py < 0 || px as u32 >= self.width || py as u32 >= self.height {
+                continue; // tiles fully outside the canvas can't be displayed
+            }
+            // Clamp partial edge tiles to the canvas bounds.
+            let w = (self.width - px as u32).min(TILE as u32);
+            let h = (self.height - py as u32).min(TILE as u32);
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: px as u32, y: py as u32, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                tile.as_bytes(),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(TILE as u32 * BPP),
+                    rows_per_image: Some(TILE as u32),
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+    }
+
+    /// Read the whole layer back into tiles (called once at pen-up). Blocking
+    /// map (a small hitch at commit — the async staging ring is a later
+    /// optimization). Fully-transparent tiles are dropped so blank areas cost
+    /// nothing.
+    pub fn read_tiles(&self) -> Vec<(TileCoord, Arc<TileData>)> {
+        let unpadded_bpr = self.width * BPP;
+        let padded_bpr = unpadded_bpr.div_ceil(256) * 256;
+        let buf_size = padded_bpr as u64 * self.height as u64;
+
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("readback"),
+            size: buf_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("readback"),
+        });
+        enc.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bpr),
+                    rows_per_image: Some(self.height),
+                },
+            },
+            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+        );
+        self.queue.submit(Some(enc.finish()));
+
+        // Block until the copy completes and the buffer is mapped.
+        let (tx, rx) = std::sync::mpsc::channel();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        let _ = rx.recv();
+
+        let data = staging.slice(..).get_mapped_range();
+        let tiles_x = self.width.div_ceil(TILE as u32);
+        let tiles_y = self.height.div_ceil(TILE as u32);
+        let mut out = Vec::new();
+        for ty in 0..tiles_y {
+            for tx in 0..tiles_x {
+                let mut tile = vec![0u16; anim_core::raster::TILE_LEN];
+                for row in 0..TILE as u32 {
+                    let py = ty * TILE as u32 + row;
+                    if py >= self.height {
+                        break;
+                    }
+                    let copy_px = (self.width - tx * TILE as u32).min(TILE as u32);
+                    let src_row = py as usize * padded_bpr as usize
+                        + (tx * TILE as u32) as usize * BPP as usize;
+                    let dst_row = row as usize * TILE * 4;
+                    for px in 0..copy_px as usize {
+                        let sb = src_row + px * BPP as usize;
+                        for c in 0..4 {
+                            let lo = data[sb + c * 2] as u16;
+                            let hi = data[sb + c * 2 + 1] as u16;
+                            tile[dst_row + px * 4 + c] = lo | (hi << 8);
+                        }
+                    }
+                }
+                let td = TileData::from_vec(tile);
+                if !td.is_empty() {
+                    out.push(((tx as i32, ty as i32), Arc::new(td)));
+                }
+            }
+        }
+        drop(data);
+        staging.unmap();
+        out
     }
 }

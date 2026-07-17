@@ -81,14 +81,17 @@ pub struct CanvasView {
     cur_some: u32,
     cur_none: u32,
 
-    // --- Raster brush (Phase 1: a single GPU scratch layer, not yet wired to
-    // frames/drawings/undo/persistence — that's Phase 2) ---
+    // --- Raster brush: GPU layer mirrors the current cel; strokes read back
+    // into the engine as PaintTiles (undoable + saved) ---
     raster: bool,
     raster_brush_px: f32,
     /// How many of the current stroke's dabs are already on the GPU layer.
     dabs_flushed: usize,
     /// The stroke finished this frame; flush its last dabs, then reset.
     raster_stroke_done: bool,
+    /// (drawing id, raster hash) currently uploaded to the GPU layer — when it
+    /// no longer matches the current cel, re-sync from the engine.
+    synced: (u64, u64),
 }
 
 impl CanvasView {
@@ -116,6 +119,7 @@ impl CanvasView {
             raster_brush_px: 14.0,
             dabs_flushed: 0,
             raster_stroke_done: false,
+            synced: (u64::MAX, u64::MAX), // force an initial sync
         }
     }
 
@@ -138,10 +142,13 @@ impl CanvasView {
                         .text("px")
                         .fixed_decimals(0),
                 );
-                if ui.button("clear layer").clicked()
-                    && let Some(p) = paint.as_deref_mut() {
-                        p.clear();
-                    }
+                if ui
+                    .button("clear cel")
+                    .on_hover_text("clear this cel's raster (undoable)")
+                    .clicked()
+                {
+                    state.clear_current_raster();
+                }
                 if ui.button("test").on_hover_text("stamp test dabs (checks the GPU display path)").clicked()
                     && let Some(p) = paint.as_deref_mut() {
                         let (w, h) = p.size();
@@ -255,21 +262,50 @@ impl CanvasView {
             self.touch_active = false;
         }
 
-        // ---- Raster: stamp the stroke's new dabs onto the GPU layer -------
+        // ---- Raster: keep the GPU layer synced to the current cel, stamp
+        //      live dabs, and read back into the engine at pen-up ----------
         if self.raster
-            && let Some(p) = paint.as_deref_mut() {
-                p.ensure_size(state.engine.project.width, state.engine.project.height);
+            && let Some(p) = paint.as_deref_mut()
+        {
+            p.ensure_size(state.engine.project.width, state.engine.project.height);
+
+            if self.current.is_empty() && !self.raster_stroke_done {
+                // Between strokes: re-upload if the current cel changed
+                // (frame switch, undo, redo, selection).
+                let key = state.current_raster_key();
+                if key != self.synced {
+                    match state.current_raster_tiles() {
+                        Some(tiles) => p.sync_from(tiles),
+                        None => p.clear(),
+                    }
+                    self.synced = key;
+                }
+            } else {
+                // Drawing (or finishing this frame): stamp the new dabs.
                 let dabs = self.build_stroke_dabs();
                 if dabs.len() > self.dabs_flushed {
                     p.paint(&dabs[self.dabs_flushed..]);
                     self.dabs_flushed = dabs.len();
                 }
                 if self.raster_stroke_done {
+                    // Read the painted layer back and commit it as a PaintTiles
+                    // edit (undoable, saved).
+                    let tiles = p.read_tiles();
+                    if let Some(id) = state.commit_raster(tiles) {
+                        let h = state
+                            .cut()
+                            .drawing(id)
+                            .and_then(|d| d.raster.as_ref())
+                            .map(|r| r.content_hash())
+                            .unwrap_or(0);
+                        self.synced = (id.0, h);
+                    }
                     self.current.clear();
                     self.dabs_flushed = 0;
                     self.raster_stroke_done = false;
                 }
             }
+        }
 
         // ---- Render layers ------------------------------------------------
         let cut = state.cut();
