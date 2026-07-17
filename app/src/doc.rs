@@ -152,8 +152,21 @@ impl AppState {
         }
     }
 
+    /// Per-column drawing name, e.g. D1A, D2A on column A; D1B on column B.
     fn next_drawing_name(&self) -> String {
-        format!("D{}", self.cut().drawings.len() + 1)
+        match self.cut().xsheet.column(self.active_column) {
+            Some(col) => {
+                let distinct: std::collections::HashSet<DrawingId> = col
+                    .keys()
+                    .filter_map(|(_, e)| match e {
+                        Exposure::Drawing(d) => Some(d),
+                        Exposure::Empty => None,
+                    })
+                    .collect();
+                format!("D{}{}", distinct.len() + 1, col.name)
+            }
+            None => format!("D{}", self.cut().drawings.len() + 1),
+        }
     }
 
     // ---- Editing ----------------------------------------------------------
@@ -320,8 +333,13 @@ impl AppState {
         }
     }
 
-    /// Create an empty raster cel and expose it at the current frame.
+    /// Create an empty raster cel and expose it at the current frame — but only
+    /// if this frame doesn't already have its own key (don't overwrite a cel).
     pub fn new_drawing_at_frame(&mut self) {
+        if self.own_key_drawing().is_some() {
+            self.status = "this frame already has a drawing".into();
+            return;
+        }
         let at = self.at();
         let name = self.next_drawing_name();
         let id = self.engine.alloc_drawing_id();
@@ -393,6 +411,28 @@ impl AppState {
             }
             Err(e) => self.status = format!("error: {e}"),
         }
+    }
+
+    /// Remove the selected (active) column. Keeps at least one column.
+    pub fn remove_active_column(&mut self) {
+        if self.cut().xsheet.columns.len() <= 1 {
+            self.status = "can't remove the last column".into();
+            return;
+        }
+        let at = self.at();
+        let removed = self.active_column;
+        // Pick a neighbour to become active before removing.
+        let cols: Vec<ColumnId> = self.cut().xsheet.columns.iter().map(|c| c.id).collect();
+        let idx = cols.iter().position(|&c| c == removed).unwrap_or(0);
+        let new_active = cols
+            .get(idx + 1)
+            .or_else(|| idx.checked_sub(1).and_then(|i| cols.get(i)))
+            .copied()
+            .unwrap_or(removed);
+        self.engine.remove_column(at, removed);
+        self.active_column = new_active;
+        self.selected_drawing = None;
+        self.status = "column removed".into();
     }
 
     pub fn undo(&mut self) {

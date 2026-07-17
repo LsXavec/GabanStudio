@@ -10,7 +10,7 @@ mod newproject;
 mod paint;
 mod xsheet_panel;
 
-use config::{Action, Config, FrameLatency, PenConfig, SettingsCategory};
+use config::{Action, Config, FrameLatency, PenConfig, RebindCapture, SettingsCategory};
 use doc::AppState;
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
@@ -63,8 +63,8 @@ struct App {
     config: Config,
     settings_open: bool,
     settings_category: SettingsCategory,
-    /// Action awaiting a new key binding (Settings rebind capture).
-    capturing: Option<Action>,
+    /// In-progress rebind capture (Settings).
+    capturing: Option<RebindCapture>,
     /// Active GPU backend name (for the Performance page's Renderer row).
     backend: String,
 }
@@ -107,6 +107,8 @@ impl App {
             }
             Action::NewDrawing => s.new_drawing_at_frame(),
             Action::ClearCel => s.clear_current_raster(),
+            Action::ClearFrameKey => s.clear_key_at_frame(),
+            Action::RemoveColumn => s.remove_active_column(),
             Action::ToggleOnion => s.onion = !s.onion,
             Action::Undo => s.undo(),
             Action::Redo => s.redo(),

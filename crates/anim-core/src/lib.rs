@@ -115,6 +115,16 @@ impl Engine {
         Ok(id)
     }
 
+    /// Remove a column and its exposures. Scaffolding op (not undoable — matches
+    /// `add_column`). Drawings themselves stay in the cut library.
+    pub fn remove_column(&mut self, at: CutRef, column: ColumnId) {
+        if let Some(cut) = self.project.cut_mut(at.scene, at.cut) {
+            cut.xsheet.columns.retain(|c| c.id != column);
+            // A DrawingSource for this column now resolves nothing; clear caches.
+            self.evaluator.invalidate_all();
+        }
+    }
+
     /// Allocate an id for a new drawing/node to be created via a Command.
     pub fn alloc_drawing_id(&mut self) -> DrawingId {
         DrawingId(self.project.alloc_id())

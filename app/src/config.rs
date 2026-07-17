@@ -19,6 +19,8 @@ pub enum Action {
     LastFrame,
     NewDrawing,
     ClearCel,
+    ClearFrameKey,
+    RemoveColumn,
     ToggleOnion,
     Undo,
     Redo,
@@ -38,6 +40,8 @@ impl Action {
         Action::LastFrame,
         Action::NewDrawing,
         Action::ClearCel,
+        Action::ClearFrameKey,
+        Action::RemoveColumn,
         Action::ToggleOnion,
         Action::Undo,
         Action::Redo,
@@ -56,6 +60,8 @@ impl Action {
             Action::LastFrame => "Last frame",
             Action::NewDrawing => "New drawing (blank cel)",
             Action::ClearCel => "Clear cel",
+            Action::ClearFrameKey => "Remove frame from X-sheet",
+            Action::RemoveColumn => "Remove selected column",
             Action::ToggleOnion => "Toggle onion skin",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
@@ -70,7 +76,7 @@ impl Action {
         use Action::*;
         let k = |name: &str| Chord::plain(name);
         let ctrl = |name: &str| Chord {
-            key: name.to_string(),
+            keys: vec![name.to_string()],
             ctrl: true,
             shift: false,
             alt: false,
@@ -83,12 +89,14 @@ impl Action {
             LastFrame => Some(k("End")),
             NewDrawing => Some(k("E")),
             ClearCel => Some(k("D")),
+            ClearFrameKey => Some(k("Backspace")),
+            RemoveColumn => Some(k("Delete")),
             ToggleOnion => Some(k("O")),
             Undo => Some(ctrl("Z")),
             Redo => Some(ctrl("Y")),
             Save => Some(ctrl("S")),
             SaveAs => Some(Chord {
-                key: "S".to_string(),
+                keys: vec!["S".to_string()],
                 ctrl: true,
                 shift: true,
                 alt: false,
@@ -99,11 +107,12 @@ impl Action {
     }
 }
 
-/// A key combination. `key` is an egui [`egui::Key`] name (see `Key::name`);
-/// `ctrl` means the platform command modifier (Ctrl on Windows/Linux).
+/// A key combination: a set of (non-modifier) keys plus modifier flags. Held
+/// together, they fire the action. Multi-key chords (e.g. A+S) are supported.
+/// `keys` are egui [`egui::Key`] names; `ctrl` is the platform command modifier.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Chord {
-    pub key: String,
+    pub keys: Vec<String>,
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
@@ -112,27 +121,24 @@ pub struct Chord {
 impl Chord {
     fn plain(key: &str) -> Self {
         Self {
-            key: key.to_string(),
+            keys: vec![key.to_string()],
             ctrl: false,
             shift: false,
             alt: false,
         }
     }
 
-    pub fn from_event(key: egui::Key, m: egui::Modifiers) -> Self {
+    /// Build from a captured set of keys + the modifiers held at capture.
+    pub fn from_capture(keys: Vec<String>, m: egui::Modifiers) -> Self {
         Self {
-            key: key.name().to_string(),
+            keys,
             ctrl: m.command,
             shift: m.shift,
             alt: m.alt,
         }
     }
 
-    fn egui_key(&self) -> Option<egui::Key> {
-        egui::Key::from_name(&self.key)
-    }
-
-    /// Human-readable label, e.g. "Ctrl+Shift+S" or ",".
+    /// Human-readable label, e.g. "Ctrl+Shift+S" or "A+S".
     pub fn label(&self) -> String {
         let mut s = String::new();
         if self.ctrl {
@@ -144,16 +150,34 @@ impl Chord {
         if self.alt {
             s.push_str("Alt+");
         }
-        s.push_str(pretty_key(&self.key));
+        let keys: Vec<&str> = self.keys.iter().map(|k| pretty_key(k)).collect();
+        s.push_str(&keys.join("+"));
         s
     }
 
+    /// Fires when every key is held, at least one was pressed THIS frame, and
+    /// the modifiers match exactly.
     fn matches(&self, i: &egui::InputState) -> bool {
-        let Some(key) = self.egui_key() else {
+        if self.keys.is_empty() {
             return false;
-        };
+        }
         let m = i.modifiers;
-        i.key_pressed(key) && m.command == self.ctrl && m.shift == self.shift && m.alt == self.alt
+        if m.command != self.ctrl || m.shift != self.shift || m.alt != self.alt {
+            return false;
+        }
+        let mut any_pressed = false;
+        for name in &self.keys {
+            let Some(k) = egui::Key::from_name(name) else {
+                return false;
+            };
+            if !i.keys_down.contains(&k) {
+                return false;
+            }
+            if i.key_pressed(k) {
+                any_pressed = true;
+            }
+        }
+        any_pressed
     }
 }
 
@@ -302,6 +326,25 @@ pub struct PenConfig {
     pub pressure_curve: PressureCurve,
 }
 
+/// In-progress rebind: accumulates the keys held (release confirms the chord,
+/// so multi-key combos like Ctrl+Shift+S or A+S can be built).
+#[derive(Debug, Clone)]
+pub struct RebindCapture {
+    pub action: Action,
+    keys: Vec<String>,
+    modifiers: egui::Modifiers,
+}
+
+impl RebindCapture {
+    pub fn new(action: Action) -> Self {
+        Self {
+            action,
+            keys: Vec::new(),
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+}
+
 /// Which Settings page is showing (Krita-style category sidebar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsCategory {
@@ -413,7 +456,7 @@ pub fn settings_window(
     ctx: &egui::Context,
     open: &mut bool,
     config: &mut Config,
-    capturing: &mut Option<Action>,
+    capturing: &mut Option<RebindCapture>,
     category: &mut SettingsCategory,
     backend: &str,
 ) {
@@ -424,29 +467,41 @@ pub fn settings_window(
     // Only the Shortcuts page captures keys.
     if *category != SettingsCategory::Shortcuts {
         *capturing = None;
-    } else if let Some(action) = *capturing {
-        let result: Option<Option<Chord>> = ctx.input(|i| {
+    } else if let Some(cap) = capturing.as_mut() {
+        // Accumulate keys as they go down; commit on the first key release, so
+        // the whole held combination (Ctrl+Shift+S, A+S, …) is captured.
+        let (cancel, released) = ctx.input(|i| {
+            let mut cancel = false;
+            let mut released = false;
             for e in &i.events {
                 if let egui::Event::Key {
                     key,
-                    pressed: true,
+                    pressed,
                     modifiers,
                     ..
                 } = e
                 {
                     if *key == egui::Key::Escape {
-                        return Some(None);
+                        cancel = true;
+                    } else if *pressed {
+                        let name = key.name().to_string();
+                        if !cap.keys.contains(&name) {
+                            cap.keys.push(name);
+                        }
+                        cap.modifiers = *modifiers;
+                    } else {
+                        released = true;
                     }
-                    return Some(Some(Chord::from_event(*key, *modifiers)));
                 }
             }
-            None
+            (cancel, released)
         });
-        if let Some(outcome) = result {
-            if let Some(chord) = outcome {
-                config.binding_mut(action).chord = Some(chord);
-                config.save();
-            }
+        if cancel {
+            *capturing = None;
+        } else if released && !cap.keys.is_empty() {
+            config.binding_mut(cap.action).chord =
+                Some(Chord::from_capture(cap.keys.clone(), cap.modifiers));
+            config.save();
             *capturing = None;
         }
     }
@@ -480,7 +535,7 @@ pub fn settings_window(
         });
 }
 
-fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option<Action>) {
+fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option<RebindCapture>) {
     ui.horizontal(|ui| {
         ui.heading("Keyboard Shortcuts");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -492,11 +547,14 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
         });
     });
     ui.label(
-        egui::RichText::new("Click a shortcut to rebind it, then press the new keys (Esc cancels).")
-            .weak(),
+        egui::RichText::new(
+            "Click a shortcut, hold the new combination, then release to set it (Esc cancels).",
+        )
+        .weak(),
     );
     ui.separator();
 
+    let capturing_action = capturing.as_ref().map(|c| c.action);
     egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("keybind_grid")
             .num_columns(3)
@@ -507,9 +565,9 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                     let action = *action;
                     ui.label(action.label());
 
-                    let is_capturing = *capturing == Some(action);
+                    let is_capturing = capturing_action == Some(action);
                     let text = if is_capturing {
-                        "press keys…".to_string()
+                        "hold keys, release to set…".to_string()
                     } else {
                         config
                             .chord_for(action)
@@ -519,7 +577,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                     let clash = config
                         .chord_for(action)
                         .and_then(|c| config.conflict(action, c));
-                    let btn = egui::Button::new(text).min_size(egui::vec2(140.0, 0.0));
+                    let btn = egui::Button::new(text).min_size(egui::vec2(160.0, 0.0));
                     let btn = if is_capturing {
                         btn.fill(egui::Color32::from_rgb(70, 55, 30))
                     } else if clash.is_some() {
@@ -532,12 +590,16 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                         resp = resp.on_hover_text(format!("⚠ also bound to “{}”", other.label()));
                     }
                     if resp.clicked() {
-                        *capturing = if is_capturing { None } else { Some(action) };
+                        *capturing = if is_capturing {
+                            None
+                        } else {
+                            Some(RebindCapture::new(action))
+                        };
                     }
                     if ui.button("✕").on_hover_text("unbind").clicked() {
                         config.binding_mut(action).chord = None;
                         config.save();
-                        if *capturing == Some(action) {
+                        if capturing_action == Some(action) {
                             *capturing = None;
                         }
                     }
