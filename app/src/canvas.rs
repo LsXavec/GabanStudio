@@ -112,6 +112,16 @@ pub struct CanvasView {
     /// Tool latched at stroke START — a mid-stroke eraser toggle must not split
     /// one stroke across the wet buffer and the cel (wrong ordering at composite).
     stroke_erasing: bool,
+    // --- Brush dynamics (what pen pressure drives). Tilt dynamics are gated on
+    // the octotablet backend — egui pen events carry no tilt.
+    /// Pressure drives dab size (through the pen curve).
+    dyn_size: bool,
+    /// Pressure drives dab opacity (through the pen curve) — shading-pen feel.
+    dyn_opacity: bool,
+    /// Size floor as a fraction of the brush size: pressure maps size between
+    /// `min_size×brush` and `brush`, so light touches on a big brush draw a
+    /// thin-but-visible line instead of vanishing (Krita's minimum-size).
+    min_size: f32,
     /// This stroke wrote the CEL texture directly (eraser dabs, or the new-cel
     /// clear). If it is abandoned, the cel must re-sync from engine truth —
     /// otherwise phantom damage gets baked into the NEXT commit.
@@ -177,6 +187,9 @@ impl CanvasView {
             brush_opacity: 1.0,
             wet_dirty: false,
             stroke_erasing: false,
+            dyn_size: true,
+            dyn_opacity: false,
+            min_size: 0.0,
             cel_touched: false,
             dabs_flushed: 0,
             raster_stroke_done: false,
@@ -246,6 +259,24 @@ impl CanvasView {
                         .text("opacity")
                         .fixed_decimals(2),
                 );
+                ui.menu_button("dynamics", |ui| {
+                    ui.checkbox(&mut self.dyn_size, "pressure → size");
+                    ui.checkbox(&mut self.dyn_opacity, "pressure → opacity");
+                    ui.add(
+                        egui::Slider::new(&mut self.min_size, 0.0..=1.0)
+                            .text("min size")
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text(
+                        "size at zero pressure, as a fraction of the brush — \
+                         keeps light touches visible on big brushes",
+                    );
+                    ui.label(
+                        egui::RichText::new("tilt: needs the tablet backend (planned)")
+                            .weak()
+                            .small(),
+                    );
+                });
                 if ui
                     .button("clear cel")
                     .on_hover_text("clear this cel's raster (undoable)")
@@ -639,11 +670,14 @@ impl CanvasView {
             && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-            // Exact size: a full-pressure dab paints out to radius
-            // brush_px * curve(1.0) * 0.5 in paper px (the dab falloff reaches
-            // zero exactly at its radius), mapped into screen space. Floor only
-            // for visibility once a brush is sub-3px on screen.
-            let r = (self.raster_brush_px * self.pen_curve.apply(1.0) * scale * 0.5).max(1.5);
+            // Exact size: what a FULL-pressure dab paints (the falloff reaches
+            // zero exactly at its radius), including the dynamics mapping —
+            // min-size floor and the pressure→size toggle — in screen space.
+            // Floor only for visibility once a brush is sub-3px on screen.
+            let t_max = if self.dyn_size { self.pen_curve.apply(1.0) } else { 1.0 };
+            let min_s = self.min_size.clamp(0.0, 1.0);
+            let r = (self.raster_brush_px * (min_s + (1.0 - min_s) * t_max) * scale * 0.5)
+                .max(1.5);
             painter.circle_stroke(pos, r, egui::Stroke::new(1.0, Color32::from_black_alpha(170)));
             painter.circle_stroke(
                 pos,
@@ -665,8 +699,8 @@ impl CanvasView {
         if pts.is_empty() {
             return dabs;
         }
-        let mut color = linear_rgba(self.brush_color);
-        color[3] *= self.brush_flow.clamp(0.0, 1.0); // per-dab strength (also erase strength)
+        let base = linear_rgba(self.brush_color);
+        let flow = self.brush_flow.clamp(0.0, 1.0);
         let hardness = 0.85;
         // When no real pressure reached this stroke (mouse-mode, or a tap with no
         // force), cap the dab so a big brush can't stamp a huge flat-pressure disc.
@@ -675,19 +709,25 @@ impl CanvasView {
         } else {
             f32::INFINITY
         };
+        // Dynamics: pressure (through the pen curve) drives size and/or opacity.
+        // Size maps between min_size×brush and brush (the floor keeps light
+        // touches visible); opacity scales the dab's alpha on top of flow.
+        let min_s = self.min_size.clamp(0.0, 1.0);
         let radius_of = |pr: f32| {
-            (self.raster_brush_px * self.pen_curve.apply(pr) * 0.5)
+            let t = if self.dyn_size { self.pen_curve.apply(pr) } else { 1.0 };
+            (self.raster_brush_px * (min_s + (1.0 - min_s) * t) * 0.5)
                 .max(0.5)
                 .min(cap)
         };
+        let dab_at = |x: f32, y: f32, pr: f32| {
+            let a = if self.dyn_opacity { self.pen_curve.apply(pr) } else { 1.0 };
+            let mut color = base;
+            color[3] *= flow * a;
+            Dab { center: [x, y], radius: radius_of(pr), hardness, color }
+        };
 
         if pts.len() == 1 {
-            dabs.push(Dab {
-                center: [pts[0].x, pts[0].y],
-                radius: radius_of(pts[0].pressure),
-                hardness,
-                color,
-            });
+            dabs.push(dab_at(pts[0].x, pts[0].y, pts[0].pressure));
             return dabs;
         }
 
@@ -704,13 +744,9 @@ impl CanvasView {
             while d < len {
                 let t = d / len;
                 let pr = apr + (bpr - apr) * t;
-                let r = radius_of(pr);
-                dabs.push(Dab {
-                    center: [ax + dx * t, ay + dy * t],
-                    radius: r,
-                    hardness,
-                    color,
-                });
+                let d2 = dab_at(ax + dx * t, ay + dy * t, pr);
+                let r = d2.radius;
+                dabs.push(d2);
                 let step = (0.1 * (2.0 * r)).max(0.75); // spacing 0.1 * diameter
                 d += step;
             }
