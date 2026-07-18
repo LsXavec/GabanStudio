@@ -95,6 +95,9 @@ pub struct CanvasView {
     // into the engine as PaintTiles (undoable + saved) ---
     raster: bool,
     raster_brush_px: f32,
+    /// Eraser tool active: strokes subtract coverage (destination-out) instead of
+    /// laying down ink. Same dab geometry, size and pressure response as the brush.
+    erasing: bool,
     /// How many of the current stroke's dabs are already on the GPU layer.
     dabs_flushed: usize,
     /// The stroke finished this frame; flush its last dabs, then reset.
@@ -151,6 +154,7 @@ impl CanvasView {
             cur_none: 0,
             raster: true,
             raster_brush_px: 14.0,
+            erasing: false,
             dabs_flushed: 0,
             raster_stroke_done: false,
             synced: (u64::MAX, u64::MAX), // force an initial sync
@@ -185,6 +189,20 @@ impl CanvasView {
             }
 
             if self.raster {
+                if ui
+                    .selectable_label(!self.erasing, "✏ brush")
+                    .on_hover_text("paint ink")
+                    .clicked()
+                {
+                    self.erasing = false;
+                }
+                if ui
+                    .selectable_label(self.erasing, "▱ eraser")
+                    .on_hover_text("erase to transparency")
+                    .clicked()
+                {
+                    self.erasing = true;
+                }
                 ui.add(
                     egui::Slider::new(&mut self.raster_brush_px, 1.0..=300.0)
                         .text("px")
@@ -205,7 +223,7 @@ impl CanvasView {
                             Dab { center: [w as f32 * 0.35, h as f32 * 0.5], radius: h as f32 * 0.18, hardness: 0.5, color: col },
                             Dab { center: [w as f32 * 0.65, h as f32 * 0.5], radius: h as f32 * 0.10, hardness: 0.95, color: col },
                         ];
-                        p.paint(&test);
+                        p.paint(&test, false);
                     }
             } else {
                 ui.add(
@@ -368,7 +386,7 @@ impl CanvasView {
                 // Drawing (or finishing this frame): stamp the new dabs.
                 let dabs = self.build_stroke_dabs();
                 if dabs.len() > self.dabs_flushed {
-                    p.paint(&dabs[self.dabs_flushed..]);
+                    p.paint(&dabs[self.dabs_flushed..], self.erasing);
                     self.dabs_flushed = dabs.len();
                 }
                 if self.raster_stroke_done {

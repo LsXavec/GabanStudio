@@ -24,6 +24,23 @@ use wgpu::util::DeviceExt;
 /// Bytes per RGBA16 pixel.
 const BPP: u32 = 8;
 
+/// Eraser blend: result = dst * (1 - src.alpha). A dab's coverage subtracts
+/// from the layer instead of adding ink, so painting with it erases to true
+/// transparency (and keeps the premultiplied invariant, since rgb and a are
+/// scaled by the same factor).
+const ERASE_BLEND: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
 /// One brush dab in layer texel space (= project pixel space).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -57,6 +74,8 @@ pub struct PaintLayer {
     queue: wgpu::Queue,
     renderer: Arc<RwLock<Renderer>>,
     pipeline: wgpu::RenderPipeline,
+    /// Destination-out variant of `pipeline` for the eraser tool.
+    erase_pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     texture: wgpu::Texture,
@@ -175,6 +194,47 @@ impl PaintLayer {
             immediate_size: 0,
         });
 
+        // Brush = premultiplied "over" (adds ink); eraser = destination-out
+        // (subtracts coverage). Same dab geometry/shader, different blend.
+        let pipeline = Self::make_dab_pipeline(
+            &device,
+            &pipeline_layout,
+            &shader,
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+        );
+        let erase_pipeline =
+            Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ERASE_BLEND);
+
+        let filter = wgpu::FilterMode::Linear;
+        let (texture, view, tex_id) =
+            Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+
+        Self {
+            device,
+            queue,
+            renderer,
+            pipeline,
+            erase_pipeline,
+            uniform_buf,
+            bind_group,
+            texture,
+            view,
+            tex_id,
+            width,
+            height,
+            filter,
+            onion: [None, None],
+        }
+    }
+
+    /// Build a soft-round-dab render pipeline with the given blend (brush = over,
+    /// eraser = destination-out). Shares the shader and instance layout.
+    fn make_dab_pipeline(
+        device: &wgpu::Device,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        blend: wgpu::BlendState,
+    ) -> wgpu::RenderPipeline {
         let instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Dab>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -185,22 +245,21 @@ impl PaintLayer {
                 wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
             ],
         };
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("dab_pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(layout),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("vs_main"),
                 buffers: &[instance_layout],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba16Float,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -213,27 +272,7 @@ impl PaintLayer {
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
-        });
-
-        let filter = wgpu::FilterMode::Linear;
-        let (texture, view, tex_id) =
-            Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
-
-        Self {
-            device,
-            queue,
-            renderer,
-            pipeline,
-            uniform_buf,
-            bind_group,
-            texture,
-            view,
-            tex_id,
-            width,
-            height,
-            filter,
-            onion: [None, None],
-        }
+        })
     }
 
     /// Create a blank Rgba16Float layer texture with the paint-layer usages.
@@ -385,7 +424,9 @@ impl PaintLayer {
     }
 
     /// Stamp a batch of dabs onto the layer (accumulate — LoadOp::Load).
-    pub fn paint(&mut self, dabs: &[Dab]) {
+    /// `erase` selects the destination-out pipeline so the dabs subtract coverage
+    /// instead of adding ink.
+    pub fn paint(&mut self, dabs: &[Dab], erase: bool) {
         if dabs.is_empty() {
             return;
         }
@@ -415,7 +456,7 @@ impl PaintLayer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&self.pipeline);
+            pass.set_pipeline(if erase { &self.erase_pipeline } else { &self.pipeline });
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, instances.slice(..));
             pass.draw(0..4, 0..dabs.len() as u32);
