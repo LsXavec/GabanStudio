@@ -24,13 +24,81 @@ pub type TileCoord = (i32, i32);
 /// raster paint slots into the existing undo history like any other command.
 pub type TileDiff = Vec<(TileCoord, Option<Arc<TileData>>, Option<Arc<TileData>>)>;
 
-/// One 64×64 premultiplied-RGBA16 tile plus its content hash.
+/// One 64×64 premultiplied-RGBA16F tile plus its content hash.
+///
+/// ENCODING LAW: each u16 is an IEEE-754 HALF-FLOAT BIT PATTERN (the GPU's
+/// Rgba16Float texel format, copied byte-for-byte by the readback/upload
+/// paths and persisted as BLOBs) — NOT a 0..=65535 normalized integer. Any
+/// CPU math over tile values must go through [`f16_bits_to_f32`] /
+/// [`f32_to_f16_bits`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TileData {
-    /// Row-major RGBA16, length [`TILE_LEN`], premultiplied alpha.
+    /// Row-major RGBA16F bit patterns, length [`TILE_LEN`], premultiplied alpha.
     pub rgba: Box<[u16]>,
     /// fnv1a over the little-endian bytes — the content-address of this tile.
     pub hash: u64,
+}
+
+/// Decode an IEEE-754 binary16 bit pattern to f32.
+pub fn f16_bits_to_f32(bits: u16) -> f32 {
+    let sign = ((bits >> 15) as u32) << 31;
+    let exp = ((bits >> 10) & 0x1F) as u32;
+    let frac = (bits & 0x3FF) as u32;
+    let out = match (exp, frac) {
+        (0, 0) => sign,                          // ±0
+        (0, _) => {
+            // Subnormal: normalize into f32.
+            let mut e: i32 = -14 + 127;
+            let mut f = frac;
+            while f & 0x400 == 0 {
+                f <<= 1;
+                e -= 1;
+            }
+            sign | ((e as u32) << 23) | ((f & 0x3FF) << 13)
+        }
+        (0x1F, 0) => sign | 0x7F80_0000,          // ±inf
+        (0x1F, _) => sign | 0x7FC0_0000,          // NaN
+        _ => sign | ((exp + 127 - 15) << 23) | (frac << 13),
+    };
+    f32::from_bits(out)
+}
+
+/// Encode an f32 to the nearest IEEE-754 binary16 bit pattern
+/// (round-to-nearest-even; overflow saturates to ±inf).
+pub fn f32_to_f16_bits(v: f32) -> u16 {
+    let b = v.to_bits();
+    let sign = ((b >> 31) as u16) << 15;
+    let exp = ((b >> 23) & 0xFF) as i32;
+    let frac = b & 0x7F_FFFF;
+    if exp == 0xFF {
+        // inf / NaN
+        return sign | 0x7C00 | if frac != 0 { 0x200 } else { 0 };
+    }
+    let e = exp - 127 + 15;
+    if e >= 0x1F {
+        return sign | 0x7C00; // overflow → inf
+    }
+    if e <= 0 {
+        if e < -10 {
+            return sign; // underflow → ±0
+        }
+        // Subnormal half.
+        let frac = frac | 0x80_0000;
+        let shift = (14 - e) as u32; // 11..=24
+        let half = frac >> shift;
+        let rem = frac & ((1u32 << shift) - 1);
+        let halfway = 1u32 << (shift - 1);
+        let rounded =
+            half + u32::from(rem > halfway || (rem == halfway && (half & 1) == 1));
+        return sign | rounded as u16;
+    }
+    let half = (frac >> 13) as u16;
+    let rem = frac & 0x1FFF;
+    let mut out = sign | ((e as u16) << 10) | half;
+    if rem > 0x1000 || (rem == 0x1000 && (half & 1) == 1) {
+        out = out.wrapping_add(1); // may carry into the exponent — correct
+    }
+    out
 }
 
 impl TileData {
@@ -58,11 +126,11 @@ impl TileData {
         Some(Self::from_vec(rgba))
     }
 
-    /// True if every pixel is fully transparent (alpha 0) — such tiles need
-    /// not be stored (the layer's absence of a tile means "empty there").
+    /// True if every pixel is fully transparent (alpha ±0.0 in f16 bits) —
+    /// such tiles need not be stored (a missing tile means "empty there").
     pub fn is_empty(&self) -> bool {
-        // Premultiplied: transparent => all channels 0. Check alpha channel.
-        self.rgba.chunks_exact(4).all(|px| px[3] == 0)
+        // Premultiplied: transparent => alpha 0. f16 ±0.0 = 0x0000 / 0x8000.
+        self.rgba.chunks_exact(4).all(|px| px[3] & 0x7FFF == 0)
     }
 }
 

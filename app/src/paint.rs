@@ -59,7 +59,8 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
-/// An onion-skin ghost texture (adjacent cel), drawn tinted under the current.
+/// An onion-skin ghost texture (adjacent cel composite), drawn tinted under
+/// the current cel's sandwich.
 struct OnionSlot {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -68,6 +69,17 @@ struct OnionSlot {
     width: u32,
     height: u32,
 }
+
+/// One full-canvas Rgba16Float render/display target.
+struct Target {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    tex_id: egui::TextureId,
+}
+
+/// One layer's contribution to a projection: its tiles + display opacity.
+/// (Only VISIBLE layers should be passed; visibility is filtered by the caller.)
+pub type LayerSlice<'a> = (&'a BTreeMap<TileCoord, Arc<TileData>>, f32);
 
 pub struct PaintLayer {
     device: wgpu::Device,
@@ -78,29 +90,44 @@ pub struct PaintLayer {
     erase_pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    tex_id: egui::TextureId,
     width: u32,
     height: u32,
-    /// Sampler filter used to display the layer (Canvas scaling filter setting).
+    /// Sampler filter used to display the layers (Canvas scaling filter setting).
     filter: wgpu::FilterMode,
-    /// Onion ghosts: [0]=previous cel, [1]=next cel.
+    /// Onion ghosts: [0]=previous cel, [1]=next cel (whole-cel composites).
     onion: [Option<OnionSlot>; 2],
 
+    // --- Sandwich projections (Krita model): the ACTIVE layer is editable in
+    // its own texture (bit-exact — read_tiles reads only this); everything
+    // below/above it is composited into two display-only projections. VRAM is
+    // constant in layer count and the eraser can only ever touch `active`.
+    /// The active cel layer, full-strength pixels (display applies opacity).
+    active: Target,
+    /// Composite of visible layers UNDER the active one.
+    below: Target,
+    /// Composite of visible layers OVER the active one.
+    above: Target,
+    /// Staging texture for building projections/onion (upload one layer here,
+    /// then blend into the target at its opacity). Never displayed.
+    scratch: Target,
     // --- Wet buffer: the live brush stroke paints here, NOT onto the cel.
     // Displayed composited at the stroke opacity; merged onto the cel ONCE at
     // pen-up (composite_wet), so overlapping dabs never build past the opacity
     // ceiling — Krita's temporaryTarget / indirect-painting model.
-    wet_texture: wgpu::Texture,
-    wet_view: wgpu::TextureView,
-    wet_tex_id: egui::TextureId,
-    /// Fullscreen pass that blends the wet buffer onto the cel at an opacity.
+    wet: Target,
+
+    /// Fullscreen pass blending a sampled texture × opacity onto a target.
     composite_pipeline: wgpu::RenderPipeline,
     composite_layout: wgpu::BindGroupLayout,
-    composite_bind: wgpu::BindGroup,
+    /// Bind group sampling the WET buffer (composite_wet → active).
+    composite_bind_wet: wgpu::BindGroup,
+    /// Bind group sampling SCRATCH (projection/onion building).
+    composite_bind_scratch: wgpu::BindGroup,
     composite_sampler: wgpu::Sampler,
-    /// Uniform: [opacity, 0, 0, 0].
+    /// Uniform: [opacity, 0, 0, 0]. LAW: one buffer — issue ONE write_buffer +
+    /// ONE submit per composited layer; batching passes into a single encoder
+    /// would make every pass read the last-written opacity (switch to dynamic
+    /// offsets first if this is ever optimized).
     opacity_buf: wgpu::Buffer,
 }
 
@@ -254,10 +281,11 @@ impl PaintLayer {
             Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ERASE_BLEND);
 
         let filter = wgpu::FilterMode::Linear;
-        let (texture, view, tex_id) =
-            Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
-        let (wet_texture, wet_view, wet_tex_id) =
-            Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+        let active = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+        let wet = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+        let below = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+        let above = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+        let scratch = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
 
         // Wet→cel composite: sampled wet texture × opacity uniform, blended over.
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -340,10 +368,17 @@ impl PaintLayer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let composite_bind = Self::make_composite_bind(
+        let composite_bind_wet = Self::make_composite_bind(
             &device,
             &composite_layout,
-            &wet_view,
+            &wet.view,
+            &composite_sampler,
+            &opacity_buf,
+        );
+        let composite_bind_scratch = Self::make_composite_bind(
+            &device,
+            &composite_layout,
+            &scratch.view,
             &composite_sampler,
             &opacity_buf,
         );
@@ -356,29 +391,30 @@ impl PaintLayer {
             erase_pipeline,
             uniform_buf,
             bind_group,
-            texture,
-            view,
-            tex_id,
             width,
             height,
             filter,
             onion: [None, None],
-            wet_texture,
-            wet_view,
-            wet_tex_id,
+            active,
+            below,
+            above,
+            scratch,
+            wet,
             composite_pipeline,
             composite_layout,
-            composite_bind,
+            composite_bind_wet,
+            composite_bind_scratch,
             composite_sampler,
             opacity_buf,
         }
     }
 
-    /// Bind group for the wet→cel composite (rebuilt when the wet view changes).
+    /// Bind group for a composite pass sampling `src_view` (rebuilt whenever
+    /// that view is recreated).
     fn make_composite_bind(
         device: &wgpu::Device,
         layout: &wgpu::BindGroupLayout,
-        wet_view: &wgpu::TextureView,
+        src_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         opacity_buf: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
@@ -388,7 +424,7 @@ impl PaintLayer {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(wet_view),
+                    resource: wgpu::BindingResource::TextureView(src_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -477,7 +513,7 @@ impl PaintLayer {
         width: u32,
         height: u32,
         filter: wgpu::FilterMode,
-    ) -> (wgpu::Texture, wgpu::TextureView, egui::TextureId) {
+    ) -> Target {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("paint_layer"),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -527,10 +563,10 @@ impl PaintLayer {
         let tex_id = renderer
             .write()
             .register_native_texture(device, &view, filter);
-        (texture, view, tex_id)
+        Target { texture, view, tex_id }
     }
 
-    /// Recreate the layer if the project resolution changed (clears content).
+    /// Recreate every target if the project resolution changed (clears content).
     pub fn ensure_size(&mut self, width: u32, height: u32) {
         if width == self.width && height == self.height {
             return;
@@ -539,87 +575,104 @@ impl PaintLayer {
         // textures inside the renderer for the app's lifetime otherwise.
         {
             let mut renderer = self.renderer.write();
-            renderer.free_texture(&self.tex_id);
-            renderer.free_texture(&self.wet_tex_id);
+            for t in [&self.active, &self.wet, &self.below, &self.above, &self.scratch] {
+                renderer.free_texture(&t.tex_id);
+            }
+            // Onion slots are dropped below (stale size) — free their
+            // registrations too, or the old full-canvas textures stay pinned.
+            for slot in self.onion.iter().flatten() {
+                renderer.free_texture(&slot.tex_id);
+            }
         }
-        let (texture, view, tex_id) = Self::make_target(
-            &self.device,
-            &self.renderer,
-            &self.queue,
-            &self.uniform_buf,
-            width,
-            height,
-            self.filter,
-        );
-        self.texture = texture;
-        self.view = view;
-        self.tex_id = tex_id;
+        let mk = |s: &Self| {
+            Self::make_target(
+                &s.device,
+                &s.renderer,
+                &s.queue,
+                &s.uniform_buf,
+                width,
+                height,
+                s.filter,
+            )
+        };
+        self.active = mk(self);
+        self.wet = mk(self);
+        self.below = mk(self);
+        self.above = mk(self);
+        self.scratch = mk(self);
         self.width = width;
         self.height = height;
         self.onion = [None, None]; // stale size
-
-        // Wet buffer follows the layer size; its bind group references the view.
-        let (wet_texture, wet_view, wet_tex_id) = Self::make_target(
-            &self.device,
-            &self.renderer,
-            &self.queue,
-            &self.uniform_buf,
-            width,
-            height,
-            self.filter,
-        );
-        self.wet_texture = wet_texture;
-        self.wet_view = wet_view;
-        self.wet_tex_id = wet_tex_id;
-        self.composite_bind = Self::make_composite_bind(
+        self.composite_bind_wet = Self::make_composite_bind(
             &self.device,
             &self.composite_layout,
-            &self.wet_view,
+            &self.wet.view,
+            &self.composite_sampler,
+            &self.opacity_buf,
+        );
+        self.composite_bind_scratch = Self::make_composite_bind(
+            &self.device,
+            &self.composite_layout,
+            &self.scratch.view,
             &self.composite_sampler,
             &self.opacity_buf,
         );
     }
 
     /// Switch the display sampler filter (Canvas scaling filter setting), live.
+    /// Applies to every DISPLAYED target — active, wet, and both projections —
+    /// so nothing "snaps" between live stroke and committed pixels.
     pub fn set_filter(&mut self, filter: wgpu::FilterMode) {
         if filter == self.filter {
             return;
         }
         self.filter = filter;
         let mut renderer = self.renderer.write();
-        renderer.update_egui_texture_from_wgpu_texture(
-            &self.device,
-            &self.view,
-            filter,
-            self.tex_id,
-        );
-        // The wet buffer previews the very pixels being committed — it must
-        // sample with the same filter as the cel or the stroke "snaps" at pen-up.
-        renderer.update_egui_texture_from_wgpu_texture(
-            &self.device,
-            &self.wet_view,
-            filter,
-            self.wet_tex_id,
-        );
+        for t in [&self.active, &self.wet, &self.below, &self.above] {
+            renderer.update_egui_texture_from_wgpu_texture(
+                &self.device,
+                &t.view,
+                filter,
+                t.tex_id,
+            );
+        }
+        // Onion ghosts sample with the same filter as everything else.
+        for slot in self.onion.iter().flatten() {
+            renderer.update_egui_texture_from_wgpu_texture(
+                &self.device,
+                &slot.view,
+                filter,
+                slot.tex_id,
+            );
+        }
     }
 
+    /// egui id of the ACTIVE layer texture.
     pub fn texture_id(&self) -> egui::TextureId {
-        self.tex_id
+        self.active.tex_id
+    }
+
+    /// egui ids of the below/above sandwich projections.
+    pub fn below_id(&self) -> egui::TextureId {
+        self.below.tex_id
+    }
+
+    pub fn above_id(&self) -> egui::TextureId {
+        self.above.tex_id
     }
 
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
-    /// Clear the whole layer to transparent.
-    pub fn clear(&mut self) {
+    fn clear_view(&self, view: &wgpu::TextureView, label: &str) {
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("clear"),
+            label: Some(label),
         });
         enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("clear"),
+            label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.view,
+                view,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -635,18 +688,89 @@ impl PaintLayer {
         self.queue.submit(Some(enc.finish()));
     }
 
-    /// Stamp a batch of dabs onto the CEL layer (accumulate — LoadOp::Load).
+    /// Clear the ACTIVE layer texture to transparent.
+    pub fn clear_active(&mut self) {
+        let view = self.active.view.clone();
+        self.clear_view(&view, "clear_active");
+    }
+
+    /// Clear both sandwich projections (blank cel: nothing below or above).
+    pub fn clear_projections(&mut self) {
+        let below = self.below.view.clone();
+        let above = self.above.view.clone();
+        self.clear_view(&below, "clear_below");
+        self.clear_view(&above, "clear_above");
+    }
+
+    /// Build one sandwich projection (`above == false` → below) by compositing
+    /// the given VISIBLE layers bottom→top at their opacities. LAW: one
+    /// write_buffer + one submit per layer — `opacity_buf` is a single uniform,
+    /// so batching passes into one encoder would alias every pass to the
+    /// last-written opacity.
+    pub fn build_projection(&mut self, above: bool, layers: &[LayerSlice<'_>]) {
+        let target = if above {
+            self.above.view.clone()
+        } else {
+            self.below.view.clone()
+        };
+        self.composite_layers_into(&target, layers);
+    }
+
+    fn composite_layers_into(&mut self, target: &wgpu::TextureView, layers: &[LayerSlice<'_>]) {
+        self.clear_view(target, "clear_projection");
+        let scratch_tex = self.scratch.texture.clone();
+        let scratch_view = self.scratch.view.clone();
+        for (tiles, opacity) in layers {
+            // Upload this layer's tiles into scratch (clear + write_texture)...
+            self.fill_texture(&scratch_tex, &scratch_view, tiles);
+            // ...then blend scratch onto the target at the layer's opacity.
+            self.queue.write_buffer(
+                &self.opacity_buf,
+                0,
+                bytemuck::bytes_of(&[opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0]),
+            );
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("layer_composite"),
+                });
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("layer_over"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                pass.set_pipeline(&self.composite_pipeline);
+                pass.set_bind_group(0, &self.composite_bind_scratch, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            self.queue.submit(Some(enc.finish()));
+        }
+    }
+
+    /// Stamp a batch of dabs onto the ACTIVE layer (accumulate — LoadOp::Load).
     /// `erase` selects the destination-out pipeline so the dabs subtract coverage
-    /// instead of adding ink. (The eraser paints the cel directly; brush strokes
-    /// go through `paint_wet` + `composite_wet`.)
+    /// instead of adding ink. (The eraser paints the active layer directly;
+    /// brush strokes go through `paint_wet` + `composite_wet`.)
     pub fn paint(&mut self, dabs: &[Dab], erase: bool) {
-        let view = self.view.clone();
+        let view = self.active.view.clone();
         self.paint_into(&view, dabs, erase);
     }
 
     /// Stamp a batch of brush dabs into the WET buffer (the live stroke).
     pub fn paint_wet(&mut self, dabs: &[Dab]) {
-        let view = self.wet_view.clone();
+        let view = self.wet.view.clone();
         self.paint_into(&view, dabs, false);
     }
 
@@ -688,9 +812,10 @@ impl PaintLayer {
         self.queue.submit(Some(enc.finish()));
     }
 
-    /// Merge the wet buffer onto the cel at `opacity` (one premultiplied-over
-    /// blend of the whole stroke — overlapping dabs can't exceed the ceiling),
-    /// then clear the wet buffer. Call at pen-up, before `read_tiles`.
+    /// Merge the wet buffer onto the ACTIVE layer at `opacity` (one
+    /// premultiplied-over blend of the whole stroke — overlapping dabs can't
+    /// exceed the ceiling), then clear the wet buffer. Call at pen-up, before
+    /// `read_tiles`.
     pub fn composite_wet(&mut self, opacity: f32) {
         self.queue.write_buffer(
             &self.opacity_buf,
@@ -702,9 +827,9 @@ impl PaintLayer {
         });
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("wet_over_cel"),
+                label: Some("wet_over_active"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.view,
+                    view: &self.active.view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -718,14 +843,14 @@ impl PaintLayer {
                 multiview_mask: None,
             });
             pass.set_pipeline(&self.composite_pipeline);
-            pass.set_bind_group(0, &self.composite_bind, &[]);
+            pass.set_bind_group(0, &self.composite_bind_wet, &[]);
             pass.draw(0..3, 0..1);
         }
         // Clear the wet buffer in the same submission.
         enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("clear_wet"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.wet_view,
+                view: &self.wet.view,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -743,40 +868,22 @@ impl PaintLayer {
 
     /// Clear the wet buffer without compositing (abandoned stroke).
     pub fn clear_wet(&mut self) {
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("clear_wet"),
-        });
-        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("clear_wet"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &self.wet_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        self.queue.submit(Some(enc.finish()));
+        let view = self.wet.view.clone();
+        self.clear_view(&view, "clear_wet");
     }
 
-    /// egui texture id of the wet buffer (drawn over the cel at the stroke
-    /// opacity while a brush stroke is live).
+    /// egui texture id of the wet buffer (drawn over the active layer at the
+    /// stroke opacity while a brush stroke is live).
     pub fn wet_id(&self) -> egui::TextureId {
-        self.wet_tex_id
+        self.wet.tex_id
     }
 
-    /// Replace the layer's contents with the engine's stored tiles (called when
-    /// the current drawing changes — frame switch, undo, redo). Tiles carry the
-    /// exact texel bytes, so this is a bit-for-bit restore.
-    pub fn sync_from(&mut self, tiles: &BTreeMap<TileCoord, Arc<TileData>>) {
-        let texture = self.texture.clone();
-        let view = self.view.clone();
+    /// Replace the ACTIVE layer texture with the engine's stored tiles (called
+    /// when the displayed drawing/layer changes — frame switch, layer switch,
+    /// undo, redo). Tiles carry the exact texel bytes: a bit-for-bit restore.
+    pub fn sync_active(&mut self, tiles: &BTreeMap<TileCoord, Arc<TileData>>) {
+        let texture = self.active.texture.clone();
+        let view = self.active.view.clone();
         self.fill_texture(&texture, &view, tiles);
     }
 
@@ -835,17 +942,15 @@ impl PaintLayer {
         }
     }
 
-    /// Upload an onion-skin cel into slot 0 (previous) or 1 (next). `hash` is the
-    /// cel's raster content hash (skip re-upload if unchanged); `None` tiles
-    /// clears the slot. Returns the egui texture id to draw, if any.
-    pub fn set_onion(
-        &mut self,
-        slot: usize,
-        tiles: Option<&BTreeMap<TileCoord, Arc<TileData>>>,
-        hash: u64,
-    ) {
-        let Some(tiles) = tiles else {
-            self.onion[slot] = None;
+    /// Build an onion-skin ghost into slot 0 (previous) or 1 (next) as the
+    /// WHOLE-CEL composite of the neighbour's visible layers. `hash` is the
+    /// composite's content hash (skip rebuild if unchanged); `None` clears the
+    /// slot.
+    pub fn set_onion(&mut self, slot: usize, layers: Option<&[LayerSlice<'_>]>, hash: u64) {
+        let Some(layers) = layers else {
+            if let Some(old) = self.onion[slot].take() {
+                self.renderer.write().free_texture(&old.tex_id);
+            }
             return;
         };
         // Reuse the existing slot texture if the content is unchanged.
@@ -857,18 +962,22 @@ impl PaintLayer {
             Some(s) if s.width == self.width && s.height == self.height => {
                 (s.texture, s.view, s.tex_id)
             }
-            _ => {
+            old => {
+                // Size changed: free the stale registration before replacing.
+                if let Some(old) = old {
+                    self.renderer.write().free_texture(&old.tex_id);
+                }
                 let texture = Self::create_layer_texture(&self.device, self.width, self.height);
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let tex_id = self.renderer.write().register_native_texture(
                     &self.device,
                     &view,
-                    wgpu::FilterMode::Linear,
+                    self.filter,
                 );
                 (texture, view, tex_id)
             }
         };
-        self.fill_texture(&texture, &view, tiles);
+        self.composite_layers_into(&view, layers);
         self.onion[slot] = Some(OnionSlot {
             texture,
             view,
@@ -904,7 +1013,7 @@ impl PaintLayer {
         });
         enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.texture,
+                texture: &self.active.texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,

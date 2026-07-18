@@ -149,12 +149,15 @@ impl Drawing {
     }
 
     /// CPU composite of the visible layers, bottom -> top, premultiplied-over
-    /// with per-layer opacity, in u16. Plain bytes — the headless law holds.
+    /// with per-layer opacity. Tile values are f16 BIT PATTERNS (the GPU's
+    /// Rgba16Float texels — see the encoding law on `TileData`), so the math
+    /// decodes to f32, blends linearly, and re-encodes — the same arithmetic
+    /// the GPU compositor performs. Plain bytes — the headless law holds.
     ///
     /// This is the GOLDEN REFERENCE the GPU compositor is tested against, and
     /// the future export/eval path. It is NOT the interactive display path.
     pub fn flatten(&self) -> std::collections::BTreeMap<TileCoord, Arc<TileData>> {
-        use crate::raster::TILE_LEN;
+        use crate::raster::{TILE_LEN, f16_bits_to_f32, f32_to_f16_bits};
 
         // Collect every coordinate any visible layer touches.
         let mut coords: std::collections::BTreeSet<TileCoord> = std::collections::BTreeSet::new();
@@ -166,7 +169,7 @@ impl Drawing {
 
         let mut out = std::collections::BTreeMap::new();
         for coord in coords {
-            // f32 working buffer, normalized 0..1 premultiplied.
+            // f32 working buffer, linear premultiplied.
             let mut acc = vec![0.0f32; TILE_LEN];
             for layer in &self.layers {
                 if !layer.props.visible || layer.props.opacity <= 0.0 {
@@ -178,17 +181,17 @@ impl Drawing {
                 let op = layer.props.opacity.clamp(0.0, 1.0);
                 // src-over: out = src*op + out*(1 - src.a*op), premultiplied.
                 for (px, spx) in acc.chunks_exact_mut(4).zip(tile.rgba.chunks_exact(4)) {
-                    let sa = spx[3] as f32 / 65535.0 * op;
+                    let sa = f16_bits_to_f32(spx[3]) * op;
                     let keep = 1.0 - sa;
                     for c in 0..4 {
-                        let s = spx[c] as f32 / 65535.0 * op;
+                        let s = f16_bits_to_f32(spx[c]) * op;
                         px[c] = s + px[c] * keep;
                     }
                 }
             }
             let rgba: Vec<u16> = acc
                 .iter()
-                .map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16)
+                .map(|v| f32_to_f16_bits(v.clamp(0.0, 1.0)))
                 .collect();
             let tile = TileData::from_vec(rgba);
             if !tile.is_empty() {

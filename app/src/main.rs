@@ -100,6 +100,30 @@ impl App {
             ed.canvas.toggle_eraser();
             return;
         }
+        // STROKE GUARD: while a stroke is live, actions that would retarget or
+        // orphan its pen-up commit are dropped — frame nav would commit onto
+        // the wrong frame, an A-cycle onto the wrong layer, undo/clear against
+        // a vanished target. (Tool toggles are safe: the stroke latches them.)
+        if ed.canvas.stroke_active()
+            && matches!(
+                action,
+                Action::PlayPause
+                    | Action::NextFrame
+                    | Action::PrevFrame
+                    | Action::FirstFrame
+                    | Action::LastFrame
+                    | Action::NewDrawing
+                    | Action::ClearCel
+                    | Action::CycleCelLayer
+                    | Action::CycleCelLayerBack
+                    | Action::ClearFrameKey
+                    | Action::RemoveColumn
+                    | Action::Undo
+                    | Action::Redo
+            )
+        {
+            return;
+        }
         let s = &mut ed.state;
         match action {
             Action::PlayPause => s.toggle_play(),
@@ -116,6 +140,8 @@ impl App {
             Action::RemoveColumn => s.remove_active_column(),
             Action::ToggleOnion => s.onion = !s.onion,
             Action::ToggleEraser => {} // handled above
+            Action::CycleCelLayer => s.cycle_layer(false),
+            Action::CycleCelLayerBack => s.cycle_layer(true),
             Action::Undo => s.undo(),
             Action::Redo => s.redo(),
             Action::Save => s.save(false),

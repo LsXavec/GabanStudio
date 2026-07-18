@@ -112,6 +112,10 @@ pub struct CanvasView {
     /// Tool latched at stroke START — a mid-stroke eraser toggle must not split
     /// one stroke across the wet buffer and the cel (wrong ordering at composite).
     stroke_erasing: bool,
+    /// Layer slot latched at stroke START — a mid-stroke A-cycle must not
+    /// retarget the pen-up commit (it would bake the OLD layer's readback into
+    /// the NEW layer: silent cross-layer corruption).
+    stroke_layer_slot: usize,
     // --- Brush dynamics (what pen pressure drives). Tilt dynamics are gated on
     // the octotablet backend — egui pen events carry no tilt.
     /// Pressure drives dab size (through the pen curve).
@@ -130,9 +134,14 @@ pub struct CanvasView {
     dabs_flushed: usize,
     /// The stroke finished this frame; flush its last dabs, then reset.
     raster_stroke_done: bool,
-    /// (drawing id, raster hash) currently uploaded to the GPU layer — when it
-    /// no longer matches the current cel, re-sync from the engine.
-    synced: (u64, u64),
+    /// (drawing, layer, content hash) currently uploaded to the GPU ACTIVE
+    /// texture — when it no longer matches, re-sync from the engine.
+    synced_active: (u64, u64, u64),
+    /// Content keys of the below/above sandwich projections (None = must
+    /// rebuild). Pen-up commits touch only `synced_active`; these change on
+    /// frame/layer switches, visibility/opacity edits, reorders, undo.
+    synced_below: Option<u64>,
+    synced_above: Option<u64>,
     /// This stroke will create a NEW cel (the frame had no own key) — clear the
     /// GPU layer at the first dab so the new cel is blank, not a copy of the
     /// held drawing that was on display.
@@ -187,13 +196,16 @@ impl CanvasView {
             brush_opacity: 1.0,
             wet_dirty: false,
             stroke_erasing: false,
+            stroke_layer_slot: 0,
             dyn_size: true,
             dyn_opacity: false,
             min_size: 0.0,
             cel_touched: false,
             dabs_flushed: 0,
             raster_stroke_done: false,
-            synced: (u64::MAX, u64::MAX), // force an initial sync
+            synced_active: (u64::MAX, u64::MAX, u64::MAX), // force initial sync
+            synced_below: None,
+            synced_above: None,
             raster_new_cel: false,
             pen_curve: PressureCurve::linear(),
             seen_pen: false,
@@ -207,6 +219,13 @@ impl CanvasView {
     /// Flip between brush and eraser (bound to a rebindable shortcut).
     pub fn toggle_eraser(&mut self) {
         self.erasing = !self.erasing;
+    }
+
+    /// A stroke is live (pen down, or its pen-up commit hasn't run yet).
+    /// Stroke-unsafe actions (frame nav, undo, layer cycle, clears) must not
+    /// dispatch while this holds — they would retarget or orphan the commit.
+    pub fn stroke_active(&self) -> bool {
+        self.touch_active || !self.current.is_empty() || self.raster_stroke_done
     }
 
     pub fn ui(
@@ -243,6 +262,19 @@ impl CanvasView {
                     .clicked()
                 {
                     self.erasing = true;
+                }
+                // Active cel-layer chip (RETAS trace-line colours). Click or A
+                // cycles; strokes land on this layer.
+                let lname = state.active_layer_name();
+                if ui
+                    .button(
+                        egui::RichText::new(format!("▣ {lname}"))
+                            .color(layer_chip_color(&lname)),
+                    )
+                    .on_hover_text("active layer — strokes land here (A cycles)")
+                    .clicked()
+                {
+                    state.cycle_layer(false);
                 }
                 ui.add(
                     egui::Slider::new(&mut self.raster_brush_px, 1.0..=300.0)
@@ -458,28 +490,46 @@ impl CanvasView {
                     p.clear_wet();
                     self.wet_dirty = false;
                 }
-                // If the abandoned stroke wrote the CEL directly (eraser dabs,
-                // new-cel clear), the texture no longer matches engine truth —
-                // invalidate the sync key so the next block restores it.
+                // If the abandoned stroke wrote textures directly (eraser dabs,
+                // new-cel clear), they no longer match engine truth —
+                // invalidate every sync key so this block restores them.
                 if self.cel_touched {
-                    self.synced = (u64::MAX, u64::MAX);
+                    self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+                    self.synced_below = None;
+                    self.synced_above = None;
                     self.cel_touched = false;
                 }
-                // Between strokes: re-upload if the current cel changed
-                // (frame switch, undo, redo, selection).
-                let key = state.current_raster_key();
-                if key != self.synced {
-                    match state.current_raster_tiles() {
-                        Some(tiles) => p.sync_from(tiles),
-                        None => p.clear(),
+                // Between strokes: re-sync whatever changed (frame switch,
+                // layer switch, undo/redo, visibility/opacity edits, reorder).
+                // Three keys, one mechanism; the blank-frame sentinel is folded
+                // into ALL of them (stale-pixel bug class).
+                let key = state.active_layer_key();
+                if key != self.synced_active {
+                    match state.active_layer_tiles() {
+                        Some(tiles) => p.sync_active(tiles),
+                        None => p.clear_active(),
                     }
-                    self.synced = key;
+                    self.synced_active = key;
+                }
+                let bk = state.below_stack_key();
+                if Some(bk) != self.synced_below {
+                    p.build_projection(false, &state.below_layers());
+                    self.synced_below = Some(bk);
+                }
+                let ak = state.above_stack_key();
+                if Some(ak) != self.synced_above {
+                    p.build_projection(true, &state.above_layers());
+                    self.synced_above = Some(ak);
                 }
             } else {
-                // Starting a new cel: wipe the held drawing off the GPU layer
-                // so the new cel is blank, not a copy of what was displayed.
+                // Starting a new cel: wipe the held drawing's textures so the
+                // new cel starts blank — active AND both projections (nothing
+                // is below or above a fresh cel yet), all keys invalidated.
                 if self.raster_new_cel && self.dabs_flushed == 0 {
-                    p.clear();
+                    p.clear_active();
+                    p.clear_projections();
+                    self.synced_below = None;
+                    self.synced_above = None;
                     self.cel_touched = true;
                 }
                 // Drawing (or finishing this frame): stamp the new dabs. Brush
@@ -506,19 +556,24 @@ impl CanvasView {
                         self.wet_dirty = false;
                     }
                     let tiles = p.read_tiles();
-                    if let Some(id) = state.commit_raster(tiles) {
+                    // Commit against the slot LATCHED at stroke start — a
+                    // mid-stroke A-cycle must not retarget the readback.
+                    if let Some((id, layer)) = state.commit_raster(tiles, self.stroke_layer_slot) {
                         let h = state
                             .cut()
                             .drawing(id)
-                            .and_then(|d| d.layers.last())
+                            .and_then(|d| d.layer(layer))
                             .map(|l| l.content_hash())
                             .unwrap_or(0);
-                        self.synced = (id.0, h);
+                        // Pen-up touches ONLY the active key: the projections
+                        // exclude the active layer, so their stacks are
+                        // unchanged by this commit.
+                        self.synced_active = (id.0, layer.0, h);
                     } else {
-                        // Commit refused (e.g. vector-only cel): the GPU layer
-                        // holds a stroke the engine never accepted — invalidate
-                        // so the next frame restores truth, not a phantom.
-                        self.synced = (u64::MAX, u64::MAX);
+                        // Commit refused: the GPU layer holds a stroke the
+                        // engine never accepted — invalidate so the next frame
+                        // restores truth, not a phantom.
+                        self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
                     }
                     self.cel_touched = false;
                     self.current.clear();
@@ -535,8 +590,8 @@ impl CanvasView {
             if state.onion {
                 let neighbors = state.onion_neighbors();
                 for (slot, nid) in neighbors.iter().enumerate() {
-                    match nid.and_then(|id| state.drawing_raster(id)) {
-                        Some((tiles, hash)) => p.set_onion(slot, Some(tiles), hash),
+                    match nid.and_then(|id| state.drawing_composite(id)) {
+                        Some((slices, hash)) => p.set_onion(slot, Some(&slices), hash),
                         None => p.set_onion(slot, None, 0),
                     }
                 }
@@ -598,7 +653,10 @@ impl CanvasView {
                 draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
             }
 
-        // 3b. Raster onion ghosts (under) + the current GPU raster layer (over).
+        // 3b. The raster sandwich, bottom→top: onion ghosts, BELOW projection,
+        //     the ACTIVE layer at its own opacity, the live wet stroke, the
+        //     ABOVE projection. Painting "color" previews under the line art
+        //     live — the solo shiage workflow.
         if self.raster
             && let Some(p) = paint {
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -609,18 +667,38 @@ impl CanvasView {
                 if let Some(id) = p.onion_id(1) {
                     painter.image(id, paper_rect, uv, Color32::from_rgba_unmultiplied(180, 235, 190, 110));
                 }
-                // Current cel on top, full strength.
-                painter.image(p.texture_id(), paper_rect, uv, Color32::WHITE);
-                // Live brush stroke (wet buffer) previewed over the cel at the
-                // stroke opacity — verified EXACT vs composite_wet: egui-wgpu
-                // 0.35 tints native-texture samples RAW (no sRGB conversion), so
-                // from_white_alpha(a) is the same o×texel multiply the composite
-                // bakes in. Re-check if an egui upgrade changes egui.wgsl's
-                // sample handling.
-                if self.wet_dirty {
-                    let a = (self.brush_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-                    painter.image(p.wet_id(), paper_rect, uv, Color32::from_white_alpha(a));
+                // Layers under the active one (per-layer opacities baked in).
+                painter.image(p.below_id(), paper_rect, uv, Color32::WHITE);
+                // Active layer: the texture holds FULL-strength pixels (so the
+                // pen-up readback stays bit-exact); its layer opacity is applied
+                // here as a display tint. from_white_alpha is an exact o×texel
+                // multiply under egui-wgpu 0.35's raw native-texture sampling —
+                // re-check if an egui upgrade changes egui.wgsl.
+                let (a_visible, a_opacity) = state
+                    .active_layer_props()
+                    .map(|pr| (pr.visible, pr.opacity))
+                    .unwrap_or((true, 1.0));
+                if a_visible {
+                    let t = (a_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    painter.image(p.texture_id(), paper_rect, uv, Color32::from_white_alpha(t));
+                    // Live brush stroke over it, at stroke × layer opacity
+                    // (both factors, or the stroke pops at pen-up).
+                    // KNOWN latent deviation: where the stroke overlaps existing
+                    // active-layer ink AND the layer opacity < 1, this two-quad
+                    // preview attenuates the old ink slightly differently than
+                    // the merged commit (exact at opacity 1 — always true until
+                    // the Phase 3 opacity UI ships; revisit then with a merged
+                    // preview pass through scratch).
+                    if self.wet_dirty {
+                        let wa = (self.brush_opacity.clamp(0.0, 1.0)
+                            * a_opacity.clamp(0.0, 1.0)
+                            * 255.0)
+                            .round() as u8;
+                        painter.image(p.wet_id(), paper_rect, uv, Color32::from_white_alpha(wa));
+                    }
                 }
+                // Layers over the active one.
+                painter.image(p.above_id(), paper_rect, uv, Color32::WHITE);
             }
 
         // 4. In-progress stroke preview (vector mode only — the raster layer
@@ -796,6 +874,7 @@ impl CanvasView {
                         self.cur_none = 0;
                         self.stroke_from_mouse = false;
                         self.stroke_erasing = self.erasing;
+                        self.stroke_layer_slot = state.active_layer_slot;
                         self.cel_touched = false;
                         self.dabs_flushed = 0;
                         self.raster_stroke_done = false;
@@ -841,6 +920,7 @@ impl CanvasView {
                 self.cur_none = 0; // force% diagnostic honest for this stroke
                 self.stroke_from_mouse = true;
                 self.stroke_erasing = self.erasing;
+                self.stroke_layer_slot = state.active_layer_slot;
                 self.cel_touched = false;
                 self.dabs_flushed = 0;
                 self.raster_stroke_done = false;
@@ -1003,6 +1083,21 @@ impl CanvasView {
             color: self.brush_color,
         };
         state.commit_stroke(stroke);
+    }
+}
+
+/// RETAS-convention trace-line colour for a layer name (orientation aid):
+/// line = near-white ink, color = green, shadow = blue, highlight = red,
+/// correction = orange, rough = the blue-pencil convention.
+fn layer_chip_color(name: &str) -> Color32 {
+    match name {
+        "line" => Color32::from_gray(230),
+        "color" => Color32::from_rgb(120, 200, 120),
+        "shadow" => Color32::from_rgb(110, 160, 240),
+        "highlight" => Color32::from_rgb(240, 120, 120),
+        "correction" => Color32::from_rgb(240, 170, 90),
+        "rough" => Color32::from_rgb(130, 180, 255),
+        _ => Color32::from_gray(180),
     }
 }
 

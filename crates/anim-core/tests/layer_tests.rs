@@ -606,27 +606,32 @@ fn hash_law_pixels_order_props_count_rename_does_not() {
 
 #[test]
 fn flatten_composites_opacity_overlap_and_missing_tiles() {
+    use anim_core::raster::{f16_bits_to_f32, f32_to_f16_bits};
+
     let mut f = layer_fixture();
+    // Tile values are f16 BIT PATTERNS (the GPU texel encoding law).
+    let one = f32_to_f16_bits(1.0); // 0x3C00
+    let half = f32_to_f16_bits(0.5); // 0x3800
     // color: opaque mid-gray on tile (0,0) and (1,0).
-    // line: 50%-opacity solid on tile (0,0) only (overlap), via layer opacity.
+    // line: 50%-opacity solid red on tile (0,0) only (overlap), via layer opacity.
     let gray = {
         // premultiplied: solid alpha, half-intensity color
         let mut v = vec![0u16; TILE_LEN];
         for px in v.chunks_exact_mut(4) {
-            px[0] = 0x8000;
-            px[1] = 0x8000;
-            px[2] = 0x8000;
-            px[3] = 0xFFFF;
+            px[0] = half;
+            px[1] = half;
+            px[2] = half;
+            px[3] = one;
         }
         Arc::new(TileData::from_vec(v))
     };
     let ink = {
         let mut v = vec![0u16; TILE_LEN];
         for px in v.chunks_exact_mut(4) {
-            px[0] = 0xFFFF;
+            px[0] = one;
             px[1] = 0;
             px[2] = 0;
-            px[3] = 0xFFFF;
+            px[3] = one;
         }
         Arc::new(TileData::from_vec(v))
     };
@@ -666,20 +671,20 @@ fn flatten_composites_opacity_overlap_and_missing_tiles() {
     let flat = drawing(&f).flatten();
     assert_eq!(flat.len(), 2);
 
-    // Tile (1,0): color only — passes through unchanged.
+    // Tile (1,0): color only — passes through bit-identical.
     let t10 = &flat[&(1, 0)].rgba;
-    assert_eq!(&t10[0..4], &[0x8000, 0x8000, 0x8000, 0xFFFF]);
+    assert_eq!(&t10[0..4], &[half, half, half, one]);
 
     // Tile (0,0): line at 50% over gray.
     // src(prem, x0.5) = (0.5, 0, 0, 0.5); out = src + dst*(1-0.5)
     // r = 0.5 + 0.5*0.5 = 0.75 ; g/b = 0.25 ; a = 1.0
     let t00 = &flat[&(0, 0)].rgba;
     let px = [t00[0], t00[1], t00[2], t00[3]];
-    let close = |v: u16, expect: f32| ((v as f32 / 65535.0) - expect).abs() < 0.002;
-    assert!(close(px[0], 0.75), "r was {}", px[0] as f32 / 65535.0);
-    assert!(close(px[1], 0.25), "g was {}", px[1] as f32 / 65535.0);
-    assert!(close(px[2], 0.25), "b was {}", px[2] as f32 / 65535.0);
-    assert!(close(px[3], 1.0), "a was {}", px[3] as f32 / 65535.0);
+    let close = |v: u16, expect: f32| (f16_bits_to_f32(v) - expect).abs() < 0.002;
+    assert!(close(px[0], 0.75), "r was {}", f16_bits_to_f32(px[0]));
+    assert!(close(px[1], 0.25), "g was {}", f16_bits_to_f32(px[1]));
+    assert!(close(px[2], 0.25), "b was {}", f16_bits_to_f32(px[2]));
+    assert!(close(px[3], 1.0), "a was {}", f16_bits_to_f32(px[3]));
 
     // Hidden layers contribute nothing.
     f.engine
@@ -698,7 +703,28 @@ fn flatten_composites_opacity_overlap_and_missing_tiles() {
         )
         .unwrap();
     let flat2 = drawing(&f).flatten();
-    assert_eq!(&flat2[&(0, 0)].rgba[0..4], &[0x8000, 0x8000, 0x8000, 0xFFFF]);
+    assert_eq!(&flat2[&(0, 0)].rgba[0..4], &[half, half, half, one]);
+}
+
+#[test]
+fn f16_codec_round_trips_key_values() {
+    use anim_core::raster::{f16_bits_to_f32, f32_to_f16_bits};
+    // Exactly representable values encode to the canonical bit patterns.
+    assert_eq!(f32_to_f16_bits(0.0), 0x0000);
+    assert_eq!(f32_to_f16_bits(0.25), 0x3400);
+    assert_eq!(f32_to_f16_bits(0.5), 0x3800);
+    assert_eq!(f32_to_f16_bits(0.75), 0x3A00);
+    assert_eq!(f32_to_f16_bits(1.0), 0x3C00);
+    // Decode inverts encode for every finite half bit pattern.
+    for bits in 0..=0x7BFFu16 {
+        assert_eq!(f32_to_f16_bits(f16_bits_to_f32(bits)), bits, "bits {bits:#06x}");
+    }
+    // Round-trip error within half-precision ULP across 0..1.
+    for i in 0..=1000 {
+        let v = i as f32 / 1000.0;
+        let rt = f16_bits_to_f32(f32_to_f16_bits(v));
+        assert!((rt - v).abs() < 0.0005, "{v} -> {rt}");
+    }
 }
 
 // ---- Persistence: v5 round-trip + v4 migration ------------------------------

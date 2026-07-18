@@ -15,6 +15,9 @@ use anim_core::model::CelLayer;
 use anim_core::raster::{TileCoord, TileData, TileDiff};
 use anim_core::xsheet::Exposure;
 
+/// Bottom→top display slices of cel layers: (tiles, effective opacity).
+pub type LayerSlices<'a> = Vec<(&'a BTreeMap<TileCoord, Arc<TileData>>, f32)>;
+
 pub struct AppState {
     pub engine: Engine,
     pub scene: SceneId,
@@ -31,6 +34,11 @@ pub struct AppState {
     /// into position. Such a hold stays statically visible even when it holds to
     /// its natural end (no Empty terminator); un-touched holds stay hidden.
     pub positioned_holds: HashSet<(ColumnId, u32)>,
+    /// Which cel layer is being edited, counted FROM THE TOP of the stack
+    /// (0 = topmost — "line" in the default template). Position-based so it
+    /// follows across frames ("on line at frame 5 → on line at frame 6");
+    /// clamped per drawing when stacks are shallower.
+    pub active_layer_slot: usize,
 }
 
 impl AppState {
@@ -65,6 +73,7 @@ impl AppState {
             file_path: None,
             status: "new project — draw on the canvas to create frame 1".into(),
             positioned_holds: HashSet::new(),
+            active_layer_slot: 0,
         }
     }
 
@@ -104,6 +113,7 @@ impl AppState {
             status: "project loaded".into(),
             engine,
             positioned_holds: HashSet::new(),
+            active_layer_slot: 0,
         })
     }
 
@@ -225,17 +235,31 @@ impl AppState {
     }
 
     /// Commit a finished raster stroke: the readback tiles become a `PaintTiles`
-    /// edit (undoable + persisted). If the current cell is empty, a new raster
-    /// cel is created and exposed here first — all as ONE undo step. Returns the
-    /// drawing the paint landed on (None if it couldn't be committed).
-    pub fn commit_raster(&mut self, new_tiles: Vec<(TileCoord, Arc<TileData>)>) -> Option<DrawingId> {
+    /// edit targeting the layer at `slot` — the slot is LATCHED by the canvas at
+    /// stroke start, so a mid-stroke A-cycle can never retarget the commit. If
+    /// the current cell is empty, a new [color, line] cel is created and exposed
+    /// here first; if the cel is a legacy vector-only drawing, the default stack
+    /// is added — each as ONE undo step. Returns (drawing, layer) on a
+    /// successful commit; None means nothing landed (canvas must re-sync).
+    pub fn commit_raster(
+        &mut self,
+        new_tiles: Vec<(TileCoord, Arc<TileData>)>,
+        slot: usize,
+    ) -> Option<(DrawingId, LayerId)> {
         let at = self.at();
         match self.own_key_drawing() {
             None => {
+                // Nothing painted (e.g. an eraser stroke on a held/blank frame):
+                // don't create an empty cel that would blank the held display.
+                if new_tiles.is_empty() {
+                    return None;
+                }
                 let name = self.next_drawing_name();
                 let id = self.engine.alloc_drawing_id();
                 let layers = self.new_cel_layers();
-                let layer = layers.last().expect("template has a layer").id;
+                // Paint lands on the latched slot of the fresh template.
+                let s = slot.min(layers.len() - 1);
+                let layer = layers[layers.len() - 1 - s].id;
                 let index = self.cut().drawings.len(); // append to the library
                 let diff: TileDiff = new_tiles
                     .into_iter()
@@ -261,28 +285,49 @@ impl AppState {
                         Command::PaintTiles { at, id, layer, diff },
                     ],
                 );
-                if r.is_ok() {
+                let ok = r.is_ok();
+                if ok {
                     self.selected_drawing = Some(id);
                 }
                 self.report(r, "painted (new cel)");
-                Some(id)
+                ok.then_some((id, layer))
             }
             Some(id) => {
-                // Snapshot the target layer's current tiles as the diff "before".
-                // Phase 1: the edit target is the TOP layer (stacks are single-
-                // layer until the Phase 2 UI lands an active-layer selection).
-                let (layer, before): (_, BTreeMap<TileCoord, Arc<TileData>>) = match self
-                    .cut()
-                    .drawing(id)
-                    .and_then(|d| d.layers.last())
-                {
-                    Some(l) => (l.id, l.raster.tiles.clone()),
-                    None => {
-                        self.status =
-                            "this cel is vector-only; raster paint isn't wired here yet".into();
+                let d = self.cut().drawing(id)?;
+                if d.layers.is_empty() {
+                    if new_tiles.is_empty() {
                         return None;
                     }
-                };
+                    // Legacy vector-only cel: give it the default stack and
+                    // paint onto the latched slot — one undo step, no dead end.
+                    let layers = self.new_cel_layers();
+                    let s = slot.min(layers.len() - 1);
+                    let layer = layers[layers.len() - 1 - s].id;
+                    let diff: TileDiff = new_tiles
+                        .into_iter()
+                        .map(|(c, t)| (c, None, Some(t)))
+                        .collect();
+                    let mut cmds: Vec<Command> = layers
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, l)| Command::AddCelLayer {
+                            at,
+                            drawing: id,
+                            index: i,
+                            layer: l,
+                        })
+                        .collect();
+                    cmds.push(Command::PaintTiles { at, id, layer, diff });
+                    let r = self.engine.apply("paint (add layers)", cmds);
+                    let ok = r.is_ok();
+                    self.report(r, "painted (layers added)");
+                    return ok.then_some((id, layer));
+                }
+                // Snapshot the LATCHED layer's tiles as the diff "before"
+                // (never None here: the stack is non-empty).
+                let target = Self::layer_at_slot(d, slot)?;
+                let (layer, before): (_, BTreeMap<TileCoord, Arc<TileData>>) =
+                    (target.id, target.raster.tiles.clone());
                 let after: BTreeMap<TileCoord, Arc<TileData>> = new_tiles.into_iter().collect();
 
                 let mut diff: TileDiff = Vec::new();
@@ -297,22 +342,79 @@ impl AppState {
                     }
                 }
                 if diff.is_empty() {
-                    return Some(id);
+                    return Some((id, layer));
                 }
                 let r = self
                     .engine
                     .apply("paint", vec![Command::PaintTiles { at, id, layer, diff }]);
+                let ok = r.is_ok();
                 self.report(r, "painted");
-                Some(id)
+                ok.then_some((id, layer))
             }
         }
     }
 
-    /// Layer stack for a NEW cel. Phase 1: one "paint" layer (identical
-    /// behavior to the single-raster era); the [color, line] template arrives
-    /// with the Phase 2 active-layer UI.
+    /// Layer stack for a NEW cel — the merged solo douga/shiage template:
+    /// "line" on top (draw), "color" underneath (paint shiage without ever
+    /// touching the line). The full professional set (rough/shadow/highlight/
+    /// correction) arrives with the Phase 3 layer strip's + menu.
     fn new_cel_layers(&mut self) -> Vec<CelLayer> {
-        vec![CelLayer::new(self.engine.alloc_layer_id(), "paint")]
+        vec![
+            CelLayer::new(self.engine.alloc_layer_id(), "color"), // bottom
+            CelLayer::new(self.engine.alloc_layer_id(), "line"),  // top
+        ]
+    }
+
+    /// Resolve a layer SLOT (counted from the top, clamped) to a concrete
+    /// layer of `d`. None only for layerless (vector-only) drawings.
+    fn layer_at_slot(d: &anim_core::model::Drawing, slot: usize) -> Option<&CelLayer> {
+        if d.layers.is_empty() {
+            return None;
+        }
+        let slot = slot.min(d.layers.len() - 1);
+        d.layers.get(d.layers.len() - 1 - slot)
+    }
+
+    /// The live active layer of `d` (current slot).
+    fn active_layer_of<'a>(&self, d: &'a anim_core::model::Drawing) -> Option<&'a CelLayer> {
+        Self::layer_at_slot(d, self.active_layer_slot)
+    }
+
+    /// Props of the layer the NEXT stroke will actually edit — based on the
+    /// frame's OWN cel only. None on held/blank frames (the stroke will create
+    /// a fresh template cel: visible, opacity 1), so chip/tint never describe
+    /// a held drawing's layer the commit won't touch.
+    pub fn active_layer_props(&self) -> Option<&anim_core::model::LayerProps> {
+        let id = self.own_key_drawing()?;
+        let d = self.cut().drawing(id)?;
+        self.active_layer_of(d).map(|l| &l.props)
+    }
+
+    /// Name of the active layer — template names on held/blank frames
+    /// (the layer the next stroke will land on).
+    pub fn active_layer_name(&self) -> String {
+        if let Some(p) = self.active_layer_props() {
+            return p.name.clone();
+        }
+        // Fresh-cel template is [color, line]; slot 0 = line (top).
+        match self.active_layer_slot.min(1) {
+            0 => "line".into(),
+            _ => "color".into(),
+        }
+    }
+
+    /// Cycle the active layer (A / Shift+A). Wraps within the OWN cel's stack
+    /// depth; on held/blank frames, the new-cel template depth (2).
+    pub fn cycle_layer(&mut self, back: bool) {
+        let n = self
+            .own_key_drawing()
+            .and_then(|id| self.cut().drawing(id))
+            .map(|d| d.layers.len())
+            .filter(|n| *n > 0)
+            .unwrap_or(2);
+        let slot = self.active_layer_slot.min(n - 1);
+        self.active_layer_slot = if back { (slot + n - 1) % n } else { (slot + 1) % n };
+        self.status = format!("layer: {}", self.active_layer_name());
     }
 
     /// Clear this frame's own cel raster (undoable). No-op on a held frame that
@@ -323,7 +425,7 @@ impl AppState {
         };
         let at = self.at();
         let (layer, before): (_, BTreeMap<TileCoord, Arc<TileData>>) =
-            match self.cut().drawing(id).and_then(|d| d.layers.last()) {
+            match self.cut().drawing(id).and_then(|d| self.active_layer_of(d)) {
                 Some(l) if !l.raster.tiles.is_empty() => (l.id, l.raster.tiles.clone()),
                 _ => return,
             };
@@ -333,8 +435,8 @@ impl AppState {
             .collect();
         let r = self
             .engine
-            .apply("clear cel", vec![Command::PaintTiles { at, id, layer, diff }]);
-        self.report(r, "cel cleared");
+            .apply("clear layer", vec![Command::PaintTiles { at, id, layer, diff }]);
+        self.report(r, "layer cleared");
     }
 
     /// Nearest distinct drawings before / after the current frame on the active
@@ -373,15 +475,22 @@ impl AppState {
         [prev, next]
     }
 
-    /// Raster tiles + content hash of a specific drawing (for onion upload).
-    /// Phase 1: single-layer stacks, so the top layer IS the cel; the Phase 2
-    /// compositor switches this to the whole-stack composite.
-    pub fn drawing_raster(
-        &self,
-        id: DrawingId,
-    ) -> Option<(&BTreeMap<TileCoord, Arc<TileData>>, u64)> {
-        let l = self.cut().drawing(id)?.layers.last()?;
-        Some((&l.raster.tiles, l.content_hash()))
+    /// WHOLE-CEL composite of a drawing's visible layers (bottom→top slices +
+    /// composite hash) — the onion ghost is the cel as it looks, all layers.
+    pub fn drawing_composite(&self, id: DrawingId) -> Option<(LayerSlices<'_>, u64)> {
+        let d = self.cut().drawing(id)?;
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut slices = Vec::new();
+        for l in &d.layers {
+            if l.props.visible && l.props.opacity > 0.0 {
+                bytes.extend_from_slice(&l.content_hash().to_le_bytes());
+                slices.push((&l.raster.tiles, l.props.opacity));
+            }
+        }
+        if slices.is_empty() {
+            return None;
+        }
+        Some((slices, anim_core::value::fnv1a(&bytes)))
     }
 
     /// Which drawing the GPU canvas layer should DISPLAY at the current frame:
@@ -401,37 +510,101 @@ impl AppState {
         }
     }
 
-    /// The raster tiles to upload to the GPU layer for display (top layer —
-    /// Phase 1 stacks are single-layer).
-    pub fn current_raster_tiles(&self) -> Option<&BTreeMap<TileCoord, Arc<TileData>>> {
+    /// Tiles of the ACTIVE layer of the displayed drawing (for the GPU active
+    /// texture). None = blank (held frame w/ onion, or layerless drawing).
+    pub fn active_layer_tiles(&self) -> Option<&BTreeMap<TileCoord, Arc<TileData>>> {
         let id = self.display_drawing()?;
-        self.cut()
-            .drawing(id)?
-            .layers
-            .last()
-            .map(|l| &l.raster.tiles)
+        let d = self.cut().drawing(id)?;
+        self.active_layer_of(d).map(|l| &l.raster.tiles)
     }
 
-    /// Identity of the displayed raster (drawing id, content hash, onion flag) —
-    /// used to decide when the GPU layer needs re-syncing. The onion flag is part
-    /// of the key so toggling onion on a held frame re-syncs (solid ↔ blank).
-    pub fn current_raster_key(&self) -> (u64, u64) {
+    /// Identity of the displayed ACTIVE layer (drawing, layer, content hash) —
+    /// decides when the GPU active texture re-syncs. Blank display: the key
+    /// must be UNIQUE PER FRAME (u64::MAX sentinel + frame), else navigating
+    /// between two blank frames keeps the same key, the re-sync is skipped,
+    /// and the layer shows stale pixels (a real historical bug).
+    pub fn active_layer_key(&self) -> (u64, u64, u64) {
+        match self.display_drawing() {
+            Some(id) => match self.cut().drawing(id).and_then(|d| self.active_layer_of(d)) {
+                Some(l) => (id.0, l.id.0, l.content_hash()),
+                None => (id.0, u64::MAX, 0), // layerless (vector-only) drawing
+            },
+            None => (u64::MAX, self.frame as u64, 0),
+        }
+    }
+
+    /// Visible layers strictly BELOW / ABOVE the active one in the displayed
+    /// drawing (bottom→top slices for the sandwich projections).
+    fn sandwich(&self, above: bool) -> LayerSlices<'_> {
+        let Some(id) = self.display_drawing() else {
+            return Vec::new();
+        };
+        let Some(d) = self.cut().drawing(id) else {
+            return Vec::new();
+        };
+        let Some(active) = self.active_layer_of(d) else {
+            return Vec::new();
+        };
+        let ai = d.layer_index(active.id).expect("active layer is in the stack");
+        d.layers
+            .iter()
+            .enumerate()
+            .filter(|(i, l)| {
+                l.props.visible
+                    && l.props.opacity > 0.0
+                    && if above { *i > ai } else { *i < ai }
+            })
+            .map(|(_, l)| (&l.raster.tiles, l.props.opacity))
+            .collect()
+    }
+
+    pub fn below_layers(&self) -> LayerSlices<'_> {
+        self.sandwich(false)
+    }
+
+    pub fn above_layers(&self) -> LayerSlices<'_> {
+        self.sandwich(true)
+    }
+
+    /// Content key of one sandwich half — folds the displayed drawing id, the
+    /// contributing layers' (id, content_hash), and the blank-frame sentinel,
+    /// so frame flips, layer switches, visibility/opacity edits, reorders and
+    /// undo into a buried layer all re-trigger the projection rebuild.
+    fn stack_key(&self, above: bool) -> u64 {
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.push(above as u8);
         match self.display_drawing() {
             Some(id) => {
-                let h = self
-                    .cut()
-                    .drawing(id)
-                    .and_then(|d| d.layers.last())
-                    .map(|l| l.content_hash())
-                    .unwrap_or(0);
-                (id.0, h)
+                bytes.extend_from_slice(&id.0.to_le_bytes());
+                if let Some(d) = self.cut().drawing(id)
+                    && let Some(active) = self.active_layer_of(d)
+                {
+                    let ai = d.layer_index(active.id).expect("active in stack");
+                    bytes.extend_from_slice(&(ai as u64).to_le_bytes());
+                    for (i, l) in d.layers.iter().enumerate() {
+                        let in_half = if above { i > ai } else { i < ai };
+                        if in_half && l.props.visible && l.props.opacity > 0.0 {
+                            bytes.extend_from_slice(&l.id.0.to_le_bytes());
+                            bytes.extend_from_slice(&l.content_hash().to_le_bytes());
+                        }
+                    }
+                }
             }
-            // Blank display: key must be UNIQUE PER FRAME, else navigating between
-            // two blank frames keeps the same key, the re-sync is skipped, and the
-            // layer keeps stale pixels. u64::MAX in slot 0 never collides with a
-            // real (drawing_id, hash).
-            None => (u64::MAX, self.frame as u64),
+            None => {
+                // Blank display: unique per frame (same law as active_layer_key).
+                bytes.extend_from_slice(&u64::MAX.to_le_bytes());
+                bytes.extend_from_slice(&(self.frame as u64).to_le_bytes());
+            }
         }
+        anim_core::value::fnv1a(&bytes)
+    }
+
+    pub fn below_stack_key(&self) -> u64 {
+        self.stack_key(false)
+    }
+
+    pub fn above_stack_key(&self) -> u64 {
+        self.stack_key(true)
     }
 
     /// Create an empty raster cel and expose it at the current frame — but only
