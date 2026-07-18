@@ -114,6 +114,7 @@ impl App {
                     | Action::LastFrame
                     | Action::NewDrawing
                     | Action::ClearCel
+                    | Action::ClearCelAll
                     | Action::CycleCelLayer
                     | Action::CycleCelLayerBack
                     | Action::ClearFrameKey
@@ -136,6 +137,7 @@ impl App {
             }
             Action::NewDrawing => s.new_drawing_at_frame(),
             Action::ClearCel => s.clear_current_raster(),
+            Action::ClearCelAll => s.clear_current_cel_all(),
             Action::ClearFrameKey => s.clear_key_at_frame(),
             Action::RemoveColumn => s.remove_active_column(),
             Action::ToggleOnion => s.onion = !s.onion,

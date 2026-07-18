@@ -39,6 +39,11 @@ pub struct AppState {
     /// follows across frames ("on line at frame 5 → on line at frame 6");
     /// clamped per drawing when stacks are shallower.
     pub active_layer_slot: usize,
+    /// Transient layer-strip UI state: an in-progress rename (layer, buffer).
+    pub strip_rename: Option<(LayerId, String)>,
+    /// Transient layer-strip UI state: an in-progress opacity drag
+    /// (layer, live value) — committed as ONE SetCelLayerProps at gesture end.
+    pub strip_opacity: Option<(LayerId, f32)>,
 }
 
 impl AppState {
@@ -74,6 +79,8 @@ impl AppState {
             status: "new project — draw on the canvas to create frame 1".into(),
             positioned_holds: HashSet::new(),
             active_layer_slot: 0,
+            strip_rename: None,
+            strip_opacity: None,
         }
     }
 
@@ -114,6 +121,8 @@ impl AppState {
             engine,
             positioned_holds: HashSet::new(),
             active_layer_slot: 0,
+            strip_rename: None,
+            strip_opacity: None,
         })
     }
 
@@ -437,6 +446,192 @@ impl AppState {
             .engine
             .apply("clear layer", vec![Command::PaintTiles { at, id, layer, diff }]);
         self.report(r, "layer cleared");
+    }
+
+    /// Clear EVERY layer of this frame's own cel (Shift+D) — one undo step.
+    pub fn clear_current_cel_all(&mut self) {
+        let Some(id) = self.own_key_drawing() else {
+            return;
+        };
+        let at = self.at();
+        let clears: Vec<Command> = match self.cut().drawing(id) {
+            Some(d) => d
+                .layers
+                .iter()
+                .filter(|l| !l.raster.tiles.is_empty())
+                .map(|l| Command::PaintTiles {
+                    at,
+                    id,
+                    layer: l.id,
+                    diff: l
+                        .raster
+                        .tiles
+                        .iter()
+                        .map(|(c, b)| (*c, Some(b.clone()), None))
+                        .collect(),
+                })
+                .collect(),
+            None => return,
+        };
+        if clears.is_empty() {
+            return;
+        }
+        let r = self.engine.apply("clear cel", clears);
+        self.report(r, "cel cleared (all layers)");
+    }
+
+    // ---- Layer strip operations (all one-command = one undo step) ---------
+
+    /// The own cel's layer list for the strip, TOP-FIRST (strip row order),
+    /// with each layer's stack index. Empty on held/blank frames.
+    pub fn strip_layers(&self) -> Vec<(usize, &CelLayer)> {
+        let Some(id) = self.own_key_drawing() else {
+            return Vec::new();
+        };
+        let Some(d) = self.cut().drawing(id) else {
+            return Vec::new();
+        };
+        d.layers.iter().enumerate().rev().collect()
+    }
+
+    fn own_drawing_id(&self) -> Option<DrawingId> {
+        self.own_key_drawing()
+    }
+
+    /// Replace one layer's props (rename / eye / opacity-drag end).
+    pub fn layer_set_props(&mut self, layer: LayerId, props: anim_core::model::LayerProps) {
+        let Some(id) = self.own_drawing_id() else {
+            return;
+        };
+        let at = self.at();
+        let r = self.engine.apply(
+            "layer properties",
+            vec![Command::SetCelLayerProps {
+                at,
+                drawing: id,
+                layer,
+                props,
+            }],
+        );
+        self.report(r, "layer updated");
+    }
+
+    /// Remove a layer (refused on the last one — a raster cel keeps >= 1).
+    pub fn layer_remove(&mut self, layer: LayerId) {
+        let Some(id) = self.own_drawing_id() else {
+            return;
+        };
+        if self.cut().drawing(id).map(|d| d.layers.len()) <= Some(1) {
+            self.status = "a cel keeps at least one layer".into();
+            return;
+        }
+        let at = self.at();
+        let r = self.engine.apply(
+            "remove layer",
+            vec![Command::RemoveCelLayer {
+                at,
+                drawing: id,
+                layer,
+            }],
+        );
+        self.report(r, "layer removed");
+    }
+
+    /// Move a layer one step up (toward the top) or down in the stack.
+    pub fn layer_move(&mut self, layer: LayerId, up: bool) {
+        let Some(id) = self.own_drawing_id() else {
+            return;
+        };
+        let Some(d) = self.cut().drawing(id) else {
+            return;
+        };
+        let Some(idx) = d.layer_index(layer) else {
+            return;
+        };
+        let to = if up { idx + 1 } else { idx.wrapping_sub(1) };
+        if to >= d.layers.len() {
+            return; // already at the end
+        }
+        let at = self.at();
+        let r = self.engine.apply(
+            "move layer",
+            vec![Command::MoveCelLayer {
+                at,
+                drawing: id,
+                layer,
+                to_index: to,
+            }],
+        );
+        self.report(r, "layer moved");
+    }
+
+    /// Anime-pipeline stack rank for the preset names (bottom → top):
+    /// color < shadow < highlight < rough < line < correction.
+    fn preset_rank(name: &str) -> Option<u8> {
+        match name {
+            "color" => Some(0),
+            "shadow" => Some(1),
+            "highlight" => Some(2),
+            "rough" => Some(3),
+            "line" => Some(4),
+            "correction" => Some(5),
+            _ => None,
+        }
+    }
+
+    /// Add a preset layer at its anime-correct stack position: directly above
+    /// the topmost existing layer whose known rank is <= the preset's (bottom
+    /// if none). "empty" (no rank) inserts above the active layer.
+    pub fn layer_add_preset(&mut self, name: &str) {
+        let Some(id) = self.own_drawing_id() else {
+            self.status = "no cel on this frame — draw or press E first".into();
+            return;
+        };
+        let Some(d) = self.cut().drawing(id) else {
+            return;
+        };
+        if d.layers.len() >= 8 {
+            self.status = "layer cap (8) reached on this cel".into();
+            return;
+        }
+        let index = match Self::preset_rank(name) {
+            Some(rank) => d
+                .layers
+                .iter()
+                .rposition(|l| Self::preset_rank(&l.props.name).is_some_and(|r| r <= rank))
+                .map(|i| i + 1)
+                .unwrap_or(0),
+            None => {
+                // "empty": directly above the active layer.
+                self.active_layer_of(d)
+                    .and_then(|l| d.layer_index(l.id))
+                    .map(|i| i + 1)
+                    .unwrap_or(d.layers.len())
+            }
+        };
+        let at = self.at();
+        // The generic "empty" menu item makes a plain renameable "layer".
+        let lname = if name == "empty" { "layer" } else { name };
+        let layer = CelLayer::new(self.engine.alloc_layer_id(), lname);
+        let new_id = layer.id;
+        let r = self.engine.apply(
+            "add layer",
+            vec![Command::AddCelLayer {
+                at,
+                drawing: id,
+                index,
+                layer,
+            }],
+        );
+        if r.is_ok() {
+            // Activate the new layer (slot counted from the top).
+            if let Some(d) = self.cut().drawing(id)
+                && let Some(i) = d.layer_index(new_id)
+            {
+                self.active_layer_slot = d.layers.len() - 1 - i;
+            }
+        }
+        self.report(r, "layer added");
     }
 
     /// Nearest distinct drawings before / after the current frame on the active

@@ -2,10 +2,13 @@
 //! kept in its own digital exposure sheet), columns as layers. Keys show as
 //! ● + name; held frames show as │. Click any row to jump the playhead.
 
+use anim_core::ids::LayerId;
+use anim_core::model::LayerProps;
 use anim_core::xsheet::Exposure;
 use eframe::egui;
 use egui::{Color32, Rect, Sense, pos2, vec2};
 
+use crate::canvas::layer_chip_color;
 use crate::doc::AppState;
 
 const ROW_H: f32 = 18.0;
@@ -13,6 +16,12 @@ const FRAME_NUM_W: f32 = 34.0;
 const COL_W: f32 = 86.0;
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
+    // Cel Layers strip docks at the BOTTOM of this panel (time axis above,
+    // inside-of-one-cel below) — added first so the sheet gets the remainder.
+    egui::Panel::bottom(egui::Id::new("cel_layers_strip"))
+        .resizable(false)
+        .show(ui, |ui| cel_layers_strip(ui, state));
+
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.label(
@@ -351,4 +360,182 @@ fn continuation_handles(
     for (column, old, new) in pending {
         state.set_hold_terminator(column, old, new);
     }
+}
+
+// ---- Cel Layers strip -------------------------------------------------------
+// The layers INSIDE this frame's own cel, top-first (Krita/CSP convention).
+// Row: [eye] [colour dot] [name] [↑][↓][–] [opacity]. Click = activate,
+// double-click = rename, opacity drag commits ONCE at gesture end. The + menu
+// inserts presets at their anime-correct stack positions.
+
+fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new("CEL LAYERS")
+                .strong()
+                .small()
+                .color(Color32::from_rgb(120, 190, 255)),
+        );
+        let have_cel = state.own_key_drawing().is_some();
+        let at_cap = state.strip_layers().len() >= 8;
+        ui.menu_button("＋", |ui| {
+            if at_cap {
+                ui.label(egui::RichText::new("layer cap (8) reached").weak().small());
+                return;
+            }
+            if !have_cel {
+                ui.label(
+                    egui::RichText::new("no cel on this frame (draw or press E)")
+                        .weak()
+                        .small(),
+                );
+                return;
+            }
+            for preset in ["rough", "shadow", "highlight", "correction", "empty"] {
+                let text = egui::RichText::new(preset).color(layer_chip_color(preset));
+                if ui.button(text).clicked() {
+                    state.layer_add_preset(preset);
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text("add a layer at its pipeline position");
+    });
+
+    // Owned snapshot so row actions can mutate state freely.
+    let rows: Vec<(LayerId, String, bool, f32)> = state
+        .strip_layers()
+        .iter()
+        .map(|(_, l)| (l.id, l.props.name.clone(), l.props.visible, l.props.opacity))
+        .collect();
+
+    if rows.is_empty() {
+        ui.label(
+            egui::RichText::new("held/empty frame — a new cel gets color + line")
+                .weak()
+                .small(),
+        );
+        ui.add_space(2.0);
+        return;
+    }
+
+    let n = rows.len();
+    for (slot, (lid, name, visible, opacity)) in rows.iter().enumerate() {
+        let is_active = state.active_layer_slot.min(n - 1) == slot;
+        ui.horizontal(|ui| {
+            // Eye: visibility toggle (one click = one undo step).
+            let eye = if *visible { "👁" } else { "—" };
+            if ui
+                .selectable_label(*visible, eye)
+                .on_hover_text("show / hide")
+                .clicked()
+            {
+                state.layer_set_props(
+                    *lid,
+                    LayerProps {
+                        name: name.clone(),
+                        visible: !visible,
+                        opacity: *opacity,
+                    },
+                );
+            }
+            // RETAS colour dot.
+            ui.label(egui::RichText::new("●").color(layer_chip_color(name)));
+
+            // Name: click = activate, double-click = rename.
+            let renaming = matches!(&state.strip_rename, Some((rid, _)) if rid == lid);
+            if renaming {
+                let (_, mut buf) = state.strip_rename.take().expect("checked above");
+                let resp = ui.text_edit_singleline(&mut buf);
+                let done = resp.lost_focus();
+                if done {
+                    let trimmed = buf.trim();
+                    if !trimmed.is_empty() && trimmed != name {
+                        state.layer_set_props(
+                            *lid,
+                            LayerProps {
+                                name: trimmed.to_string(),
+                                visible: *visible,
+                                opacity: *opacity,
+                            },
+                        );
+                    }
+                } else {
+                    resp.request_focus();
+                    state.strip_rename = Some((*lid, buf));
+                }
+            } else {
+                let text = if is_active {
+                    egui::RichText::new(name).strong().color(Color32::from_rgb(120, 190, 255))
+                } else {
+                    egui::RichText::new(name).color(Color32::from_gray(200))
+                };
+                let resp = ui
+                    .selectable_label(is_active, text)
+                    .on_hover_text("click: edit this layer — double-click: rename");
+                if resp.double_clicked() {
+                    state.strip_rename = Some((*lid, name.clone()));
+                } else if resp.clicked() {
+                    state.active_layer_slot = slot;
+                }
+            }
+
+            // Reorder / remove.
+            if ui.small_button("↑").on_hover_text("move up").clicked() {
+                state.layer_move(*lid, true);
+            }
+            if ui.small_button("↓").on_hover_text("move down").clicked() {
+                state.layer_move(*lid, false);
+            }
+            if ui.small_button("–").on_hover_text("remove layer").clicked() {
+                state.layer_remove(*lid);
+            }
+
+            // Opacity: live value during the drag, committed ONCE at the end
+            // (one gesture = one undo step).
+            let mut live = match &state.strip_opacity {
+                Some((oid, v)) if oid == lid => *v,
+                _ => *opacity,
+            };
+            ui.spacing_mut().slider_width = 60.0;
+            let resp = ui.add(
+                egui::Slider::new(&mut live, 0.0..=1.0)
+                    .show_value(false)
+                    .handle_shape(egui::style::HandleShape::Rect { aspect_ratio: 0.5 }),
+            );
+            ui.label(
+                egui::RichText::new(format!("{:3.0}%", live * 100.0))
+                    .monospace()
+                    .small(),
+            );
+            if resp.drag_stopped() {
+                state.strip_opacity = None;
+                if (live - *opacity).abs() > 0.001 {
+                    state.layer_set_props(
+                        *lid,
+                        LayerProps {
+                            name: name.clone(),
+                            visible: *visible,
+                            opacity: live,
+                        },
+                    );
+                }
+            } else if resp.dragged() {
+                state.strip_opacity = Some((*lid, live));
+            } else if resp.changed() {
+                // Click-to-set (no drag): apply immediately.
+                state.layer_set_props(
+                    *lid,
+                    LayerProps {
+                        name: name.clone(),
+                        visible: *visible,
+                        opacity: live,
+                    },
+                );
+            }
+        });
+    }
+    ui.add_space(2.0);
 }

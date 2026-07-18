@@ -264,13 +264,17 @@ impl CanvasView {
                     self.erasing = true;
                 }
                 // Active cel-layer chip (RETAS trace-line colours). Click or A
-                // cycles; strokes land on this layer.
+                // cycles; strokes land on this layer. Red when the layer is
+                // hidden (painting is refused until it's shown or switched).
                 let lname = state.active_layer_name();
+                let hidden = state.active_layer_props().is_some_and(|p| !p.visible);
+                let (label, color) = if hidden {
+                    (format!("▣ {lname} (hidden)"), Color32::from_rgb(235, 90, 80))
+                } else {
+                    (format!("▣ {lname}"), layer_chip_color(&lname))
+                };
                 if ui
-                    .button(
-                        egui::RichText::new(format!("▣ {lname}"))
-                            .color(layer_chip_color(&lname)),
-                    )
+                    .button(egui::RichText::new(label).color(color))
                     .on_hover_text("active layer — strokes land here (A cycles)")
                     .clicked()
                 {
@@ -864,6 +868,17 @@ impl CanvasView {
                         if !rect.contains(*pos) {
                             continue;
                         }
+                        // GUARD (CSP behavior): never paint into a layer you
+                        // can't see — refuse with a hint instead.
+                        if self.raster
+                            && state.active_layer_props().is_some_and(|p| !p.visible)
+                        {
+                            state.status = format!(
+                                "layer '{}' is hidden — press A to switch or click its eye",
+                                state.active_layer_name()
+                            );
+                            continue;
+                        }
                         let p0 = force.filter(|f| *f > 0.0).unwrap_or(START_SEED);
                         self.touch_active = true;
                         self.seed_pending = force.filter(|f| *f > 0.0).is_none();
@@ -915,6 +930,13 @@ impl CanvasView {
         // clicks that would otherwise paint flat-pressure blobs on light taps).
         if !self.touch_active && !touch_seen && self.mouse_lockout == 0 && !self.seen_pen {
             if response.drag_started_by(egui::PointerButton::Primary) {
+                if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {
+                    state.status = format!(
+                        "layer '{}' is hidden — press A to switch or click its eye",
+                        state.active_layer_name()
+                    );
+                    return;
+                }
                 self.current.clear();
                 self.cur_some = 0; // no tablet force will arrive; keep the
                 self.cur_none = 0; // force% diagnostic honest for this stroke
@@ -1089,7 +1111,7 @@ impl CanvasView {
 /// RETAS-convention trace-line colour for a layer name (orientation aid):
 /// line = near-white ink, color = green, shadow = blue, highlight = red,
 /// correction = orange, rough = the blue-pencil convention.
-fn layer_chip_color(name: &str) -> Color32 {
+pub fn layer_chip_color(name: &str) -> Color32 {
     match name {
         "line" => Color32::from_gray(230),
         "color" => Color32::from_rgb(120, 200, 120),
