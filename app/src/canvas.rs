@@ -98,6 +98,10 @@ pub struct CanvasView {
     /// Eraser tool active: strokes subtract coverage (destination-out) instead of
     /// laying down ink. Same dab geometry, size and pressure response as the brush.
     erasing: bool,
+    /// Per-dab strength (0–1): scales each dab's alpha, so overlapping dabs build
+    /// up within a stroke (airbrush-like). NOT whole-stroke opacity — that needs
+    /// the wet-buffer (paints the stroke separately, then composites once).
+    brush_flow: f32,
     /// How many of the current stroke's dabs are already on the GPU layer.
     dabs_flushed: usize,
     /// The stroke finished this frame; flush its last dabs, then reset.
@@ -155,6 +159,7 @@ impl CanvasView {
             raster: true,
             raster_brush_px: 14.0,
             erasing: false,
+            brush_flow: 1.0,
             dabs_flushed: 0,
             raster_stroke_done: false,
             synced: (u64::MAX, u64::MAX), // force an initial sync
@@ -213,6 +218,11 @@ impl CanvasView {
                         .text("px")
                         .fixed_decimals(0),
                 );
+                ui.add(
+                    egui::Slider::new(&mut self.brush_flow, 0.05..=1.0)
+                        .text("flow")
+                        .fixed_decimals(2),
+                );
                 if ui
                     .button("clear cel")
                     .on_hover_text("clear this cel's raster (undoable)")
@@ -238,6 +248,15 @@ impl CanvasView {
                 );
             }
             ui.separator();
+            // Custom colour picker (any RGB); the swatches beside it are presets.
+            let mut rgb = [self.brush_color[0], self.brush_color[1], self.brush_color[2]];
+            if ui
+                .color_edit_button_srgb(&mut rgb)
+                .on_hover_text("brush colour")
+                .changed()
+            {
+                self.brush_color = [rgb[0], rgb[1], rgb[2], self.brush_color[3]];
+            }
             for c in SWATCHES {
                 let selected = self.brush_color == c;
                 let swatch = egui::RichText::new("⬤")
@@ -563,7 +582,8 @@ impl CanvasView {
         if pts.is_empty() {
             return dabs;
         }
-        let color = linear_rgba(self.brush_color);
+        let mut color = linear_rgba(self.brush_color);
+        color[3] *= self.brush_flow.clamp(0.0, 1.0); // per-dab strength (also erase strength)
         let hardness = 0.85;
         // When no real pressure reached this stroke (mouse-mode, or a tap with no
         // force), cap the dab so a big brush can't stamp a huge flat-pressure disc.
