@@ -260,45 +260,70 @@ fn continuation_handles(
     for c in &conts {
         let col_x = cleft + FRAME_NUM_W + c.ci as f32 * COL_W;
         let x = col_x + COL_W - 10.0;
-        let hold_end = c.terminator.unwrap_or(c.max_end);
-        let handle_y = ctop + hold_end as f32 * ROW_H;
+        // Exposure top = just below the drawing's own key cell.
         let start_y = ctop + (c.n as f32 + 1.0) * ROW_H;
-        let handle_center = pos2(x, handle_y);
+        let max_y = ctop + c.max_end as f32 * ROW_H;
+
+        // A hold is "positioned" once the user has actually pulled the handle
+        // (it has an Empty terminator, or was dragged to its natural end and
+        // recorded). Positioned = the exposure line is drawn down the sheet.
+        // Un-positioned = STOWED: the handle rests at the drawing's frame and no
+        // line is drawn; the drawing still holds normally down the sheet.
+        let positioned =
+            c.terminator.is_some() || state.positioned_holds.contains(&(c.column, c.n));
+        let rest_y = if positioned {
+            ctop + c.terminator.unwrap_or(c.max_end) as f32 * ROW_H
+        } else {
+            // Stowed: centred on the drawing's own cell, no line drawn.
+            ctop + (c.n as f32 + 0.5) * ROW_H
+        };
 
         // Interact first (so the handle wins over the row click).
         let id = ui.id().with(("cont", c.column.0, c.n));
         let hr = ui.interact(
-            Rect::from_center_size(handle_center, vec2(16.0, 16.0)),
+            Rect::from_center_size(pos2(x, rest_y), vec2(16.0, 16.0)),
             id,
             Sense::drag(),
         );
 
-        // Visibility: a hold is shown ONLY once the user has positioned it —
-        // either it has an Empty terminator (dragged to shorten) or it was
-        // dragged and recorded in positioned_holds (even if left at its natural
-        // end). A freshly-added drawing shows nothing. For discoverability the
-        // handle also reveals while the pointer is right at the hold-end (a small
-        // grab zone), not across the whole span — so it never appears "way down".
-        let positioned =
-            c.terminator.is_some() || state.positioned_holds.contains(&(c.column, c.n));
-        let near_end = hover.is_some_and(|p| {
+        // While dragging, the handle (and line) follow the pointer live, clamped
+        // to the valid span; otherwise it sits at its resting row.
+        let handle_y = if hr.dragged() {
+            hr.interact_pointer_pos()
+                .map(|p| p.y)
+                .unwrap_or(rest_y)
+                .clamp(start_y, max_y)
+        } else {
+            rest_y
+        };
+        let handle_center = pos2(x, handle_y);
+
+        // Reveal: positioned, dragging, or hovering near the (stowed or set)
+        // handle — a small grab zone, so a fresh drawing shows nothing until you
+        // reach for it at the frame.
+        let near = hover.is_some_and(|p| {
             p.x >= col_x
                 && p.x <= col_x + COL_W
-                && p.y >= handle_y - ROW_H
-                && p.y <= handle_y + ROW_H
+                && p.y >= rest_y - ROW_H
+                && p.y <= rest_y + ROW_H
         });
-        let show = positioned || hr.dragged() || near_end;
+        let show = positioned || hr.dragged() || near;
 
         if show {
-            let col = if hr.dragged() || hr.hovered() || near_end {
+            let active = hr.dragged() || hr.hovered() || near;
+            let col = if active {
                 Color32::WHITE
             } else {
                 Color32::from_rgb(230, 160, 90) // positioned, resting
             };
-            painter.line_segment(
-                [pos2(x, start_y), pos2(x, handle_y)],
-                egui::Stroke::new(1.5, col),
-            );
+            // Draw the line only when the handle is below the frame start (i.e.
+            // it has been pulled down); a stowed handle is just the circle.
+            if handle_y > start_y + 0.5 {
+                painter.line_segment(
+                    [pos2(x, start_y), pos2(x, handle_y)],
+                    egui::Stroke::new(1.5, col),
+                );
+            }
             painter.circle_stroke(handle_center, 4.0, egui::Stroke::new(1.5, col));
         }
 

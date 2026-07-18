@@ -95,6 +95,11 @@ impl App {
             return;
         }
         let Some(ed) = &mut self.editor else { return };
+        // Handled on the canvas (owns the tool state), before borrowing ed.state.
+        if action == Action::ToggleEraser {
+            ed.canvas.toggle_eraser();
+            return;
+        }
         let s = &mut ed.state;
         match action {
             Action::PlayPause => s.toggle_play(),
@@ -110,6 +115,7 @@ impl App {
             Action::ClearFrameKey => s.clear_key_at_frame(),
             Action::RemoveColumn => s.remove_active_column(),
             Action::ToggleOnion => s.onion = !s.onion,
+            Action::ToggleEraser => {} // handled above
             Action::Undo => s.undo(),
             Action::Redo => s.redo(),
             Action::Save => s.save(false),

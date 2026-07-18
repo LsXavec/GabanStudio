@@ -168,6 +168,11 @@ impl CanvasView {
         }
     }
 
+    /// Flip between brush and eraser (bound to a rebindable shortcut).
+    pub fn toggle_eraser(&mut self) {
+        self.erasing = !self.erasing;
+    }
+
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -523,6 +528,29 @@ impl CanvasView {
                 egui::FontId::proportional(15.0),
                 Color32::from_gray(150),
             );
+        }
+
+        // ---- Brush-outline cursor (Krita-style) --------------------------
+        // Over the canvas in raster mode, hide the OS cursor and draw a circle
+        // matching the brush footprint (diameter = brush px, in screen space), so
+        // you see exactly where and how big the next dab lands — following the pen
+        // even mid-stroke. Black+white concentric rings stay visible on any
+        // background; the eraser adds a centre dot to tell the tools apart.
+        if self.raster
+            && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+            && rect.contains(pos)
+        {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            let r = (self.raster_brush_px * scale * 0.5).max(1.5);
+            painter.circle_stroke(pos, r, egui::Stroke::new(1.0, Color32::from_black_alpha(170)));
+            painter.circle_stroke(
+                pos,
+                (r - 1.0).max(0.5),
+                egui::Stroke::new(1.0, Color32::from_white_alpha(170)),
+            );
+            if self.erasing {
+                painter.circle_filled(pos, 1.3, Color32::from_black_alpha(180));
+            }
         }
     }
 
