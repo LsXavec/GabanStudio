@@ -87,6 +87,21 @@ pub struct PaintLayer {
     filter: wgpu::FilterMode,
     /// Onion ghosts: [0]=previous cel, [1]=next cel.
     onion: [Option<OnionSlot>; 2],
+
+    // --- Wet buffer: the live brush stroke paints here, NOT onto the cel.
+    // Displayed composited at the stroke opacity; merged onto the cel ONCE at
+    // pen-up (composite_wet), so overlapping dabs never build past the opacity
+    // ceiling — Krita's temporaryTarget / indirect-painting model.
+    wet_texture: wgpu::Texture,
+    wet_view: wgpu::TextureView,
+    wet_tex_id: egui::TextureId,
+    /// Fullscreen pass that blends the wet buffer onto the cel at an opacity.
+    composite_pipeline: wgpu::RenderPipeline,
+    composite_layout: wgpu::BindGroupLayout,
+    composite_bind: wgpu::BindGroup,
+    composite_sampler: wgpu::Sampler,
+    /// Uniform: [opacity, 0, 0, 0].
+    opacity_buf: wgpu::Buffer,
 }
 
 const SHADER: &str = r#"
@@ -145,6 +160,39 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let aa = clamp((1.0 - rr) / fw, 0.0, 1.0);   // analytic rim AA
     let a = opa * aa * in.color.a;
     return vec4<f32>(in.color.rgb * a, a);       // premultiplied
+}
+"#;
+
+/// Fullscreen pass: sample the wet buffer, scale by the stroke opacity (uniform
+/// multiply of a premultiplied color = correct opacity in linear space), blend
+/// over the cel with premultiplied-over.
+const COMPOSITE_SHADER: &str = r#"
+struct CU { opacity: vec4<f32> };
+@group(0) @binding(0) var wet_tex: texture_2d<f32>;
+@group(0) @binding(1) var wet_smp: sampler;
+@group(0) @binding(2) var<uniform> cu: CU;
+
+struct VsOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
+    // Fullscreen triangle.
+    var corners = array<vec2<f32>, 3>(
+        vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0),
+    );
+    let p = corners[vid];
+    var out: VsOut;
+    out.pos = vec4<f32>(p, 0.0, 1.0);
+    out.uv = vec2<f32>((p.x + 1.0) * 0.5, (1.0 - p.y) * 0.5);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return textureSample(wet_tex, wet_smp, in.uv) * cu.opacity.x;
 }
 "#;
 
@@ -208,6 +256,97 @@ impl PaintLayer {
         let filter = wgpu::FilterMode::Linear;
         let (texture, view, tex_id) =
             Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+        let (wet_texture, wet_view, wet_tex_id) =
+            Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+
+        // Wet→cel composite: sampled wet texture × opacity uniform, blended over.
+        let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("composite_shader"),
+            source: wgpu::ShaderSource::Wgsl(COMPOSITE_SHADER.into()),
+        });
+        let composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("composite_bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let composite_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("composite_pl"),
+            bind_group_layouts: &[Some(&composite_layout)],
+            immediate_size: 0,
+        });
+        let composite_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("composite_pipeline"),
+                layout: Some(&composite_pl),
+                vertex: wgpu::VertexState {
+                    module: &composite_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &composite_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+        let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("composite_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let opacity_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("opacity_uniform"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let composite_bind = Self::make_composite_bind(
+            &device,
+            &composite_layout,
+            &wet_view,
+            &composite_sampler,
+            &opacity_buf,
+        );
 
         Self {
             device,
@@ -224,7 +363,43 @@ impl PaintLayer {
             height,
             filter,
             onion: [None, None],
+            wet_texture,
+            wet_view,
+            wet_tex_id,
+            composite_pipeline,
+            composite_layout,
+            composite_bind,
+            composite_sampler,
+            opacity_buf,
         }
+    }
+
+    /// Bind group for the wet→cel composite (rebuilt when the wet view changes).
+    fn make_composite_bind(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        wet_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        opacity_buf: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("composite_bg"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(wet_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: opacity_buf.as_entire_binding(),
+                },
+            ],
+        })
     }
 
     /// Build a soft-round-dab render pipeline with the given blend (brush = over,
@@ -360,6 +535,13 @@ impl PaintLayer {
         if width == self.width && height == self.height {
             return;
         }
+        // Free the old egui registrations first — they pin the old full-canvas
+        // textures inside the renderer for the app's lifetime otherwise.
+        {
+            let mut renderer = self.renderer.write();
+            renderer.free_texture(&self.tex_id);
+            renderer.free_texture(&self.wet_tex_id);
+        }
         let (texture, view, tex_id) = Self::make_target(
             &self.device,
             &self.renderer,
@@ -375,6 +557,27 @@ impl PaintLayer {
         self.width = width;
         self.height = height;
         self.onion = [None, None]; // stale size
+
+        // Wet buffer follows the layer size; its bind group references the view.
+        let (wet_texture, wet_view, wet_tex_id) = Self::make_target(
+            &self.device,
+            &self.renderer,
+            &self.queue,
+            &self.uniform_buf,
+            width,
+            height,
+            self.filter,
+        );
+        self.wet_texture = wet_texture;
+        self.wet_view = wet_view;
+        self.wet_tex_id = wet_tex_id;
+        self.composite_bind = Self::make_composite_bind(
+            &self.device,
+            &self.composite_layout,
+            &self.wet_view,
+            &self.composite_sampler,
+            &self.opacity_buf,
+        );
     }
 
     /// Switch the display sampler filter (Canvas scaling filter setting), live.
@@ -383,11 +586,20 @@ impl PaintLayer {
             return;
         }
         self.filter = filter;
-        self.renderer.write().update_egui_texture_from_wgpu_texture(
+        let mut renderer = self.renderer.write();
+        renderer.update_egui_texture_from_wgpu_texture(
             &self.device,
             &self.view,
             filter,
             self.tex_id,
+        );
+        // The wet buffer previews the very pixels being committed — it must
+        // sample with the same filter as the cel or the stroke "snaps" at pen-up.
+        renderer.update_egui_texture_from_wgpu_texture(
+            &self.device,
+            &self.wet_view,
+            filter,
+            self.wet_tex_id,
         );
     }
 
@@ -423,10 +635,22 @@ impl PaintLayer {
         self.queue.submit(Some(enc.finish()));
     }
 
-    /// Stamp a batch of dabs onto the layer (accumulate — LoadOp::Load).
+    /// Stamp a batch of dabs onto the CEL layer (accumulate — LoadOp::Load).
     /// `erase` selects the destination-out pipeline so the dabs subtract coverage
-    /// instead of adding ink.
+    /// instead of adding ink. (The eraser paints the cel directly; brush strokes
+    /// go through `paint_wet` + `composite_wet`.)
     pub fn paint(&mut self, dabs: &[Dab], erase: bool) {
+        let view = self.view.clone();
+        self.paint_into(&view, dabs, erase);
+    }
+
+    /// Stamp a batch of brush dabs into the WET buffer (the live stroke).
+    pub fn paint_wet(&mut self, dabs: &[Dab]) {
+        let view = self.wet_view.clone();
+        self.paint_into(&view, dabs, false);
+    }
+
+    fn paint_into(&mut self, view: &wgpu::TextureView, dabs: &[Dab], erase: bool) {
         if dabs.is_empty() {
             return;
         }
@@ -443,7 +667,7 @@ impl PaintLayer {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("dabs"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -462,6 +686,89 @@ impl PaintLayer {
             pass.draw(0..4, 0..dabs.len() as u32);
         }
         self.queue.submit(Some(enc.finish()));
+    }
+
+    /// Merge the wet buffer onto the cel at `opacity` (one premultiplied-over
+    /// blend of the whole stroke — overlapping dabs can't exceed the ceiling),
+    /// then clear the wet buffer. Call at pen-up, before `read_tiles`.
+    pub fn composite_wet(&mut self, opacity: f32) {
+        self.queue.write_buffer(
+            &self.opacity_buf,
+            0,
+            bytemuck::bytes_of(&[opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0]),
+        );
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("composite_wet"),
+        });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("wet_over_cel"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.composite_pipeline);
+            pass.set_bind_group(0, &self.composite_bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        // Clear the wet buffer in the same submission.
+        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear_wet"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.wet_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.queue.submit(Some(enc.finish()));
+    }
+
+    /// Clear the wet buffer without compositing (abandoned stroke).
+    pub fn clear_wet(&mut self) {
+        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("clear_wet"),
+        });
+        enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear_wet"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.wet_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        self.queue.submit(Some(enc.finish()));
+    }
+
+    /// egui texture id of the wet buffer (drawn over the cel at the stroke
+    /// opacity while a brush stroke is live).
+    pub fn wet_id(&self) -> egui::TextureId {
+        self.wet_tex_id
     }
 
     /// Replace the layer's contents with the engine's stored tiles (called when

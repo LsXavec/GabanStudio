@@ -102,6 +102,20 @@ pub struct CanvasView {
     /// up within a stroke (airbrush-like). NOT whole-stroke opacity — that needs
     /// the wet-buffer (paints the stroke separately, then composites once).
     brush_flow: f32,
+    /// Whole-stroke opacity (0–1): the live stroke paints into the wet buffer and
+    /// is merged onto the cel ONCE at this level at pen-up, so a stroke can never
+    /// build past it no matter how much it overlaps itself (Krita's opacity).
+    brush_opacity: f32,
+    /// The wet buffer holds un-committed dabs (brush stroke in progress, or an
+    /// abandoned stroke that still needs clearing).
+    wet_dirty: bool,
+    /// Tool latched at stroke START — a mid-stroke eraser toggle must not split
+    /// one stroke across the wet buffer and the cel (wrong ordering at composite).
+    stroke_erasing: bool,
+    /// This stroke wrote the CEL texture directly (eraser dabs, or the new-cel
+    /// clear). If it is abandoned, the cel must re-sync from engine truth —
+    /// otherwise phantom damage gets baked into the NEXT commit.
+    cel_touched: bool,
     /// How many of the current stroke's dabs are already on the GPU layer.
     dabs_flushed: usize,
     /// The stroke finished this frame; flush its last dabs, then reset.
@@ -160,6 +174,10 @@ impl CanvasView {
             raster_brush_px: 14.0,
             erasing: false,
             brush_flow: 1.0,
+            brush_opacity: 1.0,
+            wet_dirty: false,
+            stroke_erasing: false,
+            cel_touched: false,
             dabs_flushed: 0,
             raster_stroke_done: false,
             synced: (u64::MAX, u64::MAX), // force an initial sync
@@ -221,6 +239,11 @@ impl CanvasView {
                 ui.add(
                     egui::Slider::new(&mut self.brush_flow, 0.05..=1.0)
                         .text("flow")
+                        .fixed_decimals(2),
+                );
+                ui.add(
+                    egui::Slider::new(&mut self.brush_opacity, 0.05..=1.0)
+                        .text("opacity")
                         .fixed_decimals(2),
                 );
                 if ui
@@ -346,22 +369,28 @@ impl CanvasView {
         let to_screen = |p: Pos2| -> Pos2 { origin + p.to_vec2() * scale };
         let to_paper = |s: Pos2| -> Pos2 { ((s - origin) / scale).to_pos2() };
 
-        // Zoom at cursor.
-        if response.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll.abs() > 0.0
-                && let Some(mouse) = response.hover_pos() {
-                    let before = to_paper(mouse);
-                    self.zoom = (self.zoom * (scroll * 0.0015).exp()).clamp(0.2, 10.0);
-                    let scale2 = fit * self.zoom;
-                    let origin2 = rect.center() - vec2(paper_w, paper_h) * scale2 * 0.5 + self.pan;
-                    let after = origin2 + before.to_vec2() * scale2;
-                    self.pan += mouse - after;
-                }
-        }
-        // Middle-drag pans.
-        if response.dragged_by(egui::PointerButton::Middle) {
-            self.pan += response.drag_delta();
+        // Zoom at cursor / middle-drag pan — DISABLED during playback: the pen
+        // resting or hovering on the drawing display (hover scroll deltas, a
+        // barrel button mapped to middle-click) must not move the view while
+        // the animation plays.
+        if !state.playing {
+            if response.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll.abs() > 0.0
+                    && let Some(mouse) = response.hover_pos() {
+                        let before = to_paper(mouse);
+                        self.zoom = (self.zoom * (scroll * 0.0015).exp()).clamp(0.2, 10.0);
+                        let scale2 = fit * self.zoom;
+                        let origin2 =
+                            rect.center() - vec2(paper_w, paper_h) * scale2 * 0.5 + self.pan;
+                        let after = origin2 + before.to_vec2() * scale2;
+                        self.pan += mouse - after;
+                    }
+            }
+            // Middle-drag pans.
+            if response.dragged_by(egui::PointerButton::Middle) {
+                self.pan += response.drag_delta();
+            }
         }
 
         // ---- Paper --------------------------------------------------------
@@ -391,6 +420,20 @@ impl CanvasView {
             p.ensure_size(state.engine.project.width, state.engine.project.height);
 
             if self.current.is_empty() && !self.raster_stroke_done {
+                // An abandoned stroke (e.g. playback started mid-stroke) may have
+                // left dabs in the wet buffer — drop them, they were never
+                // committed.
+                if self.wet_dirty {
+                    p.clear_wet();
+                    self.wet_dirty = false;
+                }
+                // If the abandoned stroke wrote the CEL directly (eraser dabs,
+                // new-cel clear), the texture no longer matches engine truth —
+                // invalidate the sync key so the next block restores it.
+                if self.cel_touched {
+                    self.synced = (u64::MAX, u64::MAX);
+                    self.cel_touched = false;
+                }
                 // Between strokes: re-upload if the current cel changed
                 // (frame switch, undo, redo, selection).
                 let key = state.current_raster_key();
@@ -406,16 +449,31 @@ impl CanvasView {
                 // so the new cel is blank, not a copy of what was displayed.
                 if self.raster_new_cel && self.dabs_flushed == 0 {
                     p.clear();
+                    self.cel_touched = true;
                 }
-                // Drawing (or finishing this frame): stamp the new dabs.
+                // Drawing (or finishing this frame): stamp the new dabs. Brush
+                // dabs go to the WET buffer (composited at opacity at pen-up);
+                // the eraser works on the cel directly. Tool is LATCHED at
+                // stroke start so a mid-stroke toggle can't split the stroke.
                 let dabs = self.build_stroke_dabs();
                 if dabs.len() > self.dabs_flushed {
-                    p.paint(&dabs[self.dabs_flushed..], self.erasing);
+                    if self.stroke_erasing {
+                        p.paint(&dabs[self.dabs_flushed..], true);
+                        self.cel_touched = true;
+                    } else {
+                        p.paint_wet(&dabs[self.dabs_flushed..]);
+                        self.wet_dirty = true;
+                    }
                     self.dabs_flushed = dabs.len();
                 }
                 if self.raster_stroke_done {
-                    // Read the painted layer back and commit it as a PaintTiles
-                    // edit (undoable, saved).
+                    // Merge the whole wet stroke onto the cel at the chosen
+                    // opacity (single blend — can't build past the ceiling),
+                    // then read back and commit as a PaintTiles edit.
+                    if self.wet_dirty {
+                        p.composite_wet(self.brush_opacity);
+                        self.wet_dirty = false;
+                    }
                     let tiles = p.read_tiles();
                     if let Some(id) = state.commit_raster(tiles) {
                         let h = state
@@ -425,7 +483,13 @@ impl CanvasView {
                             .map(|r| r.content_hash())
                             .unwrap_or(0);
                         self.synced = (id.0, h);
+                    } else {
+                        // Commit refused (e.g. vector-only cel): the GPU layer
+                        // holds a stroke the engine never accepted — invalidate
+                        // so the next frame restores truth, not a phantom.
+                        self.synced = (u64::MAX, u64::MAX);
                     }
+                    self.cel_touched = false;
                     self.current.clear();
                     self.dabs_flushed = 0;
                     self.raster_stroke_done = false;
@@ -516,6 +580,16 @@ impl CanvasView {
                 }
                 // Current cel on top, full strength.
                 painter.image(p.texture_id(), paper_rect, uv, Color32::WHITE);
+                // Live brush stroke (wet buffer) previewed over the cel at the
+                // stroke opacity — verified EXACT vs composite_wet: egui-wgpu
+                // 0.35 tints native-texture samples RAW (no sRGB conversion), so
+                // from_white_alpha(a) is the same o×texel multiply the composite
+                // bakes in. Re-check if an egui upgrade changes egui.wgsl's
+                // sample handling.
+                if self.wet_dirty {
+                    let a = (self.brush_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    painter.image(p.wet_id(), paper_rect, uv, Color32::from_white_alpha(a));
+                }
             }
 
         // 4. In-progress stroke preview (vector mode only — the raster layer
@@ -550,17 +624,26 @@ impl CanvasView {
         }
 
         // ---- Brush-outline cursor (Krita-style) --------------------------
-        // Over the canvas in raster mode, hide the OS cursor and draw a circle
-        // matching the brush footprint (diameter = brush px, in screen space), so
-        // you see exactly where and how big the next dab lands — following the pen
-        // even mid-stroke. Black+white concentric rings stay visible on any
-        // background; the eraser adds a centre dot to tell the tools apart.
+        // Over the canvas in raster mode, hide the OS cursor and draw the brush's
+        // exact painted footprint, following the pen even mid-stroke. Gated on the
+        // pointer's TOPMOST egui layer being the canvas itself — a floating menu,
+        // popup or window over the canvas gets the normal OS cursor back (same
+        // occlusion test egui's own hover uses). Black+white concentric rings stay
+        // visible on any background; the eraser adds a centre dot.
+        // (Future textured/mask brushes: derive this preview from the brush's
+        // footprint/stamp instead of a plain circle.)
         if self.raster
+            && !state.playing
             && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
             && rect.contains(pos)
+            && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
-            let r = (self.raster_brush_px * scale * 0.5).max(1.5);
+            // Exact size: a full-pressure dab paints out to radius
+            // brush_px * curve(1.0) * 0.5 in paper px (the dab falloff reaches
+            // zero exactly at its radius), mapped into screen space. Floor only
+            // for visibility once a brush is sub-3px on screen.
+            let r = (self.raster_brush_px * self.pen_curve.apply(1.0) * scale * 0.5).max(1.5);
             painter.circle_stroke(pos, r, egui::Stroke::new(1.0, Color32::from_black_alpha(170)));
             painter.circle_stroke(
                 pos,
@@ -676,6 +759,8 @@ impl CanvasView {
                         self.cur_some = 0;
                         self.cur_none = 0;
                         self.stroke_from_mouse = false;
+                        self.stroke_erasing = self.erasing;
+                        self.cel_touched = false;
                         self.dabs_flushed = 0;
                         self.raster_stroke_done = false;
                         self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
@@ -719,6 +804,8 @@ impl CanvasView {
                 self.cur_some = 0; // no tablet force will arrive; keep the
                 self.cur_none = 0; // force% diagnostic honest for this stroke
                 self.stroke_from_mouse = true;
+                self.stroke_erasing = self.erasing;
+                self.cel_touched = false;
                 self.dabs_flushed = 0;
                 self.raster_stroke_done = false;
                 self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
