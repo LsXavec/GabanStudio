@@ -371,6 +371,45 @@ impl RebindCapture {
     }
 }
 
+// ---- Cel-layer defaults ----------------------------------------------------
+
+/// Default brush colour per cel-layer NAME. Switching the active layer loads
+/// its colour (a colour picked during the session overrides the default for
+/// that layer name until the app closes). Editable in Settings → Layers.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LayersConfig {
+    #[serde(default = "default_layer_colors")]
+    pub colors: std::collections::BTreeMap<String, [u8; 4]>,
+}
+
+impl Default for LayersConfig {
+    fn default() -> Self {
+        Self {
+            colors: default_layer_colors(),
+        }
+    }
+}
+
+/// Anime-pipeline conventions: ink line, blue-pencil rough, cool shadow,
+/// warm highlight, sakkan-red correction.
+pub fn default_layer_colors() -> std::collections::BTreeMap<String, [u8; 4]> {
+    [
+        ("line", [26, 26, 26, 255]),
+        ("color", [222, 178, 140, 255]),
+        ("shadow", [96, 112, 192, 255]),
+        ("highlight", [255, 233, 168, 255]),
+        ("correction", [224, 72, 72, 255]),
+        ("rough", [116, 168, 232, 255]),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
+/// Fixed display order for the Layers settings page (pipeline order, top-first).
+pub const LAYER_COLOR_ORDER: [&str; 6] =
+    ["correction", "line", "rough", "highlight", "shadow", "color"];
+
 /// Which Settings page is showing (Krita-style category sidebar).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsCategory {
@@ -378,6 +417,7 @@ pub enum SettingsCategory {
     Shortcuts,
     Performance,
     Pen,
+    Layers,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -387,6 +427,8 @@ pub struct Config {
     pub perf: PerfConfig,
     #[serde(default)]
     pub pen: PenConfig,
+    #[serde(default)]
+    pub layers: LayersConfig,
 }
 
 impl Default for Config {
@@ -401,6 +443,7 @@ impl Default for Config {
                 .collect(),
             perf: PerfConfig::default(),
             pen: PenConfig::default(),
+            layers: LayersConfig::default(),
         }
     }
 }
@@ -549,6 +592,7 @@ pub fn settings_window(
                     );
                     ui.selectable_value(category, SettingsCategory::Performance, "Performance");
                     ui.selectable_value(category, SettingsCategory::Pen, "Pen / Tablet");
+                    ui.selectable_value(category, SettingsCategory::Layers, "Layers");
                 });
                 ui.separator();
                 // Right: the selected page.
@@ -556,6 +600,7 @@ pub fn settings_window(
                     SettingsCategory::Shortcuts => shortcuts_page(ui, config, capturing),
                     SettingsCategory::Performance => performance_page(ui, config, backend),
                     SettingsCategory::Pen => pen_page(ui, config),
+                    SettingsCategory::Layers => layers_page(ui, config),
                 });
             });
         });
@@ -804,6 +849,53 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
         .weak()
         .size(11.0),
     );
+
+    if changed {
+        config.save();
+    }
+}
+
+/// Layers page: default brush colour per cel-layer name. Switching the active
+/// layer loads its colour; a colour picked during the session overrides the
+/// default for that layer name until the app closes.
+fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
+    ui.heading("Layers");
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(
+            "Default brush colour per layer. Switching to a layer loads its colour \
+             (picking a colour while on a layer remembers it for this session).",
+        )
+        .weak(),
+    );
+    ui.add_space(8.0);
+
+    let mut changed = false;
+    for name in LAYER_COLOR_ORDER {
+        let entry = config
+            .layers
+            .colors
+            .entry(name.to_string())
+            .or_insert([128, 128, 128, 255]);
+        ui.horizontal(|ui| {
+            let mut rgb = [entry[0], entry[1], entry[2]];
+            if ui.color_edit_button_srgb(&mut rgb).changed() {
+                *entry = [rgb[0], rgb[1], rgb[2], 255];
+                changed = true;
+            }
+            ui.label(name);
+        });
+    }
+
+    ui.add_space(8.0);
+    if ui
+        .button("Reset to defaults")
+        .on_hover_text("ink line, blue-pencil rough, cool shadow, warm highlight, sakkan-red correction")
+        .clicked()
+    {
+        config.layers.colors = default_layer_colors();
+        changed = true;
+    }
 
     if changed {
         config.save();

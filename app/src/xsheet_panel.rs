@@ -16,6 +16,14 @@ const FRAME_NUM_W: f32 = 34.0;
 const COL_W: f32 = 86.0;
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
+    // Claim the full panel width EVERY frame. egui 0.35 panels are
+    // content-sized (the stored panel rect is the content rect, re-measured
+    // per frame), so variable-width rows — the layer strip swapping between
+    // full rows and the held-frame note during playback, changing text —
+    // would otherwise wobble the panel width and nudge the canvas
+    // horizontally on every frame of playback.
+    ui.set_min_width(ui.available_width());
+
     // Cel Layers strip docks at the BOTTOM of this panel (time axis above,
     // inside-of-one-cel below) — added first so the sheet gets the remainder.
     egui::Panel::bottom(egui::Id::new("cel_layers_strip"))
@@ -362,6 +370,18 @@ fn continuation_handles(
     }
 }
 
+/// Cap a layer name for strip display (full name stays in the model/rename).
+fn truncate_name(name: &str) -> String {
+    const MAX: usize = 16;
+    if name.chars().count() > MAX {
+        let mut s: String = name.chars().take(MAX - 1).collect();
+        s.push('…');
+        s
+    } else {
+        name.to_string()
+    }
+}
+
 // ---- Cel Layers strip -------------------------------------------------------
 // The layers INSIDE this frame's own cel, top-first (Krita/CSP convention).
 // Row: [eye] [colour dot] [name] [↑][↓][–] [opacity]. Click = activate,
@@ -369,6 +389,9 @@ fn continuation_handles(
 // inserts presets at their anime-correct stack positions.
 
 fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
+    // Same width-isolation as the parent panel: the strip's rows must never
+    // drive the panel width (they appear/disappear on undo/redo and playback).
+    ui.set_min_width(ui.available_width());
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.label(
@@ -467,10 +490,13 @@ fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
                     state.strip_rename = Some((*lid, buf));
                 }
             } else {
+                // Truncated for display so a long name can't widen the row
+                // (and with it the panel); renaming edits the full name.
+                let shown = truncate_name(name);
                 let text = if is_active {
-                    egui::RichText::new(name).strong().color(Color32::from_rgb(120, 190, 255))
+                    egui::RichText::new(shown).strong().color(Color32::from_rgb(120, 190, 255))
                 } else {
-                    egui::RichText::new(name).color(Color32::from_gray(200))
+                    egui::RichText::new(shown).color(Color32::from_gray(200))
                 };
                 let resp = ui
                     .selectable_label(is_active, text)

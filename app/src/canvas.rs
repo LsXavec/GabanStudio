@@ -10,7 +10,7 @@ use anim_core::model::{Stroke, StrokePoint};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
-use crate::config::{PenConfig, PressureCurve};
+use crate::config::{LayersConfig, PenConfig, PressureCurve};
 use crate::doc::AppState;
 use crate::paint::{Dab, PaintLayer};
 
@@ -149,6 +149,15 @@ pub struct CanvasView {
     /// Pressure response curve (from Pen/Tablet settings); remaps pressure to
     /// width at render time. Stored pressure stays raw.
     pen_curve: PressureCurve,
+    /// Active layer name last frame — detects layer switches so the brush
+    /// colour follows the layer.
+    last_layer_name: String,
+    /// Session colour memory per layer NAME: picking a colour while a layer is
+    /// active remembers it here (overrides the Settings default until close).
+    layer_colors: std::collections::HashMap<String, [u8; 4]>,
+    /// The canvas area rect of the last frame — read by the headless layout
+    /// probe (ANIMSTUDIO_PROBE) to detect ANY movement of the drawing area.
+    pub dbg_rect: Rect,
     /// Set once a real pressure pen (Touch with force > 0) is seen. After that,
     /// the mouse-drawing fallback is disabled so Windows' synthesized pen→mouse
     /// clicks (e.g. from a fast light double-tap) can't paint flat-pressure blobs.
@@ -208,6 +217,9 @@ impl CanvasView {
             synced_above: None,
             raster_new_cel: false,
             pen_curve: PressureCurve::linear(),
+            last_layer_name: String::new(),
+            layer_colors: std::collections::HashMap::new(),
+            dbg_rect: Rect::NOTHING,
             seen_pen: false,
             stroke_from_mouse: false,
             dbg_mouse_mode: false,
@@ -234,8 +246,27 @@ impl CanvasView {
         state: &mut AppState,
         paint: Option<&mut PaintLayer>,
         pen: &PenConfig,
+        layers_cfg: &LayersConfig,
     ) {
         self.pen_curve = pen.pressure_curve.clone();
+        // Brush colour follows the active layer: on a switch, remember the
+        // colour picked while the previous layer was active, then load the new
+        // layer's colour (session pick, else the Settings default).
+        let layer_name = state.active_layer_name();
+        if layer_name != self.last_layer_name {
+            if !self.last_layer_name.is_empty() {
+                self.layer_colors
+                    .insert(self.last_layer_name.clone(), self.brush_color);
+            }
+            if let Some(c) = self
+                .layer_colors
+                .get(&layer_name)
+                .or_else(|| layers_cfg.colors.get(&layer_name))
+            {
+                self.brush_color = *c;
+            }
+            self.last_layer_name = layer_name;
+        }
         let mut paint = paint;
         // ---- Toolbar ------------------------------------------------------
         ui.horizontal(|ui| {
@@ -422,6 +453,7 @@ impl CanvasView {
 
         // ---- Canvas area --------------------------------------------------
         let rect = ui.available_rect_before_wrap();
+        self.dbg_rect = rect;
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 

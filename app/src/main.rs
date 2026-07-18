@@ -10,7 +10,7 @@ mod newproject;
 mod paint;
 mod xsheet_panel;
 
-use config::{Action, Config, FrameLatency, PenConfig, RebindCapture, SettingsCategory};
+use config::{Action, Config, FrameLatency, LayersConfig, PenConfig, RebindCapture, SettingsCategory};
 use doc::AppState;
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
@@ -19,6 +19,13 @@ use paint::PaintLayer;
 use std::time::Duration;
 
 fn main() -> eframe::Result<()> {
+    // Headless layout probe: runs the REAL panel/canvas layout on the CPU and
+    // prints the canvas rect per scripted step, so any drawing-area movement
+    // is a measurable number instead of an on-rig observation.
+    if std::env::var_os("ANIMSTUDIO_PROBE").is_some() {
+        probe();
+        return Ok(());
+    }
     // Load config up front so the surface (V-Sync / frame latency) reflects it.
     let config = Config::load();
     let surface = eframe::egui_wgpu::SurfaceConfig {
@@ -209,6 +216,7 @@ impl eframe::App for App {
         let undo_limit = self.config.perf.undo_limit;
         let canvas_filter = self.config.perf.canvas_filter.wgpu();
         let pen = self.config.pen.clone();
+        let layers_cfg = self.config.layers.clone();
 
         // Editor (if any) renders first as the base layer.
         if let Some(editor) = &mut self.editor {
@@ -216,7 +224,7 @@ impl eframe::App for App {
             if let Some(p) = &mut editor.paint {
                 p.set_filter(canvas_filter);
             }
-            editor.ui(ui, &pen);
+            editor.ui(ui, &pen, &layers_cfg);
             if editor.request_new {
                 editor.request_new = false;
                 self.new_form = Some(NewProjectForm::default());
@@ -342,8 +350,117 @@ impl App {
     }
 }
 
+/// Headless layout probe (ANIMSTUDIO_PROBE=1): drives Editor::ui through the
+/// scenarios that historically nudged the canvas — play/stop, stepping between
+/// a cel frame and an empty frame, undo/redo — and prints the canvas rect
+/// after every step. Any `MOVED` line is a layout-stability bug.
+fn probe() {
+    // Two passes: 100% and 125% display scale (fractional scales can add
+    // pixel-rounding jitter that 1.0 never shows).
+    for ppp in [1.0f32, 1.25] {
+        println!("---- pixels_per_point {ppp} ----");
+        probe_at(ppp);
+    }
+}
+
+fn probe_at(ppp: f32) {
+    let ctx = egui::Context::default();
+    ctx.set_pixels_per_point(ppp);
+    let config = Config::default();
+    let pen = config.pen.clone();
+    let layers_cfg = config.layers.clone();
+
+    let mut state = AppState::new_project("probe", 1920, 1080, 24, 300.0);
+    state.new_drawing_at_frame(); // cel at frame 0; frame 1 stays empty
+    let mut editor = Editor::from_state(state, None);
+
+    let raw = || egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(
+            egui::pos2(0.0, 0.0),
+            egui::vec2(1280.0, 800.0),
+        )),
+        ..Default::default()
+    };
+
+    let mut last: Option<egui::Rect> = None;
+    let mut moved = 0usize;
+    let run = |editor: &mut Editor, label: &str, last: &mut Option<egui::Rect>, moved: &mut usize| {
+        ctx.begin_pass(raw());
+        let mut root = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("probe_root"),
+            egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1280.0, 800.0),
+            )),
+        );
+        editor.ui(&mut root, &pen, &layers_cfg);
+        let _ = ctx.end_pass();
+        let r = editor.canvas.dbg_rect;
+        let note = match *last {
+            Some(p)
+                if (r.left() - p.left()).abs() > 0.01
+                    || (r.top() - p.top()).abs() > 0.01
+                    || (r.width() - p.width()).abs() > 0.01
+                    || (r.height() - p.height()).abs() > 0.01 =>
+            {
+                *moved += 1;
+                format!(
+                    "  MOVED dL{:+.2} dT{:+.2} dW{:+.2} dH{:+.2}",
+                    r.left() - p.left(),
+                    r.top() - p.top(),
+                    r.width() - p.width(),
+                    r.height() - p.height()
+                )
+            }
+            _ => String::new(),
+        };
+        println!(
+            "{label:26} L{:8.2} T{:7.2} W{:8.2} H{:7.2}{note}",
+            r.left(),
+            r.top(),
+            r.width(),
+            r.height()
+        );
+        *last = Some(r);
+    };
+
+    for _ in 0..4 {
+        run(&mut editor, "settle", &mut last, &mut moved);
+    }
+    // Scenario 1: step cel-frame <-> empty-frame (strip rows <-> note).
+    for i in 0..6 {
+        let f = if i % 2 == 0 { 1 } else { 0 };
+        editor.state.goto(f);
+        run(&mut editor, if f == 0 { "goto cel frame" } else { "goto empty frame" }, &mut last, &mut moved);
+    }
+    // Scenario 2: play / stop.
+    editor.state.toggle_play();
+    for _ in 0..6 {
+        run(&mut editor, "playing", &mut last, &mut moved);
+    }
+    editor.state.toggle_play();
+    for _ in 0..2 {
+        run(&mut editor, "stopped", &mut last, &mut moved);
+    }
+    // Scenario 3: undo / redo (removes and restores the cel + strip rows).
+    for _ in 0..2 {
+        editor.state.undo();
+        run(&mut editor, "after undo", &mut last, &mut moved);
+        editor.state.redo();
+        run(&mut editor, "after redo", &mut last, &mut moved);
+    }
+
+    println!();
+    if moved == 0 {
+        println!("PROBE PASS: canvas rect never moved");
+    } else {
+        println!("PROBE FAIL: canvas rect moved {moved} time(s)");
+    }
+}
+
 impl Editor {
-    fn ui(&mut self, ui: &mut egui::Ui, pen: &PenConfig) {
+    fn ui(&mut self, ui: &mut egui::Ui, pen: &PenConfig, layers_cfg: &LayersConfig) {
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
 
@@ -446,7 +563,7 @@ impl Editor {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(egui::Color32::from_rgb(24, 26, 30)))
             .show(ui, |ui| {
-                self.canvas.ui(ui, &mut self.state, self.paint.as_mut(), pen);
+                self.canvas.ui(ui, &mut self.state, self.paint.as_mut(), pen, layers_cfg);
             });
     }
 }
