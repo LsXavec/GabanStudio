@@ -10,3 +10,7 @@ serde_json = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
 thiserror = "2"
 bytemuck = "1"
+
+[dev-dependencies]
+# Tests forge legacy (schema v4) project files directly to prove migration.
+rusqlite = { version = "0.37", features = ["bundled"] }

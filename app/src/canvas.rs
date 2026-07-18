@@ -510,8 +510,8 @@ impl CanvasView {
                         let h = state
                             .cut()
                             .drawing(id)
-                            .and_then(|d| d.raster.as_ref())
-                            .map(|r| r.content_hash())
+                            .and_then(|d| d.layers.last())
+                            .map(|l| l.content_hash())
                             .unwrap_or(0);
                         self.synced = (id.0, h);
                     } else {

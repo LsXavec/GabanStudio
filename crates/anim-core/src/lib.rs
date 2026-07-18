@@ -134,6 +134,10 @@ impl Engine {
         NodeId(self.project.alloc_id())
     }
 
+    pub fn alloc_layer_id(&mut self) -> LayerId {
+        LayerId(self.project.alloc_id())
+    }
+
     // ---- Editing (undoable) ----------------------------------------------
 
     /// Apply a labeled batch of commands as ONE undo step.

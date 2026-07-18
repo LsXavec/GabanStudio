@@ -4,9 +4,11 @@
 //! it owns a drawing library, an X-sheet, and a node graph. The X-sheet
 //! references drawings by id; the graph references X-sheet columns by id.
 
+use std::sync::Arc;
+
 use crate::graph::Graph;
 use crate::ids::*;
-use crate::raster::RasterLayer;
+use crate::raster::{RasterLayer, TileCoord, TileData};
 use crate::xsheet::XSheet;
 
 /// One sampled pen point in paper coordinates (resolution independent).
@@ -26,21 +28,77 @@ pub struct Stroke {
     pub color: [u8; 4],
 }
 
-/// A cel: vector strokes and/or one raster layer, composited raster-over-vector.
+/// Per-layer compositing properties. Kept as ONE struct so `SetCelLayerProps`
+/// replaces it wholesale — the exact inverse is trivially the prior struct.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayerProps {
+    /// Free text: "line", "color", "shadow", "correction", ...
+    pub name: String,
+    pub visible: bool,
+    /// 0..=1, applied when compositing this layer into the cel.
+    pub opacity: f32,
+}
+
+impl Default for LayerProps {
+    fn default() -> Self {
+        Self {
+            name: "paint".into(),
+            visible: true,
+            opacity: 1.0,
+        }
+    }
+}
+
+/// One paint layer INSIDE a cel (the anime separation: douga line art, shiage
+/// color under it, shadow between, sakkan correction above). Orthogonal to
+/// X-sheet columns, which are layers ACROSS TIME. Id-addressed so commands
+/// stay exact under any undo/reorder interleaving.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CelLayer {
+    pub id: LayerId,
+    pub props: LayerProps,
+    pub raster: RasterLayer,
+}
+
+impl CelLayer {
+    pub fn new(id: LayerId, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            props: LayerProps {
+                name: name.into(),
+                ..LayerProps::default()
+            },
+            raster: RasterLayer::empty(),
+        }
+    }
+
+    /// Folds the properties that affect the composited PIXELS — visibility,
+    /// opacity, and the raster content. The NAME is deliberately excluded so
+    /// renaming a layer never invalidates the eval cache or forces a GPU
+    /// re-sync.
+    pub fn content_hash(&self) -> u64 {
+        let mut bytes: Vec<u8> = Vec::with_capacity(16);
+        bytes.push(self.props.visible as u8);
+        bytes.extend_from_slice(&self.props.opacity.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&self.raster.content_hash().to_le_bytes());
+        crate::value::fnv1a(&bytes)
+    }
+}
+
+/// A cel: vector strokes under an ordered stack of raster paint layers.
 ///
-/// Hybrid model (Krita-like): raster is the primary paint surface, vector stays
-/// available for resolution-independent line work. A fuller multi-layer stack
-/// (`Vec<Layer>`) can generalize this later; one optional raster layer covers
-/// frame-by-frame raster animation now.
+/// `layers[0]` is the BOTTOM of the stack. An empty stack = a vector-only cel
+/// (the legacy pre-v5 case); the app keeps raster cels at >= 1 layer by
+/// policy, but the ENGINE allows zero (matching the remove-column precedent).
 ///
 /// Not `serde` — the store persists drawings field-by-field (strokes as JSON,
-/// tiles as BLOBs), and `RasterLayer` holds large pixel buffers.
+/// tiles as BLOBs), and layers hold large pixel buffers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Drawing {
     pub id: DrawingId,
     pub name: String,
     pub strokes: Vec<Stroke>,
-    pub raster: Option<RasterLayer>,
+    pub layers: Vec<CelLayer>,
 }
 
 impl Drawing {
@@ -49,14 +107,27 @@ impl Drawing {
             id,
             name: name.into(),
             strokes: Vec::new(),
-            raster: None,
+            layers: Vec::new(),
         }
+    }
+
+    pub fn layer(&self, id: LayerId) -> Option<&CelLayer> {
+        self.layers.iter().find(|l| l.id == id)
+    }
+
+    pub fn layer_mut(&mut self, id: LayerId) -> Option<&mut CelLayer> {
+        self.layers.iter_mut().find(|l| l.id == id)
+    }
+
+    pub fn layer_index(&self, id: LayerId) -> Option<usize> {
+        self.layers.iter().position(|l| l.id == id)
     }
 
     /// Stable content hash — folded into the evaluator's recipe so editing
     /// artwork (vector OR raster) invalidates cached values naturally.
-    /// Canonical little-endian byte fold; the raster part folds per-tile
-    /// hashes (see [`RasterLayer::content_hash`]), never raw pixels per eval.
+    /// Canonical little-endian byte fold; the raster part folds per-layer
+    /// hashes IN STACK ORDER (a reorder changes the composite; a rename does
+    /// not — see [`CelLayer::content_hash`]), never raw pixels per eval.
     pub fn content_hash(&self) -> u64 {
         let mut bytes: Vec<u8> = Vec::with_capacity(16 + self.strokes.len() * 16);
         for stroke in &self.strokes {
@@ -68,11 +139,63 @@ impl Drawing {
                 bytes.extend_from_slice(&p.pressure.to_bits().to_le_bytes());
             }
         }
-        if let Some(raster) = &self.raster {
-            bytes.extend_from_slice(b"raster");
-            bytes.extend_from_slice(&raster.content_hash().to_le_bytes());
+        if !self.layers.is_empty() {
+            bytes.extend_from_slice(b"layers");
+            for layer in &self.layers {
+                bytes.extend_from_slice(&layer.content_hash().to_le_bytes());
+            }
         }
         crate::value::fnv1a(&bytes)
+    }
+
+    /// CPU composite of the visible layers, bottom -> top, premultiplied-over
+    /// with per-layer opacity, in u16. Plain bytes — the headless law holds.
+    ///
+    /// This is the GOLDEN REFERENCE the GPU compositor is tested against, and
+    /// the future export/eval path. It is NOT the interactive display path.
+    pub fn flatten(&self) -> std::collections::BTreeMap<TileCoord, Arc<TileData>> {
+        use crate::raster::TILE_LEN;
+
+        // Collect every coordinate any visible layer touches.
+        let mut coords: std::collections::BTreeSet<TileCoord> = std::collections::BTreeSet::new();
+        for layer in &self.layers {
+            if layer.props.visible && layer.props.opacity > 0.0 {
+                coords.extend(layer.raster.tiles.keys().copied());
+            }
+        }
+
+        let mut out = std::collections::BTreeMap::new();
+        for coord in coords {
+            // f32 working buffer, normalized 0..1 premultiplied.
+            let mut acc = vec![0.0f32; TILE_LEN];
+            for layer in &self.layers {
+                if !layer.props.visible || layer.props.opacity <= 0.0 {
+                    continue;
+                }
+                let Some(tile) = layer.raster.tiles.get(&coord) else {
+                    continue;
+                };
+                let op = layer.props.opacity.clamp(0.0, 1.0);
+                // src-over: out = src*op + out*(1 - src.a*op), premultiplied.
+                for (px, spx) in acc.chunks_exact_mut(4).zip(tile.rgba.chunks_exact(4)) {
+                    let sa = spx[3] as f32 / 65535.0 * op;
+                    let keep = 1.0 - sa;
+                    for c in 0..4 {
+                        let s = spx[c] as f32 / 65535.0 * op;
+                        px[c] = s + px[c] * keep;
+                    }
+                }
+            }
+            let rgba: Vec<u16> = acc
+                .iter()
+                .map(|v| (v.clamp(0.0, 1.0) * 65535.0).round() as u16)
+                .collect();
+            let tile = TileData::from_vec(rgba);
+            if !tile.is_empty() {
+                out.insert(coord, Arc::new(tile));
+            }
+        }
+        out
     }
 }
 

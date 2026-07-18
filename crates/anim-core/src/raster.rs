@@ -66,35 +66,27 @@ impl TileData {
     }
 }
 
-/// One raster layer: a sparse grid of tiles + a layer opacity.
+/// One raster surface: a sparse grid of tiles. PURE pixels — opacity and other
+/// compositing properties live on the owning [`crate::model::CelLayer`], so one
+/// surface has exactly one home for each property.
 /// A missing tile is fully transparent, so a blank layer costs nothing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct RasterLayer {
     /// BTreeMap (not HashMap) so `content_hash` folds tiles in a deterministic
     /// order — hash stability is load-bearing for the eval cache and tests.
     pub tiles: BTreeMap<TileCoord, Arc<TileData>>,
-    pub opacity: f32,
-}
-
-impl Default for RasterLayer {
-    fn default() -> Self {
-        Self::empty()
-    }
 }
 
 impl RasterLayer {
     pub fn empty() -> Self {
-        Self {
-            tiles: BTreeMap::new(),
-            opacity: 1.0,
-        }
+        Self::default()
     }
 
-    /// Content-addressable hash: folds `(coord, tile.hash)` in sorted order
-    /// plus the opacity. Cheap — no pixel bytes, just per-tile hashes.
+    /// Content-addressable hash: folds `(coord, tile.hash)` in sorted order.
+    /// Cheap — no pixel bytes, just per-tile hashes. Pixels only; the owning
+    /// CelLayer folds its own props (opacity/visibility) on top.
     pub fn content_hash(&self) -> u64 {
-        let mut bytes: Vec<u8> = Vec::with_capacity(self.tiles.len() * 16 + 4);
-        bytes.extend_from_slice(&self.opacity.to_bits().to_le_bytes());
+        let mut bytes: Vec<u8> = Vec::with_capacity(self.tiles.len() * 16);
         for ((tx, ty), tile) in &self.tiles {
             bytes.extend_from_slice(&tx.to_le_bytes());
             bytes.extend_from_slice(&ty.to_le_bytes());

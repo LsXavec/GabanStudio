@@ -10,8 +10,8 @@ use std::collections::HashSet;
 use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
-use crate::model::{Cut, Drawing, Project, Stroke};
-use crate::raster::{RasterLayer, TileDiff};
+use crate::model::{CelLayer, Cut, Drawing, LayerProps, Project, Stroke};
+use crate::raster::TileDiff;
 use crate::xsheet::Exposure;
 
 // Not `serde` — commands can carry `Arc<TileData>` (large pixel buffers), and
@@ -27,19 +27,62 @@ pub enum Command {
     AddDrawing {
         at: CutRef,
         id: DrawingId,
+        /// Position in the cut's drawing library (0..=len). User-created
+        /// drawings append (pass `drawings.len()`); the inverse of a
+        /// RemoveDrawing carries the original index so undo restores the
+        /// library order byte-for-byte.
+        index: usize,
         name: String,
         /// Usually empty for user-created drawings; carries full artwork when
         /// this command is the inverse of a RemoveDrawing.
         strokes: Vec<Stroke>,
-        /// The drawing's raster layer, if any. Raster cels start with an empty
-        /// layer here; this also restores tiles when inverting a RemoveDrawing.
-        raster: Option<RasterLayer>,
+        /// The drawing's full layer stack (ids + props + tiles). Usually the
+        /// app's default template for user-created cels; carries everything
+        /// when inverting a RemoveDrawing, so redo-stack commands referencing
+        /// those LayerIds stay valid after undo.
+        layers: Vec<CelLayer>,
     },
-    /// Apply a tile-level raster edit (paint/erase). Inverse swaps before/after.
+    /// Apply a tile-level raster edit (paint/erase) to ONE cel layer.
+    /// Inverse swaps before/after.
     PaintTiles {
         at: CutRef,
         id: DrawingId,
+        layer: LayerId,
         diff: TileDiff,
+    },
+    /// Insert a cel layer at `index` (0 = bottom; may equal len = on top).
+    AddCelLayer {
+        at: CutRef,
+        drawing: DrawingId,
+        index: usize,
+        /// Usually a fresh empty layer; carries tiles when inverting a
+        /// RemoveCelLayer.
+        layer: CelLayer,
+    },
+    /// Remove a cel layer by id. The engine allows removing the last layer
+    /// ("keep >= 1" is app policy, matching the remove-column precedent).
+    RemoveCelLayer {
+        at: CutRef,
+        drawing: DrawingId,
+        layer: LayerId,
+    },
+    /// Move a cel layer to `to_index` (remove-then-insert semantics, so
+    /// move(i->j) then move(j->i) is an exact identity). Validates rather than
+    /// clamps — a clamped command's recorded params would differ from its
+    /// effect and its inverse would not be self-evidently exact.
+    MoveCelLayer {
+        at: CutRef,
+        drawing: DrawingId,
+        layer: LayerId,
+        to_index: usize,
+    },
+    /// Replace a layer's whole property block (name/visible/opacity). One
+    /// gesture = one apply; the exact inverse is the prior block.
+    SetCelLayerProps {
+        at: CutRef,
+        drawing: DrawingId,
+        layer: LayerId,
+        props: LayerProps,
     },
     RemoveDrawing {
         at: CutRef,
@@ -104,6 +147,10 @@ impl Command {
         match self {
             Command::AddDrawing { at, .. }
             | Command::PaintTiles { at, .. }
+            | Command::AddCelLayer { at, .. }
+            | Command::RemoveCelLayer { at, .. }
+            | Command::MoveCelLayer { at, .. }
+            | Command::SetCelLayerProps { at, .. }
             | Command::RemoveDrawing { at, .. }
             | Command::AddStroke { at, .. }
             | Command::PopStroke { at, .. }
@@ -128,9 +175,10 @@ pub struct AppliedEffect {
     pub invalidation_roots: Vec<NodeId>,
 }
 
-/// Nodes to invalidate when a drawing's artwork changes: the DrawingSource
-/// nodes of every column that currently exposes it.
-fn stroke_invalidation_roots(cut: &Cut, id: DrawingId) -> Vec<NodeId> {
+/// Nodes to invalidate when a drawing's artwork changes (strokes, layer
+/// pixels, or layer structure/props): the DrawingSource nodes of every column
+/// that currently exposes it.
+fn artwork_invalidation_roots(cut: &Cut, id: DrawingId) -> Vec<NodeId> {
     let mut roots = Vec::new();
     for col in &cut.xsheet.columns {
         if !col.keys_referencing(id).is_empty() {
@@ -150,14 +198,41 @@ fn cut_mut(project: &mut Project, at: CutRef) -> Result<&mut Cut> {
         .ok_or(EngineError::UnknownCut(at.cut))
 }
 
+/// Layer ids must be unique CUT-WIDE (the store's cel_layers PRIMARY KEY is
+/// the layer id, so a duplicate anywhere would make the document unsaveable;
+/// ids are minted from the project counter, so any reuse is a caller bug).
+fn validate_layer_id_free(cut: &Cut, id: LayerId) -> Result<()> {
+    if cut.drawings.iter().any(|d| d.layer(id).is_some()) {
+        return Err(EngineError::InvalidCommand(format!(
+            "layer id {id} already exists in this cut"
+        )));
+    }
+    Ok(())
+}
+
+/// Opacity is part of the persisted format and the compositing math: reject
+/// out-of-range and non-finite values at the command boundary (validate,
+/// don't clamp — same law as MoveCelLayer) so NaN can never reach flatten()
+/// or the GPU compositor.
+fn validate_props(props: &LayerProps) -> Result<()> {
+    if !props.opacity.is_finite() || !(0.0..=1.0).contains(&props.opacity) {
+        return Err(EngineError::InvalidCommand(format!(
+            "layer opacity {} outside 0..=1",
+            props.opacity
+        )));
+    }
+    Ok(())
+}
+
 pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffect> {
     match cmd {
         Command::AddDrawing {
             at,
             id,
+            index,
             name,
             strokes,
-            raster,
+            layers,
         } => {
             let cut = cut_mut(project, *at)?;
             if cut.drawing(*id).is_some() {
@@ -165,50 +240,203 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     "drawing {id} already exists"
                 )));
             }
-            cut.drawings.push(Drawing {
-                id: *id,
-                name: name.clone(),
-                strokes: strokes.clone(),
-                raster: raster.clone(),
-            });
+            if *index > cut.drawings.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "drawing index {index} out of range (library has {})",
+                    cut.drawings.len()
+                )));
+            }
+            // Layer ids: distinct within the stack AND unused cut-wide;
+            // props valid.
+            for (i, l) in layers.iter().enumerate() {
+                if layers[i + 1..].iter().any(|o| o.id == l.id) {
+                    return Err(EngineError::InvalidCommand(format!(
+                        "duplicate layer id {} in AddDrawing",
+                        l.id
+                    )));
+                }
+                validate_layer_id_free(cut, l.id)?;
+                validate_props(&l.props)?;
+            }
+            cut.drawings.insert(
+                *index,
+                Drawing {
+                    id: *id,
+                    name: name.clone(),
+                    strokes: strokes.clone(),
+                    layers: layers.clone(),
+                },
+            );
             Ok(AppliedEffect {
                 inverse: vec![Command::RemoveDrawing { at: *at, id: *id }],
                 invalidation_roots: vec![],
             })
         }
 
-        Command::PaintTiles { at, id, diff } => {
+        Command::PaintTiles {
+            at,
+            id,
+            layer,
+            diff,
+        } => {
             let cut = cut_mut(project, *at)?;
-            let roots = stroke_invalidation_roots(cut, *id);
+            let roots = artwork_invalidation_roots(cut, *id);
             let drawing = cut
                 .drawings
                 .iter_mut()
                 .find(|d| d.id == *id)
                 .ok_or(EngineError::UnknownDrawing(*id))?;
-            let raster = drawing.raster.as_mut().ok_or_else(|| {
-                EngineError::InvalidCommand(format!("drawing {id} has no raster layer"))
-            })?;
+            let cel_layer = drawing
+                .layer_mut(*layer)
+                .ok_or(EngineError::UnknownLayer(*layer))?;
             // Install the `after` tiles; remove where `after` is None.
             for (coord, _before, after) in diff {
                 match after {
                     Some(tile) => {
-                        raster.tiles.insert(*coord, tile.clone());
+                        cel_layer.raster.tiles.insert(*coord, tile.clone());
                     }
                     None => {
-                        raster.tiles.remove(coord);
+                        cel_layer.raster.tiles.remove(coord);
                     }
                 }
             }
-            // Exact inverse: swap before/after on every entry.
+            // Exact inverse: swap before/after on every entry, REVERSED — so a
+            // diff that touches the same coord twice still unwinds exactly
+            // (last-write-wins forward, first-write-restored backward).
             let inverse_diff: TileDiff = diff
                 .iter()
+                .rev()
                 .map(|(c, b, a)| (*c, a.clone(), b.clone()))
                 .collect();
             Ok(AppliedEffect {
                 inverse: vec![Command::PaintTiles {
                     at: *at,
                     id: *id,
+                    layer: *layer,
                     diff: inverse_diff,
+                }],
+                invalidation_roots: roots,
+            })
+        }
+
+        Command::AddCelLayer {
+            at,
+            drawing,
+            index,
+            layer,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            let roots = artwork_invalidation_roots(cut, *drawing);
+            validate_layer_id_free(cut, layer.id)?;
+            validate_props(&layer.props)?;
+            let d = cut
+                .drawings
+                .iter_mut()
+                .find(|d| d.id == *drawing)
+                .ok_or(EngineError::UnknownDrawing(*drawing))?;
+            if *index > d.layers.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "layer index {index} out of range (stack has {})",
+                    d.layers.len()
+                )));
+            }
+            d.layers.insert(*index, layer.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::RemoveCelLayer {
+                    at: *at,
+                    drawing: *drawing,
+                    layer: layer.id,
+                }],
+                invalidation_roots: roots,
+            })
+        }
+
+        Command::RemoveCelLayer {
+            at,
+            drawing,
+            layer,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            let roots = artwork_invalidation_roots(cut, *drawing);
+            let d = cut
+                .drawings
+                .iter_mut()
+                .find(|d| d.id == *drawing)
+                .ok_or(EngineError::UnknownDrawing(*drawing))?;
+            let idx = d
+                .layer_index(*layer)
+                .ok_or(EngineError::UnknownLayer(*layer))?;
+            let removed = d.layers.remove(idx);
+            Ok(AppliedEffect {
+                inverse: vec![Command::AddCelLayer {
+                    at: *at,
+                    drawing: *drawing,
+                    index: idx,
+                    layer: removed, // full clone: props + tiles (Arc = cheap)
+                }],
+                invalidation_roots: roots,
+            })
+        }
+
+        Command::MoveCelLayer {
+            at,
+            drawing,
+            layer,
+            to_index,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            let roots = artwork_invalidation_roots(cut, *drawing);
+            let d = cut
+                .drawings
+                .iter_mut()
+                .find(|d| d.id == *drawing)
+                .ok_or(EngineError::UnknownDrawing(*drawing))?;
+            let from = d
+                .layer_index(*layer)
+                .ok_or(EngineError::UnknownLayer(*layer))?;
+            if *to_index >= d.layers.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "move target {to_index} out of range (stack has {})",
+                    d.layers.len()
+                )));
+            }
+            let moved = d.layers.remove(from);
+            d.layers.insert(*to_index, moved);
+            Ok(AppliedEffect {
+                inverse: vec![Command::MoveCelLayer {
+                    at: *at,
+                    drawing: *drawing,
+                    layer: *layer,
+                    to_index: from,
+                }],
+                invalidation_roots: roots,
+            })
+        }
+
+        Command::SetCelLayerProps {
+            at,
+            drawing,
+            layer,
+            props,
+        } => {
+            validate_props(props)?;
+            let cut = cut_mut(project, *at)?;
+            let roots = artwork_invalidation_roots(cut, *drawing);
+            let d = cut
+                .drawings
+                .iter_mut()
+                .find(|d| d.id == *drawing)
+                .ok_or(EngineError::UnknownDrawing(*drawing))?;
+            let cel_layer = d
+                .layer_mut(*layer)
+                .ok_or(EngineError::UnknownLayer(*layer))?;
+            let prev = std::mem::replace(&mut cel_layer.props, props.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetCelLayerProps {
+                    at: *at,
+                    drawing: *drawing,
+                    layer: *layer,
+                    props: prev,
                 }],
                 invalidation_roots: roots,
             })
@@ -216,7 +444,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
 
         Command::AddStroke { at, id, stroke } => {
             let cut = cut_mut(project, *at)?;
-            let roots = stroke_invalidation_roots(cut, *id);
+            let roots = artwork_invalidation_roots(cut, *id);
             let drawing = cut
                 .drawings
                 .iter_mut()
@@ -231,7 +459,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
 
         Command::PopStroke { at, id } => {
             let cut = cut_mut(project, *at)?;
-            let roots = stroke_invalidation_roots(cut, *id);
+            let roots = artwork_invalidation_roots(cut, *id);
             let drawing = cut
                 .drawings
                 .iter_mut()
@@ -282,9 +510,10 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             let mut inverse = vec![Command::AddDrawing {
                 at: *at,
                 id: *id,
+                index: idx, // restore the original library position
                 name: drawing.name.clone(),
                 strokes: drawing.strokes.clone(),
-                raster: drawing.raster.clone(),
+                layers: drawing.layers.clone(), // full stack: ids+props+tiles
             }];
             inverse.extend(restore_cells);
 

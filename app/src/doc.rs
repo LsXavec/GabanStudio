@@ -11,7 +11,8 @@ use anim_core::Engine;
 use anim_core::command::{Command, CutRef};
 use anim_core::ids::*;
 use anim_core::model::{Cut, Stroke};
-use anim_core::raster::{RasterLayer, TileCoord, TileData, TileDiff};
+use anim_core::model::CelLayer;
+use anim_core::raster::{TileCoord, TileData, TileDiff};
 use anim_core::xsheet::Exposure;
 
 pub struct AppState {
@@ -193,15 +194,18 @@ impl AppState {
             None => {
                 let name = self.next_drawing_name();
                 let id = self.engine.alloc_drawing_id();
+                let layers = self.new_cel_layers();
+                let index = self.cut().drawings.len(); // append to the library
                 let r = self.engine.apply(
                     "draw (new drawing)",
                     vec![
                         Command::AddDrawing {
                             at,
                             id,
+                            index,
                             name,
                             strokes: vec![],
-                            raster: Some(RasterLayer::empty()),
+                            layers,
                         },
                         Command::SetCell {
                             at,
@@ -230,6 +234,9 @@ impl AppState {
             None => {
                 let name = self.next_drawing_name();
                 let id = self.engine.alloc_drawing_id();
+                let layers = self.new_cel_layers();
+                let layer = layers.last().expect("template has a layer").id;
+                let index = self.cut().drawings.len(); // append to the library
                 let diff: TileDiff = new_tiles
                     .into_iter()
                     .map(|(c, t)| (c, None, Some(t)))
@@ -240,9 +247,10 @@ impl AppState {
                         Command::AddDrawing {
                             at,
                             id,
+                            index,
                             name,
                             strokes: vec![],
-                            raster: Some(RasterLayer::empty()),
+                            layers,
                         },
                         Command::SetCell {
                             at,
@@ -250,7 +258,7 @@ impl AppState {
                             frame: self.frame,
                             key: Some(Exposure::Drawing(id)),
                         },
-                        Command::PaintTiles { at, id, diff },
+                        Command::PaintTiles { at, id, layer, diff },
                     ],
                 );
                 if r.is_ok() {
@@ -260,13 +268,15 @@ impl AppState {
                 Some(id)
             }
             Some(id) => {
-                // Snapshot the drawing's current tiles as the diff "before".
-                let before: BTreeMap<TileCoord, Arc<TileData>> = match self
+                // Snapshot the target layer's current tiles as the diff "before".
+                // Phase 1: the edit target is the TOP layer (stacks are single-
+                // layer until the Phase 2 UI lands an active-layer selection).
+                let (layer, before): (_, BTreeMap<TileCoord, Arc<TileData>>) = match self
                     .cut()
                     .drawing(id)
-                    .and_then(|d| d.raster.as_ref())
+                    .and_then(|d| d.layers.last())
                 {
-                    Some(raster) => raster.tiles.clone(),
+                    Some(l) => (l.id, l.raster.tiles.clone()),
                     None => {
                         self.status =
                             "this cel is vector-only; raster paint isn't wired here yet".into();
@@ -289,11 +299,20 @@ impl AppState {
                 if diff.is_empty() {
                     return Some(id);
                 }
-                let r = self.engine.apply("paint", vec![Command::PaintTiles { at, id, diff }]);
+                let r = self
+                    .engine
+                    .apply("paint", vec![Command::PaintTiles { at, id, layer, diff }]);
                 self.report(r, "painted");
                 Some(id)
             }
         }
+    }
+
+    /// Layer stack for a NEW cel. Phase 1: one "paint" layer (identical
+    /// behavior to the single-raster era); the [color, line] template arrives
+    /// with the Phase 2 active-layer UI.
+    fn new_cel_layers(&mut self) -> Vec<CelLayer> {
+        vec![CelLayer::new(self.engine.alloc_layer_id(), "paint")]
     }
 
     /// Clear this frame's own cel raster (undoable). No-op on a held frame that
@@ -303,16 +322,18 @@ impl AppState {
             return;
         };
         let at = self.at();
-        let before: BTreeMap<TileCoord, Arc<TileData>> =
-            match self.cut().drawing(id).and_then(|d| d.raster.as_ref()) {
-                Some(raster) if !raster.tiles.is_empty() => raster.tiles.clone(),
+        let (layer, before): (_, BTreeMap<TileCoord, Arc<TileData>>) =
+            match self.cut().drawing(id).and_then(|d| d.layers.last()) {
+                Some(l) if !l.raster.tiles.is_empty() => (l.id, l.raster.tiles.clone()),
                 _ => return,
             };
         let diff: TileDiff = before
             .into_iter()
             .map(|(c, b)| (c, Some(b), None))
             .collect();
-        let r = self.engine.apply("clear cel", vec![Command::PaintTiles { at, id, diff }]);
+        let r = self
+            .engine
+            .apply("clear cel", vec![Command::PaintTiles { at, id, layer, diff }]);
         self.report(r, "cel cleared");
     }
 
@@ -353,12 +374,14 @@ impl AppState {
     }
 
     /// Raster tiles + content hash of a specific drawing (for onion upload).
+    /// Phase 1: single-layer stacks, so the top layer IS the cel; the Phase 2
+    /// compositor switches this to the whole-stack composite.
     pub fn drawing_raster(
         &self,
         id: DrawingId,
     ) -> Option<(&BTreeMap<TileCoord, Arc<TileData>>, u64)> {
-        let r = self.cut().drawing(id)?.raster.as_ref()?;
-        Some((&r.tiles, r.content_hash()))
+        let l = self.cut().drawing(id)?.layers.last()?;
+        Some((&l.raster.tiles, l.content_hash()))
     }
 
     /// Which drawing the GPU canvas layer should DISPLAY at the current frame:
@@ -378,10 +401,15 @@ impl AppState {
         }
     }
 
-    /// The raster tiles to upload to the GPU layer for display.
+    /// The raster tiles to upload to the GPU layer for display (top layer —
+    /// Phase 1 stacks are single-layer).
     pub fn current_raster_tiles(&self) -> Option<&BTreeMap<TileCoord, Arc<TileData>>> {
         let id = self.display_drawing()?;
-        self.cut().drawing(id)?.raster.as_ref().map(|r| &r.tiles)
+        self.cut()
+            .drawing(id)?
+            .layers
+            .last()
+            .map(|l| &l.raster.tiles)
     }
 
     /// Identity of the displayed raster (drawing id, content hash, onion flag) —
@@ -393,8 +421,8 @@ impl AppState {
                 let h = self
                     .cut()
                     .drawing(id)
-                    .and_then(|d| d.raster.as_ref())
-                    .map(|r| r.content_hash())
+                    .and_then(|d| d.layers.last())
+                    .map(|l| l.content_hash())
                     .unwrap_or(0);
                 (id.0, h)
             }
@@ -416,15 +444,18 @@ impl AppState {
         let at = self.at();
         let name = self.next_drawing_name();
         let id = self.engine.alloc_drawing_id();
+        let layers = self.new_cel_layers();
+        let index = self.cut().drawings.len(); // append to the library
         let r = self.engine.apply(
             "new drawing",
             vec![
                 Command::AddDrawing {
                     at,
                     id,
+                    index,
                     name,
                     strokes: vec![],
-                    raster: Some(RasterLayer::empty()),
+                    layers,
                 },
                 Command::SetCell {
                     at,

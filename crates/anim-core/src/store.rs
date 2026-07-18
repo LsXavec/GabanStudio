@@ -12,11 +12,11 @@ use rusqlite::Connection;
 use crate::error::{EngineError, Result};
 use crate::graph::{Graph, Node, NodeKind};
 use crate::ids::*;
-use crate::model::{Cut, Drawing, Project, Scene};
+use crate::model::{CelLayer, Cut, Drawing, LayerProps, Project, Scene};
 use crate::raster::{RasterLayer, TileData};
 use crate::xsheet::{Column, Exposure, XSheet};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -46,7 +46,20 @@ CREATE TABLE IF NOT EXISTS raster_layers(
 CREATE TABLE IF NOT EXISTS tiles(
     drawing_id INTEGER NOT NULL, tx INTEGER NOT NULL, ty INTEGER NOT NULL,
     bytes BLOB NOT NULL, PRIMARY KEY(drawing_id, tx, ty));
+CREATE TABLE IF NOT EXISTS cel_layers(
+    layer_id INTEGER PRIMARY KEY, drawing_id INTEGER NOT NULL,
+    ord INTEGER NOT NULL,
+    name TEXT NOT NULL, visible INTEGER NOT NULL, opacity REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS cel_tiles(
+    layer_id INTEGER NOT NULL, tx INTEGER NOT NULL, ty INTEGER NOT NULL,
+    bytes BLOB NOT NULL, PRIMARY KEY(layer_id, tx, ty));
 ";
+// `raster_layers`/`tiles` are the LEGACY (schema <= 4) single-raster tables.
+// They stay in the schema + the DELETE batch (uniform create+purge pattern, and
+// re-saving an opened v4 file empties them in the same transaction), but
+// nothing is ever written to them again — v5 writes cel_layers/cel_tiles,
+// whose per-LAYER primary keys the old `tiles` PK (drawing_id,tx,ty) cannot
+// express (and CREATE IF NOT EXISTS would silently keep the old shape).
 
 pub fn save(project: &Project, path: &Path) -> Result<()> {
     let mut conn = Connection::open(path)?;
@@ -57,7 +70,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
         "DELETE FROM meta; DELETE FROM scenes; DELETE FROM cuts;
          DELETE FROM drawings; DELETE FROM columns; DELETE FROM cells;
          DELETE FROM nodes; DELETE FROM links;
-         DELETE FROM raster_layers; DELETE FROM tiles;",
+         DELETE FROM raster_layers; DELETE FROM tiles;
+         DELETE FROM cel_layers; DELETE FROM cel_tiles;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -91,10 +105,12 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
             "INSERT INTO links(cut_id, to_node, to_pin, from_node, from_pin)
              VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
-        let mut ins_raster =
-            tx.prepare("INSERT INTO raster_layers(drawing_id, opacity) VALUES (?1, ?2)")?;
+        let mut ins_layer = tx.prepare(
+            "INSERT INTO cel_layers(layer_id, drawing_id, ord, name, visible, opacity)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
         let mut ins_tile = tx.prepare(
-            "INSERT INTO tiles(drawing_id, tx, ty, bytes) VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO cel_tiles(layer_id, tx, ty, bytes) VALUES (?1, ?2, ?3, ?4)",
         )?;
 
         for (s_ord, scene) in project.scenes.iter().enumerate() {
@@ -117,11 +133,18 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                         payload,
                         d_ord as i64,
                     ))?;
-                    if let Some(raster) = &d.raster {
-                        ins_raster.execute((d.id.0 as i64, raster.opacity as f64))?;
-                        for ((tx_c, ty_c), tile) in &raster.tiles {
+                    for (l_ord, layer) in d.layers.iter().enumerate() {
+                        ins_layer.execute((
+                            layer.id.0 as i64,
+                            d.id.0 as i64,
+                            l_ord as i64, // ord = stack position, 0 = bottom
+                            &layer.props.name,
+                            layer.props.visible as i64,
+                            layer.props.opacity as f64,
+                        ))?;
+                        for ((tx_c, ty_c), tile) in &layer.raster.tiles {
                             ins_tile.execute((
-                                d.id.0 as i64,
+                                layer.id.0 as i64,
                                 *tx_c as i64,
                                 *ty_c as i64,
                                 tile.as_bytes(),
@@ -160,6 +183,15 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
 
     tx.commit()?;
     Ok(())
+}
+
+/// Clamp a persisted opacity into the command-validated domain (0..=1,
+/// finite). Files are a trust boundary; the in-memory model never holds a
+/// value the command layer would reject (which would break undo exactness
+/// for inverses that carry props).
+fn sane_opacity(raw: f64) -> f32 {
+    let v = raw as f32;
+    if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 }
 }
 
 pub fn load(path: &Path) -> Result<Project> {
@@ -245,44 +277,99 @@ pub fn load(path: &Path) -> Result<Project> {
                 .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<std::result::Result<_, _>>()?;
             for (id, name, payload) in rows {
-                // Raster layer for this drawing, if any.
-                let opacity: Option<f64> = conn
-                    .query_row(
-                        "SELECT opacity FROM raster_layers WHERE drawing_id = ?1",
-                        (id,),
-                        |r| r.get(0),
-                    )
-                    .ok();
-                let raster = if let Some(opacity) = opacity {
-                    let mut layer = RasterLayer {
-                        opacity: opacity as f32,
-                        ..RasterLayer::empty()
-                    };
-                    let mut tstmt = conn.prepare(
-                        "SELECT tx, ty, bytes FROM tiles WHERE drawing_id = ?1",
+                let layers = if version >= 5 {
+                    // v5+: ordered stack from cel_layers/cel_tiles.
+                    let mut lstmt = conn.prepare(
+                        "SELECT layer_id, name, visible, opacity FROM cel_layers
+                         WHERE drawing_id = ?1 ORDER BY ord",
                     )?;
-                    let tile_rows: Vec<(i64, i64, Vec<u8>)> = tstmt
-                        .query_map((id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    let layer_rows: Vec<(i64, String, i64, f64)> = lstmt
+                        .query_map((id,), |r| {
+                            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                        })?
                         .collect::<std::result::Result<_, _>>()?;
-                    for (tx_c, ty_c, bytes) in tile_rows {
-                        let tile = TileData::from_bytes(&bytes).ok_or_else(|| {
-                            EngineError::Corrupt(format!(
-                                "tile ({tx_c},{ty_c}) of drawing {id} has wrong byte length"
-                            ))
-                        })?;
-                        layer
-                            .tiles
-                            .insert((tx_c as i32, ty_c as i32), std::sync::Arc::new(tile));
+                    let mut layers = Vec::with_capacity(layer_rows.len());
+                    let mut tstmt = conn.prepare(
+                        "SELECT tx, ty, bytes FROM cel_tiles WHERE layer_id = ?1",
+                    )?;
+                    for (layer_id, lname, visible, opacity) in layer_rows {
+                        let mut raster = RasterLayer::empty();
+                        let tile_rows: Vec<(i64, i64, Vec<u8>)> = tstmt
+                            .query_map((layer_id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                            .collect::<std::result::Result<_, _>>()?;
+                        for (tx_c, ty_c, bytes) in tile_rows {
+                            let tile = TileData::from_bytes(&bytes).ok_or_else(|| {
+                                EngineError::Corrupt(format!(
+                                    "tile ({tx_c},{ty_c}) of layer {layer_id} has wrong byte length"
+                                ))
+                            })?;
+                            raster
+                                .tiles
+                                .insert((tx_c as i32, ty_c as i32), std::sync::Arc::new(tile));
+                        }
+                        layers.push(CelLayer {
+                            id: LayerId(layer_id as u64),
+                            props: LayerProps {
+                                name: lname,
+                                visible: visible != 0,
+                                // Sanitize at the trust boundary: commands
+                                // validate 0..=1, so the model must never hold
+                                // an out-of-range/NaN value from a file.
+                                opacity: sane_opacity(opacity),
+                            },
+                            raster,
+                        });
                     }
-                    Some(layer)
+                    layers
                 } else {
-                    None
+                    // v<=4 migration: the legacy single raster becomes exactly
+                    // ONE CelLayer ("paint" — the old surface holds line AND
+                    // color merged), opacity preserved, id minted fresh
+                    // (next_id was already parsed above, so this is unique).
+                    // .ok() tolerance: v1/v2 files may lack the raster tables.
+                    let opacity: Option<f64> = conn
+                        .query_row(
+                            "SELECT opacity FROM raster_layers WHERE drawing_id = ?1",
+                            (id,),
+                            |r| r.get(0),
+                        )
+                        .ok();
+                    if let Some(opacity) = opacity {
+                        let mut raster = RasterLayer::empty();
+                        let mut tstmt = conn.prepare(
+                            "SELECT tx, ty, bytes FROM tiles WHERE drawing_id = ?1",
+                        )?;
+                        let tile_rows: Vec<(i64, i64, Vec<u8>)> = tstmt
+                            .query_map((id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                            .collect::<std::result::Result<_, _>>()?;
+                        for (tx_c, ty_c, bytes) in tile_rows {
+                            let tile = TileData::from_bytes(&bytes).ok_or_else(|| {
+                                EngineError::Corrupt(format!(
+                                    "tile ({tx_c},{ty_c}) of drawing {id} has wrong byte length"
+                                ))
+                            })?;
+                            raster
+                                .tiles
+                                .insert((tx_c as i32, ty_c as i32), std::sync::Arc::new(tile));
+                        }
+                        vec![CelLayer {
+                            id: LayerId(project.alloc_id()),
+                            props: LayerProps {
+                                name: "paint".into(),
+                                visible: true,
+                                opacity: sane_opacity(opacity),
+                            },
+                            raster,
+                        }]
+                    } else {
+                        Vec::new() // vector-only drawing stays layerless
+                    }
                 };
                 cut.drawings.push(Drawing {
                     id: DrawingId(id as u64),
                     name,
                     strokes: serde_json::from_str(&payload)?,
-                    raster,
+                    layers,
                 });
             }
 
