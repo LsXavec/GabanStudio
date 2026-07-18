@@ -32,9 +32,10 @@ const SWATCHES: [[u8; 4]; 4] = [
 // rather than trust the release event or the EMA to reach zero.
 
 /// Provisional pressure for the Start point (Windows Ink Start force is usually
-/// None/0). Overwritten by the first real Move sample; a pure tap keeps it, so
-/// a dot is modest, not full width.
-const START_SEED: f32 = 0.3;
+/// None/0). Overwritten by the first real Move sample. Kept at ~0 so a feather
+/// tap with NO real pressure sample makes essentially nothing (not a fat blob);
+/// a deliberate dot comes from the pressure you actually apply.
+const START_SEED: f32 = 0.0;
 /// Minimum screen-space distance between committed samples — banks a
 /// decelerating pen onto one point instead of stacking overlapping AA
 /// segments. Screen space = constant physical dead-zone (Krita Scalable Distance).
@@ -48,6 +49,17 @@ const END_TAPER_POINTS: usize = 5;
 /// Interior-only width floor: avoids sub-pixel invisibility mid-stroke without
 /// re-creating a minimum-radius dot at the (now zero-pressure) tip.
 const WIDTH_FLOOR: f32 = 0.1;
+/// Pressure fabricated for the mouse fallback (no tablet force available). Kept
+/// low so a mouse stroke is a thin line, not a fat flat-pressure ribbon, and a
+/// stray synthesized pen→mouse click can't stamp a big disc.
+const MOUSE_PRESSURE: f32 = 0.15;
+/// Absolute radius cap (paper px) for a dab in a stroke that never saw real
+/// pressure (mouse-mode / a tap with no force). Keeps a big-brush mouse tap from
+/// blobbing a huge disc even when pressure is unavailable.
+const NO_FORCE_DAB_MAX_PX: f32 = 6.0;
+/// A mouse "stroke" whose committed path is shorter than this (screen px) is a
+/// stationary click, not a drag — discard it so a bare click paints nothing.
+const MOUSE_MIN_TRAVEL_PX: f32 = 3.0;
 
 pub struct CanvasView {
     zoom: f32,
@@ -97,6 +109,23 @@ pub struct CanvasView {
     /// Pressure response curve (from Pen/Tablet settings); remaps pressure to
     /// width at render time. Stored pressure stays raw.
     pen_curve: PressureCurve,
+    /// Set once a real pressure pen (Touch with force > 0) is seen. After that,
+    /// the mouse-drawing fallback is disabled so Windows' synthesized pen→mouse
+    /// clicks (e.g. from a fast light double-tap) can't paint flat-pressure blobs.
+    seen_pen: bool,
+    /// The current stroke was started by the mouse fallback (no pen stream), so
+    /// its pressure is fabricated, not measured.
+    stroke_from_mouse: bool,
+    /// The last committed stroke had no real pressure (mouse-mode: the pen is
+    /// arriving as plain mouse events, or Windows Ink is off). Drives the red
+    /// "MOUSE — no pen pressure" badge so the failure is visible, not silent.
+    dbg_mouse_mode: bool,
+    /// Whether onion ghost slots [prev, next] currently hold a texture — shown in
+    /// the toolbar so a vanishing onion is diagnosable (data present vs occluded).
+    dbg_onion: [bool; 2],
+    /// What the current GPU layer holds ("own"/"blank"/"HELD-SOLID"/"empty") — a
+    /// "HELD-SOLID" layer is opaque and occludes the onion; "blank" cannot.
+    dbg_cel: &'static str,
 }
 
 impl CanvasView {
@@ -127,6 +156,11 @@ impl CanvasView {
             synced: (u64::MAX, u64::MAX), // force an initial sync
             raster_new_cel: false,
             pen_curve: PressureCurve::linear(),
+            seen_pen: false,
+            stroke_from_mouse: false,
+            dbg_mouse_mode: false,
+            dbg_onion: [false, false],
+            dbg_cel: "",
         }
     }
 
@@ -202,18 +236,49 @@ impl CanvasView {
             // min≈max or none≫some, the problem is capture, not rendering.
             let total = (self.dbg_some + self.dbg_none).max(1);
             let real_pct = 100 * self.dbg_some / total;
-            ui.label(
-                egui::RichText::new(format!(
-                    "P {:.2}   last {:.2}–{:.2}   force {}%",
-                    self.dbg_pressure, self.dbg_min, self.dbg_max, real_pct
-                ))
-                .monospace()
-                .color(if self.dbg_max - self.dbg_min > 0.15 {
-                    Color32::from_rgb(120, 200, 140)
-                } else {
-                    Color32::from_rgb(210, 180, 90)
-                }),
-            );
+            if self.dbg_mouse_mode {
+                // No real pressure reached the app — the pen is arriving as plain
+                // mouse events. Make it loud and actionable instead of a silent blob.
+                ui.label(
+                    egui::RichText::new("⚠ MOUSE — no pen pressure (enable Windows Ink + Pen Mode)")
+                        .strong()
+                        .color(Color32::from_rgb(235, 90, 80)),
+                );
+            } else {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "P {:.2}   last {:.2}–{:.2}   force {}%",
+                        self.dbg_pressure, self.dbg_min, self.dbg_max, real_pct
+                    ))
+                    .monospace()
+                    .color(if self.dbg_max - self.dbg_min > 0.15 {
+                        Color32::from_rgb(120, 200, 140)
+                    } else {
+                        Color32::from_rgb(210, 180, 90)
+                    }),
+                );
+            }
+            if self.raster {
+                ui.separator();
+                let mark = |on: bool| if on { "✓" } else { "✗" };
+                ui.label(
+                    egui::RichText::new(format!(
+                        "onion {} prev{} next{} cel:{}",
+                        if state.onion { "on" } else { "off" },
+                        mark(self.dbg_onion[0]),
+                        mark(self.dbg_onion[1]),
+                        self.dbg_cel,
+                    ))
+                    .monospace()
+                    .color(if self.dbg_cel == "HELD-SOLID" {
+                        Color32::from_rgb(235, 90, 80) // opaque layer = occludes onion
+                    } else if self.dbg_onion[0] || self.dbg_onion[1] {
+                        Color32::from_rgb(150, 180, 210)
+                    } else {
+                        Color32::from_gray(120)
+                    }),
+                );
+            }
             if state.playing {
                 ui.separator();
                 ui.label(
@@ -326,7 +391,11 @@ impl CanvasView {
             }
 
             // ---- Raster onion: upload the neighbour cels into ghost slots.
-            if state.onion && self.current.is_empty() {
+            // Refresh EVERY frame (set_onion is a no-op when the content hash is
+            // unchanged, so this is cheap) — decoupled from stroke state entirely,
+            // so no current-cel/stroke predicate can ever tear a slot down. Only
+            // onion-off clears the slots.
+            if state.onion {
                 let neighbors = state.onion_neighbors();
                 for (slot, nid) in neighbors.iter().enumerate() {
                     match nid.and_then(|id| state.drawing_raster(id)) {
@@ -338,6 +407,19 @@ impl CanvasView {
                 p.set_onion(0, None, 0);
                 p.set_onion(1, None, 0);
             }
+            self.dbg_onion = [p.onion_id(0).is_some(), p.onion_id(1).is_some()];
+            // Decisive occlusion probe: what does the current GPU layer HOLD right
+            // now? A "HELD-SOLID" or dense "own" cel is opaque and would bury the
+            // onion; "blank" means the layer is transparent and the onion must show.
+            self.dbg_cel = if state.own_key_drawing().is_some() {
+                "own"
+            } else if state.onion {
+                "blank"
+            } else if state.current_drawing().is_some() {
+                "HELD-SOLID"
+            } else {
+                "empty"
+            };
         }
 
         // ---- Render layers ------------------------------------------------
@@ -437,8 +519,18 @@ impl CanvasView {
         }
         let color = linear_rgba(self.brush_color);
         let hardness = 0.85;
-        let radius_of =
-            |pr: f32| (self.raster_brush_px * self.pen_curve.apply(pr) * 0.5).max(0.5);
+        // When no real pressure reached this stroke (mouse-mode, or a tap with no
+        // force), cap the dab so a big brush can't stamp a huge flat-pressure disc.
+        let cap = if self.stroke_from_mouse || self.cur_some == 0 {
+            NO_FORCE_DAB_MAX_PX
+        } else {
+            f32::INFINITY
+        };
+        let radius_of = |pr: f32| {
+            (self.raster_brush_px * self.pen_curve.apply(pr) * 0.5)
+                .max(0.5)
+                .min(cap)
+        };
 
         if pts.len() == 1 {
             dabs.push(Dab {
@@ -500,6 +592,7 @@ impl CanvasView {
             } = event
             {
                 touch_seen = true;
+                self.seen_pen = true; // a pen/stylus is driving input — not a mouse
                 match phase {
                     // Step 2: distrust the Start force (WM_POINTERDOWN pressure
                     // is usually 0 -> None). Seed provisionally; the first real
@@ -516,6 +609,7 @@ impl CanvasView {
                         self.raw_history = [p0; 3];
                         self.cur_some = 0;
                         self.cur_none = 0;
+                        self.stroke_from_mouse = false;
                         self.dabs_flushed = 0;
                         self.raster_stroke_done = false;
                         self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
@@ -549,11 +643,16 @@ impl CanvasView {
         }
 
         // Mouse fallback (flat pressure) — only when NO pen stream is present,
-        // and not during the post-lift lockout that suppresses egui's
-        // synthesized primary-drag for the pen that just finished.
-        if !self.touch_active && !touch_seen && self.mouse_lockout == 0 {
+        // not during the post-lift lockout that suppresses egui's synthesized
+        // primary-drag for the pen that just finished, and never once a real
+        // pressure pen has been seen this session (Windows synthesizes pen→mouse
+        // clicks that would otherwise paint flat-pressure blobs on light taps).
+        if !self.touch_active && !touch_seen && self.mouse_lockout == 0 && !self.seen_pen {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 self.current.clear();
+                self.cur_some = 0; // no tablet force will arrive; keep the
+                self.cur_none = 0; // force% diagnostic honest for this stroke
+                self.stroke_from_mouse = true;
                 self.dabs_flushed = 0;
                 self.raster_stroke_done = false;
                 self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
@@ -562,7 +661,7 @@ impl CanvasView {
                     self.current.push(StrokePoint {
                         x: p.x,
                         y: p.y,
-                        pressure: 0.5,
+                        pressure: MOUSE_PRESSURE,
                     });
                 }
             } else if response.dragged_by(egui::PointerButton::Primary) {
@@ -571,16 +670,31 @@ impl CanvasView {
                     self.current.push(StrokePoint {
                         x: p.x,
                         y: p.y,
-                        pressure: 0.5,
+                        pressure: MOUSE_PRESSURE,
                     });
                 }
             } else if response.drag_stopped_by(egui::PointerButton::Primary)
                 && !self.current.is_empty()
             {
-                // Mouse has no pressure, so no taper is synthesized here.
-                self.finish_stroke(state);
+                // Discard a stationary click (no real drag) so a bare mouse click
+                // paints nothing; only commit an actual dragged stroke. Mouse has
+                // no pressure, so no taper is synthesized here.
+                if self.mouse_path_len_px(scale) >= MOUSE_MIN_TRAVEL_PX {
+                    self.finish_stroke(state);
+                } else {
+                    self.current.clear();
+                }
             }
         }
+    }
+
+    /// Total committed path length of the current stroke, in screen pixels.
+    fn mouse_path_len_px(&self, scale: f32) -> f32 {
+        let mut len = 0.0;
+        for w in self.current.windows(2) {
+            len += ((w[1].x - w[0].x).powi(2) + (w[1].y - w[0].y).powi(2)).sqrt() * scale;
+        }
+        len
     }
 
     /// One pen Move sample: pressure derivation (Steps 3-5) + distance banking.
@@ -663,6 +777,13 @@ impl CanvasView {
             self.dbg_some = self.cur_some;
             self.dbg_none = self.cur_none;
         }
+        // Mouse-mode = this stroke carried no real tablet force: either the mouse
+        // fallback drew it, or a Touch stream that DID move (cur_none Move samples)
+        // never once reported force. The `cur_none > 0` guard avoids falsely
+        // flagging a legitimate quick pen tap (Start+End, no Move sample at all).
+        // Drives the red MOUSE badge that tells the user to fix the driver.
+        self.dbg_mouse_mode =
+            self.stroke_from_mouse || (self.cur_none > 0 && self.cur_some == 0);
         // Raster mode: dabs are stamped incrementally in ui(); just flag the
         // final flush + reset. No vector taper/commit needed — dab radius
         // already follows pressure, and opaque dabs don't get the tip blob.

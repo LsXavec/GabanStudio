@@ -3,7 +3,7 @@
 //! All document mutations route through Engine commands — undo covers
 //! everything the artist does here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -26,6 +26,10 @@ pub struct AppState {
     pub onion: bool,
     pub file_path: Option<PathBuf>,
     pub status: String,
+    /// Continuation handles (column, key-frame) the user has explicitly dragged
+    /// into position. Such a hold stays statically visible even when it holds to
+    /// its natural end (no Empty terminator); un-touched holds stay hidden.
+    pub positioned_holds: HashSet<(ColumnId, u32)>,
 }
 
 impl AppState {
@@ -59,6 +63,7 @@ impl AppState {
             onion: true,
             file_path: None,
             status: "new project — draw on the canvas to create frame 1".into(),
+            positioned_holds: HashSet::new(),
         }
     }
 
@@ -97,6 +102,7 @@ impl AppState {
             file_path: Some(path),
             status: "project loaded".into(),
             engine,
+            positioned_holds: HashSet::new(),
         })
     }
 
@@ -312,8 +318,15 @@ impl AppState {
 
     /// Nearest distinct drawings before / after the current frame on the active
     /// column (for onion skin). [0] = previous, [1] = next.
+    ///
+    /// Excludes the frame's OWN key, not the resolved (held) drawing: on a held
+    /// or blank frame — where you draw a NEW cel — the drawing being held here is
+    /// the very reference you want, so it must count as the "previous" ghost. If
+    /// we excluded the resolved drawing (as `current_drawing`), a held frame's
+    /// previous ghost would skip past it to the drawing before it, and the held
+    /// drawing would vanish the instant you start drawing the new cel.
     pub fn onion_neighbors(&self) -> [Option<DrawingId>; 2] {
-        let cur = self.current_drawing();
+        let cur = self.own_key_drawing();
         let Some(col) = self.cut().xsheet.column(self.active_column) else {
             return [None, None];
         };
@@ -328,7 +341,10 @@ impl AppState {
         let mut next = None;
         for f in (self.frame + 1)..self.frame_count() {
             if let Some(d) = col.resolve(f)
-                && Some(d) != cur {
+                && Some(d) != cur
+                && Some(d) != prev {
+                    // Skip the drawing still held through these frames (it's the
+                    // `prev` ghost) so a mid-hold frame doesn't show it as both.
                     next = Some(d);
                     break;
                 }
@@ -345,16 +361,34 @@ impl AppState {
         Some((&r.tiles, r.content_hash()))
     }
 
-    /// The raster tiles of the current cel (for uploading to the GPU layer).
+    /// Which drawing the GPU canvas layer should DISPLAY at the current frame:
+    /// - the frame's OWN cel if it has one (you're editing that cel);
+    /// - nothing (blank) on a held/empty frame while onion is ON — you're about
+    ///   to draw a NEW cel here, so the canvas is blank and the drawing held on
+    ///   this frame shows as the onion ghost instead of a solid copy that would
+    ///   appear to vanish the moment the new cel clears the layer;
+    /// - the held (resolved) drawing when onion is OFF, for normal viewing.
+    fn display_drawing(&self) -> Option<DrawingId> {
+        if let Some(own) = self.own_key_drawing() {
+            Some(own)
+        } else if self.onion {
+            None
+        } else {
+            self.current_drawing()
+        }
+    }
+
+    /// The raster tiles to upload to the GPU layer for display.
     pub fn current_raster_tiles(&self) -> Option<&BTreeMap<TileCoord, Arc<TileData>>> {
-        let id = self.current_drawing()?;
+        let id = self.display_drawing()?;
         self.cut().drawing(id)?.raster.as_ref().map(|r| &r.tiles)
     }
 
-    /// Identity of the current cel's raster (drawing id, raster content hash) —
-    /// used to decide when the GPU layer needs re-syncing.
+    /// Identity of the displayed raster (drawing id, content hash, onion flag) —
+    /// used to decide when the GPU layer needs re-syncing. The onion flag is part
+    /// of the key so toggling onion on a held frame re-syncs (solid ↔ blank).
     pub fn current_raster_key(&self) -> (u64, u64) {
-        match self.current_drawing() {
+        match self.display_drawing() {
             Some(id) => {
                 let h = self
                     .cut()
@@ -364,7 +398,11 @@ impl AppState {
                     .unwrap_or(0);
                 (id.0, h)
             }
-            None => (0, 0),
+            // Blank display: key must be UNIQUE PER FRAME, else navigating between
+            // two blank frames keeps the same key, the re-sync is skipped, and the
+            // layer keeps stale pixels. u64::MAX in slot 0 never collides with a
+            // real (drawing_id, hash).
+            None => (u64::MAX, self.frame as u64),
         }
     }
 

@@ -109,6 +109,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // Frame rows must abut: egui's default item_spacing.y would insert a
+            // few px between each allocated row, so ROW_H would NOT be the true
+            // row pitch and the continuation handles (which step by ROW_H) would
+            // drift farther down the more frames there are. Zero it here so the
+            // sheet is contiguous and ctop + frame*ROW_H lands exactly on a row.
+            ui.spacing_mut().item_spacing.y = 0.0;
             let frame_count = state.frame_count();
             let fps = state.fps();
             let mut clicked_frame: Option<u32> = None;
@@ -249,6 +255,7 @@ fn continuation_handles(
     let painter = ui.painter();
     let hover = ui.input(|i| i.pointer.hover_pos());
     let mut pending: Vec<(anim_core::ids::ColumnId, Option<u32>, Option<u32>)> = Vec::new();
+    let mut mark_positioned: Vec<(anim_core::ids::ColumnId, u32)> = Vec::new();
 
     for c in &conts {
         let col_x = cleft + FRAME_NUM_W + c.ci as f32 * COL_W;
@@ -266,22 +273,27 @@ fn continuation_handles(
             Sense::drag(),
         );
 
-        // Show if edited, hovered within the span, or being dragged.
-        let span_rect = Rect::from_min_max(
-            pos2(col_x, ctop + c.n as f32 * ROW_H),
-            pos2(col_x + COL_W, ctop + c.max_end as f32 * ROW_H),
-        );
-        let hovered_span = hover.is_some_and(|p| span_rect.contains(p));
-        let edited = c.terminator.is_some();
-        let show = edited || hovered_span || hr.dragged();
+        // Visibility: a hold is shown ONLY once the user has positioned it —
+        // either it has an Empty terminator (dragged to shorten) or it was
+        // dragged and recorded in positioned_holds (even if left at its natural
+        // end). A freshly-added drawing shows nothing. For discoverability the
+        // handle also reveals while the pointer is right at the hold-end (a small
+        // grab zone), not across the whole span — so it never appears "way down".
+        let positioned =
+            c.terminator.is_some() || state.positioned_holds.contains(&(c.column, c.n));
+        let near_end = hover.is_some_and(|p| {
+            p.x >= col_x
+                && p.x <= col_x + COL_W
+                && p.y >= handle_y - ROW_H
+                && p.y <= handle_y + ROW_H
+        });
+        let show = positioned || hr.dragged() || near_end;
 
         if show {
-            let col = if hr.dragged() || hr.hovered() {
+            let col = if hr.dragged() || hr.hovered() || near_end {
                 Color32::WHITE
-            } else if edited {
-                Color32::from_rgb(230, 160, 90)
             } else {
-                Color32::from_gray(150)
+                Color32::from_rgb(230, 160, 90) // positioned, resting
             };
             painter.line_segment(
                 [pos2(x, start_y), pos2(x, handle_y)],
@@ -290,8 +302,10 @@ fn continuation_handles(
             painter.circle_stroke(handle_center, 4.0, egui::Stroke::new(1.5, col));
         }
 
-        if hr.dragged()
-            && let Some(p) = hr.interact_pointer_pos() {
+        if hr.dragged() {
+            // Any deliberate drag counts as positioning it, so it stays visible.
+            mark_positioned.push((c.column, c.n));
+            if let Some(p) = hr.interact_pointer_pos() {
                 let raw = ((p.y - ctop) / ROW_H).round() as i32;
                 let new_end = raw.clamp(c.n as i32 + 1, c.max_end as i32) as u32;
                 let new_term = if new_end >= c.max_end {
@@ -303,8 +317,12 @@ fn continuation_handles(
                     pending.push((c.column, c.terminator, new_term));
                 }
             }
+        }
     }
 
+    for key in mark_positioned {
+        state.positioned_holds.insert(key);
+    }
     for (column, old, new) in pending {
         state.set_hold_terminator(column, old, new);
     }
