@@ -541,13 +541,25 @@ impl Editor {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&self.state.status).weak());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(
-                            "space play · S/F prev/next frame · E new cel · D clear · O onion · ctrl+Z undo · wheel zoom · mid-drag pan · ⚙ settings to rebind",
-                        )
-                        .weak()
-                        .size(10.5),
-                    );
+                    // Pen diagnostics live HERE, fixed-width monospace — never
+                    // in the canvas toolbar, where changing text reflowed the
+                    // row and read as the workspace shifting.
+                    let (diag, healthy, mouse_mode) = self.canvas.pressure_diag();
+                    if mouse_mode {
+                        ui.label(
+                            egui::RichText::new("⚠ MOUSE — enable Windows Ink + Pen Mode")
+                                .strong()
+                                .color(egui::Color32::from_rgb(235, 90, 80)),
+                        );
+                    } else {
+                        ui.label(egui::RichText::new(diag).monospace().size(11.0).color(
+                            if healthy {
+                                egui::Color32::from_rgb(120, 200, 140)
+                            } else {
+                                egui::Color32::from_gray(140)
+                            },
+                        ));
+                    }
                 });
             });
         });

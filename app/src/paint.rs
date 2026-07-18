@@ -661,10 +661,6 @@ impl PaintLayer {
         self.above.tex_id
     }
 
-    pub fn size(&self) -> (u32, u32) {
-        (self.width, self.height)
-    }
-
     fn clear_view(&self, view: &wgpu::TextureView, label: &str) {
         let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some(label),

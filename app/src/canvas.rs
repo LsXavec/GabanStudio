@@ -169,12 +169,6 @@ pub struct CanvasView {
     /// arriving as plain mouse events, or Windows Ink is off). Drives the red
     /// "MOUSE — no pen pressure" badge so the failure is visible, not silent.
     dbg_mouse_mode: bool,
-    /// Whether onion ghost slots [prev, next] currently hold a texture — shown in
-    /// the toolbar so a vanishing onion is diagnosable (data present vs occluded).
-    dbg_onion: [bool; 2],
-    /// What the current GPU layer holds ("own"/"blank"/"HELD-SOLID"/"empty") — a
-    /// "HELD-SOLID" layer is opaque and occludes the onion; "blank" cannot.
-    dbg_cel: &'static str,
 }
 
 impl CanvasView {
@@ -223,8 +217,6 @@ impl CanvasView {
             seen_pen: false,
             stroke_from_mouse: false,
             dbg_mouse_mode: false,
-            dbg_onion: [false, false],
-            dbg_cel: "",
         }
     }
 
@@ -238,6 +230,21 @@ impl CanvasView {
     /// dispatch while this holds — they would retarget or orphan the commit.
     pub fn stroke_active(&self) -> bool {
         self.touch_active || !self.current.is_empty() || self.raster_stroke_done
+    }
+
+    /// Fixed-width pressure diagnostic for the status bar:
+    /// (text, pressure-range-is-healthy, pen-arriving-as-mouse).
+    pub fn pressure_diag(&self) -> (String, bool, bool) {
+        let total = (self.dbg_some + self.dbg_none).max(1);
+        let pct = 100 * self.dbg_some / total;
+        (
+            format!(
+                "P{:5.2}  {:4.2}–{:4.2}  {:3}%",
+                self.dbg_pressure, self.dbg_min, self.dbg_max, pct
+            ),
+            self.dbg_max - self.dbg_min > 0.15,
+            self.dbg_mouse_mode,
+        )
     }
 
     pub fn ui(
@@ -295,18 +302,29 @@ impl CanvasView {
                     self.erasing = true;
                 }
                 // Active cel-layer chip (RETAS trace-line colours). Click or A
-                // cycles; strokes land on this layer. Red when the layer is
-                // hidden (painting is refused until it's shown or switched).
+                // cycles; strokes land on this layer. Red = hidden (painting
+                // is refused until it's shown or switched). FIXED WIDTH:
+                // monospace + padded name, so switching layers never reflows
+                // the toolbar items after it (canvas-stability law).
                 let lname = state.active_layer_name();
                 let hidden = state.active_layer_props().is_some_and(|p| !p.visible);
-                let (label, color) = if hidden {
-                    (format!("▣ {lname} (hidden)"), Color32::from_rgb(235, 90, 80))
+                let shown: String = lname.chars().take(10).collect();
+                let color = if hidden {
+                    Color32::from_rgb(235, 90, 80)
                 } else {
-                    (format!("▣ {lname}"), layer_chip_color(&lname))
+                    layer_chip_color(&lname)
                 };
                 if ui
-                    .button(egui::RichText::new(label).color(color))
-                    .on_hover_text("active layer — strokes land here (A cycles)")
+                    .button(
+                        egui::RichText::new(format!("▣ {shown:<10}"))
+                            .monospace()
+                            .color(color),
+                    )
+                    .on_hover_text(if hidden {
+                        "active layer is HIDDEN — painting refused (A cycles, or show its eye)"
+                    } else {
+                        "active layer — strokes land here (A cycles)"
+                    })
                     .clicked()
                 {
                     state.cycle_layer(false);
@@ -351,16 +369,6 @@ impl CanvasView {
                 {
                     state.clear_current_raster();
                 }
-                if ui.button("test").on_hover_text("stamp test dabs (checks the GPU display path)").clicked()
-                    && let Some(p) = paint.as_deref_mut() {
-                        let (w, h) = p.size();
-                        let col = linear_rgba(self.brush_color);
-                        let test = vec![
-                            Dab { center: [w as f32 * 0.35, h as f32 * 0.5], radius: h as f32 * 0.18, hardness: 0.5, color: col },
-                            Dab { center: [w as f32 * 0.65, h as f32 * 0.5], radius: h as f32 * 0.10, hardness: 0.95, color: col },
-                        ];
-                        p.paint(&test, false);
-                    }
             } else {
                 ui.add(
                     egui::Slider::new(&mut self.brush_width, 0.5..=16.0)
@@ -392,63 +400,11 @@ impl CanvasView {
                 self.zoom = 1.0;
                 self.pan = egui::Vec2::ZERO;
             }
-            ui.separator();
-            // Live pressure diagnostic: current value + last stroke's range and
-            // how many samples carried real force vs None. If the range is wide,
-            // the device delivers varying pressure and the ribbon renders it; if
-            // min≈max or none≫some, the problem is capture, not rendering.
-            let total = (self.dbg_some + self.dbg_none).max(1);
-            let real_pct = 100 * self.dbg_some / total;
-            if self.dbg_mouse_mode {
-                // No real pressure reached the app — the pen is arriving as plain
-                // mouse events. Make it loud and actionable instead of a silent blob.
-                ui.label(
-                    egui::RichText::new("⚠ MOUSE — no pen pressure (enable Windows Ink + Pen Mode)")
-                        .strong()
-                        .color(Color32::from_rgb(235, 90, 80)),
-                );
-            } else {
-                ui.label(
-                    egui::RichText::new(format!(
-                        "P {:.2}   last {:.2}–{:.2}   force {}%",
-                        self.dbg_pressure, self.dbg_min, self.dbg_max, real_pct
-                    ))
-                    .monospace()
-                    .color(if self.dbg_max - self.dbg_min > 0.15 {
-                        Color32::from_rgb(120, 200, 140)
-                    } else {
-                        Color32::from_rgb(210, 180, 90)
-                    }),
-                );
-            }
-            if self.raster {
-                ui.separator();
-                let mark = |on: bool| if on { "✓" } else { "✗" };
-                ui.label(
-                    egui::RichText::new(format!(
-                        "onion {} prev{} next{} cel:{}",
-                        if state.onion { "on" } else { "off" },
-                        mark(self.dbg_onion[0]),
-                        mark(self.dbg_onion[1]),
-                        self.dbg_cel,
-                    ))
-                    .monospace()
-                    .color(if self.dbg_cel == "HELD-SOLID" {
-                        Color32::from_rgb(235, 90, 80) // opaque layer = occludes onion
-                    } else if self.dbg_onion[0] || self.dbg_onion[1] {
-                        Color32::from_rgb(150, 180, 210)
-                    } else {
-                        Color32::from_gray(120)
-                    }),
-                );
-            }
-            if state.playing {
-                ui.separator();
-                ui.label(
-                    egui::RichText::new("PLAYING (space to stop)")
-                        .color(Color32::from_rgb(120, 220, 140)),
-                );
-            }
+            // NOTHING VARIABLE-WIDTH GOES IN THIS ROW. The toolbar used to
+            // carry live diagnostics (pressure readout, onion/cel probes, the
+            // PLAYING label) whose changing text reflowed everything after it
+            // and read as "the workspace shifting". Diagnostics now live in
+            // the status bar (fixed-width) and PLAYING is a canvas overlay.
         });
 
         // ---- Canvas area --------------------------------------------------
@@ -635,19 +591,6 @@ impl CanvasView {
                 p.set_onion(0, None, 0);
                 p.set_onion(1, None, 0);
             }
-            self.dbg_onion = [p.onion_id(0).is_some(), p.onion_id(1).is_some()];
-            // Decisive occlusion probe: what does the current GPU layer HOLD right
-            // now? A "HELD-SOLID" or dense "own" cel is opaque and would bury the
-            // onion; "blank" means the layer is transparent and the onion must show.
-            self.dbg_cel = if state.own_key_drawing().is_some() {
-                "own"
-            } else if state.onion {
-                "blank"
-            } else if state.current_drawing().is_some() {
-                "HELD-SOLID"
-            } else {
-                "empty"
-            };
         }
 
         // ---- Render layers ------------------------------------------------
@@ -765,6 +708,18 @@ impl CanvasView {
                 "empty cell — draw to create a new drawing here",
                 egui::FontId::proportional(15.0),
                 Color32::from_gray(150),
+            );
+        }
+
+        // Playback indicator as a canvas OVERLAY (painted, zero layout impact
+        // — a toolbar label here used to reflow the row and shift the view).
+        if state.playing {
+            painter.text(
+                pos2(rect.center().x, rect.top() + 16.0),
+                egui::Align2::CENTER_CENTER,
+                "PLAYING — space to stop",
+                egui::FontId::proportional(13.0),
+                Color32::from_rgb(120, 220, 140),
             );
         }
 
