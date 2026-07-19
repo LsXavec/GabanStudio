@@ -21,6 +21,14 @@ pub enum Action {
     ClearCel,
     ClearCelAll,
     ToggleEraser,
+    Preset1,
+    Preset2,
+    Preset3,
+    Preset4,
+    Preset5,
+    Preset6,
+    Preset7,
+    Preset8,
     CycleCelLayer,
     CycleCelLayerBack,
     ClearFrameKey,
@@ -46,6 +54,14 @@ impl Action {
         Action::ClearCel,
         Action::ClearCelAll,
         Action::ToggleEraser,
+        Action::Preset1,
+        Action::Preset2,
+        Action::Preset3,
+        Action::Preset4,
+        Action::Preset5,
+        Action::Preset6,
+        Action::Preset7,
+        Action::Preset8,
         Action::CycleCelLayer,
         Action::CycleCelLayerBack,
         Action::ClearFrameKey,
@@ -70,6 +86,14 @@ impl Action {
             Action::ClearCel => "Clear active layer",
             Action::ClearCelAll => "Clear whole cel (all layers)",
             Action::ToggleEraser => "Brush / eraser toggle",
+            Action::Preset1 => "Brush preset 1",
+            Action::Preset2 => "Brush preset 2",
+            Action::Preset3 => "Brush preset 3",
+            Action::Preset4 => "Brush preset 4",
+            Action::Preset5 => "Brush preset 5",
+            Action::Preset6 => "Brush preset 6",
+            Action::Preset7 => "Brush preset 7",
+            Action::Preset8 => "Brush preset 8",
             Action::CycleCelLayer => "Next cel layer",
             Action::CycleCelLayerBack => "Previous cel layer",
             Action::ClearFrameKey => "Remove frame from X-sheet",
@@ -108,6 +132,14 @@ impl Action {
                 alt: false,
             }),
             ToggleEraser => Some(k("X")),
+            Preset1 => Some(k("1")),
+            Preset2 => Some(k("2")),
+            Preset3 => Some(k("3")),
+            Preset4 => Some(k("4")),
+            Preset5 => Some(k("5")),
+            Preset6 => Some(k("6")),
+            Preset7 => Some(k("7")),
+            Preset8 => Some(k("8")),
             CycleCelLayer => Some(k("A")),
             CycleCelLayerBack => Some(Chord {
                 keys: vec!["A".to_string()],
@@ -371,6 +403,72 @@ impl RebindCapture {
     }
 }
 
+// ---- Brush presets ----------------------------------------------------------
+
+/// A named brush snapshot — applied whole from a keybind (1–8), the Presets
+/// pane, or automatically when entering a workspace bound to it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BrushPreset {
+    pub name: String,
+    pub size_px: f32,
+    pub flow: f32,
+    pub opacity: f32,
+    pub dyn_size: bool,
+    pub dyn_opacity: bool,
+    pub min_size: f32,
+    /// None = keep the current brush colour when applying.
+    pub color: Option<[u8; 4]>,
+}
+
+impl Default for BrushPreset {
+    fn default() -> Self {
+        Self {
+            name: "preset".into(),
+            size_px: 14.0,
+            flow: 1.0,
+            opacity: 1.0,
+            dyn_size: true,
+            dyn_opacity: false,
+            min_size: 0.0,
+            color: None,
+        }
+    }
+}
+
+/// Starter presets mapped to the anime pipeline stages.
+pub fn default_presets() -> Vec<BrushPreset> {
+    vec![
+        BrushPreset {
+            name: "genga pen".into(),
+            size_px: 6.0,
+            min_size: 0.05,
+            ..Default::default()
+        },
+        BrushPreset {
+            name: "rough pencil".into(),
+            size_px: 10.0,
+            flow: 0.55,
+            dyn_opacity: true,
+            min_size: 0.2,
+            ..Default::default()
+        },
+        BrushPreset {
+            name: "shiage fill".into(),
+            size_px: 60.0,
+            dyn_size: false,
+            ..Default::default()
+        },
+        BrushPreset {
+            name: "shadow airbrush".into(),
+            size_px: 120.0,
+            flow: 0.25,
+            dyn_size: false,
+            dyn_opacity: true,
+            ..Default::default()
+        },
+    ]
+}
+
 // ---- Cel-layer defaults ----------------------------------------------------
 
 /// Default brush colour per cel-layer NAME. Switching the active layer loads
@@ -418,6 +516,7 @@ pub enum SettingsCategory {
     Performance,
     Pen,
     Layers,
+    Brushes,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -429,6 +528,11 @@ pub struct Config {
     pub pen: PenConfig,
     #[serde(default)]
     pub layers: LayersConfig,
+    #[serde(default = "default_presets")]
+    pub presets: Vec<BrushPreset>,
+    /// Transient: last Krita-import result line (not persisted).
+    #[serde(skip)]
+    pub last_import_note: String,
 }
 
 impl Default for Config {
@@ -444,6 +548,8 @@ impl Default for Config {
             perf: PerfConfig::default(),
             pen: PenConfig::default(),
             layers: LayersConfig::default(),
+            presets: default_presets(),
+            last_import_note: String::new(),
         }
     }
 }
@@ -593,6 +699,7 @@ pub fn settings_window(
                     ui.selectable_value(category, SettingsCategory::Performance, "Performance");
                     ui.selectable_value(category, SettingsCategory::Pen, "Pen / Tablet");
                     ui.selectable_value(category, SettingsCategory::Layers, "Layers");
+                    ui.selectable_value(category, SettingsCategory::Brushes, "Brushes");
                 });
                 ui.separator();
                 // Right: the selected page.
@@ -601,6 +708,7 @@ pub fn settings_window(
                     SettingsCategory::Performance => performance_page(ui, config, backend),
                     SettingsCategory::Pen => pen_page(ui, config),
                     SettingsCategory::Layers => layers_page(ui, config),
+                    SettingsCategory::Brushes => brushes_page(ui, config),
                 });
             });
         });
@@ -895,6 +1003,122 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
     {
         config.layers.colors = default_layer_colors();
         changed = true;
+    }
+
+    if changed {
+        config.save();
+    }
+}
+
+/// Brushes page: edit the preset list (name, size, strength, dynamics, an
+/// optional colour), reorder implicitly by position (slots 1–8 map to the
+/// number keybinds), and import Krita community brushes (.kpp / .bundle).
+fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
+    ui.heading("Brush presets");
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(
+            "Slots 1–8 fire from the number keys (rebindable in Shortcuts). \
+             Bind a preset to a workspace in the ws menu to auto-load it per \
+             workflow stage.",
+        )
+        .weak(),
+    );
+    ui.add_space(8.0);
+
+    let mut changed = false;
+    let mut remove: Option<usize> = None;
+    egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
+        for (i, p) in config.presets.iter_mut().enumerate() {
+            ui.push_id(i, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(if i < 8 {
+                            format!("[{}]", i + 1)
+                        } else {
+                            "[·]".into()
+                        })
+                        .monospace()
+                        .weak(),
+                    );
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(&mut p.name).desired_width(130.0))
+                        .changed();
+                    changed |= ui
+                        .add(
+                            egui::DragValue::new(&mut p.size_px)
+                                .range(1.0..=300.0)
+                                .suffix(" px"),
+                        )
+                        .changed();
+                    if ui.small_button("✕").on_hover_text("delete preset").clicked() {
+                        remove = Some(i);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add_space(34.0);
+                    ui.spacing_mut().slider_width = 70.0;
+                    changed |= ui
+                        .add(egui::Slider::new(&mut p.flow, 0.05..=1.0).text("flow"))
+                        .changed();
+                    changed |= ui
+                        .add(egui::Slider::new(&mut p.opacity, 0.05..=1.0).text("op"))
+                        .changed();
+                    changed |= ui.checkbox(&mut p.dyn_size, "size dyn").changed();
+                    changed |= ui.checkbox(&mut p.dyn_opacity, "op dyn").changed();
+                    // Optional fixed colour.
+                    let mut has_color = p.color.is_some();
+                    if ui
+                        .checkbox(&mut has_color, "colour")
+                        .on_hover_text("preset sets the brush colour when applied")
+                        .changed()
+                    {
+                        p.color = has_color.then_some([26, 26, 26, 255]);
+                        changed = true;
+                    }
+                    if let Some(c) = &mut p.color {
+                        let mut rgb = [c[0], c[1], c[2]];
+                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                            *c = [rgb[0], rgb[1], rgb[2], 255];
+                            changed = true;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+            });
+        }
+    });
+    if let Some(i) = remove {
+        config.presets.remove(i);
+        changed = true;
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        if ui.button("＋ new preset").clicked() {
+            config.presets.push(BrushPreset::default());
+            changed = true;
+        }
+        if ui
+            .button("import Krita brushes…")
+            .on_hover_text(
+                "community .kpp presets / .bundle packs — maps name, size, \
+                 opacity and flow onto our round brush (textured tips need the \
+                 fuller brush engine, later)",
+            )
+            .clicked()
+            && let Some(paths) = rfd::FileDialog::new()
+                .add_filter("Krita brushes", &["kpp", "bundle"])
+                .pick_files()
+        {
+            let (ok, dup, failed) = crate::kpp::import_files(&paths, &mut config.presets);
+            changed |= ok > 0;
+            config.last_import_note =
+                format!("imported {ok}, skipped {dup} duplicate(s), {failed} failed");
+        }
+    });
+    if !config.last_import_note.is_empty() {
+        ui.label(egui::RichText::new(&config.last_import_note).weak().small());
     }
 
     if changed {

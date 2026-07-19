@@ -7,12 +7,13 @@ mod canvas;
 mod config;
 mod doc;
 mod export;
+mod kpp;
 mod newproject;
 mod paint;
 mod workspace;
 mod xsheet_panel;
 
-use config::{Action, Config, FrameLatency, LayersConfig, PenConfig, RebindCapture, SettingsCategory};
+use config::{Action, BrushPreset, Config, FrameLatency, LayersConfig, PenConfig, RebindCapture, SettingsCategory};
 use doc::AppState;
 use egui_dock::{DockArea, DockState};
 use workspace::{Pane, Workspace, Workspaces, draw_workspace};
@@ -111,6 +112,28 @@ impl App {
             ed.canvas.toggle_eraser();
             return;
         }
+        // Brush presets apply to the canvas; blocked mid-stroke (dab size/alpha
+        // read live state — a mid-stroke swap would bend the stroke).
+        let preset_idx = match action {
+            Action::Preset1 => Some(0),
+            Action::Preset2 => Some(1),
+            Action::Preset3 => Some(2),
+            Action::Preset4 => Some(3),
+            Action::Preset5 => Some(4),
+            Action::Preset6 => Some(5),
+            Action::Preset7 => Some(6),
+            Action::Preset8 => Some(7),
+            _ => None,
+        };
+        if let Some(i) = preset_idx {
+            if !ed.canvas.stroke_active()
+                && let Some(p) = self.config.presets.get(i)
+            {
+                ed.canvas.apply_preset(p);
+                ed.state.status = format!("brush: {}", p.name);
+            }
+            return;
+        }
         // STROKE GUARD: while a stroke is live, actions that would retarget or
         // orphan its pen-up commit are dropped — frame nav would commit onto
         // the wrong frame, an A-cycle onto the wrong layer, undo/clear against
@@ -153,6 +176,14 @@ impl App {
             Action::RemoveColumn => s.remove_active_column(),
             Action::ToggleOnion => s.onion = !s.onion,
             Action::ToggleEraser => {} // handled above
+            Action::Preset1
+            | Action::Preset2
+            | Action::Preset3
+            | Action::Preset4
+            | Action::Preset5
+            | Action::Preset6
+            | Action::Preset7
+            | Action::Preset8 => {} // handled above
             Action::CycleCelLayer => s.cycle_layer(false),
             Action::CycleCelLayerBack => s.cycle_layer(true),
             Action::Undo => s.undo(),
@@ -181,6 +212,8 @@ struct Editor {
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
     ws_name: String,
+    /// Buffer for the Presets pane's "save current as" name field.
+    preset_name: String,
 }
 
 /// Renders each pane by borrowing the editor's parts (disjoint fields, so the
@@ -191,18 +224,16 @@ struct EditorTabs<'a> {
     paint: Option<&'a mut PaintLayer>,
     pen: &'a PenConfig,
     layers_cfg: &'a LayersConfig,
+    presets: &'a mut Vec<BrushPreset>,
+    presets_dirty: &'a mut bool,
+    preset_name: &'a mut String,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
     type Tab = Pane;
 
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
-        match tab {
-            Pane::Canvas => "Canvas".into(),
-            Pane::XSheet => "X-Sheet".into(),
-            Pane::Layers => "Cel Layers".into(),
-            Pane::Brush => "Brush".into(),
-        }
+        tab.title().into()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
@@ -213,6 +244,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 let raster_available = self.paint.is_some();
                 self.canvas.brush_ui(ui, self.state, raster_available);
             }
+            Pane::Presets => self.presets_ui(ui),
             Pane::Canvas => self.canvas.ui(
                 ui,
                 self.state,
@@ -223,14 +255,68 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
         }
     }
 
-    // Phase 0: panes can move and resize but not close or tear out — losing
-    // the canvas would strand the user. Both arrive in later phases.
-    fn closeable(&mut self, _tab: &mut Pane) -> bool {
-        false
+    // Everything except the canvas can be closed (re-add from the "panes"
+    // menu); losing the canvas would strand the user.
+    fn closeable(&mut self, tab: &mut Pane) -> bool {
+        !matches!(tab, Pane::Canvas)
     }
 
     fn allowed_in_windows(&self, _tab: &mut Pane) -> bool {
         false
+    }
+}
+
+impl EditorTabs<'_> {
+    /// The Presets pane: click applies; save the current brush under a name.
+    fn presets_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(self.preset_name)
+                    .hint_text("name…")
+                    .desired_width(110.0),
+            );
+            let name = self.preset_name.trim().to_string();
+            if ui
+                .button("save current")
+                .on_hover_text("snapshot the current brush as a preset")
+                .clicked()
+                && !name.is_empty()
+            {
+                let snap = self.canvas.snapshot_preset(name.clone());
+                if let Some(existing) = self.presets.iter_mut().find(|p| p.name == name) {
+                    *existing = snap;
+                } else {
+                    self.presets.push(snap);
+                }
+                *self.presets_dirty = true;
+                self.preset_name.clear();
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            for (i, p) in self.presets.iter().enumerate() {
+                let hotkey = if i < 8 {
+                    format!("{} ", i + 1)
+                } else {
+                    "· ".into()
+                };
+                let mut text = egui::RichText::new(format!(
+                    "{hotkey}{}  {:.0}px",
+                    p.name, p.size_px
+                ));
+                if let Some(c) = p.color {
+                    text = text.color(egui::Color32::from_rgb(c[0], c[1], c[2]));
+                }
+                if ui.button(text).on_hover_text("apply preset").clicked() {
+                    self.canvas.apply_preset(p);
+                    self.state.status = format!("brush: {}", p.name);
+                }
+            }
+            if self.presets.is_empty() {
+                ui.label(egui::RichText::new("no presets — save one above").weak());
+            }
+        });
     }
 }
 
@@ -256,6 +342,7 @@ impl Editor {
             },
             workspaces: Workspaces::load(),
             ws_name: String::new(),
+            preset_name: String::new(),
         }
     }
 
@@ -274,6 +361,7 @@ impl Editor {
             },
             workspaces: Workspaces::load(),
             ws_name: String::new(),
+            preset_name: String::new(),
         }
     }
 }
@@ -291,6 +379,8 @@ impl eframe::App for App {
         let canvas_filter = self.config.perf.canvas_filter.wgpu();
         let pen = self.config.pen.clone();
         let layers_cfg = self.config.layers.clone();
+        let mut presets = self.config.presets.clone();
+        let mut presets_dirty = false;
 
         // Editor (if any) renders first as the base layer.
         if let Some(editor) = &mut self.editor {
@@ -298,7 +388,11 @@ impl eframe::App for App {
             if let Some(p) = &mut editor.paint {
                 p.set_filter(canvas_filter);
             }
-            editor.ui(ui, &pen, &layers_cfg);
+            editor.ui(ui, &pen, &layers_cfg, &mut presets, &mut presets_dirty);
+            if presets_dirty {
+                self.config.presets = presets.clone();
+                self.config.save();
+            }
             if editor.request_new {
                 editor.request_new = false;
                 self.new_form = Some(NewProjectForm::default());
@@ -468,7 +562,9 @@ fn probe_at(ppp: f32) {
                 egui::vec2(1280.0, 800.0),
             )),
         );
-        editor.ui(&mut root, &pen, &layers_cfg);
+        let mut presets = config.presets.clone();
+        let mut presets_dirty = false;
+        editor.ui(&mut root, &pen, &layers_cfg, &mut presets, &mut presets_dirty);
         let _ = ctx.end_pass();
         let r = editor.canvas.dbg_rect;
         let note = match *last {
@@ -539,7 +635,14 @@ fn probe_at(ppp: f32) {
 }
 
 impl Editor {
-    fn ui(&mut self, ui: &mut egui::Ui, pen: &PenConfig, layers_cfg: &LayersConfig) {
+    fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        pen: &PenConfig,
+        layers_cfg: &LayersConfig,
+        presets: &mut Vec<BrushPreset>,
+        presets_dirty: &mut bool,
+    ) {
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
 
@@ -658,6 +761,14 @@ impl Editor {
                         .clicked()
                     {
                         self.dock = self.workspaces.list[i].dock.clone();
+                        // Workflow-stage brush: entering a bound workspace
+                        // loads its preset automatically.
+                        if let Some(pname) = self.workspaces.list[i].preset.clone()
+                            && let Some(p) = presets.iter().find(|p| p.name == pname)
+                        {
+                            self.canvas.apply_preset(p);
+                            self.state.status = format!("workspace {name} — brush: {pname}");
+                        }
                     }
                 }
                 ui.menu_button("ws ▾", |ui| {
@@ -674,6 +785,7 @@ impl Editor {
                                 self.workspaces.list.push(Workspace {
                                     name,
                                     dock: self.dock.clone(),
+                                    preset: None,
                                 });
                             }
                             self.workspaces.save();
@@ -683,17 +795,54 @@ impl Editor {
                     });
                     ui.separator();
                     let mut remove: Option<usize> = None;
+                    let mut assign: Option<(usize, Option<String>)> = None;
                     for (i, w) in self.workspaces.list.iter().enumerate() {
                         ui.horizontal(|ui| {
                             ui.label(&w.name);
+                            // Bound brush preset for this workspace (workflow
+                            // stage keeps its own brush).
+                            let bound = w.preset.clone().unwrap_or_else(|| "no brush".into());
+                            ui.menu_button(format!("🖌 {bound}"), |ui| {
+                                if ui.button("no brush").clicked() {
+                                    assign = Some((i, None));
+                                    ui.close();
+                                }
+                                for p in presets.iter() {
+                                    if ui.button(&p.name).clicked() {
+                                        assign = Some((i, Some(p.name.clone())));
+                                        ui.close();
+                                    }
+                                }
+                            });
                             if ui.small_button("✕").on_hover_text("delete workspace").clicked() {
                                 remove = Some(i);
                             }
                         });
                     }
+                    if let Some((i, pname)) = assign {
+                        self.workspaces.list[i].preset = pname;
+                        self.workspaces.save();
+                    }
                     if let Some(i) = remove {
                         self.workspaces.list.remove(i);
                         self.workspaces.save();
+                    }
+                });
+                // Re-open closed panes (a pane lives only while it's in the
+                // dock tree).
+                ui.menu_button("panes ▾", |ui| {
+                    for pane in Pane::ALL {
+                        let present = self
+                            .dock
+                            .iter_all_tabs()
+                            .any(|(_, t)| t == pane);
+                        if ui
+                            .add_enabled(!present, egui::Button::new(pane.title()))
+                            .clicked()
+                        {
+                            self.dock.main_surface_mut().push_to_focused_leaf(*pane);
+                            ui.close();
+                        }
                     }
                 });
                 ui.separator();
@@ -745,9 +894,18 @@ impl Editor {
             paint: self.paint.as_mut(),
             pen,
             layers_cfg,
+            presets,
+            presets_dirty,
+            preset_name: &mut self.preset_name,
         };
+        let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
+        // egui_dock clamps every divider so each side keeps `separator.extra`
+        // pixels — the DEFAULT IS 175px, which silently blocked collapsing
+        // panes (e.g. the Brush band above the canvas). 26px keeps the tab bar
+        // grabbable while letting panes shrink to slim rails.
+        dock_style.separator.extra = 26.0;
         DockArea::new(&mut self.dock)
-            .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+            .style(dock_style)
             .show_inside(ui, &mut tabs);
     }
 }

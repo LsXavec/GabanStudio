@@ -225,6 +225,35 @@ impl CanvasView {
         self.erasing = !self.erasing;
     }
 
+    /// Apply a brush preset wholesale (keybind 1–8, Presets pane, or a
+    /// workspace switch bound to it). Also drops the eraser — a preset is ink.
+    pub fn apply_preset(&mut self, p: &crate::config::BrushPreset) {
+        self.raster_brush_px = p.size_px;
+        self.brush_flow = p.flow;
+        self.brush_opacity = p.opacity;
+        self.dyn_size = p.dyn_size;
+        self.dyn_opacity = p.dyn_opacity;
+        self.min_size = p.min_size;
+        if let Some(c) = p.color {
+            self.brush_color = c;
+        }
+        self.erasing = false;
+    }
+
+    /// Snapshot the current brush as a preset (the Presets pane's "save").
+    pub fn snapshot_preset(&self, name: String) -> crate::config::BrushPreset {
+        crate::config::BrushPreset {
+            name,
+            size_px: self.raster_brush_px,
+            flow: self.brush_flow,
+            opacity: self.brush_opacity,
+            dyn_size: self.dyn_size,
+            dyn_opacity: self.dyn_opacity,
+            min_size: self.min_size,
+            color: Some(self.brush_color),
+        }
+    }
+
     /// A stroke is live (pen down, or its pen-up commit hasn't run yet).
     /// Stroke-unsafe actions (frame nav, undo, layer cycle, clears) must not
     /// dispatch while this holds — they would retarget or orphan the commit.
@@ -254,75 +283,117 @@ impl CanvasView {
         // Sliders are the widest fixed-size widgets — scale them to the pane
         // so the toolbox keeps collapsing in narrow docks instead of hitting
         // a ~180px floor at the dock divider.
+        // Responsive: below the threshold the pane drops to COMPACT mode —
+        // icon buttons and drag-value numbers instead of labelled sliders —
+        // so it collapses to a slim icon rail beside the canvas.
+        let compact = ui.available_width() < 190.0;
         let sw = (ui.available_width() * 0.45).clamp(48.0, 110.0);
         ui.spacing_mut().slider_width = sw;
         ui.horizontal_wrapped(|ui| {
             if raster_available {
-                ui.checkbox(&mut self.raster, "raster")
-                    .on_hover_text("GPU raster brush");
-                ui.separator();
+                if compact {
+                    if ui
+                        .selectable_label(self.raster, "🖌")
+                        .on_hover_text("raster brush engine")
+                        .clicked()
+                    {
+                        self.raster = !self.raster;
+                    }
+                } else {
+                    ui.checkbox(&mut self.raster, "raster")
+                        .on_hover_text("GPU raster brush");
+                    ui.separator();
+                }
             } else {
                 self.raster = false;
             }
             if self.raster {
+                let (brush_lbl, eraser_lbl) = if compact {
+                    ("✏", "▱")
+                } else {
+                    ("✏ brush", "▱ eraser")
+                };
                 if ui
-                    .selectable_label(!self.erasing, "✏ brush")
+                    .selectable_label(!self.erasing, brush_lbl)
                     .on_hover_text("paint ink")
                     .clicked()
                 {
                     self.erasing = false;
                 }
                 if ui
-                    .selectable_label(self.erasing, "▱ eraser")
+                    .selectable_label(self.erasing, eraser_lbl)
                     .on_hover_text("erase to transparency")
                     .clicked()
                 {
                     self.erasing = true;
                 }
                 // Active cel-layer chip (RETAS trace-line colours). Click or A
-                // cycles; strokes land on this layer. Red = hidden (painting
-                // is refused until it's shown or switched). FIXED WIDTH:
-                // monospace + padded name, so switching layers never reflows
-                // the toolbar items after it (canvas-stability law).
+                // cycles; strokes land on this layer. Red = hidden. Wide mode
+                // pads to a FIXED width (no reflow on layer switch); compact
+                // mode is the bare glyph with the name in the tooltip.
                 let lname = state.active_layer_name();
                 let hidden = state.active_layer_props().is_some_and(|p| !p.visible);
-                let shown: String = lname.chars().take(10).collect();
                 let color = if hidden {
                     Color32::from_rgb(235, 90, 80)
                 } else {
                     layer_chip_color(&lname)
                 };
+                let chip = if compact {
+                    "▣".to_string()
+                } else {
+                    let shown: String = lname.chars().take(10).collect();
+                    format!("▣ {shown:<10}")
+                };
                 if ui
-                    .button(
-                        egui::RichText::new(format!("▣ {shown:<10}"))
-                            .monospace()
-                            .color(color),
-                    )
+                    .button(egui::RichText::new(chip).monospace().color(color))
                     .on_hover_text(if hidden {
-                        "active layer is HIDDEN — painting refused (A cycles, or show its eye)"
+                        format!("layer '{lname}' is HIDDEN — painting refused (A cycles)")
                     } else {
-                        "active layer — strokes land here (A cycles)"
+                        format!("active layer: {lname} — strokes land here (A cycles)")
                     })
                     .clicked()
                 {
                     state.cycle_layer(false);
                 }
-                ui.add(
-                    egui::Slider::new(&mut self.raster_brush_px, 1.0..=300.0)
-                        .text("px")
-                        .fixed_decimals(0),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.brush_flow, 0.05..=1.0)
-                        .text("flow")
-                        .fixed_decimals(2),
-                );
-                ui.add(
-                    egui::Slider::new(&mut self.brush_opacity, 0.05..=1.0)
-                        .text("opacity")
-                        .fixed_decimals(2),
-                );
-                ui.menu_button("dynamics", |ui| {
+                if compact {
+                    ui.add(
+                        egui::DragValue::new(&mut self.raster_brush_px)
+                            .range(1.0..=300.0)
+                            .suffix("px"),
+                    )
+                    .on_hover_text("brush size (drag)");
+                    ui.add(
+                        egui::DragValue::new(&mut self.brush_flow)
+                            .range(0.05..=1.0)
+                            .speed(0.01)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text("flow (drag)");
+                    ui.add(
+                        egui::DragValue::new(&mut self.brush_opacity)
+                            .range(0.05..=1.0)
+                            .speed(0.01)
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text("opacity (drag)");
+                } else {
+                    ui.add(
+                        egui::Slider::new(&mut self.raster_brush_px, 1.0..=300.0)
+                            .text("px")
+                            .fixed_decimals(0),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.brush_flow, 0.05..=1.0)
+                            .text("flow")
+                            .fixed_decimals(2),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.brush_opacity, 0.05..=1.0)
+                            .text("opacity")
+                            .fixed_decimals(2),
+                    );
+                }
+                ui.menu_button(if compact { "⚙" } else { "dynamics" }, |ui| {
                     ui.checkbox(&mut self.dyn_size, "pressure → size");
                     ui.checkbox(&mut self.dyn_opacity, "pressure → opacity");
                     ui.add(
@@ -341,7 +412,7 @@ impl CanvasView {
                     );
                 });
                 if ui
-                    .button("clear cel")
+                    .button(if compact { "🗑" } else { "clear cel" })
                     .on_hover_text("clear this cel's raster (undoable)")
                     .clicked()
                 {
@@ -354,7 +425,9 @@ impl CanvasView {
                         .fixed_decimals(1),
                 );
             }
-            ui.separator();
+            if !compact {
+                ui.separator();
+            }
             // Custom colour picker (any RGB); the swatches beside it are presets.
             let mut rgb = [self.brush_color[0], self.brush_color[1], self.brush_color[2]];
             if ui
@@ -373,16 +446,19 @@ impl CanvasView {
                     self.brush_color = c;
                 }
             }
-            ui.separator();
-            if ui.button("fit view").clicked() {
+            if !compact {
+                ui.separator();
+            }
+            if ui
+                .button(if compact { "⌖" } else { "fit view" })
+                .on_hover_text("reset zoom & pan")
+                .clicked()
+            {
                 self.zoom = 1.0;
                 self.pan = egui::Vec2::ZERO;
             }
-            // NOTHING VARIABLE-WIDTH GOES IN THIS ROW. The toolbar used to
-            // carry live diagnostics (pressure readout, onion/cel probes, the
-            // PLAYING label) whose changing text reflowed everything after it
-            // and read as "the workspace shifting". Diagnostics now live in
-            // the status bar (fixed-width) and PLAYING is a canvas overlay.
+            // NOTHING VARIABLE-WIDTH GOES IN THIS ROW (canvas-stability law):
+            // diagnostics live in the status bar; PLAYING is a canvas overlay.
         });
     }
 

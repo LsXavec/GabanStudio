@@ -16,6 +16,24 @@ pub enum Pane {
     Layers,
     /// Brush & tool controls (was the canvas toolbar).
     Brush,
+    /// Brush preset list: click to apply, save the current brush by name.
+    Presets,
+}
+
+impl Pane {
+    /// Every pane kind, for the "panes" add-menu.
+    pub const ALL: &'static [Pane] =
+        &[Pane::Canvas, Pane::XSheet, Pane::Layers, Pane::Brush, Pane::Presets];
+
+    pub fn title(&self) -> &'static str {
+        match self {
+            Pane::Canvas => "Canvas",
+            Pane::XSheet => "X-Sheet",
+            Pane::Layers => "Cel Layers",
+            Pane::Brush => "Brush",
+            Pane::Presets => "Presets",
+        }
+    }
 }
 
 /// The "Draw" room: brush bar over a big canvas; X-sheet rail with the layer
@@ -44,6 +62,10 @@ pub fn timing_workspace() -> DockState<Pane> {
 pub struct Workspace {
     pub name: String,
     pub dock: DockState<Pane>,
+    /// Brush preset (by name) applied automatically when this workspace is
+    /// entered — each workflow stage keeps its own brush.
+    #[serde(default)]
+    pub preset: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -71,10 +93,12 @@ impl Workspaces {
                 Workspace {
                     name: "draw".into(),
                     dock: draw_workspace(),
+                    preset: None,
                 },
                 Workspace {
                     name: "timing".into(),
                     dock: timing_workspace(),
+                    preset: None,
                 },
             ],
         }
