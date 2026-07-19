@@ -46,10 +46,18 @@ const ERASE_BLEND: wgpu::BlendState = wgpu::BlendState {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Dab {
     pub center: [f32; 2],
+    /// MINOR radius: the ellipse's short semi-axis (= the circle radius when
+    /// `aspect` is 1).
     pub radius: f32,
     pub hardness: f32,
     /// Straight (non-premultiplied) linear RGBA; premultiplied in the shader.
     pub color: [f32; 4],
+    /// Unit direction of the ellipse's MAJOR axis (tilt-shaped dabs stamp a
+    /// flattened footprint along the pen's lean). [1, 0] for round dabs.
+    pub dir: [f32; 2],
+    /// Major/minor axis ratio, >= 1. Exactly 1.0 = today's round dab, and the
+    /// shader math degenerates to the plain radial falloff bit-for-bit.
+    pub aspect: f32,
 }
 
 #[repr(C)]
@@ -141,6 +149,8 @@ struct VsOut {
     @location(1) radius: f32,
     @location(2) hardness: f32,
     @location(3) color: vec4<f32>,
+    @location(4) dir: vec2<f32>,
+    @location(5) aspect: f32,
 };
 
 @vertex
@@ -150,13 +160,16 @@ fn vs_main(
     @location(1) radius: f32,
     @location(2) hardness: f32,
     @location(3) color: vec4<f32>,
+    @location(4) dir: vec2<f32>,
+    @location(5) aspect: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 4>(
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
         vec2<f32>(-1.0,  1.0), vec2<f32>(1.0,  1.0),
     );
     let corner = corners[vid];
-    let half_extent = radius + 1.5;          // +AA pad
+    // Quad covers the MAJOR extent (radius * aspect); aspect 1 = old size.
+    let half_extent = radius * max(aspect, 1.0) + 1.5;   // +AA pad
     let local = corner * half_extent;
     let texel = center + local;
     let clip = vec2<f32>(
@@ -169,12 +182,20 @@ fn vs_main(
     out.radius = radius;
     out.hardness = hardness;
     out.color = color;
+    out.dir = dir;
+    out.aspect = aspect;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let rr = dot(in.local, in.local) / max(in.radius * in.radius, 1e-6);
+    // Rotate local into the ellipse frame (major axis = dir), squash the
+    // major coordinate by aspect: the radial falloff below then draws an
+    // ellipse. dir=[1,0] aspect=1 reduces to the plain circle exactly.
+    let xr = dot(in.local, in.dir);
+    let yr = dot(in.local, vec2<f32>(-in.dir.y, in.dir.x));
+    let ell = vec2<f32>(xr / max(in.aspect, 1.0), yr);
+    let rr = dot(ell, ell) / max(in.radius * in.radius, 1e-6);
     let fw = max(fwidth(rr), 1e-5);
     let h = clamp(in.hardness, 0.01, 0.99);
     // MyPaint two-segment hardness falloff in rr = (r/radius)^2 space.
@@ -454,6 +475,8 @@ impl PaintLayer {
                 wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32 },
                 wgpu::VertexAttribute { offset: 12, shader_location: 2, format: wgpu::VertexFormat::Float32 },
                 wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
+                wgpu::VertexAttribute { offset: 32, shader_location: 4, format: wgpu::VertexFormat::Float32x2 },
+                wgpu::VertexAttribute { offset: 40, shader_location: 5, format: wgpu::VertexFormat::Float32 },
             ],
         };
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {

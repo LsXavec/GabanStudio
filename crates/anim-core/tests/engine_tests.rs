@@ -526,16 +526,38 @@ fn test_stroke(seed: f32) -> anim_core::model::Stroke {
                 x: seed,
                 y: 10.0,
                 pressure: 0.4,
+                tilt: [0.0, 0.0],
             },
             anim_core::model::StrokePoint {
                 x: seed + 5.0,
                 y: 12.0,
                 pressure: 0.9,
+                tilt: [0.0, 0.0],
             },
         ],
         base_width: 3.0,
         color: [20, 20, 25, 255],
     }
+}
+
+/// Serde law: tilt was added to StrokePoint after files existed — a point
+/// saved WITHOUT it (every pre-tilt project) must load as a vertical pen,
+/// and tilt must stay out of the content hash until rendering consumes it.
+#[test]
+fn stroke_point_tilt_serde_and_hash_law() {
+    let p: anim_core::model::StrokePoint =
+        serde_json::from_str(r#"{"x":1.0,"y":2.0,"pressure":0.5}"#).unwrap();
+    assert_eq!(p.tilt, [0.0, 0.0]);
+
+    let mut d = anim_core::model::Drawing {
+        id: anim_core::ids::DrawingId(1),
+        name: "t".into(),
+        strokes: vec![test_stroke(1.0)],
+        layers: Vec::new(),
+    };
+    let h0 = d.content_hash();
+    d.strokes[0].points[0].tilt = [0.5, -0.3];
+    assert_eq!(d.content_hash(), h0, "tilt must not shift the content hash");
 }
 
 #[test]

@@ -311,17 +311,19 @@ fn spawn_tablet_thread(
 
             let mut down = false;
             let mut last: Option<egui::Pos2> = None;
+            let mut last_tilt: Option<[f32; 2]> = None;
             loop {
                 let ppp = ctx.pixels_per_point();
                 let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    drain_tablet(&mut mgr, ppp, down, last)
+                    drain_tablet(&mut mgr, ppp, down, last, last_tilt)
                 }));
-                let Ok((samples, d2, l2)) = step else {
+                let Ok((samples, d2, l2, t2)) = step else {
                     eprintln!("native tablet backend panicked — disabled for this session");
                     return;
                 };
                 down = d2;
                 last = l2;
+                last_tilt = t2;
                 if !samples.is_empty() {
                     for s in samples {
                         if tx.send(s).is_err() {
@@ -339,19 +341,21 @@ fn spawn_tablet_thread(
 
 /// The actual event drain, on the tablet thread.
 /// In→Down→Pose*→Up→Out per octotablet's stream; Down carries no pose, so the
-/// last hover pose seeds the stroke position.
+/// last hover pose seeds the stroke position — and its tilt, so a stroke
+/// starts at the pen's real approach angle, not the previous stroke's exit.
 fn drain_tablet(
     mgr: &mut octotablet::Manager,
     ppp: f32,
     mut down: bool,
     mut last: Option<egui::Pos2>,
-) -> (Vec<PenSample>, bool, Option<egui::Pos2>) {
+    mut last_tilt: Option<[f32; 2]>,
+) -> (Vec<PenSample>, bool, Option<egui::Pos2>, Option<[f32; 2]>) {
     let mut out = Vec::new();
     // On Windows the pump error type is uninhabited (pump can't fail);
     // keep the guard for platforms where it can.
     #[allow(irrefutable_let_patterns)]
     let Ok(events) = mgr.pump() else {
-        return (out, down, last);
+        return (out, down, last, last_tilt);
     };
     for event in events {
         let octotablet::events::Event::Tool { event, .. } = event else {
@@ -362,11 +366,26 @@ fn drain_tablet(
             TE::Pose(pose) => {
                 let pos = egui::pos2(pose.position[0] / ppp, pose.position[1] / ppp);
                 last = Some(pos);
+                if pose.tilt.is_some() {
+                    last_tilt = pose.tilt; // hover poses carry tilt too
+                }
                 if down {
                     out.push(PenSample {
                         pos,
                         pressure: pose.pressure.get(),
+                        tilt: pose.tilt,
                         phase: PenPhase::Move,
+                    });
+                } else if pose.tilt.is_some() {
+                    // Proximity pose: forward the live tilt so the cursor
+                    // needle and T° readout move before the stroke starts.
+                    // Tilt-less hovers are dropped (nothing to show; the OS
+                    // mouse-move already drives the cursor position).
+                    out.push(PenSample {
+                        pos,
+                        pressure: None,
+                        tilt: pose.tilt,
+                        phase: PenPhase::Hover,
                     });
                 }
             }
@@ -376,6 +395,7 @@ fn drain_tablet(
                     out.push(PenSample {
                         pos,
                         pressure: None, // first Pose supplies real pressure
+                        tilt: last_tilt, // hover already reported the angle
                         phase: PenPhase::Down,
                     });
                 }
@@ -385,6 +405,7 @@ fn drain_tablet(
                     out.push(PenSample {
                         pos: last.unwrap_or(egui::pos2(0.0, 0.0)),
                         pressure: None,
+                        tilt: None,
                         phase: PenPhase::Up,
                     });
                 }
@@ -393,7 +414,7 @@ fn drain_tablet(
             _ => {}
         }
     }
-    (out, down, last)
+    (out, down, last, last_tilt)
 }
 
 struct Editor {

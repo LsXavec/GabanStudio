@@ -18,6 +18,14 @@ pub struct StrokePoint {
     pub y: f32,
     /// 0..1 tablet pressure (0.5 for mouse input).
     pub pressure: f32,
+    /// Pen tilt from vertical in radians, [x, y] per octotablet's convention
+    /// ([+,+] = right + toward the user). [0, 0] = vertical pen — and also
+    /// mouse/legacy input, so old files load with a vertical pen (serde
+    /// default). NOT folded into `content_hash`: vector rendering doesn't
+    /// consume tilt yet, and the hash law folds only what reaches pixels —
+    /// fold it the day a vector renderer draws tilt-shaped ribbons.
+    #[serde(default)]
+    pub tilt: [f32; 2],
 }
 
 /// A single pen stroke. Rendered width = base_width * point pressure.
@@ -137,6 +145,7 @@ impl Drawing {
                 bytes.extend_from_slice(&p.x.to_bits().to_le_bytes());
                 bytes.extend_from_slice(&p.y.to_bits().to_le_bytes());
                 bytes.extend_from_slice(&p.pressure.to_bits().to_le_bytes());
+                // tilt deliberately excluded — see `StrokePoint::tilt`.
             }
         }
         if !self.layers.is_empty() {

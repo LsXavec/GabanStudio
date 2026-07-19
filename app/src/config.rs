@@ -428,6 +428,24 @@ pub struct BrushPreset {
     pub min_size: f32,
     /// None = keep the current brush colour when applying.
     pub color: Option<[u8; 4]>,
+    /// Tilt dynamics (native tablet backend only — egui pen events carry no
+    /// tilt). Serde defaults keep pre-tilt configs loading.
+    #[serde(default)]
+    pub tilt_size: bool,
+    #[serde(default)]
+    pub tilt_opacity: bool,
+    /// Tilting flattens + rotates the dab along the lean (the stamp itself
+    /// shows the tilt, like Krita's tip masks following the pen).
+    #[serde(default)]
+    pub tilt_shape: bool,
+    /// How strongly tilt drives the enabled dynamics (0 = off, 1 = full:
+    /// size up to 2×, opacity down to ¼ at a flat pen).
+    #[serde(default = "default_tilt_strength")]
+    pub tilt_strength: f32,
+}
+
+pub fn default_tilt_strength() -> f32 {
+    0.5
 }
 
 impl Default for BrushPreset {
@@ -441,6 +459,10 @@ impl Default for BrushPreset {
             dyn_opacity: false,
             min_size: 0.0,
             color: None,
+            tilt_size: false,
+            tilt_opacity: false,
+            tilt_shape: false,
+            tilt_strength: default_tilt_strength(),
         }
     }
 }
@@ -460,6 +482,12 @@ pub fn default_presets() -> Vec<BrushPreset> {
             flow: 0.55,
             dyn_opacity: true,
             min_size: 0.2,
+            // Side-of-the-lead shading: tilting the pencil draws broader,
+            // lighter, and flattened along the lean, like a real pencil laid
+            // on its side.
+            tilt_size: true,
+            tilt_opacity: true,
+            tilt_shape: true,
             ..Default::default()
         },
         BrushPreset {
@@ -1092,6 +1120,20 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                         .changed();
                     changed |= ui.checkbox(&mut p.dyn_size, "size dyn").changed();
                     changed |= ui.checkbox(&mut p.dyn_opacity, "op dyn").changed();
+                    changed |= ui
+                        .checkbox(&mut p.tilt_size, "tilt sz")
+                        .on_hover_text("tilting the pen broadens the stroke (native ink pen)")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut p.tilt_opacity, "tilt op")
+                        .on_hover_text("tilting the pen lightens the stroke (native ink pen)")
+                        .changed();
+                    changed |= ui
+                        .checkbox(&mut p.tilt_shape, "tilt shape")
+                        .on_hover_text(
+                            "the stamp flattens and turns with the pen's lean (native ink pen)",
+                        )
+                        .changed();
                     // Optional fixed colour.
                     let mut has_color = p.color.is_some();
                     if ui

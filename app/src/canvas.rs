@@ -67,14 +67,38 @@ const MOUSE_MIN_TRAVEL_PX: f32 = 3.0;
 pub struct PenSample {
     pub pos: Pos2,
     pub pressure: Option<f32>,
+    /// Pen tilt from vertical in radians, [x, y] (octotablet convention:
+    /// [+,+] = right + toward the user). None = the packet carried no tilt.
+    pub tilt: Option<[f32; 2]>,
     pub phase: PenPhase,
 }
+
+/// Tilt magnitude that counts as "fully flat" for the dynamics mapping —
+/// the XP-Pen Artist line (and most pens) report up to ±60° from vertical.
+const TILT_MAX_RAD: f32 = std::f32::consts::PI / 3.0;
+
+/// EMA factor for tilt smoothing. Tilt packets are far steadier than
+/// pressure, so a light touch is enough — just kills single-packet steps.
+const TILT_SMOOTH: f32 = 0.35;
+
+/// How far tilt→shape flattens the dab: major/minor ratio grows to
+/// 1 + GAIN·strength·tilt_norm (2.5× at full strength + a flat pen) — the
+/// stamp visibly turns with the pen, like a Krita tip mask following tilt.
+const TILT_ASPECT_GAIN: f32 = 1.5;
+
+/// Tilt magnitude (normalized) below which the cursor needle hides — a
+/// near-vertical pen has no meaningful direction to point.
+const TILT_NEEDLE_MIN: f32 = 0.05;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PenPhase {
     Down,
     Move,
     Up,
+    /// Pen in proximity but not touching: carries live tilt (and position)
+    /// so the cursor needle and T° readout move BEFORE the stroke starts.
+    /// Never paints, and never latches the native-owns-the-pen dedupe.
+    Hover,
 }
 
 pub struct CanvasView {
@@ -132,7 +156,7 @@ pub struct CanvasView {
     /// retarget the pen-up commit (it would bake the OLD layer's readback into
     /// the NEW layer: silent cross-layer corruption).
     stroke_layer_slot: usize,
-    // --- Brush dynamics (what pen pressure drives). Tilt dynamics are gated on
+    // --- Brush dynamics (what pen pressure/tilt drives). Tilt flows only from
     // the octotablet backend — egui pen events carry no tilt.
     /// Pressure drives dab size (through the pen curve).
     dyn_size: bool,
@@ -142,6 +166,27 @@ pub struct CanvasView {
     /// `min_size×brush` and `brush`, so light touches on a big brush draw a
     /// thin-but-visible line instead of vanishing (Krita's minimum-size).
     min_size: f32,
+    /// Tilting the pen broadens the stroke (side-of-the-lead pencil feel).
+    tilt_size: bool,
+    /// Tilting the pen lightens the stroke.
+    tilt_opacity: bool,
+    /// Tilting the pen flattens + rotates the dab along the lean direction —
+    /// the stamp itself shows the tilt, like Krita's tip masks.
+    tilt_shape: bool,
+    /// How strongly tilt drives the enabled dynamics (0..1): at 1.0 a flat
+    /// pen doubles the dab size and drops its alpha to a quarter.
+    tilt_strength: f32,
+    /// EMA-smoothed live tilt (radians, [x, y]); sampled into each stroke
+    /// point so already-flushed dabs never recompute differently.
+    smoothed_tilt: [f32; 2],
+    /// Last tilt the tablet reported — carried across strokes (a pen's tilt
+    /// barely changes between lift and touch-down; Down packets carry none).
+    last_tilt: [f32; 2],
+    /// Live tilt magnitude in degrees, for the status-bar diagnostic.
+    dbg_tilt: f32,
+    /// A real tilt sample arrived this session (hover or stroke) — gates the
+    /// T° readout and the cursor needle. One-way latch: fixed-width law.
+    tilt_seen: bool,
     /// This stroke wrote the CEL texture directly (eraser dabs, or the new-cel
     /// clear). If it is abandoned, the cel must re-sync from engine truth —
     /// otherwise phantom damage gets baked into the NEXT commit.
@@ -223,6 +268,14 @@ impl CanvasView {
             dyn_size: true,
             dyn_opacity: false,
             min_size: 0.0,
+            tilt_size: false,
+            tilt_opacity: false,
+            tilt_shape: false,
+            tilt_strength: crate::config::default_tilt_strength(),
+            smoothed_tilt: [0.0; 2],
+            last_tilt: [0.0; 2],
+            dbg_tilt: 0.0,
+            tilt_seen: false,
             cel_touched: false,
             dabs_flushed: 0,
             raster_stroke_done: false,
@@ -255,6 +308,10 @@ impl CanvasView {
         self.dyn_size = p.dyn_size;
         self.dyn_opacity = p.dyn_opacity;
         self.min_size = p.min_size;
+        self.tilt_size = p.tilt_size;
+        self.tilt_opacity = p.tilt_opacity;
+        self.tilt_shape = p.tilt_shape;
+        self.tilt_strength = p.tilt_strength;
         if let Some(c) = p.color {
             self.brush_color = c;
         }
@@ -272,6 +329,10 @@ impl CanvasView {
             dyn_opacity: self.dyn_opacity,
             min_size: self.min_size,
             color: Some(self.brush_color),
+            tilt_size: self.tilt_size,
+            tilt_opacity: self.tilt_opacity,
+            tilt_shape: self.tilt_shape,
+            tilt_strength: self.tilt_strength,
         }
     }
 
@@ -282,16 +343,36 @@ impl CanvasView {
         self.touch_active || !self.current.is_empty() || self.raster_stroke_done
     }
 
+    /// Fold one live tilt sample into the smoothed state (EMA) + diagnostics.
+    /// Used by hover samples and by mid-stroke Moves past the seed.
+    fn note_tilt(&mut self, t: [f32; 2]) {
+        self.smoothed_tilt[0] += (t[0] - self.smoothed_tilt[0]) * TILT_SMOOTH;
+        self.smoothed_tilt[1] += (t[1] - self.smoothed_tilt[1]) * TILT_SMOOTH;
+        self.last_tilt = t;
+        self.tilt_seen = true;
+        self.dbg_tilt = (self.smoothed_tilt[0].powi(2) + self.smoothed_tilt[1].powi(2))
+            .sqrt()
+            .to_degrees();
+    }
+
     /// Fixed-width pressure diagnostic for the status bar:
     /// (text, pressure-range-is-healthy, pen-arriving-as-mouse).
     pub fn pressure_diag(&self) -> (String, bool, bool) {
         let total = (self.dbg_some + self.dbg_none).max(1);
         let pct = 100 * self.dbg_some / total;
+        // The tilt readout appears once a real tilt sample has arrived (hover
+        // counts — the needle and readout work before the first stroke);
+        // tilt_seen latches once, so the bar's width never reflows.
+        let tilt = if self.tilt_seen {
+            format!("  T{:2.0}°", self.dbg_tilt.clamp(0.0, 90.0))
+        } else {
+            String::new()
+        };
         (
             format!(
-                "{}P{:5.2}  {:4.2}–{:4.2}  {:3}%",
+                "{}P{:5.2}  {:4.2}–{:4.2}  {:3}%{}",
                 if self.native_active { "ink " } else { "" },
-                self.dbg_pressure, self.dbg_min, self.dbg_max, pct
+                self.dbg_pressure, self.dbg_min, self.dbg_max, pct, tilt
             ),
             self.dbg_max - self.dbg_min > 0.15,
             self.dbg_mouse_mode,
@@ -427,11 +508,32 @@ impl CanvasView {
                         "size at zero pressure, as a fraction of the brush — \
                          keeps light touches visible on big brushes",
                     );
-                    ui.label(
-                        egui::RichText::new("tilt: needs the tablet backend (planned)")
-                            .weak()
-                            .small(),
+                    ui.separator();
+                    ui.checkbox(&mut self.tilt_size, "tilt → size")
+                        .on_hover_text("tilting the pen broadens the stroke, like a pencil on its side");
+                    ui.checkbox(&mut self.tilt_opacity, "tilt → opacity")
+                        .on_hover_text("tilting the pen lightens the stroke");
+                    ui.checkbox(&mut self.tilt_shape, "tilt → shape")
+                        .on_hover_text(
+                            "the stamp flattens and turns with the pen's lean — \
+                             the stroke itself shows the tilt",
+                        );
+                    ui.add(
+                        egui::Slider::new(&mut self.tilt_strength, 0.0..=1.0)
+                            .text("tilt strength")
+                            .fixed_decimals(2),
+                    )
+                    .on_hover_text(
+                        "at 1.00 a fully flat pen (60°) doubles the size \
+                         and quarters the opacity",
                     );
+                    if !self.native_active {
+                        ui.label(
+                            egui::RichText::new("tilt flows from the native ink pen — draw once to latch it")
+                                .weak()
+                                .small(),
+                        );
+                    }
                 });
                 if ui
                     .button(if compact { "🗑" } else { "clear cel" })
@@ -851,18 +953,76 @@ impl CanvasView {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             // Exact size: what a FULL-pressure dab paints (the falloff reaches
             // zero exactly at its radius), including the dynamics mapping —
-            // min-size floor and the pressure→size toggle — in screen space.
+            // min-size floor, the pressure→size toggle, and the tilt broaden
+            // factor (without it, tilt→size would paint OUTSIDE the ring — the
+            // one direction the preview must never err). Tilt is LIVE both
+            // hovering and mid-stroke: proximity poses arrive as PenPhase::Hover
+            // and feed note_tilt (pens that report no tilt in proximity keep
+            // the previous stroke's carried value).
             // Floor only for visibility once a brush is sub-3px on screen.
             let t_max = if self.dyn_size { self.pen_curve.apply(1.0) } else { 1.0 };
             let min_s = self.min_size.clamp(0.0, 1.0);
-            let r = (self.raster_brush_px * (min_s + (1.0 - min_s) * t_max) * scale * 0.5)
+            let strength = self.tilt_strength.clamp(0.0, 1.0);
+            let tmag = (self.smoothed_tilt[0].powi(2) + self.smoothed_tilt[1].powi(2)).sqrt();
+            let tn = (tmag / TILT_MAX_RAD).clamp(0.0, 1.0);
+            let broaden = if self.tilt_size { 1.0 + strength * tn } else { 1.0 };
+            let r = (self.raster_brush_px * (min_s + (1.0 - min_s) * t_max) * broaden * scale
+                * 0.5)
                 .max(1.5);
-            painter.circle_stroke(pos, r, egui::Stroke::new(1.0, Color32::from_black_alpha(170)));
-            painter.circle_stroke(
-                pos,
-                (r - 1.0).max(0.5),
-                egui::Stroke::new(1.0, Color32::from_white_alpha(170)),
-            );
+            // Tilt direction in screen space (paper axes = screen axes).
+            let dir = if tmag > 1e-4 {
+                egui::vec2(self.smoothed_tilt[0] / tmag, self.smoothed_tilt[1] / tmag)
+            } else {
+                egui::vec2(1.0, 0.0)
+            };
+            let aspect = if self.tilt_shape && tmag > 1e-4 {
+                1.0 + TILT_ASPECT_GAIN * strength * tn
+            } else {
+                1.0
+            };
+            if aspect > 1.01 {
+                // The footprint is a rotated ellipse (major axis along the
+                // lean) — draw the exact outline, same double-ring contrast.
+                let perp = egui::vec2(-dir.y, dir.x);
+                let ellipse = |major: f32, minor: f32, color: Color32| {
+                    let pts: Vec<Pos2> = (0..=32)
+                        .map(|i| {
+                            let th = i as f32 / 32.0 * std::f32::consts::TAU;
+                            pos + dir * (th.cos() * major) + perp * (th.sin() * minor)
+                        })
+                        .collect();
+                    painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
+                };
+                ellipse(r * aspect, r, Color32::from_black_alpha(170));
+                ellipse((r * aspect - 1.0).max(0.5), (r - 1.0).max(0.5),
+                    Color32::from_white_alpha(170));
+            } else {
+                painter.circle_stroke(
+                    pos, r, egui::Stroke::new(1.0, Color32::from_black_alpha(170)));
+                painter.circle_stroke(
+                    pos,
+                    (r - 1.0).max(0.5),
+                    egui::Stroke::new(1.0, Color32::from_white_alpha(170)),
+                );
+            }
+            // Tilt needle (Krita-calligraphy style): a line from the centre
+            // pointing the way the pen leans, growing with the lean — the
+            // visual proof tilt is flowing even for a plain round brush.
+            if self.tilt_seen && tn > TILT_NEEDLE_MIN {
+                // Order-safe length: .max().min(), NOT clamp(4.0, footprint) —
+                // f32::clamp PANICS when min > max, and small brushes routinely
+                // have a sub-4px footprint. There the needle just spans it.
+                let len = (r * aspect * tn).max(4.0).min(r * aspect);
+                let tip = pos + dir * len;
+                painter.line_segment(
+                    [pos, tip],
+                    egui::Stroke::new(3.0, Color32::from_white_alpha(150)),
+                );
+                painter.line_segment(
+                    [pos, tip],
+                    egui::Stroke::new(1.2, Color32::from_black_alpha(200)),
+                );
+            }
             if self.erasing {
                 painter.circle_filled(pos, 1.3, Color32::from_black_alpha(180));
             }
@@ -891,22 +1051,58 @@ impl CanvasView {
         // Dynamics: pressure (through the pen curve) drives size and/or opacity.
         // Size maps between min_size×brush and brush (the floor keeps light
         // touches visible); opacity scales the dab's alpha on top of flow.
+        // Tilt (native backend only; stored per point like pressure so
+        // already-flushed dabs never recompute differently): the flatter the
+        // pen, the broader and/or lighter the dab — side-of-the-lead feel.
         let min_s = self.min_size.clamp(0.0, 1.0);
-        let radius_of = |pr: f32| {
+        let strength = self.tilt_strength.clamp(0.0, 1.0);
+        // Normalized 0 (vertical) .. 1 (≥60° flat) tilt magnitude.
+        let tilt_norm =
+            |t: [f32; 2]| ((t[0] * t[0] + t[1] * t[1]).sqrt() / TILT_MAX_RAD).clamp(0.0, 1.0);
+        let radius_of = |pr: f32, tn: f32| {
             let t = if self.dyn_size { self.pen_curve.apply(pr) } else { 1.0 };
-            (self.raster_brush_px * (min_s + (1.0 - min_s) * t) * 0.5)
+            let broaden = if self.tilt_size { 1.0 + strength * tn } else { 1.0 };
+            (self.raster_brush_px * (min_s + (1.0 - min_s) * t) * broaden * 0.5)
                 .max(0.5)
                 .min(cap)
         };
-        let dab_at = |x: f32, y: f32, pr: f32| {
+        let dab_at = |x: f32, y: f32, pr: f32, tv: [f32; 2]| {
+            let tn = tilt_norm(tv);
             let a = if self.dyn_opacity { self.pen_curve.apply(pr) } else { 1.0 };
+            let lighten = if self.tilt_opacity { 1.0 - 0.75 * strength * tn } else { 1.0 };
             let mut color = base;
-            color[3] *= flow * a;
-            Dab { center: [x, y], radius: radius_of(pr), hardness, color }
+            color[3] *= flow * a * lighten;
+            // tilt→shape: flatten + rotate the stamp along the lean direction
+            // (paper axes = screen axes — the canvas never rotates).
+            let radius = radius_of(pr, tn);
+            let mag = (tv[0] * tv[0] + tv[1] * tv[1]).sqrt();
+            let (dir, aspect) = if self.tilt_shape && mag > 1e-4 {
+                let a = 1.0 + TILT_ASPECT_GAIN * strength * tn;
+                // The no-force cap bounds the whole FOOTPRINT: the ellipse
+                // paints out to radius×aspect along the lean, so a capped
+                // (pressureless) dab must cap the major extent too — else a
+                // leaned tap escapes the anti-blob cap by up to 2.5×.
+                let a = if cap.is_finite() {
+                    a.min((cap / radius).max(1.0))
+                } else {
+                    a
+                };
+                ([tv[0] / mag, tv[1] / mag], a)
+            } else {
+                ([1.0, 0.0], 1.0)
+            };
+            Dab {
+                center: [x, y],
+                radius,
+                hardness,
+                color,
+                dir,
+                aspect,
+            }
         };
 
         if pts.len() == 1 {
-            dabs.push(dab_at(pts[0].x, pts[0].y, pts[0].pressure));
+            dabs.push(dab_at(pts[0].x, pts[0].y, pts[0].pressure, pts[0].tilt));
             return dabs;
         }
 
@@ -914,6 +1110,9 @@ impl CanvasView {
         for w in pts.windows(2) {
             let (ax, ay, apr) = (w[0].x, w[0].y, w[0].pressure);
             let (bx, by, bpr) = (w[1].x, w[1].y, w[1].pressure);
+            // Lerp the tilt VECTOR (not the magnitude): adjacent samples point
+            // the same general way, so the interpolated magnitude stays honest.
+            let (at2, bt2) = (w[0].tilt, w[1].tilt);
             let (dx, dy) = (bx - ax, by - ay);
             let len = (dx * dx + dy * dy).sqrt();
             if len < 1e-4 {
@@ -923,7 +1122,11 @@ impl CanvasView {
             while d < len {
                 let t = d / len;
                 let pr = apr + (bpr - apr) * t;
-                let d2 = dab_at(ax + dx * t, ay + dy * t, pr);
+                let tv = [
+                    at2[0] + (bt2[0] - at2[0]) * t,
+                    at2[1] + (bt2[1] - at2[1]) * t,
+                ];
+                let d2 = dab_at(ax + dx * t, ay + dy * t, pr, tv);
                 let r = d2.radius;
                 dabs.push(d2);
                 let step = (0.1 * (2.0 * r)).max(0.75); // spacing 0.1 * diameter
@@ -940,6 +1143,7 @@ impl CanvasView {
         &mut self,
         pos: Pos2,
         force: Option<f32>,
+        tilt: Option<[f32; 2]>,
         rect: Rect,
         to_paper: &impl Fn(Pos2) -> Pos2,
         state: &mut AppState,
@@ -961,6 +1165,12 @@ impl CanvasView {
         self.last_pressure = p0;
         self.smoothed_pressure = p0;
         self.raw_history = [p0; 3];
+        // Down packets carry no pose: seed from the last reported tilt (a
+        // pen's tilt barely changes across a lift) and let the EMA converge.
+        if let Some(t) = tilt {
+            self.last_tilt = t;
+        }
+        self.smoothed_tilt = self.last_tilt;
         self.cur_some = 0;
         self.cur_none = 0;
         self.stroke_from_mouse = false;
@@ -976,6 +1186,7 @@ impl CanvasView {
             x: p.x,
             y: p.y,
             pressure: p0,
+            tilt: self.smoothed_tilt,
         });
         true
     }
@@ -1009,12 +1220,26 @@ impl CanvasView {
         let events = ui.input(|i| i.events.clone());
         let mut touch_seen = false;
 
+        // HOVER TILT (any backend state): proximity samples carry live tilt so
+        // the cursor needle + T° readout move before the stroke starts. Never
+        // touches stroke state (the thread only emits Hover while the pen is
+        // up, and the guard makes that a hard rule).
+        for s in native_pen {
+            if s.phase == PenPhase::Hover
+                && !self.touch_active
+                && let Some(t) = s.tilt
+            {
+                self.note_tilt(t);
+            }
+        }
+
         // NATIVE TABLET PATH (octotablet / Windows Ink RealTimeStylus): once
         // real tablet samples arrive, they own the pen forever this session —
         // Windows ALSO surfaces the same physical strokes as egui Touch and
         // mouse events, so both fallbacks must go quiet or every stroke would
-        // paint twice.
-        if !native_pen.is_empty() {
+        // paint twice. Hover samples deliberately do NOT latch: they never
+        // paint, so they must not silence the fallbacks by themselves.
+        if native_pen.iter().any(|s| s.phase != PenPhase::Hover) {
             self.native_active = true;
             self.seen_pen = true;
         }
@@ -1022,14 +1247,15 @@ impl CanvasView {
             for s in native_pen {
                 match s.phase {
                     PenPhase::Down => {
-                        self.stroke_start(s.pos, s.pressure, rect, to_paper, state);
+                        self.stroke_start(s.pos, s.pressure, s.tilt, rect, to_paper, state);
                     }
                     PenPhase::Move => {
                         if self.touch_active {
-                            self.process_move(s.pos, s.pressure, to_paper, scale);
+                            self.process_move(s.pos, s.pressure, s.tilt, to_paper, scale);
                         }
                     }
                     PenPhase::Up => self.stroke_end(state),
+                    PenPhase::Hover => {} // handled above
                 }
             }
             return;
@@ -1047,13 +1273,18 @@ impl CanvasView {
                     // is usually 0 -> None). Seed provisionally; the first real
                     // Move overwrites it so strokes don't begin with a fat dot.
                     egui::TouchPhase::Start => {
-                        self.stroke_start(*pos, *force, rect, to_paper, state);
+                        // egui Touch carries no tilt data → treat it as a
+                        // VERTICAL pen, explicitly (like the mouse path). None
+                        // would seed from last_tilt, which hover samples now
+                        // update WITHOUT latching native — a hovered pen's
+                        // angle must not leak into a finger/fallback stroke.
+                        self.stroke_start(*pos, *force, Some([0.0, 0.0]), rect, to_paper, state);
                     }
                     egui::TouchPhase::Move => {
                         if !self.touch_active {
                             continue;
                         }
-                        self.process_move(*pos, *force, to_paper, scale);
+                        self.process_move(*pos, *force, Some([0.0, 0.0]), to_paper, scale);
                     }
                     // Step 6: the release event's own pos/force are unreliable
                     // (End force is None on Windows). Discard them; synthesize
@@ -1095,6 +1326,7 @@ impl CanvasView {
                         x: p.x,
                         y: p.y,
                         pressure: MOUSE_PRESSURE,
+                        tilt: [0.0; 2], // mouse: vertical pen
                     });
                 }
             } else if response.dragged_by(egui::PointerButton::Primary) {
@@ -1104,6 +1336,7 @@ impl CanvasView {
                         x: p.x,
                         y: p.y,
                         pressure: MOUSE_PRESSURE,
+                        tilt: [0.0; 2],
                     });
                 }
             } else if response.drag_stopped_by(egui::PointerButton::Primary)
@@ -1135,6 +1368,7 @@ impl CanvasView {
         &mut self,
         pos: Pos2,
         force: Option<f32>,
+        tilt: Option<[f32; 2]>,
         to_paper: &impl Fn(Pos2) -> Pos2,
         scale: f32,
     ) {
@@ -1161,12 +1395,42 @@ impl CanvasView {
             None => self.last_pressure,
         };
 
+        // Tilt: EMA-smoothed (packets are steady — this just rounds off
+        // single-packet steps); None reuses the last reported value. The first
+        // real sample of a stroke SNAPS (the carried-over seed may be stale if
+        // the pen re-approached at a new angle) — but the stored first point
+        // is only corrected while NOTHING is stamped (dabs_flushed == 0):
+        // rewriting a point whose dab is already on the GPU can't fix the
+        // painted dab, only misalign every dab after it (radius feeds the
+        // spacing chain). When Down and the first Move drain in the same
+        // frame — the common case — the rewrite lands before any flush.
+        if let Some(t) = tilt {
+            if self.seed_pending {
+                self.smoothed_tilt = t;
+                if self.dabs_flushed == 0
+                    && let Some(first) = self.current.first_mut()
+                {
+                    first.tilt = t;
+                }
+                self.last_tilt = t;
+                self.tilt_seen = true;
+                self.dbg_tilt = (t[0].powi(2) + t[1].powi(2)).sqrt().to_degrees();
+            } else {
+                self.note_tilt(t);
+            }
+        }
+
         // First real Move adopts the pressure immediately (no seed lag), so the
-        // stroke has correct width from the moment the pen presses down.
+        // stroke has correct width from the moment the pen presses down. Same
+        // flushed-prefix gate as the tilt snap above: a stamped first dab is
+        // already painted at the seed width — rewriting the point can only
+        // misalign the dabs that follow.
         if self.seed_pending && matches!(force, Some(f) if f > 0.0) {
             self.smoothed_pressure = raw;
             self.raw_history = [raw; 3];
-            if let Some(first) = self.current.first_mut() {
+            if self.dabs_flushed == 0
+                && let Some(first) = self.current.first_mut()
+            {
                 first.pressure = raw;
             }
             self.seed_pending = false;
@@ -1182,8 +1446,17 @@ impl CanvasView {
         // Distance gate: bank a near-stationary sample onto the last point,
         // tracking the LATEST pressure (min biased pressure downward → jumpy).
         if moved < MIN_SAMPLE_DIST {
-            if let Some(lp) = self.current.last_mut() {
+            // Bank only on the VECTOR path, which re-renders the whole stroke
+            // every frame. The raster path's dabs for this point's segment are
+            // already stamped — mutating the point recomputes them differently
+            // (pressing or tilting while stationary would darken or gap the
+            // stroke tip); the live values reach the stroke through the next
+            // APPENDED point instead, which only extends the tail.
+            if !self.raster
+                && let Some(lp) = self.current.last_mut()
+            {
                 lp.pressure = self.smoothed_pressure;
+                lp.tilt = self.smoothed_tilt;
             }
             return;
         }
@@ -1191,6 +1464,7 @@ impl CanvasView {
             x: p.x,
             y: p.y,
             pressure: self.smoothed_pressure,
+            tilt: self.smoothed_tilt,
         });
     }
 
