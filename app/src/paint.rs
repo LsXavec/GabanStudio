@@ -13,6 +13,7 @@
 //! is Phase 3). The texel bytes ARE the engine's tile bytes — opaque to the
 //! headless engine, round-tripped bit-for-bit.
 
+use anim_core::ids::ColumnId;
 use anim_core::raster::{TileCoord, TileData, TILE};
 use eframe::egui;
 use eframe::egui_wgpu::{RenderState, Renderer};
@@ -141,6 +142,11 @@ pub struct PaintLayer {
     filter: wgpu::FilterMode,
     /// Onion ghosts: [0]=previous cel, [1]=next cel (whole-cel composites).
     onion: [Option<OnionSlot>; 2],
+    /// Raster projections of OTHER columns' cels at the current frame —
+    /// edit-view multi-column display (B4). Same shape/lifecycle as an
+    /// onion slot (content-hash gated, size-checked), keyed by column so
+    /// the set naturally tracks however many columns the sheet has.
+    other_cols: std::collections::HashMap<ColumnId, OnionSlot>,
 
     // --- Sandwich projections (Krita model): the ACTIVE layer is editable in
     // its own texture (bit-exact — read_tiles reads only this); everything
@@ -456,6 +462,7 @@ impl PaintLayer {
             height,
             filter,
             onion: [None, None],
+            other_cols: std::collections::HashMap::new(),
             active,
             below,
             above,
@@ -646,6 +653,9 @@ impl PaintLayer {
             for slot in self.onion.iter().flatten() {
                 renderer.free_texture(&slot.tex_id);
             }
+            for slot in self.other_cols.values() {
+                renderer.free_texture(&slot.tex_id);
+            }
         }
         let mk = |s: &Self| {
             Self::make_target(
@@ -666,6 +676,7 @@ impl PaintLayer {
         self.width = width;
         self.height = height;
         self.onion = [None, None]; // stale size
+        self.other_cols.clear(); // stale size
         self.composite_bind_wet = Self::make_composite_bind(
             &self.device,
             &self.composite_layout,
@@ -699,8 +710,9 @@ impl PaintLayer {
                 t.tex_id,
             );
         }
-        // Onion ghosts sample with the same filter as everything else.
-        for slot in self.onion.iter().flatten() {
+        // Onion ghosts and other-column projections sample with the same
+        // filter as everything else.
+        for slot in self.onion.iter().flatten().chain(self.other_cols.values()) {
             renderer.update_egui_texture_from_wgpu_texture(
                 &self.device,
                 &slot.view,
@@ -1056,6 +1068,73 @@ impl PaintLayer {
 
     pub fn onion_id(&self, slot: usize) -> Option<egui::TextureId> {
         self.onion[slot].as_ref().map(|s| s.tex_id)
+    }
+
+    /// Sync ONE non-active column's raster projection (its own resolved
+    /// drawing's visible layers, bottom→top) for edit-view multi-column
+    /// display (B4) — same law as `set_onion`: content-hash + size gated,
+    /// reuses the existing texture when nothing changed, frees on removal.
+    /// `None` clears the column's slot (empty cel / vector-only / column
+    /// resolves to nothing this frame).
+    pub fn sync_other_column(&mut self, column: ColumnId, layers: Option<(&[LayerSlice<'_>], u64)>) {
+        let Some((layers, hash)) = layers else {
+            if let Some(old) = self.other_cols.remove(&column) {
+                self.renderer.write().free_texture(&old.tex_id);
+            }
+            return;
+        };
+        if let Some(s) = self.other_cols.get(&column)
+            && s.hash == hash
+            && s.width == self.width
+            && s.height == self.height
+        {
+            return;
+        }
+        let (texture, view, tex_id) = match self.other_cols.remove(&column) {
+            Some(s) if s.width == self.width && s.height == self.height => {
+                (s.texture, s.view, s.tex_id)
+            }
+            old => {
+                if let Some(old) = old {
+                    self.renderer.write().free_texture(&old.tex_id);
+                }
+                let texture = Self::create_layer_texture(&self.device, self.width, self.height);
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let tex_id = self.renderer.write().register_native_texture(
+                    &self.device,
+                    &view,
+                    self.filter,
+                );
+                (texture, view, tex_id)
+            }
+        };
+        self.composite_layers_into(&view, layers);
+        self.other_cols.insert(
+            column,
+            OnionSlot { texture, view, tex_id, hash, width: self.width, height: self.height },
+        );
+    }
+
+    /// Drop any column projections for columns that no longer exist (a
+    /// column was removed since the last frame) — `sync_other_column` only
+    /// ever hears about columns that are STILL there, so removal needs an
+    /// explicit prune or the freed column's texture would leak forever.
+    pub fn prune_other_columns(&mut self, live: &[ColumnId]) {
+        let stale: Vec<ColumnId> = self
+            .other_cols
+            .keys()
+            .filter(|c| !live.contains(c))
+            .copied()
+            .collect();
+        for column in stale {
+            if let Some(old) = self.other_cols.remove(&column) {
+                self.renderer.write().free_texture(&old.tex_id);
+            }
+        }
+    }
+
+    pub fn other_column_id(&self, column: ColumnId) -> Option<egui::TextureId> {
+        self.other_cols.get(&column).map(|s| s.tex_id)
     }
 
     /// Read the whole layer back into tiles (called once at pen-up). Blocking

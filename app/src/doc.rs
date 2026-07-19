@@ -797,6 +797,15 @@ impl AppState {
         Some((slices, anim_core::value::fnv1a(&bytes)))
     }
 
+    /// The composite of the drawing resolved (hold-aware) on `column` at the
+    /// CURRENT frame — a non-active column's raster art for edit-view
+    /// multi-column display (B4). None when the column holds nothing yet or
+    /// resolves to a vector-only drawing.
+    pub fn column_composite(&self, column: ColumnId) -> Option<(LayerSlices<'_>, u64)> {
+        let id = self.resolve_at(column, self.view.frame)?;
+        self.drawing_composite(id, None)
+    }
+
     /// Which drawing the GPU canvas layer should DISPLAY at the current frame:
     /// - the frame's OWN cel if it has one (you're editing that cel);
     /// - nothing (blank) on a held/empty frame while onion is ON — you're about

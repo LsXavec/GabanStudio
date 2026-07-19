@@ -1616,6 +1616,21 @@ impl CanvasView {
                 p.set_onion(0, None, 0);
                 p.set_onion(1, None, 0);
             }
+
+            // ---- Multi-column raster display (B4): every OTHER column's
+            // own resolved cel, refreshed every frame like onion (cheap —
+            // sync_other_column is a no-op when the content hash matches).
+            // Prune first so a removed column's texture doesn't leak.
+            let live_cols: Vec<anim_core::ids::ColumnId> =
+                state.cut().xsheet.columns.iter().map(|c| c.id).collect();
+            p.prune_other_columns(&live_cols);
+            for &col in &live_cols {
+                if col == state.view.active_column {
+                    continue;
+                }
+                let composite = state.column_composite(col);
+                p.sync_other_column(col, composite.as_ref().map(|(s, h)| (s.as_slice(), *h)));
+            }
         }
 
         // ---- Render layers ------------------------------------------------
@@ -1651,11 +1666,22 @@ impl CanvasView {
             );
         }
 
-        // 1. Non-active columns (in sheet order = layer order).
+        // 1. Non-active columns (in sheet order = layer order): each
+        // column's own resolved RASTER cel (B4 — was invisible in edit view
+        // before; only composite view showed it) plus any legacy vector
+        // strokes. Reborrow, not move — `paint` is consumed by value at 3b
+        // below, which must still see it.
         if edit_view {
+            let other_tex = paint.as_deref(); // Option<&PaintLayer>, Copy
             for col in &cut.xsheet.columns {
                 if col.id == active_col {
                     continue;
+                }
+                if self.raster
+                    && let Some(id) = other_tex.and_then(|p| p.other_column_id(col.id))
+                {
+                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                    painter.image(id, paper_rect, uv, Color32::WHITE);
                 }
                 if let Some(id) = col.resolve(frame)
                     && let Some(d) = cut.drawing(id) {
