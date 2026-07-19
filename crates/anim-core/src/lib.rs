@@ -12,6 +12,7 @@
 //! No I/O besides `save`/`load`, no rendering, no UI types. Fully testable.
 
 pub mod command;
+pub mod edit;
 pub mod error;
 pub mod eval;
 pub mod export;

@@ -152,6 +152,29 @@ impl App {
             ed.canvas.toggle_eraser();
             return;
         }
+        // Tool switches are canvas-owned; set_tool refuses mid-stroke itself
+        // and commits any floating transform when leaving Select.
+        if action == Action::SelectTool {
+            let next = if ed.canvas.tool == canvas::CanvasTool::Select {
+                canvas::CanvasTool::Paint
+            } else {
+                canvas::CanvasTool::Select
+            };
+            ed.canvas.set_tool(next, &mut ed.state);
+            return;
+        }
+        if action == Action::BrushTool {
+            ed.canvas.set_tool(canvas::CanvasTool::Paint, &mut ed.state);
+            return;
+        }
+        if action == Action::SelectAll {
+            let (w, h) = (
+                ed.state.engine.project.width as f32,
+                ed.state.engine.project.height as f32,
+            );
+            ed.canvas.select_all(&mut ed.state, w, h);
+            return;
+        }
         // Composite view swaps what the canvas renders — blocked mid-stroke
         // (the live stroke's sandwich would vanish under it).
         if action == Action::ToggleCompositeView {
@@ -186,6 +209,12 @@ impl App {
                 ed.state.status = format!("brush: {}", p.name);
             }
             return;
+        }
+        // Save/Open land any in-flight gesture FIRST: the saved file must
+        // contain what the screen shows, and an Open's commit must not cross
+        // into the newly loaded project.
+        if matches!(action, Action::Save | Action::SaveAs | Action::Open) {
+            ed.canvas.finish_gesture(&mut ed.state);
         }
         // STROKE GUARD: while a stroke is live, actions that would retarget or
         // orphan its pen-up commit are dropped — frame nav would commit onto
@@ -228,7 +257,11 @@ impl App {
             Action::ClearFrameKey => s.clear_key_at_frame(),
             Action::RemoveColumn => s.remove_active_column(),
             Action::ToggleOnion => s.onion = !s.onion,
-            Action::ToggleEraser | Action::ToggleCompositeView => {} // handled above
+            Action::ToggleEraser
+            | Action::ToggleCompositeView
+            | Action::SelectTool
+            | Action::BrushTool
+            | Action::SelectAll => {} // handled above
             Action::Preset1
             | Action::Preset2
             | Action::Preset3
@@ -923,12 +956,17 @@ impl Editor {
                     self.request_new = true;
                 }
                 if ui.button("open").clicked() {
+                    // Land any in-flight gesture in the CURRENT project first
+                    // — its commit must not cross into the opened one.
+                    self.canvas.finish_gesture(&mut self.state);
                     self.state.open();
                 }
                 if ui.button("⚙ settings").on_hover_text("keyboard shortcuts & config").clicked() {
                     self.request_settings = true;
                 }
                 if ui.button("save").clicked() {
+                    // The saved file must contain what the screen shows.
+                    self.canvas.finish_gesture(&mut self.state);
                     self.state.save(false);
                 }
                 ui.menu_button("export", |ui| {
@@ -976,8 +1014,12 @@ impl Editor {
                 });
                 ui.separator();
 
-                let can_undo = self.state.engine.can_undo();
-                let can_redo = self.state.engine.can_redo();
+                // Guarded like the keybinds: history must not move under a
+                // live stroke or floating transform (the gesture's commit
+                // would land on rewound state with stale before-values).
+                let gesture = self.canvas.stroke_active();
+                let can_undo = self.state.engine.can_undo() && !gesture;
+                let can_redo = self.state.engine.can_redo() && !gesture;
                 if ui.add_enabled(can_undo, egui::Button::new("undo")).clicked() {
                     self.state.undo();
                 }

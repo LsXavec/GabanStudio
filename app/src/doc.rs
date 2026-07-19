@@ -265,6 +265,27 @@ impl AppState {
         }
     }
 
+    /// Commit a select/move/scale/rotate gesture: the edit-math diff becomes
+    /// ONE `PaintTiles` command against the target LATCHED at lift, so a
+    /// mid-gesture frame/layer change can never retarget it. One gesture =
+    /// one undo step, by construction (the diff is its own exact inverse).
+    pub fn commit_region_edit(
+        &mut self,
+        id: DrawingId,
+        layer: LayerId,
+        diff: anim_core::raster::TileDiff,
+    ) {
+        let at = self.at();
+        let n = diff.len();
+        let r = self
+            .engine
+            .apply("transform selection", vec![Command::PaintTiles { at, id, layer, diff }]);
+        match r {
+            Ok(_) => self.status = format!("transform applied ({n} tile(s))"),
+            Err(e) => self.status = format!("transform failed: {e:?}"),
+        }
+    }
+
     /// Commit a finished raster stroke: the readback tiles become a `PaintTiles`
     /// edit targeting the layer at `slot` — the slot is LATCHED by the canvas at
     /// stroke start, so a mid-stroke A-cycle can never retarget the commit. If

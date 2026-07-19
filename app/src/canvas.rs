@@ -5,8 +5,13 @@
 //! Input reuses the M0-validated path: Windows Ink pen arrives as egui Touch
 //! events with real pressure; mouse is the no-pressure fallback.
 
-use anim_core::ids::ColumnId;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use anim_core::edit::{self, FloatingPatch};
+use anim_core::ids::{ColumnId, DrawingId, LayerId};
 use anim_core::model::{Stroke, StrokePoint};
+use anim_core::raster::{TileCoord, TileData};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
@@ -89,6 +94,79 @@ const TILT_ASPECT_GAIN: f32 = 1.5;
 /// Tilt magnitude (normalized) below which the cursor needle hides — a
 /// near-vertical pen has no meaningful direction to point.
 const TILT_NEEDLE_MIN: f32 = 0.05;
+
+/// The canvas's active TOOL — the abstraction workspaces will restore per
+/// stage (LENS-DOCK: workspace = layout + tool/mode). `Paint` keeps the
+/// existing brush/eraser pair (which sub-tool via `erasing`); `Select` is the
+/// select/move/scale/rotate tool. Flood fill joins this enum next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CanvasTool {
+    Paint,
+    Select,
+}
+
+/// Selection drawing shape (a rect is a 4-point polygon through the same
+/// lift path).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelShape {
+    Rect,
+    Lasso,
+}
+
+/// A lifted, in-flight transform: the selected pixels float above the layer
+/// under a live affine until Enter/click-outside commits them as ONE
+/// PaintTiles command (or Esc restores). The target (drawing, layer) is
+/// LATCHED at lift — a frame switch mid-gesture auto-commits to the latched
+/// target, never to whatever is now displayed.
+struct Floating {
+    patch: FloatingPatch,
+    cleared: Vec<(TileCoord, Option<Arc<TileData>>)>,
+    /// Engine-truth tiles at lift (merge base; also rebuilt the punched
+    /// display).
+    base_tiles: BTreeMap<TileCoord, Arc<TileData>>,
+    tex: egui::TextureHandle,
+    drawing: DrawingId,
+    layer: LayerId,
+    // Live gesture affine (paper space).
+    pivot: Pos2,
+    translate: egui::Vec2,
+    rotate: f32,
+    scale: f32,
+    drag: Option<FloatDrag>,
+}
+
+impl Floating {
+    fn affine(&self) -> edit::Affine {
+        edit::Affine {
+            pivot: (self.pivot.x, self.pivot.y),
+            translate: (self.translate.x, self.translate.y),
+            rotate_rad: self.rotate,
+            scale: self.scale,
+        }
+    }
+
+    /// The four transformed corners of the patch bbox, paper space,
+    /// in (TL, TR, BL, BR) order.
+    fn corners(&self) -> [Pos2; 4] {
+        let a = self.affine();
+        let (x0, y0) = (self.patch.x0 as f32, self.patch.y0 as f32);
+        let (x1, y1) = (
+            (self.patch.x0 + self.patch.w as i32) as f32,
+            (self.patch.y0 + self.patch.h as i32) as f32,
+        );
+        let m = |x, y| {
+            let (px, py) = a.apply((x, y));
+            pos2(px, py)
+        };
+        [m(x0, y0), m(x1, y0), m(x0, y1), m(x1, y1)]
+    }
+}
+
+enum FloatDrag {
+    Move { start_ptr: Pos2, start_translate: egui::Vec2 },
+    Scale { start_dist: f32, start_scale: f32 },
+    Rotate { start_angle: f32, start_rotate: f32 },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PenPhase {
@@ -192,6 +270,18 @@ pub struct CanvasView {
     /// painting is refused while on (a stroke must never land somewhere the
     /// view doesn't show). Toggled by the C keybind / 🎬 toolbar button.
     pub composite_view: bool,
+    /// Active canvas tool (Paint = brush/eraser pipeline, Select = the
+    /// select/move/scale/rotate tool). Keybinds: B = paint, V = select.
+    pub tool: CanvasTool,
+    /// Selection drawing shape for the Select tool (toolbar toggle).
+    sel_shape: SelShape,
+    /// Committed selection outline, paper-space polygon (None = no selection).
+    /// Survives frame nav — it's a region of PAPER, not of one cel.
+    selection: Option<Vec<Pos2>>,
+    /// Selection being drawn right now (rect = [anchor, current]).
+    sel_draft: Option<Vec<Pos2>>,
+    /// Lifted pixels mid-transform. See [`Floating`].
+    floating: Option<Floating>,
     /// This stroke wrote the CEL texture directly (eraser dabs, or the new-cel
     /// clear). If it is abandoned, the cel must re-sync from engine truth —
     /// otherwise phantom damage gets baked into the NEXT commit.
@@ -282,6 +372,11 @@ impl CanvasView {
             dbg_tilt: 0.0,
             tilt_seen: false,
             composite_view: false,
+            tool: CanvasTool::Paint,
+            sel_shape: SelShape::Lasso,
+            selection: None,
+            sel_draft: None,
+            floating: None,
             cel_touched: false,
             dabs_flushed: 0,
             raster_stroke_done: false,
@@ -342,11 +437,459 @@ impl CanvasView {
         }
     }
 
-    /// A stroke is live (pen down, or its pen-up commit hasn't run yet).
-    /// Stroke-unsafe actions (frame nav, undo, layer cycle, clears) must not
+    /// An edit gesture is live: a stroke (pen down or its pen-up commit
+    /// pending), a selection being drawn, or a lifted transform in flight.
+    /// Gesture-unsafe actions (frame nav, undo, layer cycle, clears) must not
     /// dispatch while this holds — they would retarget or orphan the commit.
     pub fn stroke_active(&self) -> bool {
-        self.touch_active || !self.current.is_empty() || self.raster_stroke_done
+        self.touch_active
+            || !self.current.is_empty()
+            || self.raster_stroke_done
+            || self.sel_draft.is_some()
+            || self.floating.is_some()
+    }
+
+    /// Switch to the Select tool (V) / back to Paint (B). A live stroke
+    /// blocks the switch (the stroke pipeline would be orphaned mid-flight);
+    /// leaving Select commits any floating transform rather than losing it.
+    pub fn set_tool(&mut self, tool: CanvasTool, state: &mut AppState) {
+        if self.tool == tool {
+            return;
+        }
+        if self.touch_active || !self.current.is_empty() || self.raster_stroke_done {
+            return; // mid-stroke: refuse silently, same as other guards
+        }
+        if tool == CanvasTool::Paint && self.floating.is_some() {
+            self.commit_floating(state);
+        }
+        self.sel_draft = None;
+        self.tool = tool;
+        state.status = match tool {
+            CanvasTool::Select => {
+                "select: drag = select, drag inside = move, corners = scale, \
+                 just outside corners = rotate; Enter applies, Esc cancels"
+                    .into()
+            }
+            CanvasTool::Paint => "paint".into(),
+        };
+    }
+
+    /// Ctrl+A: select the whole paper (switches to the Select tool).
+    pub fn select_all(&mut self, state: &mut AppState, paper_w: f32, paper_h: f32) {
+        self.set_tool(CanvasTool::Select, state);
+        if self.tool != CanvasTool::Select {
+            return; // switch refused mid-stroke
+        }
+        self.selection = Some(vec![
+            pos2(0.0, 0.0),
+            pos2(paper_w, 0.0),
+            pos2(paper_w, paper_h),
+            pos2(0.0, paper_h),
+        ]);
+        state.status = "all selected — drag inside to move".into();
+    }
+
+    /// Lift the current selection (or the whole layer if `poly` is None) off
+    /// the ACTIVE layer into a floating transform. Guards mirror the stroke
+    /// pipeline's: no composite view, no hidden layer, own-key frames only.
+    fn try_lift(
+        &mut self,
+        state: &mut AppState,
+        paint: &mut PaintLayer,
+        ctx: &egui::Context,
+        poly: Option<&[Pos2]>,
+    ) -> bool {
+        if self.composite_view {
+            state.status = "composite view — press C to edit".into();
+            return false;
+        }
+        if !self.raster {
+            state.status = "the select tool needs the raster engine (🖌)".into();
+            return false;
+        }
+        if state.active_layer_props().is_some_and(|p| !p.visible) {
+            state.status = format!(
+                "layer '{}' is hidden — press A to switch or click its eye",
+                state.active_layer_name()
+            );
+            return false;
+        }
+        let Some(did) = state.own_key_drawing() else {
+            state.status =
+                "held/blank frame — a transform edits a frame's OWN cel (draw here first)"
+                    .into();
+            return false;
+        };
+        let (kd, kl, _) = state.active_layer_key();
+        if kd != did.0 || kl == u64::MAX {
+            state.status = "no raster layer here to transform".into();
+            return false;
+        }
+        let Some(tiles) = state.active_layer_tiles().cloned() else {
+            state.status = "no raster layer here to transform".into();
+            return false;
+        };
+        let lift = match poly {
+            Some(p) => {
+                let pts: Vec<(f32, f32)> = p.iter().map(|q| (q.x, q.y)).collect();
+                edit::lift_region(&tiles, &pts)
+            }
+            None => edit::lift_all(&tiles),
+        };
+        let Some(lift) = lift else {
+            state.status = format!(
+                "selection has no ink on layer '{}'",
+                state.active_layer_name()
+            );
+            return false;
+        };
+
+        // Preview texture (premultiplied bytes — the raw-texel display law).
+        let mut bytes = Vec::with_capacity(lift.patch.rgba.len());
+        for v in &lift.patch.rgba {
+            bytes.push((v.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+        let img = egui::ColorImage::from_rgba_premultiplied(
+            [lift.patch.w as usize, lift.patch.h as usize],
+            &bytes,
+        );
+        let tex = ctx.load_texture("floating_selection", img, egui::TextureOptions::LINEAR);
+
+        // Punch the lifted pixels out of the DISPLAYED active texture (engine
+        // truth is untouched until commit; the sync key still matches, so the
+        // between-strokes sync won't fight this).
+        let mut punched = tiles.clone();
+        for (c, after) in &lift.cleared {
+            match after {
+                Some(t) => punched.insert(*c, t.clone()),
+                None => punched.remove(c),
+            };
+        }
+        paint.sync_active(&punched);
+
+        let pivot = pos2(
+            lift.patch.x0 as f32 + lift.patch.w as f32 / 2.0,
+            lift.patch.y0 as f32 + lift.patch.h as f32 / 2.0,
+        );
+        self.floating = Some(Floating {
+            patch: lift.patch,
+            cleared: lift.cleared,
+            base_tiles: tiles,
+            tex,
+            drawing: did,
+            layer: LayerId(kl),
+            pivot,
+            translate: vec2(0.0, 0.0),
+            rotate: 0.0,
+            scale: 1.0,
+            drag: None,
+        });
+        self.selection = None; // absorbed into the floating transform
+        true
+    }
+
+    /// Commit the floating transform: resample + merge → ONE PaintTiles
+    /// command against the LATCHED target, then re-sync the display from
+    /// engine truth. An identity gesture commits nothing (empty diff).
+    fn commit_floating(&mut self, state: &mut AppState) {
+        let Some(f) = self.floating.take() else {
+            return;
+        };
+        let affine = f.affine();
+        if !affine.is_identity() {
+            let moved = edit::transform_patch(&f.patch, &affine);
+            let diff = edit::merge_patch(&f.base_tiles, &f.cleared, &moved);
+            if !diff.is_empty() {
+                state.commit_region_edit(f.drawing, f.layer, diff);
+            }
+        }
+        // Either way the displayed texture was punched — restore from truth.
+        self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+    }
+
+    /// Drop the floating transform and restore the display (engine truth was
+    /// never touched).
+    fn cancel_floating(&mut self) {
+        if self.floating.take().is_some() {
+            self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+        }
+    }
+
+    /// Land any in-flight gesture NOW (commit the floating transform, drop a
+    /// half-drawn selection outline). Call before anything that would pull
+    /// the document out from under the gesture — Save (the file must contain
+    /// what the screen shows), Open (the commit belongs to the CURRENT
+    /// project), New.
+    pub fn finish_gesture(&mut self, state: &mut AppState) {
+        self.sel_draft = None;
+        if self.floating.is_some() {
+            self.commit_floating(state);
+        }
+    }
+
+    /// Select-tool input: draw selections, lift, and drive the transform
+    /// handles. Pointer comes from egui (the pen arrives as synthesized
+    /// mouse events for UI purposes — the stroke pipeline is not involved).
+    #[allow(clippy::too_many_arguments)] // one call site; mirrors handle_pen
+    fn select_input(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: Rect,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        to_screen: &impl Fn(Pos2) -> Pos2,
+        scale: f32,
+        state: &mut AppState,
+        paint: Option<&mut PaintLayer>,
+    ) {
+        // Composite view is a review mode for gestures too: a selection drawn
+        // over the graph render would be invisible (the overlay is edit-view
+        // gated) and misleading. Hint once on an attempted drag.
+        if self.composite_view {
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                state.status = "composite view — press C to edit".into();
+            }
+            return;
+        }
+        // Enter/Esc belong to whoever has keyboard focus — finishing a rename
+        // in another pane must not commit/cancel a live transform here.
+        let kb_free = !ui.ctx().egui_wants_keyboard_input();
+        let (esc, enter) = ui.input(|i| {
+            (
+                kb_free && i.key_pressed(egui::Key::Escape),
+                kb_free && i.key_pressed(egui::Key::Enter),
+            )
+        });
+        if esc {
+            if self.floating.is_some() {
+                self.cancel_floating();
+                state.status = "transform cancelled".into();
+            } else if self.sel_draft.take().is_some() {
+                // dropped the in-progress outline
+            } else if self.selection.take().is_some() {
+                state.status = "selection cleared".into();
+            }
+        }
+        if enter && self.floating.is_some() {
+            self.commit_floating(state);
+        }
+        // A frame OR LAYER change slipped past the guards (an X-sheet click
+        // scrub, a strip/chip layer click): commit to the LATCHED target
+        // rather than displaying a floating patch over the wrong cel — or
+        // doubling the lifted pixels over a projection rebuilt from
+        // (unpunched) engine truth.
+        if let Some(f) = &self.floating {
+            let (kd, kl, _) = state.active_layer_key();
+            if state.own_key_drawing() != Some(f.drawing)
+                || kd != f.drawing.0
+                || kl != f.layer.0
+            {
+                self.commit_floating(state);
+            }
+        }
+        let Some(paint) = paint else {
+            return; // no GPU: the select tool has nothing to lift/preview
+        };
+
+        let ptr = response.interact_pointer_pos();
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && let Some(pos) = ptr
+            && rect.contains(pos)
+        {
+            let pp = to_paper(pos);
+            if self.floating.is_some() {
+                self.float_drag_start(pos, pp, to_screen, state);
+            } else if let Some(sel) = self.selection.clone()
+                && point_in_poly(&sel, pp)
+            {
+                // Drag inside the selection = lift it and start moving.
+                if self.try_lift(state, paint, ui.ctx(), Some(&sel))
+                    && let Some(f) = &mut self.floating
+                {
+                    f.drag = Some(FloatDrag::Move {
+                        start_ptr: pos,
+                        start_translate: f.translate,
+                    });
+                }
+            } else {
+                self.sel_draft = Some(vec![pp, pp]);
+            }
+        } else if response.dragged_by(egui::PointerButton::Primary)
+            && let Some(pos) = ptr
+        {
+            if let Some(f) = &mut self.floating {
+                match &f.drag {
+                    Some(FloatDrag::Move { start_ptr, start_translate }) => {
+                        f.translate = *start_translate + (pos - *start_ptr) / scale;
+                    }
+                    Some(FloatDrag::Scale { start_dist, start_scale }) => {
+                        let pivot_s = to_screen(f.pivot + f.translate);
+                        let d = (pos - pivot_s).length().max(1.0);
+                        f.scale = (start_scale * d / start_dist.max(1.0)).clamp(0.05, 20.0);
+                    }
+                    Some(FloatDrag::Rotate { start_angle, start_rotate }) => {
+                        let pivot_s = to_screen(f.pivot + f.translate);
+                        let a = (pos - pivot_s).angle();
+                        f.rotate = start_rotate + (a - start_angle);
+                    }
+                    None => {}
+                }
+            } else if let Some(draft) = &mut self.sel_draft {
+                let pp = to_paper(pos);
+                match self.sel_shape {
+                    SelShape::Rect => {
+                        draft.truncate(1);
+                        draft.push(pp);
+                    }
+                    SelShape::Lasso => {
+                        // Decimate: only keep points ≥2 screen px apart.
+                        if draft
+                            .last()
+                            .is_none_or(|l| (pp - *l).length() * scale >= 2.0)
+                        {
+                            draft.push(pp);
+                        }
+                    }
+                }
+            }
+        } else if response.drag_stopped_by(egui::PointerButton::Primary) {
+            if let Some(f) = &mut self.floating {
+                f.drag = None;
+            } else if let Some(draft) = self.sel_draft.take() {
+                self.selection = finalize_selection(draft, self.sel_shape, scale);
+                if self.selection.is_some() {
+                    state.status =
+                        "selection set — drag inside to move; Esc clears".into();
+                }
+            }
+        }
+    }
+
+    /// Hit-test a drag start against the floating transform's handles.
+    fn float_drag_start(
+        &mut self,
+        pos: Pos2,
+        pp: Pos2,
+        to_screen: &impl Fn(Pos2) -> Pos2,
+        state: &mut AppState,
+    ) {
+        let Some(f) = &mut self.floating else { return };
+        let pivot_s = to_screen(f.pivot + f.translate);
+        let corners_s: Vec<Pos2> = f.corners().iter().map(|c| to_screen(*c)).collect();
+        let nearest = corners_s
+            .iter()
+            .map(|c| (pos - *c).length())
+            .fold(f32::INFINITY, f32::min);
+        if nearest <= 12.0 {
+            f.drag = Some(FloatDrag::Scale {
+                start_dist: (pos - pivot_s).length(),
+                start_scale: f.scale,
+            });
+            return;
+        }
+        if nearest <= 28.0 {
+            f.drag = Some(FloatDrag::Rotate {
+                start_angle: (pos - pivot_s).angle(),
+                start_rotate: f.rotate,
+            });
+            return;
+        }
+        // Inside the transformed patch = move; outside = commit (click-away).
+        let a = f.affine();
+        if a.scale.abs() >= edit::Affine::IDENTITY_SCALE_EPS {
+            let inv = {
+                let (sin, cos) = a.rotate_rad.sin_cos();
+                let ox = pp.x - a.pivot.0 - a.translate.0;
+                let oy = pp.y - a.pivot.1 - a.translate.1;
+                let inv_s = 1.0 / a.scale;
+                pos2(
+                    a.pivot.0 + (cos * ox + sin * oy) * inv_s,
+                    a.pivot.1 + (-sin * ox + cos * oy) * inv_s,
+                )
+            };
+            let inside = inv.x >= f.patch.x0 as f32
+                && inv.y >= f.patch.y0 as f32
+                && inv.x < (f.patch.x0 + f.patch.w as i32) as f32
+                && inv.y < (f.patch.y0 + f.patch.h as i32) as f32;
+            if inside {
+                f.drag = Some(FloatDrag::Move {
+                    start_ptr: pos,
+                    start_translate: f.translate,
+                });
+                return;
+            }
+        }
+        self.commit_floating(state);
+    }
+
+    /// Select-tool overlay: marching-ants selection outline, the floating
+    /// patch preview (textured mesh under the live affine), and its handles.
+    /// Painted AFTER the layer images so it sits on top.
+    fn select_overlay(&self, painter: &egui::Painter, to_screen: &impl Fn(Pos2) -> Pos2) {
+        let ants = |pts: &[Pos2], closed: bool, painter: &egui::Painter| {
+            if pts.len() < 2 {
+                return;
+            }
+            let mut s: Vec<Pos2> = pts.iter().map(|p| to_screen(*p)).collect();
+            if closed {
+                s.push(s[0]);
+            }
+            painter.extend(egui::Shape::dashed_line(
+                &s,
+                egui::Stroke::new(2.5, Color32::from_white_alpha(180)),
+                6.0,
+                6.0,
+            ));
+            painter.extend(egui::Shape::dashed_line(
+                &s,
+                egui::Stroke::new(1.0, Color32::from_black_alpha(230)),
+                6.0,
+                6.0,
+            ));
+        };
+        if let Some(sel) = &self.selection {
+            ants(sel, true, painter);
+        }
+        if let Some(draft) = &self.sel_draft {
+            match self.sel_shape {
+                SelShape::Rect if draft.len() == 2 => {
+                    let (a, b) = (draft[0], draft[1]);
+                    ants(
+                        &[a, pos2(b.x, a.y), b, pos2(a.x, b.y)],
+                        true,
+                        painter,
+                    );
+                }
+                _ => ants(draft, false, painter),
+            }
+        }
+        if let Some(f) = &self.floating {
+            let c = f.corners(); // TL TR BL BR, paper
+            let s: Vec<Pos2> = c.iter().map(|p| to_screen(*p)).collect();
+            let mut mesh = egui::Mesh::with_texture(f.tex.id());
+            let uv = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(0.0, 1.0), pos2(1.0, 1.0)];
+            for i in 0..4 {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: s[i],
+                    uv: uv[i],
+                    color: Color32::WHITE,
+                });
+            }
+            mesh.indices.extend_from_slice(&[0, 1, 2, 2, 1, 3]);
+            painter.add(egui::Shape::mesh(mesh));
+            // Outline (TL→TR→BR→BL) + corner scale handles.
+            ants(&[c[0], c[1], c[3], c[2]], true, painter);
+            for p in &s {
+                let r = Rect::from_center_size(*p, vec2(9.0, 9.0));
+                painter.rect_filled(r, 1.5, Color32::from_black_alpha(200));
+                painter.rect_stroke(
+                    r,
+                    1.5,
+                    egui::Stroke::new(1.5, Color32::from_white_alpha(230)),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
     }
 
     /// Fold one live tilt sample into the smoothed state (EMA) + diagnostics.
@@ -435,6 +978,37 @@ impl CanvasView {
                     .clicked()
                 {
                     self.erasing = true;
+                }
+                // Select / transform tool (V; B returns to paint). Leaving
+                // Select commits any floating transform.
+                let sel_on = self.tool == CanvasTool::Select;
+                if ui
+                    .selectable_label(sel_on, if compact { "⬚" } else { "⬚ select" })
+                    .on_hover_text(
+                        "select / move / scale / rotate (V) — drag = select, drag \
+                         inside = move, corners = scale, just outside = rotate; \
+                         Enter applies, Esc cancels; Ctrl+A selects all",
+                    )
+                    .clicked()
+                {
+                    let next = if sel_on { CanvasTool::Paint } else { CanvasTool::Select };
+                    self.set_tool(next, state);
+                }
+                if self.tool == CanvasTool::Select {
+                    if ui
+                        .selectable_label(self.sel_shape == SelShape::Lasso, "◌")
+                        .on_hover_text("lasso selection")
+                        .clicked()
+                    {
+                        self.sel_shape = SelShape::Lasso;
+                    }
+                    if ui
+                        .selectable_label(self.sel_shape == SelShape::Rect, "▭")
+                        .on_hover_text("rectangle selection")
+                        .clicked()
+                    {
+                        self.sel_shape = SelShape::Rect;
+                    }
                 }
                 // Composite view: the node graph's rendered output (review
                 // mode — painting pauses). Blocked mid-stroke: swapping the
@@ -559,7 +1133,11 @@ impl CanvasView {
                     .button(if compact { "🗑" } else { "clear cel" })
                     .on_hover_text("clear this cel's raster (undoable)")
                     .clicked()
+                    && !self.stroke_active()
                 {
+                    // Guarded like the keybind: clearing mid-gesture would
+                    // mutate the layer a floating transform lifted from —
+                    // the later commit would resurrect the cleared content.
                     state.clear_current_raster();
                 }
             } else {
@@ -695,10 +1273,33 @@ impl CanvasView {
 
         // ---- Pen input (edit mode only) -----------------------------------
         if !state.playing {
-            self.handle_pen(ui, &response, rect, &to_paper, scale, state, native_pen);
+            match self.tool {
+                CanvasTool::Paint => {
+                    self.handle_pen(ui, &response, rect, &to_paper, scale, state, native_pen);
+                }
+                CanvasTool::Select => {
+                    self.select_input(
+                        ui,
+                        &response,
+                        rect,
+                        &to_paper,
+                        &to_screen,
+                        scale,
+                        state,
+                        paint.as_deref_mut(),
+                    );
+                }
+            }
         } else {
             self.current.clear();
             self.touch_active = false;
+            // Playback started under a live gesture (e.g. the top-bar play
+            // button): commit the floating transform to its LATCHED target
+            // rather than leaving a lifted patch over a moving frame.
+            if self.floating.is_some() {
+                self.commit_floating(state);
+            }
+            self.sel_draft = None;
         }
 
         // ---- COMPOSITE VIEW: execute the node graph on the GPU ------------
@@ -740,6 +1341,23 @@ impl CanvasView {
             && let Some(p) = paint.as_deref_mut()
         {
             p.ensure_size(state.engine.project.width, state.engine.project.height);
+
+            // RACE GUARD: a gesture commit/cancel set the invalidation
+            // sentinel the SAME frame a stroke started (dispatch runs before
+            // this ui). The between-strokes resync below only runs when no
+            // stroke is live — restore engine truth HERE, before any dab
+            // stamps, or the pen-up readback would bake the punched texture
+            // back into the engine as a phantom erase. (Full-tuple sentinel
+            // compare: a blank frame's key is (MAX, frame, 0), not this.)
+            if self.synced_active == (u64::MAX, u64::MAX, u64::MAX)
+                && (!self.current.is_empty() || self.raster_stroke_done)
+            {
+                match state.active_layer_tiles() {
+                    Some(tiles) => p.sync_active(tiles),
+                    None => p.clear_active(),
+                }
+                self.synced_active = state.active_layer_key();
+            }
 
             if self.current.is_empty() && !self.raster_stroke_done {
                 // An abandoned stroke (e.g. playback started mid-stroke) may have
@@ -995,6 +1613,12 @@ impl CanvasView {
             );
         }
 
+        // Select-tool overlay (ants, floating preview, handles) — after the
+        // layer images so it reads on top of the art.
+        if edit_view && self.tool == CanvasTool::Select {
+            self.select_overlay(&painter, &to_screen);
+        }
+
         // Empty-cell hint (vector mode only).
         if edit_view
             && !self.raster
@@ -1035,6 +1659,7 @@ impl CanvasView {
         if self.raster
             && !state.playing
             && !self.composite_view // review mode: painting refused, OS cursor back
+            && self.tool == CanvasTool::Paint // select tool keeps the OS cursor
             && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
             && rect.contains(pos)
             && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
@@ -1655,6 +2280,57 @@ fn median3(v: [f32; 3]) -> f32 {
 }
 
 /// sRGB u8 swatch -> straight linear f32 RGBA (the dab shader premultiplies).
+/// Even-odd point-in-polygon (paper space) — the same crossing rule the
+/// engine's lift mask uses, so "drag inside the selection" and "pixels the
+/// lift takes" agree.
+fn point_in_poly(poly: &[Pos2], p: Pos2) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[j]);
+        if (a.y > p.y) != (b.y > p.y) {
+            let t = (p.y - a.y) / (b.y - a.y);
+            if p.x < a.x + t * (b.x - a.x) {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Turn a finished selection draft into a polygon; a near-click (tiny drag)
+/// means deselect, mirroring the mouse stroke's stationary-click discard.
+fn finalize_selection(draft: Vec<Pos2>, shape: SelShape, scale: f32) -> Option<Vec<Pos2>> {
+    match shape {
+        SelShape::Rect => {
+            let (a, b) = (*draft.first()?, *draft.last()?);
+            if (b.x - a.x).abs() * scale < 3.0 || (b.y - a.y).abs() * scale < 3.0 {
+                return None;
+            }
+            Some(vec![a, pos2(b.x, a.y), b, pos2(a.x, b.y)])
+        }
+        SelShape::Lasso => {
+            if draft.len() < 3 {
+                return None;
+            }
+            let (mut lo, mut hi) = (draft[0], draft[0]);
+            for p in &draft {
+                lo = pos2(lo.x.min(p.x), lo.y.min(p.y));
+                hi = pos2(hi.x.max(p.x), hi.y.max(p.y));
+            }
+            if (hi - lo).length() * scale < 4.0 {
+                return None;
+            }
+            Some(draft)
+        }
+    }
+}
+
 fn linear_rgba(c: [u8; 4]) -> [f32; 4] {
     // ONE EOTF for the whole app: the engine's srgb_to_linear is the same
     // function Solid nodes render with (and the CPU/GPU graph compositors
