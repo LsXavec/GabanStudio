@@ -247,45 +247,23 @@ impl CanvasView {
         )
     }
 
-    pub fn ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        paint: Option<&mut PaintLayer>,
-        pen: &PenConfig,
-        layers_cfg: &LayersConfig,
-    ) {
-        self.pen_curve = pen.pressure_curve.clone();
-        // Brush colour follows the active layer: on a switch, remember the
-        // colour picked while the previous layer was active, then load the new
-        // layer's colour (session pick, else the Settings default).
-        let layer_name = state.active_layer_name();
-        if layer_name != self.last_layer_name {
-            if !self.last_layer_name.is_empty() {
-                self.layer_colors
-                    .insert(self.last_layer_name.clone(), self.brush_color);
-            }
-            if let Some(c) = self
-                .layer_colors
-                .get(&layer_name)
-                .or_else(|| layers_cfg.colors.get(&layer_name))
-            {
-                self.brush_color = *c;
-            }
-            self.last_layer_name = layer_name;
-        }
-        let mut paint = paint;
-        // ---- Toolbar ------------------------------------------------------
-        ui.horizontal(|ui| {
-            let raster_available = paint.is_some();
+    /// Brush & tool controls — a dockable pane of its own (the old canvas
+    /// toolbar). Wrapped layout: in a narrow dock it flows to more rows
+    /// without pushing any other pane around.
+    pub fn brush_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState, raster_available: bool) {
+        // Sliders are the widest fixed-size widgets — scale them to the pane
+        // so the toolbox keeps collapsing in narrow docks instead of hitting
+        // a ~180px floor at the dock divider.
+        let sw = (ui.available_width() * 0.45).clamp(48.0, 110.0);
+        ui.spacing_mut().slider_width = sw;
+        ui.horizontal_wrapped(|ui| {
             if raster_available {
                 ui.checkbox(&mut self.raster, "raster")
-                    .on_hover_text("GPU raster brush (Phase 1 preview: one scratch layer, not yet per-frame/undo/saved)");
+                    .on_hover_text("GPU raster brush");
                 ui.separator();
             } else {
                 self.raster = false;
             }
-
             if self.raster {
                 if ui
                     .selectable_label(!self.erasing, "✏ brush")
@@ -406,6 +384,39 @@ impl CanvasView {
             // and read as "the workspace shifting". Diagnostics now live in
             // the status bar (fixed-width) and PLAYING is a canvas overlay.
         });
+    }
+
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        paint: Option<&mut PaintLayer>,
+        pen: &PenConfig,
+        layers_cfg: &LayersConfig,
+    ) {
+        self.pen_curve = pen.pressure_curve.clone();
+        // Brush colour follows the active layer: on a switch, remember the
+        // colour picked while the previous layer was active, then load the new
+        // layer's colour (session pick, else the Settings default).
+        let layer_name = state.active_layer_name();
+        if layer_name != self.last_layer_name {
+            if !self.last_layer_name.is_empty() {
+                self.layer_colors
+                    .insert(self.last_layer_name.clone(), self.brush_color);
+            }
+            if let Some(c) = self
+                .layer_colors
+                .get(&layer_name)
+                .or_else(|| layers_cfg.colors.get(&layer_name))
+            {
+                self.brush_color = *c;
+            }
+            self.last_layer_name = layer_name;
+        }
+        let mut paint = paint;
+        if paint.is_none() {
+            self.raster = false;
+        }
 
         // ---- Canvas area --------------------------------------------------
         let rect = ui.available_rect_before_wrap();

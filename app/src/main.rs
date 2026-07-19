@@ -9,11 +9,13 @@ mod doc;
 mod export;
 mod newproject;
 mod paint;
+mod workspace;
 mod xsheet_panel;
 
 use config::{Action, Config, FrameLatency, LayersConfig, PenConfig, RebindCapture, SettingsCategory};
 use doc::AppState;
-use egui_dock::{DockArea, DockState, NodeIndex};
+use egui_dock::{DockArea, DockState};
+use workspace::{Pane, Workspace, Workspaces, draw_workspace};
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use newproject::{FormAction, NewProjectForm};
@@ -175,30 +177,10 @@ struct Editor {
     /// The docking shell: every UI element is a movable pane over ONE document;
     /// a workspace is just a saved arrangement of these panes.
     dock: DockState<Pane>,
-}
-
-/// One dockable UI element (drag, split, stack — the document underneath is
-/// shared; panes are windows onto it).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Pane {
-    Canvas,
-    XSheet,
-}
-
-/// Workspace preset: big canvas, X-sheet as a side rail (the "Draw" room).
-fn draw_workspace() -> DockState<Pane> {
-    let mut ds = DockState::new(vec![Pane::Canvas]);
-    ds.main_surface_mut()
-        .split_left(NodeIndex::root(), 0.26, vec![Pane::XSheet]);
-    ds
-}
-
-/// Workspace preset: timing-first — the X-sheet takes half the room.
-fn timing_workspace() -> DockState<Pane> {
-    let mut ds = DockState::new(vec![Pane::Canvas]);
-    ds.main_surface_mut()
-        .split_left(NodeIndex::root(), 0.5, vec![Pane::XSheet]);
-    ds
+    /// Named, persisted workspaces (%APPDATA%/AnimStudio/workspaces.json).
+    workspaces: Workspaces,
+    /// Buffer for the "save workspace as" name field.
+    ws_name: String,
 }
 
 /// Renders each pane by borrowing the editor's parts (disjoint fields, so the
@@ -218,12 +200,19 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
         match tab {
             Pane::Canvas => "Canvas".into(),
             Pane::XSheet => "X-Sheet".into(),
+            Pane::Layers => "Cel Layers".into(),
+            Pane::Brush => "Brush".into(),
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
         match tab {
             Pane::XSheet => xsheet_panel::ui(ui, self.state),
+            Pane::Layers => xsheet_panel::cel_layers_strip(ui, self.state),
+            Pane::Brush => {
+                let raster_available = self.paint.is_some();
+                self.canvas.brush_ui(ui, self.state, raster_available);
+            }
             Pane::Canvas => self.canvas.ui(
                 ui,
                 self.state,
@@ -261,7 +250,12 @@ impl Editor {
             paint,
             request_new: false,
             request_settings: false,
-            dock: draw_workspace(),
+            dock: {
+                let ws = Workspaces::load();
+                ws.list.first().map(|w| w.dock.clone()).unwrap_or_else(draw_workspace)
+            },
+            workspaces: Workspaces::load(),
+            ws_name: String::new(),
         }
     }
 
@@ -274,7 +268,12 @@ impl Editor {
             paint,
             request_new: false,
             request_settings: false,
-            dock: draw_workspace(),
+            dock: {
+                let ws = Workspaces::load();
+                ws.list.first().map(|w| w.dock.clone()).unwrap_or_else(draw_workspace)
+            },
+            workspaces: Workspaces::load(),
+            ws_name: String::new(),
         }
     }
 }
@@ -479,7 +478,12 @@ fn probe_at(ppp: f32) {
                     || (r.width() - p.width()).abs() > 0.01
                     || (r.height() - p.height()).abs() > 0.01 =>
             {
-                *moved += 1;
+                // Settle steps exist to absorb first-frames layout (font
+                // metrics, wrapped-row heights); only movement DURING the
+                // scripted scenarios is the bug class.
+                if label != "settle" {
+                    *moved += 1;
+                }
                 format!(
                     "  MOVED dL{:+.2} dT{:+.2} dW{:+.2} dH{:+.2}",
                     r.left() - p.left(),
@@ -646,20 +650,52 @@ impl Editor {
                     .on_hover_text("off = playback stops on the last frame");
                 ui.separator();
                 // Workspaces: saved pane arrangements over the same document.
-                if ui
-                    .button("draw")
-                    .on_hover_text("workspace: big canvas, X-sheet side rail")
-                    .clicked()
-                {
-                    self.dock = draw_workspace();
+                for i in 0..self.workspaces.list.len().min(6) {
+                    let name = self.workspaces.list[i].name.clone();
+                    if ui
+                        .button(&name)
+                        .on_hover_text("switch workspace (same document, new room)")
+                        .clicked()
+                    {
+                        self.dock = self.workspaces.list[i].dock.clone();
+                    }
                 }
-                if ui
-                    .button("timing")
-                    .on_hover_text("workspace: X-sheet takes half the room")
-                    .clicked()
-                {
-                    self.dock = timing_workspace();
-                }
+                ui.menu_button("ws ▾", |ui| {
+                    ui.label(egui::RichText::new("save current arrangement as:").weak());
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.ws_name);
+                        let name = self.ws_name.trim().to_string();
+                        if ui.button("save").clicked() && !name.is_empty() {
+                            if let Some(w) =
+                                self.workspaces.list.iter_mut().find(|w| w.name == name)
+                            {
+                                w.dock = self.dock.clone();
+                            } else {
+                                self.workspaces.list.push(Workspace {
+                                    name,
+                                    dock: self.dock.clone(),
+                                });
+                            }
+                            self.workspaces.save();
+                            self.ws_name.clear();
+                            ui.close();
+                        }
+                    });
+                    ui.separator();
+                    let mut remove: Option<usize> = None;
+                    for (i, w) in self.workspaces.list.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.label(&w.name);
+                            if ui.small_button("✕").on_hover_text("delete workspace").clicked() {
+                                remove = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = remove {
+                        self.workspaces.list.remove(i);
+                        self.workspaces.save();
+                    }
+                });
                 ui.separator();
                 ui.label(
                     egui::RichText::new(format!(

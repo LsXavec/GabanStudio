@@ -24,12 +24,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // horizontally on every frame of playback.
     ui.set_min_width(ui.available_width());
 
-    // Cel Layers strip docks at the BOTTOM of this panel (time axis above,
-    // inside-of-one-cel below) — added first so the sheet gets the remainder.
-    egui::Panel::bottom(egui::Id::new("cel_layers_strip"))
-        .resizable(false)
-        .show(ui, |ui| cel_layers_strip(ui, state));
-
+    // (The cel-layers strip is its own dockable pane now — see workspace::Pane.)
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.label(
@@ -388,7 +383,7 @@ fn truncate_name(name: &str) -> String {
 // double-click = rename, opacity drag commits ONCE at gesture end. The + menu
 // inserts presets at their anime-correct stack positions.
 
-fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
+pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
     // Same width-isolation as the parent panel: the strip's rows must never
     // drive the panel width (they appear/disappear on undo/redo and playback).
     ui.set_min_width(ui.available_width());
