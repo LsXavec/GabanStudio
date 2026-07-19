@@ -97,12 +97,13 @@ const TILT_NEEDLE_MIN: f32 = 0.05;
 
 /// The canvas's active TOOL — the abstraction workspaces will restore per
 /// stage (LENS-DOCK: workspace = layout + tool/mode). `Paint` keeps the
-/// existing brush/eraser pair (which sub-tool via `erasing`); `Select` is the
-/// select/move/scale/rotate tool. Flood fill joins this enum next.
+/// existing brush/eraser pair (which sub-tool via `erasing`); `Select` is
+/// the select/move/scale/rotate tool; `Fill` is the ink-&-paint bucket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CanvasTool {
     Paint,
     Select,
+    Fill,
 }
 
 /// Selection drawing shape (a rect is a 4-point polygon through the same
@@ -275,6 +276,13 @@ pub struct CanvasView {
     pub tool: CanvasTool,
     /// Selection drawing shape for the Select tool (toolbar toggle).
     sel_shape: SelShape,
+    /// Fill: line-art gaps up to this many px act closed.
+    fill_gap: u32,
+    /// Fill: how far flats tuck UNDER the lines (kills the pale halo).
+    fill_grow: u32,
+    /// Fill reference: true = the whole cel's flatten bounds the fill (line
+    /// art on any layer — the shiage default); false = active layer only.
+    fill_ref_cel: bool,
     /// Committed selection outline, paper-space polygon (None = no selection).
     /// Survives frame nav — it's a region of PAPER, not of one cel.
     selection: Option<Vec<Pos2>>,
@@ -374,6 +382,9 @@ impl CanvasView {
             composite_view: false,
             tool: CanvasTool::Paint,
             sel_shape: SelShape::Lasso,
+            fill_gap: 2,
+            fill_grow: 2,
+            fill_ref_cel: true,
             selection: None,
             sel_draft: None,
             floating: None,
@@ -459,7 +470,8 @@ impl CanvasView {
         if self.touch_active || !self.current.is_empty() || self.raster_stroke_done {
             return; // mid-stroke: refuse silently, same as other guards
         }
-        if tool == CanvasTool::Paint && self.floating.is_some() {
+        // Leaving Select for ANY tool lands the floating transform.
+        if self.tool == CanvasTool::Select && self.floating.is_some() {
             self.commit_floating(state);
         }
         self.sel_draft = None;
@@ -468,6 +480,11 @@ impl CanvasView {
             CanvasTool::Select => {
                 "select: drag = select, drag inside = move, corners = scale, \
                  just outside corners = rotate; Enter applies, Esc cancels"
+                    .into()
+            }
+            CanvasTool::Fill => {
+                "fill: click a region — line art bounds it; gap closes line \
+                 breaks, under tucks the flat beneath the lines"
                     .into()
             }
             CanvasTool::Paint => "paint".into(),
@@ -600,7 +617,7 @@ impl CanvasView {
             let moved = edit::transform_patch(&f.patch, &affine);
             let diff = edit::merge_patch(&f.base_tiles, &f.cleared, &moved);
             if !diff.is_empty() {
-                state.commit_region_edit(f.drawing, f.layer, diff);
+                state.commit_region_edit("transform", f.drawing, f.layer, diff);
             }
         }
         // Either way the displayed texture was punched — restore from truth.
@@ -1010,6 +1027,42 @@ impl CanvasView {
                         self.sel_shape = SelShape::Rect;
                     }
                 }
+                // Fill / bucket tool (G): the shiage verb.
+                let fill_on = self.tool == CanvasTool::Fill;
+                if ui
+                    .selectable_label(fill_on, if compact { "🪣" } else { "🪣 fill" })
+                    .on_hover_text(
+                        "flood fill (G) — click a region; line art bounds it. \
+                         gap closes line breaks; under tucks the flat beneath \
+                         the lines; cel/layer picks the boundary reference",
+                    )
+                    .clicked()
+                {
+                    let next = if fill_on { CanvasTool::Paint } else { CanvasTool::Fill };
+                    self.set_tool(next, state);
+                }
+                if self.tool == CanvasTool::Fill {
+                    let mut gap = self.fill_gap;
+                    ui.add(egui::DragValue::new(&mut gap).range(0..=8).prefix("gap "));
+                    self.fill_gap = gap;
+                    let mut grow = self.fill_grow;
+                    ui.add(egui::DragValue::new(&mut grow).range(0..=4).prefix("under "));
+                    self.fill_grow = grow;
+                    if ui
+                        .selectable_label(self.fill_ref_cel, "cel")
+                        .on_hover_text("boundaries come from the whole cel (all visible layers)")
+                        .clicked()
+                    {
+                        self.fill_ref_cel = true;
+                    }
+                    if ui
+                        .selectable_label(!self.fill_ref_cel, "layer")
+                        .on_hover_text("boundaries come from the active layer only")
+                        .clicked()
+                    {
+                        self.fill_ref_cel = false;
+                    }
+                }
                 // Composite view: the node graph's rendered output (review
                 // mode — painting pauses). Blocked mid-stroke: swapping the
                 // view under a live stroke would orphan its display.
@@ -1288,6 +1341,9 @@ impl CanvasView {
                         state,
                         paint.as_deref_mut(),
                     );
+                }
+                CanvasTool::Fill => {
+                    self.fill_input(&response, rect, &to_paper, state);
                 }
             }
         } else {
@@ -1849,6 +1905,86 @@ impl CanvasView {
             carry = d - len;
         }
         dabs
+    }
+
+    /// Fill-tool input: a press flood-fills the clicked region on the ACTIVE
+    /// layer, bounded by the reference (cel flatten or active layer), and
+    /// commits immediately — one click = one PaintTiles = one undo step.
+    fn fill_input(
+        &mut self,
+        response: &egui::Response,
+        rect: Rect,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        state: &mut AppState,
+    ) {
+        if !response.drag_started_by(egui::PointerButton::Primary) {
+            return;
+        }
+        let Some(pos) = response.interact_pointer_pos() else {
+            return;
+        };
+        if !rect.contains(pos) {
+            return;
+        }
+        if self.composite_view {
+            state.status = "composite view — press C to edit".into();
+            return;
+        }
+        if !self.raster {
+            state.status = "the fill tool needs the raster engine (🖌)".into();
+            return;
+        }
+        if state.active_layer_props().is_some_and(|p| !p.visible) {
+            state.status = format!(
+                "layer '{}' is hidden — press A to switch or click its eye",
+                state.active_layer_name()
+            );
+            return;
+        }
+        let Some(did) = state.own_key_drawing() else {
+            state.status =
+                "held/blank frame — a fill edits a frame's OWN cel (draw here first)".into();
+            return;
+        };
+        let (kd, kl, _) = state.active_layer_key();
+        if kd != did.0 || kl == u64::MAX {
+            state.status = "no raster layer here to fill".into();
+            return;
+        }
+        let (pw, ph) = (state.engine.project.width, state.engine.project.height);
+        let p = to_paper(pos);
+        let seed = (p.x.floor() as i32, p.y.floor() as i32);
+        let reference = if self.fill_ref_cel {
+            state.display_cel_flatten().unwrap_or_default()
+        } else {
+            state.active_layer_tiles().cloned().unwrap_or_default()
+        };
+        let opts = anim_core::fill::FillOpts {
+            threshold: 0.1,
+            gap_px: self.fill_gap,
+            grow_px: self.fill_grow,
+        };
+        let Some(mask) = anim_core::fill::flood_fill_mask(&reference, seed, pw, ph, &opts)
+        else {
+            state.status =
+                "clicked on line art — nothing to fill (near a line? a smaller gap value \
+                 shrinks the closing band)"
+                    .into();
+            return;
+        };
+        // Fill colour = the brush colour through the same conversion the dab
+        // path uses, premultiplied.
+        let c = linear_rgba(self.brush_color);
+        let premult = [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
+        let target = state.active_layer_tiles().cloned().unwrap_or_default();
+        let diff = anim_core::fill::fill_diff(&target, &mask, premult);
+        if diff.is_empty() {
+            state.status = "fill made no change".into();
+            return;
+        }
+        state.commit_region_edit("flood fill", did, LayerId(kl), diff);
+        // The engine changed under the displayed texture — resync from truth.
+        self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
     }
 
     /// Begin a stroke at `pos` (shared by the native tablet path and the egui

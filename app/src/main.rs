@@ -167,6 +167,15 @@ impl App {
             ed.canvas.set_tool(canvas::CanvasTool::Paint, &mut ed.state);
             return;
         }
+        if action == Action::FillTool {
+            let next = if ed.canvas.tool == canvas::CanvasTool::Fill {
+                canvas::CanvasTool::Paint
+            } else {
+                canvas::CanvasTool::Fill
+            };
+            ed.canvas.set_tool(next, &mut ed.state);
+            return;
+        }
         if action == Action::SelectAll {
             let (w, h) = (
                 ed.state.engine.project.width as f32,
@@ -261,6 +270,7 @@ impl App {
             | Action::ToggleCompositeView
             | Action::SelectTool
             | Action::BrushTool
+            | Action::FillTool
             | Action::SelectAll => {} // handled above
             Action::Preset1
             | Action::Preset2

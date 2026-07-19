@@ -271,6 +271,7 @@ impl AppState {
     /// one undo step, by construction (the diff is its own exact inverse).
     pub fn commit_region_edit(
         &mut self,
+        label: &str,
         id: DrawingId,
         layer: LayerId,
         diff: anim_core::raster::TileDiff,
@@ -279,11 +280,21 @@ impl AppState {
         let n = diff.len();
         let r = self
             .engine
-            .apply("transform selection", vec![Command::PaintTiles { at, id, layer, diff }]);
+            .apply(label, vec![Command::PaintTiles { at, id, layer, diff }]);
         match r {
-            Ok(_) => self.status = format!("transform applied ({n} tile(s))"),
-            Err(e) => self.status = format!("transform failed: {e:?}"),
+            Ok(_) => self.status = format!("{label} applied ({n} tile(s))"),
+            Err(e) => self.status = format!("{label} failed: {e:?}"),
         }
+    }
+
+    /// Flatten of the DISPLAYED drawing's visible layers — the fill tool's
+    /// "cel" reference: line art bounds a fill no matter which layer it
+    /// lands on (the shiage workflow).
+    pub fn display_cel_flatten(
+        &self,
+    ) -> Option<std::collections::BTreeMap<TileCoord, Arc<TileData>>> {
+        let d = self.cut().drawing(self.display_drawing()?)?;
+        Some(d.flatten())
     }
 
     /// Commit a finished raster stroke: the readback tiles become a `PaintTiles`

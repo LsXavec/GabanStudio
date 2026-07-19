@@ -16,6 +16,7 @@ pub mod edit;
 pub mod error;
 pub mod eval;
 pub mod export;
+pub mod fill;
 pub mod graph;
 pub mod ids;
 pub mod model;
