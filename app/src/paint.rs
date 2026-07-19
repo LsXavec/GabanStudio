@@ -41,6 +41,42 @@ const ERASE_BLEND: wgpu::BlendState = wgpu::BlendState {
     },
 };
 
+/// Alpha-lock blend (Krita lock-alpha): the dab's colour contribution is
+/// masked by the DESTINATION's existing alpha (src_factor = DstAlpha), so a
+/// stroke can only recolor pixels that already have coverage — it can never
+/// grow the layer's silhouette. The alpha channel is left completely
+/// UNCHANGED (src_factor Zero, dst_factor One): coverage is locked exactly
+/// as it was, not just "hard to extend". Premultiplied throughout, so a
+/// partial-alpha destination (a soft edge) proportionally limits how much
+/// colour a full-strength dab can deposit there — verified by hand: dst
+/// opaque + full dab -> full recolor, coverage unchanged; dst transparent +
+/// any dab -> zero change; dst partial + full dab -> full recolor AT THAT
+/// alpha, same coverage.
+const ALPHA_LOCK_BLEND: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::DstAlpha,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::One,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// Which pipeline a raster dab batch stamps with. Only ever used for the
+/// DIRECT-to-active paths (eraser and alpha-lock both bypass the wet
+/// buffer — alpha-lock specifically because its mask must read the ACTIVE
+/// layer's real coverage, and the wet buffer starts every stroke
+/// transparent, which would mask out the whole stroke).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PaintMode {
+    Ink,
+    Erase,
+    AlphaLock,
+}
+
 /// One brush dab in layer texel space (= project pixel space).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -96,6 +132,7 @@ pub struct PaintLayer {
     pipeline: wgpu::RenderPipeline,
     /// Destination-out variant of `pipeline` for the eraser tool.
     erase_pipeline: wgpu::RenderPipeline,
+    alpha_lock_pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     width: u32,
@@ -300,6 +337,8 @@ impl PaintLayer {
         );
         let erase_pipeline =
             Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ERASE_BLEND);
+        let alpha_lock_pipeline =
+            Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ALPHA_LOCK_BLEND);
 
         let filter = wgpu::FilterMode::Linear;
         let active = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
@@ -410,6 +449,7 @@ impl PaintLayer {
             renderer,
             pipeline,
             erase_pipeline,
+            alpha_lock_pipeline,
             uniform_buf,
             bind_group,
             width,
@@ -778,22 +818,25 @@ impl PaintLayer {
         }
     }
 
-    /// Stamp a batch of dabs onto the ACTIVE layer (accumulate — LoadOp::Load).
-    /// `erase` selects the destination-out pipeline so the dabs subtract coverage
-    /// instead of adding ink. (The eraser paints the active layer directly;
-    /// brush strokes go through `paint_wet` + `composite_wet`.)
-    pub fn paint(&mut self, dabs: &[Dab], erase: bool) {
+    /// Stamp a batch of dabs onto the ACTIVE layer directly (accumulate —
+    /// LoadOp::Load). `mode` selects Erase (destination-out) or AlphaLock
+    /// (masked by the layer's OWN existing alpha) — both bypass the wet
+    /// buffer for exactly that reason: their blend needs the active layer's
+    /// real coverage as the destination, and the wet buffer starts every
+    /// stroke transparent. Ordinary ink strokes go through `paint_wet` +
+    /// `composite_wet` instead, for the opacity-ceiling behavior.
+    pub fn paint(&mut self, dabs: &[Dab], mode: PaintMode) {
         let view = self.active.view.clone();
-        self.paint_into(&view, dabs, erase);
+        self.paint_into(&view, dabs, mode);
     }
 
     /// Stamp a batch of brush dabs into the WET buffer (the live stroke).
     pub fn paint_wet(&mut self, dabs: &[Dab]) {
         let view = self.wet.view.clone();
-        self.paint_into(&view, dabs, false);
+        self.paint_into(&view, dabs, PaintMode::Ink);
     }
 
-    fn paint_into(&mut self, view: &wgpu::TextureView, dabs: &[Dab], erase: bool) {
+    fn paint_into(&mut self, view: &wgpu::TextureView, dabs: &[Dab], mode: PaintMode) {
         if dabs.is_empty() {
             return;
         }
@@ -823,7 +866,11 @@ impl PaintLayer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(if erase { &self.erase_pipeline } else { &self.pipeline });
+            pass.set_pipeline(match mode {
+                PaintMode::Ink => &self.pipeline,
+                PaintMode::Erase => &self.erase_pipeline,
+                PaintMode::AlphaLock => &self.alpha_lock_pipeline,
+            });
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.set_vertex_buffer(0, instances.slice(..));
             pass.draw(0..4, 0..dabs.len() as u32);

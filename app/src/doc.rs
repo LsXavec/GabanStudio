@@ -11,7 +11,7 @@ use anim_core::Engine;
 use anim_core::command::{Command, CutRef};
 use anim_core::ids::*;
 use anim_core::model::{Cut, Stroke};
-use anim_core::model::CelLayer;
+use anim_core::model::{CelLayer, LayerProps};
 use anim_core::raster::{TileCoord, TileData, TileDiff};
 use anim_core::xsheet::Exposure;
 
@@ -33,6 +33,11 @@ pub struct ViewContext {
     pub playing: bool,
     pub(crate) play_acc: f32,
     pub onion: bool,
+    /// Onion ghosts show ONLY the layer matching the active layer's NAME
+    /// (classic douga "line-only ghost" — inking against the neighbour's
+    /// line without its color/shadow bleeding through). Off = whole-cel
+    /// ghost (today's default behavior).
+    pub onion_layer_only: bool,
     /// Which cel layer is being edited, counted FROM THE TOP of the stack
     /// (0 = topmost — "line" in the default template). Position-based so it
     /// follows across frames; clamped per drawing when stacks are shallower.
@@ -100,6 +105,7 @@ impl AppState {
                 playing: false,
                 play_acc: 0.0,
                 onion: true,
+                onion_layer_only: false,
                 active_layer_slot: 0,
                 loop_playback: true,
             },
@@ -148,6 +154,7 @@ impl AppState {
                 playing: false,
                 play_acc: 0.0,
                 onion: true,
+                onion_layer_only: false,
                 active_layer_slot: 0,
                 loop_playback: true,
             },
@@ -433,11 +440,33 @@ impl AppState {
         }
     }
 
-    /// Layer stack for a NEW cel — the merged solo douga/shiage template:
-    /// "line" on top (draw), "color" underneath (paint shiage without ever
-    /// touching the line). The full professional set (rough/shadow/highlight/
-    /// correction) arrives with the Phase 3 layer strip's + menu.
+    /// Layer stack for a NEW cel. Clones the STRUCTURE (names, visibility,
+    /// opacity — never pixels) of the drawing currently HELD on the active
+    /// column at the current frame (CSP's "new cel inherits the previous
+    /// cel's stack" — pro stacks are per-scene consistent, so this saves
+    /// rebuilding shadow/highlight/correction layers by hand on every new
+    /// drawing). Falls back to the merged solo douga/shiage default —
+    /// "color" bottom, "line" top — when there's nothing to clone: the
+    /// column start, right after an Empty terminator, or a legacy
+    /// vector-only held drawing (no layers).
     fn new_cel_layers(&mut self) -> Vec<CelLayer> {
+        // Collect owned props first — self.cut() borrows self.engine.project
+        // immutably, which would collide with alloc_layer_id()'s &mut below.
+        let prev_props: Vec<LayerProps> = self
+            .resolve_at(self.view.active_column, self.view.frame)
+            .and_then(|id| self.cut().drawing(id))
+            .map(|d| d.layers.iter().map(|l| l.props.clone()).collect())
+            .unwrap_or_default();
+        if !prev_props.is_empty() {
+            return prev_props
+                .into_iter()
+                .map(|props| CelLayer {
+                    id: self.engine.alloc_layer_id(),
+                    props,
+                    raster: Default::default(),
+                })
+                .collect();
+        }
         vec![
             CelLayer::new(self.engine.alloc_layer_id(), "color"), // bottom
             CelLayer::new(self.engine.alloc_layer_id(), "line"),  // top
@@ -742,12 +771,22 @@ impl AppState {
 
     /// WHOLE-CEL composite of a drawing's visible layers (bottom→top slices +
     /// composite hash) — the onion ghost is the cel as it looks, all layers.
-    pub fn drawing_composite(&self, id: DrawingId) -> Option<(LayerSlices<'_>, u64)> {
+    /// Composite of `id`'s visible layers, optionally restricted to layers
+    /// matching `filter_name` (the per-layer onion: a neighbour cel with no
+    /// layer of that name contributes nothing, not a wrong-role ghost).
+    pub fn drawing_composite(
+        &self,
+        id: DrawingId,
+        filter_name: Option<&str>,
+    ) -> Option<(LayerSlices<'_>, u64)> {
         let d = self.cut().drawing(id)?;
         let mut bytes: Vec<u8> = Vec::new();
         let mut slices = Vec::new();
         for l in &d.layers {
-            if l.props.visible && l.props.opacity > 0.0 {
+            if l.props.visible
+                && l.props.opacity > 0.0
+                && filter_name.is_none_or(|n| l.props.name == n)
+            {
                 bytes.extend_from_slice(&l.content_hash().to_le_bytes());
                 slices.push((&l.raster.tiles, l.props.opacity));
             }

@@ -153,6 +153,10 @@ impl App {
             ed.canvas.toggle_eraser();
             return;
         }
+        if action == Action::ToggleAlphaLock {
+            ed.canvas.toggle_alpha_lock();
+            return;
+        }
         // Tool switches are canvas-owned; set_tool refuses mid-stroke itself
         // and commits any floating transform when leaving Select.
         if action == Action::SelectTool {
@@ -268,6 +272,7 @@ impl App {
             Action::RemoveColumn => s.remove_active_column(),
             Action::ToggleOnion => s.view.onion = !s.view.onion,
             Action::ToggleEraser
+            | Action::ToggleAlphaLock
             | Action::ToggleCompositeView
             | Action::SelectTool
             | Action::BrushTool
@@ -1102,6 +1107,17 @@ impl Editor {
                 );
                 ui.separator();
                 ui.checkbox(&mut self.state.view.onion, "onion");
+                // Fixed-width regardless of onion state (UI-STABILITY law:
+                // nothing variable-width in the toolbar) — disabled, not
+                // hidden, when onion is off.
+                ui.add_enabled(
+                    self.state.view.onion,
+                    egui::Checkbox::new(&mut self.state.view.onion_layer_only, "line only"),
+                )
+                .on_hover_text(
+                    "ghost only the layer matching your active layer's name \
+                     (e.g. line-on-line) instead of the whole neighbour cel",
+                );
                 ui.checkbox(&mut self.state.view.loop_playback, "loop")
                     .on_hover_text("off = playback stops on the last frame");
                 ui.separator();

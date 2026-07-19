@@ -17,7 +17,7 @@ use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
 use crate::config::{LayersConfig, PenConfig, PressureCurve};
 use crate::doc::AppState;
-use crate::paint::{Dab, PaintLayer};
+use crate::paint::{Dab, PaintLayer, PaintMode};
 
 /// Default new-project resolution (the New Project dialog's starting values).
 pub const DEFAULT_PAPER_W: u32 = 1920;
@@ -217,6 +217,14 @@ pub struct CanvasView {
     /// Eraser tool active: strokes subtract coverage (destination-out) instead of
     /// laying down ink. Same dab geometry, size and pressure response as the brush.
     erasing: bool,
+    /// Alpha lock: ink can only land where the active layer ALREADY has
+    /// coverage (Krita's lock-alpha) — recolor a shape without ever
+    /// painting outside its silhouette. Session-transient (not a per-layer
+    /// persisted property; v1.5's cheap MVP — a toolbar toggle, like
+    /// eraser). Bypasses the wet buffer (like eraser) so the mask reads the
+    /// ACTIVE layer's real alpha, not the wet buffer's own (which starts
+    /// every stroke transparent and would mask out everything).
+    alpha_lock: bool,
     /// Per-dab strength (0–1): scales each dab's alpha, so overlapping dabs build
     /// up within a stroke (airbrush-like). NOT whole-stroke opacity — that needs
     /// the wet-buffer (paints the stroke separately, then composites once).
@@ -231,6 +239,9 @@ pub struct CanvasView {
     /// Tool latched at stroke START — a mid-stroke eraser toggle must not split
     /// one stroke across the wet buffer and the cel (wrong ordering at composite).
     stroke_erasing: bool,
+    /// Alpha-lock latched at stroke START — same reasoning as stroke_erasing.
+    /// Ignored when stroke_erasing is also set (erase always wins).
+    stroke_alpha_locked: bool,
     /// Layer slot latched at stroke START — a mid-stroke A-cycle must not
     /// retarget the pen-up commit (it would bake the OLD layer's readback into
     /// the NEW layer: silent cross-layer corruption).
@@ -363,10 +374,12 @@ impl CanvasView {
             raster: true,
             raster_brush_px: 14.0,
             erasing: false,
+            alpha_lock: false,
             brush_flow: 1.0,
             brush_opacity: 1.0,
             wet_dirty: false,
             stroke_erasing: false,
+            stroke_alpha_locked: false,
             stroke_layer_slot: 0,
             dyn_size: true,
             dyn_opacity: false,
@@ -409,6 +422,11 @@ impl CanvasView {
     /// Flip between brush and eraser (bound to a rebindable shortcut).
     pub fn toggle_eraser(&mut self) {
         self.erasing = !self.erasing;
+    }
+
+    /// Flip alpha-lock (bound to a rebindable shortcut).
+    pub fn toggle_alpha_lock(&mut self) {
+        self.alpha_lock = !self.alpha_lock;
     }
 
     /// Apply a brush preset wholesale (keybind 1–8, Presets pane, or a
@@ -500,6 +518,7 @@ impl CanvasView {
             tool: self.tool,
             composite_view: self.composite_view,
             onion: state.view.onion,
+            onion_layer_only: state.view.onion_layer_only,
             sel_shape: self.sel_shape,
             fill_ref_cel: self.fill_ref_cel,
         }
@@ -530,6 +549,7 @@ impl CanvasView {
         self.sel_shape = v.sel_shape;
         self.fill_ref_cel = v.fill_ref_cel;
         state.view.onion = v.onion;
+        state.view.onion_layer_only = v.onion_layer_only;
         true
     }
 
@@ -1038,6 +1058,21 @@ impl CanvasView {
                 {
                     self.erasing = true;
                 }
+                // Alpha lock (L): ink can only recolor pixels the active
+                // layer already has coverage on — never paint outside its
+                // silhouette. Independent of brush/eraser (a toggle, not a
+                // third tool) so it combines with either sub-mode's dab
+                // geometry/pressure — though erase always wins if both are on.
+                if ui
+                    .selectable_label(self.alpha_lock, if compact { "🔒" } else { "🔒 lock" })
+                    .on_hover_text(
+                        "alpha lock (L) — ink only recolors pixels this layer \
+                         already has coverage on; the silhouette can't grow",
+                    )
+                    .clicked()
+                {
+                    self.alpha_lock = !self.alpha_lock;
+                }
                 // Select / transform tool (V; B returns to paint). Leaving
                 // Select commits any floating transform.
                 let sel_on = self.tool == CanvasTool::Select;
@@ -1515,7 +1550,10 @@ impl CanvasView {
                 let dabs = self.build_stroke_dabs();
                 if dabs.len() > self.dabs_flushed {
                     if self.stroke_erasing {
-                        p.paint(&dabs[self.dabs_flushed..], true);
+                        p.paint(&dabs[self.dabs_flushed..], PaintMode::Erase);
+                        self.cel_touched = true;
+                    } else if self.stroke_alpha_locked {
+                        p.paint(&dabs[self.dabs_flushed..], PaintMode::AlphaLock);
                         self.cel_touched = true;
                     } else {
                         p.paint_wet(&dabs[self.dabs_flushed..]);
@@ -1565,8 +1603,11 @@ impl CanvasView {
             // onion-off clears the slots.
             if state.view.onion {
                 let neighbors = state.onion_neighbors();
+                // Computed once per frame, not per neighbour: the active
+                // layer's role name is what "line-only ghost" locks onto.
+                let filter = state.view.onion_layer_only.then(|| state.active_layer_name());
                 for (slot, nid) in neighbors.iter().enumerate() {
-                    match nid.and_then(|id| state.drawing_composite(id)) {
+                    match nid.and_then(|id| state.drawing_composite(id, filter.as_deref())) {
                         Some((slices, hash)) => p.set_onion(slot, Some(&slices), hash),
                         None => p.set_onion(slot, None, 0),
                     }
@@ -2117,6 +2158,7 @@ impl CanvasView {
         self.cur_none = 0;
         self.stroke_from_mouse = false;
         self.stroke_erasing = self.erasing;
+        self.stroke_alpha_locked = self.alpha_lock;
         self.stroke_layer_slot = state.view.active_layer_slot;
         self.cel_touched = false;
         self.dabs_flushed = 0;
@@ -2261,6 +2303,7 @@ impl CanvasView {
                 self.cur_none = 0; // force% diagnostic honest for this stroke
                 self.stroke_from_mouse = true;
                 self.stroke_erasing = self.erasing;
+                self.stroke_alpha_locked = self.alpha_lock;
                 self.stroke_layer_slot = state.view.active_layer_slot;
                 self.cel_touched = false;
                 self.dabs_flushed = 0;

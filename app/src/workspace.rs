@@ -88,6 +88,10 @@ pub struct WorkspaceView {
     pub tool: crate::canvas::CanvasTool,
     pub composite_view: bool,
     pub onion: bool,
+    /// Added after `onion` — a workspace saved before this field existed
+    /// deserializes it as `false` (whole-cel ghost, today's default).
+    #[serde(default)]
+    pub onion_layer_only: bool,
     pub sel_shape: crate::canvas::SelShape,
     pub fill_ref_cel: bool,
 }
