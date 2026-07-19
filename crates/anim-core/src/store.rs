@@ -16,7 +16,7 @@ use crate::model::{CelLayer, Cut, Drawing, LayerProps, Project, Scene};
 use crate::raster::{RasterLayer, TileData};
 use crate::xsheet::{Column, Exposure, XSheet};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS cel_layers(
 CREATE TABLE IF NOT EXISTS cel_tiles(
     layer_id INTEGER NOT NULL, tx INTEGER NOT NULL, ty INTEGER NOT NULL,
     bytes BLOB NOT NULL, PRIMARY KEY(layer_id, tx, ty));
+CREATE TABLE IF NOT EXISTS cut_images(
+    id INTEGER PRIMARY KEY, cut_id INTEGER NOT NULL, ord INTEGER NOT NULL,
+    name TEXT NOT NULL, bytes BLOB NOT NULL);
 ";
 // `raster_layers`/`tiles` are the LEGACY (schema <= 4) single-raster tables.
 // They stay in the schema + the DELETE batch (uniform create+purge pattern, and
@@ -71,7 +74,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
          DELETE FROM drawings; DELETE FROM columns; DELETE FROM cells;
          DELETE FROM nodes; DELETE FROM links;
          DELETE FROM raster_layers; DELETE FROM tiles;
-         DELETE FROM cel_layers; DELETE FROM cel_tiles;",
+         DELETE FROM cel_layers; DELETE FROM cel_tiles;
+         DELETE FROM cut_images;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -112,6 +116,9 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
         let mut ins_tile = tx.prepare(
             "INSERT INTO cel_tiles(layer_id, tx, ty, bytes) VALUES (?1, ?2, ?3, ?4)",
         )?;
+        let mut ins_image = tx.prepare(
+            "INSERT INTO cut_images(id, cut_id, ord, name, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
 
         for (s_ord, scene) in project.scenes.iter().enumerate() {
             ins_scene.execute((scene.id.0 as i64, &scene.name, s_ord as i64))?;
@@ -151,6 +158,16 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                             ))?;
                         }
                     }
+                }
+                for (i_ord, img) in cut.images.iter().enumerate() {
+                    // The ORIGINAL encoded bytes, verbatim — never re-encoded.
+                    ins_image.execute((
+                        img.id.0 as i64,
+                        cut.id.0 as i64,
+                        i_ord as i64,
+                        &img.name,
+                        img.bytes.as_slice(),
+                    ))?;
                 }
                 for (col_ord, col) in cut.xsheet.columns.iter().enumerate() {
                     ins_column.execute((col.id.0 as i64, cut.id.0 as i64, &col.name, col_ord as i64))?;
@@ -269,7 +286,28 @@ pub fn load(path: &Path) -> Result<Project> {
                 drawings: Vec::new(),
                 xsheet: XSheet::default(),
                 graph: Graph::default(),
+                images: Vec::new(),
             };
+
+            // Image assets: added in schema v6 (older files have none — and
+            // no cut_images table to query).
+            if version >= 6 {
+                let mut stmt = conn.prepare(
+                    "SELECT id, name, bytes FROM cut_images WHERE cut_id = ?1 ORDER BY ord",
+                )?;
+                let images: Vec<(i64, String, Vec<u8>)> = stmt
+                    .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<std::result::Result<_, _>>()?;
+                for (img_id, img_name, img_bytes) in images {
+                    let asset = crate::model::ImageAsset::from_png(
+                        ImageId(img_id as u64),
+                        img_name,
+                        img_bytes,
+                    )
+                    .map_err(|e| EngineError::Corrupt(format!("image {img_id}: {e}")))?;
+                    cut.images.push(asset);
+                }
+            }
 
             let mut stmt = conn
                 .prepare("SELECT id, name, payload FROM drawings WHERE cut_id = ?1 ORDER BY ord")?;

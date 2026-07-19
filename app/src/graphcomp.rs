@@ -471,6 +471,17 @@ impl GraphCompositor {
                 }
                 slot
             }
+            NodeKind::ImageSource { image } => {
+                let slot = self.acquire_cleared();
+                if let Some(img) = cut.image(*image) {
+                    // Same upload path as a cel layer at full opacity — the
+                    // asset's tiles ARE the universal currency.
+                    let slices: Vec<LayerSlice<'_>> = vec![(&img.tiles, 1.0)];
+                    let view = self.pool[slot].view.clone();
+                    paint.composite_layers_into(&view, &slices);
+                }
+                slot
+            }
             NodeKind::Solid { rgba } => self.acquire_cleared_to(wgpu::Color {
                 // Premultiplied linear — the same srgb_to_linear the CPU
                 // reference and the brush dab path use.

@@ -14,6 +14,8 @@ pub enum EngineError {
     UnknownDrawing(DrawingId),
     #[error("unknown cel layer {0}")]
     UnknownLayer(LayerId),
+    #[error("unknown image {0}")]
+    UnknownImage(ImageId),
     #[error("connecting {from} -> {to} would create a cycle")]
     WouldCycle { from: NodeId, to: NodeId },
     #[error("pin {pin} out of range for node {node}")]

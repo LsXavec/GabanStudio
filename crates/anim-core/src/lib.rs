@@ -103,6 +103,7 @@ impl Engine {
             drawings: Vec::new(),
             xsheet: Default::default(),
             graph: Default::default(),
+            images: Vec::new(),
         });
         Ok(id)
     }
@@ -139,6 +140,10 @@ impl Engine {
 
     pub fn alloc_layer_id(&mut self) -> LayerId {
         LayerId(self.project.alloc_id())
+    }
+
+    pub fn alloc_image_id(&mut self) -> ImageId {
+        ImageId(self.project.alloc_id())
     }
 
     // ---- Editing (undoable) ----------------------------------------------

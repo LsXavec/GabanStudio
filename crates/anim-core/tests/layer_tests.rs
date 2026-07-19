@@ -910,11 +910,11 @@ fn v4_file_migrates_to_one_layer() {
         let legacy_tiles: i64 = conn
             .query_row("SELECT COUNT(*) FROM tiles", (), |r| r.get(0))
             .unwrap();
-        assert_eq!(legacy_tiles, 0, "legacy rows purged on v5 save");
+        assert_eq!(legacy_tiles, 0, "legacy rows purged on re-save");
         let v: String = conn
             .query_row("SELECT value FROM meta WHERE key='schema_version'", (), |r| r.get(0))
             .unwrap();
-        assert_eq!(v, "5");
+        assert_eq!(v, "6", "re-save writes the current schema");
     }
 
     std::fs::remove_file(&path).unwrap();

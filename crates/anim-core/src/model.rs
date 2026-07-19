@@ -211,6 +211,147 @@ impl Drawing {
     }
 }
 
+/// An image asset owned by a CUT (background plate, reference/storyboard
+/// underlay, scanned pencil art — the satsuei "cels over BG" model keeps
+/// BGs per cut). The ORIGINAL encoded bytes are the persisted truth (saved
+/// verbatim, never re-encoded); premultiplied-f16 tiles are decoded once at
+/// construction so every render path speaks the same currency as cel
+/// layers. COLOR LAW: file channel values are kept AS-IS (premultiplied but
+/// no EOTF applied) — texel space = file space, so importing a PNG and
+/// exporting it round-trips bit-clean, consistent with export writing texel
+/// values directly as sRGB bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageAsset {
+    pub id: ImageId,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// Encoded source bytes (PNG), persisted verbatim.
+    pub bytes: std::sync::Arc<Vec<u8>>,
+    /// Decoded premultiplied-f16 tiles anchored at (0,0), derived
+    /// deterministically from `bytes`.
+    pub tiles: std::collections::BTreeMap<TileCoord, std::sync::Arc<TileData>>,
+    /// fnv1a of the encoded bytes — the content address eval recipes fold.
+    pub content_hash: u64,
+}
+
+/// Per-side dimension cap for imported images (BG plates, not gigapixel
+/// scans). Enforced BEFORE any pixel allocation so a crafted header can't
+/// drive an OOM, and kept small enough that all size arithmetic fits usize.
+pub const MAX_IMAGE_DIM: u32 = 16_384;
+/// Total pixel cap (~64 Mpx, an 8k×8k plate) — same rationale.
+pub const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+
+impl ImageAsset {
+    /// Decode a PNG into an asset. EXPAND normalizes palette and sub-8-bit
+    /// images to plain 8-bit channels (scanned 1-bit line art, indexed
+    /// exports); 16-bit files are rejected as a plain error. Every failure
+    /// is an `Err`, never a panic — commands reject atomically and loads
+    /// report Corrupt.
+    pub fn from_png(id: ImageId, name: impl Into<String>, bytes: Vec<u8>) -> Result<Self, String> {
+        use crate::raster::{TILE, TILE_LEN, f32_to_f16_bits};
+
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut reader = decoder.read_info().map_err(|e| format!("png: {e}"))?;
+        {
+            // Caps from the HEADER, before any pixel-sized allocation — a
+            // few-hundred-byte file declaring huge dimensions must fail
+            // cleanly, not OOM.
+            let info = reader.info();
+            let (w, h) = (info.width, info.height);
+            if w == 0 || h == 0 {
+                return Err("png: empty image".into());
+            }
+            if w > MAX_IMAGE_DIM || h > MAX_IMAGE_DIM
+                || (w as u64) * (h as u64) > MAX_IMAGE_PIXELS
+            {
+                return Err(format!(
+                    "png: too large ({w}×{h}; max {MAX_IMAGE_DIM} per side, \
+                     {MAX_IMAGE_PIXELS} pixels total)"
+                ));
+            }
+        }
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).map_err(|e| format!("png: {e}"))?;
+        // Depth check BEFORE any slicing: EXPAND leaves 16-bit as-is, and a
+        // sub-8-bit buffer would be smaller than the slices below expect.
+        if info.bit_depth != png::BitDepth::Eight {
+            return Err(format!("png: unsupported bit depth {:?}", info.bit_depth));
+        }
+        let (w, h) = (info.width, info.height);
+        let n = w as usize * h as usize; // fits: capped at 64 Mpx above
+        let frame = &buf[..info.buffer_size()];
+        let rgba: Vec<u8> = match info.color_type {
+            png::ColorType::Rgba => frame[..n * 4].to_vec(),
+            png::ColorType::Rgb => frame[..n * 3]
+                .chunks_exact(3)
+                .flat_map(|p| [p[0], p[1], p[2], 255])
+                .collect(),
+            png::ColorType::Grayscale => frame[..n]
+                .iter()
+                .flat_map(|&g| [g, g, g, 255])
+                .collect(),
+            png::ColorType::GrayscaleAlpha => frame[..n * 2]
+                .chunks_exact(2)
+                .flat_map(|p| [p[0], p[0], p[0], p[1]])
+                .collect(),
+            // Indexed cannot appear after EXPAND; anything else is exotic.
+            other => return Err(format!("png: unsupported color type {other:?}")),
+        };
+
+        // Tile it: straight u8 → premultiplied f16 (no EOTF — see color law).
+        let mut tiles = std::collections::BTreeMap::new();
+        let t1x = (w as i32 - 1).div_euclid(TILE as i32);
+        let t1y = (h as i32 - 1).div_euclid(TILE as i32);
+        for ty in 0..=t1y {
+            for tx in 0..=t1x {
+                let mut px = vec![0u16; TILE_LEN];
+                let mut any = false;
+                for row in 0..TILE {
+                    let sy = ty as i64 * TILE as i64 + row as i64;
+                    if sy >= h as i64 {
+                        break;
+                    }
+                    for cx in 0..TILE {
+                        let sx = tx as i64 * TILE as i64 + cx as i64;
+                        if sx >= w as i64 {
+                            break;
+                        }
+                        let s = &rgba[(sy as usize * w as usize + sx as usize) * 4..][..4];
+                        let a = s[3] as f32 / 255.0;
+                        if a <= 0.0 {
+                            continue;
+                        }
+                        let i = (row * TILE + cx) * 4;
+                        for c in 0..3 {
+                            px[i + c] = f32_to_f16_bits(s[c] as f32 / 255.0 * a);
+                        }
+                        px[i + 3] = f32_to_f16_bits(a);
+                        any = true;
+                    }
+                }
+                if any {
+                    tiles.insert(
+                        (tx, ty),
+                        std::sync::Arc::new(TileData::from_vec(px)),
+                    );
+                }
+            }
+        }
+        let content_hash = crate::value::fnv1a(&bytes);
+        Ok(Self {
+            id,
+            name: name.into(),
+            width: w,
+            height: h,
+            bytes: std::sync::Arc::new(bytes),
+            tiles,
+            content_hash,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cut {
     pub id: CutId,
@@ -219,11 +360,17 @@ pub struct Cut {
     pub drawings: Vec<Drawing>,
     pub xsheet: XSheet,
     pub graph: Graph,
+    /// Image assets owned by this cut (BG plates, references).
+    pub images: Vec<ImageAsset>,
 }
 
 impl Cut {
     pub fn drawing(&self, id: DrawingId) -> Option<&Drawing> {
         self.drawings.iter().find(|d| d.id == id)
+    }
+
+    pub fn image(&self, id: ImageId) -> Option<&ImageAsset> {
+        self.images.iter().find(|i| i.id == id)
     }
 }
 

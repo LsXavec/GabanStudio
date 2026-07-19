@@ -25,6 +25,7 @@ fn kind_color(kind: &NodeKind) -> Color32 {
     match kind {
         NodeKind::DrawingSource { .. } => Color32::from_rgb(90, 140, 200),
         NodeKind::Solid { .. } => Color32::from_rgb(150, 120, 190),
+        NodeKind::ImageSource { .. } => Color32::from_rgb(90, 180, 170),
         NodeKind::Transform { .. } => Color32::from_rgb(120, 170, 120),
         NodeKind::Blend { .. } => Color32::from_rgb(200, 150, 90),
         NodeKind::Output => Color32::from_rgb(200, 100, 100),
@@ -276,6 +277,22 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             );
             ui.close();
         }
+        if ui
+            .button("Image (PNG)…")
+            .on_hover_text(
+                "import a background plate / reference image into this cut — \
+                 stored inside the project file, wired as an ImageSource node",
+            )
+            .clicked()
+        {
+            ui.close();
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .pick_file()
+            {
+                state.graph_import_image(&path, world);
+            }
+        }
         if ui.button("Transform").clicked() {
             state.graph_add_node(
                 NodeKind::Transform {
@@ -369,6 +386,19 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 changed |= ui
                     .add(egui::DragValue::new(rotate_deg).suffix("°"))
                     .changed();
+            }
+            NodeKind::ImageSource { image } => {
+                match state.cut().image(*image) {
+                    Some(img) => {
+                        ui.label(format!("{} — {}×{}", img.name, img.width, img.height));
+                    }
+                    None => {
+                        ui.label(
+                            egui::RichText::new("missing image (renders transparent)")
+                                .color(egui::Color32::from_rgb(235, 160, 90)),
+                        );
+                    }
+                }
             }
             NodeKind::Blend { mode } => {
                 for m in [

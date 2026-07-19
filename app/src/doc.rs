@@ -1083,6 +1083,42 @@ impl AppState {
 
     // ---- Node graph (all mutations = engine commands = undoable) -----------
 
+    /// Import a PNG as a cut image asset AND wire an ImageSource node for it
+    /// — ONE batch, one undo step (undo removes both the node and the asset).
+    pub fn graph_import_image(&mut self, path: &std::path::Path, pos: (f32, f32)) {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("image import failed: {e}");
+                return;
+            }
+        };
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".into());
+        let at = self.at();
+        let index = self.cut().images.len();
+        let image = self.engine.alloc_image_id();
+        let node = self.engine.alloc_node_id();
+        let r = self.engine.apply(
+            "import image",
+            vec![
+                Command::AddImage { at, id: image, index, name, bytes },
+                Command::AddNode {
+                    at,
+                    id: node,
+                    kind: anim_core::graph::NodeKind::ImageSource { image },
+                },
+            ],
+        );
+        if r.is_ok() {
+            self.node_positions.insert(node.0, pos);
+            self.selected_node = Some(node);
+        }
+        self.report(r, "image imported");
+    }
+
     pub fn graph_add_node(&mut self, kind: anim_core::graph::NodeKind, pos: (f32, f32)) {
         let at = self.at();
         let id = self.engine.alloc_node_id();
@@ -1166,7 +1202,7 @@ impl AppState {
                 }
                 use anim_core::graph::NodeKind::*;
                 let (col_x, row) = match node.kind {
-                    DrawingSource { .. } | Solid { .. } => {
+                    DrawingSource { .. } | Solid { .. } | ImageSource { .. } => {
                         n_src += 1;
                         (40.0, n_src - 1)
                     }

@@ -99,6 +99,16 @@ impl Evaluator {
                 "solid(#{:02x}{:02x}{:02x}{:02x})",
                 rgba[0], rgba[1], rgba[2], rgba[3]
             )),
+            // Content-addressed like DrawingSource; a missing asset is
+            // TOLERATED as a sentinel (renders transparent) — the same law
+            // as missing columns, so every consumer agrees.
+            NodeKind::ImageSource { image } => match cut.image(*image) {
+                Some(img) => Value::image(format!(
+                    "image({}:'{}'#{:016x})",
+                    image, img.name, img.content_hash
+                )),
+                None => Value::image(format!("missing-image({image})")),
+            },
             NodeKind::Transform {
                 translate,
                 scale,

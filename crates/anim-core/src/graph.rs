@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use crate::error::{EngineError, Result};
-use crate::ids::{ColumnId, NodeId};
+use crate::ids::{ColumnId, ImageId, NodeId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
@@ -36,6 +36,8 @@ pub enum NodeKind {
     DrawingSource { column: ColumnId },
     /// Constant color layer.
     Solid { rgba: [u8; 4] },
+    /// One of the cut's imported image assets (BG plate, reference).
+    ImageSource { image: ImageId },
     /// Geometric transform of its single input.
     Transform {
         translate: (f32, f32),
@@ -51,7 +53,7 @@ pub enum NodeKind {
 impl NodeKind {
     pub fn input_count(&self) -> usize {
         match self {
-            Self::DrawingSource { .. } | Self::Solid { .. } => 0,
+            Self::DrawingSource { .. } | Self::Solid { .. } | Self::ImageSource { .. } => 0,
             Self::Transform { .. } | Self::Output => 1,
             Self::Blend { .. } => 2,
         }
@@ -61,6 +63,7 @@ impl NodeKind {
         match self {
             Self::DrawingSource { .. } => "DrawingSource",
             Self::Solid { .. } => "Solid",
+            Self::ImageSource { .. } => "ImageSource",
             Self::Transform { .. } => "Transform",
             Self::Blend { .. } => "Blend",
             Self::Output => "Output",
@@ -226,6 +229,16 @@ impl Graph {
         self.nodes
             .values()
             .filter(|n| matches!(n.kind, NodeKind::DrawingSource { column: c } if c == column))
+            .map(|n| n.id)
+            .collect()
+    }
+
+    /// All ImageSource nodes reading the given image asset (invalidation
+    /// roots when the asset is added/removed).
+    pub fn sources_of_image(&self, image: ImageId) -> Vec<NodeId> {
+        self.nodes
+            .values()
+            .filter(|n| matches!(n.kind, NodeKind::ImageSource { image: i } if i == image))
             .map(|n| n.id)
             .collect()
     }

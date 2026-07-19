@@ -84,6 +84,21 @@ pub enum Command {
         layer: LayerId,
         props: LayerProps,
     },
+    /// Import an image asset (PNG bytes) into the cut's library at `index`.
+    /// The decode is validated BEFORE any mutation — bad bytes reject the
+    /// whole batch atomically. Inverse: RemoveImage.
+    AddImage {
+        at: CutRef,
+        id: ImageId,
+        index: usize,
+        name: String,
+        bytes: Vec<u8>,
+    },
+    /// Remove an image asset. ImageSource nodes that still reference it stay
+    /// wired and render transparent (the missing-image sentinel — the same
+    /// tolerance as deleted columns). Inverse restores the exact bytes at
+    /// the original library position.
+    RemoveImage { at: CutRef, id: ImageId },
     RemoveDrawing {
         at: CutRef,
         id: DrawingId,
@@ -145,7 +160,9 @@ pub enum Command {
 impl Command {
     pub fn cut_ref(&self) -> CutRef {
         match self {
-            Command::AddDrawing { at, .. }
+            Command::AddImage { at, .. }
+            | Command::RemoveImage { at, .. }
+            | Command::AddDrawing { at, .. }
             | Command::PaintTiles { at, .. }
             | Command::AddCelLayer { at, .. }
             | Command::RemoveCelLayer { at, .. }
@@ -270,6 +287,59 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             Ok(AppliedEffect {
                 inverse: vec![Command::RemoveDrawing { at: *at, id: *id }],
                 invalidation_roots: vec![],
+            })
+        }
+
+        Command::AddImage {
+            at,
+            id,
+            index,
+            name,
+            bytes,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            if cut.image(*id).is_some() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "image {id} already exists"
+                )));
+            }
+            if *index > cut.images.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "image index {index} out of range (library has {})",
+                    cut.images.len()
+                )));
+            }
+            // Decode BEFORE mutating — a bad file must reject atomically.
+            let asset = crate::model::ImageAsset::from_png(*id, name.clone(), bytes.clone())
+                .map_err(EngineError::InvalidCommand)?;
+            cut.images.insert(*index, asset);
+            // Dangling ImageSource nodes (e.g. a redo after remove) now
+            // resolve again — their cached values must drop.
+            let roots = cut.graph.sources_of_image(*id);
+            Ok(AppliedEffect {
+                inverse: vec![Command::RemoveImage { at: *at, id: *id }],
+                invalidation_roots: roots,
+            })
+        }
+
+        Command::RemoveImage { at, id } => {
+            let cut = cut_mut(project, *at)?;
+            let idx = cut
+                .images
+                .iter()
+                .position(|i| i.id == *id)
+                .ok_or(EngineError::UnknownImage(*id))?;
+            let roots = cut.graph.sources_of_image(*id);
+            let img = cut.images.remove(idx);
+            Ok(AppliedEffect {
+                inverse: vec![Command::AddImage {
+                    at: *at,
+                    id: *id,
+                    index: idx, // restore the original library position
+                    name: img.name.clone(),
+                    bytes: (*img.bytes).clone(),
+                }],
+                invalidation_roots: roots,
             })
         }
 

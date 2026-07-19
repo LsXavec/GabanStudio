@@ -271,6 +271,13 @@ fn render_node(
             }
             acc
         }
+        NodeKind::ImageSource { image } => {
+            let mut acc = empty();
+            if let Some(img) = cut.image(*image) {
+                splat_flat(&mut acc, &img.tiles, width, height);
+            }
+            acc
+        }
         NodeKind::Solid { rgba } => {
             let a = rgba[3] as f32 / 255.0;
             let px = [
