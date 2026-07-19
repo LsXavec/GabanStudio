@@ -9,6 +9,7 @@ mod doc;
 mod export;
 mod kpp;
 mod newproject;
+mod nodegraph_panel;
 mod paint;
 mod workspace;
 mod xsheet_panel;
@@ -245,6 +246,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 self.canvas.brush_ui(ui, self.state, raster_available);
             }
             Pane::Presets => self.presets_ui(ui),
+            Pane::NodeGraph => nodegraph_panel::ui(ui, self.state),
             Pane::Canvas => self.canvas.ui(
                 ui,
                 self.state,

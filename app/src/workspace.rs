@@ -18,12 +18,20 @@ pub enum Pane {
     Brush,
     /// Brush preset list: click to apply, save the current brush by name.
     Presets,
+    /// The cut's compositing node graph (view + edit; engine-backed).
+    NodeGraph,
 }
 
 impl Pane {
     /// Every pane kind, for the "panes" add-menu.
-    pub const ALL: &'static [Pane] =
-        &[Pane::Canvas, Pane::XSheet, Pane::Layers, Pane::Brush, Pane::Presets];
+    pub const ALL: &'static [Pane] = &[
+        Pane::Canvas,
+        Pane::XSheet,
+        Pane::Layers,
+        Pane::Brush,
+        Pane::Presets,
+        Pane::NodeGraph,
+    ];
 
     pub fn title(&self) -> &'static str {
         match self {
@@ -32,6 +40,7 @@ impl Pane {
             Pane::Layers => "Cel Layers",
             Pane::Brush => "Brush",
             Pane::Presets => "Presets",
+            Pane::NodeGraph => "Node Graph",
         }
     }
 }

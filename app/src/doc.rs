@@ -3,7 +3,7 @@
 //! All document mutations route through Engine commands — undo covers
 //! everything the artist does here.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -46,6 +46,16 @@ pub struct AppState {
     /// Transient layer-strip UI state: an in-progress opacity drag
     /// (layer, live value) — committed as ONE SetCelLayerProps at gesture end.
     pub strip_opacity: Option<(LayerId, f32)>,
+    /// Node-graph pane: world position per node (session-only for now; the
+    /// engine graph itself is persisted and undoable, positions are view
+    /// furniture).
+    pub node_positions: HashMap<u64, (f32, f32)>,
+    /// Node-graph pane: an in-progress wire drag from a node's output pin.
+    pub pending_wire: Option<NodeId>,
+    /// Node-graph pane: selected node (its params edit in the inspector row).
+    pub selected_node: Option<NodeId>,
+    /// Node-graph pane: view pan.
+    pub graph_pan: (f32, f32),
 }
 
 impl AppState {
@@ -84,6 +94,10 @@ impl AppState {
             loop_playback: true,
             strip_rename: None,
             strip_opacity: None,
+            node_positions: HashMap::new(),
+            pending_wire: None,
+            selected_node: None,
+            graph_pan: (0.0, 0.0),
         }
     }
 
@@ -127,6 +141,10 @@ impl AppState {
             loop_playback: true,
             strip_rename: None,
             strip_opacity: None,
+            node_positions: HashMap::new(),
+            pending_wire: None,
+            selected_node: None,
+            graph_pan: (0.0, 0.0),
         })
     }
 
@@ -1012,6 +1030,112 @@ impl AppState {
             } else {
                 self.frame += 1;
             }
+        }
+    }
+
+    // ---- Node graph (all mutations = engine commands = undoable) -----------
+
+    pub fn graph_add_node(&mut self, kind: anim_core::graph::NodeKind, pos: (f32, f32)) {
+        let at = self.at();
+        let id = self.engine.alloc_node_id();
+        let r = self
+            .engine
+            .apply("add node", vec![Command::AddNode { at, id, kind }]);
+        if r.is_ok() {
+            self.node_positions.insert(id.0, pos);
+            self.selected_node = Some(id);
+        }
+        self.report(r, "node added");
+    }
+
+    pub fn graph_remove_node(&mut self, id: NodeId) {
+        let at = self.at();
+        let r = self
+            .engine
+            .apply("remove node", vec![Command::RemoveNode { at, id }]);
+        if r.is_ok() {
+            self.node_positions.remove(&id.0);
+            if self.selected_node == Some(id) {
+                self.selected_node = None;
+            }
+        }
+        self.report(r, "node removed");
+    }
+
+    pub fn graph_connect(&mut self, from: NodeId, to: NodeId, to_pin: u16) {
+        let at = self.at();
+        let r = self.engine.apply(
+            "connect",
+            vec![Command::Connect {
+                at,
+                from,
+                from_pin: 0,
+                to,
+                to_pin,
+            }],
+        );
+        self.report(r, "connected");
+    }
+
+    pub fn graph_disconnect(&mut self, to: NodeId, to_pin: u16) {
+        let at = self.at();
+        let r = self
+            .engine
+            .apply("disconnect", vec![Command::Disconnect { at, to, to_pin }]);
+        self.report(r, "disconnected");
+    }
+
+    pub fn graph_set_output(&mut self, node: NodeId) {
+        let at = self.at();
+        let r = self.engine.apply(
+            "set output",
+            vec![Command::SetOutput {
+                at,
+                node: Some(node),
+            }],
+        );
+        self.report(r, "output set");
+    }
+
+    pub fn graph_set_kind(&mut self, id: NodeId, kind: anim_core::graph::NodeKind) {
+        let at = self.at();
+        let r = self
+            .engine
+            .apply("node parameters", vec![Command::SetNodeKind { at, id, kind }]);
+        self.report(r, "node updated");
+    }
+
+    /// Give every unplaced node a default spot: sources in a left column,
+    /// processors centre, output right — a readable first layout.
+    pub fn ensure_node_layout(&mut self) {
+        let mut new_positions: Vec<(u64, (f32, f32))> = Vec::new();
+        {
+            let cut = self.cut();
+            let (mut n_src, mut n_mid, mut n_out) = (0, 0, 0);
+            for node in cut.graph.nodes() {
+                if self.node_positions.contains_key(&node.id.0) {
+                    continue;
+                }
+                use anim_core::graph::NodeKind::*;
+                let (col_x, row) = match node.kind {
+                    DrawingSource { .. } | Solid { .. } => {
+                        n_src += 1;
+                        (40.0, n_src - 1)
+                    }
+                    Transform { .. } | Blend { .. } => {
+                        n_mid += 1;
+                        (260.0, n_mid - 1)
+                    }
+                    Output => {
+                        n_out += 1;
+                        (480.0, n_out - 1)
+                    }
+                };
+                new_positions.push((node.id.0, (col_x, 40.0 + row as f32 * 90.0)));
+            }
+        }
+        for (id, pos) in new_positions {
+            self.node_positions.insert(id, pos);
         }
     }
 
