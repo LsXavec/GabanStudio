@@ -727,6 +727,58 @@ fn f16_codec_round_trips_key_values() {
     }
 }
 
+#[test]
+fn export_render_frame_composites_and_unpremultiplies() {
+    use anim_core::export::{render_frame, render_frame_over};
+    use anim_core::raster::f32_to_f16_bits;
+
+    let mut f = layer_fixture();
+    // color layer: 50%-alpha pure red (premultiplied) on tile (0,0).
+    let half = f32_to_f16_bits(0.5);
+    let red_half = {
+        let mut v = vec![0u16; TILE_LEN];
+        for px in v.chunks_exact_mut(4) {
+            px[0] = half; // r premult = 0.5 (straight red at 50% alpha)
+            px[3] = half;
+        }
+        Arc::new(TileData::from_vec(v))
+    };
+    f.engine
+        .apply(
+            "paint",
+            vec![Command::PaintTiles {
+                at: f.at,
+                id: f.d,
+                layer: f.color,
+                diff: vec![((0, 0), None, Some(red_half))],
+            }],
+        )
+        .unwrap();
+
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+
+    // Transparent export: inked pixel = straight red at alpha 128.
+    let img = render_frame(cut, 0, 128, 128);
+    let px = &img[(10 * 128 + 10) * 4..][..4];
+    assert_eq!(px, &[255, 0, 0, 128]);
+    // Outside the inked tile: fully transparent.
+    let far = &img[(100 * 128 + 100) * 4..][..4];
+    assert_eq!(far, &[0, 0, 0, 0]);
+    // Frame 1 resolves the SAME drawing via the hold.
+    let img_held = render_frame(cut, 1, 128, 128);
+    assert_eq!(&img_held[(10 * 128 + 10) * 4..][..4], &[255, 0, 0, 128]);
+
+    // Over-white export: 0.5 red + 0.5 white = (255, 128, 128), opaque.
+    let over = render_frame_over(cut, 0, 128, 128, [255, 255, 255]);
+    let px = &over[(10 * 128 + 10) * 4..][..4];
+    assert_eq!(px[0], 255);
+    assert!((px[1] as i32 - 128).abs() <= 1, "g was {}", px[1]);
+    assert!((px[2] as i32 - 128).abs() <= 1, "b was {}", px[2]);
+    assert_eq!(px[3], 255);
+    // Background shows plain white where nothing is inked.
+    assert_eq!(&over[(100 * 128 + 100) * 4..][..4], &[255, 255, 255, 255]);
+}
+
 // ---- Persistence: v5 round-trip + v4 migration ------------------------------
 
 #[test]

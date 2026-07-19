@@ -6,6 +6,7 @@
 mod canvas;
 mod config;
 mod doc;
+mod export;
 mod newproject;
 mod paint;
 mod xsheet_panel;
@@ -485,6 +486,49 @@ impl Editor {
                 if ui.button("save").clicked() {
                     self.state.save(false);
                 }
+                ui.menu_button("export", |ui| {
+                    if ui
+                        .button("PNG sequence…")
+                        .on_hover_text("one PNG per frame, transparent background")
+                        .clicked()
+                    {
+                        ui.close();
+                        let mut dlg = rfd::FileDialog::new();
+                        if let Some(dir) = export::suggest_dir(&self.state) {
+                            dlg = dlg.set_directory(dir);
+                        }
+                        if let Some(dir) = dlg.pick_folder() {
+                            self.state.status = match export::export_png_sequence(&self.state, &dir)
+                            {
+                                Ok((n, note)) => {
+                                    format!("exported {n} PNG frames to {}{note}", dir.display())
+                                }
+                                Err(e) => format!("PNG export failed: {e}"),
+                            };
+                        }
+                    }
+                    if ui
+                        .button("MP4 video…")
+                        .on_hover_text("white background — needs ffmpeg on PATH")
+                        .clicked()
+                    {
+                        ui.close();
+                        let mut dlg = rfd::FileDialog::new()
+                            .add_filter("MP4 video", &["mp4"])
+                            .set_file_name("animation.mp4");
+                        if let Some(dir) = export::suggest_dir(&self.state) {
+                            dlg = dlg.set_directory(dir);
+                        }
+                        if let Some(path) = dlg.save_file() {
+                            self.state.status = match export::export_mp4(&self.state, &path) {
+                                Ok((n, note)) => {
+                                    format!("exported {n} frames to {}{note}", path.display())
+                                }
+                                Err(e) => format!("MP4 export failed: {e}"),
+                            };
+                        }
+                    }
+                });
                 ui.separator();
 
                 let can_undo = self.state.engine.can_undo();
@@ -524,6 +568,8 @@ impl Editor {
                 );
                 ui.separator();
                 ui.checkbox(&mut self.state.onion, "onion");
+                ui.checkbox(&mut self.state.loop_playback, "loop")
+                    .on_hover_text("off = playback stops on the last frame");
                 ui.separator();
                 ui.label(
                     egui::RichText::new(format!(

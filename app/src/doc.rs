@@ -39,6 +39,8 @@ pub struct AppState {
     /// follows across frames ("on line at frame 5 → on line at frame 6");
     /// clamped per drawing when stacks are shallower.
     pub active_layer_slot: usize,
+    /// Loop playback at the end of the cut (off = stop on the last frame).
+    pub loop_playback: bool,
     /// Transient layer-strip UI state: an in-progress rename (layer, buffer).
     pub strip_rename: Option<(LayerId, String)>,
     /// Transient layer-strip UI state: an in-progress opacity drag
@@ -79,6 +81,7 @@ impl AppState {
             status: "new project — draw on the canvas to create frame 1".into(),
             positioned_holds: HashSet::new(),
             active_layer_slot: 0,
+            loop_playback: true,
             strip_rename: None,
             strip_opacity: None,
         }
@@ -121,6 +124,7 @@ impl AppState {
             engine,
             positioned_holds: HashSet::new(),
             active_layer_slot: 0,
+            loop_playback: true,
             strip_rename: None,
             strip_opacity: None,
         })
@@ -997,7 +1001,17 @@ impl AppState {
         let frame_time = 1.0 / self.fps() as f32;
         while self.play_acc >= frame_time {
             self.play_acc -= frame_time;
-            self.frame = (self.frame + 1) % self.frame_count();
+            if self.frame + 1 >= self.frame_count() {
+                if self.loop_playback {
+                    self.frame = 0;
+                } else {
+                    self.playing = false; // hold on the last frame
+                    self.play_acc = 0.0;
+                    break;
+                }
+            } else {
+                self.frame += 1;
+            }
         }
     }
 
