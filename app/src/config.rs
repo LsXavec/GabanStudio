@@ -382,13 +382,16 @@ impl Default for PressureCurve {
 pub struct PenConfig {
     #[serde(default)]
     pub pressure_curve: PressureCurve,
-    /// Use the native tablet backend (Windows Ink RealTimeStylus via
-    /// octotablet). OPT-IN while it hardens against driver quirks: a stylus
-    /// packet the backend's parser doesn't expect can abort the process from
-    /// inside a COM callback, and on a pen display that fires at startup.
-    /// Off = egui Touch events (the long-proven path).
-    #[serde(default)]
+    /// Native tablet backend (Windows Ink RealTimeStylus via octotablet) on
+    /// its dedicated input thread. Proven on the XP-Pen Artist 22 Pro —
+    /// default ON. Off = egui Touch events; ANIMSTUDIO_NO_TABLET=1
+    /// force-disables if a driver ever misbehaves.
+    #[serde(default = "default_true")]
     pub native_tablet: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// In-progress rebind: accumulates the keys held (release confirms the chord,
@@ -906,7 +909,7 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
         changed |= ui
             .checkbox(
                 &mut config.pen.native_tablet,
-                "Native tablet backend (Windows Ink) — EXPERIMENTAL, applies after restart",
+                "Native tablet backend (Windows Ink) — applies after restart",
             )
             .on_hover_text(
                 "Direct RealTimeStylus pen input (Krita-grade). If the app                  crashes with this on, launch with ANIMSTUDIO_NO_TABLET=1 to                  force it off, then untick here. Fallback = the standard                  pen-touch path.",
