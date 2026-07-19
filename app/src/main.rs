@@ -13,6 +13,7 @@ mod xsheet_panel;
 
 use config::{Action, Config, FrameLatency, LayersConfig, PenConfig, RebindCapture, SettingsCategory};
 use doc::AppState;
+use egui_dock::{DockArea, DockState, NodeIndex};
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use newproject::{FormAction, NewProjectForm};
@@ -171,6 +172,77 @@ struct Editor {
     request_new: bool,
     /// Set when the user clicks "settings".
     request_settings: bool,
+    /// The docking shell: every UI element is a movable pane over ONE document;
+    /// a workspace is just a saved arrangement of these panes.
+    dock: DockState<Pane>,
+}
+
+/// One dockable UI element (drag, split, stack — the document underneath is
+/// shared; panes are windows onto it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pane {
+    Canvas,
+    XSheet,
+}
+
+/// Workspace preset: big canvas, X-sheet as a side rail (the "Draw" room).
+fn draw_workspace() -> DockState<Pane> {
+    let mut ds = DockState::new(vec![Pane::Canvas]);
+    ds.main_surface_mut()
+        .split_left(NodeIndex::root(), 0.26, vec![Pane::XSheet]);
+    ds
+}
+
+/// Workspace preset: timing-first — the X-sheet takes half the room.
+fn timing_workspace() -> DockState<Pane> {
+    let mut ds = DockState::new(vec![Pane::Canvas]);
+    ds.main_surface_mut()
+        .split_left(NodeIndex::root(), 0.5, vec![Pane::XSheet]);
+    ds
+}
+
+/// Renders each pane by borrowing the editor's parts (disjoint fields, so the
+/// dock tree and the pane contents can be mutated in the same frame).
+struct EditorTabs<'a> {
+    state: &'a mut AppState,
+    canvas: &'a mut canvas::CanvasView,
+    paint: Option<&'a mut PaintLayer>,
+    pen: &'a PenConfig,
+    layers_cfg: &'a LayersConfig,
+}
+
+impl egui_dock::TabViewer for EditorTabs<'_> {
+    type Tab = Pane;
+
+    fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
+        match tab {
+            Pane::Canvas => "Canvas".into(),
+            Pane::XSheet => "X-Sheet".into(),
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
+        match tab {
+            Pane::XSheet => xsheet_panel::ui(ui, self.state),
+            Pane::Canvas => self.canvas.ui(
+                ui,
+                self.state,
+                self.paint.as_deref_mut(),
+                self.pen,
+                self.layers_cfg,
+            ),
+        }
+    }
+
+    // Phase 0: panes can move and resize but not close or tear out — losing
+    // the canvas would strand the user. Both arrive in later phases.
+    fn closeable(&mut self, _tab: &mut Pane) -> bool {
+        false
+    }
+
+    fn allowed_in_windows(&self, _tab: &mut Pane) -> bool {
+        false
+    }
 }
 
 impl Editor {
@@ -189,6 +261,7 @@ impl Editor {
             paint,
             request_new: false,
             request_settings: false,
+            dock: draw_workspace(),
         }
     }
 
@@ -201,6 +274,7 @@ impl Editor {
             paint,
             request_new: false,
             request_settings: false,
+            dock: draw_workspace(),
         }
     }
 }
@@ -571,6 +645,22 @@ impl Editor {
                 ui.checkbox(&mut self.state.loop_playback, "loop")
                     .on_hover_text("off = playback stops on the last frame");
                 ui.separator();
+                // Workspaces: saved pane arrangements over the same document.
+                if ui
+                    .button("draw")
+                    .on_hover_text("workspace: big canvas, X-sheet side rail")
+                    .clicked()
+                {
+                    self.dock = draw_workspace();
+                }
+                if ui
+                    .button("timing")
+                    .on_hover_text("workspace: X-sheet takes half the room")
+                    .clicked()
+                {
+                    self.dock = timing_workspace();
+                }
+                ui.separator();
                 ui.label(
                     egui::RichText::new(format!(
                         "{}×{}  {}fps",
@@ -610,18 +700,18 @@ impl Editor {
             });
         });
 
-        egui::Panel::left("xsheet_panel")
-            .default_size(330.0)
-            .min_size(260.0)
-            .resizable(true)
-            .show(ui, |ui| {
-                xsheet_panel::ui(ui, &mut self.state);
-            });
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::from_rgb(24, 26, 30)))
-            .show(ui, |ui| {
-                self.canvas.ui(ui, &mut self.state, self.paint.as_mut(), pen, layers_cfg);
-            });
+        // The docking shell replaces the fixed left/central panels: panes are
+        // draggable/stackable windows onto the one document; workspaces are
+        // saved arrangements (top-bar buttons swap them).
+        let mut tabs = EditorTabs {
+            state: &mut self.state,
+            canvas: &mut self.canvas,
+            paint: self.paint.as_mut(),
+            pen,
+            layers_cfg,
+        };
+        DockArea::new(&mut self.dock)
+            .style(egui_dock::Style::from_egui(ui.style().as_ref()))
+            .show_inside(ui, &mut tabs);
     }
 }
