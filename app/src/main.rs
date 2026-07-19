@@ -12,6 +12,7 @@ mod kpp;
 mod newproject;
 mod nodegraph_panel;
 mod paint;
+mod viewer;
 mod workspace;
 mod xsheet_panel;
 
@@ -494,6 +495,24 @@ struct Editor {
     ws_name: String,
     /// Buffer for the Presets pane's "save current as" name field.
     preset_name: String,
+    /// Per-instance viewer-pane state (zoom/pan), keyed by the pane's viewer
+    /// id — the first multi-instance pane state (session-only).
+    viewers: std::collections::HashMap<u8, viewer::ViewerView>,
+}
+
+/// The ACTIVE tab of every dock leaf — the panes actually rendered this
+/// frame. Tabs hidden behind another in a stack don't render, so they must
+/// not consume per-frame work (graph executions).
+fn visible_panes(dock: &DockState<Pane>) -> Vec<Pane> {
+    let mut out = Vec::new();
+    for node in dock.main_surface().iter() {
+        if let egui_dock::Node::Leaf(leaf) = node
+            && let Some(t) = leaf.tabs.get(leaf.active.0)
+        {
+            out.push(*t);
+        }
+    }
+    out
 }
 
 /// Renders each pane by borrowing the editor's parts (disjoint fields, so the
@@ -502,7 +521,10 @@ struct EditorTabs<'a> {
     state: &'a mut AppState,
     canvas: &'a mut canvas::CanvasView,
     paint: Option<&'a mut PaintLayer>,
-    graph: Option<&'a mut graphcomp::GraphCompositor>,
+    /// The node graph's per-frame render status, executed ONCE by Editor::ui
+    /// for every VISIBLE consumer (canvas composite view + viewer panes).
+    graph: viewer::GraphView,
+    viewers: &'a mut std::collections::HashMap<u8, viewer::ViewerView>,
     pen: &'a PenConfig,
     layers_cfg: &'a LayersConfig,
     presets: &'a mut Vec<BrushPreset>,
@@ -532,11 +554,15 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 ui,
                 self.state,
                 self.paint.as_deref_mut(),
-                self.graph.as_deref_mut(),
+                self.graph,
                 self.pen,
                 self.layers_cfg,
                 self.native_pen,
             ),
+            Pane::Viewer(id) => {
+                let vs = self.viewers.entry(*id).or_default();
+                viewer::ui(ui, self.state, self.graph, vs);
+            }
         }
     }
 
@@ -544,6 +570,15 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
     // menu); losing the canvas would strand the user.
     fn closeable(&mut self, tab: &mut Pane) -> bool {
         !matches!(tab, Pane::Canvas)
+    }
+
+    // Closing a viewer drops its zoom/pan — re-adding its id later must give
+    // a FRESH viewer, not a ghost of the old view state.
+    fn on_close(&mut self, tab: &mut Pane) -> egui_dock::widgets::tab_viewer::OnCloseResponse {
+        if let Pane::Viewer(id) = tab {
+            self.viewers.remove(id);
+        }
+        egui_dock::widgets::tab_viewer::OnCloseResponse::Close
     }
 
     fn allowed_in_windows(&self, _tab: &mut Pane) -> bool {
@@ -630,6 +665,7 @@ impl Editor {
             workspaces: Workspaces::load(),
             ws_name: String::new(),
             preset_name: String::new(),
+            viewers: Default::default(),
         }
     }
 
@@ -651,6 +687,7 @@ impl Editor {
             workspaces: Workspaces::load(),
             ws_name: String::new(),
             preset_name: String::new(),
+            viewers: Default::default(),
         }
     }
 }
@@ -1160,6 +1197,27 @@ impl Editor {
                             ui.close();
                         }
                     }
+                    // Viewers are multi-instance: add up to MAX_VIEWERS.
+                    let next_id = (0..Pane::MAX_VIEWERS).find(|id| {
+                        !self
+                            .dock
+                            .iter_all_tabs()
+                            .any(|(_, t)| *t == Pane::Viewer(*id))
+                    });
+                    if ui
+                        .add_enabled(next_id.is_some(), egui::Button::new("+ Viewer"))
+                        .on_hover_text(
+                            "a read-only composite viewer (the node graph's render) — \
+                             dock one beside the canvas to paint and watch the result live",
+                        )
+                        .clicked()
+                        && let Some(id) = next_id
+                    {
+                        self.dock
+                            .main_surface_mut()
+                            .push_to_focused_leaf(Pane::Viewer(id));
+                        ui.close();
+                    }
                 });
                 ui.separator();
                 ui.label(
@@ -1204,11 +1262,49 @@ impl Editor {
         // The docking shell replaces the fixed left/central panels: panes are
         // draggable/stackable windows onto the one document; workspaces are
         // saved arrangements (top-bar buttons swap them).
+        // Execute the node graph ONCE per frame, only when a VISIBLE consumer
+        // needs it (the active tab of a leaf — hidden tabs behind a stack
+        // don't render, so they don't pay for executions). The evaluator hash
+        // is the dirty key, so an unchanged frame costs nothing. Running
+        // BEFORE the dock renders means pane-driven edits (node-graph pane)
+        // reach viewers one frame later — accepted: egui repaints
+        // continuously during any interaction.
+        let visible = visible_panes(&self.dock);
+        let viewers_open = visible.iter().any(|t| matches!(t, Pane::Viewer(_)));
+        let composite_needed =
+            self.canvas.composite_view && visible.contains(&Pane::Canvas);
+        let mut graph = viewer::GraphView::Off;
+        if viewers_open || composite_needed {
+            graph = if self.state.cut().graph.output.is_none() {
+                viewer::GraphView::NoOutput
+            } else if let (Some(g), Some(p)) = (&mut self.graph, &mut self.paint) {
+                let (w, h) = (
+                    self.state.engine.project.width,
+                    self.state.engine.project.height,
+                );
+                p.ensure_size(w, h);
+                g.ensure_size(w, h);
+                let (scene, cutid, frame) =
+                    (self.state.scene, self.state.cut, self.state.frame);
+                match self.state.engine.eval(scene, cutid, frame) {
+                    Ok(v) => {
+                        let hash = v.hash();
+                        let cut = self.state.cut();
+                        viewer::GraphView::Ready(g.execute(hash, cut, frame, p))
+                    }
+                    Err(_) => viewer::GraphView::EvalFailed,
+                }
+            } else {
+                viewer::GraphView::NoGpu
+            };
+        }
+
         let mut tabs = EditorTabs {
             state: &mut self.state,
             canvas: &mut self.canvas,
             paint: self.paint.as_mut(),
-            graph: self.graph.as_mut(),
+            graph,
+            viewers: &mut self.viewers,
             pen,
             layers_cfg,
             presets,

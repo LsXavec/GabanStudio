@@ -101,8 +101,10 @@ impl Affine {
 }
 
 /// Point-in-polygon (even-odd crossing rule) at pixel centres. A rect
-/// selection is just a 4-point polygon through the same path.
-fn contains(poly: &[(f32, f32)], x: f32, y: f32) -> bool {
+/// selection is just a 4-point polygon through the same path. Shared with
+/// the fill module so "inside the selection" means the same thing to the
+/// lift mask and the fill clip.
+pub(crate) fn contains(poly: &[(f32, f32)], x: f32, y: f32) -> bool {
     let mut inside = false;
     let n = poly.len();
     if n < 3 {

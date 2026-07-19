@@ -20,10 +20,17 @@ pub enum Pane {
     Presets,
     /// The cut's compositing node graph (view + edit; engine-backed).
     NodeGraph,
+    /// A read-only composite VIEWER: the node graph's rendered output with
+    /// its own zoom/pan — the first multi-instance pane (LENS-DOCK Phase 1).
+    /// Put one beside the canvas for the Finishing room: paint in the edit
+    /// canvas, watch the graph result live next to it. The id keeps several
+    /// viewers distinct in the dock tree (and keys their view state).
+    Viewer(u8),
 }
 
 impl Pane {
-    /// Every pane kind, for the "panes" add-menu.
+    /// Every SINGLETON pane kind, for the "panes" add-menu (viewers are
+    /// multi-instance and get their own add entry).
     pub const ALL: &'static [Pane] = &[
         Pane::Canvas,
         Pane::XSheet,
@@ -33,14 +40,19 @@ impl Pane {
         Pane::NodeGraph,
     ];
 
-    pub fn title(&self) -> &'static str {
+    /// How many simultaneous viewers the add-menu offers.
+    pub const MAX_VIEWERS: u8 = 4;
+
+    pub fn title(&self) -> String {
         match self {
-            Pane::Canvas => "Canvas",
-            Pane::XSheet => "X-Sheet",
-            Pane::Layers => "Cel Layers",
-            Pane::Brush => "Brush",
-            Pane::Presets => "Presets",
-            Pane::NodeGraph => "Node Graph",
+            Pane::Canvas => "Canvas".into(),
+            Pane::XSheet => "X-Sheet".into(),
+            Pane::Layers => "Cel Layers".into(),
+            Pane::Brush => "Brush".into(),
+            Pane::Presets => "Presets".into(),
+            Pane::NodeGraph => "Node Graph".into(),
+            Pane::Viewer(0) => "Viewer".into(),
+            Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }
     }
 }
@@ -89,13 +101,22 @@ impl Workspaces {
     }
 
     /// Load saved workspaces; a missing/unreadable file seeds the defaults.
+    /// TOLERANT per-workspace parse: one unreadable workspace (e.g. saved by
+    /// a newer build with pane kinds this build doesn't know) must not reset
+    /// every workspace — the readable ones survive.
     pub fn load() -> Self {
         if let Some(path) = Self::path()
             && let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(ws) = serde_json::from_str::<Workspaces>(&text)
-            && !ws.list.is_empty()
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+            && let Some(items) = v.get("list").and_then(|l| l.as_array())
         {
-            return ws;
+            let list: Vec<Workspace> = items
+                .iter()
+                .filter_map(|it| serde_json::from_value(it.clone()).ok())
+                .collect();
+            if !list.is_empty() {
+                return Self { list };
+            }
         }
         Self {
             list: vec![

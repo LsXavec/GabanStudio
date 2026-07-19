@@ -1243,7 +1243,7 @@ impl CanvasView {
         ui: &mut egui::Ui,
         state: &mut AppState,
         paint: Option<&mut PaintLayer>,
-        graph: Option<&mut crate::graphcomp::GraphCompositor>,
+        graph: crate::viewer::GraphView,
         pen: &PenConfig,
         layers_cfg: &LayersConfig,
         native_pen: &[PenSample],
@@ -1343,7 +1343,7 @@ impl CanvasView {
                     );
                 }
                 CanvasTool::Fill => {
-                    self.fill_input(&response, rect, &to_paper, state);
+                    self.fill_input(ui, &response, rect, &to_paper, state);
                 }
             }
         } else {
@@ -1358,35 +1358,36 @@ impl CanvasView {
             self.sel_draft = None;
         }
 
-        // ---- COMPOSITE VIEW: execute the node graph on the GPU ------------
-        // The evaluator's memoized output Value supplies the dirty key: same
-        // hash → the compositor returns its cached texture untouched. The
-        // sandwich section below is skipped entirely while this shows (its
-        // textures keep their sync keys; anything that changed re-syncs by
-        // key mismatch on return to edit view).
+        // ---- COMPOSITE VIEW ------------------------------------------------
+        // The graph is executed ONCE per frame by Editor::ui (shared with the
+        // viewer panes); the canvas just displays the result. The sandwich
+        // section below is skipped entirely while this shows (its textures
+        // keep their sync keys; anything that changed re-syncs by key
+        // mismatch on return to edit view).
         let mut composite_tex: Option<egui::TextureId> = None;
         let mut composite_note: Option<&'static str> = None;
         if self.composite_view {
-            if state.cut().graph.output.is_none() {
-                composite_note = Some("composite view — no graph output wired (C to edit)");
-            } else if let (Some(g), Some(p)) = (graph, paint.as_deref_mut()) {
-                let (pw, ph) = (state.engine.project.width, state.engine.project.height);
-                p.ensure_size(pw, ph);
-                g.ensure_size(pw, ph);
-                let (scene, cutid, frame) = (state.scene, state.cut, state.frame);
-                match state.engine.eval(scene, cutid, frame) {
-                    Ok(v) => {
-                        let hash = v.hash();
-                        let cut = state.cut();
-                        composite_tex = Some(g.execute(hash, cut, frame, p));
-                    }
-                    Err(_) => {
-                        composite_note =
-                            Some("composite view — graph failed to evaluate (C to edit)");
-                    }
+            use crate::viewer::GraphView as GV;
+            match graph {
+                GV::Ready(id) => composite_tex = Some(id),
+                GV::NoOutput => {
+                    composite_note =
+                        Some("composite view — no graph output wired (C to edit)");
                 }
-            } else {
-                composite_note = Some("composite view needs the GPU — showing edit view");
+                GV::EvalFailed => {
+                    composite_note =
+                        Some("composite view — the graph failed to evaluate (C to edit)");
+                }
+                GV::NoGpu => {
+                    composite_note =
+                        Some("composite view needs the GPU — showing edit view");
+                }
+                // Off = this canvas wasn't a visible consumer; if it IS being
+                // rendered anyway, fall back honestly.
+                GV::Off => {
+                    composite_note =
+                        Some("composite view — nothing rendered this frame (C to edit)");
+                }
             }
         }
 
@@ -1670,8 +1671,10 @@ impl CanvasView {
         }
 
         // Select-tool overlay (ants, floating preview, handles) — after the
-        // layer images so it reads on top of the art.
-        if edit_view && self.tool == CanvasTool::Select {
+        // layer images so it reads on top of the art. Fill mode keeps the
+        // selection ants visible: an active selection CONFINES fills, and an
+        // invisible constraint would read as a broken bucket.
+        if edit_view && matches!(self.tool, CanvasTool::Select | CanvasTool::Fill) {
             self.select_overlay(&painter, &to_screen);
         }
 
@@ -1912,11 +1915,21 @@ impl CanvasView {
     /// commits immediately — one click = one PaintTiles = one undo step.
     fn fill_input(
         &mut self,
+        ui: &egui::Ui,
         response: &egui::Response,
         rect: Rect,
         to_paper: &impl Fn(Pos2) -> Pos2,
         state: &mut AppState,
     ) {
+        // Esc clears the selection HERE too — fills respect it, so dropping
+        // it must not require a round-trip through the Select tool. Same
+        // keyboard-focus gate as select_input.
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && self.selection.take().is_some()
+        {
+            state.status = "selection cleared".into();
+        }
         if !response.drag_started_by(egui::PointerButton::Primary) {
             return;
         }
@@ -1963,14 +1976,43 @@ impl CanvasView {
             threshold: 0.1,
             gap_px: self.fill_gap,
             grow_px: self.fill_grow,
+            // Layer mode: the reference IS the target — never let grow paint
+            // over the very lines bounding the fill.
+            protect_ink: !self.fill_ref_cel,
         };
-        let Some(mask) = anim_core::fill::flood_fill_mask(&reference, seed, pw, ph, &opts)
-        else {
-            state.status =
-                "clicked on line art — nothing to fill (near a line? a smaller gap value \
-                 shrinks the closing band)"
-                    .into();
-            return;
+        // Fills respect the select tool's active selection (industry rule);
+        // its ants stay visible in fill mode so the constraint is never a
+        // mystery.
+        let clip: Option<Vec<(f32, f32)>> = self
+            .selection
+            .as_ref()
+            .map(|sel| sel.iter().map(|q| (q.x, q.y)).collect());
+        let mask = match anim_core::fill::flood_fill_mask(
+            &reference,
+            seed,
+            pw,
+            ph,
+            &opts,
+            clip.as_deref(),
+        ) {
+            Ok(m) => m,
+            Err(r) => {
+                use anim_core::fill::FillRefusal as FR;
+                state.status = match r {
+                    FR::OffPaper => "clicked outside the paper".into(),
+                    FR::OnInk => "clicked on inked pixels — fills flow into EMPTY \
+                         regions (a smaller gap shrinks the closing band; recolor \
+                         is a future tool)"
+                        .to_string(),
+                    FR::OutsideSelection => {
+                        "clicked outside the selection (Esc clears it)".into()
+                    }
+                    FR::ClippedOut => {
+                        "the selection excluded the whole region (Esc clears it)".into()
+                    }
+                };
+                return;
+            }
         };
         // Fill colour = the brush colour through the same conversion the dab
         // path uses, premultiplied.

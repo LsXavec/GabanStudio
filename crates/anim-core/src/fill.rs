@@ -13,6 +13,11 @@
 //! Fills are HARD-EDGED by design (cel flats, not airbrushes). The result
 //! is applied to the target layer as one `PaintTiles` diff — one click =
 //! one exact undo step, same law as every other edit.
+//!
+//! HONEST LIMITS: legacy VECTOR strokes are not rasterized here, so they do
+//! not bound fills (the same limitation as export); grow can cross a line
+//! thinner than itself by (grow − thickness) px — the same accepted artifact
+//! as CSP/Krita's fill expansion.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -29,6 +34,12 @@ pub struct FillOpts {
     pub gap_px: u32,
     /// How far the fill extends UNDER the boundary lines.
     pub grow_px: u32,
+    /// Never paint over the reference's own inked pixels. For LAYER-mode
+    /// fills (reference == target layer) "tucking under the lines" would
+    /// overwrite the very lines bounding the fill — protection keeps grow
+    /// useful for gap recovery while the ink survives. Cel-mode fills leave
+    /// this off: the lines live on another layer, tucking under is the point.
+    pub protect_ink: bool,
 }
 
 impl Default for FillOpts {
@@ -37,6 +48,7 @@ impl Default for FillOpts {
             threshold: 0.1,
             gap_px: 2,
             grow_px: 2,
+            protect_ink: false,
         }
     }
 }
@@ -104,16 +116,34 @@ fn dilate(bits: &mut [bool], w: usize, h: usize, r: usize) {
     }
 }
 
-/// Compute the fill region for a click at `seed` (paper pixels). `None` when
-/// the seed is outside the canvas or lands on (gap-closed) ink — there is no
-/// region to fill.
+/// Why a fill produced no region — callers word their refusal messages from
+/// the actual cause, not a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FillRefusal {
+    /// Seed outside the canvas.
+    OffPaper,
+    /// Seed on (gap-closed) ink — fills flow into empty regions.
+    OnInk,
+    /// Seed outside the active selection (fills respect selections; an
+    /// outside click is a no-op, the industry rule).
+    OutsideSelection,
+    /// The selection excluded every filled pixel.
+    ClippedOut,
+}
+
+/// Compute the fill region for a click at `seed` (paper pixels). `clip` (a
+/// paper-space polygon, e.g. the select tool's active selection) confines
+/// the fill: the selection border is a WALL during the flood (no tunnelling
+/// through unselected territory), an outside seed is refused, and the final
+/// mask is re-clipped after grow.
 pub fn flood_fill_mask(
     reference: &BTreeMap<TileCoord, Arc<TileData>>,
     seed: (i32, i32),
     width: u32,
     height: u32,
     opts: &FillOpts,
-) -> Option<FillMask> {
+    clip: Option<&[(f32, f32)]>,
+) -> Result<FillMask, FillRefusal> {
     let (w, h) = (width as usize, height as usize);
     if w == 0
         || h == 0
@@ -122,7 +152,30 @@ pub fn flood_fill_mask(
         || seed.0 >= width as i32
         || seed.1 >= height as i32
     {
-        return None;
+        return Err(FillRefusal::OffPaper);
+    }
+    let clip = clip.filter(|p| p.len() >= 3);
+    // Selection bbox in pixel bounds — culls the per-pixel polygon tests
+    // (everything outside the bbox is outside the polygon by definition).
+    let clip_bbox = clip.map(|poly| {
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for (px, py) in poly {
+            x0 = x0.min(*px);
+            y0 = y0.min(*py);
+            x1 = x1.max(*px);
+            y1 = y1.max(*py);
+        }
+        (
+            (x0.floor() as i64).clamp(0, w as i64) as usize,
+            (y0.floor() as i64).clamp(0, h as i64) as usize,
+            (x1.ceil() as i64).clamp(0, w as i64) as usize,
+            (y1.ceil() as i64).clamp(0, h as i64) as usize,
+        )
+    });
+    if let Some(poly) = clip
+        && !crate::edit::contains(poly, seed.0 as f32 + 0.5, seed.1 as f32 + 0.5)
+    {
+        return Err(FillRefusal::OutsideSelection);
     }
 
     // Boundary grid from the reference: alpha ≥ threshold = ink.
@@ -151,12 +204,36 @@ pub fn flood_fill_mask(
     // Close gaps: fatten every line by ceil(gap/2) so breaks up to gap_px
     // act sealed for the flood.
     let r_close = opts.gap_px.div_ceil(2) as usize;
-    let mut closed = boundary;
+    let mut closed = boundary.clone();
     dilate(&mut closed, w, h, r_close);
+
+    // The selection border is a WALL for the traversal (applied AFTER the
+    // gap dilation so selection edges aren't fattened like ink): the flood
+    // can never tunnel around a line through unselected territory.
+    if let (Some(poly), Some((bx0, by0, bx1, by1))) = (clip, clip_bbox) {
+        for y in 0..h {
+            let inside_band = y >= by0 && y < by1;
+            for x in 0..w {
+                let i = y * w + x;
+                if closed[i] {
+                    continue;
+                }
+                // Outside the bbox = outside the polygon (cheap cull); inside
+                // it, the real even-odd test decides.
+                let outside = !inside_band
+                    || x < bx0
+                    || x >= bx1
+                    || !crate::edit::contains(poly, x as f32 + 0.5, y as f32 + 0.5);
+                if outside {
+                    closed[i] = true;
+                }
+            }
+        }
+    }
 
     let seed_i = seed.1 as usize * w + seed.0 as usize;
     if closed[seed_i] {
-        return None; // clicked on ink (or inside the gap-closing band)
+        return Err(FillRefusal::OnInk); // ink, or the gap-closing band
     }
 
     // Scanline flood over the non-ink grid. Canvas edges are walls.
@@ -200,7 +277,38 @@ pub fn flood_fill_mask(
     // grow_px further UNDER the ink. gap 0 + grow 0 = the exact flood.
     dilate(&mut bits, w, h, r_close + opts.grow_px as usize);
 
-    Some(FillMask {
+    // Layer-mode protection: the reference IS the target — never paint over
+    // its own inked pixels.
+    if opts.protect_ink {
+        for (b, ink) in bits.iter_mut().zip(&boundary) {
+            *b = *b && !ink;
+        }
+    }
+
+    // Re-clip after grow (the dilate above can push paint back across the
+    // selection border). Bbox-culled: outside the bbox = outside the poly.
+    if let (Some(poly), Some((bx0, by0, bx1, by1))) = (clip, clip_bbox) {
+        for y in 0..h {
+            let inside_band = y >= by0 && y < by1;
+            for x in 0..w {
+                if !bits[y * w + x] {
+                    continue;
+                }
+                if !inside_band
+                    || x < bx0
+                    || x >= bx1
+                    || !crate::edit::contains(poly, x as f32 + 0.5, y as f32 + 0.5)
+                {
+                    bits[y * w + x] = false;
+                }
+            }
+        }
+        if !bits.iter().any(|b| *b) {
+            return Err(FillRefusal::ClippedOut);
+        }
+    }
+
+    Ok(FillMask {
         w: width,
         h: height,
         bits,
