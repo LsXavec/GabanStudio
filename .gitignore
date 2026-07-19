@@ -10,3 +10,6 @@ Desktop.ini
 # Local scratch files
 *.tmp
 *.bak
+probe_err.txt
+probe_out.txt
+tablet_test_err.txt

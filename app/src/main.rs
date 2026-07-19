@@ -81,13 +81,13 @@ struct App {
     capturing: Option<RebindCapture>,
     /// Active GPU backend name (for the Performance page's Renderer row).
     backend: String,
-    /// Native tablet input (octotablet → Windows Ink RealTimeStylus). None if
-    /// the backend couldn't attach — egui Touch remains the fallback.
-    tablet: Option<octotablet::Manager>,
-    /// Native pen state across frames (Down arrives without a pose; poses
-    /// stream while hovering, so the last hover position seeds the stroke).
-    tablet_down: bool,
-    tablet_last_pos: Option<egui::Pos2>,
+    /// Native tablet input: samples streamed from the dedicated tablet
+    /// thread (the octotablet Manager lives ENTIRELY on that thread — RTS
+    /// init can block on window messages, which froze the app when done on
+    /// the UI thread; a worker can block harmlessly while the UI pumps).
+    tablet_rx: Option<std::sync::mpsc::Receiver<PenSample>>,
+    /// The spawn ran (attempted once, on the first frame).
+    tablet_boot_tried: bool,
 }
 
 impl App {
@@ -97,20 +97,10 @@ impl App {
             .as_ref()
             .map(|rs| format!("{:?}", rs.adapter.get_info().backend))
             .unwrap_or_else(|| "none".to_string());
-        // SAFETY: eframe's window (and display) outlive the App — the Manager
-        // is dropped with the App when the event loop ends, never after the
-        // window. octotablet's own eframe example attaches the same way.
-        // Opt-out via Settings → Pen (restart applies) — the escape hatch if
-        // the native backend misbehaves with a particular driver.
-        // ANIMSTUDIO_NO_TABLET=1 force-disables regardless of config — the
-        // guaranteed launch path if the backend ever crashes at startup.
-        let tablet = if config.pen.native_tablet
-            && std::env::var_os("ANIMSTUDIO_NO_TABLET").is_none()
-        {
-            unsafe { octotablet::Builder::new().build_raw(cc) }.ok()
-        } else {
-            None
-        };
+        // The Manager is built LAZILY on the first UI frame, NOT here:
+        // RealTimeStylus initialization on the UI thread can block on window
+        // messages, and App::new runs BEFORE the event loop pumps — building
+        // here deadlocked the app at startup (Event Log: AppHangB1).
         Self {
             render_state: cc.wgpu_render_state.clone(),
             editor: None,
@@ -120,46 +110,33 @@ impl App {
             settings_category: SettingsCategory::default(),
             capturing: None,
             backend,
-            tablet,
-            tablet_down: false,
-            tablet_last_pos: None,
+            tablet_rx: None,
+            tablet_boot_tried: false,
         }
     }
 
-    /// Drain native tablet events into per-frame pen samples (window points),
-    /// behind a PANIC NET: octotablet 0.1.0's Ink backend carries unwraps and
-    /// unreachable!s that unexpected driver packet layouts can trip — a panic
-    /// on the pump path disables the native backend for the session and falls
-    /// back to egui Touch instead of crashing the app.
-    fn pump_tablet(&mut self, ctx: &egui::Context) -> Vec<PenSample> {
-        let Some(mgr) = &mut self.tablet else {
+    /// Collect this frame's native pen samples from the tablet thread.
+    /// A disconnected channel (thread failed/panicked) drops the backend for
+    /// the session — egui Touch keeps working.
+    fn pump_tablet(&mut self) -> Vec<PenSample> {
+        let Some(rx) = &self.tablet_rx else {
             return Vec::new();
         };
-        let ppp = ctx.pixels_per_point();
-        let (down, last) = (self.tablet_down, self.tablet_last_pos);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            drain_tablet(mgr, ppp, down, last)
-        }));
-        match result {
-            Ok((out, down, last)) => {
-                self.tablet_down = down;
-                self.tablet_last_pos = last;
-                if !out.is_empty() {
-                    // Keep frames flowing while the pen streams (RTS samples
-                    // arrive on octotablet's thread, never waking winit).
-                    ctx.request_repaint();
+        let mut out = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(s) => out.push(s),
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    eprintln!(
+                        "native tablet thread ended — falling back to standard pen input"
+                    );
+                    self.tablet_rx = None;
+                    break;
                 }
-                out
-            }
-            Err(_) => {
-                eprintln!(
-                    "native tablet backend panicked — disabled for this session,                      falling back to Windows Ink touch events"
-                );
-                self.tablet = None;
-                self.tablet_down = false;
-                Vec::new()
             }
         }
+        out
     }
 
     /// Run an action bound to a keyboard shortcut.
@@ -258,7 +235,109 @@ impl App {
     }
 }
 
-/// The actual event drain (separate fn so the panic net can wrap it).
+/// Spawn the dedicated tablet thread. The octotablet Manager is built AND
+/// pumped there: RealTimeStylus initialization can block on window messages,
+/// which froze the app when done on the UI thread (Event Log: AppHangB1) —
+/// on a worker thread it blocks harmlessly while the UI keeps pumping.
+/// Returns None if the window handle isn't extractable.
+fn spawn_tablet_thread(
+    frame: &eframe::Frame,
+    ctx: egui::Context,
+) -> Option<std::sync::mpsc::Receiver<PenSample>> {
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
+
+    // Extract the Win32 handle parts (plain integers — sendable) on the UI
+    // thread; the worker reconstructs a handle carrier from them.
+    let raw = frame.window_handle().ok()?.as_raw();
+    let RawWindowHandle::Win32(w32) = raw else {
+        return None;
+    };
+    let hwnd = w32.hwnd;
+    let hinstance = w32.hinstance;
+    frame.display_handle().ok()?; // Windows display handle is a unit
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("tablet-input".into())
+        .spawn(move || {
+            // COM for this thread: octotablet only CoCreateInstances (it
+            // relies on the caller's apartment). MTA = no message pumping
+            // required here.
+            #[link(name = "ole32")]
+            unsafe extern "system" {
+                fn CoInitializeEx(reserved: *mut std::ffi::c_void, coinit: u32) -> i32;
+            }
+            const COINIT_MULTITHREADED: u32 = 0x0;
+            unsafe {
+                CoInitializeEx(std::ptr::null_mut(), COINIT_MULTITHREADED);
+            }
+
+            struct Handles {
+                hwnd: std::num::NonZeroIsize,
+                hinstance: Option<std::num::NonZeroIsize>,
+            }
+            impl HasWindowHandle for Handles {
+                fn window_handle(
+                    &self,
+                ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError>
+                {
+                    let mut h = raw_window_handle::Win32WindowHandle::new(self.hwnd);
+                    h.hinstance = self.hinstance;
+                    // SAFETY: the eframe window outlives the app; an HWND is
+                    // an opaque token — a stale one fails calls, it can't UB.
+                    Ok(unsafe {
+                        raw_window_handle::WindowHandle::borrow_raw(RawWindowHandle::Win32(h))
+                    })
+                }
+            }
+            impl HasDisplayHandle for Handles {
+                fn display_handle(
+                    &self,
+                ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError>
+                {
+                    Ok(raw_window_handle::DisplayHandle::windows())
+                }
+            }
+            let handles = Handles { hwnd, hinstance };
+
+            // SAFETY: see Handles::window_handle.
+            let built = std::panic::catch_unwind(|| unsafe {
+                octotablet::Builder::new().build_raw(&handles)
+            });
+            let Ok(Ok(mut mgr)) = built else {
+                eprintln!("native tablet backend failed to attach — using fallback pen input");
+                return; // rx disconnects; the app falls back
+            };
+
+            let mut down = false;
+            let mut last: Option<egui::Pos2> = None;
+            loop {
+                let ppp = ctx.pixels_per_point();
+                let step = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    drain_tablet(&mut mgr, ppp, down, last)
+                }));
+                let Ok((samples, d2, l2)) = step else {
+                    eprintln!("native tablet backend panicked — disabled for this session");
+                    return;
+                };
+                down = d2;
+                last = l2;
+                if !samples.is_empty() {
+                    for s in samples {
+                        if tx.send(s).is_err() {
+                            return; // app side gone
+                        }
+                    }
+                    ctx.request_repaint();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        })
+        .ok()?;
+    Some(rx)
+}
+
+/// The actual event drain, on the tablet thread.
 /// In→Down→Pose*→Up→Out per octotablet's stream; Down carries no pose, so the
 /// last hover pose seeds the stroke position.
 fn drain_tablet(
@@ -491,7 +570,20 @@ impl Editor {
 }
 
 impl eframe::App for App {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Native tablet backend: build on the FIRST frame — the message pump
+        // is running now, so RealTimeStylus init can't deadlock on window
+        // messages (the startup-hang failure mode). Opt-in via Settings → Pen;
+        // ANIMSTUDIO_NO_TABLET=1 force-disables.
+        if !self.tablet_boot_tried {
+            self.tablet_boot_tried = true;
+            let want = (self.config.pen.native_tablet
+                || std::env::var_os("ANIMSTUDIO_TABLET").is_some())
+                && std::env::var_os("ANIMSTUDIO_NO_TABLET").is_none();
+            if want {
+                self.tablet_rx = spawn_tablet_thread(frame, ui.ctx().clone());
+            }
+        }
         // Nothing open and no dialog -> show the startup dialog.
         if self.editor.is_none() && self.new_form.is_none() {
             self.new_form = Some(NewProjectForm::default());
@@ -505,7 +597,7 @@ impl eframe::App for App {
         let layers_cfg = self.config.layers.clone();
         let mut presets = self.config.presets.clone();
         let mut presets_dirty = false;
-        let native_pen = self.pump_tablet(ui.ctx());
+        let native_pen = self.pump_tablet();
 
         // Editor (if any) renders first as the base layer.
         if let Some(editor) = &mut self.editor {
