@@ -21,6 +21,7 @@ use workspace::{Pane, Workspace, Workspaces, draw_workspace};
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use newproject::{FormAction, NewProjectForm};
+use canvas::{PenPhase, PenSample};
 use paint::PaintLayer;
 use std::time::Duration;
 
@@ -80,6 +81,13 @@ struct App {
     capturing: Option<RebindCapture>,
     /// Active GPU backend name (for the Performance page's Renderer row).
     backend: String,
+    /// Native tablet input (octotablet → Windows Ink RealTimeStylus). None if
+    /// the backend couldn't attach — egui Touch remains the fallback.
+    tablet: Option<octotablet::Manager>,
+    /// Native pen state across frames (Down arrives without a pose; poses
+    /// stream while hovering, so the last hover position seeds the stroke).
+    tablet_down: bool,
+    tablet_last_pos: Option<egui::Pos2>,
 }
 
 impl App {
@@ -89,6 +97,20 @@ impl App {
             .as_ref()
             .map(|rs| format!("{:?}", rs.adapter.get_info().backend))
             .unwrap_or_else(|| "none".to_string());
+        // SAFETY: eframe's window (and display) outlive the App — the Manager
+        // is dropped with the App when the event loop ends, never after the
+        // window. octotablet's own eframe example attaches the same way.
+        // Opt-out via Settings → Pen (restart applies) — the escape hatch if
+        // the native backend misbehaves with a particular driver.
+        // ANIMSTUDIO_NO_TABLET=1 force-disables regardless of config — the
+        // guaranteed launch path if the backend ever crashes at startup.
+        let tablet = if config.pen.native_tablet
+            && std::env::var_os("ANIMSTUDIO_NO_TABLET").is_none()
+        {
+            unsafe { octotablet::Builder::new().build_raw(cc) }.ok()
+        } else {
+            None
+        };
         Self {
             render_state: cc.wgpu_render_state.clone(),
             editor: None,
@@ -98,6 +120,45 @@ impl App {
             settings_category: SettingsCategory::default(),
             capturing: None,
             backend,
+            tablet,
+            tablet_down: false,
+            tablet_last_pos: None,
+        }
+    }
+
+    /// Drain native tablet events into per-frame pen samples (window points),
+    /// behind a PANIC NET: octotablet 0.1.0's Ink backend carries unwraps and
+    /// unreachable!s that unexpected driver packet layouts can trip — a panic
+    /// on the pump path disables the native backend for the session and falls
+    /// back to egui Touch instead of crashing the app.
+    fn pump_tablet(&mut self, ctx: &egui::Context) -> Vec<PenSample> {
+        let Some(mgr) = &mut self.tablet else {
+            return Vec::new();
+        };
+        let ppp = ctx.pixels_per_point();
+        let (down, last) = (self.tablet_down, self.tablet_last_pos);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drain_tablet(mgr, ppp, down, last)
+        }));
+        match result {
+            Ok((out, down, last)) => {
+                self.tablet_down = down;
+                self.tablet_last_pos = last;
+                if !out.is_empty() {
+                    // Keep frames flowing while the pen streams (RTS samples
+                    // arrive on octotablet's thread, never waking winit).
+                    ctx.request_repaint();
+                }
+                out
+            }
+            Err(_) => {
+                eprintln!(
+                    "native tablet backend panicked — disabled for this session,                      falling back to Windows Ink touch events"
+                );
+                self.tablet = None;
+                self.tablet_down = false;
+                Vec::new()
+            }
         }
     }
 
@@ -197,6 +258,65 @@ impl App {
     }
 }
 
+/// The actual event drain (separate fn so the panic net can wrap it).
+/// In→Down→Pose*→Up→Out per octotablet's stream; Down carries no pose, so the
+/// last hover pose seeds the stroke position.
+fn drain_tablet(
+    mgr: &mut octotablet::Manager,
+    ppp: f32,
+    mut down: bool,
+    mut last: Option<egui::Pos2>,
+) -> (Vec<PenSample>, bool, Option<egui::Pos2>) {
+    let mut out = Vec::new();
+    // On Windows the pump error type is uninhabited (pump can't fail);
+    // keep the guard for platforms where it can.
+    #[allow(irrefutable_let_patterns)]
+    let Ok(events) = mgr.pump() else {
+        return (out, down, last);
+    };
+    for event in events {
+        let octotablet::events::Event::Tool { event, .. } = event else {
+            continue;
+        };
+        use octotablet::events::ToolEvent as TE;
+        match event {
+            TE::Pose(pose) => {
+                let pos = egui::pos2(pose.position[0] / ppp, pose.position[1] / ppp);
+                last = Some(pos);
+                if down {
+                    out.push(PenSample {
+                        pos,
+                        pressure: pose.pressure.get(),
+                        phase: PenPhase::Move,
+                    });
+                }
+            }
+            TE::Down => {
+                down = true;
+                if let Some(pos) = last {
+                    out.push(PenSample {
+                        pos,
+                        pressure: None, // first Pose supplies real pressure
+                        phase: PenPhase::Down,
+                    });
+                }
+            }
+            TE::Up | TE::Out | TE::Removed => {
+                if down {
+                    out.push(PenSample {
+                        pos: last.unwrap_or(egui::pos2(0.0, 0.0)),
+                        pressure: None,
+                        phase: PenPhase::Up,
+                    });
+                }
+                down = false;
+            }
+            _ => {}
+        }
+    }
+    (out, down, last)
+}
+
 struct Editor {
     state: AppState,
     canvas: canvas::CanvasView,
@@ -228,6 +348,7 @@ struct EditorTabs<'a> {
     presets: &'a mut Vec<BrushPreset>,
     presets_dirty: &'a mut bool,
     preset_name: &'a mut String,
+    native_pen: &'a [PenSample],
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -253,6 +374,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 self.paint.as_deref_mut(),
                 self.pen,
                 self.layers_cfg,
+                self.native_pen,
             ),
         }
     }
@@ -383,6 +505,7 @@ impl eframe::App for App {
         let layers_cfg = self.config.layers.clone();
         let mut presets = self.config.presets.clone();
         let mut presets_dirty = false;
+        let native_pen = self.pump_tablet(ui.ctx());
 
         // Editor (if any) renders first as the base layer.
         if let Some(editor) = &mut self.editor {
@@ -390,7 +513,7 @@ impl eframe::App for App {
             if let Some(p) = &mut editor.paint {
                 p.set_filter(canvas_filter);
             }
-            editor.ui(ui, &pen, &layers_cfg, &mut presets, &mut presets_dirty);
+            editor.ui(ui, &pen, &layers_cfg, &mut presets, &mut presets_dirty, &native_pen);
             if presets_dirty {
                 self.config.presets = presets.clone();
                 self.config.save();
@@ -566,7 +689,7 @@ fn probe_at(ppp: f32) {
         );
         let mut presets = config.presets.clone();
         let mut presets_dirty = false;
-        editor.ui(&mut root, &pen, &layers_cfg, &mut presets, &mut presets_dirty);
+        editor.ui(&mut root, &pen, &layers_cfg, &mut presets, &mut presets_dirty, &[]);
         let _ = ctx.end_pass();
         let r = editor.canvas.dbg_rect;
         let note = match *last {
@@ -644,6 +767,7 @@ impl Editor {
         layers_cfg: &LayersConfig,
         presets: &mut Vec<BrushPreset>,
         presets_dirty: &mut bool,
+        native_pen: &[PenSample],
     ) {
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
@@ -899,6 +1023,7 @@ impl Editor {
             presets,
             presets_dirty,
             preset_name: &mut self.preset_name,
+            native_pen,
         };
         let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
         // egui_dock clamps every divider so each side keeps `separator.extra`

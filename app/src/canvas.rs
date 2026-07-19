@@ -61,6 +61,22 @@ const NO_FORCE_DAB_MAX_PX: f32 = 6.0;
 /// stationary click, not a drag — discard it so a bare click paints nothing.
 const MOUSE_MIN_TRAVEL_PX: f32 = 3.0;
 
+/// One native tablet sample (octotablet / Windows Ink), already mapped to
+/// egui window points.
+#[derive(Clone, Copy, Debug)]
+pub struct PenSample {
+    pub pos: Pos2,
+    pub pressure: Option<f32>,
+    pub phase: PenPhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PenPhase {
+    Down,
+    Move,
+    Up,
+}
+
 pub struct CanvasView {
     zoom: f32,
     pan: egui::Vec2,
@@ -162,6 +178,10 @@ pub struct CanvasView {
     /// the mouse-drawing fallback is disabled so Windows' synthesized pen→mouse
     /// clicks (e.g. from a fast light double-tap) can't paint flat-pressure blobs.
     seen_pen: bool,
+    /// Latched when octotablet delivers native tablet samples: the native path
+    /// owns the pen; egui Touch/mouse (duplicates of the same physical strokes)
+    /// go quiet.
+    native_active: bool,
     /// The current stroke was started by the mouse fallback (no pen stream), so
     /// its pressure is fabricated, not measured.
     stroke_from_mouse: bool,
@@ -215,6 +235,7 @@ impl CanvasView {
             layer_colors: std::collections::HashMap::new(),
             dbg_rect: Rect::NOTHING,
             seen_pen: false,
+            native_active: false,
             stroke_from_mouse: false,
             dbg_mouse_mode: false,
         }
@@ -268,7 +289,8 @@ impl CanvasView {
         let pct = 100 * self.dbg_some / total;
         (
             format!(
-                "P{:5.2}  {:4.2}–{:4.2}  {:3}%",
+                "{}P{:5.2}  {:4.2}–{:4.2}  {:3}%",
+                if self.native_active { "ink " } else { "" },
                 self.dbg_pressure, self.dbg_min, self.dbg_max, pct
             ),
             self.dbg_max - self.dbg_min > 0.15,
@@ -469,6 +491,7 @@ impl CanvasView {
         paint: Option<&mut PaintLayer>,
         pen: &PenConfig,
         layers_cfg: &LayersConfig,
+        native_pen: &[PenSample],
     ) {
         self.pen_curve = pen.pressure_curve.clone();
         // Brush colour follows the active layer: on a switch, remember the
@@ -548,7 +571,7 @@ impl CanvasView {
 
         // ---- Pen input (edit mode only) -----------------------------------
         if !state.playing {
-            self.handle_pen(ui, &response, rect, &to_paper, scale, state);
+            self.handle_pen(ui, &response, rect, &to_paper, scale, state, native_pen);
         } else {
             self.current.clear();
             self.touch_active = false;
@@ -911,6 +934,64 @@ impl CanvasView {
         dabs
     }
 
+    /// Begin a stroke at `pos` (shared by the native tablet path and the egui
+    /// Touch path). Returns false if refused (outside canvas / hidden layer).
+    fn stroke_start(
+        &mut self,
+        pos: Pos2,
+        force: Option<f32>,
+        rect: Rect,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        state: &mut AppState,
+    ) -> bool {
+        if !rect.contains(pos) {
+            return false;
+        }
+        // GUARD (CSP behavior): never paint into a layer you can't see.
+        if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {
+            state.status = format!(
+                "layer '{}' is hidden — press A to switch or click its eye",
+                state.active_layer_name()
+            );
+            return false;
+        }
+        let p0 = force.filter(|f| *f > 0.0).unwrap_or(START_SEED);
+        self.touch_active = true;
+        self.seed_pending = force.filter(|f| *f > 0.0).is_none();
+        self.last_pressure = p0;
+        self.smoothed_pressure = p0;
+        self.raw_history = [p0; 3];
+        self.cur_some = 0;
+        self.cur_none = 0;
+        self.stroke_from_mouse = false;
+        self.stroke_erasing = self.erasing;
+        self.stroke_layer_slot = state.active_layer_slot;
+        self.cel_touched = false;
+        self.dabs_flushed = 0;
+        self.raster_stroke_done = false;
+        self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
+        self.current.clear();
+        let p = to_paper(pos);
+        self.current.push(StrokePoint {
+            x: p.x,
+            y: p.y,
+            pressure: p0,
+        });
+        true
+    }
+
+    /// End the live stroke (release pos/force are unreliable — the taper is
+    /// synthesized from the committed points instead).
+    fn stroke_end(&mut self, state: &mut AppState) {
+        if self.touch_active {
+            self.finish_stroke(state);
+            self.mouse_lockout = 1;
+        }
+        self.touch_active = false;
+        self.seed_pending = false;
+    }
+
+    #[allow(clippy::too_many_arguments)] // one call site; a struct would be noise
     fn handle_pen(
         &mut self,
         ui: &egui::Ui,
@@ -919,6 +1000,7 @@ impl CanvasView {
         to_paper: &impl Fn(Pos2) -> Pos2,
         scale: f32,
         state: &mut AppState,
+        native_pen: &[PenSample],
     ) {
         if self.mouse_lockout > 0 {
             self.mouse_lockout -= 1;
@@ -926,6 +1008,32 @@ impl CanvasView {
 
         let events = ui.input(|i| i.events.clone());
         let mut touch_seen = false;
+
+        // NATIVE TABLET PATH (octotablet / Windows Ink RealTimeStylus): once
+        // real tablet samples arrive, they own the pen forever this session —
+        // Windows ALSO surfaces the same physical strokes as egui Touch and
+        // mouse events, so both fallbacks must go quiet or every stroke would
+        // paint twice.
+        if !native_pen.is_empty() {
+            self.native_active = true;
+            self.seen_pen = true;
+        }
+        if self.native_active {
+            for s in native_pen {
+                match s.phase {
+                    PenPhase::Down => {
+                        self.stroke_start(s.pos, s.pressure, rect, to_paper, state);
+                    }
+                    PenPhase::Move => {
+                        if self.touch_active {
+                            self.process_move(s.pos, s.pressure, to_paper, scale);
+                        }
+                    }
+                    PenPhase::Up => self.stroke_end(state),
+                }
+            }
+            return;
+        }
 
         for event in &events {
             if let egui::Event::Touch {
@@ -939,42 +1047,7 @@ impl CanvasView {
                     // is usually 0 -> None). Seed provisionally; the first real
                     // Move overwrites it so strokes don't begin with a fat dot.
                     egui::TouchPhase::Start => {
-                        if !rect.contains(*pos) {
-                            continue;
-                        }
-                        // GUARD (CSP behavior): never paint into a layer you
-                        // can't see — refuse with a hint instead.
-                        if self.raster
-                            && state.active_layer_props().is_some_and(|p| !p.visible)
-                        {
-                            state.status = format!(
-                                "layer '{}' is hidden — press A to switch or click its eye",
-                                state.active_layer_name()
-                            );
-                            continue;
-                        }
-                        let p0 = force.filter(|f| *f > 0.0).unwrap_or(START_SEED);
-                        self.touch_active = true;
-                        self.seed_pending = force.filter(|f| *f > 0.0).is_none();
-                        self.last_pressure = p0;
-                        self.smoothed_pressure = p0;
-                        self.raw_history = [p0; 3];
-                        self.cur_some = 0;
-                        self.cur_none = 0;
-                        self.stroke_from_mouse = false;
-                        self.stroke_erasing = self.erasing;
-                        self.stroke_layer_slot = state.active_layer_slot;
-                        self.cel_touched = false;
-                        self.dabs_flushed = 0;
-                        self.raster_stroke_done = false;
-                        self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
-                        self.current.clear();
-                        let p = to_paper(*pos);
-                        self.current.push(StrokePoint {
-                            x: p.x,
-                            y: p.y,
-                            pressure: p0,
-                        });
+                        self.stroke_start(*pos, *force, rect, to_paper, state);
                     }
                     egui::TouchPhase::Move => {
                         if !self.touch_active {
@@ -986,12 +1059,7 @@ impl CanvasView {
                     // (End force is None on Windows). Discard them; synthesize
                     // the taper from the committed points instead.
                     egui::TouchPhase::End | egui::TouchPhase::Cancel => {
-                        if self.touch_active {
-                            self.finish_stroke(state);
-                            self.mouse_lockout = 1;
-                        }
-                        self.touch_active = false;
-                        self.seed_pending = false;
+                        self.stroke_end(state);
                     }
                 }
             }
