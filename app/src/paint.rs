@@ -735,7 +735,7 @@ impl PaintLayer {
         self.composite_layers_into(&target, layers);
     }
 
-    fn composite_layers_into(&mut self, target: &wgpu::TextureView, layers: &[LayerSlice<'_>]) {
+    pub(crate) fn composite_layers_into(&mut self, target: &wgpu::TextureView, layers: &[LayerSlice<'_>]) {
         self.clear_view(target, "clear_projection");
         let scratch_tex = self.scratch.texture.clone();
         let scratch_view = self.scratch.view.clone();

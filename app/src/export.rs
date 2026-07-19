@@ -1,11 +1,18 @@
 //! Export: PNG sequence (with alpha) and MP4 via the system ffmpeg.
 //! Rendering is the engine's headless compositor (anim_core::export) — the
 //! same math as the GPU display, so what you see is what exports.
+//!
+//! When the cut's node graph has a wired Output, export renders THROUGH the
+//! graph (the composite-view truth); otherwise it falls back to the plain
+//! column-stack composite. The note returned to the status bar says which.
 
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-use anim_core::export::{render_frame, render_frame_over, vector_stroke_cels};
+use anim_core::export::{
+    render_frame, render_frame_over, render_graph_frame, render_graph_frame_over,
+    vector_stroke_cels,
+};
 
 use crate::doc::AppState;
 
@@ -17,11 +24,21 @@ pub fn export_png_sequence(state: &AppState, dir: &Path) -> Result<(usize, Strin
     let (w, h) = (state.engine.project.width, state.engine.project.height);
     let n = state.frame_count();
     for f in 0..n {
-        let rgba = render_frame(cut, f, w, h);
+        let rgba =
+            render_graph_frame(cut, f, w, h).unwrap_or_else(|| render_frame(cut, f, w, h));
         let path = dir.join(format!("frame_{:04}.png", f + 1));
         write_png(&path, w, h, &rgba)?;
     }
-    Ok((n as usize, strokes_note(cut)))
+    Ok((n as usize, format!("{}{}", path_note(state), strokes_note(cut))))
+}
+
+/// Which render path exported — surfaced in the status message.
+fn path_note(state: &AppState) -> &'static str {
+    if state.cut().graph.output.is_some() {
+        " [node graph]"
+    } else {
+        " [column stack]"
+    }
 }
 
 /// Export the whole cut as an MP4 at `path` (white background) using the
@@ -35,7 +52,8 @@ pub fn export_mp4(state: &AppState, path: &Path) -> Result<(usize, String), Stri
     let tmp = std::env::temp_dir().join(format!("animstudio_export_{}", std::process::id()));
     std::fs::create_dir_all(&tmp).map_err(|e| format!("temp dir: {e}"))?;
     for f in 0..n {
-        let rgba = render_frame_over(cut, f, w, h, [255, 255, 255]);
+        let rgba = render_graph_frame_over(cut, f, w, h, [255, 255, 255])
+            .unwrap_or_else(|| render_frame_over(cut, f, w, h, [255, 255, 255]));
         write_png(&tmp.join(format!("frame_{:04}.png", f + 1)), w, h, &rgba)?;
     }
 
@@ -76,7 +94,7 @@ pub fn export_mp4(state: &AppState, path: &Path) -> Result<(usize, String), Stri
     if !status.success() {
         return Err(format!("ffmpeg failed (exit {:?})", status.code()));
     }
-    Ok((n as usize, strokes_note(cut)))
+    Ok((n as usize, format!("{}{}", path_note(state), strokes_note(cut))))
 }
 
 /// A default export location proposal next to the project file, if any.

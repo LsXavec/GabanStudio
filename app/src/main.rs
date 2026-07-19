@@ -7,6 +7,7 @@ mod canvas;
 mod config;
 mod doc;
 mod export;
+mod graphcomp;
 mod kpp;
 mod newproject;
 mod nodegraph_panel;
@@ -151,6 +152,19 @@ impl App {
             ed.canvas.toggle_eraser();
             return;
         }
+        // Composite view swaps what the canvas renders — blocked mid-stroke
+        // (the live stroke's sandwich would vanish under it).
+        if action == Action::ToggleCompositeView {
+            if !ed.canvas.stroke_active() {
+                ed.canvas.composite_view = !ed.canvas.composite_view;
+                ed.state.status = if ed.canvas.composite_view {
+                    "composite view — the node graph's output (C to edit)".into()
+                } else {
+                    "edit view".into()
+                };
+            }
+            return;
+        }
         // Brush presets apply to the canvas; blocked mid-stroke (dab size/alpha
         // read live state — a mid-stroke swap would bend the stroke).
         let preset_idx = match action {
@@ -214,7 +228,7 @@ impl App {
             Action::ClearFrameKey => s.clear_key_at_frame(),
             Action::RemoveColumn => s.remove_active_column(),
             Action::ToggleOnion => s.onion = !s.onion,
-            Action::ToggleEraser => {} // handled above
+            Action::ToggleEraser | Action::ToggleCompositeView => {} // handled above
             Action::Preset1
             | Action::Preset2
             | Action::Preset3
@@ -422,6 +436,8 @@ struct Editor {
     canvas: canvas::CanvasView,
     /// GPU raster paint layer (None if wgpu is unavailable).
     paint: Option<PaintLayer>,
+    /// GPU graph compositor — the composite-view render path (None like paint).
+    graph: Option<graphcomp::GraphCompositor>,
     /// Set when the user clicks "New…"; the App picks it up to show the dialog.
     request_new: bool,
     /// Set when the user clicks "settings".
@@ -443,6 +459,7 @@ struct EditorTabs<'a> {
     state: &'a mut AppState,
     canvas: &'a mut canvas::CanvasView,
     paint: Option<&'a mut PaintLayer>,
+    graph: Option<&'a mut graphcomp::GraphCompositor>,
     pen: &'a PenConfig,
     layers_cfg: &'a LayersConfig,
     presets: &'a mut Vec<BrushPreset>,
@@ -472,6 +489,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 ui,
                 self.state,
                 self.paint.as_deref_mut(),
+                self.graph.as_deref_mut(),
                 self.pen,
                 self.layers_cfg,
                 self.native_pen,
@@ -554,10 +572,12 @@ impl Editor {
             form.dpi as f32,
         );
         let paint = rs.map(|rs| PaintLayer::new(rs, form.width, form.height));
+        let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, form.width, form.height));
         Self {
             state,
             canvas: canvas::CanvasView::new(),
             paint,
+            graph,
             request_new: false,
             request_settings: false,
             dock: {
@@ -573,10 +593,12 @@ impl Editor {
     fn from_state(state: AppState, rs: Option<&RenderState>) -> Self {
         let (w, h) = (state.engine.project.width, state.engine.project.height);
         let paint = rs.map(|rs| PaintLayer::new(rs, w, h));
+        let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, w, h));
         Self {
             state,
             canvas: canvas::CanvasView::new(),
             paint,
+            graph,
             request_new: false,
             request_settings: false,
             dock: {
@@ -625,6 +647,9 @@ impl eframe::App for App {
             editor.state.engine.set_undo_limit(undo_limit);
             if let Some(p) = &mut editor.paint {
                 p.set_filter(canvas_filter);
+            }
+            if let Some(g) = &mut editor.graph {
+                g.set_filter(canvas_filter);
             }
             editor.ui(ui, &pen, &layers_cfg, &mut presets, &mut presets_dirty, &native_pen);
             if presets_dirty {
@@ -1131,6 +1156,7 @@ impl Editor {
             state: &mut self.state,
             canvas: &mut self.canvas,
             paint: self.paint.as_mut(),
+            graph: self.graph.as_mut(),
             pen,
             layers_cfg,
             presets,

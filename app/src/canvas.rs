@@ -187,6 +187,11 @@ pub struct CanvasView {
     /// A real tilt sample arrived this session (hover or stroke) — gates the
     /// T° readout and the cursor needle. One-way latch: fixed-width law.
     tilt_seen: bool,
+    /// COMPOSITE VIEW: the canvas shows the node graph's rendered output (the
+    /// playback/export truth) instead of the editing sandwich. Review mode —
+    /// painting is refused while on (a stroke must never land somewhere the
+    /// view doesn't show). Toggled by the C keybind / 🎬 toolbar button.
+    pub composite_view: bool,
     /// This stroke wrote the CEL texture directly (eraser dabs, or the new-cel
     /// clear). If it is abandoned, the cel must re-sync from engine truth —
     /// otherwise phantom damage gets baked into the NEXT commit.
@@ -276,6 +281,7 @@ impl CanvasView {
             last_tilt: [0.0; 2],
             dbg_tilt: 0.0,
             tilt_seen: false,
+            composite_view: false,
             cel_touched: false,
             dabs_flushed: 0,
             raster_stroke_done: false,
@@ -429,6 +435,20 @@ impl CanvasView {
                     .clicked()
                 {
                     self.erasing = true;
+                }
+                // Composite view: the node graph's rendered output (review
+                // mode — painting pauses). Blocked mid-stroke: swapping the
+                // view under a live stroke would orphan its display.
+                if ui
+                    .selectable_label(self.composite_view, if compact { "🎬" } else { "🎬 comp" })
+                    .on_hover_text(
+                        "composite view — what the node graph renders \
+                         (playback/export truth). C toggles; painting pauses here.",
+                    )
+                    .clicked()
+                    && !self.stroke_active()
+                {
+                    self.composite_view = !self.composite_view;
                 }
                 // Active cel-layer chip (RETAS trace-line colours). Click or A
                 // cycles; strokes land on this layer. Red = hidden. Wide mode
@@ -586,11 +606,13 @@ impl CanvasView {
         });
     }
 
+    #[allow(clippy::too_many_arguments)] // one call site; a struct would be noise
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
         paint: Option<&mut PaintLayer>,
+        graph: Option<&mut crate::graphcomp::GraphCompositor>,
         pen: &PenConfig,
         layers_cfg: &LayersConfig,
         native_pen: &[PenSample],
@@ -679,9 +701,42 @@ impl CanvasView {
             self.touch_active = false;
         }
 
+        // ---- COMPOSITE VIEW: execute the node graph on the GPU ------------
+        // The evaluator's memoized output Value supplies the dirty key: same
+        // hash → the compositor returns its cached texture untouched. The
+        // sandwich section below is skipped entirely while this shows (its
+        // textures keep their sync keys; anything that changed re-syncs by
+        // key mismatch on return to edit view).
+        let mut composite_tex: Option<egui::TextureId> = None;
+        let mut composite_note: Option<&'static str> = None;
+        if self.composite_view {
+            if state.cut().graph.output.is_none() {
+                composite_note = Some("composite view — no graph output wired (C to edit)");
+            } else if let (Some(g), Some(p)) = (graph, paint.as_deref_mut()) {
+                let (pw, ph) = (state.engine.project.width, state.engine.project.height);
+                p.ensure_size(pw, ph);
+                g.ensure_size(pw, ph);
+                let (scene, cutid, frame) = (state.scene, state.cut, state.frame);
+                match state.engine.eval(scene, cutid, frame) {
+                    Ok(v) => {
+                        let hash = v.hash();
+                        let cut = state.cut();
+                        composite_tex = Some(g.execute(hash, cut, frame, p));
+                    }
+                    Err(_) => {
+                        composite_note =
+                            Some("composite view — graph failed to evaluate (C to edit)");
+                    }
+                }
+            } else {
+                composite_note = Some("composite view needs the GPU — showing edit view");
+            }
+        }
+
         // ---- Raster: keep the GPU layer synced to the current cel, stamp
         //      live dabs, and read back into the engine at pen-up ----------
-        if self.raster
+        if composite_tex.is_none()
+            && self.raster
             && let Some(p) = paint.as_deref_mut()
         {
             p.ensure_size(state.engine.project.width, state.engine.project.height);
@@ -810,19 +865,49 @@ impl CanvasView {
         let active_col = state.active_column;
         let frame = state.frame;
 
+        // COMPOSITE VIEW: the graph's output IS the frame — nothing else
+        // renders under or over it (no sandwich, no onion, no vector
+        // overlays; it is the playback/export truth). `edit_view` gates
+        // every editing-display step below.
+        let edit_view = composite_tex.is_none();
+        if let Some(id) = composite_tex {
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            painter.image(id, paper_rect, uv, Color32::WHITE);
+            // Painted overlay tag (zero layout impact) so the mode is never
+            // ambiguous — this view looks like art, not like a mode.
+            painter.text(
+                pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
+                egui::Align2::LEFT_TOP,
+                "🎬 composite",
+                egui::FontId::proportional(12.0),
+                Color32::from_rgba_unmultiplied(120, 190, 235, 200),
+            );
+        }
+        if let Some(note) = composite_note {
+            painter.text(
+                pos2(rect.center().x, rect.top() + 34.0),
+                egui::Align2::CENTER_CENTER,
+                note,
+                egui::FontId::proportional(13.0),
+                Color32::from_rgb(235, 180, 90),
+            );
+        }
+
         // 1. Non-active columns (in sheet order = layer order).
-        for col in &cut.xsheet.columns {
-            if col.id == active_col {
-                continue;
-            }
-            if let Some(id) = col.resolve(frame)
-                && let Some(d) = cut.drawing(id) {
-                    draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
+        if edit_view {
+            for col in &cut.xsheet.columns {
+                if col.id == active_col {
+                    continue;
                 }
+                if let Some(id) = col.resolve(frame)
+                    && let Some(d) = cut.drawing(id) {
+                        draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
+                    }
+            }
         }
 
         // 2. Onion ghosts of the active column, under its current drawing.
-        if state.onion {
+        if edit_view && state.onion {
             let ghosts = onion_ghosts(state, active_col, frame);
             for (id, tint) in ghosts {
                 if let Some(d) = cut.drawing(id) {
@@ -839,7 +924,8 @@ impl CanvasView {
         }
 
         // 3. Active column's current drawing on top.
-        if let Some(id) = state.resolve_at(active_col, frame)
+        if edit_view
+            && let Some(id) = state.resolve_at(active_col, frame)
             && let Some(d) = state.cut().drawing(id) {
                 draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
             }
@@ -848,7 +934,8 @@ impl CanvasView {
         //     the ACTIVE layer at its own opacity, the live wet stroke, the
         //     ABOVE projection. Painting "color" previews under the line art
         //     live — the solo shiage workflow.
-        if self.raster
+        if edit_view
+            && self.raster
             && let Some(p) = paint {
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
                 // Previous cel tinted warm, next cel tinted cool, both faded.
@@ -894,7 +981,7 @@ impl CanvasView {
 
         // 4. In-progress stroke preview (vector mode only — the raster layer
         //    already shows the live stroke when raster is on).
-        if !self.raster && self.current.len() >= 2 {
+        if edit_view && !self.raster && self.current.len() >= 2 {
             let c = self.brush_color;
             let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
             fill_stroke(
@@ -909,7 +996,8 @@ impl CanvasView {
         }
 
         // Empty-cell hint (vector mode only).
-        if !self.raster
+        if edit_view
+            && !self.raster
             && !state.playing
             && state.current_drawing().is_none()
             && self.current.is_empty()
@@ -946,6 +1034,7 @@ impl CanvasView {
         // footprint/stamp instead of a plain circle.)
         if self.raster
             && !state.playing
+            && !self.composite_view // review mode: painting refused, OS cursor back
             && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
             && rect.contains(pos)
             && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
@@ -1151,6 +1240,14 @@ impl CanvasView {
         if !rect.contains(pos) {
             return false;
         }
+        // GUARD: composite view is a review mode — a stroke would land on the
+        // active layer while the canvas shows the graph's output (possibly
+        // transformed or not even including that layer). Refuse + hint, same
+        // pattern as the hidden-layer guard.
+        if self.composite_view {
+            state.status = "composite view — press C to edit".into();
+            return false;
+        }
         // GUARD (CSP behavior): never paint into a layer you can't see.
         if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {
             state.status = format!(
@@ -1303,6 +1400,10 @@ impl CanvasView {
         // clicks that would otherwise paint flat-pressure blobs on light taps).
         if !self.touch_active && !touch_seen && self.mouse_lockout == 0 && !self.seen_pen {
             if response.drag_started_by(egui::PointerButton::Primary) {
+                if self.composite_view {
+                    state.status = "composite view — press C to edit".into();
+                    return;
+                }
                 if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {
                     state.status = format!(
                         "layer '{}' is hidden — press A to switch or click its eye",
@@ -1329,7 +1430,16 @@ impl CanvasView {
                         tilt: [0.0; 2], // mouse: vertical pen
                     });
                 }
-            } else if response.dragged_by(egui::PointerButton::Primary) {
+            } else if response.dragged_by(egui::PointerButton::Primary)
+                && !self.current.is_empty()
+            {
+                // Continue ONLY a stroke whose start was ACCEPTED (current
+                // non-empty). A refused start (composite view, hidden layer)
+                // leaves current empty — without this gate the continuation
+                // frames re-built the refused stroke and its release frame
+                // committed it blind (and in raster mode latched
+                // raster_stroke_done with the flush section skipped =
+                // composite-view softlock).
                 if let Some(p) = response.interact_pointer_pos() {
                     let p = to_paper(p);
                     self.current.push(StrokePoint {
@@ -1546,14 +1656,11 @@ fn median3(v: [f32; 3]) -> f32 {
 
 /// sRGB u8 swatch -> straight linear f32 RGBA (the dab shader premultiplies).
 fn linear_rgba(c: [u8; 4]) -> [f32; 4] {
-    let lin = |v: u8| {
-        let s = v as f32 / 255.0;
-        if s <= 0.04045 {
-            s / 12.92
-        } else {
-            ((s + 0.055) / 1.055).powf(2.4)
-        }
-    };
+    // ONE EOTF for the whole app: the engine's srgb_to_linear is the same
+    // function Solid nodes render with (and the CPU/GPU graph compositors
+    // pin) — sharing it makes "a Solid matches painting that colour" a
+    // structural law instead of two copies that could drift.
+    let lin = anim_core::export::srgb_to_linear;
     [lin(c[0]), lin(c[1]), lin(c[2]), c[3] as f32 / 255.0]
 }
 

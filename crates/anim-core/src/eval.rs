@@ -69,23 +69,30 @@ impl Evaluator {
 
         let value = match &kind {
             NodeKind::DrawingSource { column } => {
-                let col = cut
-                    .xsheet
-                    .column(*column)
-                    .ok_or(EngineError::UnknownColumn(*column))?;
-                match col.resolve(frame) {
-                    Some(d) => match cut.drawing(d) {
-                        // Content hash in the recipe: editing artwork changes
-                        // the value (and its hash) without any extra plumbing.
-                        Some(dr) => Value::image(format!(
-                            "drawing({}:'{}'#{:016x})",
-                            d,
-                            dr.name,
-                            dr.content_hash()
-                        )),
-                        None => Value::image(format!("drawing({d}:?)")),
+                // A missing column (deleted while a DrawingSource still reads
+                // it) is TOLERATED as transparent, not an error — both frame
+                // renderers (CPU export + GPU compositor) already draw it that
+                // way, and erroring here made composite view refuse a graph
+                // that export would happily render. The distinct sentinel
+                // keeps the hash honest: remove/re-add a column and the value
+                // changes accordingly.
+                match cut.xsheet.column(*column) {
+                    None => Value::image(format!("missing-column({column})")),
+                    Some(col) => match col.resolve(frame) {
+                        Some(d) => match cut.drawing(d) {
+                            // Content hash in the recipe: editing artwork
+                            // changes the value (and its hash) without any
+                            // extra plumbing.
+                            Some(dr) => Value::image(format!(
+                                "drawing({}:'{}'#{:016x})",
+                                d,
+                                dr.name,
+                                dr.content_hash()
+                            )),
+                            None => Value::image(format!("drawing({d}:?)")),
+                        },
+                        None => Value::image("empty".to_string()),
                     },
-                    None => Value::image("empty".to_string()),
                 }
             }
             NodeKind::Solid { rgba } => Value::image(format!(
