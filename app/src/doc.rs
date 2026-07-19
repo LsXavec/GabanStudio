@@ -18,29 +18,41 @@ use anim_core::xsheet::Exposure;
 /// Bottom→top display slices of cel layers: (tiles, effective opacity).
 pub type LayerSlices<'a> = Vec<(&'a BTreeMap<TileCoord, Arc<TileData>>, f32)>;
 
-pub struct AppState {
-    pub engine: Engine,
+/// The user's CURSOR into the document: which scene/cut/frame/column/layer
+/// is being looked at, and how (onion, playback). This is LENS-DOCK Phase
+/// 2's ViewContext, split from the document so panels can eventually hold or
+/// share one per link-channel. TODAY there is exactly ONE (the "Main"
+/// context, owned by AppState) — behavior is byte-identical to the fused
+/// struct; only the field paths moved.
+pub struct ViewContext {
     pub scene: SceneId,
     pub cut: CutId,
     pub active_column: ColumnId,
     pub frame: u32,
     pub selected_drawing: Option<DrawingId>,
     pub playing: bool,
-    play_acc: f32,
+    pub(crate) play_acc: f32,
     pub onion: bool,
+    /// Which cel layer is being edited, counted FROM THE TOP of the stack
+    /// (0 = topmost — "line" in the default template). Position-based so it
+    /// follows across frames; clamped per drawing when stacks are shallower.
+    pub active_layer_slot: usize,
+    /// Loop playback at the end of the cut (off = stop on the last frame).
+    pub loop_playback: bool,
+}
+
+/// The document (engine + where it lives on disk) plus the single "Main"
+/// view context and app-transient UI furniture. Mutations still route
+/// exclusively through `engine.apply` — the split changes no behavior.
+pub struct AppState {
+    pub engine: Engine,
+    pub view: ViewContext,
     pub file_path: Option<PathBuf>,
     pub status: String,
     /// Continuation handles (column, key-frame) the user has explicitly dragged
     /// into position. Such a hold stays statically visible even when it holds to
     /// its natural end (no Empty terminator); un-touched holds stay hidden.
     pub positioned_holds: HashSet<(ColumnId, u32)>,
-    /// Which cel layer is being edited, counted FROM THE TOP of the stack
-    /// (0 = topmost — "line" in the default template). Position-based so it
-    /// follows across frames ("on line at frame 5 → on line at frame 6");
-    /// clamped per drawing when stacks are shallower.
-    pub active_layer_slot: usize,
-    /// Loop playback at the end of the cut (off = stop on the last frame).
-    pub loop_playback: bool,
     /// Transient layer-strip UI state: an in-progress rename (layer, buffer).
     pub strip_rename: Option<(LayerId, String)>,
     /// Transient layer-strip UI state: an in-progress opacity drag
@@ -79,19 +91,21 @@ impl AppState {
         engine.clear_history();
         Self {
             engine,
-            scene,
-            cut,
-            active_column,
-            frame: 0,
-            selected_drawing: None,
-            playing: false,
-            play_acc: 0.0,
-            onion: true,
+            view: ViewContext {
+                scene,
+                cut,
+                active_column,
+                frame: 0,
+                selected_drawing: None,
+                playing: false,
+                play_acc: 0.0,
+                onion: true,
+                active_layer_slot: 0,
+                loop_playback: true,
+            },
             file_path: None,
             status: "new project — draw on the canvas to create frame 1".into(),
             positioned_holds: HashSet::new(),
-            active_layer_slot: 0,
-            loop_playback: true,
             strip_rename: None,
             strip_opacity: None,
             node_positions: HashMap::new(),
@@ -125,20 +139,22 @@ impl AppState {
             .first()
             .ok_or("cut has no X-sheet columns")?;
         Ok(Self {
-            scene: scene.id,
-            cut: cut.id,
-            active_column: column.id,
-            frame: 0,
-            selected_drawing: None,
-            playing: false,
-            play_acc: 0.0,
-            onion: true,
+            view: ViewContext {
+                scene: scene.id,
+                cut: cut.id,
+                active_column: column.id,
+                frame: 0,
+                selected_drawing: None,
+                playing: false,
+                play_acc: 0.0,
+                onion: true,
+                active_layer_slot: 0,
+                loop_playback: true,
+            },
             file_path: Some(path),
             status: "project loaded".into(),
             engine,
             positioned_holds: HashSet::new(),
-            active_layer_slot: 0,
-            loop_playback: true,
             strip_rename: None,
             strip_opacity: None,
             node_positions: HashMap::new(),
@@ -152,15 +168,15 @@ impl AppState {
 
     pub fn at(&self) -> CutRef {
         CutRef {
-            scene: self.scene,
-            cut: self.cut,
+            scene: self.view.scene,
+            cut: self.view.cut,
         }
     }
 
     pub fn cut(&self) -> &Cut {
         self.engine
             .project
-            .cut(self.scene, self.cut)
+            .cut(self.view.scene, self.view.cut)
             .expect("current cut exists")
     }
 
@@ -182,7 +198,7 @@ impl AppState {
     /// The drawing under the pen right now (active column @ current frame),
     /// following holds — this is what's *displayed*.
     pub fn current_drawing(&self) -> Option<DrawingId> {
-        self.resolve_at(self.active_column, self.frame)
+        self.resolve_at(self.view.active_column, self.view.frame)
     }
 
     /// The drawing keyed at *exactly* this frame (not a hold from an earlier
@@ -192,8 +208,8 @@ impl AppState {
         match self
             .cut()
             .xsheet
-            .column(self.active_column)?
-            .key_at(self.frame)
+            .column(self.view.active_column)?
+            .key_at(self.view.frame)
         {
             Some(Exposure::Drawing(d)) => Some(d),
             _ => None,
@@ -202,7 +218,7 @@ impl AppState {
 
     /// Per-column drawing name, e.g. D1A, D2A on column A; D1B on column B.
     fn next_drawing_name(&self) -> String {
-        match self.cut().xsheet.column(self.active_column) {
+        match self.cut().xsheet.column(self.view.active_column) {
             Some(col) => {
                 let distinct: std::collections::HashSet<DrawingId> = col
                     .keys()
@@ -250,15 +266,15 @@ impl AppState {
                         },
                         Command::SetCell {
                             at,
-                            column: self.active_column,
-                            frame: self.frame,
+                            column: self.view.active_column,
+                            frame: self.view.frame,
                             key: Some(Exposure::Drawing(id)),
                         },
                         Command::AddStroke { at, id, stroke },
                     ],
                 );
                 if r.is_ok() {
-                    self.selected_drawing = Some(id);
+                    self.view.selected_drawing = Some(id);
                 }
                 self.report(r, "new drawing");
             }
@@ -341,8 +357,8 @@ impl AppState {
                         },
                         Command::SetCell {
                             at,
-                            column: self.active_column,
-                            frame: self.frame,
+                            column: self.view.active_column,
+                            frame: self.view.frame,
                             key: Some(Exposure::Drawing(id)),
                         },
                         Command::PaintTiles { at, id, layer, diff },
@@ -350,7 +366,7 @@ impl AppState {
                 );
                 let ok = r.is_ok();
                 if ok {
-                    self.selected_drawing = Some(id);
+                    self.view.selected_drawing = Some(id);
                 }
                 self.report(r, "painted (new cel)");
                 ok.then_some((id, layer))
@@ -440,7 +456,7 @@ impl AppState {
 
     /// The live active layer of `d` (current slot).
     fn active_layer_of<'a>(&self, d: &'a anim_core::model::Drawing) -> Option<&'a CelLayer> {
-        Self::layer_at_slot(d, self.active_layer_slot)
+        Self::layer_at_slot(d, self.view.active_layer_slot)
     }
 
     /// Props of the layer the NEXT stroke will actually edit — based on the
@@ -460,7 +476,7 @@ impl AppState {
             return p.name.clone();
         }
         // Fresh-cel template is [color, line]; slot 0 = line (top).
-        match self.active_layer_slot.min(1) {
+        match self.view.active_layer_slot.min(1) {
             0 => "line".into(),
             _ => "color".into(),
         }
@@ -475,8 +491,8 @@ impl AppState {
             .map(|d| d.layers.len())
             .filter(|n| *n > 0)
             .unwrap_or(2);
-        let slot = self.active_layer_slot.min(n - 1);
-        self.active_layer_slot = if back { (slot + n - 1) % n } else { (slot + 1) % n };
+        let slot = self.view.active_layer_slot.min(n - 1);
+        self.view.active_layer_slot = if back { (slot + n - 1) % n } else { (slot + 1) % n };
         self.status = format!("layer: {}", self.active_layer_name());
     }
 
@@ -682,7 +698,7 @@ impl AppState {
             if let Some(d) = self.cut().drawing(id)
                 && let Some(i) = d.layer_index(new_id)
             {
-                self.active_layer_slot = d.layers.len() - 1 - i;
+                self.view.active_layer_slot = d.layers.len() - 1 - i;
             }
         }
         self.report(r, "layer added");
@@ -699,11 +715,11 @@ impl AppState {
     /// drawing would vanish the instant you start drawing the new cel.
     pub fn onion_neighbors(&self) -> [Option<DrawingId>; 2] {
         let cur = self.own_key_drawing();
-        let Some(col) = self.cut().xsheet.column(self.active_column) else {
+        let Some(col) = self.cut().xsheet.column(self.view.active_column) else {
             return [None, None];
         };
         let mut prev = None;
-        for f in (0..self.frame).rev() {
+        for f in (0..self.view.frame).rev() {
             if let Some(d) = col.resolve(f)
                 && Some(d) != cur {
                     prev = Some(d);
@@ -711,7 +727,7 @@ impl AppState {
                 }
         }
         let mut next = None;
-        for f in (self.frame + 1)..self.frame_count() {
+        for f in (self.view.frame + 1)..self.frame_count() {
             if let Some(d) = col.resolve(f)
                 && Some(d) != cur
                 && Some(d) != prev {
@@ -752,7 +768,7 @@ impl AppState {
     fn display_drawing(&self) -> Option<DrawingId> {
         if let Some(own) = self.own_key_drawing() {
             Some(own)
-        } else if self.onion {
+        } else if self.view.onion {
             None
         } else {
             self.current_drawing()
@@ -778,7 +794,7 @@ impl AppState {
                 Some(l) => (id.0, l.id.0, l.content_hash()),
                 None => (id.0, u64::MAX, 0), // layerless (vector-only) drawing
             },
-            None => (u64::MAX, self.frame as u64, 0),
+            None => (u64::MAX, self.view.frame as u64, 0),
         }
     }
 
@@ -842,7 +858,7 @@ impl AppState {
             None => {
                 // Blank display: unique per frame (same law as active_layer_key).
                 bytes.extend_from_slice(&u64::MAX.to_le_bytes());
-                bytes.extend_from_slice(&(self.frame as u64).to_le_bytes());
+                bytes.extend_from_slice(&(self.view.frame as u64).to_le_bytes());
             }
         }
         anim_core::value::fnv1a(&bytes)
@@ -881,21 +897,21 @@ impl AppState {
                 },
                 Command::SetCell {
                     at,
-                    column: self.active_column,
-                    frame: self.frame,
+                    column: self.view.active_column,
+                    frame: self.view.frame,
                     key: Some(Exposure::Drawing(id)),
                 },
             ],
         );
         if r.is_ok() {
-            self.selected_drawing = Some(id);
+            self.view.selected_drawing = Some(id);
         }
         self.report(r, "new drawing");
     }
 
     /// Expose the selected library drawing at the current frame (a hold key).
     pub fn expose_selected(&mut self) {
-        let Some(id) = self.selected_drawing else {
+        let Some(id) = self.view.selected_drawing else {
             self.status = "select a drawing in the library first".into();
             return;
         };
@@ -904,8 +920,8 @@ impl AppState {
             "expose drawing",
             vec![Command::SetCell {
                 at,
-                column: self.active_column,
-                frame: self.frame,
+                column: self.view.active_column,
+                frame: self.view.frame,
                 key: Some(Exposure::Drawing(id)),
             }],
         );
@@ -952,8 +968,8 @@ impl AppState {
             "clear key",
             vec![Command::SetCell {
                 at,
-                column: self.active_column,
-                frame: self.frame,
+                column: self.view.active_column,
+                frame: self.view.frame,
                 key: None,
             }],
         );
@@ -965,7 +981,7 @@ impl AppState {
         let name = format!("{}", (b'A' + (self.cut().xsheet.columns.len() as u8 % 26)) as char);
         match self.engine.add_column(at, name) {
             Ok(id) => {
-                self.active_column = id;
+                self.view.active_column = id;
                 self.status = "column added".into();
             }
             Err(e) => self.status = format!("error: {e}"),
@@ -979,7 +995,7 @@ impl AppState {
             return;
         }
         let at = self.at();
-        let removed = self.active_column;
+        let removed = self.view.active_column;
         // Pick a neighbour to become active before removing.
         let cols: Vec<ColumnId> = self.cut().xsheet.columns.iter().map(|c| c.id).collect();
         let idx = cols.iter().position(|&c| c == removed).unwrap_or(0);
@@ -989,8 +1005,8 @@ impl AppState {
             .copied()
             .unwrap_or(removed);
         self.engine.remove_column(at, removed);
-        self.active_column = new_active;
-        self.selected_drawing = None;
+        self.view.active_column = new_active;
+        self.view.selected_drawing = None;
         self.status = "column removed".into();
     }
 
@@ -1011,11 +1027,11 @@ impl AppState {
     /// Selection can dangle after undo of a creation command — never let a
     /// dead id escape into the UI.
     fn sanitize(&mut self) {
-        if let Some(id) = self.selected_drawing
+        if let Some(id) = self.view.selected_drawing
             && self.cut().drawing(id).is_none() {
-                self.selected_drawing = None;
+                self.view.selected_drawing = None;
             }
-        self.frame = self.frame.min(self.frame_count() - 1);
+        self.view.frame = self.view.frame.min(self.frame_count() - 1);
     }
 
     fn report(&mut self, r: anim_core::error::Result<()>, ok_msg: &str) {
@@ -1028,39 +1044,39 @@ impl AppState {
     // ---- Transport --------------------------------------------------------
 
     pub fn goto(&mut self, frame: u32) {
-        self.frame = frame.min(self.frame_count() - 1);
-        self.play_acc = 0.0;
+        self.view.frame = frame.min(self.frame_count() - 1);
+        self.view.play_acc = 0.0;
     }
 
     pub fn step(&mut self, delta: i64) {
         let n = self.frame_count() as i64;
-        let f = (self.frame as i64 + delta).rem_euclid(n);
+        let f = (self.view.frame as i64 + delta).rem_euclid(n);
         self.goto(f as u32);
     }
 
     pub fn toggle_play(&mut self) {
-        self.playing = !self.playing;
-        self.play_acc = 0.0;
+        self.view.playing = !self.view.playing;
+        self.view.play_acc = 0.0;
     }
 
     pub fn tick(&mut self, dt: f32) {
-        if !self.playing {
+        if !self.view.playing {
             return;
         }
-        self.play_acc += dt;
+        self.view.play_acc += dt;
         let frame_time = 1.0 / self.fps() as f32;
-        while self.play_acc >= frame_time {
-            self.play_acc -= frame_time;
-            if self.frame + 1 >= self.frame_count() {
-                if self.loop_playback {
-                    self.frame = 0;
+        while self.view.play_acc >= frame_time {
+            self.view.play_acc -= frame_time;
+            if self.view.frame + 1 >= self.frame_count() {
+                if self.view.loop_playback {
+                    self.view.frame = 0;
                 } else {
-                    self.playing = false; // hold on the last frame
-                    self.play_acc = 0.0;
+                    self.view.playing = false; // hold on the last frame
+                    self.view.play_acc = 0.0;
                     break;
                 }
             } else {
-                self.frame += 1;
+                self.view.frame += 1;
             }
         }
     }

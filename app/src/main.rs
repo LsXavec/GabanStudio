@@ -266,7 +266,7 @@ impl App {
             Action::ClearCelAll => s.clear_current_cel_all(),
             Action::ClearFrameKey => s.clear_key_at_frame(),
             Action::RemoveColumn => s.remove_active_column(),
-            Action::ToggleOnion => s.onion = !s.onion,
+            Action::ToggleOnion => s.view.onion = !s.view.onion,
             Action::ToggleEraser
             | Action::ToggleCompositeView
             | Action::SelectTool
@@ -799,7 +799,7 @@ impl eframe::App for App {
         let playing_fps = self
             .editor
             .as_ref()
-            .filter(|e| e.state.playing)
+            .filter(|e| e.state.view.playing)
             .map(|e| e.state.fps());
         let target = playing_fps
             .map(|f| f.max(self.config.perf.fps_cap))
@@ -1081,7 +1081,7 @@ impl Editor {
                 if ui.button("<").clicked() {
                     self.state.step(-1);
                 }
-                let play_text = if self.state.playing { "stop" } else { "play" };
+                let play_text = if self.state.view.playing { "stop" } else { "play" };
                 if ui.button(play_text).clicked() {
                     self.state.toggle_play();
                 }
@@ -1095,14 +1095,14 @@ impl Editor {
                 ui.label(
                     egui::RichText::new(format!(
                         "{:>3} / {}",
-                        self.state.frame + 1,
+                        self.state.view.frame + 1,
                         self.state.frame_count()
                     ))
                     .monospace(),
                 );
                 ui.separator();
-                ui.checkbox(&mut self.state.onion, "onion");
-                ui.checkbox(&mut self.state.loop_playback, "loop")
+                ui.checkbox(&mut self.state.view.onion, "onion");
+                ui.checkbox(&mut self.state.view.loop_playback, "loop")
                     .on_hover_text("off = playback stops on the last frame");
                 ui.separator();
                 // Workspaces: saved pane arrangements over the same document.
@@ -1114,9 +1114,18 @@ impl Editor {
                         .clicked()
                     {
                         self.dock = self.workspaces.list[i].dock.clone();
-                        // Workflow-stage brush: entering a bound workspace
-                        // loads its preset automatically.
-                        if let Some(pname) = self.workspaces.list[i].preset.clone()
+                        // A room restores its tool/view state (LENS-DOCK:
+                        // workspace = layout + tool/mode + view) — all or
+                        // nothing; a live stroke keeps the old tool state.
+                        let view_ok = match self.workspaces.list[i].view {
+                            Some(v) => self.canvas.apply_view(&v, &mut self.state),
+                            None => !self.canvas.stroke_active(),
+                        };
+                        // The workflow-stage brush follows the same gate: a
+                        // mid-stroke switch must not bend the live stroke's
+                        // remaining dabs with a new brush.
+                        if view_ok
+                            && let Some(pname) = self.workspaces.list[i].preset.clone()
                             && let Some(p) = presets.iter().find(|p| p.name == pname)
                         {
                             self.canvas.apply_preset(p);
@@ -1130,15 +1139,20 @@ impl Editor {
                         ui.text_edit_singleline(&mut self.ws_name);
                         let name = self.ws_name.trim().to_string();
                         if ui.button("save").clicked() && !name.is_empty() {
+                            // Saving a room captures the CURRENT tool/view
+                            // state along with the layout.
+                            let view = Some(self.canvas.snapshot_view(&self.state));
                             if let Some(w) =
                                 self.workspaces.list.iter_mut().find(|w| w.name == name)
                             {
                                 w.dock = self.dock.clone();
+                                w.view = view;
                             } else {
                                 self.workspaces.list.push(Workspace {
                                     name,
                                     dock: self.dock.clone(),
                                     preset: None,
+                                    view,
                                 });
                             }
                             self.workspaces.save();
@@ -1285,7 +1299,7 @@ impl Editor {
                 p.ensure_size(w, h);
                 g.ensure_size(w, h);
                 let (scene, cutid, frame) =
-                    (self.state.scene, self.state.cut, self.state.frame);
+                    (self.state.view.scene, self.state.view.cut, self.state.view.frame);
                 match self.state.engine.eval(scene, cutid, frame) {
                     Ok(v) => {
                         let hash = v.hash();

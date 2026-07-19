@@ -79,6 +79,19 @@ pub fn timing_workspace() -> DockState<Pane> {
     ds
 }
 
+/// The tool/view state a workspace restores on entry — what makes a room a
+/// ROOM (LENS-DOCK: workspace = layout + tool/mode + view). A Finishing
+/// room re-arms the fill tool with composite view beside it; the Draw room
+/// comes back holding the brush with onion on.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct WorkspaceView {
+    pub tool: crate::canvas::CanvasTool,
+    pub composite_view: bool,
+    pub onion: bool,
+    pub sel_shape: crate::canvas::SelShape,
+    pub fill_ref_cel: bool,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Workspace {
     pub name: String,
@@ -87,6 +100,10 @@ pub struct Workspace {
     /// entered — each workflow stage keeps its own brush.
     #[serde(default)]
     pub preset: Option<String>,
+    /// Tool/view state restored on entry (None = legacy workspace: layout
+    /// and preset only).
+    #[serde(default)]
+    pub view: Option<WorkspaceView>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -124,11 +141,13 @@ impl Workspaces {
                     name: "draw".into(),
                     dock: draw_workspace(),
                     preset: None,
+                    view: None,
                 },
                 Workspace {
                     name: "timing".into(),
                     dock: timing_workspace(),
                     preset: None,
+                    view: None,
                 },
             ],
         }

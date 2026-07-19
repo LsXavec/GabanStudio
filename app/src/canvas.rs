@@ -99,7 +99,7 @@ const TILT_NEEDLE_MIN: f32 = 0.05;
 /// stage (LENS-DOCK: workspace = layout + tool/mode). `Paint` keeps the
 /// existing brush/eraser pair (which sub-tool via `erasing`); `Select` is
 /// the select/move/scale/rotate tool; `Fill` is the ink-&-paint bucket.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CanvasTool {
     Paint,
     Select,
@@ -108,7 +108,7 @@ pub enum CanvasTool {
 
 /// Selection drawing shape (a rect is a 4-point polygon through the same
 /// lift path).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SelShape {
     Rect,
     Lasso,
@@ -489,6 +489,48 @@ impl CanvasView {
             }
             CanvasTool::Paint => "paint".into(),
         };
+    }
+
+    /// Capture the tool/view state a workspace restores (LENS-DOCK: a
+    /// workspace = layout + TOOL/MODE + view). The cursor (frame/column) is
+    /// deliberately NOT captured — switching rooms re-lenses the same spot,
+    /// it never navigates.
+    pub fn snapshot_view(&self, state: &AppState) -> crate::workspace::WorkspaceView {
+        crate::workspace::WorkspaceView {
+            tool: self.tool,
+            composite_view: self.composite_view,
+            onion: state.view.onion,
+            sel_shape: self.sel_shape,
+            fill_ref_cel: self.fill_ref_cel,
+        }
+    }
+
+    /// Restore a workspace's tool/view state — ALL OR NOTHING: a room must
+    /// never come back half-restored (new onion/shape but old tool). Any
+    /// floating transform lands first (explicitly — set_tool's same-tool
+    /// early-out would skip its commit); a live PEN stroke refuses the whole
+    /// view restore with a status note (the layout still switches). Returns
+    /// whether the view was restored (callers gate the preset apply on it).
+    pub fn apply_view(
+        &mut self,
+        v: &crate::workspace::WorkspaceView,
+        state: &mut AppState,
+    ) -> bool {
+        if self.floating.is_some() {
+            self.commit_floating(state);
+        }
+        self.sel_draft = None;
+        if self.touch_active || !self.current.is_empty() || self.raster_stroke_done {
+            state.status =
+                "workspace switched — tool/view kept (finish the stroke first)".into();
+            return false;
+        }
+        self.set_tool(v.tool, state);
+        self.composite_view = v.composite_view;
+        self.sel_shape = v.sel_shape;
+        self.fill_ref_cel = v.fill_ref_cel;
+        state.view.onion = v.onion;
+        true
     }
 
     /// Ctrl+A: select the whole paper (switches to the Select tool).
@@ -1293,7 +1335,7 @@ impl CanvasView {
         // resting or hovering on the drawing display (hover scroll deltas, a
         // barrel button mapped to middle-click) must not move the view while
         // the animation plays.
-        if !state.playing {
+        if !state.view.playing {
             if response.hovered() {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll.abs() > 0.0
@@ -1325,7 +1367,7 @@ impl CanvasView {
         );
 
         // ---- Pen input (edit mode only) -----------------------------------
-        if !state.playing {
+        if !state.view.playing {
             match self.tool {
                 CanvasTool::Paint => {
                     self.handle_pen(ui, &response, rect, &to_paper, scale, state, native_pen);
@@ -1521,7 +1563,7 @@ impl CanvasView {
             // unchanged, so this is cheap) — decoupled from stroke state entirely,
             // so no current-cel/stroke predicate can ever tear a slot down. Only
             // onion-off clears the slots.
-            if state.onion {
+            if state.view.onion {
                 let neighbors = state.onion_neighbors();
                 for (slot, nid) in neighbors.iter().enumerate() {
                     match nid.and_then(|id| state.drawing_composite(id)) {
@@ -1537,8 +1579,8 @@ impl CanvasView {
 
         // ---- Render layers ------------------------------------------------
         let cut = state.cut();
-        let active_col = state.active_column;
-        let frame = state.frame;
+        let active_col = state.view.active_column;
+        let frame = state.view.frame;
 
         // COMPOSITE VIEW: the graph's output IS the frame — nothing else
         // renders under or over it (no sandwich, no onion, no vector
@@ -1582,7 +1624,7 @@ impl CanvasView {
         }
 
         // 2. Onion ghosts of the active column, under its current drawing.
-        if edit_view && state.onion {
+        if edit_view && state.view.onion {
             let ghosts = onion_ghosts(state, active_col, frame);
             for (id, tint) in ghosts {
                 if let Some(d) = cut.drawing(id) {
@@ -1681,7 +1723,7 @@ impl CanvasView {
         // Empty-cell hint (vector mode only).
         if edit_view
             && !self.raster
-            && !state.playing
+            && !state.view.playing
             && state.current_drawing().is_none()
             && self.current.is_empty()
         {
@@ -1696,7 +1738,7 @@ impl CanvasView {
 
         // Playback indicator as a canvas OVERLAY (painted, zero layout impact
         // — a toolbar label here used to reflow the row and shift the view).
-        if state.playing {
+        if state.view.playing {
             painter.text(
                 pos2(rect.center().x, rect.top() + 16.0),
                 egui::Align2::CENTER_CENTER,
@@ -1716,7 +1758,7 @@ impl CanvasView {
         // (Future textured/mask brushes: derive this preview from the brush's
         // footprint/stamp instead of a plain circle.)
         if self.raster
-            && !state.playing
+            && !state.view.playing
             && !self.composite_view // review mode: painting refused, OS cursor back
             && self.tool == CanvasTool::Paint // select tool keeps the OS cursor
             && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
@@ -2075,7 +2117,7 @@ impl CanvasView {
         self.cur_none = 0;
         self.stroke_from_mouse = false;
         self.stroke_erasing = self.erasing;
-        self.stroke_layer_slot = state.active_layer_slot;
+        self.stroke_layer_slot = state.view.active_layer_slot;
         self.cel_touched = false;
         self.dabs_flushed = 0;
         self.raster_stroke_done = false;
@@ -2219,7 +2261,7 @@ impl CanvasView {
                 self.cur_none = 0; // force% diagnostic honest for this stroke
                 self.stroke_from_mouse = true;
                 self.stroke_erasing = self.erasing;
-                self.stroke_layer_slot = state.active_layer_slot;
+                self.stroke_layer_slot = state.view.active_layer_slot;
                 self.cel_touched = false;
                 self.dabs_flushed = 0;
                 self.raster_stroke_done = false;

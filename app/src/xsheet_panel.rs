@@ -47,10 +47,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             .collect();
         for (id, name) in columns {
             if ui
-                .selectable_label(state.active_column == id, name)
+                .selectable_label(state.view.active_column == id, name)
                 .clicked()
             {
-                state.active_column = id;
+                state.view.active_column = id;
             }
         }
         if ui.button("+").on_hover_text("add column (layer)").clicked() {
@@ -85,10 +85,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         }
         for (id, name) in drawings {
             if ui
-                .selectable_label(state.selected_drawing == Some(id), name)
+                .selectable_label(state.view.selected_drawing == Some(id), name)
                 .clicked()
             {
-                state.selected_drawing = Some(id);
+                state.view.selected_drawing = Some(id);
             }
         }
     });
@@ -103,7 +103,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         ui.allocate_exact_size(vec2(FRAME_NUM_W, ROW_H), Sense::hover());
         for col in &state.cut().xsheet.columns {
             let (rect, _) = ui.allocate_exact_size(vec2(COL_W, ROW_H), Sense::hover());
-            let is_active = col.id == state.active_column;
+            let is_active = col.id == state.view.active_column;
             ui.painter().text(
                 rect.left_center(),
                 egui::Align2::LEFT_CENTER,
@@ -147,7 +147,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 let painter = ui.painter_at(row_rect);
 
                 // Row background: playhead > second marks > default.
-                let is_current = frame == state.frame;
+                let is_current = frame == state.view.frame;
                 if is_current {
                     painter.rect_filled(row_rect, 0, Color32::from_rgb(45, 62, 88));
                 } else if fps > 0 && frame % fps == 0 {
@@ -441,7 +441,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
 
     let n = rows.len();
     for (slot, (lid, name, visible, opacity)) in rows.iter().enumerate() {
-        let is_active = state.active_layer_slot.min(n - 1) == slot;
+        let is_active = state.view.active_layer_slot.min(n - 1) == slot;
         ui.horizontal(|ui| {
             // Eye: visibility toggle (one click = one undo step).
             let eye = if *visible { "👁" } else { "—" };
@@ -499,7 +499,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
                 if resp.double_clicked() {
                     state.strip_rename = Some((*lid, name.clone()));
                 } else if resp.clicked() {
-                    state.active_layer_slot = slot;
+                    state.view.active_layer_slot = slot;
                 }
             }
 
