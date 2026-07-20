@@ -1398,6 +1398,14 @@ impl AppState {
 
     pub fn toggle_play(&mut self) {
         self.view.playing = !self.view.playing;
+        // Starting playback parked on the LAST frame (exactly where a
+        // non-loop run stops) rewinds to the top first — otherwise the
+        // first tick would hit the end condition and stop again instantly,
+        // making the play press feel dead (and silently disarming the
+        // playback the user thought they started).
+        if self.view.playing && self.view.frame + 1 >= self.frame_count() {
+            self.view.frame = 0;
+        }
         self.view.play_acc = 0.0;
     }
 
@@ -1670,5 +1678,59 @@ impl AppState {
             Some(Err(msg)) => self.status = format!("open failed: {msg}"),
             None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::AppState;
+
+    fn state() -> AppState {
+        AppState::new_project("t", 64, 48, 24, 72.0)
+    }
+
+    /// The dead-play-press bug: with loop off, playback stops PARKED on the
+    /// last frame; pressing play there must rewind to the top, not flip
+    /// `playing` on and have the first tick instantly stop it again.
+    #[test]
+    fn play_at_the_end_rewinds_instead_of_instantly_stopping() {
+        let mut s = state();
+        s.view.loop_playback = false;
+        let last = s.frame_count() - 1;
+        s.goto(last);
+        s.toggle_play();
+        assert!(s.view.playing);
+        assert_eq!(s.view.frame, 0, "parked at the end, play rewinds first");
+        // A full run then stops ON the last frame again (the hold-at-end law).
+        for _ in 0..s.frame_count() * 2 {
+            s.tick(1.0 / 24.0);
+        }
+        assert!(!s.view.playing);
+        assert_eq!(s.view.frame, last);
+    }
+
+    /// Seek-then-play: a mid-cut playhead must be respected (the rewind
+    /// applies ONLY when parked at the very end).
+    #[test]
+    fn click_seek_then_play_starts_from_the_clicked_frame() {
+        let mut s = state();
+        s.view.loop_playback = false;
+        s.goto(10);
+        s.toggle_play();
+        assert_eq!(s.view.frame, 10, "mid-cut play does not rewind");
+        s.tick(1.0 / 24.0);
+        assert_eq!(s.view.frame, 11);
+    }
+
+    /// Seeking DURING playback keeps playing from the new position.
+    #[test]
+    fn seek_while_playing_continues_from_there() {
+        let mut s = state();
+        s.toggle_play();
+        s.tick(1.0 / 24.0);
+        s.goto(20);
+        assert!(s.view.playing);
+        s.tick(1.0 / 24.0);
+        assert_eq!(s.view.frame, 21);
     }
 }
