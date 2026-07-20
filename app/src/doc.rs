@@ -1128,6 +1128,128 @@ impl AppState {
         }
     }
 
+    /// Export the current cut's timing as an .xdts exposure sheet.
+    pub fn export_xdts(&mut self, path: &std::path::Path) {
+        let scene_name = self
+            .engine
+            .project
+            .scenes
+            .iter()
+            .find(|s| s.id == self.view.scene)
+            .map(|s| s.name.clone())
+            .unwrap_or_default();
+        let text = anim_core::xdts::export(self.cut(), &scene_name);
+        match std::fs::write(path, text) {
+            Ok(()) => self.status = format!("exposure sheet exported: {}", path.display()),
+            Err(e) => self.status = format!("XDTS export failed: {e}"),
+        }
+    }
+
+    /// Import an .xdts exposure sheet as a NEW cut in the current scene:
+    /// columns from its CELL tracks, one empty drawing (standard
+    /// colour+line stack) per distinct cell number, keys as one undo step.
+    /// Never touches an existing cut.
+    pub fn import_xdts(&mut self, path: &std::path::Path) {
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.status = format!("XDTS read failed: {e}");
+                return;
+            }
+        };
+        let sheet = match anim_core::xdts::parse(&text) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("XDTS import failed: {e}");
+                return;
+            }
+        };
+
+        // Scaffolding: the new cut + its columns (non-undoable, like every
+        // scene/cut/column creation).
+        let scene = self.view.scene;
+        let cut_id = match self.engine.add_cut(scene, sheet.name.clone(), sheet.duration) {
+            Ok(id) => id,
+            Err(e) => {
+                self.status = format!("error: {e}");
+                return;
+            }
+        };
+        let at = CutRef { scene, cut: cut_id };
+        let mut col_ids = Vec::new();
+        for col in &sheet.columns {
+            match self.engine.add_column(at, col.name.clone()) {
+                Ok(id) => col_ids.push(id),
+                Err(e) => {
+                    self.status = format!("error: {e}");
+                    return;
+                }
+            }
+        }
+        if col_ids.is_empty() {
+            // A sheet with no tracks still needs a drawable column.
+            let _ = self.engine.add_column(at, "A");
+        }
+
+        // One drawing per distinct cell number (sorted for stable library
+        // order), each with the standard colour+line stack; then the keys.
+        // ONE batch = one undo step for the whole timing import.
+        let mut cells: Vec<String> = sheet
+            .columns
+            .iter()
+            .flat_map(|c| c.keys.iter().filter_map(|(_, v)| v.clone()))
+            .collect();
+        cells.sort();
+        cells.dedup();
+        let mut commands = Vec::new();
+        let mut drawing_of = std::collections::HashMap::new();
+        for (index, cell) in cells.iter().enumerate() {
+            let id = self.engine.alloc_drawing_id();
+            let layers = vec![
+                CelLayer::new(self.engine.alloc_layer_id(), "color"),
+                CelLayer::new(self.engine.alloc_layer_id(), "line"),
+            ];
+            drawing_of.insert(cell.clone(), id);
+            commands.push(Command::AddDrawing {
+                at,
+                id,
+                index,
+                name: cell.clone(),
+                strokes: vec![],
+                layers,
+            });
+        }
+        for (col, col_id) in sheet.columns.iter().zip(&col_ids) {
+            for (frame, value) in &col.keys {
+                if *frame >= sheet.duration {
+                    continue; // out-of-range key in a foreign file — drop it
+                }
+                let key = match value {
+                    Some(cell) => anim_core::xsheet::Exposure::Drawing(drawing_of[cell]),
+                    None => anim_core::xsheet::Exposure::Empty,
+                };
+                commands.push(Command::SetCell {
+                    at,
+                    column: *col_id,
+                    frame: *frame,
+                    key: Some(key),
+                });
+            }
+        }
+        if let Err(e) = self.engine.apply("import XDTS timing", commands) {
+            self.status = format!("XDTS import failed: {e}");
+            return;
+        }
+        let n = cells.len();
+        self.goto_cut(scene, cut_id);
+        self.status = format!(
+            "imported exposure sheet '{}' — {} column(s), {} cel slot(s); draw into them",
+            sheet.name,
+            sheet.columns.len(),
+            n
+        );
+    }
+
     /// Rename the cut being edited (scaffolding, like scene/cut creation).
     pub fn rename_current_cut(&mut self, name: &str) {
         let at = self.at();

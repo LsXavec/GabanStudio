@@ -23,6 +23,7 @@ pub mod model;
 pub mod raster;
 pub mod store;
 pub mod value;
+pub mod xdts;
 pub mod xsheet;
 
 use std::collections::HashSet;

@@ -1647,6 +1647,41 @@ impl Editor {
                             self.rename_buf.clear();
                         }
                     });
+                    // XDTS interop: the industry exposure-sheet exchange
+                    // format (Toei/OpenToonz/CSP). Export = this cut's
+                    // timing; import = a NEW cut built from the file.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("⇥ XDTS…")
+                            .on_hover_text("export this cut's timing as an exposure sheet (.xdts)")
+                            .clicked()
+                        {
+                            ui.close();
+                            let mut dlg = rfd::FileDialog::new()
+                                .add_filter("exposure sheet", &["xdts"])
+                                .set_file_name(format!("{}.xdts", self.state.cut().name));
+                            if let Some(dir) = export::suggest_dir(&self.state) {
+                                dlg = dlg.set_directory(dir);
+                            }
+                            if let Some(path) = dlg.save_file() {
+                                self.state.export_xdts(&path);
+                            }
+                        }
+                        if ui
+                            .button("⇤ XDTS…")
+                            .on_hover_text("import an exposure sheet (.xdts) as a NEW cut")
+                            .clicked()
+                        {
+                            ui.close();
+                            if guard_gesture(&mut self.canvas, &mut self.state)
+                                && let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("exposure sheet", &["xdts"])
+                                    .pick_file()
+                            {
+                                self.state.import_xdts(&path);
+                            }
+                        }
+                    });
                     ui.separator();
                     let scenes: SceneCutTree = self
                         .state
