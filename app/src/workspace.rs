@@ -62,26 +62,116 @@ impl Pane {
     }
 }
 
-/// The "Draw" room: brush bar over a big canvas; X-sheet rail with the layer
-/// strip under it.
-pub fn draw_workspace() -> DockState<Pane> {
-    let mut ds = DockState::new(vec![Pane::Canvas]);
-    let tree = ds.main_surface_mut();
-    // fraction = share of the top/left child of the split.
-    let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.24, vec![Pane::XSheet]);
-    tree.split_below(rail, 0.62, vec![Pane::Layers]);
-    tree.split_above(canvas, 0.11, vec![Pane::Brush]);
-    ds
+/// The workflow trees (LENS-DOCK Phase 3): a FIXED ORDERED STAGE SPINE on
+/// the merged solo pipeline — Layout → Drawing → Finishing → Edit. Stages
+/// are compiled-in rooms (always available, can't be deleted or renamed);
+/// the user customizes by rearranging and Save-as-ing into the ordinary
+/// workspace list. The re-lensing invariant is absolute: switching stage
+/// swaps layout + tool/view state only — it NEVER touches document data.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Stage {
+    /// Story/layout: rough the shot against reference (imported BG plates /
+    /// storyboards live in the node graph as ImageSource nodes).
+    Layout,
+    /// Genga + douga + sakkan merged: the daily drawing room.
+    Drawing,
+    /// Paint + composite merged: fill against the line column with the
+    /// character palette at hand, graph result live alongside.
+    Finishing,
+    /// Timing + review: the X-sheet is the master artifact (camera columns
+    /// will land HERE too, per the C1 decision), viewer + graph beside it.
+    Edit,
 }
 
-/// The "Timing" room: X-sheet takes half the screen.
-pub fn timing_workspace() -> DockState<Pane> {
-    let mut ds = DockState::new(vec![Pane::Canvas]);
-    let tree = ds.main_surface_mut();
-    let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.5, vec![Pane::XSheet]);
-    tree.split_below(rail, 0.7, vec![Pane::Layers]);
-    tree.split_above(canvas, 0.11, vec![Pane::Brush]);
-    ds
+impl Stage {
+    /// The spine, in pipeline order.
+    pub const ALL: &'static [Stage] =
+        &[Stage::Layout, Stage::Drawing, Stage::Finishing, Stage::Edit];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Stage::Layout => "layout",
+            Stage::Drawing => "drawing",
+            Stage::Finishing => "finishing",
+            Stage::Edit => "edit",
+        }
+    }
+
+    /// The stage's opinionated default layout.
+    /// (fraction = share of the top/left child of the split.)
+    pub fn dock(self) -> DockState<Pane> {
+        match self {
+            Stage::Layout => {
+                // Big canvas; node graph tabbed behind the sheet (reference
+                // images are graph nodes).
+                let mut ds = DockState::new(vec![Pane::Canvas]);
+                let tree = ds.main_surface_mut();
+                let [canvas, rail] =
+                    tree.split_left(NodeIndex::root(), 0.22, vec![Pane::XSheet, Pane::NodeGraph]);
+                tree.split_below(rail, 0.6, vec![Pane::Layers]);
+                tree.split_above(canvas, 0.11, vec![Pane::Brush]);
+                ds
+            }
+            Stage::Drawing => {
+                // The classic draw room; presets tabbed behind the layer
+                // strip (each drawing pass keeps its own pencil).
+                let mut ds = DockState::new(vec![Pane::Canvas]);
+                let tree = ds.main_surface_mut();
+                let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.24, vec![Pane::XSheet]);
+                tree.split_below(rail, 0.62, vec![Pane::Layers, Pane::Presets]);
+                tree.split_above(canvas, 0.11, vec![Pane::Brush]);
+                ds
+            }
+            Stage::Finishing => {
+                // Edit canvas + live composite viewer SIDE BY SIDE (the A2
+                // motivation), palette under the viewer.
+                let mut ds = DockState::new(vec![Pane::Canvas]);
+                let tree = ds.main_surface_mut();
+                let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.18, vec![Pane::XSheet]);
+                tree.split_below(rail, 0.55, vec![Pane::Layers]);
+                let [canvas, side] = tree.split_right(canvas, 0.58, vec![Pane::Viewer(0)]);
+                tree.split_below(side, 0.55, vec![Pane::Palette]);
+                tree.split_above(canvas, 0.11, vec![Pane::Brush]);
+                ds
+            }
+            Stage::Edit => {
+                // Sheet takes the left half; result viewer (canvas tabbed
+                // behind it for quick fixes) over the node graph.
+                let mut ds = DockState::new(vec![Pane::Viewer(0), Pane::Canvas]);
+                let tree = ds.main_surface_mut();
+                let [view, sheet] = tree.split_left(NodeIndex::root(), 0.45, vec![Pane::XSheet]);
+                tree.split_below(sheet, 0.72, vec![Pane::Layers]);
+                tree.split_below(view, 0.62, vec![Pane::NodeGraph]);
+                ds
+            }
+        }
+    }
+
+    /// The tool/view state the stage re-arms on entry — the room's verb.
+    pub fn view(self) -> WorkspaceView {
+        use crate::canvas::{CanvasTool, SelShape};
+        let base = WorkspaceView {
+            tool: CanvasTool::Paint,
+            composite_view: false,
+            onion: false,
+            onion_layer_only: false,
+            sel_shape: SelShape::Rect,
+            fill_ref_cel: false,
+        };
+        match self {
+            Stage::Layout => base,
+            Stage::Drawing => WorkspaceView { onion: true, ..base },
+            Stage::Finishing => WorkspaceView {
+                tool: CanvasTool::Fill,
+                fill_ref_cel: true,
+                ..base
+            },
+            Stage::Edit => WorkspaceView {
+                tool: CanvasTool::Select,
+                ..base
+            },
+        }
+    }
 }
 
 /// The tool/view state a workspace restores on entry — what makes a room a
@@ -144,22 +234,9 @@ impl Workspaces {
                 return Self { list };
             }
         }
-        Self {
-            list: vec![
-                Workspace {
-                    name: "draw".into(),
-                    dock: draw_workspace(),
-                    preset: None,
-                    view: None,
-                },
-                Workspace {
-                    name: "timing".into(),
-                    dock: timing_workspace(),
-                    preset: None,
-                    view: None,
-                },
-            ],
-        }
+        // No seeded defaults anymore: the stage spine provides the built-in
+        // rooms; this list is purely the user's own saved arrangements.
+        Self { list: Vec::new() }
     }
 
     pub fn save(&self) {

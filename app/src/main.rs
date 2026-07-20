@@ -21,7 +21,7 @@ mod xsheet_panel;
 use config::{Action, BrushPreset, Config, FrameLatency, LayersConfig, PenConfig, RebindCapture, SettingsCategory};
 use doc::AppState;
 use egui_dock::{DockArea, DockState};
-use workspace::{Pane, Workspace, Workspaces, draw_workspace};
+use workspace::{Pane, Stage, Workspace, Workspaces};
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use newproject::{FormAction, NewProjectForm};
@@ -513,6 +513,11 @@ struct Editor {
     /// The docking shell: every UI element is a movable pane over ONE document;
     /// a workspace is just a saved arrangement of these panes.
     dock: DockState<Pane>,
+    /// Which spine stage the current layout came from (highlight only) —
+    /// None after applying a custom saved workspace. Deliberately NOT
+    /// cleared when panes are rearranged: the highlight means "this is the
+    /// room I'm working from", not "the layout is pixel-identical".
+    stage: Option<Stage>,
     /// Named, persisted workspaces (%APPDATA%/AnimStudio/workspaces.json).
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
@@ -710,10 +715,10 @@ impl Editor {
             graph,
             request_new: false,
             request_settings: false,
-            dock: {
-                let ws = Workspaces::load();
-                ws.list.first().map(|w| w.dock.clone()).unwrap_or_else(draw_workspace)
-            },
+            // Every project opens in the Drawing room — the daily driver
+            // and the spine's canonical default.
+            dock: Stage::Drawing.dock(),
+            stage: Some(Stage::Drawing),
             workspaces: Workspaces::load(),
             ws_name: String::new(),
             preset_name: String::new(),
@@ -734,10 +739,8 @@ impl Editor {
             graph,
             request_new: false,
             request_settings: false,
-            dock: {
-                let ws = Workspaces::load();
-                ws.list.first().map(|w| w.dock.clone()).unwrap_or_else(draw_workspace)
-            },
+            dock: Stage::Drawing.dock(),
+            stage: Some(Stage::Drawing),
             workspaces: Workspaces::load(),
             ws_name: String::new(),
             preset_name: String::new(),
@@ -1318,31 +1321,22 @@ impl Editor {
                 ui.checkbox(&mut self.state.view.loop_playback, "loop")
                     .on_hover_text("off = playback stops on the last frame");
                 ui.separator();
-                // Workspaces: saved pane arrangements over the same document.
-                for i in 0..self.workspaces.list.len().min(6) {
-                    let name = self.workspaces.list[i].name.clone();
+                // THE STAGE SPINE (workflow trees, LENS-DOCK Phase 3): the
+                // four fixed pipeline rooms, in order. Switching re-lenses
+                // the SAME document — layout + tool/view state swap, data
+                // never forks. Tool/view restore is all-or-nothing; a live
+                // stroke keeps the old tool state (same law as saved
+                // workspaces below).
+                for st in Stage::ALL {
                     if ui
-                        .button(&name)
-                        .on_hover_text("switch workspace (same document, new room)")
+                        .selectable_label(self.stage == Some(*st), st.name())
+                        .on_hover_text("switch room (same document, different lens)")
                         .clicked()
                     {
-                        self.dock = self.workspaces.list[i].dock.clone();
-                        // A room restores its tool/view state (LENS-DOCK:
-                        // workspace = layout + tool/mode + view) — all or
-                        // nothing; a live stroke keeps the old tool state.
-                        let view_ok = match self.workspaces.list[i].view {
-                            Some(v) => self.canvas.apply_view(&v, &mut self.state),
-                            None => !self.canvas.stroke_active(),
-                        };
-                        // The workflow-stage brush follows the same gate: a
-                        // mid-stroke switch must not bend the live stroke's
-                        // remaining dabs with a new brush.
-                        if view_ok
-                            && let Some(pname) = self.workspaces.list[i].preset.clone()
-                            && let Some(p) = presets.iter().find(|p| p.name == pname)
-                        {
-                            self.canvas.apply_preset(p);
-                            self.state.status = format!("workspace {name} — brush: {pname}");
+                        self.dock = st.dock();
+                        if self.canvas.apply_view(&st.view(), &mut self.state) {
+                            self.stage = Some(*st);
+                            self.state.status = format!("room: {}", st.name());
                         }
                     }
                 }
@@ -1374,11 +1368,19 @@ impl Editor {
                         }
                     });
                     ui.separator();
+                    let mut apply: Option<usize> = None;
                     let mut remove: Option<usize> = None;
                     let mut assign: Option<(usize, Option<String>)> = None;
                     for (i, w) in self.workspaces.list.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(&w.name);
+                            if ui
+                                .button(&w.name)
+                                .on_hover_text("apply this saved arrangement")
+                                .clicked()
+                            {
+                                apply = Some(i);
+                                ui.close();
+                            }
                             // Bound brush preset for this workspace (workflow
                             // stage keeps its own brush).
                             let bound = w.preset.clone().unwrap_or_else(|| "no brush".into());
@@ -1398,6 +1400,26 @@ impl Editor {
                                 remove = Some(i);
                             }
                         });
+                    }
+                    if let Some(i) = apply {
+                        let name = self.workspaces.list[i].name.clone();
+                        self.dock = self.workspaces.list[i].dock.clone();
+                        // A custom room is off-spine — no stage highlighted.
+                        self.stage = None;
+                        // Same all-or-nothing tool/view + brush gate as the
+                        // stage buttons.
+                        let view_ok = match self.workspaces.list[i].view {
+                            Some(v) => self.canvas.apply_view(&v, &mut self.state),
+                            None => !self.canvas.stroke_active(),
+                        };
+                        self.state.status = format!("workspace: {name}");
+                        if view_ok
+                            && let Some(pname) = self.workspaces.list[i].preset.clone()
+                            && let Some(p) = presets.iter().find(|p| p.name == pname)
+                        {
+                            self.canvas.apply_preset(p);
+                            self.state.status = format!("workspace {name} — brush: {pname}");
+                        }
                     }
                     if let Some((i, pname)) = assign {
                         self.workspaces.list[i].preset = pname;
