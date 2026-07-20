@@ -1063,6 +1063,71 @@ impl AppState {
         }
     }
 
+    /// Import a WAV as this cut's scratch audio track (one undo step;
+    /// replaces any existing clip — the inverse restores it).
+    pub fn import_audio(&mut self, path: &std::path::Path) {
+        let at = self.at();
+        // Size gate BEFORE reading: the picker filters by extension only,
+        // so a mislabeled multi-GB file must fail here, not after a full
+        // read into memory.
+        match std::fs::metadata(path) {
+            Ok(m) if m.len() > anim_core::model::MAX_AUDIO_BYTES as u64 => {
+                self.status = format!(
+                    "audio import failed: file is {} MB (max {} MB)",
+                    m.len() / (1024 * 1024),
+                    anim_core::model::MAX_AUDIO_BYTES / (1024 * 1024)
+                );
+                return;
+            }
+            Err(e) => {
+                self.status = format!("audio read failed: {e}");
+                return;
+            }
+            Ok(_) => {}
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("audio read failed: {e}");
+                return;
+            }
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "audio.wav".into());
+        let clip = match anim_core::model::AudioClip::from_wav(name, bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = format!("audio import failed: {e}");
+                return;
+            }
+        };
+        let secs = clip.seconds();
+        let cname = clip.name.clone();
+        if let Err(e) = self.engine.apply(
+            "set audio",
+            vec![Command::SetCutAudio { at, audio: Some(clip) }],
+        ) {
+            self.status = format!("error: {e}");
+        } else {
+            self.status = format!("audio: {cname} ({secs:.1}s)");
+        }
+    }
+
+    /// Remove the cut's scratch audio (one undo step).
+    pub fn remove_audio(&mut self) {
+        let at = self.at();
+        if let Err(e) = self
+            .engine
+            .apply("remove audio", vec![Command::SetCutAudio { at, audio: None }])
+        {
+            self.status = format!("error: {e}");
+        } else {
+            self.status = "audio removed".into();
+        }
+    }
+
     /// Rename the cut being edited (scaffolding, like scene/cut creation).
     pub fn rename_current_cut(&mut self, name: &str) {
         let at = self.at();

@@ -235,6 +235,109 @@ pub struct ImageAsset {
     pub content_hash: u64,
 }
 
+/// The audio scratch track (C4): one WAV per cut, frame-0 aligned. Same
+/// asset law as ImageAsset — the ORIGINAL encoded bytes are the persisted
+/// truth (saved verbatim, never re-encoded); interleaved f32 samples are
+/// decoded once at construction. The engine stays headless: hound is a pure
+/// decoder, playback lives entirely in the app.
+#[derive(Debug, Clone)]
+pub struct AudioClip {
+    pub name: String,
+    /// Encoded source bytes (WAV), persisted verbatim.
+    pub bytes: std::sync::Arc<Vec<u8>>,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Interleaved f32 samples in [-1, 1], derived deterministically from
+    /// `bytes`. Arc'd so Cut/Project clones stay cheap.
+    pub samples: std::sync::Arc<Vec<f32>>,
+}
+
+/// Manual PartialEq: `samples` is a pure function of `bytes`, so comparing
+/// it is redundant work (hundreds of MB of floats on a long clip) — and
+/// bytes get an Arc pointer fast path clones always hit.
+impl PartialEq for AudioClip {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.sample_rate == other.sample_rate
+            && self.channels == other.channels
+            && (std::sync::Arc::ptr_eq(&self.bytes, &other.bytes) || self.bytes == other.bytes)
+    }
+}
+
+/// Encoded-size cap for imported audio (a scratch track, not a mix session).
+pub const MAX_AUDIO_BYTES: usize = 200 * 1024 * 1024;
+/// Decoded-length cap: 30 minutes at 48 kHz stereo — far beyond any cut,
+/// enforced BEFORE sample allocation so a crafted header can't drive an OOM.
+pub const MAX_AUDIO_SAMPLES: u64 = 48_000 * 60 * 30 * 2;
+
+impl AudioClip {
+    /// Decode a WAV into a clip. Int PCM (8/16/24/32-bit) and float WAVs
+    /// are normalized to f32 in [-1, 1]; mono and stereo only. Every
+    /// failure is an `Err`, never a panic — commands reject atomically and
+    /// loads report Corrupt.
+    pub fn from_wav(name: impl Into<String>, bytes: Vec<u8>) -> Result<Self, String> {
+        if bytes.len() > MAX_AUDIO_BYTES {
+            return Err(format!(
+                "wav: too large ({} MB; max {} MB)",
+                bytes.len() / (1024 * 1024),
+                MAX_AUDIO_BYTES / (1024 * 1024)
+            ));
+        }
+        let mut reader =
+            hound::WavReader::new(std::io::Cursor::new(&bytes)).map_err(|e| format!("wav: {e}"))?;
+        let spec = reader.spec();
+        if spec.channels == 0 || spec.channels > 2 {
+            return Err(format!(
+                "wav: {} channels unsupported (mono or stereo only)",
+                spec.channels
+            ));
+        }
+        if spec.sample_rate < 8_000 || spec.sample_rate > 192_000 {
+            return Err(format!("wav: sample rate {} Hz out of range", spec.sample_rate));
+        }
+        // Cap from the HEADER, before allocating sample storage.
+        if reader.len() as u64 > MAX_AUDIO_SAMPLES {
+            return Err("wav: longer than the 30-minute scratch-track cap".into());
+        }
+        let samples: Vec<f32> = match (spec.sample_format, spec.bits_per_sample) {
+            // Files are a trust boundary: float WAVs can carry NaN/inf or
+            // out-of-range values — sanitize at decode (non-finite → 0,
+            // clamp to [-1, 1]) so the documented sample contract holds and
+            // playback can never blast. Deterministic, so save/load
+            // re-decode agrees.
+            (hound::SampleFormat::Float, 32) => reader
+                .samples::<f32>()
+                .map(|s| {
+                    s.map(|v| if v.is_finite() { v.clamp(-1.0, 1.0) } else { 0.0 })
+                })
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("wav: {e}"))?,
+            (hound::SampleFormat::Int, bits @ 1..=32) => {
+                // Normalize by the format's full scale, not the observed peak.
+                let scale = 1.0 / (1u64 << (bits - 1)) as f32;
+                reader
+                    .samples::<i32>()
+                    .map(|s| s.map(|v| v as f32 * scale))
+                    .collect::<Result<_, _>>()
+                    .map_err(|e| format!("wav: {e}"))?
+            }
+            (fmt, bits) => return Err(format!("wav: unsupported format {fmt:?}/{bits}-bit")),
+        };
+        Ok(Self {
+            name: name.into(),
+            bytes: std::sync::Arc::new(bytes),
+            sample_rate: spec.sample_rate,
+            channels: spec.channels,
+            samples: std::sync::Arc::new(samples),
+        })
+    }
+
+    /// Clip length in seconds.
+    pub fn seconds(&self) -> f32 {
+        self.samples.len() as f32 / (self.sample_rate as f32 * self.channels as f32)
+    }
+}
+
 /// Per-side dimension cap for imported images (BG plates, not gigapixel
 /// scans). Enforced BEFORE any pixel allocation so a crafted header can't
 /// drive an OOM, and kept small enough that all size arithmetic fits usize.
@@ -362,6 +465,9 @@ pub struct Cut {
     pub graph: Graph,
     /// Image assets owned by this cut (BG plates, references).
     pub images: Vec<ImageAsset>,
+    /// The scratch audio track (C4): at most ONE clip per cut, aligned to
+    /// frame 0. Timing reference only — audio never enters the render graph.
+    pub audio: Option<AudioClip>,
 }
 
 impl Cut {

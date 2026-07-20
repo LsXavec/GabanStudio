@@ -16,7 +16,7 @@ use crate::model::{CelLayer, Cut, Drawing, LayerProps, Project, Scene};
 use crate::raster::{RasterLayer, TileData};
 use crate::xsheet::{Column, Exposure, ParamColumn, ParamInterp, ParamKey, XSheet};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -63,6 +63,8 @@ CREATE TABLE IF NOT EXISTS param_keys(
     column_id INTEGER NOT NULL, frame INTEGER NOT NULL,
     value REAL NOT NULL, interp TEXT NOT NULL,
     PRIMARY KEY(column_id, frame));
+CREATE TABLE IF NOT EXISTS cut_audio(
+    cut_id INTEGER PRIMARY KEY, name TEXT NOT NULL, bytes BLOB NOT NULL);
 ";
 // `raster_layers`/`tiles` are the LEGACY (schema <= 4) single-raster tables.
 // They stay in the schema + the DELETE batch (uniform create+purge pattern, and
@@ -83,7 +85,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
          DELETE FROM raster_layers; DELETE FROM tiles;
          DELETE FROM cel_layers; DELETE FROM cel_tiles;
          DELETE FROM cut_images;
-         DELETE FROM param_columns; DELETE FROM param_keys;",
+         DELETE FROM param_columns; DELETE FROM param_keys;
+         DELETE FROM cut_audio;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -139,6 +142,9 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
         let mut ins_tile = tx.prepare(
             "INSERT INTO cel_tiles(layer_id, tx, ty, bytes) VALUES (?1, ?2, ?3, ?4)",
         )?;
+        let mut ins_audio = tx.prepare(
+            "INSERT INTO cut_audio(cut_id, name, bytes) VALUES (?1, ?2, ?3)",
+        )?;
         let mut ins_image = tx.prepare(
             "INSERT INTO cut_images(id, cut_id, ord, name, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
@@ -191,6 +197,10 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                         &img.name,
                         img.bytes.as_slice(),
                     ))?;
+                }
+                if let Some(clip) = &cut.audio {
+                    // Same asset law as images: original WAV bytes verbatim.
+                    ins_audio.execute((cut.id.0 as i64, &clip.name, clip.bytes.as_slice()))?;
                 }
                 for (col_ord, col) in cut.xsheet.columns.iter().enumerate() {
                     ins_column.execute((col.id.0 as i64, cut.id.0 as i64, &col.name, col_ord as i64))?;
@@ -346,6 +356,7 @@ pub fn load(path: &Path) -> Result<Project> {
                 xsheet: XSheet::default(),
                 graph: Graph::default(),
                 images: Vec::new(),
+                audio: None,
             };
 
             // Image assets: added in schema v6 (older files have none — and
@@ -365,6 +376,27 @@ pub fn load(path: &Path) -> Result<Project> {
                     )
                     .map_err(|e| EngineError::Corrupt(format!("image {img_id}: {e}")))?;
                     cut.images.push(asset);
+                }
+            }
+
+            // Scratch audio: added in schema v8. Only "no row" means "no
+            // clip" — a mistyped column or I/O error must surface as
+            // Corrupt, not silently drop the audio (a re-save after a
+            // silent drop would destroy the bytes for good).
+            if version >= 8 {
+                let row: Option<(String, Vec<u8>)> = match conn.query_row(
+                    "SELECT name, bytes FROM cut_audio WHERE cut_id = ?1",
+                    (cut_id,),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                ) {
+                    Ok(row) => Some(row),
+                    Err(rusqlite::Error::QueryReturnedNoRows) => None,
+                    Err(e) => return Err(EngineError::Corrupt(format!("audio row: {e}"))),
+                };
+                if let Some((a_name, a_bytes)) = row {
+                    let clip = crate::model::AudioClip::from_wav(a_name, a_bytes)
+                        .map_err(|e| EngineError::Corrupt(format!("audio: {e}")))?;
+                    cut.audio = Some(clip);
                 }
             }
 

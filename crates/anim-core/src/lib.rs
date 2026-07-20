@@ -104,6 +104,7 @@ impl Engine {
             xsheet: Default::default(),
             graph: Default::default(),
             images: Vec::new(),
+            audio: None,
         });
         Ok(id)
     }

@@ -17,3 +17,6 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 egui_dock = { version = "0.20", features = ["serde"] }
 octotablet = "0.1.0"
 raw-window-handle = "0.6"
+# Audio scratch-track playback (decoded samples come from anim-core; no
+# format decoders needed here — playback feature only).
+rodio = { version = "0.21", default-features = false, features = ["playback"] }

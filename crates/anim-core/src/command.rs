@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
-use crate::model::{CelLayer, Cut, Drawing, LayerProps, Project, Stroke};
+use crate::model::{AudioClip, CelLayer, Cut, Drawing, LayerProps, Project, Stroke};
 use crate::raster::TileDiff;
 use crate::xsheet::{Exposure, ParamKey};
 
@@ -122,6 +122,12 @@ pub enum Command {
         frame: u32,
         key: Option<Exposure>,
     },
+    /// Set/replace/remove the cut's scratch audio clip (C4). One clip per
+    /// cut; the inverse carries the previous clip (Arc'd bytes — cheap).
+    SetCutAudio {
+        at: CutRef,
+        audio: Option<AudioClip>,
+    },
     /// Set/clear a key on a PARAMETER column (camera etc.) — the numeric
     /// sibling of SetCell, same exact-inverse shape.
     SetParamKey {
@@ -180,6 +186,7 @@ impl Command {
             | Command::AddStroke { at, .. }
             | Command::PopStroke { at, .. }
             | Command::SetCell { at, .. }
+            | Command::SetCutAudio { at, .. }
             | Command::SetParamKey { at, .. }
             | Command::AddNode { at, .. }
             | Command::RemoveNode { at, .. }
@@ -634,6 +641,16 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     key: prev,
                 }],
                 invalidation_roots: cut.graph.sources_of_column(*column),
+            })
+        }
+
+        Command::SetCutAudio { at, audio } => {
+            let cut = cut_mut(project, *at)?;
+            let prev = std::mem::replace(&mut cut.audio, audio.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetCutAudio { at: *at, audio: prev }],
+                // Audio never enters the render graph — nothing to invalidate.
+                invalidation_roots: Vec::new(),
             })
         }
 

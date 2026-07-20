@@ -16,6 +16,9 @@ const FRAME_NUM_W: f32 = 34.0;
 const COL_W: f32 = 86.0;
 /// Parameter (camera) columns are numeric — narrower than drawing columns.
 const PARAM_COL_W: f32 = 58.0;
+/// The audio waveform column (frames are rows, so the waveform runs DOWN
+/// the sheet — the paper timesheet's audio track).
+const AUDIO_COL_W: f32 = 46.0;
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // Claim the full panel width EVERY frame. egui 0.35 panels are
@@ -72,6 +75,35 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
 
+    // Scratch audio (C4): its OWN row — the clip name is variable-width and
+    // the toolbar row above must stay fixed (UI-STABILITY law). The name is
+    // truncated so even this row can't outgrow the panel.
+    ui.horizontal(|ui| {
+        match state.cut().audio.as_ref().map(|a| (a.name.clone(), a.seconds())) {
+            Some((name, secs)) => {
+                ui.label(
+                    egui::RichText::new(format!("♪ {} ({secs:.1}s)", truncate_name(&name)))
+                        .color(Color32::from_rgb(120, 210, 190)),
+                );
+                if ui.small_button("✕").on_hover_text("remove the audio track").clicked() {
+                    state.remove_audio();
+                }
+            }
+            None => {
+                if ui
+                    .button("♪ wav…")
+                    .on_hover_text("import a WAV as this cut's scratch track")
+                    .clicked()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("WAV audio", &["wav"])
+                        .pick_file()
+                {
+                    state.import_audio(&path);
+                }
+            }
+        }
+    });
+
     param_key_strip(ui, state);
 
     // Drawing library.
@@ -101,7 +133,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // ---- The sheet itself -------------------------------------------------
     let n_cols = state.cut().xsheet.columns.len();
     let n_params = state.cut().xsheet.params.len();
-    let sheet_w = FRAME_NUM_W + n_cols as f32 * COL_W + n_params as f32 * PARAM_COL_W;
+    let has_audio = state.cut().audio.is_some();
+    let sheet_w = FRAME_NUM_W
+        + n_cols as f32 * COL_W
+        + n_params as f32 * PARAM_COL_W
+        + if has_audio { AUDIO_COL_W } else { 0.0 };
 
     // Header row. Param-column headers are clickable: selecting one opens
     // its keying strip above the sheet.
@@ -139,6 +175,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 } else {
                     Color32::from_gray(160)
                 },
+            );
+        }
+        if has_audio {
+            let (rect, _) = ui.allocate_exact_size(vec2(AUDIO_COL_W, ROW_H), Sense::hover());
+            ui.painter().text(
+                rect.left_center(),
+                egui::Align2::LEFT_CENTER,
+                "♪",
+                egui::FontId::proportional(12.0),
+                Color32::from_rgb(120, 210, 190),
             );
         }
     });
@@ -228,6 +274,46 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                             text,
                             egui::FontId::proportional(11.0),
                             color,
+                        );
+                    }
+                }
+
+                // Audio waveform cell: this frame's peak amplitude as a
+                // centred horizontal bar — the track reads as a vertical
+                // waveform down the sheet. Subsampled (≤32 taps per row) so
+                // a long clip never makes the sheet paint heavy.
+                if let Some(clip) = &cut.audio {
+                    let x0 = row_rect.left()
+                        + FRAME_NUM_W
+                        + n_cols as f32 * COL_W
+                        + cut.xsheet.params.len() as f32 * PARAM_COL_W;
+                    let cell =
+                        Rect::from_min_size(pos2(x0, row_rect.top()), vec2(AUDIO_COL_W, ROW_H));
+                    // Same integer math as playback's start offset (whole
+                    // sample-frames, then interleave) so the drawn row and
+                    // the sound never drift apart over a long clip.
+                    let ch = clip.channels as u64;
+                    let sr = clip.sample_rate as u64;
+                    let f = fps.max(1) as u64;
+                    let a = (((frame as u64 * sr) / f) * ch).min(clip.samples.len() as u64) as usize;
+                    let b = ((((frame as u64 + 1) * sr) / f) * ch).min(clip.samples.len() as u64)
+                        as usize;
+                    if a < b {
+                        let stride = ((b - a) / 32).max(1);
+                        let mut peak = 0.0f32;
+                        let mut i = a;
+                        while i < b {
+                            peak = peak.max(clip.samples[i].abs());
+                            i += stride;
+                        }
+                        let half = peak.min(1.0) * (AUDIO_COL_W - 8.0) * 0.5;
+                        let cy = cell.center();
+                        painter.line_segment(
+                            [pos2(cy.x - half, cy.y), pos2(cy.x + half, cy.y)],
+                            egui::Stroke::new(
+                                (ROW_H - 4.0).max(1.0),
+                                Color32::from_rgba_unmultiplied(120, 210, 190, 90),
+                            ),
                         );
                     }
                 }

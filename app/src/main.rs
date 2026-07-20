@@ -94,6 +94,49 @@ struct App {
     tablet_boot_tried: bool,
 }
 
+/// Scratch-track playback (C4): a rodio output stream + sink, created
+/// lazily on the first play with a clip present. The engine owns the
+/// decoded samples; this only streams them from the playhead. A missing
+/// audio device degrades to silent playback (the app never blocks on it).
+struct AudioOut {
+    /// Keeps the OS audio stream alive for the sink's lifetime.
+    _stream: rodio::OutputStream,
+    sink: rodio::Sink,
+}
+
+/// Zero-copy rodio source over the engine's Arc'd decoded samples — a
+/// restart must never clone a multi-hundred-MB sample buffer.
+struct ClipSource {
+    data: std::sync::Arc<Vec<f32>>,
+    pos: usize,
+    channels: u16,
+    rate: u32,
+}
+
+impl Iterator for ClipSource {
+    type Item = f32;
+    fn next(&mut self) -> Option<f32> {
+        let v = self.data.get(self.pos).copied();
+        self.pos += 1;
+        v
+    }
+}
+
+impl rodio::Source for ClipSource {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        None
+    }
+}
+
 /// State for a running background export (C3) — polled once per frame
 /// (`Editor::poll_export`), same drain pattern as `App::pump_tablet`. Lives
 /// on `Editor` (not `App`): it's scoped to the open project, same as `dock`
@@ -537,6 +580,19 @@ struct Editor {
     /// menu — None = "whole cut" (recomputed fresh from the current cut's
     /// length every time the menu renders, so it's never stale).
     export_range: Option<(u32, u32)>,
+    /// Scratch-audio output (C4) — None until first play (or unavailable).
+    audio_out: Option<AudioOut>,
+    /// Device open was attempted (never retry a missing device every frame).
+    audio_tried: bool,
+    /// A clip is currently sounding through the sink.
+    audio_playing: bool,
+    /// Last frame seen by sync_audio — detects loop wraps and mid-play seeks.
+    audio_prev_frame: u32,
+    /// WHAT is sounding: (scene, cut, clip identity via the bytes Arc's
+    /// address). A cut switch or an undo/redo that swaps the clip mid-play
+    /// changes this key → the sound restarts on the right clip instead of
+    /// the stale one playing on.
+    audio_key: Option<(u64, u64, usize)>,
 }
 
 /// (scene, name, [(cut, name)]) — the "cut ▾" menu's owned snapshot of the
@@ -728,6 +784,11 @@ impl Editor {
             viewers: Default::default(),
             export_job: None,
             export_range: None,
+            audio_out: None,
+            audio_tried: false,
+            audio_playing: false,
+            audio_prev_frame: 0,
+            audio_key: None,
         }
     }
 
@@ -751,6 +812,11 @@ impl Editor {
             viewers: Default::default(),
             export_job: None,
             export_range: None,
+            audio_out: None,
+            audio_tried: false,
+            audio_playing: false,
+            audio_prev_frame: 0,
+            audio_key: None,
         }
     }
 }
@@ -1041,6 +1107,79 @@ fn probe_at(ppp: f32) {
 }
 
 impl Editor {
+    /// Keep scratch-audio playback in step with the playhead: start when
+    /// playback starts, stop when it stops (or the clip is removed/undone),
+    /// restart on a loop wrap, a mid-play seek, or when WHAT should be
+    /// sounding changes (cut switch, undo/redo swapping the clip). Called
+    /// once per UI frame, right after `state.tick` advances the playhead;
+    /// `dt` is that tick's clamped delta — the seek threshold must scale
+    /// with it (at 48+ project fps a single slow UI frame legitimately
+    /// advances the playhead by 5+, and a fixed threshold caused a restart
+    /// stutter loop).
+    fn sync_audio(&mut self, dt: f32) {
+        let playing = self.state.view.playing;
+        let frame = self.state.view.frame;
+        let key = self.state.cut().audio.as_ref().map(|c| {
+            (
+                self.state.view.scene.0,
+                self.state.view.cut.0,
+                std::sync::Arc::as_ptr(&c.bytes) as *const u8 as usize,
+            )
+        });
+        // Max frames one tick can legitimately advance, with 3x headroom.
+        let max_step = ((self.state.fps().max(1) as f32 * dt).ceil() as u32)
+            .saturating_mul(3)
+            .max(4);
+        let jumped = self.audio_playing
+            && (frame < self.audio_prev_frame
+                || frame > self.audio_prev_frame.saturating_add(max_step));
+        let clip_changed = self.audio_playing && self.audio_key != key;
+        if playing && key.is_some() && (!self.audio_playing || jumped || clip_changed) {
+            self.start_audio(frame);
+            self.audio_key = key;
+        } else if self.audio_playing && (!playing || key.is_none()) {
+            if let Some(out) = &self.audio_out {
+                out.sink.stop();
+            }
+            self.audio_playing = false;
+            self.audio_key = None;
+        }
+        self.audio_prev_frame = frame;
+    }
+
+    fn start_audio(&mut self, frame: u32) {
+        if self.audio_out.is_none() && !self.audio_tried {
+            self.audio_tried = true;
+            match rodio::OutputStreamBuilder::open_default_stream() {
+                Ok(stream) => {
+                    let sink = rodio::Sink::connect_new(stream.mixer());
+                    self.audio_out = Some(AudioOut { _stream: stream, sink });
+                }
+                Err(e) => {
+                    // Once, not per frame; playback stays silent but works.
+                    eprintln!("audio device unavailable: {e}");
+                    self.state.status = "no audio device — playing silent".into();
+                }
+            }
+        }
+        let Some(out) = &self.audio_out else { return };
+        let Some(clip) = &self.state.cut().audio else { return };
+        let fps = self.state.fps().max(1) as u64;
+        // Whole sample-frames, THEN interleave — start is always aligned to
+        // a channel-0 sample.
+        let start = ((frame as u64 * clip.sample_rate as u64) / fps) * clip.channels as u64;
+        let start = (start as usize).min(clip.samples.len());
+        out.sink.stop();
+        out.sink.append(ClipSource {
+            data: clip.samples.clone(),
+            pos: start,
+            channels: clip.channels,
+            rate: clip.sample_rate,
+        });
+        out.sink.play();
+        self.audio_playing = true;
+    }
+
     /// Drain this frame's export-progress messages. A disconnected channel
     /// (the worker thread panicked) is treated as a silent failure — the
     /// job just disappears rather than spinning forever; a real crash there
@@ -1123,6 +1262,7 @@ impl Editor {
         self.export_progress_window(ui.ctx());
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
+        self.sync_audio(dt);
 
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
