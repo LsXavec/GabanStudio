@@ -107,10 +107,11 @@ pub fn spawn_mp4(
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let result = (|| -> Result<(usize, String), String> {
-            ffmpeg_available()?;
+            let ffmpeg = ffmpeg_program()?;
             let tmp =
                 std::env::temp_dir().join(format!("animstudio_export_{}", std::process::id()));
             std::fs::create_dir_all(&tmp).map_err(|e| format!("temp dir: {e}"))?;
+            let range_start = *range.start();
             let mut n = 0usize;
             for f in range {
                 if cancel.load(Ordering::Relaxed) {
@@ -128,19 +129,54 @@ pub fn spawn_mp4(
             ctx.request_repaint();
 
             let pattern = tmp.join("frame_%04d.png");
+            let fps_n = fps.max(1);
             // Max-compatibility H.264: yuv420p (the flag hardware decoders
             // require), High@4.1 (universal on modern phones/TVs/browsers),
             // CRF 18 (visually lossless for line art), +faststart (moov atom
             // up front so the file streams/scrubs immediately when shared).
             // Odd dimensions crop by 1px (yuv420p subsampling needs even
             // sizes).
-            let status = std::process::Command::new("ffmpeg")
-                .args([
-                    "-y",
-                    "-framerate",
-                    &fps.to_string(),
-                    "-i",
-                    &pattern.to_string_lossy(),
+            let mut args: Vec<String> = vec![
+                "-y".into(),
+                "-framerate".into(),
+                fps_n.to_string(),
+                "-i".into(),
+                pattern.to_string_lossy().into_owned(),
+            ];
+            // The cut's scratch audio rides along: the ORIGINAL WAV bytes
+            // go to a temp file, offset by the export range's start (-ss
+            // BEFORE -i = input seek), trimmed to the video's length (-t on
+            // the output; -shortest would cut the VIDEO when the audio ends
+            // early). AAC because raw PCM in MP4 breaks many players.
+            let has_audio = cut.audio.is_some();
+            if let Some(clip) = &cut.audio {
+                let audio_path = tmp.join("audio.wav");
+                std::fs::write(&audio_path, clip.bytes.as_ref())
+                    .map_err(|e| format!("audio temp: {e}"))?;
+                let offset = range_start as f64 / fps_n as f64;
+                let video_secs = n as f64 / fps_n as f64;
+                args.extend(
+                    [
+                        "-ss",
+                        &format!("{offset:.6}"),
+                        "-i",
+                        &audio_path.to_string_lossy(),
+                        "-map",
+                        "0:v",
+                        "-map",
+                        "1:a",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        "192k",
+                        "-t",
+                        &format!("{video_secs:.6}"),
+                    ]
+                    .map(String::from),
+                );
+            }
+            args.extend(
+                [
                     "-c:v",
                     "libx264",
                     "-profile:v",
@@ -158,14 +194,22 @@ pub fn spawn_mp4(
                     "-vf",
                     "crop=trunc(iw/2)*2:trunc(ih/2)*2",
                     &path.to_string_lossy(),
-                ])
+                ]
+                .map(String::from),
+            );
+            let status = std::process::Command::new(&ffmpeg)
+                .args(&args)
                 .status()
                 .map_err(|e| format!("running ffmpeg: {e}"))?;
             let _ = std::fs::remove_dir_all(&tmp);
             if !status.success() {
                 return Err(format!("ffmpeg failed (exit {:?})", status.code()));
             }
-            Ok((n, format!("{}{}", graph_note(&cut), strokes_note(&cut))))
+            let audio_note = if has_audio { " [with audio]" } else { "" };
+            Ok((
+                n,
+                format!("{}{}{}", graph_note(&cut), audio_note, strokes_note(&cut)),
+            ))
         })();
         let _ = tx.send(ExportProgress::Done(result));
         ctx.request_repaint();
@@ -207,18 +251,56 @@ fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn ffmpeg_available() -> Result<(), String> {
-    match std::process::Command::new("ffmpeg")
+/// Locate ffmpeg: next to our own exe (portable bundling) → PATH → the
+/// winget package dir (winget edits the REGISTRY PATH, which processes
+/// launched from an already-open shell never see — the app must not demand
+/// a reboot to find a tool that's plainly installed).
+fn find_ffmpeg() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let local = dir.join("ffmpeg.exe");
+        if local.is_file() {
+            return Some(local);
+        }
+    }
+    if works(Path::new("ffmpeg")) {
+        return Some(PathBuf::from("ffmpeg"));
+    }
+    // winget install location: %LOCALAPPDATA%\Microsoft\WinGet\Packages\
+    //   Gyan.FFmpeg_*\ffmpeg-*\bin\ffmpeg.exe
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    let packages = PathBuf::from(base).join("Microsoft/WinGet/Packages");
+    let entries = std::fs::read_dir(&packages).ok()?;
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with("Gyan.FFmpeg") {
+            continue;
+        }
+        for sub in std::fs::read_dir(entry.path()).ok()?.flatten() {
+            let candidate = sub.path().join("bin/ffmpeg.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn works(program: &Path) -> bool {
+    std::process::Command::new(program)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-    {
-        Ok(s) if s.success() => Ok(()),
-        _ => Err(
-            "ffmpeg not found on PATH — install it (e.g. `winget install ffmpeg`) \
-             or export a PNG sequence instead"
-                .into(),
-        ),
-    }
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn ffmpeg_program() -> Result<PathBuf, String> {
+    find_ffmpeg().ok_or_else(|| {
+        "ffmpeg not found (looked next to the app, on PATH, and in the winget \
+         install location) — install it (e.g. `winget install ffmpeg`) or \
+         export a PNG sequence instead"
+            .into()
+    })
 }
