@@ -522,6 +522,8 @@ struct Editor {
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
     ws_name: String,
+    /// Buffer for the cut ▾ menu's rename field.
+    rename_buf: String,
     /// Buffer for the Presets pane's "save current as" name field.
     preset_name: String,
     /// Per-instance viewer-pane state (zoom/pan), keyed by the pane's viewer
@@ -721,6 +723,7 @@ impl Editor {
             stage: Some(Stage::Drawing),
             workspaces: Workspaces::load(),
             ws_name: String::new(),
+            rename_buf: String::new(),
             preset_name: String::new(),
             viewers: Default::default(),
             export_job: None,
@@ -743,6 +746,7 @@ impl Editor {
             stage: Some(Stage::Drawing),
             workspaces: Workspaces::load(),
             ws_name: String::new(),
+            rename_buf: String::new(),
             preset_name: String::new(),
             viewers: Default::default(),
             export_job: None,
@@ -1478,6 +1482,31 @@ impl Editor {
                         ))
                         .weak(),
                     );
+                    // Rename the current cut/scene (scaffolding, like
+                    // creation — not undoable). Empty-buffer pattern: type
+                    // a new name and confirm; no pre-seeding to fight.
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.rename_buf)
+                                .hint_text("new name…")
+                                .desired_width(110.0),
+                        );
+                        let name = self.rename_buf.trim().to_string();
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("rename cut"))
+                            .clicked()
+                        {
+                            self.state.rename_current_cut(&name);
+                            self.rename_buf.clear();
+                        }
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("rename scene"))
+                            .clicked()
+                        {
+                            self.state.rename_current_scene(&name);
+                            self.rename_buf.clear();
+                        }
+                    });
                     ui.separator();
                     let scenes: SceneCutTree = self
                         .state

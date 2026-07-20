@@ -119,6 +119,27 @@ impl Engine {
         Ok(id)
     }
 
+    /// Rename a scene. Scaffolding op (not undoable — names are setup data,
+    /// same tier as add_scene; they never enter eval recipes).
+    pub fn rename_scene(&mut self, scene: SceneId, name: impl Into<String>) -> Result<()> {
+        let s = self
+            .project
+            .scene_mut(scene)
+            .ok_or(EngineError::UnknownScene(scene))?;
+        s.name = name.into();
+        Ok(())
+    }
+
+    /// Rename a cut. Scaffolding op (not undoable — matches rename_scene).
+    pub fn rename_cut(&mut self, at: CutRef, name: impl Into<String>) -> Result<()> {
+        let cut = self
+            .project
+            .cut_mut(at.scene, at.cut)
+            .ok_or(EngineError::UnknownCut(at.cut))?;
+        cut.name = name.into();
+        Ok(())
+    }
+
     /// Add a PARAMETER column (camera etc.). Scaffolding op (not undoable —
     /// matches `add_column`); keys on it are undoable via SetParamKey.
     pub fn add_param_column(&mut self, at: CutRef, name: impl Into<String>) -> Result<ParamId> {

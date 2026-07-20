@@ -1063,6 +1063,23 @@ impl AppState {
         }
     }
 
+    /// Rename the cut being edited (scaffolding, like scene/cut creation).
+    pub fn rename_current_cut(&mut self, name: &str) {
+        let at = self.at();
+        match self.engine.rename_cut(at, name) {
+            Ok(()) => self.status = format!("cut renamed to {name}"),
+            Err(e) => self.status = format!("error: {e}"),
+        }
+    }
+
+    /// Rename the scene being edited (scaffolding).
+    pub fn rename_current_scene(&mut self, name: &str) {
+        match self.engine.rename_scene(self.view.scene, name) {
+            Ok(()) => self.status = format!("scene renamed to {name}"),
+            Err(e) => self.status = format!("error: {e}"),
+        }
+    }
+
     /// Add a PARAMETER column (camera etc.) — scaffolding, like add_column;
     /// keys on it are undoable. Returns the new id for immediate binding.
     pub fn add_param_column(&mut self, name: &str) -> Option<anim_core::ids::ParamId> {
