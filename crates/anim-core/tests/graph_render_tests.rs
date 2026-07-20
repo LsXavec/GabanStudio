@@ -176,12 +176,7 @@ fn blend_modes_match_pinned_formulas() {
             let a = top[3] as f32 / 255.0;
             (0..3).map(|c| srgb_to_linear(top[c]) * a).chain([a]).collect()
         };
-        for mode in [
-            BlendMode::Normal,
-            BlendMode::Multiply,
-            BlendMode::Add,
-            BlendMode::Screen,
-        ] {
+        for &mode in BlendMode::ALL {
             let mut r = rig();
             let a = r.node(NodeKind::Solid { rgba: bot });
             let b = r.node(NodeKind::Solid { rgba: top });
@@ -205,12 +200,50 @@ fn blend_modes_match_pinned_formulas() {
                     }
                     BlendMode::Add => pb[c] + pa[c],
                     BlendMode::Screen => pb[c] + pa[c] - pb[c] * pa[c],
+                    BlendMode::Subtract => (pa[c] - pb[c]).max(0.0),
+                    BlendMode::Darken => {
+                        (pb[c] * da).min(pa[c] * sa) + pb[c] * (1.0 - da) + pa[c] * (1.0 - sa)
+                    }
+                    BlendMode::Lighten => {
+                        (pb[c] * da).max(pa[c] * sa) + pb[c] * (1.0 - da) + pa[c] * (1.0 - sa)
+                    }
+                    BlendMode::Overlay => {
+                        let cs = if sa > 0.0 { pb[c] / sa } else { 0.0 };
+                        let cb = if da > 0.0 { pa[c] / da } else { 0.0 };
+                        let curve = if cb <= 0.5 {
+                            2.0 * cs * cb
+                        } else {
+                            1.0 - 2.0 * (1.0 - cs) * (1.0 - cb)
+                        };
+                        sa * da * curve + pb[c] * (1.0 - da) + pa[c] * (1.0 - sa)
+                    }
                 };
                 expect[c] = ((v / oa).clamp(0.0, 1.0) * 255.0).round() as u8;
             }
             expect[3] = (oa.clamp(0.0, 1.0) * 255.0).round() as u8;
             assert_eq!(px(&img, 5, 5), expect, "mode {mode} bot alpha {}", bot[3]);
         }
+    }
+}
+
+/// A fully transparent top layer must leave the bottom untouched in EVERY
+/// mode — this pins the Overlay/Darken divide-guards (÷0 alpha) and the
+/// union-alpha law at the degenerate edge.
+#[test]
+fn all_blend_modes_pass_through_a_transparent_top() {
+    let bot = [64u8, 128, 192, 255];
+    for &mode in BlendMode::ALL {
+        let mut r = rig();
+        let a = r.node(NodeKind::Solid { rgba: bot });
+        let b = r.node(NodeKind::Solid { rgba: [255, 255, 255, 0] });
+        let blend = r.node(NodeKind::Blend { mode });
+        let out = r.node(NodeKind::Output);
+        r.connect(a, blend, 0);
+        r.connect(b, blend, 1);
+        r.connect(blend, out, 0);
+        r.set_output(out);
+        let img = render_graph_frame(r.cut(), 0, W, H).unwrap();
+        assert_eq!(px(&img, 5, 5), solid_expected(bot), "mode {mode}");
     }
 }
 

@@ -473,12 +473,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             }
             NodeKind::Blend { mode } => {
-                for m in [
-                    BlendMode::Normal,
-                    BlendMode::Multiply,
-                    BlendMode::Add,
-                    BlendMode::Screen,
-                ] {
+                for &m in BlendMode::ALL {
                     if ui
                         .selectable_label(*mode == m, format!("{m}"))
                         .clicked()

@@ -151,6 +151,13 @@ pub fn srgb_to_linear(v: u8) -> f32 {
 /// Formulas pinned by graph_render_tests — the GPU blend shader mirrors them
 /// exactly. Alpha is Porter-Duff over for every mode; Add's RGB may exceed 1
 /// transiently (clamped at the RGBA8 finishers; the GPU's f16 targets hold it).
+// Premultiplied separable blends. `s` = top layer, `d` = bottom, both
+// premultiplied linear. Union alpha throughout. Darken/Lighten use the
+// alpha-correct separable form min/max(s·da, d·sa) + s(1−da) + d(1−sa);
+// Overlay evaluates its curve on UNpremultiplied colour (guarded ÷alpha)
+// then recomposites — the standard Porter-Duff separable-blend shape.
+// The GPU shader (graphcomp BLEND_SHADER) mirrors these formulas EXACTLY;
+// change both together or the composite view lies about the export.
 fn blend_into(bottom: &mut [f32], top: &[f32], mode: BlendMode) {
     for (d, s) in bottom.chunks_exact_mut(4).zip(top.chunks_exact(4)) {
         let (sa, da) = (s[3], d[3]);
@@ -161,6 +168,23 @@ fn blend_into(bottom: &mut [f32], top: &[f32], mode: BlendMode) {
                 BlendMode::Multiply => s[c] * d[c] + s[c] * (1.0 - da) + d[c] * (1.0 - sa),
                 BlendMode::Add => s[c] + d[c],
                 BlendMode::Screen => s[c] + d[c] - s[c] * d[c],
+                BlendMode::Subtract => (d[c] - s[c]).max(0.0),
+                BlendMode::Darken => {
+                    (s[c] * da).min(d[c] * sa) + s[c] * (1.0 - da) + d[c] * (1.0 - sa)
+                }
+                BlendMode::Lighten => {
+                    (s[c] * da).max(d[c] * sa) + s[c] * (1.0 - da) + d[c] * (1.0 - sa)
+                }
+                BlendMode::Overlay => {
+                    let cs = if sa > 0.0 { s[c] / sa } else { 0.0 };
+                    let cb = if da > 0.0 { d[c] / da } else { 0.0 };
+                    let b = if cb <= 0.5 {
+                        2.0 * cs * cb
+                    } else {
+                        1.0 - 2.0 * (1.0 - cs) * (1.0 - cb)
+                    };
+                    sa * da * b + s[c] * (1.0 - da) + d[c] * (1.0 - sa)
+                }
             };
         }
         d[3] = out_a;

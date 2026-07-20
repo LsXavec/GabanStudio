@@ -111,6 +111,8 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
+// Mirrors anim-core export.rs blend_into EXACTLY (a = bottom/d, b = top/s);
+// change both together or the composite view lies about the export.
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let a = textureSample(bot, smp, in.uv); // input 0 (bottom)
@@ -121,7 +123,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         case 0u: { rgb = b.rgb + a.rgb * (1.0 - b.a); }                       // Normal
         case 1u: { rgb = b.rgb * a.rgb + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Multiply
         case 2u: { rgb = b.rgb + a.rgb; }                                     // Add
-        default: { rgb = b.rgb + a.rgb - b.rgb * a.rgb; }                     // Screen
+        case 3u: { rgb = b.rgb + a.rgb - b.rgb * a.rgb; }                     // Screen
+        case 4u: { rgb = max(a.rgb - b.rgb, vec3<f32>(0.0)); }                // Subtract
+        case 5u: { rgb = min(b.rgb * a.a, a.rgb * b.a) + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Darken
+        case 6u: { rgb = max(b.rgb * a.a, a.rgb * b.a) + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Lighten
+        default: {                                                            // Overlay
+            var cs = vec3<f32>(0.0);
+            if (b.a > 0.0) { cs = b.rgb / b.a; }
+            var cb = vec3<f32>(0.0);
+            if (a.a > 0.0) { cb = a.rgb / a.a; }
+            let lo = 2.0 * cs * cb;
+            let hi = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - cs) * (vec3<f32>(1.0) - cb);
+            let curve = select(hi, lo, cb <= vec3<f32>(0.5));
+            rgb = b.a * a.a * curve + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a);
+        }
     }
     return vec4<f32>(rgb, oa);
 }
@@ -691,6 +706,10 @@ impl GraphCompositor {
             BlendMode::Multiply => 1,
             BlendMode::Add => 2,
             BlendMode::Screen => 3,
+            BlendMode::Subtract => 4,
+            BlendMode::Darken => 5,
+            BlendMode::Lighten => 6,
+            BlendMode::Overlay => 7,
         };
         self.queue.write_buffer(
             &self.blend_buf,

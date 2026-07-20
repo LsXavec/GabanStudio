@@ -15,6 +15,28 @@ pub enum BlendMode {
     Multiply,
     Add,
     Screen,
+    /// Top subtracts from bottom, clamped at zero (glow/mask removal).
+    Subtract,
+    /// Per-channel darker of the two (separable min, alpha-correct).
+    Darken,
+    /// Per-channel lighter of the two (separable max, alpha-correct).
+    Lighten,
+    /// Contrast texture blend (2·s·b below mid, screen-like above).
+    Overlay,
+}
+
+impl BlendMode {
+    /// Every mode, for the inspector's picker.
+    pub const ALL: &'static [BlendMode] = &[
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Add,
+        BlendMode::Screen,
+        BlendMode::Subtract,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Overlay,
+    ];
 }
 
 impl std::fmt::Display for BlendMode {
@@ -24,6 +46,10 @@ impl std::fmt::Display for BlendMode {
             Self::Multiply => "Multiply",
             Self::Add => "Add",
             Self::Screen => "Screen",
+            Self::Subtract => "Subtract",
+            Self::Darken => "Darken",
+            Self::Lighten => "Lighten",
+            Self::Overlay => "Overlay",
         };
         f.write_str(s)
     }
