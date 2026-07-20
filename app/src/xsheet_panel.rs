@@ -119,18 +119,29 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         if drawings.is_empty() {
             ui.label(egui::RichText::new("(none yet — just draw)").weak());
         }
+        // Defensive: if the drawing under rename vanished (undo past its
+        // creation, removal from another pane), drop the buffer — otherwise
+        // a redo reviving the SAME id would reopen a stale editor.
+        if let Some((rid, _)) = &state.drawing_rename
+            && !drawings.iter().any(|(id, _)| id == rid)
+        {
+            state.drawing_rename = None;
+        }
         for (id, name) in drawings {
             // Double-click = rename (same idiom as the cel-layer strip);
-            // the commit is one undoable RenameDrawing.
+            // the commit is one undoable RenameDrawing. Escape CANCELS
+            // (egui surrenders focus on Escape, so bare lost_focus would
+            // commit the aborted text).
             let renaming = matches!(&state.drawing_rename, Some((rid, _)) if *rid == id);
             if renaming {
                 let (_, mut buf) = state.drawing_rename.take().expect("checked above");
                 let resp = ui.add(
                     egui::TextEdit::singleline(&mut buf).desired_width(90.0),
                 );
+                let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 if resp.lost_focus() {
                     let trimmed = buf.trim();
-                    if !trimmed.is_empty() && trimmed != name {
+                    if !escaped && !trimmed.is_empty() && trimmed != name {
                         state.rename_drawing(id, trimmed);
                     }
                 } else {
@@ -672,6 +683,14 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
         .map(|(_, l)| (l.id, l.props.name.clone(), l.props.visible, l.props.opacity))
         .collect();
 
+    // Defensive: drop a rename buffer whose layer is gone (undo/redo can
+    // revive the same LayerId later and would reopen a stale editor).
+    if let Some((rid, _)) = &state.strip_rename
+        && !rows.iter().any(|(id, ..)| id == rid)
+    {
+        state.strip_rename = None;
+    }
+
     if rows.is_empty() {
         ui.label(
             egui::RichText::new("held/empty frame — a new cel gets color + line")
@@ -710,10 +729,13 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState) {
             if renaming {
                 let (_, mut buf) = state.strip_rename.take().expect("checked above");
                 let resp = ui.text_edit_singleline(&mut buf);
+                // Escape cancels (same fix as the drawing-library rename —
+                // bare lost_focus committed the aborted text).
+                let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 let done = resp.lost_focus();
                 if done {
                     let trimmed = buf.trim();
-                    if !trimmed.is_empty() && trimmed != name {
+                    if !escaped && !trimmed.is_empty() && trimmed != name {
                         state.layer_set_props(
                             *lid,
                             LayerProps {

@@ -157,3 +157,22 @@ fn parse_rejects_garbage() {
         "zero duration must be rejected"
     );
 }
+
+/// Foreign numerics must ERROR, never silently truncate into a
+/// wrong-but-plausible sheet (u64 duration 2^32+1 used to become 1; a
+/// 2^32 frame used to become frame 0 and KEPT).
+#[test]
+fn parse_rejects_out_of_range_numerics() {
+    let huge_duration = r#"{"timeTables":[{"name":"x","duration":4294967297,
+        "fields":[{"fieldId":0,"tracks":[]}]}]}"#;
+    assert!(xdts::parse(huge_duration).is_err());
+
+    let absurd_duration = r#"{"timeTables":[{"name":"x","duration":4000000000,
+        "fields":[{"fieldId":0,"tracks":[]}]}]}"#;
+    assert!(xdts::parse(absurd_duration).is_err(), "duration cap must hold");
+
+    let huge_frame = r#"{"timeTables":[{"name":"x","duration":24,
+        "fields":[{"fieldId":0,"tracks":[{"trackNo":0,"frames":[
+            {"frame":4294967296,"data":[{"id":0,"values":["1"]}]}]}]}]}]}"#;
+    assert!(xdts::parse(huge_frame).is_err());
+}

@@ -25,6 +25,10 @@ pub const XDTS_SIGNATURE: &str = "exchangeDigitalTimeSheet Save Data";
 const NULL_CELL: &str = "SYMBOL_NULL_CELL";
 /// The version OpenToonz writes (Ver_2018_11_29).
 const VERSION: i64 = 5;
+/// Sanity cap on an imported sheet's duration (~69 min at 24fps) — a cut is
+/// seconds long; anything near this is a corrupt or hostile file, and the
+/// number flows straight into cut creation and per-frame UI loops.
+const MAX_DURATION: u64 = 100_000;
 
 /// One imported track: keys as (frame, Some(cell-number) | None=empty).
 pub struct XdtsColumn {
@@ -128,9 +132,15 @@ pub fn parse(text: &str) -> Result<XdtsSheet, String> {
         .and_then(|a| a.first())
         .ok_or("xdts: no timeTables")?;
     let name = get(table, "name")?.as_str().unwrap_or("XDTS").to_string();
-    let duration = get(table, "duration")?
+    // Strict numerics: foreign/hostile values must ERROR, never silently
+    // truncate into a wrong-but-plausible sheet.
+    let duration_raw = get(table, "duration")?
         .as_u64()
-        .ok_or("xdts: bad duration")? as u32;
+        .ok_or("xdts: bad duration")?;
+    if duration_raw == 0 || duration_raw > MAX_DURATION {
+        return Err(format!("xdts: duration {duration_raw} out of range (1..={MAX_DURATION})"));
+    }
+    let duration = duration_raw as u32;
 
     // Track names from the CELL header, when present.
     let header_names: Vec<String> = table
@@ -170,10 +180,12 @@ pub fn parse(text: &str) -> Result<XdtsSheet, String> {
             .and_then(|f| f.as_array())
             .unwrap_or(&Vec::new())
         {
-            let frame = frame_item
+            let frame_raw = frame_item
                 .get("frame")
                 .and_then(|f| f.as_u64())
-                .ok_or("xdts: frame item without 'frame'")? as u32;
+                .ok_or("xdts: frame item without 'frame'")?;
+            let frame = u32::try_from(frame_raw)
+                .map_err(|_| format!("xdts: frame {frame_raw} out of range"))?;
             // First data item's first value is the cell; tick symbols and
             // extra data items are annotations we don't model.
             let value = frame_item
@@ -198,9 +210,6 @@ pub fn parse(text: &str) -> Result<XdtsSheet, String> {
             .cloned()
             .unwrap_or_else(|| format!("T{}", track_no + 1));
         columns.push(XdtsColumn { name, keys });
-    }
-    if duration == 0 {
-        return Err("xdts: zero duration".into());
     }
     Ok(XdtsSheet {
         name,
