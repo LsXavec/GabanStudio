@@ -7,6 +7,7 @@ mod canvas;
 mod config;
 mod doc;
 mod export;
+mod floatwin;
 mod graphcomp;
 mod kpp;
 mod newproject;
@@ -580,6 +581,8 @@ struct Editor {
     /// menu — None = "whole cut" (recomputed fresh from the current cut's
     /// length every time the menu renders, so it's never stale).
     export_range: Option<(u32, u32)>,
+    /// Phase 5 step 1: the floating OS viewer window (deferred viewport).
+    float_viewer: floatwin::FloatViewer,
     /// Scratch-audio output (C4) — None until first play (or unavailable).
     audio_out: Option<AudioOut>,
     /// Device open was attempted (never retry a missing device every frame).
@@ -784,6 +787,7 @@ impl Editor {
             viewers: Default::default(),
             export_job: None,
             export_range: None,
+            float_viewer: floatwin::FloatViewer::new(),
             audio_out: None,
             audio_tried: false,
             audio_playing: false,
@@ -812,6 +816,7 @@ impl Editor {
             viewers: Default::default(),
             export_job: None,
             export_range: None,
+            float_viewer: floatwin::FloatViewer::new(),
             audio_out: None,
             audio_tried: false,
             audio_playing: false,
@@ -1611,6 +1616,21 @@ impl Editor {
                             .push_to_focused_leaf(Pane::Viewer(id));
                         ui.close();
                     }
+                    ui.separator();
+                    // Phase 5 step 1: the viewer as a REAL OS window — drag
+                    // it onto the second monitor / pen display.
+                    let mut floating = self.float_viewer.is_open();
+                    if ui
+                        .checkbox(&mut floating, "viewer in an OS window")
+                        .on_hover_text(
+                            "open the composite viewer as a separate real window \
+                             (drag it to another monitor)",
+                        )
+                        .changed()
+                    {
+                        self.float_viewer.set_open(floating);
+                        ui.close();
+                    }
                 });
                 // Scene/cut navigation (C2): the model always supported
                 // more than one, there was just no way to reach them.
@@ -1788,8 +1808,10 @@ impl Editor {
         let viewers_open = visible.iter().any(|t| matches!(t, Pane::Viewer(_)));
         let composite_needed =
             self.canvas.composite_view && visible.contains(&Pane::Canvas);
+        // The floating OS viewer is a consumer too (it may be the ONLY one).
+        let float_open = self.float_viewer.is_open();
         let mut graph = viewer::GraphView::Off;
-        if viewers_open || composite_needed {
+        if viewers_open || composite_needed || float_open {
             graph = if self.state.cut().graph.output.is_none() {
                 viewer::GraphView::NoOutput
             } else if let (Some(g), Some(p)) = (&mut self.graph, &mut self.paint) {
@@ -1812,6 +1834,39 @@ impl Editor {
             } else {
                 viewer::GraphView::NoGpu
             };
+        }
+
+        // Feed + drive the floating OS viewer window. The texture id stays
+        // the same across frames (the compositor reuses its out texture),
+        // so the float must be repainted whenever content may have moved —
+        // the main context repaints on any activity, and we forward that.
+        if float_open {
+            {
+                let mut sh = self.float_viewer.shared.write();
+                sh.paper = egui::vec2(
+                    self.state.engine.project.width as f32,
+                    self.state.engine.project.height as f32,
+                );
+                match graph {
+                    viewer::GraphView::Ready(id) => sh.tex = Some(id),
+                    viewer::GraphView::NoOutput | viewer::GraphView::Off => {
+                        sh.tex = None;
+                        sh.hint =
+                            "no graph output — wire an Output node in the Node Graph pane".into();
+                    }
+                    viewer::GraphView::EvalFailed => {
+                        sh.tex = None;
+                        sh.hint = "the graph failed to evaluate — check the Node Graph pane".into();
+                    }
+                    viewer::GraphView::NoGpu => {
+                        sh.tex = None;
+                        sh.hint = "GPU unavailable — the viewer needs wgpu".into();
+                    }
+                }
+            }
+            self.float_viewer.show(ui.ctx());
+            ui.ctx()
+                .request_repaint_of(floatwin::FloatViewer::viewport_id());
         }
 
         let mut tabs = EditorTabs {
