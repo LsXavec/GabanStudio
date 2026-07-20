@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use crate::error::{EngineError, Result};
-use crate::ids::{ColumnId, ImageId, NodeId};
+use crate::ids::{ColumnId, ImageId, NodeId, ParamId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
@@ -29,6 +29,22 @@ impl std::fmt::Display for BlendMode {
     }
 }
 
+/// Which X-sheet parameter column (if any) drives each Transform param.
+/// `None` = the node's static value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct TransformBinds {
+    pub tx: Option<ParamId>,
+    pub ty: Option<ParamId>,
+    pub scale: Option<ParamId>,
+    pub rotate: Option<ParamId>,
+}
+
+impl TransformBinds {
+    pub fn references(&self, param: ParamId) -> bool {
+        [self.tx, self.ty, self.scale, self.rotate].contains(&Some(param))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NodeKind {
     /// Reads the cut's X-sheet: resolves `column` at the evaluated frame.
@@ -38,11 +54,16 @@ pub enum NodeKind {
     Solid { rgba: [u8; 4] },
     /// One of the cut's imported image assets (BG plate, reference).
     ImageSource { image: ImageId },
-    /// Geometric transform of its single input.
+    /// Geometric transform of its single input. Each param uses its bound
+    /// X-sheet parameter column when set (and resolvable at the frame),
+    /// falling back to the static value here — the C1 camera model.
     Transform {
         translate: (f32, f32),
         scale: f32,
         rotate_deg: f32,
+        /// Added post-v6; older stored nodes deserialize as unbound.
+        #[serde(default)]
+        binds: TransformBinds,
     },
     /// Composites input 1 over input 0.
     Blend { mode: BlendMode },
@@ -229,6 +250,18 @@ impl Graph {
         self.nodes
             .values()
             .filter(|n| matches!(n.kind, NodeKind::DrawingSource { column: c } if c == column))
+            .map(|n| n.id)
+            .collect()
+    }
+
+    /// All Transform nodes with any param bound to the given parameter
+    /// column (invalidation roots when a param key changes).
+    pub fn sources_of_param(&self, param: ParamId) -> Vec<NodeId> {
+        self.nodes
+            .values()
+            .filter(
+                |n| matches!(&n.kind, NodeKind::Transform { binds, .. } if binds.references(param)),
+            )
             .map(|n| n.id)
             .collect()
     }

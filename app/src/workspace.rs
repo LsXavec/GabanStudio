@@ -88,12 +88,25 @@ impl Stage {
     pub const ALL: &'static [Stage] =
         &[Stage::Layout, Stage::Drawing, Stage::Finishing, Stage::Edit];
 
+    /// Button label: the anime-pipeline term (romaji) + English, so the
+    /// rooms read instantly for both audiences. ("Layout" is already the
+    /// industry loanword in Japanese — レイアウト — so it stands alone.)
     pub fn name(self) -> &'static str {
         match self {
             Stage::Layout => "layout",
-            Stage::Drawing => "drawing",
-            Stage::Finishing => "finishing",
-            Stage::Edit => "edit",
+            Stage::Drawing => "genga (drawing)",
+            Stage::Finishing => "shiage (paint)",
+            Stage::Edit => "henshū (edit)",
+        }
+    }
+
+    /// Hover text: which real pipeline stages this room merges.
+    pub fn describes(self) -> &'static str {
+        match self {
+            Stage::Layout => "ekonte + layout — storyboard and framing against reference",
+            Stage::Drawing => "genga + dōga + sakkan — keys, inbetweens, supervision",
+            Stage::Finishing => "shiage + satsuei — ink & paint with the composite live beside you",
+            Stage::Edit => "henshū — timing and review; the sheet is the master",
         }
     }
 

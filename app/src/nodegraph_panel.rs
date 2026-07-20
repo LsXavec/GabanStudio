@@ -299,6 +299,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                     translate: (0.0, 0.0),
                     scale: 1.0,
                     rotate_deg: 0.0,
+                    binds: Default::default(),
                 },
                 world,
             );
@@ -368,15 +369,26 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 translate,
                 scale,
                 rotate_deg,
+                binds,
             } => {
+                // Static values edit only while UNBOUND — a bound param is
+                // driven by its X-sheet column (shown disabled, not hidden:
+                // UI-STABILITY law).
                 changed |= ui
-                    .add(egui::DragValue::new(&mut translate.0).prefix("x "))
+                    .add_enabled(
+                        binds.tx.is_none(),
+                        egui::DragValue::new(&mut translate.0).prefix("x "),
+                    )
                     .changed();
                 changed |= ui
-                    .add(egui::DragValue::new(&mut translate.1).prefix("y "))
+                    .add_enabled(
+                        binds.ty.is_none(),
+                        egui::DragValue::new(&mut translate.1).prefix("y "),
+                    )
                     .changed();
                 changed |= ui
-                    .add(
+                    .add_enabled(
+                        binds.scale.is_none(),
                         egui::DragValue::new(scale)
                             .range(0.01..=20.0)
                             .speed(0.01)
@@ -384,8 +396,68 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                     )
                     .changed();
                 changed |= ui
-                    .add(egui::DragValue::new(rotate_deg).suffix("°"))
+                    .add_enabled(
+                        binds.rotate.is_none(),
+                        egui::DragValue::new(rotate_deg).suffix("°"),
+                    )
                     .changed();
+                // Bind each param to an X-sheet parameter column (the C1
+                // camera model): "static" unbinds; "+ new" creates a fresh
+                // column and binds it in one click.
+                let params: Vec<(anim_core::ids::ParamId, String)> = state
+                    .cut()
+                    .xsheet
+                    .params
+                    .iter()
+                    .map(|p| (p.id, p.name.clone()))
+                    .collect();
+                ui.menu_button("binds ▾", |ui| {
+                    for (label, slot, fresh) in [
+                        ("x", &mut binds.tx, "cam.x"),
+                        ("y", &mut binds.ty, "cam.y"),
+                        ("scale", &mut binds.scale, "cam.scale"),
+                        ("rotate", &mut binds.rotate, "cam.rot"),
+                    ] {
+                        ui.menu_button(
+                            match slot
+                                .and_then(|id| params.iter().find(|(pid, _)| *pid == id))
+                            {
+                                Some((_, name)) => format!("{label}: {name}"),
+                                None => format!("{label}: static"),
+                            },
+                            |ui| {
+                                if ui.selectable_label(slot.is_none(), "static").clicked() {
+                                    *slot = None;
+                                    changed = true;
+                                    ui.close();
+                                }
+                                for (pid, pname) in &params {
+                                    if ui
+                                        .selectable_label(*slot == Some(*pid), pname)
+                                        .clicked()
+                                    {
+                                        *slot = Some(*pid);
+                                        changed = true;
+                                        ui.close();
+                                    }
+                                }
+                                if ui
+                                    .button(format!("+ new column '{fresh}'"))
+                                    .on_hover_text(
+                                        "add a parameter column to the X-sheet and bind it",
+                                    )
+                                    .clicked()
+                                {
+                                    if let Some(pid) = state.add_param_column(fresh) {
+                                        *slot = Some(pid);
+                                        changed = true;
+                                    }
+                                    ui.close();
+                                }
+                            },
+                        );
+                    }
+                });
             }
             NodeKind::ImageSource { image } => {
                 match state.cut().image(*image) {

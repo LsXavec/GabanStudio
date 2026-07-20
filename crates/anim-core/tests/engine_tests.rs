@@ -19,6 +19,7 @@ struct Fixture {
     col: ColumnId,
     d_a: DrawingId,
     d_b: DrawingId,
+    #[allow(dead_code)] // part of the documented fixture topology
     n_src: NodeId,
     n_xform: NodeId,
     n_solid: NodeId,
@@ -85,6 +86,7 @@ fn fixture() -> Fixture {
                         translate: (2.0, 0.0),
                         scale: 1.0,
                         rotate_deg: 0.0,
+                        binds: Default::default(),
                     },
                 },
                 Command::AddNode {
@@ -231,7 +233,7 @@ fn eval_produces_exact_recipes_and_respects_timing() {
     assert_eq!(
         v0.recipe(),
         format!(
-            "out(blend(Normal, xform(t=(2.000,0.000),s=1.000,r=0.000, drawing({}:'luffy_a'#{:016x})), solid(#102030ff)))",
+            "out(blend(Normal, xform(t=(2,0),s=1,r=0, drawing({}:'luffy_a'#{:016x})), solid(#102030ff)))",
             f.d_a, hash_a
         )
     );
@@ -275,6 +277,7 @@ fn eval_caches_and_invalidates_only_downstream() {
                     translate: (5.0, 1.0),
                     scale: 2.0,
                     rotate_deg: 15.0,
+                    binds: Default::default(),
                 },
             }],
         )

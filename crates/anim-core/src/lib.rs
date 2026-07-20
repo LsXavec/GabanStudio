@@ -119,6 +119,19 @@ impl Engine {
         Ok(id)
     }
 
+    /// Add a PARAMETER column (camera etc.). Scaffolding op (not undoable —
+    /// matches `add_column`); keys on it are undoable via SetParamKey.
+    pub fn add_param_column(&mut self, at: CutRef, name: impl Into<String>) -> Result<ParamId> {
+        let id = ParamId(self.project.alloc_id());
+        let name = name.into();
+        let cut = self
+            .project
+            .cut_mut(at.scene, at.cut)
+            .ok_or(EngineError::UnknownCut(at.cut))?;
+        cut.xsheet.params.push(crate::xsheet::ParamColumn::new(id, name));
+        Ok(id)
+    }
+
     /// Remove a column and its exposures. Scaffolding op (not undoable — matches
     /// `add_column`). Drawings themselves stay in the cut library.
     pub fn remove_column(&mut self, at: CutRef, column: ColumnId) {

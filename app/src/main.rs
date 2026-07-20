@@ -1330,7 +1330,7 @@ impl Editor {
                 for st in Stage::ALL {
                     if ui
                         .selectable_label(self.stage == Some(*st), st.name())
-                        .on_hover_text("switch room (same document, different lens)")
+                        .on_hover_text(st.describes())
                         .clicked()
                     {
                         self.dock = st.dock();

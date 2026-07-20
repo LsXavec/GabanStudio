@@ -372,6 +372,35 @@ impl Cut {
     pub fn image(&self, id: ImageId) -> Option<&ImageAsset> {
         self.images.iter().find(|i| i.id == id)
     }
+
+    /// A parameter column's value at `frame` (None = column missing or has
+    /// no keys — the caller falls back to its static value).
+    pub fn param_value(&self, id: ParamId, frame: u32) -> Option<f32> {
+        self.xsheet.param(id).and_then(|p| p.resolve(frame))
+    }
+
+    /// A Transform node's EFFECTIVE params at `frame`: each component takes
+    /// its bound parameter column's value when bound and resolvable, else
+    /// the static value. The single source of truth for all three render
+    /// paths (evaluator hash, CPU export, GPU compositor) — they must agree
+    /// or the composite view would lie about the export.
+    pub fn transform_at(
+        &self,
+        translate: (f32, f32),
+        scale: f32,
+        rotate_deg: f32,
+        binds: &crate::graph::TransformBinds,
+        frame: u32,
+    ) -> ((f32, f32), f32, f32) {
+        let get = |bind: Option<ParamId>, fallback: f32| {
+            bind.and_then(|id| self.param_value(id, frame)).unwrap_or(fallback)
+        };
+        (
+            (get(binds.tx, translate.0), get(binds.ty, translate.1)),
+            get(binds.scale, scale),
+            get(binds.rotate, rotate_deg),
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

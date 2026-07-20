@@ -237,6 +237,7 @@ fn transform_integer_translate_is_exact() {
         translate: (5.0, 3.0),
         scale: 1.0,
         rotate_deg: 0.0,
+        binds: Default::default(),
     });
     let out = r.node(NodeKind::Output);
     r.connect(src, xf, 0);
@@ -257,6 +258,7 @@ fn transform_identity_is_exact() {
         translate: (0.0, 0.0),
         scale: 1.0,
         rotate_deg: 0.0,
+        binds: Default::default(),
     });
     let out = r.node(NodeKind::Output);
     r.connect(src, xf, 0);
@@ -286,6 +288,7 @@ fn transform_rotate90_pins_centre_origin_clockwise() {
         translate: (0.0, 0.0),
         scale: 1.0,
         rotate_deg: 90.0,
+        binds: Default::default(),
     });
     let out = r.node(NodeKind::Output);
     r.connect(src, xf, 0);
@@ -311,6 +314,7 @@ fn transform_scale_about_centre_and_degenerate_zero() {
         translate: (0.0, 0.0),
         scale: 3.0,
         rotate_deg: 0.0,
+        binds: Default::default(),
     });
     let out = r.node(NodeKind::Output);
     r.connect(src, xf, 0);
@@ -330,6 +334,7 @@ fn transform_scale_about_centre_and_degenerate_zero() {
         translate: (0.0, 0.0),
         scale: 0.0,
         rotate_deg: 0.0,
+        binds: Default::default(),
     });
     let out2 = r2.node(NodeKind::Output);
     r2.connect(src2, xf2, 0);
@@ -352,6 +357,7 @@ fn transform_fractional_translate_pins_bilinear_edge_law() {
         translate: (0.5, 0.0),
         scale: 1.0,
         rotate_deg: 0.0,
+        binds: Default::default(),
     });
     let out = r.node(NodeKind::Output);
     r.connect(src, xf, 0);

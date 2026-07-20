@@ -494,13 +494,17 @@ impl GraphCompositor {
                 translate,
                 scale,
                 rotate_deg,
+                binds,
             } => {
                 let child = self.render_input(cut, &inputs, 0, frame, paint, visiting);
                 let slot = self.acquire_cleared();
-                if scale.abs() >= 1e-6 {
+                // Same resolved params as the evaluator hash and the CPU
+                // reference — the three paths must agree.
+                let (t, s, r) = cut.transform_at(*translate, *scale, *rotate_deg, binds, frame);
+                if s.abs() >= 1e-6 {
                     let src = self.pool[child].view.clone();
                     let dst = self.pool[slot].view.clone();
-                    self.draw_quad(&src, &dst, *translate, *scale, *rotate_deg);
+                    self.draw_quad(&src, &dst, t, s, r);
                 }
                 self.pool[child].free = true;
                 slot

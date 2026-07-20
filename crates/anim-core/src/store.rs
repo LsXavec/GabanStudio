@@ -14,9 +14,9 @@ use crate::graph::{Graph, Node, NodeKind};
 use crate::ids::*;
 use crate::model::{CelLayer, Cut, Drawing, LayerProps, Project, Scene};
 use crate::raster::{RasterLayer, TileData};
-use crate::xsheet::{Column, Exposure, XSheet};
+use crate::xsheet::{Column, Exposure, ParamColumn, ParamInterp, ParamKey, XSheet};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -56,6 +56,13 @@ CREATE TABLE IF NOT EXISTS cel_tiles(
 CREATE TABLE IF NOT EXISTS cut_images(
     id INTEGER PRIMARY KEY, cut_id INTEGER NOT NULL, ord INTEGER NOT NULL,
     name TEXT NOT NULL, bytes BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS param_columns(
+    id INTEGER PRIMARY KEY, cut_id INTEGER NOT NULL, name TEXT NOT NULL,
+    ord INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS param_keys(
+    column_id INTEGER NOT NULL, frame INTEGER NOT NULL,
+    value REAL NOT NULL, interp TEXT NOT NULL,
+    PRIMARY KEY(column_id, frame));
 ";
 // `raster_layers`/`tiles` are the LEGACY (schema <= 4) single-raster tables.
 // They stay in the schema + the DELETE batch (uniform create+purge pattern, and
@@ -75,7 +82,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
          DELETE FROM nodes; DELETE FROM links;
          DELETE FROM raster_layers; DELETE FROM tiles;
          DELETE FROM cel_layers; DELETE FROM cel_tiles;
-         DELETE FROM cut_images;",
+         DELETE FROM cut_images;
+         DELETE FROM param_columns; DELETE FROM param_keys;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -111,6 +119,12 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
             tx.prepare("INSERT INTO columns(id, cut_id, name, ord) VALUES (?1, ?2, ?3, ?4)")?;
         let mut ins_cell = tx.prepare(
             "INSERT INTO cells(column_id, frame, exposure, drawing_id) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        let mut ins_param_col = tx.prepare(
+            "INSERT INTO param_columns(id, cut_id, name, ord) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        let mut ins_param_key = tx.prepare(
+            "INSERT INTO param_keys(column_id, frame, value, interp) VALUES (?1, ?2, ?3, ?4)",
         )?;
         let mut ins_node =
             tx.prepare("INSERT INTO nodes(id, cut_id, kind) VALUES (?1, ?2, ?3)")?;
@@ -186,6 +200,27 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                             Exposure::Empty => ("empty", None),
                         };
                         ins_cell.execute((col.id.0 as i64, frame as i64, kind, drawing_id))?;
+                    }
+                }
+                for (p_ord, pcol) in cut.xsheet.params.iter().enumerate() {
+                    ins_param_col.execute((
+                        pcol.id.0 as i64,
+                        cut.id.0 as i64,
+                        &pcol.name,
+                        p_ord as i64,
+                    ))?;
+                    for (frame, key) in pcol.keys() {
+                        let interp = match key.interp {
+                            ParamInterp::Hold => "hold",
+                            ParamInterp::Linear => "linear",
+                            ParamInterp::Ease => "ease",
+                        };
+                        ins_param_key.execute((
+                            pcol.id.0 as i64,
+                            frame as i64,
+                            key.value as f64,
+                            interp,
+                        ))?;
                     }
                 }
                 for node in cut.graph.nodes() {
@@ -463,6 +498,45 @@ pub fn load(path: &Path) -> Result<Project> {
                     column.set_key(frame as u32, exposure);
                 }
                 cut.xsheet.columns.push(column);
+            }
+
+            // Parameter columns: table absent in schema <= 6 files never
+            // reaches here (CREATE IF NOT EXISTS ran on save only) — guard
+            // by probing, tolerating the missing table as "no params".
+            if version >= 7 {
+                let mut stmt = conn
+                    .prepare("SELECT id, name FROM param_columns WHERE cut_id = ?1 ORDER BY ord")?;
+                let pcols: Vec<(i64, String)> = stmt
+                    .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<std::result::Result<_, _>>()?;
+                for (pcol_id, pcol_name) in pcols {
+                    let mut pcol = ParamColumn::new(ParamId(pcol_id as u64), pcol_name);
+                    let mut stmt = conn.prepare(
+                        "SELECT frame, value, interp FROM param_keys WHERE column_id = ?1",
+                    )?;
+                    let keys: Vec<(i64, f64, String)> = stmt
+                        .query_map((pcol_id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                        .collect::<std::result::Result<_, _>>()?;
+                    for (frame, value, interp) in keys {
+                        // Files are a trust boundary: a non-finite value
+                        // would violate the command-layer invariant, so it
+                        // loads as 0 (same law as sane_opacity).
+                        let value = value as f32;
+                        let value = if value.is_finite() { value } else { 0.0 };
+                        let interp = match interp.as_str() {
+                            "hold" => ParamInterp::Hold,
+                            "linear" => ParamInterp::Linear,
+                            "ease" => ParamInterp::Ease,
+                            other => {
+                                return Err(EngineError::Corrupt(format!(
+                                    "unknown param interp '{other}'"
+                                )));
+                            }
+                        };
+                        pcol.set_key(frame as u32, ParamKey { value, interp });
+                    }
+                    cut.xsheet.params.push(pcol);
+                }
             }
 
             let mut stmt = conn.prepare("SELECT id, kind FROM nodes WHERE cut_id = ?1")?;

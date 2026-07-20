@@ -79,6 +79,15 @@ pub struct AppState {
     pub selected_node: Option<NodeId>,
     /// Node-graph pane: view pan.
     pub graph_pan: (f32, f32),
+    /// X-sheet pane: the selected PARAMETER column (its keying strip shows
+    /// under the toolbar) — session-only view state.
+    pub param_sel: Option<anim_core::ids::ParamId>,
+    /// X-sheet keying strip: live value buffer + which (column, frame) it
+    /// was seeded for (reseeded whenever either changes).
+    pub param_buf: f32,
+    pub param_buf_at: Option<(anim_core::ids::ParamId, u32)>,
+    /// X-sheet keying strip: sticky interpolation choice for new keys.
+    pub param_interp: anim_core::xsheet::ParamInterp,
 }
 
 impl AppState {
@@ -126,6 +135,10 @@ impl AppState {
             pending_wire: None,
             selected_node: None,
             graph_pan: (0.0, 0.0),
+            param_sel: None,
+            param_buf: 0.0,
+            param_buf_at: None,
+            param_interp: anim_core::xsheet::ParamInterp::Ease,
         }
     }
 
@@ -178,6 +191,10 @@ impl AppState {
             pending_wire: None,
             selected_node: None,
             graph_pan: (0.0, 0.0),
+            param_sel: None,
+            param_buf: 0.0,
+            param_buf_at: None,
+            param_interp: anim_core::xsheet::ParamInterp::Ease,
         })
     }
 
@@ -1046,6 +1063,45 @@ impl AppState {
         }
     }
 
+    /// Add a PARAMETER column (camera etc.) — scaffolding, like add_column;
+    /// keys on it are undoable. Returns the new id for immediate binding.
+    pub fn add_param_column(&mut self, name: &str) -> Option<anim_core::ids::ParamId> {
+        let at = self.at();
+        match self.engine.add_param_column(at, name) {
+            Ok(id) => {
+                self.status = format!("param column '{name}' added");
+                Some(id)
+            }
+            Err(e) => {
+                self.status = format!("error: {e}");
+                None
+            }
+        }
+    }
+
+    /// Set/clear a key on a parameter column at the current frame (one
+    /// undo step).
+    pub fn set_param_key(
+        &mut self,
+        column: anim_core::ids::ParamId,
+        key: Option<anim_core::xsheet::ParamKey>,
+    ) {
+        let at = self.at();
+        let frame = self.view.frame;
+        let label = if key.is_some() { "set param key" } else { "clear param key" };
+        if let Err(e) = self.engine.apply(
+            label,
+            vec![Command::SetParamKey {
+                at,
+                column,
+                frame,
+                key,
+            }],
+        ) {
+            self.status = format!("error: {e}");
+        }
+    }
+
     /// Remove the selected (active) column. Keeps at least one column.
     pub fn remove_active_column(&mut self) {
         if self.cut().xsheet.columns.len() <= 1 {
@@ -1090,6 +1146,10 @@ impl AppState {
                 self.view.selected_drawing = None;
             }
         self.view.frame = self.view.frame.min(self.frame_count() - 1);
+        // The param keying strip's value buffer mirrors engine state that
+        // undo/redo may have just moved — force a reseed so the strip never
+        // shows (and silently re-keys) an undone value.
+        self.param_buf_at = None;
     }
 
     fn report(&mut self, r: anim_core::error::Result<()>, ok_msg: &str) {

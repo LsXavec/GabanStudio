@@ -14,6 +14,8 @@ use crate::doc::AppState;
 const ROW_H: f32 = 18.0;
 const FRAME_NUM_W: f32 = 34.0;
 const COL_W: f32 = 86.0;
+/// Parameter (camera) columns are numeric — narrower than drawing columns.
+const PARAM_COL_W: f32 = 58.0;
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // Claim the full panel width EVERY frame. egui 0.35 panels are
@@ -70,6 +72,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         }
     });
 
+    param_key_strip(ui, state);
+
     // Drawing library.
     ui.separator();
     ui.label("drawings:");
@@ -96,9 +100,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
 
     // ---- The sheet itself -------------------------------------------------
     let n_cols = state.cut().xsheet.columns.len();
-    let sheet_w = FRAME_NUM_W + n_cols as f32 * COL_W;
+    let n_params = state.cut().xsheet.params.len();
+    let sheet_w = FRAME_NUM_W + n_cols as f32 * COL_W + n_params as f32 * PARAM_COL_W;
 
-    // Header row.
+    // Header row. Param-column headers are clickable: selecting one opens
+    // its keying strip above the sheet.
+    let mut clicked_param: Option<anim_core::ids::ParamId> = None;
     ui.horizontal(|ui| {
         ui.allocate_exact_size(vec2(FRAME_NUM_W, ROW_H), Sense::hover());
         for col in &state.cut().xsheet.columns {
@@ -116,7 +123,30 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 },
             );
         }
+        for pcol in &state.cut().xsheet.params {
+            let (rect, resp) = ui.allocate_exact_size(vec2(PARAM_COL_W, ROW_H), Sense::click());
+            if resp.clicked() {
+                clicked_param = Some(pcol.id);
+            }
+            let is_sel = state.param_sel == Some(pcol.id);
+            ui.painter().text(
+                rect.left_center(),
+                egui::Align2::LEFT_CENTER,
+                &pcol.name,
+                egui::FontId::proportional(12.0),
+                if is_sel {
+                    Color32::from_rgb(190, 160, 255)
+                } else {
+                    Color32::from_gray(160)
+                },
+            );
+        }
     });
+    if let Some(pid) = clicked_param {
+        // Toggle: clicking the selected header closes its strip.
+        state.param_sel = if state.param_sel == Some(pid) { None } else { Some(pid) };
+        state.param_buf_at = None;
+    }
 
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
@@ -201,6 +231,37 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                         );
                     }
                 }
+
+                // Parameter cells: ◆ value on keys (gold, like drawing
+                // keys), the interpolated value dimmed on in-between frames.
+                let params_x0 = row_rect.left() + FRAME_NUM_W + n_cols as f32 * COL_W;
+                for (pi, pcol) in cut.xsheet.params.iter().enumerate() {
+                    let x = params_x0 + pi as f32 * PARAM_COL_W;
+                    let cell =
+                        Rect::from_min_size(pos2(x, row_rect.top()), vec2(PARAM_COL_W, ROW_H));
+                    let (text, color) = match pcol.key_at(frame) {
+                        Some(k) => (
+                            format!("◆ {:.5}", k.value)
+                                .trim_end_matches('0')
+                                .trim_end_matches('.')
+                                .to_string(),
+                            Color32::from_rgb(230, 210, 120),
+                        ),
+                        None => match pcol.resolve(frame) {
+                            Some(v) => (format!("{v:.1}"), Color32::from_gray(95)),
+                            None => (String::new(), Color32::TRANSPARENT),
+                        },
+                    };
+                    if !text.is_empty() {
+                        painter.text(
+                            pos2(cell.left() + 4.0, cell.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            text,
+                            egui::FontId::monospace(10.0),
+                            color,
+                        );
+                    }
+                }
             }
 
             // ---- Continuation-frame-line handles ---------------------------
@@ -215,6 +276,81 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 state.goto(f);
             }
         });
+}
+
+/// The parameter keying strip (C1 camera model): shown when a param-column
+/// header is selected. Workflow: click a frame row, type the value, "key" —
+/// interpolation (hold/linear/ease) applies from that key to the next.
+fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
+    use anim_core::xsheet::{ParamInterp, ParamKey};
+
+    let Some(pid) = state.param_sel else { return };
+    let Some(pcol) = state.cut().xsheet.param(pid) else {
+        state.param_sel = None;
+        return;
+    };
+    let name = pcol.name.clone();
+    let frame = state.view.frame;
+    let existing = pcol.key_at(frame);
+    let resolved = pcol.resolve(frame);
+
+    // Reseed the value buffer whenever the (column, frame) target moves:
+    // an existing key's value, else the interpolated value here, else 0.
+    if state.param_buf_at != Some((pid, frame)) {
+        state.param_buf = existing.map(|k| k.value).or(resolved).unwrap_or(0.0);
+        if let Some(k) = existing {
+            state.param_interp = k.interp;
+        }
+        state.param_buf_at = Some((pid, frame));
+    }
+
+    // During playback the playhead (and with it this strip's target frame)
+    // moves every UI frame — an edit would land on whatever frame the
+    // playhead happened to reach. Disabled, not hidden (UI-STABILITY law).
+    let editable = !state.view.playing;
+    ui.horizontal(|ui| {
+        ui.label(
+            egui::RichText::new(format!("{name} @ {}", frame + 1))
+                .color(Color32::from_rgb(190, 160, 255)),
+        );
+        ui.add_enabled(editable, egui::DragValue::new(&mut state.param_buf).speed(0.5));
+        for (label, interp, hint) in [
+            ("H", ParamInterp::Hold, "hold: step to the next key"),
+            ("L", ParamInterp::Linear, "linear: straight line to the next key"),
+            ("E", ParamInterp::Ease, "ease: gentle start and stop (camera slide)"),
+        ] {
+            if ui
+                .add_enabled(
+                    editable,
+                    egui::Button::selectable(state.param_interp == interp, label),
+                )
+                .on_hover_text(hint)
+                .clicked()
+            {
+                state.param_interp = interp;
+            }
+        }
+        let key_label = if existing.is_some() { "set key" } else { "key" };
+        if ui
+            .add_enabled(editable, egui::Button::new(key_label))
+            .on_hover_text("one undo step")
+            .clicked()
+        {
+            let key = ParamKey {
+                value: state.param_buf,
+                interp: state.param_interp,
+            };
+            state.set_param_key(pid, Some(key));
+        }
+        if ui
+            .add_enabled(editable && existing.is_some(), egui::Button::new("clear"))
+            .on_hover_text("remove this key")
+            .clicked()
+        {
+            state.set_param_key(pid, None);
+            state.param_buf_at = None;
+        }
+    });
 }
 
 /// One drawing's exposure span and its optional early-end terminator.

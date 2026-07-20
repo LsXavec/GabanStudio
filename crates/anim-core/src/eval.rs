@@ -113,14 +113,23 @@ impl Evaluator {
                 translate,
                 scale,
                 rotate_deg,
+                binds,
             } => {
                 let child = input_value(0, self, visiting)?;
+                // Hash the RESOLVED effective params (bound X-sheet columns
+                // sampled at this frame): a camera move changes the value
+                // per frame; identical resolved params across frames still
+                // cache-hit. Plain `{}` float formatting is Rust's shortest
+                // EXACT round-trip representation — never quantize here
+                // ({:.3} made slow camera moves hash-collide across frames,
+                // freezing the GPU view while the CPU export advanced).
+                let (t, s, r) = cut.transform_at(*translate, *scale, *rotate_deg, binds, frame);
                 Value::image(format!(
-                    "xform(t=({:.3},{:.3}),s={:.3},r={:.3}, {})",
-                    translate.0,
-                    translate.1,
-                    scale,
-                    rotate_deg,
+                    "xform(t=({},{}),s={},r={}, {})",
+                    t.0,
+                    t.1,
+                    s,
+                    r,
                     child.recipe()
                 ))
             }

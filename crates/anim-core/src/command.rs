@@ -12,7 +12,7 @@ use crate::graph::{Node, NodeKind};
 use crate::ids::*;
 use crate::model::{CelLayer, Cut, Drawing, LayerProps, Project, Stroke};
 use crate::raster::TileDiff;
-use crate::xsheet::Exposure;
+use crate::xsheet::{Exposure, ParamKey};
 
 // Not `serde` — commands can carry `Arc<TileData>` (large pixel buffers), and
 // the edit history lives in memory, never persisted.
@@ -122,6 +122,14 @@ pub enum Command {
         frame: u32,
         key: Option<Exposure>,
     },
+    /// Set/clear a key on a PARAMETER column (camera etc.) — the numeric
+    /// sibling of SetCell, same exact-inverse shape.
+    SetParamKey {
+        at: CutRef,
+        column: ParamId,
+        frame: u32,
+        key: Option<ParamKey>,
+    },
     AddNode {
         at: CutRef,
         id: NodeId,
@@ -172,6 +180,7 @@ impl Command {
             | Command::AddStroke { at, .. }
             | Command::PopStroke { at, .. }
             | Command::SetCell { at, .. }
+            | Command::SetParamKey { at, .. }
             | Command::AddNode { at, .. }
             | Command::RemoveNode { at, .. }
             | Command::Connect { at, .. }
@@ -625,6 +634,46 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     key: prev,
                 }],
                 invalidation_roots: cut.graph.sources_of_column(*column),
+            })
+        }
+
+        Command::SetParamKey {
+            at,
+            column,
+            frame,
+            key,
+        } => {
+            // Values are part of the persisted format and the transform
+            // math: reject non-finite at the boundary (validate, don't
+            // clamp — same law as layer opacity) so NaN never reaches the
+            // interpolator or the GPU.
+            if let Some(k) = key
+                && !k.value.is_finite()
+            {
+                return Err(EngineError::InvalidCommand(format!(
+                    "param key value {} is not finite",
+                    k.value
+                )));
+            }
+            let cut = cut_mut(project, *at)?;
+            let col = cut
+                .xsheet
+                .param_mut(*column)
+                .ok_or_else(|| EngineError::InvalidCommand(format!(
+                    "unknown param column {column}"
+                )))?;
+            let prev = match key {
+                Some(k) => col.set_key(*frame, *k),
+                None => col.clear_key(*frame),
+            };
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetParamKey {
+                    at: *at,
+                    column: *column,
+                    frame: *frame,
+                    key: prev,
+                }],
+                invalidation_roots: cut.graph.sources_of_param(*column),
             })
         }
 

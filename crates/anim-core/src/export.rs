@@ -296,9 +296,11 @@ fn render_node(
             translate,
             scale,
             rotate_deg,
+            binds,
         } => {
             let child = input(0, visiting);
-            transform_image(&child, width, height, *translate, *scale, *rotate_deg)
+            let (t, s, r) = cut.transform_at(*translate, *scale, *rotate_deg, binds, frame);
+            transform_image(&child, width, height, t, s, r)
         }
         NodeKind::Blend { mode } => {
             let mut bottom = input(0, visiting);

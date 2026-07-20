@@ -33,3 +33,4 @@ id_type!(ColumnId);
 id_type!(NodeId);
 id_type!(LayerId);
 id_type!(ImageId);
+id_type!(ParamId);
