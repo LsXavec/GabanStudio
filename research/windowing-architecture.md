@@ -87,9 +87,22 @@ native tablet backend (RealTimeStylus) is bound to the MAIN window's HWND
 at startup, so pen input on the floating canvas window falls back to
 egui's own Touch-event path (still real pressure — the original,
 pre-native-backend M0 pipeline — just without the enhanced tilt data).
-Worth confirming on the rig whether the brush feel differs there; if it
-does, the fix is making the tablet thread multi-window-aware, not
-reaching for the heavier snapshot architecture.
+
+That disclosed trade turned out to hide an actual bug, caught on first
+rig test ("drawing doesn't seem to work in the popout canvas"): the
+native-tablet path's `native_active` latch is SESSION-WIDE and permanent
+(by design, on a single-window app, to stop Windows' redundant Touch/mouse
+duplicates of the same physical stroke from double-painting). Once it
+latches true from ordinary main-window use — which happens almost
+immediately — `handle_pen` unconditionally returns early through the
+native branch, even on a frame where `native_pen` is empty because the
+pen is now over the OTHER window. The Touch/mouse fallback meant to
+handle exactly that case never got a chance to run: net result, no
+drawing input reached the floating canvas at all. Fixed by deriving
+`native_available = ui.ctx().viewport_id() == egui::ViewportId::ROOT`
+inside `handle_pen` and gating the entire native-path block on it, so a
+non-root window always falls through to its own Touch/mouse events
+regardless of what the main window's latch is doing.
 
 ## Key risks
 - **Version lockstep:** egui/eframe/egui_dock must share the same egui minor; Phase 0 exists to surface this first.

@@ -2230,16 +2230,30 @@ impl CanvasView {
         let events = ui.input(|i| i.events.clone());
         let mut touch_seen = false;
 
+        // native_pen is collected ONCE per frame from the tablet thread,
+        // which is bound to the MAIN window's HWND (see main.rs's
+        // spawn_tablet_thread) — octotablet can never report samples for
+        // any OTHER viewport, and the same slice is (necessarily) handed to
+        // every window's canvas.ui() call this frame. Treating it as
+        // meaningful outside the root viewport would either silently do
+        // nothing (if the pen is elsewhere, native_pen is empty here too —
+        // harmless) or double-process the SAME physical samples against a
+        // second window's geometry (if the pen IS on the main window this
+        // frame — not harmless). So: native input only exists for ROOT.
+        let native_available = ui.ctx().viewport_id() == egui::ViewportId::ROOT;
+
         // HOVER TILT (any backend state): proximity samples carry live tilt so
         // the cursor needle + T° readout move before the stroke starts. Never
         // touches stroke state (the thread only emits Hover while the pen is
         // up, and the guard makes that a hard rule).
-        for s in native_pen {
-            if s.phase == PenPhase::Hover
-                && !self.touch_active
-                && let Some(t) = s.tilt
-            {
-                self.note_tilt(t);
+        if native_available {
+            for s in native_pen {
+                if s.phase == PenPhase::Hover
+                    && !self.touch_active
+                    && let Some(t) = s.tilt
+                {
+                    self.note_tilt(t);
+                }
             }
         }
 
@@ -2249,26 +2263,37 @@ impl CanvasView {
         // mouse events, so both fallbacks must go quiet or every stroke would
         // paint twice. Hover samples deliberately do NOT latch: they never
         // paint, so they must not silence the fallbacks by themselves.
-        if native_pen.iter().any(|s| s.phase != PenPhase::Hover) {
-            self.native_active = true;
-            self.seen_pen = true;
-        }
-        if self.native_active {
-            for s in native_pen {
-                match s.phase {
-                    PenPhase::Down => {
-                        self.stroke_start(s.pos, s.pressure, s.tilt, rect, to_paper, state);
-                    }
-                    PenPhase::Move => {
-                        if self.touch_active {
-                            self.process_move(s.pos, s.pressure, s.tilt, to_paper, scale);
-                        }
-                    }
-                    PenPhase::Up => self.stroke_end(state),
-                    PenPhase::Hover => {} // handled above
-                }
+        //
+        // `native_active` is a SESSION-WIDE latch (once true, stays true) —
+        // correct on the single window this app used to have, but wrong on
+        // a second (non-root) window that native input can never reach: the
+        // latch being true from earlier main-window strokes must NOT
+        // silence ITS Touch/mouse fallback too, or nothing would ever paint
+        // there. Gate the whole native branch on native_available so a
+        // floating canvas always falls through to its own Touch/mouse
+        // input, regardless of what the main window's pen has done before.
+        if native_available {
+            if native_pen.iter().any(|s| s.phase != PenPhase::Hover) {
+                self.native_active = true;
+                self.seen_pen = true;
             }
-            return;
+            if self.native_active {
+                for s in native_pen {
+                    match s.phase {
+                        PenPhase::Down => {
+                            self.stroke_start(s.pos, s.pressure, s.tilt, rect, to_paper, state);
+                        }
+                        PenPhase::Move => {
+                            if self.touch_active {
+                                self.process_move(s.pos, s.pressure, s.tilt, to_paper, scale);
+                            }
+                        }
+                        PenPhase::Up => self.stroke_end(state),
+                        PenPhase::Hover => {} // handled above
+                    }
+                }
+                return;
+            }
         }
 
         for event in &events {
