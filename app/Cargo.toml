@@ -20,3 +20,9 @@ raw-window-handle = "0.6"
 # Audio scratch-track playback (decoded samples come from anim-core; no
 # format decoders needed here — playback feature only).
 rodio = { version = "0.21", default-features = false, features = ["playback"] }
+
+[dev-dependencies]
+# WGSL shader-string validation in tests: cargo check can't see inside the
+# shader source constants, and a typo there is otherwise a STARTUP PANIC.
+# Same major as wgpu (they release in lockstep).
+naga = { version = "29", features = ["wgsl-in"] }

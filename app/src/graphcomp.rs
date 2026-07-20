@@ -770,3 +770,14 @@ impl GraphCompositor {
         self.queue.submit(Some(enc.finish()));
     }
 }
+
+#[cfg(test)]
+mod shader_tests {
+    // cargo check never parses the WGSL strings — without this, a shader
+    // typo is a startup panic on the rig instead of a red test.
+    #[test]
+    fn shaders_parse_as_valid_wgsl() {
+        naga::front::wgsl::parse_str(super::XFORM_SHADER).expect("XFORM_SHADER");
+        naga::front::wgsl::parse_str(super::BLEND_SHADER).expect("BLEND_SHADER");
+    }
+}

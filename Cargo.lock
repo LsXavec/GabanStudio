@@ -116,6 +116,7 @@ dependencies = [
  "bytemuck",
  "eframe",
  "egui_dock",
+ "naga",
  "octotablet",
  "png 0.17.16",
  "raw-window-handle",
