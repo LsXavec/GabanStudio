@@ -45,8 +45,51 @@ It's a **docking-first** shell (buy `egui_dock` for spatial layout) with the nod
 | **2 — Document + ViewContext split + link channels** | Extract cursor into ViewContext; add LinkContexts + per-panel Lens (per-axis Follow/Pin) + two-phase per-frame resolve + link-color chip UI. Default "Main" = today exactly. Ships: two canvases show different cuts/frames; a ganged pair scrubs together. (Highest-churn — done behind "Main" so it's non-regressing.) | L |
 | **3 — Workspaces (stage spine)** | Workspace struct + built-in default layouts for all 8 stages + top-bar switcher + per-stage tool restore + Save-as + schema-versioned persistence. Ships: Genga↔Composite re-lenses the same document with zero data change. | M |
 | **4 — Node graph as a panel** | Promote the spike's node editor (pan/zoom/wire-drag/bezier) into `PanelKind::NodeGraph` bound to the REAL Cut.graph via AddNode/Connect/… commands (inherits undo + eval-invalidation). Discard the spike's Vec-index model. Ships: wiring DrawingSource→…→Output updates a Viewer, undoable. | M |
-| **5 — Multi-window OS tear-out** | DetachedWindow + detach/re-dock over deferred viewports; each OS window hosts its own mini DockState. Document behind `Arc<RwLock>` + Vec<Command> intent channel. VALIDATE on the real XP-Pen 60Hz + high-refresh rig (Win11 mixed-DPI bugs). Ships: canvas floats onto the pen display as a real OS window with unified undo. | L |
+| **5 — Multi-window OS tear-out** | Step 1 (shipped 2026-07-20): read-only composite VIEWER as a real OS window (deferred viewport, `Arc<RwLock<Shared>>` content) — the hardware-risk probe, rig-tested clean on the XP-Pen + main-monitor rig (no mixed-DPI blur/misplacement observed). Step 2 (shipped 2026-07-20): the EDITABLE canvas as a real OS window — see the design-deviation note below; NOT the Arc<RwLock>+intent-channel model this row originally specified. Deferred/gated: a true detach/re-dock multi-DockState system, only if the immediate-viewport canvas proves insufficient on real use. | L (came in far smaller than estimated) |
 | **6 — Node-subnetwork groups (gated, engine-touching)** | anim-core `NodeKind::Group` + AddGroup/Ungroup with exact inverses. Deferred behind demonstrated need. | L |
+
+## Phase 5 step 2 — design deviation, and why (2026-07-20)
+
+The plan called for the detached canvas to render from an `Arc<RwLock>`
+snapshot and push `Vec<Command>` intents back through `Engine.apply` over a
+channel — real cross-boundary architecture, justified by two things: (a)
+independent repaint cadence for a pen display running at a different
+refresh rate than the main monitor, and (b) the assumption that the
+detached window's render loop is decoupled from the main app's.
+
+Building it, neither justification held up against the concrete egui API:
+
+- `Context::show_viewport_deferred`'s callback must be `'static` — that's
+  a real forcing function, but a snapshot is only ONE way to satisfy it.
+- `Context::show_viewport_immediate` also exists, and does NOT require
+  `'static` — its callback runs INLINE, in the same call, on the same
+  frame as everything else. That means it can borrow `&mut CanvasView` /
+  `&mut AppState` / `&mut PaintLayer` directly, with no snapshot and no
+  channel, and it means there is no actual thread/process boundary to
+  design a protocol across — "the detached window's render loop" and "the
+  main app's render loop" are the same loop.
+
+So Phase 5 step 2 shipped as: `CanvasView::ui` called VERBATIM from an
+immediate viewport instead of from the dock — exactly the same function,
+same guards, same wet-stroke pen-up commit law, same undo stack, zero
+duplicated state. The trade-off this accepts (disclosed, not hidden): an
+immediate viewport's repaint is tied to the main window's frame, so the
+independent-refresh-rate benefit deferred viewports offer is given up.
+For a drawing app that already repaints on every pointer move, this cost
+is expected to be negligible — but it's a real trade, not a free lunch,
+and if rig testing surfaces a latency problem on the pen display, the fix
+is to promote THIS ONE WINDOW to deferred + a snapshot (now that the
+simpler version has proven whether that's even necessary) — escalate on
+evidence, per this project's law, not up front on a hypothetical.
+
+The one thing the immediate approach doesn't get for free: octotablet's
+native tablet backend (RealTimeStylus) is bound to the MAIN window's HWND
+at startup, so pen input on the floating canvas window falls back to
+egui's own Touch-event path (still real pressure — the original,
+pre-native-backend M0 pipeline — just without the enhanced tilt data).
+Worth confirming on the rig whether the brush feel differs there; if it
+does, the fix is making the tablet thread multi-window-aware, not
+reaching for the heavier snapshot architecture.
 
 ## Key risks
 - **Version lockstep:** egui/eframe/egui_dock must share the same egui minor; Phase 0 exists to surface this first.

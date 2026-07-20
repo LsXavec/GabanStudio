@@ -7,6 +7,7 @@ mod canvas;
 mod config;
 mod doc;
 mod export;
+mod floatcanvas;
 mod floatwin;
 mod graphcomp;
 mod kpp;
@@ -583,6 +584,9 @@ struct Editor {
     export_range: Option<(u32, u32)>,
     /// Phase 5 step 1: the floating OS viewer window (deferred viewport).
     float_viewer: floatwin::FloatViewer,
+    /// Phase 5 step 2: the editable canvas as its own OS window (immediate
+    /// viewport — see floatcanvas.rs for why immediate, not deferred).
+    float_canvas: floatcanvas::FloatCanvas,
     /// Scratch-audio output (C4) — None until first play (or unavailable).
     audio_out: Option<AudioOut>,
     /// Device open was attempted (never retry a missing device every frame).
@@ -604,9 +608,12 @@ struct Editor {
 type SceneCutTree = Vec<(anim_core::ids::SceneId, String, Vec<(anim_core::ids::CutId, String)>)>;
 
 /// Land any floating transform and report whether it's now safe to switch
-/// editing context (a cut, in this case) — false = a live PEN stroke is
-/// still in progress and the caller must refuse, the same law workspace
-/// switching and Save/Open already follow.
+/// editing context — false = a live PEN stroke is still in progress and the
+/// caller must refuse. The general law behind every context transition that
+/// could otherwise orphan a gesture: cut/scene switching, workspace/stage
+/// switching, Save/Open, and docking the canvas back from its floating OS
+/// window (Phase 5 step 2) — nothing else ever resets `touch_active`, so an
+/// un-landed transition there would permanently lock out painting.
 fn guard_gesture(canvas: &mut canvas::CanvasView, state: &mut AppState) -> bool {
     canvas.finish_gesture(state);
     if canvas.stroke_active() {
@@ -648,6 +655,10 @@ struct EditorTabs<'a> {
     presets_dirty: &'a mut bool,
     preset_name: &'a mut String,
     native_pen: &'a [PenSample],
+    /// The canvas is currently rendered in its own OS window this frame —
+    /// the dock's Canvas tab shows a placeholder instead of double-driving
+    /// the one CanvasView from two places.
+    float_canvas_open: bool,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -668,6 +679,16 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             Pane::Presets => self.presets_ui(ui),
             Pane::Palette => palette_panel::ui(ui, self.state, self.canvas),
             Pane::NodeGraph => nodegraph_panel::ui(ui, self.state),
+            Pane::Canvas if self.float_canvas_open => {
+                ui.centered_and_justified(|ui| {
+                    ui.label(
+                        egui::RichText::new(
+                            "canvas is open in its own window — panes ▾ to bring it back",
+                        )
+                        .weak(),
+                    );
+                });
+            }
             Pane::Canvas => self.canvas.ui(
                 ui,
                 self.state,
@@ -788,6 +809,7 @@ impl Editor {
             export_job: None,
             export_range: None,
             float_viewer: floatwin::FloatViewer::new(),
+            float_canvas: floatcanvas::FloatCanvas::default(),
             audio_out: None,
             audio_tried: false,
             audio_playing: false,
@@ -817,6 +839,7 @@ impl Editor {
             export_job: None,
             export_range: None,
             float_viewer: floatwin::FloatViewer::new(),
+            float_canvas: floatcanvas::FloatCanvas::default(),
             audio_out: None,
             audio_tried: false,
             audio_playing: false,
@@ -1631,6 +1654,34 @@ impl Editor {
                         self.float_viewer.set_open(floating);
                         ui.close();
                     }
+                    // Phase 5 step 2: the EDITABLE canvas as a real OS window
+                    // — draw directly on the pen display. Docking it back
+                    // goes through the SAME guard as Save/Open/workspace
+                    // switching: a live pen stroke refuses the transition
+                    // rather than being silently orphaned (mid-stroke this
+                    // would otherwise strand touch_active forever — nothing
+                    // else ever resets it).
+                    let mut floating = self.float_canvas.open;
+                    if ui
+                        .checkbox(&mut floating, "canvas in an OS window")
+                        .on_hover_text(
+                            "open the drawing canvas as a separate real window \
+                             (drag it onto the pen display) — every tool works \
+                             there exactly as it does docked",
+                        )
+                        .changed()
+                    {
+                        if floating {
+                            self.float_canvas.open = true;
+                            ui.close();
+                        } else if guard_gesture(&mut self.canvas, &mut self.state) {
+                            self.float_canvas.open = false;
+                            ui.close();
+                        }
+                        // Refused: leave float_canvas.open at its prior value
+                        // (still true) — the checkbox reflects it again next
+                        // frame; the status line already explains why.
+                    }
                 });
                 // Scene/cut navigation (C2): the model always supported
                 // more than one, there was just no way to reach them.
@@ -1806,8 +1857,12 @@ impl Editor {
         // continuously during any interaction.
         let visible = visible_panes(&self.dock);
         let viewers_open = visible.iter().any(|t| matches!(t, Pane::Viewer(_)));
-        let composite_needed =
-            self.canvas.composite_view && visible.contains(&Pane::Canvas);
+        // The dock's Canvas tab renders a placeholder (not canvas.ui) whenever
+        // the canvas is floated — its dock-visibility no longer reflects
+        // whether canvas.ui will actually run this frame, so OR in the float
+        // explicitly (same reasoning as float_open below for the viewer).
+        let composite_needed = self.canvas.composite_view
+            && (visible.contains(&Pane::Canvas) || self.float_canvas.open);
         // The floating OS viewer is a consumer too (it may be the ONLY one).
         let float_open = self.float_viewer.is_open();
         let mut graph = viewer::GraphView::Off;
@@ -1881,6 +1936,7 @@ impl Editor {
             presets_dirty,
             preset_name: &mut self.preset_name,
             native_pen,
+            float_canvas_open: self.float_canvas.open,
         };
         let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
         // egui_dock clamps every divider so each side keeps `separator.extra`
@@ -1891,5 +1947,54 @@ impl Editor {
         DockArea::new(&mut self.dock)
             .style(dock_style)
             .show_inside(ui, &mut tabs);
+
+        // Phase 5 step 2: the canvas in its own OS window. Tabs' borrows of
+        // state/canvas/paint end above, so this can borrow them fresh.
+        // Immediate viewport: runs INLINE, right here, so it can capture
+        // these by plain mutable reference — see floatcanvas.rs for why
+        // that's the deliberate trade-off.
+        if self.float_canvas.open {
+            let open = ui.ctx().show_viewport_immediate(
+                floatcanvas::FloatCanvas::viewport_id(),
+                egui::ViewportBuilder::default()
+                    .with_title(floatcanvas::FloatCanvas::TITLE)
+                    .with_inner_size([960.0, 720.0]),
+                |ui, class| {
+                    if class == egui::ViewportClass::EmbeddedWindow {
+                        egui::CentralPanel::default().show(ui, |ui| {
+                            ui.label("this platform can't open a real OS window here");
+                        });
+                        return true;
+                    }
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        self.canvas.ui(
+                            ui,
+                            &mut self.state,
+                            self.paint.as_mut(),
+                            graph,
+                            pen,
+                            layers_cfg,
+                            native_pen,
+                        );
+                    });
+                    // The OS ✕ is a REQUEST, not a command — same law as
+                    // Save/Open/workspace switching (guard_gesture): a live
+                    // pen stroke refuses the transition instead of being
+                    // silently orphaned (nothing else ever resets
+                    // touch_active, so an un-landed close here would
+                    // permanently lock out painting). Refusing just means
+                    // NOT tearing the viewport down; the window stays open
+                    // and the status line explains why.
+                    if ui.ctx().input(|i| i.viewport().close_requested()) {
+                        !guard_gesture(&mut self.canvas, &mut self.state)
+                    } else {
+                        true
+                    }
+                },
+            );
+            if !open {
+                self.float_canvas.open = false;
+            }
+        }
     }
 }
