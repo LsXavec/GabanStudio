@@ -66,6 +66,8 @@ pub struct AppState {
     pub palette_new_name: String,
     /// Transient layer-strip UI state: an in-progress rename (layer, buffer).
     pub strip_rename: Option<(LayerId, String)>,
+    /// Transient drawing-library UI state: an in-progress rename.
+    pub drawing_rename: Option<(DrawingId, String)>,
     /// Transient layer-strip UI state: an in-progress opacity drag
     /// (layer, live value) — committed as ONE SetCelLayerProps at gesture end.
     pub strip_opacity: Option<(LayerId, f32)>,
@@ -130,6 +132,7 @@ impl AppState {
             palettes: Default::default(),
             palette_new_name: String::new(),
             strip_rename: None,
+            drawing_rename: None,
             strip_opacity: None,
             node_positions: HashMap::new(),
             pending_wire: None,
@@ -186,6 +189,7 @@ impl AppState {
             engine,
             positioned_holds: HashSet::new(),
             strip_rename: None,
+            drawing_rename: None,
             strip_opacity: None,
             node_positions: HashMap::new(),
             pending_wire: None,
@@ -1248,6 +1252,22 @@ impl AppState {
             sheet.columns.len(),
             n
         );
+    }
+
+    /// Rename a drawing (one undo step; consumers re-render — the name is
+    /// part of the eval recipe).
+    pub fn rename_drawing(&mut self, id: DrawingId, name: &str) {
+        let at = self.at();
+        if let Err(e) = self.engine.apply(
+            "rename drawing",
+            vec![Command::RenameDrawing {
+                at,
+                id,
+                name: name.to_string(),
+            }],
+        ) {
+            self.status = format!("error: {e}");
+        }
     }
 
     /// Rename the cut being edited (scaffolding, like scene/cut creation).

@@ -103,6 +103,13 @@ pub enum Command {
         at: CutRef,
         id: DrawingId,
     },
+    /// Rename a drawing. Undoable (unlike scene/cut renames): drawing names
+    /// live in eval recipes, so a rename invalidates its consumers.
+    RenameDrawing {
+        at: CutRef,
+        id: DrawingId,
+        name: String,
+    },
     /// Append one pen stroke to a drawing.
     AddStroke {
         at: CutRef,
@@ -183,6 +190,7 @@ impl Command {
             | Command::MoveCelLayer { at, .. }
             | Command::SetCelLayerProps { at, .. }
             | Command::RemoveDrawing { at, .. }
+            | Command::RenameDrawing { at, .. }
             | Command::AddStroke { at, .. }
             | Command::PopStroke { at, .. }
             | Command::SetCell { at, .. }
@@ -641,6 +649,25 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     key: prev,
                 }],
                 invalidation_roots: cut.graph.sources_of_column(*column),
+            })
+        }
+
+        Command::RenameDrawing { at, id, name } => {
+            let cut = cut_mut(project, *at)?;
+            let roots = artwork_invalidation_roots(cut, *id);
+            let d = cut
+                .drawings
+                .iter_mut()
+                .find(|d| d.id == *id)
+                .ok_or(EngineError::UnknownDrawing(*id))?;
+            let prev = std::mem::replace(&mut d.name, name.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::RenameDrawing {
+                    at: *at,
+                    id: *id,
+                    name: prev,
+                }],
+                invalidation_roots: roots,
             })
         }
 

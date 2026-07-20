@@ -120,11 +120,32 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             ui.label(egui::RichText::new("(none yet — just draw)").weak());
         }
         for (id, name) in drawings {
-            if ui
-                .selectable_label(state.view.selected_drawing == Some(id), name)
-                .clicked()
-            {
-                state.view.selected_drawing = Some(id);
+            // Double-click = rename (same idiom as the cel-layer strip);
+            // the commit is one undoable RenameDrawing.
+            let renaming = matches!(&state.drawing_rename, Some((rid, _)) if *rid == id);
+            if renaming {
+                let (_, mut buf) = state.drawing_rename.take().expect("checked above");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut buf).desired_width(90.0),
+                );
+                if resp.lost_focus() {
+                    let trimmed = buf.trim();
+                    if !trimmed.is_empty() && trimmed != name {
+                        state.rename_drawing(id, trimmed);
+                    }
+                } else {
+                    resp.request_focus();
+                    state.drawing_rename = Some((id, buf));
+                }
+            } else {
+                let resp = ui
+                    .selectable_label(state.view.selected_drawing == Some(id), &name)
+                    .on_hover_text("click: select — double-click: rename");
+                if resp.double_clicked() {
+                    state.drawing_rename = Some((id, name));
+                } else if resp.clicked() {
+                    state.view.selected_drawing = Some(id);
+                }
             }
         }
     });

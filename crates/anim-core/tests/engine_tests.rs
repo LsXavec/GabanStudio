@@ -916,6 +916,35 @@ fn project_resolution_survives_roundtrip() {
 /// round-trips through the `app.`-prefixed meta rows, and a project saved
 /// with NONE still loads cleanly with an empty map (no schema version gate
 /// guards this — the meta table already accepts arbitrary rows).
+/// Drawing names live in eval recipes, so a rename must be undoable AND
+/// invalidate consumers (the recipe changes), unlike scene/cut renames.
+#[test]
+fn rename_drawing_is_exact_and_invalidates_consumers() {
+    let mut f = fixture();
+    let before = f.engine.project.clone();
+    let v_before = f.engine.eval(f.scene, f.cut, 0).unwrap();
+    assert!(v_before.recipe().contains("luffy_a"));
+
+    f.engine
+        .apply(
+            "rename",
+            vec![Command::RenameDrawing {
+                at: f.at,
+                id: f.d_a,
+                name: "zoro_a".into(),
+            }],
+        )
+        .unwrap();
+    let v_after = f.engine.eval(f.scene, f.cut, 0).unwrap();
+    assert!(v_after.recipe().contains("zoro_a"), "recipe: {}", v_after.recipe());
+    assert_ne!(v_before.hash(), v_after.hash());
+
+    f.engine.undo().unwrap();
+    assert_eq!(f.engine.project, before);
+    let v_back = f.engine.eval(f.scene, f.cut, 0).unwrap();
+    assert_eq!(v_back.hash(), v_before.hash());
+}
+
 #[test]
 fn app_meta_survives_sqlite_roundtrip() {
     let mut engine = Engine::new("app meta test");
