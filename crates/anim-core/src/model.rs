@@ -394,6 +394,14 @@ pub struct Project {
     pub scenes: Vec<Scene>,
     /// Monotonic id counter; all entity ids come from here.
     pub next_id: u64,
+    /// Opaque, app-owned project data (character color palettes, and
+    /// anything similar later — e.g. per-project layout) that the ENGINE
+    /// never interprets, only round-trips: string keys/values persisted
+    /// verbatim under the `app.` prefix in the store's free-form `meta`
+    /// table. No UI/app types leak into anim-core this way, and no schema
+    /// version bump is needed to add a new key (the table already accepts
+    /// arbitrary rows) — see store.rs's save/load for the exact convention.
+    pub app_meta: std::collections::BTreeMap<String, String>,
 }
 
 impl Project {
@@ -406,6 +414,7 @@ impl Project {
             dpi: 300.0,
             scenes: Vec::new(),
             next_id: 1,
+            app_meta: std::collections::BTreeMap::new(),
         }
     }
 

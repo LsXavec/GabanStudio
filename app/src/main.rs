@@ -12,6 +12,8 @@ mod kpp;
 mod newproject;
 mod nodegraph_panel;
 mod paint;
+mod palette;
+mod palette_panel;
 mod viewer;
 mod workspace;
 mod xsheet_panel;
@@ -90,6 +92,23 @@ struct App {
     tablet_rx: Option<std::sync::mpsc::Receiver<PenSample>>,
     /// The spawn ran (attempted once, on the first frame).
     tablet_boot_tried: bool,
+}
+
+/// State for a running background export (C3) — polled once per frame
+/// (`Editor::poll_export`), same drain pattern as `App::pump_tablet`. Lives
+/// on `Editor` (not `App`): it's scoped to the open project, same as `dock`
+/// or `workspaces`.
+struct ExportJob {
+    rx: std::sync::mpsc::Receiver<export::ExportProgress>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// "PNG sequence" / "MP4" — for the progress window title and the
+    /// completion status message.
+    kind: &'static str,
+    total: usize,
+    done: usize,
+    /// MP4 only: frame rendering finished, now inside the (unprogressable)
+    /// ffmpeg subprocess.
+    encoding: bool,
 }
 
 impl App {
@@ -503,6 +522,33 @@ struct Editor {
     /// Per-instance viewer-pane state (zoom/pan), keyed by the pane's viewer
     /// id — the first multi-instance pane state (session-only).
     viewers: std::collections::HashMap<u8, viewer::ViewerView>,
+    /// In-flight background export (C3) — None = no export running. Export
+    /// menu buttons are disabled while this is Some, so only one job runs
+    /// at a time (its own worker thread, same shape as the tablet backend).
+    export_job: Option<ExportJob>,
+    /// Export frame-range buffer (0-based, inclusive), shown in the export
+    /// menu — None = "whole cut" (recomputed fresh from the current cut's
+    /// length every time the menu renders, so it's never stale).
+    export_range: Option<(u32, u32)>,
+}
+
+/// (scene, name, [(cut, name)]) — the "cut ▾" menu's owned snapshot of the
+/// project's scene/cut tree, cloned once per open so switching mid-menu
+/// never fights a live borrow of `self.state`.
+type SceneCutTree = Vec<(anim_core::ids::SceneId, String, Vec<(anim_core::ids::CutId, String)>)>;
+
+/// Land any floating transform and report whether it's now safe to switch
+/// editing context (a cut, in this case) — false = a live PEN stroke is
+/// still in progress and the caller must refuse, the same law workspace
+/// switching and Save/Open already follow.
+fn guard_gesture(canvas: &mut canvas::CanvasView, state: &mut AppState) -> bool {
+    canvas.finish_gesture(state);
+    if canvas.stroke_active() {
+        state.status = "refused — finish the stroke first".into();
+        false
+    } else {
+        true
+    }
 }
 
 /// The ACTIVE tab of every dock leaf — the panes actually rendered this
@@ -554,6 +600,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 self.canvas.brush_ui(ui, self.state, raster_available);
             }
             Pane::Presets => self.presets_ui(ui),
+            Pane::Palette => palette_panel::ui(ui, self.state, self.canvas),
             Pane::NodeGraph => nodegraph_panel::ui(ui, self.state),
             Pane::Canvas => self.canvas.ui(
                 ui,
@@ -671,6 +718,8 @@ impl Editor {
             ws_name: String::new(),
             preset_name: String::new(),
             viewers: Default::default(),
+            export_job: None,
+            export_range: None,
         }
     }
 
@@ -693,6 +742,8 @@ impl Editor {
             ws_name: String::new(),
             preset_name: String::new(),
             viewers: Default::default(),
+            export_job: None,
+            export_range: None,
         }
     }
 }
@@ -983,6 +1034,75 @@ fn probe_at(ppp: f32) {
 }
 
 impl Editor {
+    /// Drain this frame's export-progress messages. A disconnected channel
+    /// (the worker thread panicked) is treated as a silent failure — the
+    /// job just disappears rather than spinning forever; a real crash there
+    /// would already have printed to stderr.
+    fn poll_export(&mut self) {
+        let Some(job) = &mut self.export_job else { return };
+        let mut finished: Option<String> = None;
+        loop {
+            match job.rx.try_recv() {
+                Ok(export::ExportProgress::Frame) => job.done += 1,
+                Ok(export::ExportProgress::Encoding) => job.encoding = true,
+                Ok(export::ExportProgress::Done(result)) => {
+                    finished = Some(match result {
+                        Ok((n, note)) => format!("exported {n} frame(s) ({}){note}", job.kind),
+                        Err(e) if e == export::CANCELLED => "export cancelled".into(),
+                        Err(e) => format!("{} export failed: {e}", job.kind),
+                    });
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    finished = Some(format!("{} export ended unexpectedly", job.kind));
+                    break;
+                }
+            }
+        }
+        if let Some(status) = finished {
+            self.export_job = None;
+            self.state.status = status;
+        }
+    }
+
+    /// The export-progress window (Krita-style small modal, matching
+    /// `config::settings_window`'s pattern) — a Cancel button and either a
+    /// determinate bar (frame rendering) or an indeterminate one (MP4's
+    /// ffmpeg subprocess, which has no cheap progress signal).
+    fn export_progress_window(&mut self, ctx: &egui::Context) {
+        let Some(job) = &self.export_job else { return };
+        let mut open = true;
+        egui::Window::new(format!("Exporting — {}", job.kind))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                ui.set_min_width(260.0);
+                if job.encoding {
+                    ui.add(egui::ProgressBar::new(1.0).text("encoding video…").animate(true));
+                } else {
+                    let frac = if job.total > 0 {
+                        job.done as f32 / job.total as f32
+                    } else {
+                        0.0
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(frac)
+                            .text(format!("{} / {} frames", job.done, job.total)),
+                    );
+                }
+                if ui.button("cancel").clicked() {
+                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        // The window's own ✕ also cancels — closing it must not orphan the
+        // worker thread silently rendering in the background.
+        if !open && let Some(job) = &self.export_job {
+            job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -992,6 +1112,8 @@ impl Editor {
         presets_dirty: &mut bool,
         native_pen: &[PenSample],
     ) {
+        self.poll_export();
+        self.export_progress_window(ui.ctx());
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
 
@@ -1022,8 +1144,46 @@ impl Editor {
                     self.state.save(false);
                 }
                 ui.menu_button("export", |ui| {
+                    // Frame range (C3): 1-based in the UI (matches the
+                    // "N / total" frame readout elsewhere), 0-based
+                    // internally. None = whole cut — recomputed fresh every
+                    // time the menu opens so it can never point past a cut
+                    // that's since gotten shorter.
+                    let n = self.state.frame_count();
+                    let (mut a, mut b) = self.export_range.unwrap_or((0, n.saturating_sub(1)));
+                    a = a.min(n.saturating_sub(1));
+                    b = b.clamp(a, n.saturating_sub(1));
+                    ui.horizontal(|ui| {
+                        ui.label("frames");
+                        let mut a1 = a + 1;
+                        let mut b1 = b + 1;
+                        if ui.add(egui::DragValue::new(&mut a1).range(1..=b1)).changed() {
+                            a = a1 - 1;
+                        }
+                        ui.label("–");
+                        if ui.add(egui::DragValue::new(&mut b1).range(a1..=n)).changed() {
+                            b = b1 - 1;
+                        }
+                    });
+                    self.export_range = Some((a, b));
                     if ui
-                        .button("PNG sequence…")
+                        .small_button("whole cut")
+                        .on_hover_text("reset the range to frame 1 – last")
+                        .clicked()
+                    {
+                        self.export_range = None;
+                    }
+                    ui.separator();
+
+                    // Both spawns are near-identical: clone the cut (an
+                    // owned, immutable snapshot the worker thread renders
+                    // from — never a live reference, see export.rs), hand it
+                    // to a background thread, and track the job for the
+                    // progress window. Buttons disable while one is running
+                    // (one export at a time).
+                    let busy = self.export_job.is_some();
+                    if ui
+                        .add_enabled(!busy, egui::Button::new("PNG sequence…"))
                         .on_hover_text("one PNG per frame, transparent background")
                         .clicked()
                     {
@@ -1033,17 +1193,34 @@ impl Editor {
                             dlg = dlg.set_directory(dir);
                         }
                         if let Some(dir) = dlg.pick_folder() {
-                            self.state.status = match export::export_png_sequence(&self.state, &dir)
-                            {
-                                Ok((n, note)) => {
-                                    format!("exported {n} PNG frames to {}{note}", dir.display())
-                                }
-                                Err(e) => format!("PNG export failed: {e}"),
-                            };
+                            let cut = self.state.cut().clone();
+                            let (w, h) = (
+                                self.state.engine.project.width,
+                                self.state.engine.project.height,
+                            );
+                            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            let rx = export::spawn_png_sequence(
+                                cut,
+                                w,
+                                h,
+                                dir,
+                                a..=b,
+                                ui.ctx().clone(),
+                                cancel.clone(),
+                            );
+                            self.export_job = Some(ExportJob {
+                                rx,
+                                cancel,
+                                kind: "PNG sequence",
+                                total: (b - a + 1) as usize,
+                                done: 0,
+                                encoding: false,
+                            });
+                            self.state.status = "exporting…".into();
                         }
                     }
                     if ui
-                        .button("MP4 video…")
+                        .add_enabled(!busy, egui::Button::new("MP4 video…"))
                         .on_hover_text("white background — needs ffmpeg on PATH")
                         .clicked()
                     {
@@ -1055,12 +1232,32 @@ impl Editor {
                             dlg = dlg.set_directory(dir);
                         }
                         if let Some(path) = dlg.save_file() {
-                            self.state.status = match export::export_mp4(&self.state, &path) {
-                                Ok((n, note)) => {
-                                    format!("exported {n} frames to {}{note}", path.display())
-                                }
-                                Err(e) => format!("MP4 export failed: {e}"),
-                            };
+                            let cut = self.state.cut().clone();
+                            let (w, h) = (
+                                self.state.engine.project.width,
+                                self.state.engine.project.height,
+                            );
+                            let fps = self.state.fps();
+                            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                            let rx = export::spawn_mp4(
+                                cut,
+                                w,
+                                h,
+                                fps,
+                                path,
+                                a..=b,
+                                ui.ctx().clone(),
+                                cancel.clone(),
+                            );
+                            self.export_job = Some(ExportJob {
+                                rx,
+                                cancel,
+                                kind: "MP4",
+                                total: (b - a + 1) as usize,
+                                done: 0,
+                                encoding: false,
+                            });
+                            self.state.status = "exporting…".into();
                         }
                     }
                 });
@@ -1246,6 +1443,68 @@ impl Editor {
                         self.dock
                             .main_surface_mut()
                             .push_to_focused_leaf(Pane::Viewer(id));
+                        ui.close();
+                    }
+                });
+                // Scene/cut navigation (C2): the model always supported
+                // more than one, there was just no way to reach them.
+                ui.menu_button("cut ▾", |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "now editing: {}",
+                            self.state.cut().name
+                        ))
+                        .weak(),
+                    );
+                    ui.separator();
+                    let scenes: SceneCutTree = self
+                        .state
+                        .engine
+                        .project
+                        .scenes
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.id,
+                                s.name.clone(),
+                                s.cuts.iter().map(|c| (c.id, c.name.clone())).collect(),
+                            )
+                        })
+                        .collect();
+                    for (scene_id, scene_name, cuts) in &scenes {
+                        ui.label(egui::RichText::new(scene_name).strong());
+                        for (cut_id, cut_name) in cuts {
+                            let current = *scene_id == self.state.view.scene
+                                && *cut_id == self.state.view.cut;
+                            if ui
+                                .selectable_label(current, format!("    {cut_name}"))
+                                .clicked()
+                                && !current
+                                && guard_gesture(&mut self.canvas, &mut self.state)
+                            {
+                                self.state.goto_cut(*scene_id, *cut_id);
+                                ui.close();
+                            }
+                        }
+                        if ui
+                            .small_button("+ cut")
+                            .on_hover_text("add a cut to this scene")
+                            .clicked()
+                            && guard_gesture(&mut self.canvas, &mut self.state)
+                        {
+                            self.state.new_cut(*scene_id);
+                            ui.close();
+                        }
+                        ui.add_space(4.0);
+                    }
+                    ui.separator();
+                    if ui
+                        .button("+ scene")
+                        .on_hover_text("a new scene with its first cut")
+                        .clicked()
+                        && guard_gesture(&mut self.canvas, &mut self.state)
+                    {
+                        self.state.new_scene();
                         ui.close();
                     }
                 });

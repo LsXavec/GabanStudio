@@ -58,6 +58,12 @@ pub struct AppState {
     /// into position. Such a hold stays statically visible even when it holds to
     /// its natural end (no Empty terminator); un-touched holds stay hidden.
     pub positioned_holds: HashSet<(ColumnId, u32)>,
+    /// Character color palettes (B5) — project-persisted, not undo-tracked
+    /// (see palette.rs). Loaded on New/Open, written into the project's
+    /// opaque meta right before every file save.
+    pub palettes: crate::palette::Palettes,
+    /// Transient UI state: the Palette pane's "new character" name field.
+    pub palette_new_name: String,
     /// Transient layer-strip UI state: an in-progress rename (layer, buffer).
     pub strip_rename: Option<(LayerId, String)>,
     /// Transient layer-strip UI state: an in-progress opacity drag
@@ -112,6 +118,8 @@ impl AppState {
             file_path: None,
             status: "new project — draw on the canvas to create frame 1".into(),
             positioned_holds: HashSet::new(),
+            palettes: Default::default(),
+            palette_new_name: String::new(),
             strip_rename: None,
             strip_opacity: None,
             node_positions: HashMap::new(),
@@ -160,6 +168,8 @@ impl AppState {
             },
             file_path: Some(path),
             status: "project loaded".into(),
+            palettes: crate::palette::Palettes::load_from(&engine.project),
+            palette_new_name: String::new(),
             engine,
             positioned_holds: HashSet::new(),
             strip_rename: None,
@@ -1107,6 +1117,80 @@ impl AppState {
         self.view.play_acc = 0.0;
     }
 
+    // ---- Scene/cut navigation (C2) -----------------------------------------
+    // The model has always supported multiple scenes and multiple cuts per
+    // scene (Project.scenes: Vec<Scene>, Scene.cuts: Vec<Cut>); there was
+    // just no UI to create or switch between them — every project was
+    // permanently stuck on its first SC01/CUT01. Scene/cut/column creation
+    // is deliberately NON-UNDOABLE scaffolding (see the law on Engine::
+    // add_scene) — same tier as New Project itself, not the moment-to-moment
+    // drawing workflow.
+
+    /// Switch to a different cut (any scene) — re-derives `active_column` as
+    /// the new cut's OWN first column (columns never cross cuts) and resets
+    /// the frame cursor to 0 (a different cut is a different timeline, not a
+    /// scrub position worth preserving). View PREFERENCES (onion, loop, tool
+    /// mode) are left alone — those are yours, not the cut's.
+    pub fn goto_cut(&mut self, scene: SceneId, cut: CutId) {
+        let found = self
+            .engine
+            .project
+            .cut(scene, cut)
+            .and_then(|c| c.xsheet.columns.first().map(|col| (col.id, c.name.clone())));
+        let Some((column, name)) = found else {
+            self.status = "that cut has no columns yet — add one first".into();
+            return;
+        };
+        self.view.scene = scene;
+        self.view.cut = cut;
+        self.view.active_column = column;
+        self.view.frame = 0;
+        self.view.selected_drawing = None;
+        self.view.playing = false;
+        self.view.active_layer_slot = 0;
+        self.status = format!("cut: {name}");
+    }
+
+    /// Add a new scene with a first cut and column, and switch to it — the
+    /// same boot New Project performs, minus the whole-project reset.
+    /// Auto-named on the project's own SC../CUT.. convention (a rename UI
+    /// is a natural fast-follow; the name field already supports it).
+    pub fn new_scene(&mut self) {
+        let n = self.engine.project.scenes.len() + 1;
+        let scene = self.engine.add_scene(format!("SC{n:02}"));
+        let Ok(cut) = self.engine.add_cut(scene, "CUT01", 48) else {
+            self.status = "new scene failed".into();
+            return;
+        };
+        if let Err(e) = self.engine.add_column(CutRef { scene, cut }, "A") {
+            self.status = format!("new scene failed: {e:?}");
+            return;
+        }
+        self.goto_cut(scene, cut);
+    }
+
+    /// Add a new cut (+ its first column) to an existing scene, and switch
+    /// to it.
+    pub fn new_cut(&mut self, scene: SceneId) {
+        let n = self
+            .engine
+            .project
+            .scenes
+            .iter()
+            .find(|s| s.id == scene)
+            .map(|s| s.cuts.len() + 1)
+            .unwrap_or(1);
+        let Ok(cut) = self.engine.add_cut(scene, format!("CUT{n:02}"), 48) else {
+            self.status = "new cut failed".into();
+            return;
+        };
+        if let Err(e) = self.engine.add_column(CutRef { scene, cut }, "A") {
+            self.status = format!("new cut failed: {e:?}");
+            return;
+        }
+        self.goto_cut(scene, cut);
+    }
+
     pub fn tick(&mut self, dt: f32) {
         if !self.view.playing {
             return;
@@ -1283,6 +1367,10 @@ impl AppState {
             self.file_path.clone()
         };
         let Some(path) = path else { return };
+        // Palettes are project data but outside the undo/Command system —
+        // freshen the project's opaque meta right before the actual write,
+        // the same point every other "current in-memory state" gets synced.
+        self.palettes.save_into(&mut self.engine.project);
         match self.engine.save(&path) {
             Ok(()) => {
                 self.status = format!("saved {}", path.display());

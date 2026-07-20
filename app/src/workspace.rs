@@ -18,6 +18,9 @@ pub enum Pane {
     Brush,
     /// Brush preset list: click to apply, save the current brush by name.
     Presets,
+    /// Character color palettes (B5) — click a role swatch to load it as
+    /// the brush colour; project-persisted, not undo-tracked.
+    Palette,
     /// The cut's compositing node graph (view + edit; engine-backed).
     NodeGraph,
     /// A read-only composite VIEWER: the node graph's rendered output with
@@ -37,6 +40,7 @@ impl Pane {
         Pane::Layers,
         Pane::Brush,
         Pane::Presets,
+        Pane::Palette,
         Pane::NodeGraph,
     ];
 
@@ -50,6 +54,7 @@ impl Pane {
             Pane::Layers => "Cel Layers".into(),
             Pane::Brush => "Brush".into(),
             Pane::Presets => "Presets".into(),
+            Pane::Palette => "Palette".into(),
             Pane::NodeGraph => "Node Graph".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),

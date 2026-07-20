@@ -906,8 +906,42 @@ fn project_resolution_survives_roundtrip() {
     assert_eq!(loaded.project.fps, 12);
     assert_eq!(loaded.project.dpi, 144.0);
     assert_eq!(engine.project, loaded.project);
-
     std::fs::remove_file(&path).unwrap();
+}
+
+/// Opaque app-owned data (B5: character palettes, later per-project layout)
+/// round-trips through the `app.`-prefixed meta rows, and a project saved
+/// with NONE still loads cleanly with an empty map (no schema version gate
+/// guards this — the meta table already accepts arbitrary rows).
+#[test]
+fn app_meta_survives_sqlite_roundtrip() {
+    let mut engine = Engine::new("app meta test");
+    engine.project.app_meta.insert("palettes".into(), r#"{"characters":[]}"#.into());
+    engine.project.app_meta.insert("future.thing".into(), "42".into());
+    let scene = engine.add_scene("S");
+    engine.add_cut(scene, "C", 10).unwrap();
+
+    let dir = std::env::temp_dir().join("anim_core_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("app_meta_{}.animproj", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    engine.save(&path).unwrap();
+    let loaded = Engine::load(&path).unwrap();
+    assert_eq!(loaded.project.app_meta.get("palettes").map(String::as_str), Some(r#"{"characters":[]}"#));
+    assert_eq!(loaded.project.app_meta.get("future.thing").map(String::as_str), Some("42"));
+    assert_eq!(engine.project, loaded.project);
+    std::fs::remove_file(&path).unwrap();
+
+    // A project with none at all is unaffected: empty map both ways.
+    let dir2 = std::env::temp_dir().join("anim_core_tests");
+    let path2 = dir2.join(format!("app_meta_empty_{}.animproj", std::process::id()));
+    let _ = std::fs::remove_file(&path2);
+    let bare = Engine::new("no palettes");
+    bare.save(&path2).unwrap();
+    let loaded2 = Engine::load(&path2).unwrap();
+    assert!(loaded2.project.app_meta.is_empty());
+    std::fs::remove_file(&path2).unwrap();
 }
 
 #[test]

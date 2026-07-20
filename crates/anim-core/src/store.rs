@@ -86,6 +86,15 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
     put_meta.execute(("height", project.height.to_string()))?;
     put_meta.execute(("dpi", project.dpi.to_string()))?;
     put_meta.execute(("next_id", project.next_id.to_string()))?;
+    // Opaque app-owned data (character palettes, etc.) under an `app.`
+    // prefix — see the `app_meta` doc comment on Project. NOTE: an OLDER
+    // build's save() doesn't know this prefix and only re-inserts the keys
+    // above after the same DELETE FROM meta, so re-saving with an older
+    // binary silently drops these keys (the existing full-rewrite law for
+    // any meta addition — not a new hazard this introduces).
+    for (k, v) in &project.app_meta {
+        put_meta.execute((format!("app.{k}"), v))?;
+    }
     drop(put_meta);
 
     {
@@ -253,6 +262,21 @@ pub fn load(path: &Path) -> Result<Project> {
     }
     if let Some(d) = get_meta_opt("dpi").and_then(|s| s.parse().ok()) {
         project.dpi = d;
+    }
+    // Opaque app-owned data: every `app.`-prefixed meta row, prefix
+    // stripped. Absent entirely in files saved before this existed — an
+    // empty map, exactly like project.app_meta's own default.
+    {
+        let mut stmt =
+            conn.prepare("SELECT key, value FROM meta WHERE key LIKE 'app.%'")?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map((), |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (key, value) in rows {
+            if let Some(stripped) = key.strip_prefix("app.") {
+                project.app_meta.insert(stripped.to_string(), value);
+            }
+        }
     }
 
     // Scenes
