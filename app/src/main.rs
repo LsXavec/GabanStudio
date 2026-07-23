@@ -906,13 +906,30 @@ impl eframe::App for App {
         // Keyboard-shortcut dispatch — skipped while a dialog is up or while
         // capturing a rebind (so the captured key doesn't also fire an action).
         if self.editor.is_some() && self.new_form.is_none() && self.capturing.is_none() {
-            let fired: Vec<Action> = ui.ctx().input(|i| {
+            let collect = |i: &egui::InputState| -> Vec<Action> {
                 Action::ALL
                     .iter()
                     .copied()
                     .filter(|a| self.config.triggered(*a, i))
                     .collect()
-            });
+            };
+            let mut fired: Vec<Action> = ui.ctx().input(collect);
+            // Keyboard events land in whichever VIEWPORT has focus. The
+            // popout canvas (Phase 5 step 2) is its own OS window, so a
+            // shortcut pressed there arrives in ITS input state, not the
+            // root's — check it too. A physical keypress reaches exactly one
+            // viewport's input, so a deduped OR can never double-fire (undo
+            // twice from one Ctrl+Z).
+            let float_open = self.editor.as_ref().is_some_and(|e| e.float_canvas.open);
+            if float_open {
+                let more =
+                    ui.ctx().input_for(floatcanvas::FloatCanvas::viewport_id(), collect);
+                for a in more {
+                    if !fired.contains(&a) {
+                        fired.push(a);
+                    }
+                }
+            }
             for action in fired {
                 self.perform(action);
             }
