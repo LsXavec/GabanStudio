@@ -2276,6 +2276,23 @@ impl Editor {
                 }
             }
         }
+        if self.canvas.request_krita_scan && !self.canvas.stroke_active() {
+            self.canvas.request_krita_scan = false;
+            let paths = crate::kpp::installed_krita_paths();
+            let (ok, dup, failed) = crate::kpp::import_files(&paths, presets);
+            if ok > 0 {
+                *presets_dirty = true;
+            }
+            if ok == 0 && dup == 0 {
+                self.state.refuse(format!(
+                    "refused — no Krita brushes found on this machine ({failed} unreadable)"
+                ));
+            } else {
+                self.state.status = format!(
+                    "imported {ok} Krita brush(es) · {dup} duplicate(s) · {failed} skipped"
+                );
+            }
+        }
         self.poll_export();
         self.export_progress_window(ui.ctx());
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);

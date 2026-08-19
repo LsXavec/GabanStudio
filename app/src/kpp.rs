@@ -141,6 +141,48 @@ pub fn import_files(
     (ok, dup, failed)
 }
 
+/// Every brush file the INSTALLED Krita carries: its shipped bundles,
+/// its loose presets, and the user's own %APPDATA%/krita resources
+/// (which is also where community bundles land when installed there).
+pub fn installed_krita_paths() -> Vec<std::path::PathBuf> {
+    let mut roots: Vec<std::path::PathBuf> = Vec::new();
+    for pf in ["ProgramFiles", "ProgramW6432"] {
+        if let Some(base) = std::env::var_os(pf) {
+            roots.push(
+                std::path::PathBuf::from(&base)
+                    .join("Krita (x64)")
+                    .join("share")
+                    .join("krita"),
+            );
+        }
+    }
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        roots.push(std::path::PathBuf::from(appdata).join("krita"));
+    }
+    let mut out = Vec::new();
+    for root in roots {
+        for sub in ["bundles", "paintoppresets"] {
+            let dir = root.join(sub);
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                let ext = p
+                    .extension()
+                    .map(|x| x.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if ext == "bundle" || ext == "kpp" {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The on-disk thumbnail cache (PSD-brush-library NEVER-DO 2: cache,
 /// never config). One 64px PNG per preset, keyed by sanitized name.
 pub fn thumb_dir() -> Option<std::path::PathBuf> {
@@ -250,4 +292,30 @@ fn param_f32(xml: &str, key: &str) -> Option<f32> {
     // Some params wrap the value in CDATA.
     let text = after[..end].trim().trim_start_matches("<![CDATA[").trim();
     text.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Machine-dependent smoke: when a Krita install is present, its
+    /// bundles must actually yield presets through the real import path
+    /// (parse + thumb cache). Skips silently where Krita is absent.
+    #[test]
+    fn installed_krita_import_smoke() {
+        let paths = installed_krita_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let mut presets = Vec::new();
+        let (ok, _dup, _failed) = import_files(&paths, &mut presets);
+        assert!(ok > 0, "an installed Krita must yield at least one preset");
+        // Every imported preset is within our engine's honest ranges.
+        for p in &presets {
+            assert!((1.0..=300.0).contains(&p.size_px), "{}: size {}", p.name, p.size_px);
+            assert!((0.05..=1.0).contains(&p.opacity));
+            assert!((0.05..=1.0).contains(&p.flow));
+        }
+        println!("imported {ok} presets from the installed Krita");
+    }
 }

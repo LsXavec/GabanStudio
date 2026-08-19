@@ -46,3 +46,13 @@ dialog → import_files → presets_dirty). Commit when green (his word).
   click = apply_preset, "import brushes…" raising request_brush_import.
   main.rs Editor::ui drains the flag with &mut presets, never
   mid-stroke; failures refuse, outcomes chatter with counts.
+- 2026-08-18 — OWNER AMENDMENT, verbatim: "Import the Krita bundles that
+  are installable in application for now Ill test From the Public krita
+  brushes later". Shipped `installed_krita_paths()` (Program Files
+  Krita (x64) bundles + paintoppresets, plus %APPDATA%/krita — where
+  community bundles land too) and a rail button "import installed
+  Krita's brushes" (shown only when a Krita exists), drained beside the
+  file dialog, never mid-stroke. SMOKE-PROVEN on this machine: 268
+  presets imported through the real path, 268 thumbnails cached, every
+  size/opacity/flow inside our honest ranges (permanent test, skips
+  where Krita is absent). 21 tests, 0 warnings.

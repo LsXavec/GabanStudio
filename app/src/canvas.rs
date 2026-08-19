@@ -385,6 +385,9 @@ pub struct CanvasView {
     /// THE BRUSH LIBRARY (PSD-brush-library): the rail arms and imports;
     /// the import itself runs in the Editor, outside any stroke.
     pub(crate) request_brush_import: bool,
+    /// One click imports the INSTALLED Krita's own brushes (bundles +
+    /// presets + the user's %APPDATA%/krita).
+    pub(crate) request_krita_scan: bool,
     brush_search: String,
     /// Lazy thumbnail textures by preset name; None = no cached thumb
     /// (the painted-dab fallback draws instead — never tofu).
@@ -504,6 +507,7 @@ impl CanvasView {
             show_peg: false,
             request_pen_settings: false,
             request_brush_import: false,
+            request_krita_scan: false,
             brush_search: String::new(),
             thumb_cache: std::collections::HashMap::new(),
             light_open: false,
@@ -2093,6 +2097,18 @@ impl CanvasView {
             .clicked()
         {
             self.request_brush_import = true;
+        }
+        if !crate::kpp::installed_krita_paths().is_empty()
+            && ui
+                .button("import installed Krita's brushes")
+                .on_hover_text(
+                    "everything the Krita on this machine ships — its \
+                     bundles, its presets, and your %APPDATA%/krita \
+                     brushes — mapped onto OUR brush honestly",
+                )
+                .clicked()
+        {
+            self.request_krita_scan = true;
         }
     }
 
