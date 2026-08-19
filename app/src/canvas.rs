@@ -1932,7 +1932,7 @@ impl CanvasView {
             ui.add_space(4.0);
             ui.label(
                 egui::RichText::new("tilt flows from the native ink pen — draw once to latch it")
-                    .weak()
+                    .color(plate::legend_dim())
                     .small(),
             );
         }

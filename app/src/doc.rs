@@ -457,7 +457,9 @@ impl AppState {
         );
         match r {
             Ok(_) => self.status = format!("{label} applied ({n} tile(s))"),
-            Err(e) => self.status = format!("{label} failed: {e:?}"),
+            // AUDIT [45]: this showed the engine's Debug enum to the
+            // artist, e.g. InvalidTarget { drawing: DrawingId(7) }.
+            Err(e) => self.refuse(format!("refused — {label} did not apply ({e})")),
         }
     }
 
@@ -1682,7 +1684,7 @@ impl AppState {
             return;
         };
         if let Err(e) = self.engine.add_column(CutRef { scene, cut }, "A") {
-            self.status = format!("new scene failed: {e:?}");
+            self.refuse(format!("refused — the scene could not be created ({e})"));
             return;
         }
         self.goto_cut(scene, cut);
@@ -1704,7 +1706,7 @@ impl AppState {
             return;
         };
         if let Err(e) = self.engine.add_column(CutRef { scene, cut }, "A") {
-            self.status = format!("new cut failed: {e:?}");
+            self.refuse(format!("refused — the cut could not be created ({e})"));
             return;
         }
         self.goto_cut(scene, cut);

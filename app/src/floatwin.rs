@@ -88,6 +88,8 @@ impl FloatViewer {
                     return;
                 }
                 egui::CentralPanel::default().show(ctx, |ui| {
+                    // AUDIT [38]: this surface never laid the plate.
+                    crate::plate::surface(ui);
                     draw(ui, &shared);
                 });
                 if ctx.input(|i| i.viewport().close_requested()) {
@@ -133,7 +135,7 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
     }
     let paper_rect =
         Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
-    painter.rect_filled(paper_rect, 2, crate::plate::PAPER);
+    painter.rect_filled(paper_rect, 0, crate::plate::PAPER);
     painter.rect_stroke(
         paper_rect,
         2,

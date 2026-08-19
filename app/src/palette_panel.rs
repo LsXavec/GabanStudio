@@ -35,7 +35,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         }
     });
     if n_chars == 0 {
-        ui.label(egui::RichText::new("no characters yet — latch EDIT MODEL and add one").weak());
+        ui.label(egui::RichText::new("no characters yet — latch EDIT MODEL and add one").color(plate::legend_dim()));
     }
     ui.add_space(4.0);
     let edit = state.palette_edit;

@@ -78,7 +78,7 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
     }
     let paper_rect =
         Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
-    painter.rect_filled(paper_rect, 2, crate::plate::PAPER);
+    painter.rect_filled(paper_rect, 0, crate::plate::PAPER);
     painter.rect_stroke(
         paper_rect,
         2,

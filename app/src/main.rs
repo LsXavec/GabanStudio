@@ -325,6 +325,11 @@ impl App {
                 net::NetEvent::Status(st) => self.session_status = st,
                 net::NetEvent::PeerJoined { id, name } => {
                     self.session_status = format!("{name} joined");
+                    // AUDIT [44]: this reached Settings only — invisible
+                    // to someone who is drawing. Chatter, not a refusal.
+                    if let Some(ed) = &mut self.editor {
+                        ed.state.status = format!("{name} joined the room");
+                    }
                     fresh_join = true;
                     self.session_peers.insert(
                         id,
@@ -340,6 +345,10 @@ impl App {
                 net::NetEvent::PeerLeft { id } => {
                     if let Some(p) = self.session_peers.remove(&id) {
                         self.session_status = format!("{} left", p.name);
+                        let who = p.name.clone();
+                        if let Some(ed) = &mut self.editor {
+                            ed.state.status = format!("{who} left the room");
+                        }
                     }
                 }
                 net::NetEvent::Presence {
@@ -387,6 +396,10 @@ impl App {
                                     ed.state.status = "live from the host".into();
                                     self.editor = Some(ed);
                                     self.session_status = "file synced".into();
+                                    if let Some(ed) = &mut self.editor {
+                                        ed.state.status =
+                                            "the host's file arrived".into();
+                                    }
                                 }
                                 Err(e) => self.session_status = format!("snapshot refused: {e}"),
                             }
@@ -1365,7 +1378,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                         egui::RichText::new(
                             "canvas is open in its own window — panes ▾ to bring it back",
                         )
-                        .weak(),
+                        .color(plate::legend_dim()),
                     );
                 });
             }
@@ -1463,7 +1476,7 @@ impl EditorTabs<'_> {
                     }
                 }
                 if self.presets.is_empty() {
-                    ui.label(egui::RichText::new("no presets — save one above").weak());
+                    ui.label(egui::RichText::new("no presets — save one above").color(plate::legend_dim()));
                 }
             });
     }
@@ -2536,7 +2549,7 @@ impl Editor {
                     }
                 }
                 ui.menu_button("ws", |ui| {
-                    ui.label(egui::RichText::new("save current arrangement as:").weak());
+                    ui.label(egui::RichText::new("save current arrangement as:").color(plate::legend_dim()));
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut self.ws_name);
                         let name = self.ws_name.trim().to_string();
@@ -2672,7 +2685,9 @@ impl Editor {
                     // it onto the second monitor / pen display.
                     let mut floating = self.float_viewer.is_open();
                     if ui
-                        .checkbox(&mut floating, "viewer in an OS window")
+                        .add(|ui: &mut egui::Ui| {
+                            plate::latch(ui, &mut floating, "viewer in an OS window")
+                        })
                         .on_hover_text(
                             "open the composite viewer as a separate real window \
                         (drag it to another monitor)",
@@ -2691,7 +2706,9 @@ impl Editor {
                     // else ever resets it).
                     let mut floating = self.float_canvas.open;
                     if ui
-                        .checkbox(&mut floating, "canvas in an OS window")
+                        .add(|ui: &mut egui::Ui| {
+                            plate::latch(ui, &mut floating, "canvas in an OS window")
+                        })
                         .on_hover_text(
                             "open the drawing canvas as a separate real window \
                         (drag it onto the pen display) — every tool works \
@@ -2716,7 +2733,7 @@ impl Editor {
                 ui.menu_button("cut", |ui| {
                     ui.label(
                         egui::RichText::new(format!("now editing: {}", self.state.cut().name))
-                            .weak(),
+                            .color(plate::legend_dim()),
                     );
                     // Rename the current cut/scene (scaffolding, like
                     // creation — not undoable). Empty-buffer pattern: type

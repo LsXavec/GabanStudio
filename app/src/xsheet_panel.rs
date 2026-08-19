@@ -178,7 +178,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     ui.horizontal(|ui| {
         ui.menu_button("key", |ui| {
             if ui
-                .button("new drawing (E)")
+                .button("new drawing")
                 .on_hover_text("create + expose at the current frame")
                 .clicked()
             {
@@ -193,12 +193,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 state.expose_selected();
                 ui.close();
             }
-            // LIFT KEY (spec defect 7): you lift a key off a sheet and the
-            // previous hold extends. Exposure, not pixels — and guarded.
-            if plate::danger(ui, "LIFT KEY") {
-                state.clear_key_at_frame();
-                ui.close();
-            }
+            // (LIFT KEY is the standing control in the Edit-room head —
+            // AUDIT [47]: it existed here too, two identical guarded
+            // controls for one verb in one panel.)
         });
     });
 
@@ -219,7 +216,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             .map(|d| (d.id, d.name.clone()))
             .collect();
             if drawings.is_empty() {
-            ui.label(egui::RichText::new("(none yet — just draw)").weak());
+            ui.label(egui::RichText::new("(none yet — just draw)").color(plate::legend_dim()));
         }
         // Defensive: if the drawing under rename vanished (undo past its
         // creation, removal from another pane), drop the buffer — otherwise
@@ -927,13 +924,13 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         let at_cap = state.strip_layers().len() >= 8;
         ui.menu_button("+", |ui| {
             if at_cap {
-                ui.label(egui::RichText::new("layer cap (8) reached").weak().small());
+                ui.label(egui::RichText::new("layer cap (8) reached").color(plate::legend_dim()).small());
                 return;
             }
             if !have_cel {
                 ui.label(
                     egui::RichText::new("no cel on this frame (draw or press E)")
-                        .weak()
+                        .color(plate::legend_dim())
                         .small(),
                 );
                 return;
@@ -967,7 +964,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     if rows.is_empty() {
         ui.label(
             egui::RichText::new("held/empty frame — a new cel gets color + line")
-                .weak()
+                .color(plate::legend_dim())
                 .small(),
         );
         ui.add_space(2.0);

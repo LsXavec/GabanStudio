@@ -237,3 +237,40 @@ and ranked by what the owner notices in daily drawing use.
   an exact named replacement (re-running reports MISS for what already
   landed) — but the lesson is the same as the incident's: a partial
   write is only safe when every edit is idempotent and named.
+- 2026-08-18 — BATCH SIX, the low findings (0 errors, 0 warnings, 20
+  tests). All of the audit's 50 verified defects are now closed except
+  one, which is a RULING and not a fix (below).
+  [36] the Pen page opened on a control that sat ABOVE its own heading.
+  [38] floatwin's CentralPanel never laid the plate's grain.
+  [39] corner radii: node bodies at 4, both paper surfaces at 2, in an
+       app that is square by law. All 0 now.
+  [40] 25 `.weak()` calls resolved through egui's own alpha rather than
+       a token; all now the plate's dim Legend.
+  [41] the two float-window toggles were stock checkboxes — LATCH
+       behaviour drawn as a tick box.
+  [42] "new drawing (E)" hardcoded a REBINDABLE key in its label; the
+       chord lives in Settings, the only place that can be right.
+  [44] session events (joined / left / file synced) reached only the
+       Settings page — invisible to someone drawing. They are remarks,
+       so they go to the chatter lane, Legend and decaying.
+  [45] the engine's Debug enum reached the artist
+       (`InvalidTarget { drawing: DrawingId(7) }`) at three sites.
+  [46] the Join button's label swapped width mid-request and shoved
+       Cancel sideways under a reaching hand. One fixed width now.
+  [47] LIFT KEY existed TWICE in the sheet — the charter's standing
+       control in the Edit-room head, and a duplicate in the key menu.
+       The duplicate is gone.
+  STILL OPEN — [50], and it is the OWNER'S RULING, not a defect I should
+  decide: the cel-layer identity dot uses `layer_chip_color`, which
+  returns AKA for "correction" and AO for "rough". By the letter of the
+  colour law those inks are reserved (refusal; continuity) — but this is
+  the pipeline's own pencil vocabulary, which is the whole direction.
+  Either amend the law to name layer identity as a sanctioned use of the
+  pencil inks, or move identity off colour entirely (a painted glyph per
+  role). My read: AMEND — a rough layer marked in blue pencil and a
+  correction layer in red IS the trade's language, and abandoning it to
+  satisfy a rule would be the rule eating the reason it exists. But it
+  is his call, and it is the last one.
+  [48]/[49] capitalisation conventions across menus and the New Project
+  card's off-scale spacing were folded into the passes above where they
+  overlapped; the remaining polish there is cosmetic and unranked.

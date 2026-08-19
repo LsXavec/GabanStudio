@@ -138,7 +138,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         let selected = state.selected_node == Some(nv.id);
         let is_output = output_node == Some(nv.id);
         let body = Color32::from_rgb(26, 27, 24);
-        painter.rect_filled(nv.rect, 4, body);
+        // AUDIT [39]: square, like every other surface in the app.
+        painter.rect_filled(nv.rect, 0, body);
         painter.rect_filled(
             Rect::from_min_size(nv.rect.left_top(), vec2(NODE_W, TITLE_H)),
             4,
@@ -268,7 +269,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             return;
         };
         let world = (ptr.x - origin.x - 160.0, ptr.y - origin.y - 60.0);
-        ui.label(egui::RichText::new("add node").weak().small());
+        ui.label(egui::RichText::new("add node").color(crate::plate::legend_dim()).small());
         let columns: Vec<(anim_core::ids::ColumnId, String)> = state
             .cut()
             .xsheet
@@ -355,7 +356,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
         let Some(id) = state.selected_node else {
             ui.label(
                 egui::RichText::new("no node selected — click one; right-click adds/removes")
-                    .weak(),
+                    .color(crate::plate::legend_dim()),
             );
             return;
         };
@@ -513,7 +514,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 }
             }
             NodeKind::Output => {
-                ui.label(egui::RichText::new("the cut's final image").weak());
+                ui.label(egui::RichText::new("the cut's final image").color(crate::plate::legend_dim()));
             }
         }
         if changed {

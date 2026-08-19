@@ -972,7 +972,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
         egui::RichText::new(
             "Click a shortcut, hold the new combination, then release to set it (Esc cancels).",
         )
-        .weak(),
+        .color(crate::plate::legend_dim()),
     );
     ui.separator();
     let capturing_action = capturing.as_ref().map(|c| c.action);
@@ -1058,7 +1058,7 @@ pub fn connect_window(
         "Enter the host's address and the 6-digit code from their authenticator. Codes expire every 30 seconds and \
         each one works once.",
                 )
-                .weak(),
+                .color(crate::plate::legend_dim()),
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -1091,7 +1091,14 @@ pub fn connect_window(
             ui.horizontal(|ui| {
             let ready = code.len() == 6 && !addr.trim().is_empty() && !busy;
             if ui
-                    .add_enabled(ready, egui::Button::new(if busy { "Joining…" } else { "Join" }))
+                    // AUDIT [46]: the label swapped width mid-request and
+                    // shoved Cancel sideways under a reaching hand. The
+                    // button keeps ONE width; the wait shows as a lamp.
+                    .add_enabled(
+                        ready,
+                        egui::Button::new(if busy { "joining…" } else { "join" })
+                            .min_size(egui::vec2(96.0, 24.0)),
+                    )
                     .clicked()
                 {
                 out = Some((addr.trim().to_string(), code.clone()));
@@ -1137,7 +1144,7 @@ fn session_page(
             "Draw together over a direct connection. Joining a room needs \
              its key AND a fresh 6-digit code from the host's authenticator.",
         )
-        .weak(),
+        .color(crate::plate::legend_dim()),
     );
     ui.separator();
     let mut changed = false;
@@ -1198,7 +1205,7 @@ fn session_page(
                 egui::RichText::new(
                     "Authy should show this same number. If it does, enrollment took.",
                 )
-                .weak(),
+                .color(crate::plate::legend_dim()),
             );
         } else {
             ui.label(
@@ -1350,7 +1357,7 @@ fn performance_page(
                     .on_hover_text("Sync to the monitor's refresh. Off = lowest latency.");
                     ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut p.vsync, "").changed();
-                    ui.label(egui::RichText::new("(applies after restart)").weak());
+                    ui.label(egui::RichText::new("(applies after restart)").color(crate::plate::legend_dim()));
                 });
                 ui.end_row();
                 ui.label("Frame latency");
@@ -1423,6 +1430,8 @@ fn performance_page(
 }
 
 fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
+    // AUDIT [36]: this block sat ABOVE the page's own heading, so the
+    // page opened on an orphaned control.
     {
         let mut changed = false;
         changed |= ui
@@ -1458,7 +1467,7 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
     egui::RichText::new(
     "Remap pen pressure before it sets line width. Drag the curve up to make light touches thicker.",
         )
-        .weak(),
+        .color(crate::plate::legend_dim()),
     );
     ui.add_space(6.0);
     changed |= pressure_curve_editor(ui, &mut config.pen.pressure_curve);
@@ -1489,7 +1498,7 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
     ui.separator();
     ui.label(
         egui::RichText::new("Not available on this stack:")
-            .weak()
+            .color(crate::plate::legend_dim())
             .italics(),
     );
     ui.label(
@@ -1498,7 +1507,7 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
     pointer events only.\n• Use-mouse-events-for-right/middle-click — managed by the \
     window toolkit.",
         )
-        .weak()
+        .color(crate::plate::legend_dim())
         .size(11.0),
     );
     if changed {
@@ -1517,7 +1526,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
             "Default brush colour per layer. Switching to a layer loads its colour \
     (picking a colour while on a layer remembers it for this session).",
         )
-        .weak(),
+        .color(crate::plate::legend_dim()),
     );
     ui.add_space(8.0);
     let mut changed = false;
@@ -1564,7 +1573,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
     Bind a preset to a workspace in the ws menu to auto-load it per \
     workflow stage.",
         )
-        .weak(),
+        .color(crate::plate::legend_dim()),
     );
     ui.add_space(8.0);
     let mut changed = false;
@@ -1582,7 +1591,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                                 "[·]".into()
                             })
                             .monospace()
-                            .weak(),
+                            .color(crate::plate::legend_dim()),
                         );
                         changed |= ui
                             .add(egui::TextEdit::singleline(&mut p.name).desired_width(130.0))
@@ -1685,7 +1694,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
         }
     });
     if !config.last_import_note.is_empty() {
-        ui.label(egui::RichText::new(&config.last_import_note).weak().small());
+        ui.label(egui::RichText::new(&config.last_import_note).color(crate::plate::legend_dim()).small());
     }
     if changed {
         config.save();
