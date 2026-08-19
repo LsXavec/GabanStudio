@@ -27,7 +27,6 @@ pub struct ForgeState {
     /// The tip mask backing the preview (kept so the specimen doesn't
     /// re-rasterize per frame).
     tip_mask: Option<(u32, u32, Vec<u8>)>,
-    open: bool,
 }
 
 impl Default for ForgeState {
@@ -37,7 +36,6 @@ impl Default for ForgeState {
             dirty: true,
             preview: None,
             tip_mask: None,
-            open: false,
         }
     }
 }
@@ -81,15 +79,24 @@ pub fn ui(
     canvas: &mut crate::canvas::CanvasView,
     status: &mut String,
 ) {
-    ui.separator();
-    let mut open = forge.open;
-    plate::latch(ui, &mut open, "brush forge")
-        .on_hover_text("design a brush of your own — same machinery the imports use");
-    forge.open = open;
-    if !forge.open {
-        return;
-    }
+    // Its own tab (owner's amendment) — the pane IS the forge.
     ui.add_space(4.0);
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            forge_body(ui, forge, presets, presets_dirty, canvas, status);
+        });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forge_body(
+    ui: &mut egui::Ui,
+    forge: &mut ForgeState,
+    presets: &mut Vec<BrushPreset>,
+    presets_dirty: &mut bool,
+    canvas: &mut crate::canvas::CanvasView,
+    status: &mut String,
+) {
 
     // ---- THE SPECIMEN: a real stroke, drawn by the same math the pen
     // uses, at preview scale (approximation said in the hover).

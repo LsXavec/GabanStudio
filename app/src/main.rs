@@ -1489,6 +1489,14 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 );
             }
             Pane::Presets => self.presets_ui(ui),
+            Pane::Forge => forge::ui(
+                ui,
+                self.forge,
+                self.presets,
+                self.presets_dirty,
+                self.canvas,
+                &mut self.state.status,
+            ),
             Pane::Palette => palette_panel::ui(ui, self.state, self.canvas),
             Pane::NodeGraph => nodegraph_panel::ui(ui, self.state),
             Pane::Canvas if self.float_canvas_open => {
@@ -1550,17 +1558,6 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
 impl EditorTabs<'_> {
     /// The Presets pane: click applies; save the current brush under a name.
     fn presets_ui(&mut self, ui: &mut egui::Ui) {
-        // THE BRUSH FORGE rides at the pane's top so the quick list
-        // below never moves out from under a muscle-memorized click.
-        forge::ui(
-            ui,
-            self.forge,
-            self.presets,
-            self.presets_dirty,
-            self.canvas,
-            &mut self.state.status,
-        );
-        ui.separator();
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add(

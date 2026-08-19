@@ -18,6 +18,8 @@ pub enum Pane {
     Brush,
     /// Brush preset list: click to apply, save the current brush by name.
     Presets,
+    /// THE BRUSH FORGE (PSD-brush-forge) — its own tab, owner's word.
+    Forge,
     /// Character color palettes (B5) — click a role swatch to load it as
     /// the brush colour; project-persisted, not undo-tracked.
     Palette,
@@ -40,6 +42,7 @@ impl Pane {
         Pane::Layers,
         Pane::Brush,
         Pane::Presets,
+        Pane::Forge,
         Pane::Palette,
         Pane::NodeGraph,
     ];
@@ -53,6 +56,7 @@ impl Pane {
             Pane::Layers => "Cel Layers".into(),
             Pane::Brush => "Brush".into(),
             Pane::Presets => "Presets".into(),
+            Pane::Forge => "Brush Forge".into(),
             Pane::Palette => "Palette".into(),
             Pane::NodeGraph => "Node Graph".into(),
             Pane::Viewer(0) => "Viewer".into(),
@@ -130,7 +134,7 @@ impl Stage {
                 let mut ds = DockState::new(vec![Pane::Canvas]);
                 let tree = ds.main_surface_mut();
                 let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.24, vec![Pane::XSheet]);
-                tree.split_below(rail, 0.62, vec![Pane::Layers, Pane::Presets]);
+                tree.split_below(rail, 0.62, vec![Pane::Layers, Pane::Presets, Pane::Forge]);
                 tree.split_above(canvas, 0.11, vec![Pane::Brush]);
                 ds
             }

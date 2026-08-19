@@ -61,3 +61,11 @@ specimen preview. Ship together; each compiles.
   "my brushes" that the unreal purge can never classify; the specimen
   is deterministic and non-empty. Shared math went pub(crate) — never
   copied (NEVER-DO 1).
+- 2026-08-19 — OWNER AMENDMENT, verbatim: "make the Brush Forge a bar
+  where theres Cel layers and Presets that way its distinct Or a tab
+  rather." The forge is now its OWN DOCK TAB ("Brush Forge") beside Cel
+  Layers and Presets — in Pane::ALL (panes menu), in the default
+  layout's bottom-left stack, scrollable, no latch. The Presets pane
+  returns to exactly its pre-forge shape. Saved workspace layouts are
+  untouched (the new tab joins via the default layout or the panes
+  menu). 38 tests, 0 warnings.
