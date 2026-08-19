@@ -902,6 +902,7 @@ pub fn settings_window(
         .resizable(true)
         .default_size([640.0, 560.0])
         .show(ctx, |ui| {
+            crate::plate::surface(ui);
             ui.horizontal_top(|ui| {
                 // Left: category sidebar (Krita's Configure-dialog nav list).
                 ui.vertical(|ui| {
@@ -912,12 +913,21 @@ pub fn settings_window(
                         SettingsCategory::Shortcuts,
                         "Keyboard Shortcuts",
                     );
-                    ui.selectable_value(category, SettingsCategory::Performance, "Performance");
-                    ui.selectable_value(category, SettingsCategory::Pen, "Pen / Tablet");
-                    ui.selectable_value(category, SettingsCategory::Layers, "Layers");
-                    ui.selectable_value(category, SettingsCategory::Brushes, "Brushes");
-                    ui.selectable_value(category, SettingsCategory::UiFeatures, "UI Features");
-                    ui.selectable_value(category, SettingsCategory::Session, "Session");
+                    // AUDIT [18]: a mutually-exclusive pick is a DETENT.
+                    // As selectables these rendered their labels in Tally,
+                    // which is the armed LAMP, never text.
+                    for (cat, label) in [
+                        (SettingsCategory::Performance, "performance"),
+                        (SettingsCategory::Pen, "pen / tablet"),
+                        (SettingsCategory::Layers, "layers"),
+                        (SettingsCategory::Brushes, "brushes"),
+                        (SettingsCategory::UiFeatures, "ui features"),
+                        (SettingsCategory::Session, "session"),
+                    ] {
+                        if crate::plate::detent(ui, *category == cat, label).clicked() {
+                            *category = cat;
+                        }
+                    }
                 });
                 ui.separator();
                 // Right: the selected page.
@@ -944,7 +954,7 @@ pub fn settings_window(
 
 fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option<RebindCapture>) {
     ui.horizontal(|ui| {
-        ui.heading("Keyboard Shortcuts");
+        crate::plate::legend(ui, "keyboard shortcuts");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // AUDIT [1]: this called reset_to_defaults(), which is
             // `*self = Self::default()` — it wiped every brush preset,
@@ -1121,7 +1131,7 @@ fn session_page(
     joined: bool,
     peer_names: &[String],
 ) {
-    ui.heading("Session");
+    crate::plate::legend(ui, "session");
     ui.label(
         egui::RichText::new(
             "Draw together over a direct connection. Joining a room needs \
@@ -1213,7 +1223,10 @@ fn session_page(
         );
         ui.horizontal(|ui| {
             ui.label("Port");
-            ui.add(egui::DragValue::new(&mut config.session.host_port).range(1024..=65535));
+            crate::plate::field(
+                ui,
+                egui::DragValue::new(&mut config.session.host_port).range(1024..=65535),
+            );
         });
         ui.label(format!(
             "Artists here: {}",
@@ -1272,7 +1285,7 @@ fn session_page(
 }
 
 fn ui_features_page(ui: &mut egui::Ui, config: &mut Config) {
-    ui.heading("UI Features");
+    crate::plate::legend(ui, "ui features");
     ui.separator();
     let mut changed = false;
     changed |= ui
@@ -1302,7 +1315,7 @@ fn performance_page(
     raster: Option<&mut bool>,
 ) {
     ui.horizontal(|ui| {
-        ui.heading("Performance");
+        crate::plate::legend(ui, "performance");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Reset to defaults").clicked() {
                 config.perf = PerfConfig::default();
@@ -1316,8 +1329,8 @@ fn performance_page(
     // GPU backend choice, not a tool (spec §6 defect 2). None = no wgpu.
     match raster {
         Some(r) => {
-            ui.checkbox(r, "GPU raster brush engine")
-                .on_hover_text("uncheck to fall back to the vector brush");
+            crate::plate::latch(ui, r, "GPU raster brush engine")
+                .on_hover_text("off falls back to the vector brush");
         }
         None => {
             ui.label("GPU raster brush engine: unavailable (no wgpu surface)");
@@ -1430,7 +1443,7 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
         ui.add_space(6.0);
     }
     ui.horizontal(|ui| {
-        ui.heading("Pen / Tablet");
+        crate::plate::legend(ui, "pen / tablet");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Reset to defaults").clicked() {
                 config.pen = PenConfig::default();
@@ -1497,7 +1510,7 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
 /// layer loads its colour; a colour picked during the session overrides the
 /// default for that layer name until the app closes.
 fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
-    ui.heading("Layers");
+    crate::plate::legend(ui, "layers");
     ui.add_space(4.0);
     ui.label(
         egui::RichText::new(
@@ -1543,7 +1556,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
 /// optional colour), reorder implicitly by position (slots 1–8 map to the
 /// number keybinds), and import Krita community brushes (.kpp / .bundle).
 fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
-    ui.heading("Brush presets");
+    crate::plate::legend(ui, "brush presets");
     ui.add_space(4.0);
     ui.label(
         egui::RichText::new(
@@ -1594,16 +1607,25 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                             .add(egui::Slider::new(&mut p.flow, 0.05..=1.0).text("flow"))
                             .changed();
                         changed |= ui
-                            .add(egui::Slider::new(&mut p.opacity, 0.05..=1.0).text("op"))
+                            .add(egui::Slider::new(&mut p.opacity, 0.05..=1.0).text("opacity"))
                             .changed();
-                        changed |= ui.checkbox(&mut p.dyn_size, "size dyn").changed();
-                        changed |= ui.checkbox(&mut p.dyn_opacity, "op dyn").changed();
+                        // AUDIT [24]: these named struct fields, not
+                        // what the hand controls.
+                        changed |= crate::plate::latch(ui, &mut p.dyn_size, "pressure → size")
+                            .changed();
+                        changed |=
+                            crate::plate::latch(ui, &mut p.dyn_opacity, "pressure → opacity")
+                                .changed();
                         changed |= ui
-                            .checkbox(&mut p.tilt_size, "tilt sz")
+                            .add(|ui: &mut egui::Ui| {
+                                crate::plate::latch(ui, &mut p.tilt_size, "tilt → size")
+                            })
                             .on_hover_text("tilting the pen broadens the stroke (native ink pen)")
                             .changed();
                         changed |= ui
-                            .checkbox(&mut p.tilt_opacity, "tilt op")
+                            .add(|ui: &mut egui::Ui| {
+                                crate::plate::latch(ui, &mut p.tilt_opacity, "tilt → opacity")
+                            })
                             .on_hover_text("tilting the pen lightens the stroke (native ink pen)")
                             .changed();
                         changed |= ui

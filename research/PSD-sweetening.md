@@ -176,3 +176,32 @@ and ranked by what the owner notices in daily drawing use.
   sites) and [18] the Settings window's stock-egui vocabulary (sidebar,
   combos, checkboxes, headings). Both are broad and deserve their own
   batch rather than riding along.
+- 2026-08-18 — BATCH FOUR, the two broad items (0 errors, 0 warnings,
+  20 tests):
+  [9]  EVERY editable number drew in Plex Sans Legend — the plate's
+       voice — when a number the animator sets and reads is a fact they
+       authored. The FACE is fixed once globally
+       (`drag_value_text_style = Monospace`, so all 18 DragValue sites
+       become Mono without touching one of them); the INK needed a
+       scope, so `plate::field` wraps a DragValue in Struck while
+       leaving its drag-and-type behaviour untouched. Applied at the
+       fill and session sites. DEFERRED and named: lifting units out of
+       the value into separate Legend runs (a refinement; doing it
+       half-way would be worse than not at all).
+  [18] The Settings window shared no vocabulary with the app behind it.
+       The seven-category sidebar was `selectable_value`, which renders
+       a SELECTED LABEL IN TALLY — the armed lamp used as ink — and is
+       now a DETENT column. Seven `ui.heading` page titles became
+       engraved legends; the window sits on the plate's grain; the
+       raster-engine checkbox became a LATCH.
+  [24] The Brushes page named struct fields, not what the hand
+       controls: "op" → "opacity", "size dyn"/"op dyn" →
+       "pressure → size"/"pressure → opacity", "tilt sz"/"tilt op" →
+       "tilt → size"/"tilt → opacity", each now a LATCH.
+  BUG CAUGHT MID-BATCH, not shipped: `plate::latch` flipped its value
+  but never called `mark_changed()`. Callers gate their saves on
+  `.changed()` (as they do for egui checkboxes), so the moment the
+  Brushes page's checkboxes became latches, those toggles would have
+  flipped on screen and never reached disk. Both latch kinds now report
+  it. This is why converted controls need their call sites read, not
+  just their call shape matched.

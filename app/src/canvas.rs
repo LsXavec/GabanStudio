@@ -2171,14 +2171,11 @@ impl CanvasView {
                             // leak-chasing nudges these several times a cel).
                             plate::legend(ui, "gap");
                             let mut gap = self.fill_gap;
-                            ui.add_sized([64.0, 20.0], egui::DragValue::new(&mut gap).range(0..=8));
+                            plate::field(ui, egui::DragValue::new(&mut gap).range(0..=8));
                             self.fill_gap = gap;
                             plate::legend(ui, "under");
                             let mut grow = self.fill_grow;
-                            ui.add_sized(
-                                [64.0, 20.0],
-                                egui::DragValue::new(&mut grow).range(0..=4),
-                            );
+                            plate::field(ui, egui::DragValue::new(&mut grow).range(0..=4));
                             self.fill_grow = grow;
                             if plate::detent(ui, self.fill_ref_cel, "cel")
                                 .on_hover_text(

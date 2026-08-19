@@ -235,6 +235,9 @@ pub fn install_fonts(ctx: &egui::Context) {
         style
             .text_styles
             .insert(TextStyle::Heading, FontId::new(13.0, semibold()));
+        // AUDIT [9]: editable numbers drew in Plex Sans (the Button
+        // style). Digits get read in columns and compared — Mono by law.
+        style.drag_value_text_style = TextStyle::Monospace;
     });
 }
 
@@ -321,10 +324,12 @@ pub fn detent(ui: &mut Ui, armed: bool, label: &str) -> Response {
 /// edge while latched. Clicking toggles.
 pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     let text_w = text_width(ui, label, 11.5);
-    let (rect, resp) =
+    let (rect, mut resp) =
         ui.allocate_exact_size(Vec2::new(6.0 + 6.0 + text_w + 8.0, CTRL_H), Sense::click());
     if resp.clicked() {
         *on = !*on;
+        // Callers gate saves on .changed(), as they do for checkboxes.
+        resp.mark_changed();
     }
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
@@ -425,12 +430,13 @@ pub fn tool_latch(ui: &mut Ui, on: &mut bool, icon: crate::icons::Icon, label: &
     } else {
         text_width(ui, label, 11.5) + 5.0
     };
-    let (rect, resp) = ui.allocate_exact_size(
+    let (rect, mut resp) = ui.allocate_exact_size(
         Vec2::new(6.0 + 15.0 + text_w + 8.0, CTRL_H + 4.0),
         Sense::click(),
     );
     if resp.clicked() {
         *on = !*on;
+        resp.mark_changed();
     }
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
@@ -612,6 +618,21 @@ pub fn rail(
         );
     }
     resp
+}
+
+/// FIELD — an editable number. DragValue keeps its drag-and-type
+/// behaviour; this only dresses it, because a number the animator sets
+/// and reads is a fact they authored (Struck), not the plate's voice.
+/// The FACE comes from `drag_value_text_style` set in `install_fonts`.
+pub fn field(ui: &mut Ui, dv: egui::DragValue<'_>) -> Response {
+    let saved_inactive = ui.visuals().widgets.inactive.fg_stroke.color;
+    let saved_hovered = ui.visuals().widgets.hovered.fg_stroke.color;
+    ui.visuals_mut().widgets.inactive.fg_stroke.color = STRUCK;
+    ui.visuals_mut().widgets.hovered.fg_stroke.color = STRUCK;
+    let r = ui.add(dv);
+    ui.visuals_mut().widgets.inactive.fg_stroke.color = saved_inactive;
+    ui.visuals_mut().widgets.hovered.fg_stroke.color = saved_hovered;
+    r
 }
 
 /// METER — a read-only fill (export progress, and anything else that
