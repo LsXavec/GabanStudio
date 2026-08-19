@@ -385,6 +385,14 @@ pub struct CanvasView {
     /// THE BRUSH LIBRARY (PSD-brush-library): the rail arms and imports;
     /// the import itself runs in the Editor, outside any stroke.
     pub(crate) request_brush_import: bool,
+    /// PSD-brush-engine: the ARMED preset's machinery (None = procedural
+    /// dab, byte-identical). Resources load on arm, at the next ui() that
+    /// holds the paint layer.
+    brush_engine: Option<crate::config::EngineDef>,
+    brush_res_dirty: bool,
+    /// The paint layer holds a real tip mask right now (dabs carry the
+    /// tip flag only while true).
+    tip_active: bool,
     /// One click imports the INSTALLED Krita's own brushes (bundles +
     /// presets + the user's %APPDATA%/krita).
     pub(crate) request_krita_scan: bool,
@@ -507,6 +515,9 @@ impl CanvasView {
             show_peg: false,
             request_pen_settings: false,
             request_brush_import: false,
+            brush_engine: None,
+            brush_res_dirty: false,
+            tip_active: false,
             request_krita_scan: false,
             brush_search: String::new(),
             thumb_cache: std::collections::HashMap::new(),
@@ -539,6 +550,12 @@ impl CanvasView {
     /// Apply a brush preset wholesale (keybind 1–8, Presets pane, or a
     /// workspace switch bound to it). Also drops the eraser — a preset is ink.
     pub fn apply_preset(&mut self, p: &crate::config::BrushPreset) {
+        // PSD-brush-engine: arm the preset's machinery (None clears it —
+        // the pencil box always lands here with None).
+        if self.brush_engine != p.engine {
+            self.brush_engine = p.engine.clone();
+            self.brush_res_dirty = true;
+        }
         self.raster_brush_px = p.size_px;
         self.brush_flow = p.flow;
         self.brush_opacity = p.opacity;
@@ -2075,8 +2092,27 @@ impl CanvasView {
                                     egui::StrokeKind::Inside,
                                 );
                             }
-                            let hover =
-                                format!("arm '{}' · {:.0}px", p.name, p.size_px);
+                            // Hover says what the brush honestly is
+                            // (room NEVER-DO 4): its engine, and when
+                            // that engine is beyond our set, that it
+                            // paints as the plain dab.
+                            let hover = match &p.engine {
+                                Some(e) => {
+                                    let honest = match e.engine.as_str() {
+                                        "paintbrush" | "spraybrush" | "roundmarker" | "" => {
+                                            String::new()
+                                        }
+                                        other => {
+                                            format!(" — {other} engine paints as our dab")
+                                        }
+                                    };
+                                    format!(
+                                        "arm '{}' · {:.0}px{honest}",
+                                        p.name, p.size_px
+                                    )
+                                }
+                                None => format!("arm '{}' · {:.0}px", p.name, p.size_px),
+                            };
                             if resp.on_hover_text(hover).clicked() {
                                 arm = Some((*p).clone());
                             }
@@ -2398,7 +2434,7 @@ impl CanvasView {
         &mut self,
         ui: &mut egui::Ui,
         state: &mut AppState,
-        paint: Option<&mut PaintLayer>,
+        mut paint: Option<&mut PaintLayer>,
         graph: crate::viewer::GraphView,
         pen: &PenConfig,
         layers_cfg: &LayersConfig,
@@ -2406,6 +2442,17 @@ impl CanvasView {
         presets: &[BrushPreset],
     ) {
         self.pen_curve = pen.pressure_curve.clone();
+        // PSD-brush-engine: install the armed preset's tip/grain on the
+        // paint layer — once per arm, never mid-stroke (stroke_active
+        // can't be true on the frame an arm click happened).
+        if self.brush_res_dirty {
+            if let Some(p) = paint.as_deref_mut() {
+                self.brush_res_dirty = false;
+                let (tip, grain) = self.build_brush_resources();
+                self.tip_active = tip.is_some();
+                p.set_brush_resources(tip, grain);
+            }
+        }
         // (The silent per-layer colour swap is DEAD — spec defect 16: the
         // brush colour never changes without a gesture. The paint dish and
         // the pencil box are the colour-arming gestures now.)
@@ -3590,6 +3637,32 @@ impl CanvasView {
         }
     }
 
+    /// Load the armed preset's tip + grain images (PSD-brush-engine).
+    /// Stamp tips come from the brush_tips cache; auto tips rasterize
+    /// deterministically from their MaskGenerator recipe; grain from the
+    /// brush_grains cache.
+    fn build_brush_resources(
+        &self,
+    ) -> (
+        Option<(u32, u32, Vec<u8>)>,
+        Option<(u32, u32, Vec<u8>, f32, f32)>,
+    ) {
+        let Some(e) = &self.brush_engine else {
+            return (None, None);
+        };
+        let tip = if let Some(key) = &e.tip_key {
+            crate::kpp::tips_dir().and_then(|d| load_cache_png(&d.join(format!("{key}.png"))))
+        } else {
+            e.auto.as_ref().map(|a| rasterize_auto_tip(a, 256))
+        };
+        let grain = e.grain_key.as_ref().and_then(|key| {
+            let img = crate::kpp::grains_dir()
+                .and_then(|d| load_cache_png(&d.join(format!("{key}.png"))))?;
+            Some((img.0, img.1, img.2, e.grain_scale, e.grain_strength))
+        });
+        (tip, grain)
+    }
+
     /// Walk the current stroke's points into evenly spaced dabs (paper space).
     /// Deterministic prefix: appending points only extends the tail, so
     /// `dabs[dabs_flushed..]` are always genuinely new.
@@ -3602,6 +3675,26 @@ impl CanvasView {
         let base = linear_rgba(self.brush_color);
         let flow = self.brush_flow.clamp(0.0, 1.0);
         let hardness = 0.85;
+        // PSD-brush-engine: the armed preset's machinery. None = the old
+        // path, byte-identical (tip stays 0, spacing stays 0.1).
+        let eng = self.brush_engine.as_ref();
+        let tip_flag = if self.tip_active && eng.is_some_and(|e| e.tip_key.is_some() || e.auto.is_some()) {
+            1.0
+        } else {
+            0.0
+        };
+        let spacing_frac = eng.map(|e| e.spacing).unwrap_or(0.1);
+        let curve_fac = |target: &str, pr: f32, tv: [f32; 2], idx: u32, dist: f32| -> f32 {
+            let Some(e) = eng else { return 1.0 };
+            let mut f = 1.0f32;
+            let mut any = false;
+            for c in e.curves.iter().filter(|c| c.target == target) {
+                any = true;
+                let x = sensor_input(&c.sensor, pr, tv, idx, dist);
+                f *= curve_eval(&c.points, x);
+            }
+            if any { f } else { 1.0 }
+        };
         // When no real pressure reached this stroke (mouse-mode, or a tap with no
         // force), cap the dab so a big brush can't stamp a huge flat-pressure disc.
         let cap = if self.stroke_from_mouse || self.cur_some == 0 {
@@ -3635,7 +3728,7 @@ impl CanvasView {
                 .max(0.5)
                 .min(cap)
         };
-        let dab_at = |x: f32, y: f32, pr: f32, tv: [f32; 2]| {
+        let dab_at = |x: f32, y: f32, pr: f32, tv: [f32; 2], idx: u32, dist: f32| {
             let tn = tilt_norm(tv);
             let a = if self.dyn_opacity {
                 self.pen_curve.apply(pr)
@@ -3668,20 +3761,56 @@ impl CanvasView {
             } else {
                 ([1.0, 0.0], 1.0)
             };
+            // PSD-brush-engine: sensor curves scale size/opacity/flow;
+            // rotation + randomness aim the stamp; scatter offsets it.
+            // All deterministic in (idx, geometry) — NEVER-DO 2.
+            let mut center = [x, y];
+            let mut radius = radius;
+            let mut color = color;
+            let mut dir = dir;
+            let mut aspect = aspect;
+            if let Some(e) = eng {
+                let sf = curve_fac("size", pr, tv, idx, dist);
+                radius = (radius * sf.max(0.01)).max(0.35);
+                let of = curve_fac("opacity", pr, tv, idx, dist);
+                let ff = curve_fac("flow", pr, tv, idx, dist);
+                color[3] *= (of * ff).clamp(0.0, 1.0);
+                let mut rot_deg = e.angle_deg;
+                let rf = curve_fac("rotation", pr, tv, idx, dist);
+                if rf != 1.0 {
+                    rot_deg += rf * 360.0;
+                }
+                if e.randomness > 0.0 {
+                    rot_deg += (hash01(idx, 7) - 0.5) * 360.0 * e.randomness;
+                }
+                if tip_flag > 0.5 {
+                    let r = rot_deg.to_radians();
+                    dir = [r.cos(), r.sin()];
+                    aspect = 1.0; // tip ratio is baked into the mask
+                }
+                if e.scatter > 0.0 {
+                    let amp = e.scatter * radius * 2.0;
+                    center[0] += (hash01(idx, 11) - 0.5) * amp;
+                    center[1] += (hash01(idx, 13) - 0.5) * amp;
+                }
+            }
             Dab {
-                center: [x, y],
+                center,
                 radius,
                 hardness,
                 color,
                 dir,
                 aspect,
+                tip: tip_flag,
             }
         };
         if pts.len() == 1 {
-            dabs.push(dab_at(pts[0].x, pts[0].y, pts[0].pressure, pts[0].tilt));
+            dabs.push(dab_at(pts[0].x, pts[0].y, pts[0].pressure, pts[0].tilt, 0, 0.0));
             return dabs;
         }
         let mut carry = 0.0f32; // distance into the next segment for the next dab
+        let mut walked = 0.0f32; // paper distance already covered (distance sensor)
+        let mut skipped = 0u32; // density-dropped dabs (keeps idx stable)
         for w in pts.windows(2) {
             let (ax, ay, apr) = (w[0].x, w[0].y, w[0].pressure);
             let (bx, by, bpr) = (w[1].x, w[1].y, w[1].pressure);
@@ -3701,13 +3830,27 @@ impl CanvasView {
                     at2[0] + (bt2[0] - at2[0]) * t,
                     at2[1] + (bt2[1] - at2[1]) * t,
                 ];
-                let d2 = dab_at(ax + dx * t, ay + dy * t, pr, tv);
+                let idx = dabs.len() as u32 + skipped;
+                let d2 = dab_at(ax + dx * t, ay + dy * t, pr, tv, idx, walked + d);
                 let r = d2.radius;
-                dabs.push(d2);
-                let step = (0.1 * (2.0 * r)).max(0.75); // spacing 0.1 * diameter
+                // Spray density: keep a deterministic fraction of dabs.
+                let keep = match eng {
+                    Some(e) if e.density > 0.0 && e.density < 1.0 => {
+                        hash01(idx, 17) <= e.density
+                    }
+                    _ => true,
+                };
+                if keep {
+                    dabs.push(d2);
+                } else {
+                    skipped += 1;
+                }
+                // Spacing from the preset (fraction of diameter).
+                let step = (spacing_frac * (2.0 * r)).max(0.75);
                 d += step;
             }
             carry = d - len;
+            walked += len;
         }
         dabs
     }
@@ -4303,6 +4446,120 @@ pub fn layer_chip_color(name: &str) -> Color32 {
     }
 }
 
+/// PSD-brush-engine: deterministic per-dab hash (Wang) — NEVER a clock,
+/// NEVER thread RNG (NEVER-DO 2). Same stroke = same pixels, always.
+fn hash01(idx: u32, salt: u32) -> f32 {
+    let mut x = idx.wrapping_mul(0x9E37_79B9) ^ salt.wrapping_mul(0x85EB_CA6B);
+    x ^= x >> 16;
+    x = x.wrapping_mul(0x7FEB_352D);
+    x ^= x >> 15;
+    x = x.wrapping_mul(0x846C_A68B);
+    x ^= x >> 16;
+    (x as f32) / (u32::MAX as f32)
+}
+
+/// Piecewise-linear through the preset's own curve points; empty = the
+/// sensor's raw value (identity — no invented defaults, room NEVER-DO 5).
+fn curve_eval(points: &[[f32; 2]], x: f32) -> f32 {
+    if points.len() < 2 {
+        return x.clamp(0.0, 1.0);
+    }
+    let x = x.clamp(0.0, 1.0);
+    if x <= points[0][0] {
+        return points[0][1];
+    }
+    for w in points.windows(2) {
+        if x <= w[1][0] {
+            let span = (w[1][0] - w[0][0]).max(1e-6);
+            let t = (x - w[0][0]) / span;
+            return w[0][1] + (w[1][1] - w[0][1]) * t;
+        }
+    }
+    points[points.len() - 1][1]
+}
+
+/// A sensor's 0..1 input for one dab. pressure = the pen; fuzzy = the
+/// per-dab hash; fade/distance = how far the stroke has run (in dabs /
+/// paper px, Krita's own defaults for unparameterized lengths); tilt
+/// sensors from the native pen's tilt vector.
+fn sensor_input(sensor: &str, pr: f32, tv: [f32; 2], idx: u32, dist: f32) -> f32 {
+    match sensor {
+        "pressure" => pr.clamp(0.0, 1.0),
+        "fuzzy" => hash01(idx, 23),
+        "fade" => (idx as f32 / 300.0).clamp(0.0, 1.0),
+        "distance" => (dist / 500.0).clamp(0.0, 1.0),
+        "xtilt" => (tv[0] / TILT_MAX_RAD * 0.5 + 0.5).clamp(0.0, 1.0),
+        "ytilt" => (tv[1] / TILT_MAX_RAD * 0.5 + 0.5).clamp(0.0, 1.0),
+        "ascension" => (tv[1].atan2(tv[0]) / std::f32::consts::TAU + 0.5).clamp(0.0, 1.0),
+        "declination" => ((tv[0] * tv[0] + tv[1] * tv[1]).sqrt() / TILT_MAX_RAD).clamp(0.0, 1.0),
+        _ => 1.0,
+    }
+}
+
+/// Load a cache PNG (written by kpp.rs — always RGBA8) back as raw pixels.
+fn load_cache_png(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
+    let bytes = std::fs::read(path).ok()?;
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    if info.color_type != png::ColorType::Rgba {
+        return None;
+    }
+    Some((info.width, info.height, buf[..info.buffer_size()].to_vec()))
+}
+
+/// Rasterize a Krita MaskGenerator recipe to a tip mask (white + alpha).
+/// Deterministic pure function of the recipe. The model: unit disc (or
+/// box) squashed by ratio, spiked by the regular-polygon envelope when
+/// spikes > 2, alpha 1 inside the fade start and falling to the rim —
+/// fade 1.0 = crisp edge, 0.0 = cone from the centre; "soft" uses a
+/// squared falloff. An approximation of Krita's generator, said plainly
+/// in the room log.
+fn rasterize_auto_tip(a: &crate::config::AutoTip, n: u32) -> (u32, u32, Vec<u8>) {
+    let ratio = a.ratio.clamp(0.05, 1.0);
+    let is_rect = a.shape == "rect";
+    let fade = |d: f32, f: f32| -> f32 {
+        let f = f.clamp(0.0, 0.995);
+        if a.soft {
+            let t = (1.0 - d).clamp(0.0, 1.0);
+            (t * t).min(1.0)
+        } else {
+            ((1.0 - d) / (1.0 - f)).clamp(0.0, 1.0)
+        }
+    };
+    let mut rgba = vec![0u8; (n * n * 4) as usize];
+    for y in 0..n {
+        for x in 0..n {
+            let u = (x as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+            let v = (y as f32 + 0.5) / n as f32 * 2.0 - 1.0;
+            let (ex, ey) = (u, v / ratio);
+            let mut d = if is_rect {
+                ex.abs().max(ey.abs())
+            } else {
+                (ex * ex + ey * ey).sqrt()
+            };
+            if a.spikes > 2 && !is_rect {
+                let m = a.spikes as f32;
+                let a0 = std::f32::consts::PI / m;
+                let th = ey.atan2(ex);
+                let env = (a0.cos() / ((th.rem_euclid(2.0 * a0)) - a0).cos()).abs();
+                d /= env.max(1e-3);
+            }
+            // Direction-blended fade start (h across, v along).
+            let th = ey.atan2(ex);
+            let f = a.hfade * th.cos().abs() + a.vfade * th.sin().abs();
+            let alpha = if d >= 1.0 { 0.0 } else { fade(d, f.clamp(0.0, 1.0)) };
+            let i = ((y * n + x) * 4) as usize;
+            rgba[i] = 255;
+            rgba[i + 1] = 255;
+            rgba[i + 2] = 255;
+            rgba[i + 3] = (alpha * 255.0 + 0.5) as u8;
+        }
+    }
+    (n, n, rgba)
+}
+
 /// Median of three values (branch-light).
 fn median3(v: [f32; 3]) -> f32 {
     v[0].max(v[1]).min(v[0].min(v[1]).max(v[2]))
@@ -4479,5 +4736,51 @@ fn fill_stroke(
         }
         // Round dab at the far vertex smooths the joint to the next segment.
         painter.circle_filled(b, hb, color);
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    #[test]
+    fn hash01_is_deterministic_and_bounded() {
+        for i in 0..2000u32 {
+            let a = hash01(i, 7);
+            assert_eq!(a, hash01(i, 7), "same inputs, same value — always");
+            assert!((0.0..=1.0).contains(&a));
+        }
+        assert_ne!(hash01(1, 7), hash01(2, 7));
+    }
+
+    #[test]
+    fn curve_eval_matches_its_points() {
+        let pts = [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]];
+        assert_eq!(curve_eval(&pts, 0.0), 0.0);
+        assert!((curve_eval(&pts, 0.25) - 0.4).abs() < 1e-5);
+        assert!((curve_eval(&pts, 0.5) - 0.8).abs() < 1e-5);
+        assert_eq!(curve_eval(&pts, 1.0), 1.0);
+        // Empty curve = the sensor's raw value.
+        assert_eq!(curve_eval(&[], 0.37), 0.37);
+    }
+
+    #[test]
+    fn auto_tip_rasterizes_deterministically() {
+        let a = crate::config::AutoTip {
+            shape: "circle".into(),
+            ratio: 0.6,
+            hfade: 0.9,
+            vfade: 0.4,
+            spikes: 5,
+            soft: false,
+        };
+        let (w, h, m1) = rasterize_auto_tip(&a, 64);
+        let (_, _, m2) = rasterize_auto_tip(&a, 64);
+        assert_eq!((w, h), (64, 64));
+        assert_eq!(m1, m2, "pure function of the recipe");
+        let centre = m1[(32 * 64 + 32) * 4 + 3];
+        let corner = m1[3];
+        assert!(centre > 200, "solid centre (got {centre})");
+        assert_eq!(corner, 0, "empty corner");
     }
 }

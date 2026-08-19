@@ -95,6 +95,11 @@ pub struct Dab {
     /// Major/minor axis ratio, >= 1. Exactly 1.0 = today's round dab, and the
     /// shader math degenerates to the plain radial falloff bit-for-bit.
     pub aspect: f32,
+    /// PSD-brush-engine: 1.0 = shape this dab by the armed TIP MASK
+    /// texture instead of the procedural falloff. 0.0 everywhere the
+    /// engine is absent — and then the fragment math is the old body
+    /// verbatim (NEVER-DO 1).
+    pub tip: f32,
 }
 
 #[repr(C)]
@@ -102,6 +107,9 @@ pub struct Dab {
 struct Uniforms {
     inv_size: [f32; 2],
     _pad: [f32; 2],
+    /// [enabled, texel_u, texel_v, strength] — paper-grain sampling in
+    /// PAPER space (uv = texel * position) so strokes never swim.
+    grain: [f32; 4],
 }
 
 /// An onion-skin ghost texture (adjacent cel composite), drawn tinted under
@@ -136,6 +144,15 @@ pub struct PaintLayer {
     alpha_lock_pipeline: wgpu::RenderPipeline,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    // PSD-brush-engine: the ARMED preset's tip mask + paper grain (one of
+    // each, ever — NEVER-DO 3). Defaults are 1×1 white and never sampled
+    // while no dab carries the tip flag / grain is disabled.
+    dab_bind_layout: wgpu::BindGroupLayout,
+    tip_sampler: wgpu::Sampler,
+    grain_sampler: wgpu::Sampler,
+    tip_tex: wgpu::Texture,
+    grain_tex: wgpu::Texture,
+    grain_params: [f32; 4],
     width: u32,
     height: u32,
     /// Sampler filter used to display the layers (Canvas scaling filter setting).
@@ -183,8 +200,12 @@ pub struct PaintLayer {
 }
 
 const SHADER: &str = r#"
-struct U { inv_size: vec2<f32>, pad: vec2<f32> };
+struct U { inv_size: vec2<f32>, pad: vec2<f32>, grain: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var tip_tex: texture_2d<f32>;
+@group(0) @binding(2) var tip_samp: sampler;
+@group(0) @binding(3) var grain_tex: texture_2d<f32>;
+@group(0) @binding(4) var grain_samp: sampler;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -194,6 +215,8 @@ struct VsOut {
     @location(3) color: vec4<f32>,
     @location(4) dir: vec2<f32>,
     @location(5) aspect: f32,
+    @location(6) tip: f32,
+    @location(7) center: vec2<f32>,
 };
 
 @vertex
@@ -205,6 +228,7 @@ fn vs_main(
     @location(3) color: vec4<f32>,
     @location(4) dir: vec2<f32>,
     @location(5) aspect: f32,
+    @location(6) tip: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 4>(
     vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
@@ -227,6 +251,8 @@ fn vs_main(
     out.color = color;
     out.dir = dir;
     out.aspect = aspect;
+    out.tip = tip;
+    out.center = center;
     return out;
 }
 
@@ -239,17 +265,36 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let yr = dot(in.local, vec2<f32>(-in.dir.y, in.dir.x));
     let ell = vec2<f32>(xr / max(in.aspect, 1.0), yr);
     let rr = dot(ell, ell) / max(in.radius * in.radius, 1e-6);
-    let fw = max(fwidth(rr), 1e-5);
-    let h = clamp(in.hardness, 0.01, 0.99);
-    // MyPaint two-segment hardness falloff in rr = (r/radius)^2 space.
-    var opa = select(
-    (h / (1.0 - h)) * (1.0 - rr),        // rr > h
-    1.0 - rr * (1.0 / h - 1.0),          // rr <= h
-    rr <= h,
-    );
-    opa = clamp(opa, 0.0, 1.0);
-    let aa = clamp((1.0 - rr) / fw, 0.0, 1.0);   // analytic rim AA
-    let a = opa * aa * in.color.a;
+    var opa: f32;
+    if (in.tip > 0.5) {
+        // TIP MASK (PSD-brush-engine): the dab IS the stamp. uv spans
+        // the dab's footprint in its rotated frame; outside = nothing.
+        // Explicit LOD keeps sampling legal under per-instance branching.
+        let uv = ell / max(in.radius, 0.001) * 0.5 + vec2<f32>(0.5, 0.5);
+        let inb = f32(uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0);
+        opa = textureSampleLevel(tip_tex, tip_samp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).a * inb;
+    } else {
+        let fw = max(fwidth(rr), 1e-5);
+        let h = clamp(in.hardness, 0.01, 0.99);
+        // MyPaint two-segment hardness falloff in rr = (r/radius)^2 space.
+        var o = select(
+        (h / (1.0 - h)) * (1.0 - rr),        // rr > h
+        1.0 - rr * (1.0 / h - 1.0),          // rr <= h
+        rr <= h,
+        );
+        o = clamp(o, 0.0, 1.0);
+        let aa = clamp((1.0 - rr) / fw, 0.0, 1.0);   // analytic rim AA
+        opa = o * aa;
+    }
+    var a = opa * in.color.a;
+    if (u.grain.x > 0.5) {
+        // Paper grain, sampled in PAPER space so it never swims with
+        // the stroke: dark pattern texels eat ink (Krita's multiply).
+        let guv = (in.center + in.local) * vec2<f32>(u.grain.y, u.grain.z);
+        let g = textureSampleLevel(grain_tex, grain_samp, guv, 0.0);
+        let luma = dot(g.rgb, vec3<f32>(0.299, 0.587, 0.114));
+        a = a * (1.0 - u.grain.w * (1.0 - luma));
+    }
     return vec4<f32>(in.color.rgb * a, a);       // premultiplied
 }
 "#;
@@ -302,27 +347,69 @@ impl PaintLayer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let samp_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        };
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("dab_bgl"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                tex_entry(1),
+                samp_entry(2),
+                tex_entry(3),
+                samp_entry(4),
+            ],
         });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("dab_bg"),
-            layout: &bind_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buf.as_entire_binding(),
-            }],
+        // Tip sampler clamps (a stamp ends at its edge); grain repeats
+        // (paper tiles). Both linear.
+        let tip_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("tip_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
         });
+        let grain_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("grain_sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let tip_tex = Self::make_rgba_tex(&device, &queue, 1, 1, &[255, 255, 255, 255], "tip_default");
+        let grain_tex =
+            Self::make_rgba_tex(&device, &queue, 1, 1, &[255, 255, 255, 255], "grain_default");
+        let bind_group = Self::make_dab_bind_group(
+            &device,
+            &bind_layout,
+            &uniform_buf,
+            &tip_tex,
+            &tip_sampler,
+            &grain_tex,
+            &grain_sampler,
+        );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("dab_pl"),
             bind_group_layouts: &[Some(&bind_layout)],
@@ -491,6 +578,12 @@ impl PaintLayer {
             alpha_lock_pipeline,
             uniform_buf,
             bind_group,
+            dab_bind_layout: bind_layout,
+            tip_sampler,
+            grain_sampler,
+            tip_tex,
+            grain_tex,
+            grain_params: [0.0; 4],
             width,
             height,
             filter,
@@ -539,6 +632,118 @@ impl PaintLayer {
         })
     }
 
+    fn make_rgba_tex(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        w: u32,
+        h: u32,
+        rgba: &[u8],
+        label: &str,
+    ) -> wgpu::Texture {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        tex
+    }
+
+    fn make_dab_bind_group(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        uniform_buf: &wgpu::Buffer,
+        tip: &wgpu::Texture,
+        tip_sampler: &wgpu::Sampler,
+        grain: &wgpu::Texture,
+        grain_sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        let tv = tip.create_view(&Default::default());
+        let gv = grain.create_view(&Default::default());
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("dab_bg"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&tv) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(tip_sampler) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&gv) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(grain_sampler) },
+            ],
+        })
+    }
+
+    /// PSD-brush-engine: install the ARMED preset's tip mask and paper
+    /// grain (or restore the defaults with None). One texture each —
+    /// NEVER-DO 3. `grain` carries (w, h, rgba, scale, strength); the
+    /// texel scale bakes the pattern's own size so the shader multiply
+    /// stays two numbers.
+    pub fn set_brush_resources(
+        &mut self,
+        tip: Option<(u32, u32, Vec<u8>)>,
+        grain: Option<(u32, u32, Vec<u8>, f32, f32)>,
+    ) {
+        self.tip_tex = match &tip {
+            Some((w, h, rgba)) => Self::make_rgba_tex(&self.device, &self.queue, *w, *h, rgba, "tip"),
+            None => Self::make_rgba_tex(&self.device, &self.queue, 1, 1, &[255, 255, 255, 255], "tip_default"),
+        };
+        self.grain_params = match &grain {
+            Some((w, h, _, scale, strength)) => {
+                let s = scale.max(0.05);
+                [
+                    1.0,
+                    1.0 / (*w as f32 * s),
+                    1.0 / (*h as f32 * s),
+                    strength.clamp(0.0, 1.0),
+                ]
+            }
+            None => [0.0; 4],
+        };
+        self.grain_tex = match &grain {
+            Some((w, h, rgba, _, _)) => {
+                Self::make_rgba_tex(&self.device, &self.queue, *w, *h, rgba, "grain")
+            }
+            None => Self::make_rgba_tex(&self.device, &self.queue, 1, 1, &[255, 255, 255, 255], "grain_default"),
+        };
+        self.bind_group = Self::make_dab_bind_group(
+            &self.device,
+            &self.dab_bind_layout,
+            &self.uniform_buf,
+            &self.tip_tex,
+            &self.tip_sampler,
+            &self.grain_tex,
+            &self.grain_sampler,
+        );
+        self.queue.write_buffer(
+            &self.uniform_buf,
+            0,
+            bytemuck::bytes_of(&Uniforms {
+                inv_size: [1.0 / self.width as f32, 1.0 / self.height as f32],
+                _pad: [0.0, 0.0],
+                grain: self.grain_params,
+            }),
+        );
+    }
+
     /// Build a soft-round-dab render pipeline with the given blend (brush = over,
     /// eraser = destination-out). Shares the shader and instance layout.
     fn make_dab_pipeline(
@@ -579,6 +784,11 @@ impl PaintLayer {
                 wgpu::VertexAttribute {
                     offset: 40,
                     shader_location: 5,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 44,
+                    shader_location: 6,
                     format: wgpu::VertexFormat::Float32,
                 },
             ],
@@ -669,6 +879,7 @@ impl PaintLayer {
             bytemuck::bytes_of(&Uniforms {
                 inv_size: [1.0 / width as f32, 1.0 / height as f32],
                 _pad: [0.0, 0.0],
+                grain: [0.0; 4],
             }),
         );
 

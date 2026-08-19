@@ -51,3 +51,34 @@ STAGES: A parse+extract inventory-driven. B tips (predefined + auto
 shapes) + spacing/rotation in the dab pipeline. C sensor curves at dab
 build. D texture grain. E spray scatter. Each stage compiles, tests,
 delivers before the next.
+
+## Build log
+
+- 2026-08-19 — STAGES A+B+C+D+E DELIVERED (28 tests, 0 warnings).
+  A: kritares.rs GBR/GIH/PAT decoders (tested incl. malformed); deep kpp
+  parse (engines, MaskGenerator auto tips, stamp tip keys, gated sensor
+  curves, spacing/angle/randomness, spray scatter+density, texture
+  refs); bundles extract brushes/*+patterns/* to tip/grain caches;
+  proven on the real install: 247 engines · 109 stamps · 138 auto ·
+  203 curved · 39 grain · 264 resources cached (2 svg tips skipped).
+  B: paint.rs dab pipeline — per-dab tip flag; tip mask sampled at
+  explicit LOD in the dab's rotated frame (clamp sampler, out-of-
+  bounds = nothing); paper grain sampled in PAPER space via repeat
+  sampler (dark texels eat ink); uniform grew [enabled, texel, texel,
+  strength]. The procedural else-branch is the OLD fragment body
+  verbatim — tip=0 dabs compute the same ops in the same order.
+  canvas.rs — apply_preset arms EngineDef; resources load once on arm
+  (stamp from cache / AutoTip rasterized 256²: ratio, polygon-star
+  spikes, direction-blended h/v fade, soft square falloff); dab builder
+  applies preset spacing, sensor-curve products (pressure/fuzzy/fade/
+  distance/xtilt/ytilt/ascension/declination), rotation+randomness,
+  spray scatter + density with idx kept stable across skips.
+  DETERMINISM: hash01 = Wang hash of (dab idx, salt); no clock, no RNG;
+  tested. curve_eval piecewise-linear through the preset's own points
+  (empty = raw sensor); tested. Auto-tip rasterizer pure; tested.
+  HONESTY: rail hover names engines beyond the set ("colorsmudge engine
+  paints as our dab"). APPROXIMATIONS, said plainly: fade/distance
+  sensor lengths default 300 dabs/500px (Krita's per-preset lengths not
+  parsed yet); curves linear not cubic; GIH first frame; speed/time
+  sensors dropped; MaskGenerator fade model approximated.
+  SMUDGE stays out per NEVER-DO 4 — its own gate when wanted.
