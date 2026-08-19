@@ -56,15 +56,42 @@ pub fn decode_gbr(b: &[u8]) -> Option<ResImage> {
 }
 
 /// GIMP .gih: line 1 = name, line 2 = "<count> <params...>", then `count`
-/// concatenated .gbr images. First frame only (an animated pipe brush is
-/// a stamp sequence; one honest frame beats a faked cycle — logged in the
-/// room).
+/// concatenated .gbr images.
 pub fn decode_gih_first(b: &[u8]) -> Option<ResImage> {
-    // Two text lines, each \n-terminated, before the first GBR header.
+    decode_gih_frames(b, 1)?.into_iter().next()
+}
+
+/// All frames of a .gih, capped (PSD-brush-engine stage F: the atlas is
+/// bounded VRAM). Frames whose size differs from the first are dropped —
+/// a uniform atlas or nothing.
+pub fn decode_gih_frames(b: &[u8], cap: usize) -> Option<Vec<ResImage>> {
     let first_nl = b.iter().position(|&c| c == b'\n')?;
     let rest = &b[first_nl + 1..];
     let second_nl = rest.iter().position(|&c| c == b'\n')?;
-    decode_gbr(&rest[second_nl + 1..])
+    let line2 = std::str::from_utf8(&rest[..second_nl]).ok()?;
+    let count: usize = line2.split_whitespace().next()?.parse().ok()?;
+    let count = count.clamp(1, 64).min(cap.max(1));
+    let mut data = &rest[second_nl + 1..];
+    let mut out: Vec<ResImage> = Vec::new();
+    for _ in 0..count {
+        let img = decode_gbr(data)?;
+        // Advance: header size + pixel payload.
+        let hdr = be_u32(data, 0)? as usize;
+        let bytes = be_u32(data, 16)? as usize;
+        let px = (img.w as usize) * (img.h as usize) * bytes;
+        let total = hdr.checked_add(px)?;
+        if let Some(first) = out.first()
+            && (img.w != first.w || img.h != first.h)
+        {
+            break;
+        }
+        out.push(img);
+        if total >= data.len() {
+            break;
+        }
+        data = &data[total..];
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 /// GIMP .pat: header { size, version, width, height, bytes, magic "GPAT",
@@ -160,5 +187,42 @@ mod tests {
         assert!(decode_gbr(&[0, 1, 2]).is_none());
         assert!(decode_pat(b"not a pattern at all").is_none());
         assert!(decode_gih_first(b"no newlines").is_none());
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+
+    fn gbr(w: u32, h: u32, px: &[u8]) -> Vec<u8> {
+        let name = b"t\0";
+        let hdr = 28 + name.len() as u32;
+        let mut v = Vec::new();
+        v.extend_from_slice(&hdr.to_be_bytes());
+        v.extend_from_slice(&2u32.to_be_bytes());
+        v.extend_from_slice(&w.to_be_bytes());
+        v.extend_from_slice(&h.to_be_bytes());
+        v.extend_from_slice(&1u32.to_be_bytes());
+        v.extend_from_slice(b"GIMP");
+        v.extend_from_slice(&10u32.to_be_bytes());
+        v.extend_from_slice(name);
+        v.extend_from_slice(px);
+        v
+    }
+
+    #[test]
+    fn gih_all_frames_in_order_and_capped() {
+        let mut v = b"pipe\n3 ncells:3\n".to_vec();
+        v.extend(gbr(1, 1, &[10]));
+        v.extend(gbr(1, 1, &[20]));
+        v.extend(gbr(1, 1, &[30]));
+        let frames = decode_gih_frames(&v, 16).unwrap();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(
+            frames.iter().map(|f| f.rgba[3]).collect::<Vec<_>>(),
+            vec![10, 20, 30]
+        );
+        // The cap bounds the atlas.
+        assert_eq!(decode_gih_frames(&v, 2).unwrap().len(), 2);
     }
 }

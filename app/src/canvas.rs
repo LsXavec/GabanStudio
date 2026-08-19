@@ -393,6 +393,8 @@ pub struct CanvasView {
     /// The paint layer holds a real tip mask right now (dabs carry the
     /// tip flag only while true).
     tip_active: bool,
+    /// Frames in the armed tip's atlas (GIH pipe brushes cycle; 1 = still).
+    tip_frames: u32,
     /// One click imports the INSTALLED Krita's own brushes (bundles +
     /// presets + the user's %APPDATA%/krita).
     pub(crate) request_krita_scan: bool,
@@ -518,6 +520,7 @@ impl CanvasView {
             brush_engine: None,
             brush_res_dirty: false,
             tip_active: false,
+            tip_frames: 1,
             request_krita_scan: false,
             brush_search: String::new(),
             thumb_cache: std::collections::HashMap::new(),
@@ -578,6 +581,7 @@ impl CanvasView {
         crate::config::BrushPreset {
             name,
             engine: None,
+            bank: String::new(),
             size_px: self.raster_brush_px,
             flow: self.brush_flow,
             opacity: self.brush_opacity,
@@ -2448,9 +2452,10 @@ impl CanvasView {
         if self.brush_res_dirty {
             if let Some(p) = paint.as_deref_mut() {
                 self.brush_res_dirty = false;
-                let (tip, grain) = self.build_brush_resources();
+                let (tip, frames, grain) = self.build_brush_resources();
                 self.tip_active = tip.is_some();
-                p.set_brush_resources(tip, grain);
+                self.tip_frames = frames;
+                p.set_brush_resources(tip, frames, grain);
             }
         }
         // (The silent per-layer colour swap is DEAD — spec defect 16: the
@@ -3645,13 +3650,23 @@ impl CanvasView {
         &self,
     ) -> (
         Option<(u32, u32, Vec<u8>)>,
+        u32,
         Option<(u32, u32, Vec<u8>, f32, f32)>,
     ) {
         let Some(e) = &self.brush_engine else {
-            return (None, None);
+            return (None, 1, None);
         };
+        let mut frames = 1u32;
         let tip = if let Some(key) = &e.tip_key {
-            crate::kpp::tips_dir().and_then(|d| load_cache_png(&d.join(format!("{key}.png"))))
+            crate::kpp::tips_dir().and_then(|d| {
+                let img = load_cache_png(&d.join(format!("{key}.png")))?;
+                // A GIH atlas carries its frame count in a sidecar.
+                frames = std::fs::read_to_string(d.join(format!("{key}.frames")))
+                    .ok()
+                    .and_then(|t| t.trim().parse().ok())
+                    .unwrap_or(1);
+                Some(img)
+            })
         } else {
             e.auto.as_ref().map(|a| rasterize_auto_tip(a, 256))
         };
@@ -3660,7 +3675,7 @@ impl CanvasView {
                 .and_then(|d| load_cache_png(&d.join(format!("{key}.png"))))?;
             Some((img.0, img.1, img.2, e.grain_scale, e.grain_strength))
         });
-        (tip, grain)
+        (tip, frames.max(1), grain)
     }
 
     /// Walk the current stroke's points into evenly spaced dabs (paper space).
@@ -3794,6 +3809,15 @@ impl CanvasView {
                     center[1] += (hash01(idx, 13) - 0.5) * amp;
                 }
             }
+            // GIH cycling: the frame rides in the tip value (1 + f);
+            // deterministic per dab (NEVER-DO 2).
+            let tip = if tip_flag > 0.5 && self.tip_frames > 1 {
+                1.0 + (hash01(idx, 29) * self.tip_frames as f32)
+                    .floor()
+                    .min(self.tip_frames as f32 - 1.0)
+            } else {
+                tip_flag
+            };
             Dab {
                 center,
                 radius,
@@ -3801,7 +3825,7 @@ impl CanvasView {
                 color,
                 dir,
                 aspect,
-                tip: tip_flag,
+                tip,
             }
         };
         if pts.len() == 1 {

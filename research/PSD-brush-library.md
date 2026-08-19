@@ -56,3 +56,37 @@ dialog → import_files → presets_dirty). Commit when green (his word).
   presets imported through the real path, 268 thumbnails cached, every
   size/opacity/flow inside our honest ranges (permanent test, skips
   where Krita is absent). 21 tests, 0 warnings.
+- 2026-08-19 — OWNER AMENDMENT, verbatim: "I would like to add now A
+  pluggins section in settings that has a sub catagory for Brush banks
+  or custom brush imports that supports some of the more modern brush
+  data files for importation." Settings gains PLUGINS → brush banks:
+  every imported preset carries its BANK (source file); the page lists
+  banks with counts and a held REMOVE BANK. New importers, honest each:
+  Photoshop .abr (sampled brushes v1/v2 + 8BIMsamp v6+, RLE masks →
+  stamp presets); Procreate .brush/.brushset (Shape.png → tip,
+  Grain.png → grain; the NSKeyedArchiver params are NOT parsed — sizes
+  default, said in the hover); bare .gbr/.gih/.png as single stamps.
+- 2026-08-19 — OWNER QUEUE ADDITION, verbatim: "After everything is
+  completed in queue. Create me a .exe Installer for my Github. Im
+  gonna be giving some testers access. Before doing that though Make
+  sure That we install a functionality similar to claude code that Has
+  Relaunch to update when the published Build gets written to the
+  github. That way its up to date besides the Dev build that we are
+  testing. After we test Dev build features we push it to the
+  application but this will be a good draft Time to atleast get it out
+  there." QUEUED as THE SHIPPING ROOM (own gate when reached): GitHub
+  Releases channel + relaunch-to-update (the devloop's proven
+  shadow-swap is the updater's core) + installer. Needs from the owner
+  at build time: the GitHub repo. Dev channel stays devloop.
+- 2026-08-19 — PLUGINS PAGE + BRUSH BANKS DELIVERED (32 tests, 0
+  warnings): Settings → plugins lists every bank (source file) with
+  count + held REMOVE BANK; dependency audit says "every brush is
+  self-contained" or names the missing (Aka) — imports persist in
+  config + AnimStudio caches with no live dependency on Krita.
+  brushbank.rs: Photoshop .abr (v1/v2 sampled + 8BIMsamp v6/7/9/10,
+  PackBits — precedence bug in the RLE caught BY THE TEST before
+  shipping), Procreate .brush/.brushset (Shape/Grain PNGs, luma→alpha;
+  params honestly defaulted), bare .gbr/.gih/.png stamps. Rail dialog
+  takes all formats. Krita scan tags bank "krita".
+  QUEUED NEXT: THE SHIPPING ROOM (installer + GitHub
+  relaunch-to-update), then his brush-creation project.

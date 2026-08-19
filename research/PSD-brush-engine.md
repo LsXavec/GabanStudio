@@ -82,3 +82,22 @@ delivers before the next.
   parsed yet); curves linear not cubic; GIH first frame; speed/time
   sensors dropped; MaskGenerator fade model approximated.
   SMUDGE stays out per NEVER-DO 4 — its own gate when wanted.
+- 2026-08-19 — OWNER AMENDMENT, verbatim: "go ahead with the GIH frame
+  cycling, making sure we get to completion on working brushes. If you
+  can define the dependancines of each individual brush and remove any.
+  then just have to import persistant that would be great." Stage F:
+  (1) GIH tips extract ALL frames (capped 16) into a vertical atlas +
+  frame-count sidecar; per-dab frame picked by the deterministic hash
+  (Krita's selection modes approximated as random; logged). (2) Every
+  imported preset's dependencies (tip, grain) resolve at import; a
+  missing dependency is COUNTED and SAID, and the preset paints the
+  plain dab (already the fallback). Imports stay persistent: presets in
+  config, resources in the AnimStudio caches — self-contained, no live
+  dependency on the Krita install after import.
+- 2026-08-19 — STAGE F DELIVERED (32 tests, 0 warnings): GIH pipe
+  brushes extract ALL frames (cap 16) into a vertical atlas + .frames
+  sidecar; already-cached single-frame GIHs rebuild via the sidecar
+  guard on re-import; per-dab frame rides in the Dab tip value
+  (1 + hash(idx)), shader samples the sub-tile. Frame ORDER preserved
+  and tested; selection mode approximated as random (Krita's
+  incremental/angular modes logged as future).

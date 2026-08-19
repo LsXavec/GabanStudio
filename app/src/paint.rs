@@ -110,6 +110,8 @@ struct Uniforms {
     /// [enabled, texel_u, texel_v, strength] — paper-grain sampling in
     /// PAPER space (uv = texel * position) so strokes never swim.
     grain: [f32; 4],
+    /// [tip frame count, 0, 0, 0] — a GIH atlas stacks frames vertically.
+    misc: [f32; 4],
 }
 
 /// An onion-skin ghost texture (adjacent cel composite), drawn tinted under
@@ -200,7 +202,7 @@ pub struct PaintLayer {
 }
 
 const SHADER: &str = r#"
-struct U { inv_size: vec2<f32>, pad: vec2<f32>, grain: vec4<f32> };
+struct U { inv_size: vec2<f32>, pad: vec2<f32>, grain: vec4<f32>, misc: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var tip_tex: texture_2d<f32>;
 @group(0) @binding(2) var tip_samp: sampler;
@@ -272,7 +274,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // Explicit LOD keeps sampling legal under per-instance branching.
         let uv = ell / max(in.radius, 0.001) * 0.5 + vec2<f32>(0.5, 0.5);
         let inb = f32(uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0);
-        opa = textureSampleLevel(tip_tex, tip_samp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)), 0.0).a * inb;
+        // GIH atlas: frames stacked vertically; the dab's frame rides in
+        // tip (frame = tip - 1). Single-frame tips: frames = 1, fi = 0.
+        let frames = max(u.misc.x, 1.0);
+        let fi = clamp(floor(in.tip - 1.0), 0.0, frames - 1.0);
+        let auv = vec2<f32>(uv.x, (clamp(uv.y, 0.0, 1.0) + fi) / frames);
+        opa = textureSampleLevel(tip_tex, tip_samp, vec2<f32>(clamp(uv.x, 0.0, 1.0), auv.y), 0.0).a * inb;
     } else {
         let fw = max(fwidth(rr), 1e-5);
         let h = clamp(in.hardness, 0.01, 0.99);
@@ -700,8 +707,10 @@ impl PaintLayer {
     pub fn set_brush_resources(
         &mut self,
         tip: Option<(u32, u32, Vec<u8>)>,
+        tip_frames: u32,
         grain: Option<(u32, u32, Vec<u8>, f32, f32)>,
     ) {
+        let tip_frames = tip_frames.max(1) as f32;
         self.tip_tex = match &tip {
             Some((w, h, rgba)) => Self::make_rgba_tex(&self.device, &self.queue, *w, *h, rgba, "tip"),
             None => Self::make_rgba_tex(&self.device, &self.queue, 1, 1, &[255, 255, 255, 255], "tip_default"),
@@ -740,6 +749,7 @@ impl PaintLayer {
                 inv_size: [1.0 / self.width as f32, 1.0 / self.height as f32],
                 _pad: [0.0, 0.0],
                 grain: self.grain_params,
+                misc: [tip_frames, 0.0, 0.0, 0.0],
             }),
         );
     }
@@ -880,6 +890,7 @@ impl PaintLayer {
                 inv_size: [1.0 / width as f32, 1.0 / height as f32],
                 _pad: [0.0, 0.0],
                 grain: [0.0; 4],
+                misc: [1.0, 0.0, 0.0, 0.0],
             }),
         );
 

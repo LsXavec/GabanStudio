@@ -575,6 +575,11 @@ pub struct BrushPreset {
     /// procedural dab, byte-identical to before.
     #[serde(default)]
     pub engine: Option<EngineDef>,
+    /// BRUSH BANK: the source file this preset arrived in ("" = made
+    /// here / unsorted). Banks list and remove as one in Settings →
+    /// Plugins.
+    #[serde(default)]
+    pub bank: String,
     #[serde(default)]
     pub tilt_size: bool,
     #[serde(default)]
@@ -598,6 +603,7 @@ impl Default for BrushPreset {
         Self {
             name: "preset".into(),
             engine: None,
+            bank: String::new(),
             size_px: 14.0,
             flow: 1.0,
             opacity: 1.0,
@@ -624,6 +630,7 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
         BrushPreset {
             name: "atari".into(),
             engine: None,
+            bank: String::new(),
             size_px: 14.0,
             flow: 0.45,
             opacity: 0.8,
@@ -641,6 +648,7 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
         BrushPreset {
             name: "genga".into(),
             engine: None,
+            bank: String::new(),
             size_px: 6.0,
             flow: 1.0,
             opacity: 1.0,
@@ -658,6 +666,7 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
         BrushPreset {
             name: "shusei".into(),
             engine: None,
+            bank: String::new(),
             size_px: 8.0,
             flow: 0.7,
             opacity: 1.0,
@@ -750,6 +759,7 @@ pub enum SettingsCategory {
     Brushes,
     UiFeatures,
     Session,
+    Plugins,
 }
 
 /// THE SESSION's identity + connection config (PSD-session-room).
@@ -1019,6 +1029,7 @@ pub fn settings_window(
                         (SettingsCategory::Brushes, "brushes"),
                         (SettingsCategory::UiFeatures, "ui features"),
                         (SettingsCategory::Session, "session"),
+                        (SettingsCategory::Plugins, "plugins"),
                     ] {
                         if crate::plate::detent(ui, *category == cat, label).clicked() {
                             *category = cat;
@@ -1034,6 +1045,7 @@ pub fn settings_window(
                     SettingsCategory::Layers => layers_page(ui, config),
                     SettingsCategory::Brushes => brushes_page(ui, config),
                     SettingsCategory::UiFeatures => ui_features_page(ui, config),
+                    SettingsCategory::Plugins => plugins_page(ui, config),
                     SettingsCategory::Session => session_page(
                         ui,
                         config,
@@ -1384,6 +1396,110 @@ fn session_page(
     );
     if changed {
         config.save();
+    }
+}
+
+/// PLUGINS (PSD-brush-library, owner amendment 2026-08-19): brush
+/// banks — every imported preset carries its source file as its BANK;
+/// banks remove as one; the import door takes the modern formats too.
+fn plugins_page(ui: &mut egui::Ui, config: &mut Config) {
+    crate::plate::legend(ui, "plugins");
+    ui.separator();
+    crate::plate::legend(ui, "brush banks");
+    ui.label(
+        egui::RichText::new(
+            "Krita .kpp / .bundle · Photoshop .abr · Procreate .brush / \
+             .brushset · bare .gbr / .gih / .png as stamps. Photoshop and \
+             Procreate brushes bring their tip shapes and grains; their \
+             engine parameters stay with their apps — they paint with OUR \
+             brush, honestly.",
+        )
+        .size(11.5)
+        .color(crate::plate::LEGEND),
+    );
+    ui.add_space(6.0);
+    if ui
+        .button("import brush files…")
+        .clicked()
+        && let Some(paths) = rfd::FileDialog::new()
+            .add_filter(
+                "brush files",
+                &["kpp", "bundle", "abr", "brush", "brushset", "gbr", "gih", "png"],
+            )
+            .pick_files()
+    {
+        let r = crate::brushbank::import_any(&paths, &mut config.presets);
+        if r.ok > 0 {
+            config.save();
+        }
+        config.last_import_note = format!(
+            "imported {} · {} duplicate(s) · {} failed",
+            r.ok, r.dup, r.failed
+        );
+    }
+    if !config.last_import_note.is_empty() {
+        ui.label(
+            egui::RichText::new(&config.last_import_note)
+                .color(crate::plate::legend_dim())
+                .small(),
+        );
+    }
+    ui.add_space(8.0);
+    // The banks, each with its count and a held REMOVE.
+    let bank_list = crate::brushbank::banks(&config.presets);
+    let mut remove: Option<String> = None;
+    for (bank, count) in &bank_list {
+        ui.horizontal(|ui| {
+            let shown = if bank.is_empty() { "unsorted" } else { bank };
+            ui.label(
+                egui::RichText::new(shown)
+                    .size(11.5)
+                    .color(crate::plate::STRUCK),
+            );
+            ui.label(
+                egui::RichText::new(format!("{count} brush(es)"))
+                    .monospace()
+                    .size(11.0)
+                    .color(crate::plate::LEGEND),
+            );
+            if !bank.is_empty() && crate::plate::danger(ui, "REMOVE BANK") {
+                remove = Some(bank.clone());
+            }
+        });
+    }
+    if let Some(bank) = remove {
+        config.presets.retain(|p| p.bank != bank);
+        config.save();
+        config.last_import_note = format!("removed the '{bank}' bank");
+    }
+    ui.add_space(8.0);
+    // Dependencies (stage F2): self-contained or NAMED.
+    let (no_tip, no_grain) = crate::brushbank::audit_deps(&config.presets);
+    if no_tip.is_empty() && no_grain.is_empty() {
+        ui.label(
+            egui::RichText::new(
+                "every brush is self-contained — all tips and grains cached",
+            )
+            .size(11.0)
+            .color(crate::plate::legend_dim()),
+        );
+    } else {
+        ui.label(
+            egui::RichText::new(format!(
+                "{} brush(es) missing their tip, {} missing grain — they \
+                 paint as the plain dab; re-import their source to restore",
+                no_tip.len(),
+                no_grain.len()
+            ))
+            .color(crate::plate::AKA),
+        );
+        for n in no_tip.iter().take(8) {
+            ui.label(
+                egui::RichText::new(format!("  · {n}"))
+                    .size(10.5)
+                    .color(crate::plate::legend_dim()),
+            );
+        }
     }
 }
 

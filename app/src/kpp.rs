@@ -441,7 +441,32 @@ fn cache_resource(dir: &std::path::Path, file_name: &str, bytes: &[u8]) -> bool 
     };
     let path = dir.join(format!("{}.png", thumb_key(stem)));
     if path.exists() {
-        return true;
+        // A GIH cached before frame cycling existed is single-frame with
+        // no sidecar — fall through and rebuild it as an atlas.
+        if !(ext == "gih" && !path.with_extension("frames").exists()) {
+            return true;
+        }
+    }
+    // GIH: every frame into a vertical atlas + a .frames sidecar, so a
+    // pipe brush stamps ALL its shapes (stage F). Other formats: single.
+    if ext == "gih" {
+        if let Some(frames) = crate::kritares::decode_gih_frames(bytes, 16) {
+            let n = frames.len() as u32;
+            let (w, h) = (frames[0].w, frames[0].h);
+            let mut rgba = Vec::with_capacity((w * h * 4 * n) as usize);
+            for f in &frames {
+                rgba.extend_from_slice(&f.rgba);
+            }
+            if let Some(pngb) = encode_png(w, h * n, &rgba) {
+                let _ = std::fs::write(&path, pngb);
+                let _ = std::fs::write(
+                    path.with_extension("frames"),
+                    n.to_string(),
+                );
+                return true;
+            }
+        }
+        return false;
     }
     let img = if ext == "png" {
         let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -480,6 +505,20 @@ fn cache_resource(dir: &std::path::Path, file_name: &str, bytes: &[u8]) -> bool 
         return false;
     };
     std::fs::write(&path, pngb).is_ok()
+}
+
+/// Cache raw RGBA as a tip (brushbank's non-Krita importers).
+pub fn cache_rgba_as_tip(key: &str, w: u32, h: u32, rgba: &[u8]) -> bool {
+    let Some(dir) = tips_dir() else { return false };
+    let Some(pngb) = encode_png(w, h, rgba) else { return false };
+    std::fs::write(dir.join(format!("{key}.png")), pngb).is_ok()
+}
+
+/// Cache raw RGBA as a grain.
+pub fn cache_rgba_as_grain(key: &str, w: u32, h: u32, rgba: &[u8]) -> bool {
+    let Some(dir) = grains_dir() else { return false };
+    let Some(pngb) = encode_png(w, h, rgba) else { return false };
+    std::fs::write(dir.join(format!("{key}.png")), pngb).is_ok()
 }
 
 /// Pull tips and grains out of the Krita install's own resource folders

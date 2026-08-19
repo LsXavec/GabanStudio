@@ -13,6 +13,7 @@ mod floatwin;
 mod graphcomp;
 mod icons;
 mod kpp;
+mod brushbank;
 mod kritares;
 mod net;
 mod newproject;
@@ -2259,20 +2260,25 @@ impl Editor {
         if self.canvas.request_brush_import && !self.canvas.stroke_active() {
             self.canvas.request_brush_import = false;
             if let Some(paths) = rfd::FileDialog::new()
-                .add_filter("Krita brushes", &["kpp", "bundle"])
+                .add_filter(
+                    "brush files",
+                    &["kpp", "bundle", "abr", "brush", "brushset", "gbr", "gih", "png"],
+                )
                 .pick_files()
             {
-                let (ok, dup, failed) = crate::kpp::import_files(&paths, presets);
-                if ok > 0 {
+                let r = crate::brushbank::import_any(&paths, presets);
+                if r.ok > 0 {
                     *presets_dirty = true;
                 }
-                if ok == 0 && failed > 0 {
+                if r.ok == 0 && r.failed > 0 {
                     self.state.refuse(format!(
-                        "refused — none of those files imported ({failed} unreadable)"
+                        "refused — none of those files imported ({} unreadable)",
+                        r.failed
                     ));
                 } else {
                     self.state.status = format!(
-                        "imported {ok} brush(es) · {dup} duplicate(s) · {failed} failed"
+                        "imported {} brush(es) · {} duplicate(s) · {} failed",
+                        r.ok, r.dup, r.failed
                     );
                 }
             }
@@ -2282,7 +2288,14 @@ impl Editor {
             let paths = crate::kpp::installed_krita_paths();
             let cached = crate::kpp::cache_krita_resource_dirs();
             let _ = cached;
+            let before: std::collections::HashSet<String> =
+                presets.iter().map(|p| p.name.clone()).collect();
             let (ok, dup, failed) = crate::kpp::import_files(&paths, presets);
+            for p in presets.iter_mut() {
+                if !before.contains(&p.name) && p.bank.is_empty() {
+                    p.bank = "krita".into();
+                }
+            }
             if ok > 0 {
                 *presets_dirty = true;
             }
