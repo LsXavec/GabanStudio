@@ -1581,11 +1581,9 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                                     .suffix(" px"),
                             )
                             .changed();
-                        if ui
-                            .small_button("✕")
-                            .on_hover_text("delete preset")
-                            .clicked()
-                        {
+                        // AUDIT [12]: the smallest target in the row,
+                        // beside the size field being dragged.
+                        if crate::plate::danger(ui, "DELETE PRESET") {
                             remove = Some(i);
                         }
                     });

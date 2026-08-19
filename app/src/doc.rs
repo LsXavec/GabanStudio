@@ -1277,7 +1277,7 @@ impl AppState {
                 self.view.active_column = id;
                 self.status = "column added".into();
             }
-            Err(e) => self.status = format!("error: {e}"),
+            Err(e) => self.refuse(format!("could not add a column — {e}")),
         }
     }
 
@@ -1606,7 +1606,10 @@ impl AppState {
                 self.status = ok_msg.into();
                 self.doc_gen = self.doc_gen.wrapping_add(1);
             }
-            Err(e) => self.status = format!("error: {e}"),
+            // AUDIT [14]: ~30 document commands report through here, and
+            // a failure was a grey remark prefixed "error:" — a category
+            // name rather than a statement of what did not happen.
+            Err(e) => self.refuse(format!("refused — {ok_msg} did not happen ({e})")),
         }
     }
 

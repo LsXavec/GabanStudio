@@ -143,3 +143,36 @@ and ranked by what the owner notices in daily drawing use.
   [30] the dpi caption implied the value did something; it is stored and
        read by nothing today, and now says so.
   [32] the swap-dimensions button wore Icon::Fit, the fit-view mark.
+- 2026-08-18 — BATCH THREE, seven named items (0 errors, 0 warnings,
+  20 tests):
+  [11] deleting a saved workspace was `small_button("✕")` — the smallest
+       target in its row, one item from "apply". Now a held DANGER,
+       "DELETE ROOM".                            LAW: affordances.
+  [12] deleting a brush preset, the same shape, beside the size field
+       being dragged. Now "DELETE PRESET", held.  LAW: affordances.
+  [13] the room CLOSING reached only Settings — the artist kept drawing
+       believing they were connected. Now refuses at the canvas: "the
+       room closed — you are working on your own copy again".
+                                                  LAW: the Warning Law.
+  [14] report(), the funnel for ~30 document commands, wrote
+       "error: {e}" into grey chatter. Now refuses, naming the verb that
+       did not happen. (First attempt hit add_column's identical line
+       instead — caught by the compiler, both sites now correct.)
+                                                  LAW: the Warning Law.
+  [15] the export progress window was stock egui — the one surface an
+       artist watches for minutes. Added `plate::meter` (Well track,
+       Legend edge, Tally fill, count BESIDE the bar in Struck mono;
+       indeterminate work sweeps a band rather than faking a
+       percentage), and the window now sits on the plate's grain.
+                                                  LAW: affordances + type.
+  [17] the Output node's title bar was FILLED with Aka. Aka means
+       refusal; the graph's result is not a correction. Its identity is
+       its Struck edge.                           LAW: the colour law.
+  [19] an export that failed after minutes reported into chatter and
+       faded in 4s. The outcome now carries whether it failed: failures
+       refuse, success and cancellation stay chatter.
+                                                  LAW: the Warning Law.
+  DEFERRED, named: [9] a `plate::field` numeric helper (~20 DragValue
+  sites) and [18] the Settings window's stock-egui vocabulary (sidebar,
+  combos, checkboxes, headings). Both are broad and deserve their own
+  batch rather than riding along.

@@ -28,7 +28,10 @@ fn kind_color(kind: &NodeKind) -> Color32 {
         NodeKind::ImageSource { .. } => Color32::from_rgb(228, 225, 214),
         NodeKind::Transform { .. } => Color32::from_rgb(100, 102, 94),
         NodeKind::Blend { .. } => Color32::from_rgb(60, 99, 141),
-        NodeKind::Output => Color32::from_rgb(228, 82, 47),
+        // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
+        // means refusal or destruction, and the graph's result is
+        // neither. Its identity is carried by its Struck edge instead.
+        NodeKind::Output => Color32::from_rgb(228, 225, 214),
     }
 }
 

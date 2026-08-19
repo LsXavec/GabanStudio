@@ -471,6 +471,15 @@ impl App {
                 net::NetEvent::Ended(why) => {
                     self.session = net::Session::Idle;
                     self.session_peers.clear();
+                    // AUDIT [13]: this reached ONLY the Settings page, so
+                    // the artist kept drawing believing they were still
+                    // in the room. Losing the room contradicts what they
+                    // think is happening — Aka, at the pen.
+                    if let Some(ed) = &mut self.editor {
+                        ed.state.refuse(
+                            "the room closed — you are working on your own copy again",
+                        );
+                    }
                     self.session_status = why;
                 }
             }
@@ -2058,29 +2067,46 @@ impl Editor {
         let Some(job) = &mut self.export_job else {
             return;
         };
-        let mut finished: Option<String> = None;
+        // (String, failed?) — a failure refuses, success and cancel chatter.
+        let mut finished: Option<(String, bool)> = None;
         loop {
             match job.rx.try_recv() {
                 Ok(export::ExportProgress::Frame) => job.done += 1,
                 Ok(export::ExportProgress::Encoding) => job.encoding = true,
                 Ok(export::ExportProgress::Done(result)) => {
                     finished = Some(match result {
-                        Ok((n, note)) => format!("exported {n} frame(s) ({}){note}", job.kind),
-                        Err(e) if e == export::CANCELLED => "export cancelled".into(),
-                        Err(e) => format!("{} export failed: {e}", job.kind),
+                        Ok((n, note)) => {
+                            (format!("exported {n} frame(s) ({}){note}", job.kind), false)
+                        }
+                        Err(e) if e == export::CANCELLED => {
+                            ("export cancelled".into(), false)
+                        }
+                        Err(e) => (
+                            format!("the {} export did not finish — {e}", job.kind),
+                            true,
+                        ),
                     });
                     break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    finished = Some(format!("{} export ended unexpectedly", job.kind));
+                    finished = Some((
+                        format!("the {} export stopped without finishing", job.kind),
+                        true,
+                    ));
                     break;
                 }
             }
         }
-        if let Some(status) = finished {
+        if let Some((status, failed)) = finished {
             self.export_job = None;
-            self.state.status = status;
+            // AUDIT [19]: a failure after minutes of rendering used to
+            // fade out of the chatter lane in four seconds.
+            if failed {
+                self.state.refuse(status);
+            } else {
+                self.state.status = status;
+            }
         }
     }
 
@@ -2163,24 +2189,30 @@ impl Editor {
             .resizable(false)
             .collapsible(false)
             .show(ctx, |ui| {
+                plate::surface(ui);
                 ui.set_min_width(260.0);
+                // AUDIT [15]: this was a stock egui ProgressBar — the one
+                // surface the artist stares at for minutes, speaking a
+                // different language from the app behind it.
                 if job.encoding {
-                    ui.add(
-                        egui::ProgressBar::new(1.0)
-                            .text("encoding video…")
-                            .animate(true),
-                    );
+                    plate::legend(ui, "encoding video");
+                    plate::meter(ui, None, 240.0);
                 } else {
                     let frac = if job.total > 0 {
                         job.done as f32 / job.total as f32
                     } else {
                         0.0
                     };
-                    ui.add(
-                        egui::ProgressBar::new(frac)
-                            .text(format!("{} / {} frames", job.done, job.total)),
+                    plate::legend(ui, "rendering frames");
+                    plate::meter(ui, Some(frac), 240.0);
+                    ui.label(
+                        egui::RichText::new(format!("{} / {}", job.done, job.total))
+                            .monospace()
+                            .size(11.0)
+                            .color(plate::STRUCK),
                     );
                 }
+                ui.add_space(6.0);
                 if ui.button("cancel").clicked() {
                     job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -2554,11 +2586,10 @@ impl Editor {
                                     }
                                 }
                             });
-                            if ui
-                                .small_button("✕")
-                                .on_hover_text("delete workspace")
-                                .clicked()
-                            {
+                            // AUDIT [11]: this was the smallest target in
+                            // the row, one item from "apply". Destruction
+                            // must be findable by feel, not by precision.
+                            if plate::danger(ui, "DELETE ROOM") {
                                 remove = Some(i);
                             }
                         });

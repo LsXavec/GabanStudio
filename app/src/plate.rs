@@ -614,6 +614,57 @@ pub fn rail(
     resp
 }
 
+/// METER — a read-only fill (export progress, and anything else that
+/// reports how far along a machine is). Same material as RAIL: a Well
+/// track with a 1px Legend edge and a Tally fill; the count rides
+/// BESIDE it in Struck mono, never inside the bar where the fill
+/// swallows it. Indeterminate work passes `None`, which sweeps a short
+/// Tally band instead of faking a percentage.
+pub fn meter(ui: &mut Ui, frac: Option<f32>, w: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 14.0), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let ppp = ui.ctx().pixels_per_point();
+    let p = ui.painter();
+    let track = egui::Rect::from_min_max(
+        Pos2::new(snap(rect.left(), ppp), snap(rect.center().y - 5.0, ppp)),
+        Pos2::new(snap(rect.right(), ppp), snap(rect.center().y + 5.0, ppp)),
+    );
+    p.rect_filled(track, CornerRadius::ZERO, WELL);
+    match frac {
+        Some(f) => {
+            let t = f.clamp(0.0, 1.0);
+            if t > 0.0 {
+                let mut fill = track;
+                fill.max.x = snap(track.left() + track.width() * t, ppp);
+                p.rect_filled(fill.shrink(1.0), CornerRadius::ZERO, TALLY);
+            }
+        }
+        None => {
+            // Indeterminate: a band that sweeps, so the window reads as
+            // working rather than stalled — without claiming a number.
+            let phase = (ui.input(|i| i.time) * 0.6).fract() as f32;
+            let bw = track.width() * 0.25;
+            let x = track.left() + (track.width() + bw) * phase - bw;
+            let band = egui::Rect::from_min_max(
+                Pos2::new(x.max(track.left()), track.top() + 1.0),
+                Pos2::new((x + bw).min(track.right()), track.bottom() - 1.0),
+            );
+            if band.width() > 0.0 {
+                p.rect_filled(band, CornerRadius::ZERO, TALLY);
+            }
+            ui.ctx().request_repaint();
+        }
+    }
+    p.rect_stroke(
+        track,
+        CornerRadius::ZERO,
+        Stroke::new(1.0, legend_dim()),
+        StrokeKind::Inside,
+    );
+}
+
 /// How long DANGER must be held before it fires.
 const DANGER_HOLD_S: f64 = 0.35;
 
