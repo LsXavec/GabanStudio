@@ -470,6 +470,94 @@ impl RebindCapture {
 
 /// A named brush snapshot — applied whole from a keybind (1–8), the Presets
 /// pane, or automatically when entering a workspace bound to it.
+/// PSD-brush-engine: everything an imported Krita preset carries that
+/// our dab pipeline can honour. ABSENT on the pencil box and every
+/// hand-made preset — and when absent, the stroke path is byte-identical
+/// to before this room existed (NEVER-DO 1).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct EngineDef {
+    /// Krita paintopid ("paintbrush", "spraybrush", …). Engines outside
+    /// the honest set paint as the plain dab and say so in the hover.
+    #[serde(default)]
+    pub engine: String,
+    /// Dab spacing as a fraction of diameter (Krita Brush@spacing).
+    #[serde(default = "d_spacing")]
+    pub spacing: f32,
+    /// Generated tip (MaskGenerator) — rasterized to a mask at arm.
+    #[serde(default)]
+    pub auto: Option<AutoTip>,
+    /// Stamp tip: key into the brush_tips cache (extracted at import).
+    #[serde(default)]
+    pub tip_key: Option<String>,
+    /// Sensor curves per target, applied CPU-side at dab building.
+    #[serde(default)]
+    pub curves: Vec<CurveDef>,
+    /// Scatter as a fraction of diameter (spray engines only — the
+    /// paintbrush gate for it is not reliably recoverable; logged).
+    #[serde(default)]
+    pub scatter: f32,
+    /// Fraction of dabs kept (spray density). 0 = keep all (legacy).
+    #[serde(default)]
+    pub density: f32,
+    /// Random tip rotation amount 0..1 (Brush@randomness).
+    #[serde(default)]
+    pub randomness: f32,
+    /// Base tip angle, degrees (Brush@angle).
+    #[serde(default)]
+    pub angle_deg: f32,
+    /// Paper grain: key into the brush_grains cache + scale + strength.
+    #[serde(default)]
+    pub grain_key: Option<String>,
+    #[serde(default = "d_one")]
+    pub grain_scale: f32,
+    #[serde(default)]
+    pub grain_strength: f32,
+}
+
+fn d_spacing() -> f32 {
+    0.1
+}
+fn d_one() -> f32 {
+    1.0
+}
+
+/// Krita MaskGenerator, the generated-tip recipe.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct AutoTip {
+    /// "circle" or "rect".
+    #[serde(default)]
+    pub shape: String,
+    /// width/height of the stamp (1 = round).
+    #[serde(default = "d_one")]
+    pub ratio: f32,
+    /// Fade fractions 0..1 per axis (1 = hard to the rim).
+    #[serde(default = "d_one")]
+    pub hfade: f32,
+    #[serde(default = "d_one")]
+    pub vfade: f32,
+    /// Star points; 2 = plain.
+    #[serde(default = "d_two")]
+    pub spikes: u32,
+    /// The "soft" MaskGenerator (gaussian-ish falloff).
+    #[serde(default)]
+    pub soft: bool,
+}
+
+fn d_two() -> u32 {
+    2
+}
+
+/// One sensor curve: `target` ∈ size|opacity|flow|rotation, `sensor` ∈
+/// pressure|fuzzy|fade|distance|xtilt|ytilt|ascension|declination.
+/// Empty points = the sensor's raw value (identity curve).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, Default)]
+pub struct CurveDef {
+    pub target: String,
+    pub sensor: String,
+    #[serde(default)]
+    pub points: Vec<[f32; 2]>,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BrushPreset {
     pub name: String,
@@ -483,6 +571,10 @@ pub struct BrushPreset {
     pub color: Option<[u8; 4]>,
     /// Tilt dynamics (native tablet backend only — egui pen events carry no
     /// tilt). Serde defaults keep pre-tilt configs loading.
+    /// PSD-brush-engine: the imported Krita machinery. None = the
+    /// procedural dab, byte-identical to before.
+    #[serde(default)]
+    pub engine: Option<EngineDef>,
     #[serde(default)]
     pub tilt_size: bool,
     #[serde(default)]
@@ -505,6 +597,7 @@ impl Default for BrushPreset {
     fn default() -> Self {
         Self {
             name: "preset".into(),
+            engine: None,
             size_px: 14.0,
             flow: 1.0,
             opacity: 1.0,
@@ -530,6 +623,7 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
         // "does not photograph" encoded as an opacity ceiling.
         BrushPreset {
             name: "atari".into(),
+            engine: None,
             size_px: 14.0,
             flow: 0.45,
             opacity: 0.8,
@@ -546,6 +640,7 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
         // a light touch is a thin black line, never a grey one.
         BrushPreset {
             name: "genga".into(),
+            engine: None,
             size_px: 6.0,
             flow: 1.0,
             opacity: 1.0,
@@ -562,6 +657,7 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
         // unmistakably loud over both other inks at full press.
         BrushPreset {
             name: "shusei".into(),
+            engine: None,
             size_px: 8.0,
             flow: 0.7,
             opacity: 1.0,

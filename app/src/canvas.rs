@@ -560,6 +560,7 @@ impl CanvasView {
     pub fn snapshot_preset(&self, name: String) -> crate::config::BrushPreset {
         crate::config::BrushPreset {
             name,
+            engine: None,
             size_px: self.raster_brush_px,
             flow: self.brush_flow,
             opacity: self.brush_opacity,

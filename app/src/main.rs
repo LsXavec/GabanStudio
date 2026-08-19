@@ -13,6 +13,7 @@ mod floatwin;
 mod graphcomp;
 mod icons;
 mod kpp;
+mod kritares;
 mod net;
 mod newproject;
 mod nodegraph_panel;
@@ -2279,6 +2280,8 @@ impl Editor {
         if self.canvas.request_krita_scan && !self.canvas.stroke_active() {
             self.canvas.request_krita_scan = false;
             let paths = crate::kpp::installed_krita_paths();
+            let cached = crate::kpp::cache_krita_resource_dirs();
+            let _ = cached;
             let (ok, dup, failed) = crate::kpp::import_files(&paths, presets);
             if ok > 0 {
                 *presets_dirty = true;
