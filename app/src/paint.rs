@@ -14,7 +14,7 @@
 //! headless engine, round-tripped bit-for-bit.
 
 use anim_core::ids::ColumnId;
-use anim_core::raster::{TileCoord, TileData, TILE};
+use anim_core::raster::{TILE, TileCoord, TileData};
 use eframe::egui;
 use eframe::egui_wgpu::{RenderState, Renderer};
 use egui::mutex::RwLock;
@@ -207,8 +207,8 @@ fn vs_main(
     @location(5) aspect: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 4>(
-        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
-        vec2<f32>(-1.0,  1.0), vec2<f32>(1.0,  1.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
+    vec2<f32>(-1.0,  1.0), vec2<f32>(1.0,  1.0),
     );
     let corner = corners[vid];
     // Quad covers the MAJOR extent (radius * aspect); aspect 1 = old size.
@@ -216,7 +216,7 @@ fn vs_main(
     let local = corner * half_extent;
     let texel = center + local;
     let clip = vec2<f32>(
-        texel.x * u.inv_size.x * 2.0 - 1.0,
+    texel.x * u.inv_size.x * 2.0 - 1.0,
         1.0 - texel.y * u.inv_size.y * 2.0,  // flip Y
     );
     var out: VsOut;
@@ -243,9 +243,9 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let h = clamp(in.hardness, 0.01, 0.99);
     // MyPaint two-segment hardness falloff in rr = (r/radius)^2 space.
     var opa = select(
-        (h / (1.0 - h)) * (1.0 - rr),        // rr > h
-        1.0 - rr * (1.0 / h - 1.0),          // rr <= h
-        rr <= h,
+    (h / (1.0 - h)) * (1.0 - rr),        // rr > h
+    1.0 - rr * (1.0 / h - 1.0),          // rr <= h
+    rr <= h,
     );
     opa = clamp(opa, 0.0, 1.0);
     let aa = clamp((1.0 - rr) / fw, 0.0, 1.0);   // analytic rim AA
@@ -272,7 +272,7 @@ struct VsOut {
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     // Fullscreen triangle.
     var corners = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0),
     );
     let p = corners[vid];
     var out: VsOut;
@@ -292,19 +292,16 @@ impl PaintLayer {
         let device = rs.device.clone();
         let queue = rs.queue.clone();
         let renderer = rs.renderer.clone();
-
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("dab_shader"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
-
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("dab_uniform"),
             size: std::mem::size_of::<Uniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("dab_bgl"),
             entries: &[wgpu::BindGroupLayoutEntry {
@@ -326,7 +323,6 @@ impl PaintLayer {
                 resource: uniform_buf.as_entire_binding(),
             }],
         });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("dab_pl"),
             bind_group_layouts: &[Some(&bind_layout)],
@@ -345,13 +341,52 @@ impl PaintLayer {
             Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ERASE_BLEND);
         let alpha_lock_pipeline =
             Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ALPHA_LOCK_BLEND);
-
         let filter = wgpu::FilterMode::Linear;
-        let active = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
-        let wet = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
-        let below = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
-        let above = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
-        let scratch = Self::make_target(&device, &renderer, &queue, &uniform_buf, width, height, filter);
+        let active = Self::make_target(
+            &device,
+            &renderer,
+            &queue,
+            &uniform_buf,
+            width,
+            height,
+            filter,
+        );
+        let wet = Self::make_target(
+            &device,
+            &renderer,
+            &queue,
+            &uniform_buf,
+            width,
+            height,
+            filter,
+        );
+        let below = Self::make_target(
+            &device,
+            &renderer,
+            &queue,
+            &uniform_buf,
+            width,
+            height,
+            filter,
+        );
+        let above = Self::make_target(
+            &device,
+            &renderer,
+            &queue,
+            &uniform_buf,
+            width,
+            height,
+            filter,
+        );
+        let scratch = Self::make_target(
+            &device,
+            &renderer,
+            &queue,
+            &uniform_buf,
+            width,
+            height,
+            filter,
+        );
 
         // Wet→cel composite: sampled wet texture × opacity uniform, blended over.
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -394,32 +429,31 @@ impl PaintLayer {
             bind_group_layouts: &[Some(&composite_layout)],
             immediate_size: 0,
         });
-        let composite_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("composite_pipeline"),
-                layout: Some(&composite_pl),
-                vertex: wgpu::VertexState {
-                    module: &composite_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &composite_shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
+        let composite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("composite_pipeline"),
+            layout: Some(&composite_pl),
+            vertex: wgpu::VertexState {
+                module: &composite_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &composite_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         let composite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("composite_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -448,7 +482,6 @@ impl PaintLayer {
             &composite_sampler,
             &opacity_buf,
         );
-
         Self {
             device,
             queue,
@@ -518,12 +551,36 @@ impl PaintLayer {
             array_stride: std::mem::size_of::<Dab>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &[
-                wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x2 },
-                wgpu::VertexAttribute { offset: 8, shader_location: 1, format: wgpu::VertexFormat::Float32 },
-                wgpu::VertexAttribute { offset: 12, shader_location: 2, format: wgpu::VertexFormat::Float32 },
-                wgpu::VertexAttribute { offset: 16, shader_location: 3, format: wgpu::VertexFormat::Float32x4 },
-                wgpu::VertexAttribute { offset: 32, shader_location: 4, format: wgpu::VertexFormat::Float32x2 },
-                wgpu::VertexAttribute { offset: 40, shader_location: 5, format: wgpu::VertexFormat::Float32 },
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 8,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 12,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32,
+                },
+                wgpu::VertexAttribute {
+                    offset: 16,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x4,
+                },
+                wgpu::VertexAttribute {
+                    offset: 32,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 40,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32,
+                },
             ],
         };
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -560,7 +617,11 @@ impl PaintLayer {
     fn create_layer_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("layer"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -586,7 +647,11 @@ impl PaintLayer {
     ) -> Target {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("paint_layer"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -594,11 +659,10 @@ impl PaintLayer {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC   // readback at pen-up
-                | wgpu::TextureUsages::COPY_DST,  // upload engine tiles (sync_from)
+                | wgpu::TextureUsages::COPY_DST, // upload engine tiles (sync_from)
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         queue.write_buffer(
             uniform_buf,
             0,
@@ -629,11 +693,14 @@ impl PaintLayer {
             multiview_mask: None,
         });
         queue.submit(Some(enc.finish()));
-
         let tex_id = renderer
             .write()
             .register_native_texture(device, &view, filter);
-        Target { texture, view, tex_id }
+        Target {
+            texture,
+            view,
+            tex_id,
+        }
     }
 
     /// Recreate every target if the project resolution changed (clears content).
@@ -645,7 +712,13 @@ impl PaintLayer {
         // textures inside the renderer for the app's lifetime otherwise.
         {
             let mut renderer = self.renderer.write();
-            for t in [&self.active, &self.wet, &self.below, &self.above, &self.scratch] {
+            for t in [
+                &self.active,
+                &self.wet,
+                &self.below,
+                &self.above,
+                &self.scratch,
+            ] {
                 renderer.free_texture(&t.tex_id);
             }
             // Onion slots are dropped below (stale size) — free their
@@ -703,12 +776,7 @@ impl PaintLayer {
         self.filter = filter;
         let mut renderer = self.renderer.write();
         for t in [&self.active, &self.wet, &self.below, &self.above] {
-            renderer.update_egui_texture_from_wgpu_texture(
-                &self.device,
-                &t.view,
-                filter,
-                t.tex_id,
-            );
+            renderer.update_egui_texture_from_wgpu_texture(&self.device, &t.view, filter, t.tex_id);
         }
         // Onion ghosts and other-column projections sample with the same
         // filter as everything else.
@@ -731,15 +799,13 @@ impl PaintLayer {
     pub fn below_id(&self) -> egui::TextureId {
         self.below.tex_id
     }
-
     pub fn above_id(&self) -> egui::TextureId {
         self.above.tex_id
     }
-
     fn clear_view(&self, view: &wgpu::TextureView, label: &str) {
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some(label),
-        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
         enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -786,8 +852,11 @@ impl PaintLayer {
         };
         self.composite_layers_into(&target, layers);
     }
-
-    pub(crate) fn composite_layers_into(&mut self, target: &wgpu::TextureView, layers: &[LayerSlice<'_>]) {
+    pub(crate) fn composite_layers_into(
+        &mut self,
+        target: &wgpu::TextureView,
+        layers: &[LayerSlice<'_>],
+    ) {
         self.clear_view(target, "clear_projection");
         let scratch_tex = self.scratch.texture.clone();
         let scratch_view = self.scratch.view.clone();
@@ -847,20 +916,22 @@ impl PaintLayer {
         let view = self.wet.view.clone();
         self.paint_into(&view, dabs, PaintMode::Ink);
     }
-
     fn paint_into(&mut self, view: &wgpu::TextureView, dabs: &[Dab], mode: PaintMode) {
         if dabs.is_empty() {
             return;
         }
-        let instances = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("dab_instances"),
-            contents: bytemuck::cast_slice(dabs),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("paint_dabs"),
-        });
+        let instances = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("dab_instances"),
+                contents: bytemuck::cast_slice(dabs),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("paint_dabs"),
+            });
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("dabs"),
@@ -900,9 +971,11 @@ impl PaintLayer {
             0,
             bytemuck::bytes_of(&[opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0]),
         );
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("composite_wet"),
-        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("composite_wet"),
+            });
         {
             let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("wet_over_active"),
@@ -973,9 +1046,11 @@ impl PaintLayer {
         view: &wgpu::TextureView,
         tiles: &BTreeMap<TileCoord, Arc<TileData>>,
     ) {
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("clear_layer"),
-        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("clear_layer"),
+            });
         enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("clear"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -993,7 +1068,6 @@ impl PaintLayer {
             multiview_mask: None,
         });
         self.queue.submit(Some(enc.finish()));
-
         for ((tx, ty), tile) in tiles {
             let px = tx * TILE as i32;
             let py = ty * TILE as i32;
@@ -1006,7 +1080,11 @@ impl PaintLayer {
                 wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: px as u32, y: py as u32, z: 0 },
+                    origin: wgpu::Origin3d {
+                        x: px as u32,
+                        y: py as u32,
+                        z: 0,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 tile.as_bytes(),
@@ -1015,7 +1093,11 @@ impl PaintLayer {
                     bytes_per_row: Some(TILE as u32 * BPP),
                     rows_per_image: Some(TILE as u32),
                 },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                wgpu::Extent3d {
+                    width: w,
+                    height: h,
+                    depth_or_array_layers: 1,
+                },
             );
         }
     }
@@ -1033,9 +1115,12 @@ impl PaintLayer {
         };
         // Reuse the existing slot texture if the content is unchanged.
         if let Some(s) = &self.onion[slot]
-            && s.hash == hash && s.width == self.width && s.height == self.height {
-                return;
-            }
+            && s.hash == hash
+            && s.width == self.width
+            && s.height == self.height
+        {
+            return;
+        }
         let (texture, view, tex_id) = match self.onion[slot].take() {
             Some(s) if s.width == self.width && s.height == self.height => {
                 (s.texture, s.view, s.tex_id)
@@ -1047,11 +1132,10 @@ impl PaintLayer {
                 }
                 let texture = Self::create_layer_texture(&self.device, self.width, self.height);
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let tex_id = self.renderer.write().register_native_texture(
-                    &self.device,
-                    &view,
-                    self.filter,
-                );
+                let tex_id =
+                    self.renderer
+                        .write()
+                        .register_native_texture(&self.device, &view, self.filter);
                 (texture, view, tex_id)
             }
         };
@@ -1065,7 +1149,6 @@ impl PaintLayer {
             height: self.height,
         });
     }
-
     pub fn onion_id(&self, slot: usize) -> Option<egui::TextureId> {
         self.onion[slot].as_ref().map(|s| s.tex_id)
     }
@@ -1076,7 +1159,11 @@ impl PaintLayer {
     /// reuses the existing texture when nothing changed, frees on removal.
     /// `None` clears the column's slot (empty cel / vector-only / column
     /// resolves to nothing this frame).
-    pub fn sync_other_column(&mut self, column: ColumnId, layers: Option<(&[LayerSlice<'_>], u64)>) {
+    pub fn sync_other_column(
+        &mut self,
+        column: ColumnId,
+        layers: Option<(&[LayerSlice<'_>], u64)>,
+    ) {
         let Some((layers, hash)) = layers else {
             if let Some(old) = self.other_cols.remove(&column) {
                 self.renderer.write().free_texture(&old.tex_id);
@@ -1100,18 +1187,24 @@ impl PaintLayer {
                 }
                 let texture = Self::create_layer_texture(&self.device, self.width, self.height);
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let tex_id = self.renderer.write().register_native_texture(
-                    &self.device,
-                    &view,
-                    self.filter,
-                );
+                let tex_id =
+                    self.renderer
+                        .write()
+                        .register_native_texture(&self.device, &view, self.filter);
                 (texture, view, tex_id)
             }
         };
         self.composite_layers_into(&view, layers);
         self.other_cols.insert(
             column,
-            OnionSlot { texture, view, tex_id, hash, width: self.width, height: self.height },
+            OnionSlot {
+                texture,
+                view,
+                tex_id,
+                hash,
+                width: self.width,
+                height: self.height,
+            },
         );
     }
 
@@ -1132,7 +1225,6 @@ impl PaintLayer {
             }
         }
     }
-
     pub fn other_column_id(&self, column: ColumnId) -> Option<egui::TextureId> {
         self.other_cols.get(&column).map(|s| s.tex_id)
     }
@@ -1145,17 +1237,17 @@ impl PaintLayer {
         let unpadded_bpr = self.width * BPP;
         let padded_bpr = unpadded_bpr.div_ceil(256) * 256;
         let buf_size = padded_bpr as u64 * self.height as u64;
-
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
             size: buf_size,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-
-        let mut enc = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("readback"),
-        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("readback"),
+            });
         enc.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.active.texture,
@@ -1171,7 +1263,11 @@ impl PaintLayer {
                     rows_per_image: Some(self.height),
                 },
             },
-            wgpu::Extent3d { width: self.width, height: self.height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: self.width,
+                height: self.height,
+                depth_or_array_layers: 1,
+            },
         );
         self.queue.submit(Some(enc.finish()));
 
@@ -1185,7 +1281,6 @@ impl PaintLayer {
             timeout: None,
         });
         let _ = rx.recv();
-
         let data = staging.slice(..).get_mapped_range();
         let tiles_x = self.width.div_ceil(TILE as u32);
         let tiles_y = self.height.div_ceil(TILE as u32);

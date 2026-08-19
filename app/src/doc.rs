@@ -10,8 +10,8 @@ use std::sync::Arc;
 use anim_core::Engine;
 use anim_core::command::{Command, CutRef};
 use anim_core::ids::*;
-use anim_core::model::{Cut, Stroke};
 use anim_core::model::{CelLayer, LayerProps};
+use anim_core::model::{Cut, Stroke};
 use anim_core::raster::{TileCoord, TileData, TileDiff};
 use anim_core::xsheet::Exposure;
 
@@ -38,12 +38,24 @@ pub struct ViewContext {
     /// line without its color/shadow bleeding through). Off = whole-cel
     /// ghost (today's default behavior).
     pub onion_layer_only: bool,
-    /// Which cel layer is being edited, counted FROM THE TOP of the stack
-    /// (0 = topmost — "line" in the default template). Position-based so it
-    /// follows across frames; clamped per drawing when stacks are shallower.
-    pub active_layer_slot: usize,
+    /// The ACTIVE LAYER, tracked BY NAME (spec defect 16): the silent
+    /// slot-clamp is dead. If this name is absent on the cel under the
+    /// playhead, the state is UNARMED — no layer receives ink and the pen
+    /// refuses. Silence is never an acceptable response to state changing
+    /// under the hand.
+    pub active_layer: String,
     /// Loop playback at the end of the cut (off = stop on the last frame).
     pub loop_playback: bool,
+    /// LINE GUARD (shiage charter): while on, the `line`-named layer
+    /// cannot be ARMED as the ink target — cycling skips it, tapping its
+    /// row refuses. Arming-only: the pen path is untouched. Defaults ON
+    /// when entering the Finishing room, OFF elsewhere.
+    pub line_guard: bool,
+    /// THE GHOST PIN (room ratified 2026-08-17): a library drawing pinned
+    /// to the light box — rendered in Ao at the onion strength on EVERY
+    /// frame, with no sheet entry, no export, no document change. Pure
+    /// display; dies with the session (NEVER-DO 1 of its room).
+    pub ghost_pin: Option<DrawingId>,
 }
 
 /// The document (engine + where it lives on disk) plus the single "Main"
@@ -54,6 +66,20 @@ pub struct AppState {
     pub view: ViewContext,
     pub file_path: Option<PathBuf>,
     pub status: String,
+    /// THE REFUSAL channel (the Foot's Aka lane): the machine overruled
+    /// the hand. Separate from `status` chatter; `refusal_seq` bumps on
+    /// every refusal so repeats re-flash.
+    pub refusal: String,
+    pub refusal_seq: u32,
+    /// SESSION generation stamp: bumps on every reported commit and on
+    /// undo/redo — the host's cheap "the document moved" signal (the
+    /// engine's history is private, and rightly so).
+    pub doc_gen: u64,
+    /// THE SWATCH BOARD's active character tab (shiage; UI-transient).
+    pub active_character: usize,
+    /// EDIT MODEL latch: the palette board exposes its editing controls
+    /// only while this is on (model edits propagate everywhere).
+    pub palette_edit: bool,
     /// Continuation handles (column, key-frame) the user has explicitly dragged
     /// into position. Such a hold stays statically visible even when it holds to
     /// its natural end (no Empty terminator); un-touched holds stay hidden.
@@ -123,10 +149,17 @@ impl AppState {
                 play_acc: 0.0,
                 onion: true,
                 onion_layer_only: false,
-                active_layer_slot: 0,
+                active_layer: "line".into(),
                 loop_playback: true,
+                ghost_pin: None,
+                line_guard: false,
             },
             file_path: None,
+            refusal: String::new(),
+            refusal_seq: 0,
+            doc_gen: 0,
+            active_character: 0,
+            palette_edit: false,
             status: "new project — draw on the canvas to create frame 1".into(),
             positioned_holds: HashSet::new(),
             palettes: Default::default(),
@@ -161,7 +194,11 @@ impl AppState {
 
     /// Adopt a loaded engine, pointing the UI at its first scene/cut/column.
     fn adopt(engine: Engine, path: PathBuf) -> Result<Self, String> {
-        let scene = engine.project.scenes.first().ok_or("project has no scenes")?;
+        let scene = engine
+            .project
+            .scenes
+            .first()
+            .ok_or("project has no scenes")?;
         let cut = scene.cuts.first().ok_or("project has no cuts")?;
         let column = cut
             .xsheet
@@ -179,10 +216,17 @@ impl AppState {
                 play_acc: 0.0,
                 onion: true,
                 onion_layer_only: false,
-                active_layer_slot: 0,
+                active_layer: "line".into(),
                 loop_playback: true,
+                ghost_pin: None,
+                line_guard: false,
             },
             file_path: Some(path),
+            refusal: String::new(),
+            refusal_seq: 0,
+            doc_gen: 0,
+            active_character: 0,
+            palette_edit: false,
             status: "project loaded".into(),
             palettes: crate::palette::Palettes::load_from(&engine.project),
             palette_new_name: String::new(),
@@ -203,29 +247,24 @@ impl AppState {
     }
 
     // ---- Accessors --------------------------------------------------------
-
     pub fn at(&self) -> CutRef {
         CutRef {
             scene: self.view.scene,
             cut: self.view.cut,
         }
     }
-
     pub fn cut(&self) -> &Cut {
         self.engine
             .project
             .cut(self.view.scene, self.view.cut)
             .expect("current cut exists")
     }
-
     pub fn frame_count(&self) -> u32 {
         self.cut().frame_count.max(1)
     }
-
     pub fn fps(&self) -> u32 {
         self.engine.project.fps.max(1)
     }
-
     pub fn resolve_at(&self, column: ColumnId, frame: u32) -> Option<DrawingId> {
         self.cut()
             .xsheet
@@ -255,8 +294,74 @@ impl AppState {
     }
 
     /// Per-column drawing name, e.g. D1A, D2A on column A; D1B on column B.
+    /// Jump to the adjacent KEY on the active column (Q/W and the
+    /// shiage cel chevrons) — the sheet's own step, a read then a goto.
+    pub fn goto_adjacent_key(&mut self, forward: bool) {
+        let target = {
+            let here = self.view.frame;
+            let count = self.frame_count();
+            let active = self.view.active_column;
+            let cut = self.cut();
+            cut.xsheet
+                .columns
+                .iter()
+                .find(|c| c.id == active)
+                .and_then(|col| {
+                    if forward {
+                        (here + 1..count).find(|f| col.key_at(*f).is_some())
+                    } else {
+                        (0..here).rev().find(|f| col.key_at(*f).is_some())
+                    }
+                })
+        };
+        if let Some(f) = target {
+            self.goto(f);
+        }
+    }
+
+    /// Step to the previous/next CUT in shooting order (henshu head
+    /// chevrons, PageUp/PageDown). A view move on existing goto_cut.
+    pub fn step_cut(&mut self, forward: bool) {
+        let flat: Vec<(anim_core::ids::SceneId, anim_core::ids::CutId)> = self
+            .engine
+            .project
+            .scenes
+            .iter()
+            .flat_map(|sc| sc.cuts.iter().map(|c| (sc.id, c.id)))
+            .collect();
+        let Some(pos) = flat
+            .iter()
+            .position(|(s, c)| *s == self.view.scene && *c == self.view.cut)
+        else {
+            return;
+        };
+        let n = flat.len();
+        if n < 2 {
+            return;
+        }
+        let next = if forward {
+            (pos + 1) % n
+        } else {
+            (pos + n - 1) % n
+        };
+        let (s, c) = flat[next];
+        self.goto_cut(s, c);
+    }
+
+    /// Refuse the hand: routed to the Foot's Aka lane and the canvas
+    /// edge flash. Chatter (`status`) is for remarks; this is for NO.
+    pub fn refuse(&mut self, msg: impl Into<String>) {
+        self.refusal = msg.into();
+        self.refusal_seq = self.refusal_seq.wrapping_add(1);
+    }
     fn next_drawing_name(&self) -> String {
-        match self.cut().xsheet.column(self.view.active_column) {
+        let taken: std::collections::HashSet<&str> = self
+            .cut()
+            .drawings
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        let (mut n, suffix) = match self.cut().xsheet.column(self.view.active_column) {
             Some(col) => {
                 let distinct: std::collections::HashSet<DrawingId> = col
                     .keys()
@@ -265,9 +370,18 @@ impl AppState {
                         Exposure::Empty => None,
                     })
                     .collect();
-                format!("D{}{}", distinct.len() + 1, col.name)
+                (distinct.len() + 1, col.name.clone())
             }
-            None => format!("D{}", self.cut().drawings.len() + 1),
+            None => (self.cut().drawings.len() + 1, String::new()),
+        };
+        // Uniqueness law: a library with three "D1A"s is unreadable and
+        // undeletable-by-eye (owner, 2026-08-17). Bump until unused.
+        loop {
+            let name = format!("D{n}{suffix}");
+            if !taken.contains(name.as_str()) {
+                return name;
+            }
+            n += 1;
         }
     }
 
@@ -332,9 +446,15 @@ impl AppState {
     ) {
         let at = self.at();
         let n = diff.len();
-        let r = self
-            .engine
-            .apply(label, vec![Command::PaintTiles { at, id, layer, diff }]);
+        let r = self.engine.apply(
+            label,
+            vec![Command::PaintTiles {
+                at,
+                id,
+                layer,
+                diff,
+            }],
+        );
         match r {
             Ok(_) => self.status = format!("{label} applied ({n} tile(s))"),
             Err(e) => self.status = format!("{label} failed: {e:?}"),
@@ -399,7 +519,12 @@ impl AppState {
                             frame: self.view.frame,
                             key: Some(Exposure::Drawing(id)),
                         },
-                        Command::PaintTiles { at, id, layer, diff },
+                        Command::PaintTiles {
+                            at,
+                            id,
+                            layer,
+                            diff,
+                        },
                     ],
                 );
                 let ok = r.is_ok();
@@ -434,7 +559,12 @@ impl AppState {
                             layer: l,
                         })
                         .collect();
-                    cmds.push(Command::PaintTiles { at, id, layer, diff });
+                    cmds.push(Command::PaintTiles {
+                        at,
+                        id,
+                        layer,
+                        diff,
+                    });
                     let r = self.engine.apply("paint (add layers)", cmds);
                     let ok = r.is_ok();
                     self.report(r, "painted (layers added)");
@@ -446,7 +576,6 @@ impl AppState {
                 let (layer, before): (_, BTreeMap<TileCoord, Arc<TileData>>) =
                     (target.id, target.raster.tiles.clone());
                 let after: BTreeMap<TileCoord, Arc<TileData>> = new_tiles.into_iter().collect();
-
                 let mut diff: TileDiff = Vec::new();
                 for (coord, a) in &after {
                     if before.get(coord).map(|t| t.hash) != Some(a.hash) {
@@ -461,9 +590,15 @@ impl AppState {
                 if diff.is_empty() {
                     return Some((id, layer));
                 }
-                let r = self
-                    .engine
-                    .apply("paint", vec![Command::PaintTiles { at, id, layer, diff }]);
+                let r = self.engine.apply(
+                    "paint",
+                    vec![Command::PaintTiles {
+                        at,
+                        id,
+                        layer,
+                        diff,
+                    }],
+                );
                 let ok = r.is_ok();
                 self.report(r, "painted");
                 ok.then_some((id, layer))
@@ -514,9 +649,32 @@ impl AppState {
         d.layers.get(d.layers.len() - 1 - slot)
     }
 
-    /// The live active layer of `d` (current slot).
+    /// The live active layer of `d` — resolved BY NAME (defect 16).
     fn active_layer_of<'a>(&self, d: &'a anim_core::model::Drawing) -> Option<&'a CelLayer> {
-        Self::layer_at_slot(d, self.view.active_layer_slot)
+        d.layers
+            .iter()
+            .rev()
+            .find(|l| l.props.name == self.view.active_layer)
+    }
+
+    /// Resolve the active layer NAME to a top-first slot on the current
+    /// cel — or on the fresh-cel template for held/blank frames. None =
+    /// UNARMED: the pen must refuse rather than misroute (defect 16).
+    pub fn active_slot_resolved(&self) -> Option<usize> {
+        if let Some(id) = self.own_key_drawing() {
+            let d = self.cut().drawing(id)?;
+            return d
+                .layers
+                .iter()
+                .rev()
+                .position(|l| l.props.name == self.view.active_layer);
+        }
+        // Fresh-cel template is [color, line]; slot 0 = line (top).
+        match self.view.active_layer.as_str() {
+            "line" => Some(0),
+            "color" => Some(1),
+            _ => None,
+        }
     }
 
     /// Props of the layer the NEXT stroke will actually edit — based on the
@@ -532,27 +690,43 @@ impl AppState {
     /// Name of the active layer — template names on held/blank frames
     /// (the layer the next stroke will land on).
     pub fn active_layer_name(&self) -> String {
-        if let Some(p) = self.active_layer_props() {
-            return p.name.clone();
-        }
-        // Fresh-cel template is [color, line]; slot 0 = line (top).
-        match self.view.active_layer_slot.min(1) {
-            0 => "line".into(),
-            _ => "color".into(),
-        }
+        self.view.active_layer.clone()
     }
 
     /// Cycle the active layer (A / Shift+A). Wraps within the OWN cel's stack
     /// depth; on held/blank frames, the new-cel template depth (2).
     pub fn cycle_layer(&mut self, back: bool) {
-        let n = self
+        let names: Vec<String> = self
             .own_key_drawing()
             .and_then(|id| self.cut().drawing(id))
-            .map(|d| d.layers.len())
-            .filter(|n| *n > 0)
-            .unwrap_or(2);
-        let slot = self.view.active_layer_slot.min(n - 1);
-        self.view.active_layer_slot = if back { (slot + n - 1) % n } else { (slot + 1) % n };
+            .map(|d| {
+                d.layers
+                    .iter()
+                    .rev()
+                    .map(|l| l.props.name.clone())
+                    .collect()
+            })
+            .filter(|v: &Vec<String>| !v.is_empty())
+            .unwrap_or_else(|| vec!["line".into(), "color".into()]);
+        // LINE GUARD: cycling skips the line layer while guarded (unless
+        // nothing else exists to arm).
+        let names: Vec<String> = if self.view.line_guard {
+            let filtered: Vec<String> = names.iter().filter(|n| *n != "line").cloned().collect();
+            if filtered.is_empty() { names } else { filtered }
+        } else {
+            names
+        };
+        let cur = names
+            .iter()
+            .position(|n| *n == self.view.active_layer)
+            .unwrap_or(0);
+        let n = names.len();
+        let next = if back {
+            (cur + n - 1) % n
+        } else {
+            (cur + 1) % n
+        };
+        self.view.active_layer = names[next].clone();
         self.status = format!("layer: {}", self.active_layer_name());
     }
 
@@ -572,9 +746,15 @@ impl AppState {
             .into_iter()
             .map(|(c, b)| (c, Some(b), None))
             .collect();
-        let r = self
-            .engine
-            .apply("clear layer", vec![Command::PaintTiles { at, id, layer, diff }]);
+        let r = self.engine.apply(
+            "clear layer",
+            vec![Command::PaintTiles {
+                at,
+                id,
+                layer,
+                diff,
+            }],
+        );
         self.report(r, "layer cleared");
     }
 
@@ -623,7 +803,6 @@ impl AppState {
         };
         d.layers.iter().enumerate().rev().collect()
     }
-
     fn own_drawing_id(&self) -> Option<DrawingId> {
         self.own_key_drawing()
     }
@@ -758,7 +937,7 @@ impl AppState {
             if let Some(d) = self.cut().drawing(id)
                 && let Some(i) = d.layer_index(new_id)
             {
-                self.view.active_layer_slot = d.layers.len() - 1 - i;
+                self.view.active_layer = d.layers[i].props.name.clone();
             }
         }
         self.report(r, "layer added");
@@ -781,21 +960,23 @@ impl AppState {
         let mut prev = None;
         for f in (0..self.view.frame).rev() {
             if let Some(d) = col.resolve(f)
-                && Some(d) != cur {
-                    prev = Some(d);
-                    break;
-                }
+                && Some(d) != cur
+            {
+                prev = Some(d);
+                break;
+            }
         }
         let mut next = None;
         for f in (self.view.frame + 1)..self.frame_count() {
             if let Some(d) = col.resolve(f)
                 && Some(d) != cur
-                && Some(d) != prev {
-                    // Skip the drawing still held through these frames (it's the
-                    // `prev` ghost) so a mid-hold frame doesn't show it as both.
-                    next = Some(d);
-                    break;
-                }
+                && Some(d) != prev
+            {
+                // Skip the drawing still held through these frames (it's the
+                // `prev` ghost) so a mid-hold frame doesn't show it as both.
+                next = Some(d);
+                break;
+            }
         }
         [prev, next]
     }
@@ -889,23 +1070,21 @@ impl AppState {
         let Some(active) = self.active_layer_of(d) else {
             return Vec::new();
         };
-        let ai = d.layer_index(active.id).expect("active layer is in the stack");
+        let ai = d
+            .layer_index(active.id)
+            .expect("active layer is in the stack");
         d.layers
             .iter()
             .enumerate()
             .filter(|(i, l)| {
-                l.props.visible
-                    && l.props.opacity > 0.0
-                    && if above { *i > ai } else { *i < ai }
+                l.props.visible && l.props.opacity > 0.0 && if above { *i > ai } else { *i < ai }
             })
             .map(|(_, l)| (&l.raster.tiles, l.props.opacity))
             .collect()
     }
-
     pub fn below_layers(&self) -> LayerSlices<'_> {
         self.sandwich(false)
     }
-
     pub fn above_layers(&self) -> LayerSlices<'_> {
         self.sandwich(true)
     }
@@ -942,11 +1121,9 @@ impl AppState {
         }
         anim_core::value::fnv1a(&bytes)
     }
-
     pub fn below_stack_key(&self) -> u64 {
         self.stack_key(false)
     }
-
     pub fn above_stack_key(&self) -> u64 {
         self.stack_key(true)
     }
@@ -1018,14 +1195,15 @@ impl AppState {
         let at = self.at();
         let mut cmds = Vec::new();
         if let Some(o) = old
-            && Some(o) != new {
-                cmds.push(Command::SetCell {
-                    at,
-                    column,
-                    frame: o,
-                    key: None,
-                });
-            }
+            && Some(o) != new
+        {
+            cmds.push(Command::SetCell {
+                at,
+                column,
+                frame: o,
+                key: None,
+            });
+        }
         if let Some(n) = new {
             cmds.push(Command::SetCell {
                 at,
@@ -1041,6 +1219,40 @@ impl AppState {
     }
 
     /// Clear the key at the current frame (previous hold extends over it).
+    /// Remove a drawing from the library (owner, 2026-08-17: the library
+    /// had no removal). Lifts every key that exposes it first, so the
+    /// sheet never points at a ghost — all in one undoable step.
+    pub fn remove_drawing_from_library(&mut self, id: DrawingId) {
+        let at = self.at();
+        let mut cmds = Vec::new();
+        {
+            let cut = self.cut();
+            for col in &cut.xsheet.columns {
+                for (frame, e) in col.keys() {
+                    if matches!(e, Exposure::Drawing(d) if
+        d
+        == id)
+                    {
+                        cmds.push(Command::SetCell {
+                            at,
+                            column: col.id,
+                            frame,
+                            key: None,
+                        });
+                    }
+                }
+            }
+        }
+        cmds.push(Command::RemoveDrawing { at, id });
+        let r = self.engine.apply("remove drawing", cmds);
+        if self.view.selected_drawing == Some(id) {
+            self.view.selected_drawing = None;
+        }
+        if self.view.ghost_pin == Some(id) {
+            self.view.ghost_pin = None;
+        }
+        self.report(r, "drawing removed from library");
+    }
     pub fn clear_key_at_frame(&mut self) {
         let at = self.at();
         let r = self.engine.apply(
@@ -1054,10 +1266,12 @@ impl AppState {
         );
         self.report(r, "key cleared");
     }
-
     pub fn add_column(&mut self) {
         let at = self.at();
-        let name = format!("{}", (b'A' + (self.cut().xsheet.columns.len() as u8 % 26)) as char);
+        let name = format!(
+            "{}",
+            (b'A' + (self.cut().xsheet.columns.len() as u8 % 26)) as char
+        );
         match self.engine.add_column(at, name) {
             Ok(id) => {
                 self.view.active_column = id;
@@ -1111,7 +1325,10 @@ impl AppState {
         let cname = clip.name.clone();
         if let Err(e) = self.engine.apply(
             "set audio",
-            vec![Command::SetCutAudio { at, audio: Some(clip) }],
+            vec![Command::SetCutAudio {
+                at,
+                audio: Some(clip),
+            }],
         ) {
             self.status = format!("error: {e}");
         } else {
@@ -1122,10 +1339,10 @@ impl AppState {
     /// Remove the cut's scratch audio (one undo step).
     pub fn remove_audio(&mut self) {
         let at = self.at();
-        if let Err(e) = self
-            .engine
-            .apply("remove audio", vec![Command::SetCutAudio { at, audio: None }])
-        {
+        if let Err(e) = self.engine.apply(
+            "remove audio",
+            vec![Command::SetCutAudio { at, audio: None }],
+        ) {
             self.status = format!("error: {e}");
         } else {
             self.status = "audio removed".into();
@@ -1172,7 +1389,10 @@ impl AppState {
         // Scaffolding: the new cut + its columns (non-undoable, like every
         // scene/cut/column creation).
         let scene = self.view.scene;
-        let cut_id = match self.engine.add_cut(scene, sheet.name.clone(), sheet.duration) {
+        let cut_id = match self
+            .engine
+            .add_cut(scene, sheet.name.clone(), sheet.duration)
+        {
             Ok(id) => id,
             Err(e) => {
                 self.status = format!("error: {e}");
@@ -1312,7 +1532,11 @@ impl AppState {
     ) {
         let at = self.at();
         let frame = self.view.frame;
-        let label = if key.is_some() { "set param key" } else { "clear param key" };
+        let label = if key.is_some() {
+            "set param key"
+        } else {
+            "clear param key"
+        };
         if let Err(e) = self.engine.apply(
             label,
             vec![Command::SetParamKey {
@@ -1347,17 +1571,17 @@ impl AppState {
         self.view.selected_drawing = None;
         self.status = "column removed".into();
     }
-
     pub fn undo(&mut self) {
         if self.engine.undo().is_ok() {
             self.status = "undo".into();
+            self.doc_gen = self.doc_gen.wrapping_add(1);
         }
         self.sanitize();
     }
-
     pub fn redo(&mut self) {
         if self.engine.redo().is_ok() {
             self.status = "redo".into();
+            self.doc_gen = self.doc_gen.wrapping_add(1);
         }
         self.sanitize();
     }
@@ -1366,36 +1590,36 @@ impl AppState {
     /// dead id escape into the UI.
     fn sanitize(&mut self) {
         if let Some(id) = self.view.selected_drawing
-            && self.cut().drawing(id).is_none() {
-                self.view.selected_drawing = None;
-            }
+            && self.cut().drawing(id).is_none()
+        {
+            self.view.selected_drawing = None;
+        }
         self.view.frame = self.view.frame.min(self.frame_count() - 1);
         // The param keying strip's value buffer mirrors engine state that
         // undo/redo may have just moved — force a reseed so the strip never
         // shows (and silently re-keys) an undone value.
         self.param_buf_at = None;
     }
-
     fn report(&mut self, r: anim_core::error::Result<()>, ok_msg: &str) {
         match r {
-            Ok(()) => self.status = ok_msg.into(),
+            Ok(()) => {
+                self.status = ok_msg.into();
+                self.doc_gen = self.doc_gen.wrapping_add(1);
+            }
             Err(e) => self.status = format!("error: {e}"),
         }
     }
 
     // ---- Transport --------------------------------------------------------
-
     pub fn goto(&mut self, frame: u32) {
         self.view.frame = frame.min(self.frame_count() - 1);
         self.view.play_acc = 0.0;
     }
-
     pub fn step(&mut self, delta: i64) {
         let n = self.frame_count() as i64;
         let f = (self.view.frame as i64 + delta).rem_euclid(n);
         self.goto(f as u32);
     }
-
     pub fn toggle_play(&mut self) {
         self.view.playing = !self.view.playing;
         // Starting playback parked on the LAST frame (exactly where a
@@ -1439,7 +1663,7 @@ impl AppState {
         self.view.frame = 0;
         self.view.selected_drawing = None;
         self.view.playing = false;
-        self.view.active_layer_slot = 0;
+        self.view.active_layer = "line".into();
         self.status = format!("cut: {name}");
     }
 
@@ -1482,7 +1706,6 @@ impl AppState {
         }
         self.goto_cut(scene, cut);
     }
-
     pub fn tick(&mut self, dt: f32) {
         if !self.view.playing {
             return;
@@ -1528,7 +1751,13 @@ impl AppState {
         let r = self.engine.apply(
             "import image",
             vec![
-                Command::AddImage { at, id: image, index, name, bytes },
+                Command::AddImage {
+                    at,
+                    id: image,
+                    index,
+                    name,
+                    bytes,
+                },
                 Command::AddNode {
                     at,
                     id: node,
@@ -1542,7 +1771,6 @@ impl AppState {
         }
         self.report(r, "image imported");
     }
-
     pub fn graph_add_node(&mut self, kind: anim_core::graph::NodeKind, pos: (f32, f32)) {
         let at = self.at();
         let id = self.engine.alloc_node_id();
@@ -1555,7 +1783,6 @@ impl AppState {
         }
         self.report(r, "node added");
     }
-
     pub fn graph_remove_node(&mut self, id: NodeId) {
         let at = self.at();
         let r = self
@@ -1569,7 +1796,6 @@ impl AppState {
         }
         self.report(r, "node removed");
     }
-
     pub fn graph_connect(&mut self, from: NodeId, to: NodeId, to_pin: u16) {
         let at = self.at();
         let r = self.engine.apply(
@@ -1584,7 +1810,6 @@ impl AppState {
         );
         self.report(r, "connected");
     }
-
     pub fn graph_disconnect(&mut self, to: NodeId, to_pin: u16) {
         let at = self.at();
         let r = self
@@ -1592,7 +1817,6 @@ impl AppState {
             .apply("disconnect", vec![Command::Disconnect { at, to, to_pin }]);
         self.report(r, "disconnected");
     }
-
     pub fn graph_set_output(&mut self, node: NodeId) {
         let at = self.at();
         let r = self.engine.apply(
@@ -1604,12 +1828,12 @@ impl AppState {
         );
         self.report(r, "output set");
     }
-
     pub fn graph_set_kind(&mut self, id: NodeId, kind: anim_core::graph::NodeKind) {
         let at = self.at();
-        let r = self
-            .engine
-            .apply("node parameters", vec![Command::SetNodeKind { at, id, kind }]);
+        let r = self.engine.apply(
+            "node parameters",
+            vec![Command::SetNodeKind { at, id, kind }],
+        );
         self.report(r, "node updated");
     }
 
@@ -1649,6 +1873,95 @@ impl AppState {
 
     // ---- Files ------------------------------------------------------------
 
+    /// SESSION v2 (research/PSD-session-v2.md): apply a guest's tile
+    /// patch to the drawing they named, on the layer they named — the
+    /// HOST's engine is the only writer, and the step is tagged with its
+    /// author so that artist can undo their own work. Returns Err(why)
+    /// when the identity is gone; the caller sends that home (NEVER-DO 2).
+    pub fn apply_remote_tiles(
+        &mut self,
+        author: &str,
+        drawing: DrawingId,
+        layer_name: &str,
+        tiles: Vec<(TileCoord, Arc<TileData>)>,
+    ) -> Result<(), String> {
+        let at = self.at();
+        let Some(d) = self.cut().drawing(drawing) else {
+            return Err(format!("drawing {drawing} is not in this cut any more"));
+        };
+        let Some(layer) = d
+            .layers
+            .iter()
+            .find(|l| l.props.name == layer_name)
+            .map(|l| l.id)
+        else {
+            return Err(format!("no '{layer_name}' layer on that cel"));
+        };
+        // The before-state comes from OUR document — the guest's patch is
+        // only the after-state, so undo stays exact on the host's truth.
+        let before: std::collections::BTreeMap<TileCoord, Arc<TileData>> = d
+            .layers
+            .iter()
+            .find(|l| l.id == layer)
+            .map(|l| l.raster.tiles.clone())
+            .unwrap_or_default();
+        let diff: TileDiff = tiles
+            .into_iter()
+            .map(|(c, t)| (c, before.get(&c).cloned(), Some(t)))
+            .collect();
+        if diff.is_empty() {
+            return Ok(());
+        }
+        let n = diff.len();
+        self.engine.set_author(Some(author.to_string()));
+        let r = self.engine.apply(
+            "remote stroke",
+            vec![Command::PaintTiles {
+                at,
+                id: drawing,
+                layer,
+                diff,
+            }],
+        );
+        self.engine.set_author(None);
+        match r {
+            Ok(()) => {
+                self.status = format!("{author} painted ({n} tile(s))");
+                self.doc_gen = self.doc_gen.wrapping_add(1);
+                Ok(())
+            }
+            Err(e) => Err(format!("{e:?}")),
+        }
+    }
+
+    /// SESSION v2: undo/redo one artist's own last step (the host runs it
+    /// for everyone — one writer). Err(why) is sent home to that artist.
+    pub fn remote_history(&mut self, author: &str, redo: bool) -> Result<(), String> {
+        let r = if redo {
+            self.engine.redo_last_by(Some(author))
+        } else {
+            self.engine.undo_last_by(Some(author))
+        };
+        match r {
+            Ok(label) => {
+                self.status = format!("{author}: {} {label}", if redo { "redid" } else { "undid" });
+                self.doc_gen = self.doc_gen.wrapping_add(1);
+                self.sanitize();
+                Ok(())
+            }
+            Err(e) => Err(format!("{e:?}")),
+        }
+    }
+
+    /// SESSION snapshot (PSD-session-room): the document as bytes via
+    /// the SAME save path (`engine.save`) through a temp file — never a
+    /// second serialization truth (NEVER-DO 1).
+    pub fn snapshot_bytes(&mut self) -> Option<Vec<u8>> {
+        let path = std::env::temp_dir().join("animstudio_session_out.animproj");
+        self.palettes.save_into(&mut self.engine.project);
+        self.engine.save(&path).ok()?;
+        std::fs::read(&path).ok()
+    }
     pub fn save(&mut self, force_dialog: bool) {
         let path = if force_dialog || self.file_path.is_none() {
             rfd::FileDialog::new()
@@ -1668,14 +1981,16 @@ impl AppState {
                 self.status = format!("saved {}", path.display());
                 self.file_path = Some(path);
             }
-            Err(e) => self.status = format!("save failed: {e}"),
+            // AUDIT [2]: a save that did not happen is a CONTRADICTION,
+            // not a remark — Aka lane + canvas edge flash, never a grey
+            // line that fades in four seconds.
+            Err(e) => self.refuse(format!("SAVE FAILED — {e}. Your work is NOT on disk.")),
         }
     }
-
     pub fn open(&mut self) {
         match Self::pick_and_open() {
             Some(Ok(new_state)) => *self = new_state,
-            Some(Err(msg)) => self.status = format!("open failed: {msg}"),
+            Some(Err(msg)) => self.refuse(format!("could not open that file — {msg}")),
             None => {}
         }
     }
@@ -1684,7 +1999,6 @@ impl AppState {
 #[cfg(test)]
 mod transport_tests {
     use super::AppState;
-
     fn state() -> AppState {
         AppState::new_project("t", 64, 48, 24, 72.0)
     }

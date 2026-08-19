@@ -23,12 +23,12 @@ fn node_height(inputs: usize) -> f32 {
 
 fn kind_color(kind: &NodeKind) -> Color32 {
     match kind {
-        NodeKind::DrawingSource { .. } => Color32::from_rgb(90, 140, 200),
-        NodeKind::Solid { .. } => Color32::from_rgb(150, 120, 190),
-        NodeKind::ImageSource { .. } => Color32::from_rgb(90, 180, 170),
-        NodeKind::Transform { .. } => Color32::from_rgb(120, 170, 120),
-        NodeKind::Blend { .. } => Color32::from_rgb(200, 150, 90),
-        NodeKind::Output => Color32::from_rgb(200, 100, 100),
+        NodeKind::DrawingSource { .. } => Color32::from_rgb(83, 137, 196),
+        NodeKind::Solid { .. } => Color32::from_rgb(139, 141, 131),
+        NodeKind::ImageSource { .. } => Color32::from_rgb(228, 225, 214),
+        NodeKind::Transform { .. } => Color32::from_rgb(100, 102, 94),
+        NodeKind::Blend { .. } => Color32::from_rgb(60, 99, 141),
+        NodeKind::Output => Color32::from_rgb(228, 82, 47),
     }
 }
 
@@ -36,11 +36,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     state.ensure_node_layout();
     inspector_row(ui, state);
     ui.separator();
-
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0, Color32::from_rgb(20, 22, 26));
+    painter.rect_filled(rect, 0, Color32::from_rgb(14, 15, 13));
 
     // Pan with a background drag.
     if response.dragged() && state.pending_wire.is_none() {
@@ -79,16 +78,14 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             }
         })
         .collect();
-
     let in_pin_pos = |nv: &NodeView, pin: usize| -> Pos2 {
         pos2(
             nv.rect.left(),
             nv.rect.top() + TITLE_H + PIN_STEP * (pin as f32 + 0.5),
         )
     };
-    let out_pin_pos = |nv: &NodeView| -> Pos2 {
-        pos2(nv.rect.right(), nv.rect.top() + TITLE_H * 0.5)
-    };
+    let out_pin_pos =
+        |nv: &NodeView| -> Pos2 { pos2(nv.rect.right(), nv.rect.top() + TITLE_H * 0.5) };
     let find = |id: NodeId| nodes.iter().find(|n| n.id == id);
 
     // Wires (under nodes).
@@ -110,7 +107,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                     &painter,
                     out_pin_pos(sv),
                     in_pin_pos(nv, pin),
-                    Color32::from_gray(150),
+                    Color32::from_rgb(139, 141, 131),
                 );
             }
         }
@@ -120,7 +117,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         && let Some(fv) = find(from)
         && let Some(ptr) = ui.input(|i| i.pointer.latest_pos())
     {
-        cable(&painter, out_pin_pos(fv), ptr, Color32::from_rgb(120, 190, 255));
+        cable(
+            &painter,
+            out_pin_pos(fv),
+            ptr,
+            Color32::from_rgb(83, 137, 196),
+        );
     }
 
     // Nodes.
@@ -129,7 +131,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     for nv in &nodes {
         let selected = state.selected_node == Some(nv.id);
         let is_output = output_node == Some(nv.id);
-        let body = Color32::from_rgb(38, 41, 48);
+        let body = Color32::from_rgb(26, 27, 24);
         painter.rect_filled(nv.rect, 4, body);
         painter.rect_filled(
             Rect::from_min_size(nv.rect.left_top(), vec2(NODE_W, TITLE_H)),
@@ -141,12 +143,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             4,
             Stroke::new(
                 if selected { 2.0 } else { 1.0 },
+                // Selection is TALLY — the one colour meaning current/armed
+                // (Ao is never a selection; the colour law). The output
+                // node's identity edge is Struck, not Aka — the result is
+                // not a correction.
                 if selected {
-                    Color32::from_rgb(120, 190, 255)
+                    Color32::from_rgb(239, 194, 74)
                 } else if is_output {
-                    Color32::from_rgb(200, 100, 100)
+                    Color32::from_rgb(228, 225, 214)
                 } else {
-                    Color32::from_gray(70)
+                    Color32::from_rgb(100, 102, 94)
                 },
             ),
             egui::StrokeKind::Outside,
@@ -160,7 +166,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 nv.kind.name().to_string()
             },
             egui::FontId::proportional(12.0),
-            Color32::from_gray(230),
+            Color32::from_rgb(228, 225, 214),
         );
 
         // Body drag = move; click = select; right-click = node menu.
@@ -203,9 +209,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             op,
             PIN_R,
             if op_resp.hovered() {
-                Color32::from_rgb(120, 190, 255)
+                Color32::from_rgb(83, 137, 196)
             } else {
-                Color32::from_gray(170)
+                Color32::from_rgb(139, 141, 131)
             },
         );
 
@@ -228,11 +234,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 ip,
                 PIN_R,
                 if ip_resp.hovered() {
-                    Color32::from_rgb(120, 190, 255)
+                    Color32::from_rgb(83, 137, 196)
                 } else if nv.inputs[pin].is_some() {
-                    Color32::from_gray(200)
+                    Color32::from_rgb(228, 225, 214)
                 } else {
-                    Color32::from_gray(90)
+                    Color32::from_rgb(100, 102, 94)
                 },
             );
         }
@@ -263,7 +269,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             .map(|c| (c.id, c.name.clone()))
             .collect();
         for (cid, cname) in columns {
-            if ui.button(format!("DrawingSource: column {cname}")).clicked() {
+            if ui
+                .button(format!("DrawingSource: column {cname}"))
+                .clicked()
+            {
                 state.graph_add_node(NodeKind::DrawingSource { column: cid }, world);
                 ui.close();
             }
@@ -281,7 +290,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             .button("Image (PNG)…")
             .on_hover_text(
                 "import a background plate / reference image into this cut — \
-                 stored inside the project file, wired as an ImageSource node",
+            stored inside the project file, wired as an ImageSource node",
             )
             .clicked()
         {
@@ -327,7 +336,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             egui::Align2::CENTER_CENTER,
             "right-click to add nodes — the cut's compositing graph lives here",
             egui::FontId::proportional(13.0),
-            Color32::from_gray(120),
+            Color32::from_rgb(139, 141, 131),
         );
     }
 }
@@ -348,7 +357,11 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
         };
         let mut kind = node.kind.clone();
         let mut changed = false;
-        ui.label(egui::RichText::new(kind.name()).strong().color(kind_color(&kind)));
+        ui.label(
+            egui::RichText::new(kind.name())
+                .strong()
+                .color(kind_color(&kind)),
+        );
         match &mut kind {
             NodeKind::Solid { rgba } => {
                 let mut rgb = [rgba[0], rgba[1], rgba[2]];
@@ -419,9 +432,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                         ("rotate", &mut binds.rotate, "cam.rot"),
                     ] {
                         ui.menu_button(
-                            match slot
-                                .and_then(|id| params.iter().find(|(pid, _)| *pid == id))
-                            {
+                            match slot.and_then(|id| params.iter().find(|(pid, _)| *pid == id)) {
                                 Some((_, name)) => format!("{label}: {name}"),
                                 None => format!("{label}: static"),
                             },
@@ -432,10 +443,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                                     ui.close();
                                 }
                                 for (pid, pname) in &params {
-                                    if ui
-                                        .selectable_label(*slot == Some(*pid), pname)
-                                        .clicked()
-                                    {
+                                    if ui.selectable_label(*slot == Some(*pid), pname).clicked() {
                                         *slot = Some(*pid);
                                         changed = true;
                                         ui.close();
@@ -459,25 +467,20 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 });
             }
-            NodeKind::ImageSource { image } => {
-                match state.cut().image(*image) {
-                    Some(img) => {
-                        ui.label(format!("{} — {}×{}", img.name, img.width, img.height));
-                    }
-                    None => {
-                        ui.label(
-                            egui::RichText::new("missing image (renders transparent)")
-                                .color(egui::Color32::from_rgb(235, 160, 90)),
-                        );
-                    }
+            NodeKind::ImageSource { image } => match state.cut().image(*image) {
+                Some(img) => {
+                    ui.label(format!("{} — {}×{}", img.name, img.width, img.height));
                 }
-            }
+                None => {
+                    ui.label(
+                        egui::RichText::new("missing image (renders transparent)")
+                            .color(egui::Color32::from_rgb(228, 82, 47)),
+                    );
+                }
+            },
             NodeKind::Blend { mode } => {
                 for &m in BlendMode::ALL {
-                    if ui
-                        .selectable_label(*mode == m, format!("{m}"))
-                        .clicked()
-                    {
+                    if ui.selectable_label(*mode == m, format!("{m}")).clicked() {
                         *mode = m;
                         changed = true;
                     }

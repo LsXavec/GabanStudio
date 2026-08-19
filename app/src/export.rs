@@ -18,9 +18,9 @@
 use std::io::BufWriter;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
-use std::sync::Arc;
 
 use anim_core::export::{
     render_frame, render_frame_over, render_graph_frame, render_graph_frame_over,
@@ -66,8 +66,7 @@ pub fn spawn_png_sequence(
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let result = (|| -> Result<(usize, String), String> {
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("create {}: {e}", dir.display()))?;
+            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
             let mut n = 0usize;
             for f in range {
                 if cancel.load(Ordering::Relaxed) {
@@ -75,7 +74,12 @@ pub fn spawn_png_sequence(
                 }
                 let rgba = render_graph_frame(&cut, f, width, height)
                     .unwrap_or_else(|| render_frame(&cut, f, width, height));
-                write_png(&dir.join(format!("frame_{:04}.png", f + 1)), width, height, &rgba)?;
+                write_png(
+                    &dir.join(format!("frame_{:04}.png", f + 1)),
+                    width,
+                    height,
+                    &rgba,
+                )?;
                 n += 1;
                 let _ = tx.send(ExportProgress::Frame);
                 ctx.request_repaint();
@@ -120,14 +124,18 @@ pub fn spawn_mp4(
                 }
                 let rgba = render_graph_frame_over(&cut, f, width, height, [255, 255, 255])
                     .unwrap_or_else(|| render_frame_over(&cut, f, width, height, [255, 255, 255]));
-                write_png(&tmp.join(format!("frame_{:04}.png", n + 1)), width, height, &rgba)?;
+                write_png(
+                    &tmp.join(format!("frame_{:04}.png", n + 1)),
+                    width,
+                    height,
+                    &rgba,
+                )?;
                 n += 1;
                 let _ = tx.send(ExportProgress::Frame);
                 ctx.request_repaint();
             }
             let _ = tx.send(ExportProgress::Encoding);
             ctx.request_repaint();
-
             let pattern = tmp.join("frame_%04d.png");
             let fps_n = fps.max(1);
             // Max-compatibility H.264: yuv420p (the flag hardware decoders
@@ -228,7 +236,10 @@ fn graph_note(cut: &Cut) -> &'static str {
 
 /// A default export location proposal next to the project file, if any.
 pub fn suggest_dir(state: &AppState) -> Option<PathBuf> {
-    state.file_path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf()))
+    state
+        .file_path
+        .as_ref()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
 }
 
 fn strokes_note(cut: &Cut) -> String {
@@ -273,7 +284,11 @@ fn find_ffmpeg() -> Option<PathBuf> {
     let packages = PathBuf::from(base).join("Microsoft/WinGet/Packages");
     let entries = std::fs::read_dir(&packages).ok()?;
     for entry in entries.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with("Gyan.FFmpeg") {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("Gyan.FFmpeg")
+        {
             continue;
         }
         for sub in std::fs::read_dir(entry.path()).ok()?.flatten() {
@@ -299,8 +314,8 @@ fn works(program: &Path) -> bool {
 fn ffmpeg_program() -> Result<PathBuf, String> {
     find_ffmpeg().ok_or_else(|| {
         "ffmpeg not found (looked next to the app, on PATH, and in the winget \
-         install location) — install it (e.g. `winget install ffmpeg`) or \
-         export a PNG sequence instead"
+    install location) — install it (e.g. `winget install ffmpeg`) or \
+    export a PNG sequence instead"
             .into()
     })
 }

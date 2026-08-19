@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["app", "m0_spike", "crates/anim-core"]
+members = ["app", "m0_spike", "crates/anim-core", "tools/iconforge"]
 
 # Fast iteration: our crates compile quick, dependencies stay optimized
 [profile.dev]

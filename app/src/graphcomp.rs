@@ -102,7 +102,7 @@ struct VsOut {
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
     var corners = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0),
+    vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0),
     );
     let p = corners[vid];
     var out: VsOut;
@@ -120,22 +120,22 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let oa = b.a + a.a * (1.0 - b.a);
     var rgb: vec3<f32>;
     switch u.mode {
-        case 0u: { rgb = b.rgb + a.rgb * (1.0 - b.a); }                       // Normal
-        case 1u: { rgb = b.rgb * a.rgb + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Multiply
-        case 2u: { rgb = b.rgb + a.rgb; }                                     // Add
-        case 3u: { rgb = b.rgb + a.rgb - b.rgb * a.rgb; }                     // Screen
-        case 4u: { rgb = max(a.rgb - b.rgb, vec3<f32>(0.0)); }                // Subtract
-        case 5u: { rgb = min(b.rgb * a.a, a.rgb * b.a) + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Darken
-        case 6u: { rgb = max(b.rgb * a.a, a.rgb * b.a) + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Lighten
-        default: {                                                            // Overlay
-            var cs = vec3<f32>(0.0);
-            if (b.a > 0.0) { cs = b.rgb / b.a; }
-            var cb = vec3<f32>(0.0);
-            if (a.a > 0.0) { cb = a.rgb / a.a; }
-            let lo = 2.0 * cs * cb;
-            let hi = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - cs) * (vec3<f32>(1.0) - cb);
-            let curve = select(hi, lo, cb <= vec3<f32>(0.5));
-            rgb = b.a * a.a * curve + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a);
+    case 0u: { rgb = b.rgb + a.rgb * (1.0 - b.a); }                       // Normal
+    case 1u: { rgb = b.rgb * a.rgb + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Multiply
+    case 2u: { rgb = b.rgb + a.rgb; }                                     // Add
+    case 3u: { rgb = b.rgb + a.rgb - b.rgb * a.rgb; }                     // Screen
+    case 4u: { rgb = max(a.rgb - b.rgb, vec3<f32>(0.0)); }                // Subtract
+    case 5u: { rgb = min(b.rgb * a.a, a.rgb * b.a) + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Darken
+    case 6u: { rgb = max(b.rgb * a.a, a.rgb * b.a) + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a); } // Lighten
+    default: {                                                            // Overlay
+    var cs = vec3<f32>(0.0);
+    if (b.a > 0.0) { cs = b.rgb / b.a; }
+    var cb = vec3<f32>(0.0);
+    if (a.a > 0.0) { cb = a.rgb / a.a; }
+    let lo = 2.0 * cs * cb;
+    let hi = vec3<f32>(1.0) - 2.0 * (vec3<f32>(1.0) - cs) * (vec3<f32>(1.0) - cb);
+    let curve = select(hi, lo, cb <= vec3<f32>(0.5));
+    rgb = b.a * a.a * curve + b.rgb * (1.0 - a.a) + a.rgb * (1.0 - b.a);
         }
     }
     return vec4<f32>(rgb, oa);
@@ -154,9 +154,7 @@ pub struct GraphCompositor {
     out_texture: wgpu::Texture,
     out_view: wgpu::TextureView,
     out_id: egui::TextureId,
-
     pool: Vec<PoolTex>,
-
     xform_pipeline: wgpu::RenderPipeline,
     xform_layout: wgpu::BindGroupLayout,
     blend_pipeline: wgpu::RenderPipeline,
@@ -183,7 +181,6 @@ impl GraphCompositor {
         let queue = rs.queue.clone();
         let renderer = rs.renderer.clone();
         let filter = wgpu::FilterMode::Linear;
-
         let xform_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("graph_xform_shader"),
             source: wgpu::ShaderSource::Wgsl(XFORM_SHADER.into()),
@@ -192,7 +189,6 @@ impl GraphCompositor {
             label: Some("graph_blend_shader"),
             source: wgpu::ShaderSource::Wgsl(BLEND_SHADER.into()),
         });
-
         let tex_entry = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -209,7 +205,6 @@ impl GraphCompositor {
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         };
-
         let xform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("graph_xform_bgl"),
             entries: &[tex_entry(0), smp_entry(1)],
@@ -232,7 +227,6 @@ impl GraphCompositor {
                 },
             ],
         });
-
         let xform_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("graph_xform_pl"),
             bind_group_layouts: &[Some(&xform_layout)],
@@ -243,7 +237,6 @@ impl GraphCompositor {
             bind_group_layouts: &[Some(&blend_layout)],
             immediate_size: 0,
         });
-
         let quad_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<QuadVert>() as u64,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -260,7 +253,6 @@ impl GraphCompositor {
                 },
             ],
         };
-
         let target_state = [Some(wgpu::ColorTargetState {
             format: wgpu::TextureFormat::Rgba16Float,
             blend: Some(wgpu::BlendState::REPLACE),
@@ -314,7 +306,6 @@ impl GraphCompositor {
             multiview_mask: None,
             cache: None,
         });
-
         let blend_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("graph_blend_uniform"),
             size: std::mem::size_of::<BlendUniform>() as u64,
@@ -329,12 +320,10 @@ impl GraphCompositor {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-
         let (out_texture, out_view) = Self::make_texture(&device, width, height);
         let out_id = renderer
             .write()
             .register_native_texture(&device, &out_view, filter);
-
         let this = Self {
             device,
             queue,
@@ -357,8 +346,11 @@ impl GraphCompositor {
         this.clear_view_now(&this.out_view.clone());
         this
     }
-
-    fn make_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    fn make_texture(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("graph_node"),
             size: wgpu::Extent3d {
@@ -386,10 +378,11 @@ impl GraphCompositor {
         let (t, v) = Self::make_texture(&self.device, width, height);
         self.out_texture = t;
         self.out_view = v;
-        self.out_id = self
-            .renderer
-            .write()
-            .register_native_texture(&self.device, &self.out_view, self.filter);
+        self.out_id = self.renderer.write().register_native_texture(
+            &self.device,
+            &self.out_view,
+            self.filter,
+        );
         self.pool.clear();
         self.width = width;
         self.height = height;
@@ -466,7 +459,6 @@ impl GraphCompositor {
         };
         let kind = node.kind.clone();
         let inputs = node.inputs.clone();
-
         let slot = match &kind {
             NodeKind::DrawingSource { column } => {
                 let slot = self.acquire_cleared();
@@ -543,7 +535,6 @@ impl GraphCompositor {
         visiting.remove(&id);
         slot
     }
-
     fn render_input(
         &mut self,
         cut: &Cut,
@@ -560,7 +551,6 @@ impl GraphCompositor {
     }
 
     // ---- Pool + passes ------------------------------------------------------
-
     fn acquire(&mut self) -> usize {
         if let Some(i) = self.pool.iter().position(|p| p.free) {
             self.pool[i].free = false;
@@ -570,22 +560,18 @@ impl GraphCompositor {
         self.pool.push(PoolTex { view, free: false });
         self.pool.len() - 1
     }
-
     fn acquire_cleared(&mut self) -> usize {
         self.acquire_cleared_to(wgpu::Color::TRANSPARENT)
     }
-
     fn acquire_cleared_to(&mut self, color: wgpu::Color) -> usize {
         let slot = self.acquire();
         let view = self.pool[slot].view.clone();
         self.clear_pass(&view, color);
         slot
     }
-
     fn clear_view_now(&self, view: &wgpu::TextureView) {
         self.clear_pass(view, wgpu::Color::TRANSPARENT);
     }
-
     fn clear_pass(&self, view: &wgpu::TextureView, color: wgpu::Color) {
         let mut enc = self
             .device

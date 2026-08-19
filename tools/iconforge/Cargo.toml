@@ -1,0 +1,12 @@
+[package]
+name = "iconforge"
+version = "0.1.0"
+edition = "2024"
+
+# The asset forge: renders OUR OWN SVG icon drawings (app/assets/icons/svg)
+# into white-alpha PNG masks the app tints at draw time, and GENERATES the
+# chrome grain textures procedurally from a fixed seed. Everything it emits
+# is original work owned by this project. Run: cargo run -p iconforge
+
+[dependencies]
+resvg = { version = "0.45", default-features = false }

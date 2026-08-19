@@ -43,6 +43,10 @@ struct Applied {
     label: String,
     redo: Vec<Command>,
     undo: Vec<Command>,
+    /// SESSION v2 (research/PSD-session-v2.md): who authored this step.
+    /// None = this machine's own hand. RUNTIME ONLY — never serialized,
+    /// so saved files keep their exact schema (NEVER-DO 4).
+    author: Option<String>,
 }
 
 #[derive(Default)]
@@ -54,9 +58,21 @@ struct History {
     limit: usize,
 }
 
+/// SESSION v2: the (drawing, layer) a command writes to, when it has
+/// one. Steps with no such target are treated as touching everything
+/// (they can never be jumped over) — the conservative side.
+fn target_of(cmd: &Command) -> Option<(DrawingId, LayerId)> {
+    match cmd {
+        Command::PaintTiles { id, layer, .. } => Some((*id, *layer)),
+        _ => None,
+    }
+}
+
 /// The engine facade the app shell talks to.
 pub struct Engine {
     pub project: Project,
+    /// SESSION v2: the author the next applied step belongs to.
+    current_author: Option<String>,
     pub evaluator: Evaluator,
     history: History,
 }
@@ -67,6 +83,7 @@ impl Engine {
             project: Project::new(name),
             evaluator: Evaluator::new(),
             history: History::default(),
+            current_author: None,
         }
     }
 
@@ -219,10 +236,12 @@ impl Engine {
         }
 
         self.evaluator.invalidate_nodes(&invalidate);
+        let author = self.current_author.clone();
         self.history.undo_stack.push_back(Applied {
             label: label.into(),
             redo: commands,
             undo: inverses,
+            author,
         });
         // Bound the history: drop the oldest steps beyond the limit.
         if self.history.limit > 0 {
@@ -280,6 +299,71 @@ impl Engine {
         Ok(())
     }
 
+    /// SESSION v2: label the NEXT applied step with this author (None =
+    /// this machine's own hand). The host sets it around a guest's edit
+    /// so history knows whose hand each step came from.
+    pub fn set_author(&mut self, author: Option<String>) {
+        self.current_author = author;
+    }
+
+    /// Undo the most recent step authored by `author`, but ONLY while it
+    /// is still safe to remove: nothing applied after it touches the same
+    /// drawing+layer (NEVER-DO 3 — no out-of-order surgery). Returns the
+    /// step's label on success.
+    pub fn undo_last_by(&mut self, author: Option<&str>) -> Result<String> {
+        let idx = self
+            .history
+            .undo_stack
+            .iter()
+            .rposition(|a| a.author.as_deref() == author)
+            .ok_or(EngineError::NothingToUndo)?;
+        // Safety: every step ABOVE it must be disjoint in target.
+        let mine: Vec<(DrawingId, LayerId)> =
+            self.history.undo_stack[idx].redo.iter().filter_map(target_of).collect();
+        for later in self.history.undo_stack.iter().skip(idx + 1) {
+            for t in later.redo.iter().filter_map(target_of) {
+                if mine.contains(&t) {
+                    return Err(EngineError::InvalidCommand(
+                        "a later edit touches the same layer — undo refused".into(),
+                    ));
+                }
+            }
+        }
+        let step = self
+            .history
+            .undo_stack
+            .remove(idx)
+            .expect("index came from this stack");
+        self.replay(&step.undo)?;
+        let label = step.label.clone();
+        self.history.redo_stack.push(step);
+        Ok(label)
+    }
+
+    /// Redo the most recent redoable step authored by `author`.
+    pub fn redo_last_by(&mut self, author: Option<&str>) -> Result<String> {
+        let idx = self
+            .history
+            .redo_stack
+            .iter()
+            .rposition(|a| a.author.as_deref() == author)
+            .ok_or(EngineError::NothingToRedo)?;
+        let step = self.history.redo_stack.remove(idx);
+        self.replay(&step.redo)?;
+        let label = step.label.clone();
+        self.history.undo_stack.push_back(step);
+        Ok(label)
+    }
+
+    /// How many steps this author can still undo (the Foot's lamps).
+    pub fn undo_depth_by(&self, author: Option<&str>) -> usize {
+        self.history
+            .undo_stack
+            .iter()
+            .filter(|a| a.author.as_deref() == author)
+            .count()
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.history.undo_stack.is_empty()
     }
@@ -317,6 +401,7 @@ impl Engine {
             project: store::load(path)?,
             evaluator: Evaluator::new(),
             history: History::default(),
+            current_author: None,
         })
     }
 }

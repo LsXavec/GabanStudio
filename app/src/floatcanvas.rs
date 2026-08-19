@@ -37,7 +37,6 @@ pub struct FloatCanvas {
 
 impl FloatCanvas {
     pub const TITLE: &'static str = "AnimStudio — Canvas";
-
     pub fn viewport_id() -> egui::ViewportId {
         egui::ViewportId::from_hash_of("animstudio_float_canvas")
     }

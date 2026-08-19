@@ -46,7 +46,6 @@ impl Pane {
 
     /// How many simultaneous viewers the add-menu offers.
     pub const MAX_VIEWERS: u8 = 4;
-
     pub fn title(&self) -> String {
         match self {
             Pane::Canvas => "Canvas".into(),
@@ -173,7 +172,10 @@ impl Stage {
         };
         match self {
             Stage::Layout => base,
-            Stage::Drawing => WorkspaceView { onion: true, ..base },
+            Stage::Drawing => WorkspaceView {
+                onion: true,
+                ..base
+            },
             Stage::Finishing => WorkspaceView {
                 tool: CanvasTool::Fill,
                 fill_ref_cel: true,
@@ -226,7 +228,11 @@ pub struct Workspaces {
 impl Workspaces {
     fn path() -> Option<PathBuf> {
         let base = std::env::var_os("APPDATA")?;
-        Some(PathBuf::from(base).join("AnimStudio").join("workspaces.json"))
+        Some(
+            PathBuf::from(base)
+                .join("AnimStudio")
+                .join("workspaces.json"),
+        )
     }
 
     /// Load saved workspaces; a missing/unreadable file seeds the defaults.
@@ -251,7 +257,6 @@ impl Workspaces {
         // rooms; this list is purely the user's own saved arrangements.
         Self { list: Vec::new() }
     }
-
     pub fn save(&self) {
         let Some(path) = Self::path() else { return };
         if let Some(dir) = path.parent() {

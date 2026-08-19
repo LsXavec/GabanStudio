@@ -243,3 +243,133 @@ fn gesture_through_engine_is_one_exact_undo_step() {
     engine.undo().unwrap();
     assert_eq!(engine.project, baseline, "one undo restores byte-identical project");
 }
+
+// ---- SESSION v2: author-tagged history (research/PSD-session-v2.md) -------
+// The laws proved here: an author undoes only their OWN last step; the undo
+// is REFUSED while a later step touches the same drawing+layer (NEVER-DO 3,
+// no out-of-order surgery); and the tag is runtime-only, so a saved file's
+// schema is untouched.
+
+/// Two layers on one drawing, so authors can work disjointly.
+fn two_layer_rig(
+    engine: &mut Engine,
+) -> (CutRef, anim_core::ids::DrawingId, anim_core::ids::LayerId, anim_core::ids::LayerId) {
+    let scene = engine.add_scene("SC");
+    let cut = engine.add_cut(scene, "cut", 24).unwrap();
+    let at = CutRef { scene, cut };
+    let col = engine.add_column(at, "A").unwrap();
+    let d = engine.alloc_drawing_id();
+    let l_line = engine.alloc_layer_id();
+    let l_color = engine.alloc_layer_id();
+    engine
+        .apply(
+            "rig",
+            vec![
+                Command::AddDrawing {
+                    at,
+                    id: d,
+                    index: 0,
+                    name: "art".into(),
+                    strokes: vec![],
+                    layers: vec![
+                        CelLayer::new(l_color, "color"),
+                        CelLayer::new(l_line, "line"),
+                    ],
+                },
+                Command::SetCell { at, column: col, frame: 0, key: Some(Exposure::Drawing(d)) },
+            ],
+        )
+        .unwrap();
+    (at, d, l_line, l_color)
+}
+
+fn dab(at: CutRef, d: anim_core::ids::DrawingId, layer: anim_core::ids::LayerId, x: i32) -> Command {
+    Command::PaintTiles {
+        at,
+        id: d,
+        layer,
+        // TileDiff carries (coord, before, after) — before is None on a
+        // fresh layer, which is what makes undo byte-exact.
+        diff: tiles_with_texels(&[(x, 4, [1.0, 1.0, 1.0, 1.0])])
+            .into_iter()
+            .map(|(k, v)| (k, None, Some(v)))
+            .collect(),
+    }
+}
+
+#[test]
+fn each_author_undoes_only_their_own_step() {
+    let mut engine = Engine::new("session");
+    let (at, d, line, color) = two_layer_rig(&mut engine);
+    let clean = engine.project.clone();
+
+    engine.set_author(None); // the host's own hand
+    engine.apply("host stroke", vec![dab(at, d, line, 10)]).unwrap();
+    engine.set_author(Some("kotori".into()));
+    engine.apply("guest stroke", vec![dab(at, d, color, 40)]).unwrap();
+    engine.set_author(None);
+
+    // The guest undoes THEIRS — the host's stroke must survive.
+    engine.undo_last_by(Some("kotori")).expect("guest may undo their own");
+    let layers = &engine.project.cut(at.scene, at.cut).unwrap().drawing(d).unwrap().layers;
+    let color_l = layers.iter().find(|l| l.props.name == "color").unwrap();
+    let line_l = layers.iter().find(|l| l.props.name == "line").unwrap();
+    assert!(color_l.raster.tiles.is_empty(), "the guest's own stroke is gone");
+    assert!(!line_l.raster.tiles.is_empty(), "the host's stroke survived");
+
+    // And the host undoes theirs, back to the clean rig.
+    engine.undo_last_by(None).expect("host may undo their own");
+    assert_eq!(engine.project, clean, "both undos restore the rig exactly");
+}
+
+#[test]
+fn undo_refuses_when_a_later_edit_shares_the_layer() {
+    let mut engine = Engine::new("session");
+    let (at, d, line, _color) = two_layer_rig(&mut engine);
+
+    engine.set_author(Some("kotori".into()));
+    engine.apply("guest stroke", vec![dab(at, d, line, 10)]).unwrap();
+    engine.set_author(None);
+    engine.apply("host stroke", vec![dab(at, d, line, 20)]).unwrap();
+
+    // The guest's step is buried under one touching the SAME layer.
+    assert!(
+        engine.undo_last_by(Some("kotori")).is_err(),
+        "out-of-order undo on a shared layer must refuse"
+    );
+    // The host undoes theirs first; now the guest's is safely on top.
+    engine.undo_last_by(None).unwrap();
+    assert!(engine.undo_last_by(Some("kotori")).is_ok(), "now it is safe");
+}
+
+#[test]
+fn author_tags_never_reach_the_document() {
+    // The file is a SQLite container (page state varies run to run), so the
+    // honest claim is about the DOCUMENT: a project saved from a tagged
+    // history loads back identical to one saved from an untagged history.
+    // The tag is session metadata and must never become document data.
+    let dir = std::env::temp_dir().join("animstudio_v2_author_test");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let mut tagged = Engine::new("session");
+    let (at, d, line, _c) = two_layer_rig(&mut tagged);
+    tagged.set_author(Some("kotori".into()));
+    tagged.apply("guest stroke", vec![dab(at, d, line, 10)]).unwrap();
+    let p1 = dir.join("tagged.animproj");
+    tagged.save(&p1).unwrap();
+
+    let mut plain = Engine::new("session");
+    let (at2, d2, line2, _c2) = two_layer_rig(&mut plain);
+    plain.apply("guest stroke", vec![dab(at2, d2, line2, 10)]).unwrap();
+    let p2 = dir.join("plain.animproj");
+    plain.save(&p2).unwrap();
+
+    let back_tagged = Engine::load(&p1).unwrap();
+    let back_plain = Engine::load(&p2).unwrap();
+    assert_eq!(
+        back_tagged.project, back_plain.project,
+        "a tagged history must save the same document as an untagged one"
+    );
+    // And the reloaded history is empty — tags cannot survive a round trip.
+    assert!(!back_tagged.can_undo(), "history (and its tags) never persists");
+}

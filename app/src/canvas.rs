@@ -15,19 +15,24 @@ use anim_core::raster::{TileCoord, TileData};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
-use crate::config::{LayersConfig, PenConfig, PressureCurve};
+use crate::config::{BrushPreset, LayersConfig, PenConfig, PressureCurve};
 use crate::doc::AppState;
+use crate::icons::Icon;
 use crate::paint::{Dab, PaintLayer, PaintMode};
+use crate::plate;
 
 /// Default new-project resolution (the New Project dialog's starting values).
 pub const DEFAULT_PAPER_W: u32 = 1920;
 pub const DEFAULT_PAPER_H: u32 = 1080;
 
+/// The pencil case (spec §6 defect 5): ink · ao · aka · white. Ao and Aka are
+/// the trade's blue/red pencils at the plate's own values, so the swatch board
+/// reads by colour alone, peripherally, without stopping the stroke.
 const SWATCHES: [[u8; 4]; 4] = [
-    [25, 25, 30, 255],   // ink
-    [200, 40, 40, 255],  // red (shadow lines, corrections)
-    [40, 80, 200, 255],  // blue (roughs/layout, like blue pencil)
-    [245, 245, 245, 255],// white
+    [25, 25, 30, 255],    // ink
+    [83, 137, 196, 255],  // ao — construction / blue pencil
+    [228, 82, 47, 255],   // aka — the sakkan's correction
+    [245, 245, 245, 255], // white
 ];
 
 // Pen-input tuning derived from Krita's tablet pipeline (see
@@ -164,9 +169,18 @@ impl Floating {
 }
 
 enum FloatDrag {
-    Move { start_ptr: Pos2, start_translate: egui::Vec2 },
-    Scale { start_dist: f32, start_scale: f32 },
-    Rotate { start_angle: f32, start_rotate: f32 },
+    Move {
+        start_ptr: Pos2,
+        start_translate: egui::Vec2,
+    },
+    Scale {
+        start_dist: f32,
+        start_scale: f32,
+    },
+    Rotate {
+        start_angle: f32,
+        start_rotate: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,11 +226,13 @@ pub struct CanvasView {
 
     // --- Raster brush: GPU layer mirrors the current cel; strokes read back
     // into the engine as PaintTiles (undoable + saved) ---
-    raster: bool,
+    pub(crate) raster: bool,
     raster_brush_px: f32,
     /// Eraser tool active: strokes subtract coverage (destination-out) instead of
     /// laying down ink. Same dab geometry, size and pressure response as the brush.
-    erasing: bool,
+    /// Brush/eraser sub-tool. Readable so the UI hook can report the tool that
+    /// is ACTUALLY armed rather than inferring one (see uidump.rs).
+    pub(crate) erasing: bool,
     /// Alpha lock: ink can only land where the active layer ALREADY has
     /// coverage (Krita's lock-alpha) — recolor a shape without ever
     /// painting outside its silhouette. Session-transient (not a per-layer
@@ -326,10 +342,64 @@ pub struct CanvasView {
     pen_curve: PressureCurve,
     /// Active layer name last frame — detects layer switches so the brush
     /// colour follows the layer.
-    last_layer_name: String,
+    /// The pencil-box preset the brush was last armed FROM (by name). The
+    /// slot's Tally ring draws broken once the live numbers drift off it.
+    armed_preset: Option<String>,
+    /// The brush rail (canvas right edge) is showing. Opens on hover at the
+    /// edge, stays while the pointer is on it or a drag is live.
+    rail_open: bool,
+    /// Last frame's measured rail content height — centres the floating
+    /// controls on the grip's line (settles in one frame).
+    rail_content_h: f32,
+    /// SESSION v2: this app is a GUEST in someone's room — finished
+    /// strokes are SENT, never committed locally (one writer, NEVER-DO 1).
+    pub(crate) is_guest: bool,
+    /// Outbox: (drawing id, layer name, tiles) the App ships to the host.
+    pub(crate) edit_outbox: Vec<(u64, String, Vec<(i32, i32, Vec<u16>)>)>,
+    /// A guest's pending undo(false)/redo(true) request for the host.
+    pub(crate) history_request: Option<bool>,
+    /// SESSION presence (PSD-session-room): peers as the canvas draws
+    /// them, refreshed by the App each frame; and our own pointer in
+    /// paper space, read back by the App to broadcast.
+    pub(crate) peers: Vec<crate::net::PeerView>,
+    pub(crate) presence_pos: Option<[f32; 2]>,
+    /// MISS CHECK (shiage): the hole-hunt — the ground the cel
+    /// composites over flips Paper -> Graphite so unpainted pixels read
+    /// as dark pits. Pure UI paint; health is a meter, never a lamp.
+    pub(crate) miss_check: bool,
+    /// R-FLIP (momentary): while held, the canvas shows the PREVIOUS
+    /// drawing at full strength — the animator's flip. Pure display,
+    /// recomputed every frame; never engages mid-stroke or in playback.
+    flip_held: bool,
+    /// Refusal edge-flash bookkeeping (seq last seen + when).
+    flash_seq: u32,
+    flash_since: f64,
+    /// Lightbox rail (Phase 4): ghost strength scales the onion alphas.
+    onion_strength: f32,
+    /// Paper furniture: field / safe-area / peg-bar guides, in Ao.
+    show_field: bool,
+    show_safe: bool,
+    show_peg: bool,
+    /// The INPUT plate field was clicked — open Settings at the pen page.
+    pub(crate) request_pen_settings: bool,
+    /// The lightbox rail (left edge) is showing — same fold law as the
+    /// brush rail (owner 2026-08-17: everything in the canvas folds).
+    light_open: bool,
+    light_content_h: f32,
+    /// THE PAINT DISH (bottom edge, its own room 2026-08-17).
+    dish_open: bool,
+    dish_content_w: f32,
+    /// Session mixing splotches: (position 0..1 in the tray, radius, colour).
+    /// Never saved — the model is the only colour truth (NEVER-DO 2).
+    splotches: Vec<([f32; 2], f32, [u8; 4])>,
+    /// The Eye is editing this palette role (char idx, role idx); "set"
+    /// writes it back, DANGER-guarded (palettes have no undo).
+    eye_target: Option<(usize, usize)>,
+    /// The Eye's sticky HSV (hue survives greys) + the rgb it derives from.
+    eye_hsv: [f32; 3],
+    eye_sync_rgb: [u8; 3],
     /// Session colour memory per layer NAME: picking a colour while a layer is
     /// active remembers it here (overrides the Settings default until close).
-    layer_colors: std::collections::HashMap<String, [u8; 4]>,
     /// The canvas area rect of the last frame — read by the headless layout
     /// probe (ANIMSTUDIO_PROBE) to detect ANY movement of the drawing area.
     pub dbg_rect: Rect,
@@ -409,8 +479,31 @@ impl CanvasView {
             synced_above: None,
             raster_new_cel: false,
             pen_curve: PressureCurve::linear(),
-            last_layer_name: String::new(),
-            layer_colors: std::collections::HashMap::new(),
+            armed_preset: None,
+            rail_open: false,
+            rail_content_h: 420.0,
+            is_guest: false,
+            edit_outbox: Vec::new(),
+            history_request: None,
+            peers: Vec::new(),
+            presence_pos: None,
+            miss_check: false,
+            flip_held: false,
+            flash_seq: 0,
+            flash_since: -10.0,
+            onion_strength: 0.45,
+            show_field: false,
+            show_safe: false,
+            show_peg: false,
+            request_pen_settings: false,
+            light_open: false,
+            light_content_h: 330.0,
+            dish_open: false,
+            dish_content_w: 620.0,
+            splotches: Vec::new(),
+            eye_target: None,
+            eye_hsv: [0.0, 0.0, 0.0],
+            eye_sync_rgb: [0, 0, 0],
             dbg_rect: Rect::NOTHING,
             seen_pen: false,
             native_active: false,
@@ -446,6 +539,7 @@ impl CanvasView {
             self.brush_color = c;
         }
         self.erasing = false;
+        self.armed_preset = Some(p.name.clone());
     }
 
     /// Snapshot the current brush as a preset (the Presets pane's "save").
@@ -495,16 +589,12 @@ impl CanvasView {
         self.sel_draft = None;
         self.tool = tool;
         state.status = match tool {
-            CanvasTool::Select => {
-                "select: drag = select, drag inside = move, corners = scale, \
-                 just outside corners = rotate; Enter applies, Esc cancels"
-                    .into()
-            }
-            CanvasTool::Fill => {
-                "fill: click a region — line art bounds it; gap closes line \
-                 breaks, under tucks the flat beneath the lines"
-                    .into()
-            }
+            CanvasTool::Select => "select: drag = select, drag inside = move, corners = scale, \
+        just outside corners = rotate; Enter applies, Esc cancels"
+                .into(),
+            CanvasTool::Fill => "fill: click a region — line art bounds it; gap closes line \
+            breaks, under tucks the flat beneath the lines"
+                .into(),
             CanvasTool::Paint => "paint".into(),
         };
     }
@@ -540,8 +630,7 @@ impl CanvasView {
         }
         self.sel_draft = None;
         if self.touch_active || !self.current.is_empty() || self.raster_stroke_done {
-            state.status =
-                "workspace switched — tool/view kept (finish the stroke first)".into();
+            state.status = "workspace switched — tool/view kept (finish the stroke first)".into();
             return false;
         }
         self.set_tool(v.tool, state);
@@ -579,7 +668,7 @@ impl CanvasView {
         poly: Option<&[Pos2]>,
     ) -> bool {
         if self.composite_view {
-            state.status = "composite view — press C to edit".into();
+            state.refuse("refused — composite view is read-only (C to edit)");
             return false;
         }
         if !self.raster {
@@ -595,8 +684,7 @@ impl CanvasView {
         }
         let Some(did) = state.own_key_drawing() else {
             state.status =
-                "held/blank frame — a transform edits a frame's OWN cel (draw here first)"
-                    .into();
+                "held/blank frame — a transform edits a frame's OWN cel (draw here first)".into();
             return false;
         };
         let (kd, kl, _) = state.active_layer_key();
@@ -645,7 +733,6 @@ impl CanvasView {
             };
         }
         paint.sync_active(&punched);
-
         let pivot = pos2(
             lift.patch.x0 as f32 + lift.patch.w as f32 / 2.0,
             lift.patch.y0 as f32 + lift.patch.h as f32 / 2.0,
@@ -759,17 +846,13 @@ impl CanvasView {
         // (unpunched) engine truth.
         if let Some(f) = &self.floating {
             let (kd, kl, _) = state.active_layer_key();
-            if state.own_key_drawing() != Some(f.drawing)
-                || kd != f.drawing.0
-                || kl != f.layer.0
-            {
+            if state.own_key_drawing() != Some(f.drawing) || kd != f.drawing.0 || kl != f.layer.0 {
                 self.commit_floating(state);
             }
         }
         let Some(paint) = paint else {
             return; // no GPU: the select tool has nothing to lift/preview
         };
-
         let ptr = response.interact_pointer_pos();
         if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(pos) = ptr
@@ -798,15 +881,24 @@ impl CanvasView {
         {
             if let Some(f) = &mut self.floating {
                 match &f.drag {
-                    Some(FloatDrag::Move { start_ptr, start_translate }) => {
+                    Some(FloatDrag::Move {
+                        start_ptr,
+                        start_translate,
+                    }) => {
                         f.translate = *start_translate + (pos - *start_ptr) / scale;
                     }
-                    Some(FloatDrag::Scale { start_dist, start_scale }) => {
+                    Some(FloatDrag::Scale {
+                        start_dist,
+                        start_scale,
+                    }) => {
                         let pivot_s = to_screen(f.pivot + f.translate);
                         let d = (pos - pivot_s).length().max(1.0);
                         f.scale = (start_scale * d / start_dist.max(1.0)).clamp(0.05, 20.0);
                     }
-                    Some(FloatDrag::Rotate { start_angle, start_rotate }) => {
+                    Some(FloatDrag::Rotate {
+                        start_angle,
+                        start_rotate,
+                    }) => {
                         let pivot_s = to_screen(f.pivot + f.translate);
                         let a = (pos - pivot_s).angle();
                         f.rotate = start_rotate + (a - start_angle);
@@ -837,8 +929,7 @@ impl CanvasView {
             } else if let Some(draft) = self.sel_draft.take() {
                 self.selection = finalize_selection(draft, self.sel_shape, scale);
                 if self.selection.is_some() {
-                    state.status =
-                        "selection set — drag inside to move; Esc clears".into();
+                    state.status = "selection set — drag inside to move; Esc clears".into();
                 }
             }
         }
@@ -933,11 +1024,7 @@ impl CanvasView {
             match self.sel_shape {
                 SelShape::Rect if draft.len() == 2 => {
                     let (a, b) = (draft[0], draft[1]);
-                    ants(
-                        &[a, pos2(b.x, a.y), b, pos2(a.x, b.y)],
-                        true,
-                        painter,
-                    );
+                    ants(&[a, pos2(b.x, a.y), b, pos2(a.x, b.y)], true, painter);
                 }
                 _ => ants(draft, false, painter),
             }
@@ -946,7 +1033,12 @@ impl CanvasView {
             let c = f.corners(); // TL TR BL BR, paper
             let s: Vec<Pos2> = c.iter().map(|p| to_screen(*p)).collect();
             let mut mesh = egui::Mesh::with_texture(f.tex.id());
-            let uv = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(0.0, 1.0), pos2(1.0, 1.0)];
+            let uv = [
+                pos2(0.0, 0.0),
+                pos2(1.0, 0.0),
+                pos2(0.0, 1.0),
+                pos2(1.0, 1.0),
+            ];
             for i in 0..4 {
                 mesh.vertices.push(egui::epaint::Vertex {
                     pos: s[i],
@@ -1000,17 +1092,856 @@ impl CanvasView {
             format!(
                 "{}P{:5.2}  {:4.2}–{:4.2}  {:3}%{}",
                 if self.native_active { "ink " } else { "" },
-                self.dbg_pressure, self.dbg_min, self.dbg_max, pct, tilt
+                self.dbg_pressure,
+                self.dbg_min,
+                self.dbg_max,
+                pct,
+                tilt
             ),
             self.dbg_max - self.dbg_min > 0.15,
             self.dbg_mouse_mode,
         )
     }
 
+    /// The engine changed under the displayed texture (session snapshot
+    /// applied) — resync the raster display from truth.
+    pub(crate) fn engine_changed(&mut self) {
+        self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+    }
+
+    /// Our live wet stroke, in paper space, for session presence.
+    pub(crate) fn presence_wet(&self) -> Vec<[f32; 3]> {
+        self.current
+            .iter()
+            .map(|p| [p.x, p.y, p.pressure])
+            .collect()
+    }
+
+    /// The slate's arming line: what the pen does right now, in a word.
+    pub fn arming_pencil(&self) -> String {
+        match self.tool {
+            CanvasTool::Select => "select".into(),
+            CanvasTool::Fill => "fill".into(),
+            _ if self.erasing => "eraser".into(),
+            _ => self.armed_preset.clone().unwrap_or_else(|| "brush".into()),
+        }
+    }
+
+    /// True while the live brush still matches `p`'s numbers exactly.
+    fn matches_preset(&self, p: &BrushPreset) -> bool {
+        let e = |a: f32, b: f32| (a - b).abs() < 0.001;
+        e(self.raster_brush_px, p.size_px)
+            && e(self.brush_flow, p.flow)
+            && e(self.brush_opacity, p.opacity)
+            && self.dyn_size == p.dyn_size
+            && self.dyn_opacity == p.dyn_opacity
+            && e(self.min_size, p.min_size)
+            && p.color.is_none_or(|c| self.brush_color == c)
+            && self.tilt_size == p.tilt_size
+            && self.tilt_opacity == p.tilt_opacity
+            && self.tilt_shape == p.tilt_shape
+            && e(self.tilt_strength, p.tilt_strength)
+    }
+
+    /// One pencil-box slot (genga room charter): an XL detent carrying the
+    /// preset's specimen stroke in its own ink, engraved name, and hotkey
+    /// digit. The specimen is painted from the preset's REAL numbers — the
+    /// pressure story you see is the one you'll get.
+    fn pencil_slot(
+        &mut self,
+        ui: &mut egui::Ui,
+        p: &BrushPreset,
+        digit: usize,
+        state: &mut AppState,
+    ) {
+        let (rect, resp) = ui.allocate_exact_size(vec2(88.0, 44.0), Sense::click());
+        let armed = self.tool == CanvasTool::Paint
+            && !self.erasing
+            && self.armed_preset.as_deref() == Some(p.name.as_str());
+        if resp.clicked() && !self.stroke_active() {
+            if self.tool != CanvasTool::Paint {
+                self.set_tool(CanvasTool::Paint, state);
+            }
+            self.apply_preset(p);
+        }
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let painter = ui.painter();
+        // The specimen sits in a Well recess: paint is MATERIAL, seated,
+        // never a signal (the charters' material rule).
+        painter.rect_filled(rect, 0.0, plate::WELL);
+        let ink = p.color.unwrap_or([228, 225, 214, 255]);
+        let n = 12;
+        let x0 = rect.left() + 8.0;
+        let x1 = rect.right() - 8.0;
+        let cy = rect.top() + 15.0;
+        let mut prev = pos2(x0, cy + 2.5);
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            let x = x0 + (x1 - x0) * t;
+            let y = cy + (t * std::f32::consts::TAU).sin() * 2.5;
+            // Pressure story: ramp in, peak mid-stroke, release.
+            let press = (t * std::f32::consts::PI).sin();
+            let w = if p.dyn_size {
+                p.min_size + (1.0 - p.min_size) * press
+            } else {
+                1.0
+            } * (p.size_px * 0.5).clamp(2.5, 9.0);
+            let a = p.opacity
+                * if p.dyn_opacity {
+                    (0.25 + 0.75 * press) * p.flow.max(0.4)
+                } else {
+                    1.0
+                };
+            let col = Color32::from_rgba_unmultiplied(ink[0], ink[1], ink[2], (a * 255.0) as u8);
+            let pt = pos2(x, y);
+            painter.line_segment([prev, pt], egui::Stroke::new(w, col));
+            prev = pt;
+        }
+        let name_ink = if armed || resp.hovered() {
+            plate::STRUCK
+        } else {
+            plate::LEGEND
+        };
+        painter.text(
+            pos2(rect.left() + 8.0, rect.bottom() - 9.0),
+            egui::Align2::LEFT_CENTER,
+            p.name.to_uppercase(),
+            egui::FontId::new(9.5, plate::semibold()),
+            name_ink,
+        );
+        painter.text(
+            pos2(rect.right() - 7.0, rect.bottom() - 9.0),
+            egui::Align2::RIGHT_CENTER,
+            format!("{digit}"),
+            egui::FontId::new(11.0, egui::FontFamily::Monospace),
+            plate::legend_dim(),
+        );
+        // The lamp: solid Tally ring armed; BROKEN ring = armed but the
+        // live numbers have been nudged off the preset.
+        if armed {
+            if self.matches_preset(p) {
+                painter.rect_stroke(
+                    rect,
+                    0.0,
+                    egui::Stroke::new(2.0, plate::TALLY),
+                    egui::StrokeKind::Inside,
+                );
+            } else {
+                let c = [
+                    rect.left_top(),
+                    rect.right_top(),
+                    rect.right_bottom(),
+                    rect.left_bottom(),
+                    rect.left_top(),
+                ];
+                painter.extend(egui::Shape::dashed_line(
+                    &c,
+                    egui::Stroke::new(2.0, plate::TALLY),
+                    7.0,
+                    5.0,
+                ));
+            }
+        } else if resp.hovered() {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(1.0, plate::LEGEND),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let mut hover = format!(
+            "{} — {:.0}px · flow {:.2} · opacity {:.2} (hotkey {digit})",
+            p.name, p.size_px, p.flow, p.opacity
+        );
+        if plate::exact() {
+            hover.push_str(&format!(
+                "\n[PENCIL SLOT '{}' ·
+        canvas.rs
+        pencil_slot · preset in config.presets]",
+                p.name
+            ));
+        }
+        resp.on_hover_text(hover);
+    }
+
+    /// The eraser as the pencil box's fourth detent.
+    fn eraser_slot(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+        let (rect, resp) = ui.allocate_exact_size(vec2(56.0, 44.0), Sense::click());
+        let armed = self.tool == CanvasTool::Paint && self.erasing;
+        if resp.clicked() {
+            if self.tool != CanvasTool::Paint {
+                self.set_tool(CanvasTool::Paint, state);
+            }
+            self.erasing = true;
+        }
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let painter = ui.painter();
+        painter.rect_filled(rect, 0.0, plate::WELL);
+        let ink = if armed || resp.hovered() {
+            plate::STRUCK
+        } else {
+            plate::LEGEND
+        };
+        crate::icons::paint(
+            painter,
+            Rect::from_center_size(
+                pos2(rect.center().x, rect.top() + 15.0),
+                egui::Vec2::splat(18.0),
+            ),
+            ink,
+            Icon::Eraser,
+        );
+        painter.text(
+            pos2(rect.center().x, rect.bottom() - 9.0),
+            egui::Align2::CENTER_CENTER,
+            "ERASER",
+            egui::FontId::new(9.5, plate::semibold()),
+            ink,
+        );
+        if armed {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(2.0, plate::TALLY),
+                egui::StrokeKind::Inside,
+            );
+        } else if resp.hovered() {
+            painter.rect_stroke(
+                rect,
+                0.0,
+                egui::Stroke::new(1.0, plate::LEGEND),
+                egui::StrokeKind::Inside,
+            );
+        }
+        if plate::exact() {
+            resp.on_hover_text("[PENCIL SLOT 'eraser' · canvas.rs eraser_slot]");
+        }
+    }
+
+    /// THE PAINT DISH's content (its room, 2026-08-17): ARMED WELL with
+    /// row context · THE MODEL (characters × roles — the colour-model
+    /// table) · THE DISH (mixing splotches) · THE EYE (compact SV+hue).
+    /// Picking never writes the model; only the Eye's held "set" and the
+    /// row's held DERIVE write (DANGER — palettes have no undo).
+    fn dish_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+        // ---- ARMED WELL + row context ----
+        let mut armed_role: Option<String> = None;
+        let mut row_chips: Vec<[u8; 4]> = Vec::new();
+        for ch in &state.palettes.characters {
+            for r in &ch.roles {
+                if r.color[..3] == self.brush_color[..3] {
+                    armed_role = Some(r.name.clone());
+                    row_chips = ch.roles.iter().map(|q| q.color).collect();
+                }
+            }
+        }
+        ui.vertical(|ui| {
+            ui.add_space(10.0);
+            let (wrect, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(wrect.expand(2.0), 0.0, plate::WELL);
+            p.rect_filled(
+                wrect,
+                0.0,
+                Color32::from_rgba_unmultiplied(
+                    self.brush_color[0],
+                    self.brush_color[1],
+                    self.brush_color[2],
+                    255,
+                ),
+            );
+            p.rect_stroke(
+                wrect,
+                0.0,
+                egui::Stroke::new(1.0, plate::LEGEND),
+                egui::StrokeKind::Outside,
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "#{:02X}{:02X}{:02X}",
+                    self.brush_color[0], self.brush_color[1], self.brush_color[2]
+                ))
+                .monospace()
+                .size(10.0)
+                .color(plate::STRUCK),
+            );
+            if let Some(n) = &armed_role {
+                plate::legend(ui, n);
+            }
+            ui.horizontal(|ui| {
+                for c in &row_chips {
+                    let (cr, cresp) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::click());
+                    let pnt = ui.painter();
+                    pnt.rect_filled(
+                        cr,
+                        0.0,
+                        Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
+                    );
+                    pnt.rect_stroke(
+                        cr,
+                        0.0,
+                        egui::Stroke::new(1.0, plate::legend_dim()),
+                        egui::StrokeKind::Inside,
+                    );
+                    if cresp.clicked() {
+                        self.brush_color = *c;
+                    }
+                }
+            });
+        });
+        ui.add_space(12.0);
+
+        // ---- THE MODEL: the colour-model table ----
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            plate::legend(ui, "model");
+            let headers: Vec<String> = state
+                .palettes
+                .characters
+                .first()
+                .map(|c| c.roles.iter().map(|r| r.name.clone()).collect())
+                .unwrap_or_default();
+            ui.horizontal(|ui| {
+                ui.allocate_exact_size(vec2(56.0, 11.0), Sense::hover());
+                for h in &headers {
+                    let (hr, _) = ui.allocate_exact_size(vec2(32.0, 11.0), Sense::hover());
+                    ui.painter().text(
+                        hr.center(),
+                        egui::Align2::CENTER_CENTER,
+                        h.chars().take(6).collect::<String>().to_uppercase(),
+                        egui::FontId::new(8.0, plate::semibold()),
+                        plate::LEGEND,
+                    );
+                }
+            });
+            let n_chars = state.palettes.characters.len();
+            for ci in 0..n_chars {
+                ui.horizontal(|ui| {
+                    let cname = state.palettes.characters[ci].name.clone();
+                    let (nr, _) = ui.allocate_exact_size(vec2(56.0, 22.0), Sense::hover());
+                    ui.painter().text(
+                        pos2(nr.left() + 2.0, nr.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        cname.chars().take(7).collect::<String>(),
+                        egui::FontId::new(10.0, egui::FontFamily::Proportional),
+                        plate::LEGEND,
+                    );
+                    let n_roles = state.palettes.characters[ci].roles.len();
+                    for ri in 0..n_roles {
+                        let color = state.palettes.characters[ci].roles[ri].color;
+                        let rname = state.palettes.characters[ci].roles[ri].name.clone();
+                        let (pr, presp) = ui.allocate_exact_size(vec2(32.0, 22.0), Sense::click());
+                        let well = pr.shrink2(vec2(2.0, 1.0));
+                        let pnt = ui.painter();
+                        pnt.rect_filled(well.expand(1.0), 0.0, plate::WELL);
+                        pnt.rect_filled(
+                            well,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 255),
+                        );
+                        if self.brush_color[..3] == color[..3] {
+                            pnt.rect_stroke(
+                                well.expand(1.0),
+                                0.0,
+                                egui::Stroke::new(2.0, plate::TALLY),
+                                egui::StrokeKind::Outside,
+                            );
+                        } else {
+                            pnt.rect_stroke(
+                                well,
+                                0.0,
+                                egui::Stroke::new(1.0, plate::legend_dim()),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if presp.double_clicked() {
+                            self.brush_color = color;
+                            self.eye_target = Some((ci, ri));
+                        } else if presp.clicked() {
+                            self.brush_color = color;
+                        }
+                        presp.on_hover_text(format!(
+                            "{cname} · {rname} — click: arm · double-click: edit in the eye"
+                        ));
+                    }
+                    // DERIVE (held DANGER — writes the model, no undo there):
+                    // this row's shadow from its normal, the systematic way.
+                    if plate::danger(ui, "derive") {
+                        let ch = &mut state.palettes.characters[ci];
+                        if let Some(norm) = ch
+                            .roles
+                            .iter()
+                            .find(|r| r.name == "normal")
+                            .map(|r| r.color)
+                        {
+                            let sh = crate::palette::derive_shadow(norm);
+                            match ch.roles.iter_mut().find(|r| r.name == "shadow") {
+                                Some(r) => r.color = sh,
+                                None => ch.roles.push(crate::palette::ColorRole {
+                                    name: "shadow".into(),
+                                    color: sh,
+                                }),
+                            }
+                            state.status =
+                                format!("{cname}: shadow derived from normal (edit in the eye)");
+                        } else {
+                            state.refuse("refused — no 'normal' role to derive from");
+                        }
+                    }
+                });
+            }
+        });
+        ui.add_space(12.0);
+
+        // ---- THE DISH: the mixing tray ----
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                plate::legend(ui, "dish");
+                if ui
+                    .button("rinse")
+                    .on_hover_text("clear the tray (splotches are session-only)")
+                    .clicked()
+                {
+                    self.splotches.clear();
+                }
+            });
+            let (dr, dresp) = ui.allocate_exact_size(vec2(180.0, 100.0), Sense::click());
+            let pnt = ui.painter();
+            pnt.rect_filled(dr, 0.0, plate::WELL);
+            pnt.rect_stroke(
+                dr,
+                0.0,
+                egui::Stroke::new(1.0, plate::legend_dim()),
+                egui::StrokeKind::Inside,
+            );
+            for (posn, r, c) in &self.splotches {
+                pnt.circle_filled(
+                    pos2(
+                        dr.left() + posn[0] * dr.width(),
+                        dr.top() + posn[1] * dr.height(),
+                    ),
+                    *r,
+                    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
+                );
+            }
+            if let Some(hp) = dresp.interact_pointer_pos() {
+                let hit = self.splotches.iter().rposition(|(q, r, _)| {
+                    let cpos = pos2(dr.left() + q[0] * dr.width(), dr.top() + q[1] * dr.height());
+                    cpos.distance(hp) <= *r
+                });
+                if dresp.secondary_clicked() {
+                    if let Some(i) = hit {
+                        self.splotches.remove(i);
+                    }
+                } else if dresp.clicked() {
+                    match hit {
+                        // Dead-centre on a splotch: PICK it up.
+                        Some(i) => {
+                            self.brush_color = self.splotches[i].2;
+                        }
+                        // Empty dish: LAY the current colour. Overlapping a
+                        // neighbour MIXES 50/50 with it — a physical dish.
+                        None => {
+                            let rel = [
+                                ((hp.x - dr.left()) / dr.width()).clamp(0.02, 0.98),
+                                ((hp.y - dr.top()) / dr.height()).clamp(0.02, 0.98),
+                            ];
+                            let r_new = 8.0 + (self.splotches.len() % 4) as f32;
+                            let mut c = self.brush_color;
+                            if let Some(j) = self.splotches.iter().rposition(|(q, r, _)| {
+                                let cpos = pos2(
+                                    dr.left() + q[0] * dr.width(),
+                                    dr.top() + q[1] * dr.height(),
+                                );
+                                cpos.distance(hp) <= *r + r_new
+                            }) {
+                                let o = self.splotches[j].2;
+                                for k in 0..3 {
+                                    c[k] = ((c[k] as u16 + o[k] as u16) / 2) as u8;
+                                }
+                                self.brush_color = c;
+                            }
+                            self.splotches.push((rel, r_new, c));
+                        }
+                    }
+                }
+            }
+        });
+        ui.add_space(12.0);
+
+        // ---- THE EYE: compact SV square + hue strip, always open ----
+        ui.vertical(|ui| {
+            ui.add_space(6.0);
+            plate::legend(ui, "eye");
+            if self.brush_color[..3] != self.eye_sync_rgb[..] {
+                let (h, sat, v) = crate::palette::rgb_to_hsv(
+                    self.brush_color[0],
+                    self.brush_color[1],
+                    self.brush_color[2],
+                );
+                // Hue is meaningless at zero saturation — keep it sticky.
+                if sat > 0.001 {
+                    self.eye_hsv[0] = h;
+                }
+                self.eye_hsv[1] = sat;
+                self.eye_hsv[2] = v;
+                self.eye_sync_rgb = [
+                    self.brush_color[0],
+                    self.brush_color[1],
+                    self.brush_color[2],
+                ];
+            }
+            let mut changed = false;
+            let (svr, svresp) = ui.allocate_exact_size(vec2(120.0, 78.0), Sense::click_and_drag());
+            let pnt = ui.painter();
+            let (hr_, hg, hb) = crate::palette::hsv_to_rgb(self.eye_hsv[0], 1.0, 1.0);
+            let hue_col = Color32::from_rgb(hr_, hg, hb);
+            let mut mesh = egui::Mesh::default();
+            let idx = mesh.vertices.len() as u32;
+            for (pt, col) in [
+                (svr.left_top(), Color32::WHITE),
+                (svr.right_top(), hue_col),
+                (svr.right_bottom(), Color32::BLACK),
+                (svr.left_bottom(), Color32::BLACK),
+            ] {
+                mesh.vertices.push(egui::epaint::Vertex {
+                    pos: pt,
+                    uv: egui::epaint::WHITE_UV,
+                    color: col,
+                });
+            }
+            mesh.indices
+                .extend_from_slice(&[idx, idx + 1, idx + 2, idx, idx + 2, idx + 3]);
+            pnt.add(egui::Shape::mesh(mesh));
+            pnt.rect_stroke(
+                svr,
+                0.0,
+                egui::Stroke::new(1.0, plate::legend_dim()),
+                egui::StrokeKind::Inside,
+            );
+            let marker = pos2(
+                svr.left() + self.eye_hsv[1] * svr.width(),
+                svr.top() + (1.0 - self.eye_hsv[2]) * svr.height(),
+            );
+            pnt.circle_stroke(marker, 4.0, egui::Stroke::new(1.5, plate::STRUCK));
+            if svresp.dragged() || svresp.clicked() {
+                if let Some(hp) = svresp.interact_pointer_pos() {
+                    self.eye_hsv[1] = ((hp.x - svr.left()) / svr.width()).clamp(0.0, 1.0);
+                    self.eye_hsv[2] = (1.0 - (hp.y - svr.top()) / svr.height()).clamp(0.0, 1.0);
+                    changed = true;
+                }
+            }
+            let (hue_r, hue_resp) =
+                ui.allocate_exact_size(vec2(120.0, 12.0), Sense::click_and_drag());
+            let pnt = ui.painter();
+            let n = 24;
+            for i in 0..n {
+                let t0 = i as f32 / n as f32;
+                let t1 = (i + 1) as f32 / n as f32;
+                let (r0, g0, b0) = crate::palette::hsv_to_rgb(t0 * 360.0, 1.0, 1.0);
+                pnt.rect_filled(
+                    Rect::from_min_max(
+                        pos2(hue_r.left() + t0 * hue_r.width(), hue_r.top()),
+                        pos2(hue_r.left() + t1 * hue_r.width(), hue_r.bottom()),
+                    ),
+                    0.0,
+                    Color32::from_rgb(r0, g0, b0),
+                );
+            }
+            let hx = hue_r.left() + (self.eye_hsv[0] / 360.0) * hue_r.width();
+            pnt.line_segment(
+                [pos2(hx, hue_r.top() - 1.0), pos2(hx, hue_r.bottom() + 1.0)],
+                egui::Stroke::new(2.0, plate::STRUCK),
+            );
+            if hue_resp.dragged() || hue_resp.clicked() {
+                if let Some(hp) = hue_resp.interact_pointer_pos() {
+                    self.eye_hsv[0] =
+                        (((hp.x - hue_r.left()) / hue_r.width()) * 360.0).clamp(0.0, 359.9);
+                    changed = true;
+                }
+            }
+            if changed {
+                let (r, g, b) =
+                    crate::palette::hsv_to_rgb(self.eye_hsv[0], self.eye_hsv[1], self.eye_hsv[2]);
+                self.brush_color = [r, g, b, self.brush_color[3]];
+                self.eye_sync_rgb = [r, g, b];
+            }
+            if let Some((ci, ri)) = self.eye_target {
+                let label = state
+                    .palettes
+                    .characters
+                    .get(ci)
+                    .and_then(|c| c.roles.get(ri).map(|r| format!("{} · {}", c.name, r.name)));
+                match label {
+                    Some(l) => {
+                        ui.label(
+                            egui::RichText::new(format!("→ {l}"))
+                                .size(9.5)
+                                .color(plate::LEGEND),
+                        );
+                        // Writes the model — held DANGER (no undo there).
+                        if plate::danger(ui, "set") {
+                            state.palettes.characters[ci].roles[ri].color = self.brush_color;
+                            state.status = format!("{l} updated");
+                            self.eye_target = None;
+                        }
+                    }
+                    None => self.eye_target = None,
+                }
+            }
+        });
+        ui.add_space(8.0);
+    }
+
+    /// The lightbox fold-out's content: onion + strength (with a value
+    /// line — a silent dial reads as a bug), paper furniture, view, INPUT.
+    fn lightbox_rail_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+        fn vline(ui: &mut egui::Ui, label: &str, value: String) {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                &label.to_uppercase(),
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::new(9.5, plate::semibold()),
+                    color: plate::LEGEND,
+                    extra_letter_spacing: 0.9,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("  {value}"),
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::new(11.0, egui::FontFamily::Monospace),
+                    color: plate::STRUCK,
+                    ..Default::default()
+                },
+            );
+            ui.label(job);
+        }
+
+        // THE QUEUE (shiage charter): prev/next CEL at the paper's own
+        // edge, 44x40 — the room's second verb; Q/W are their keys.
+        plate::legend(ui, "queue");
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            for (icon, fwd, hover) in [
+                (Icon::ChevL, false, "previous cel (Q)"),
+                (Icon::ChevR, true, "next cel (W)"),
+            ] {
+                let (cr, cresp) = ui.allocate_exact_size(vec2(44.0, 40.0), Sense::click());
+                let p = ui.painter();
+                p.rect_filled(cr, 0.0, plate::WELL);
+                p.rect_stroke(
+                    cr,
+                    0.0,
+                    egui::Stroke::new(
+                        1.0,
+                        if cresp.hovered() {
+                            plate::LEGEND
+                        } else {
+                            plate::legend_dim()
+                        },
+                    ),
+                    egui::StrokeKind::Inside,
+                );
+                let ink = if cresp.hovered() {
+                    plate::STRUCK
+                } else {
+                    plate::LEGEND
+                };
+                crate::icons::paint(
+                    p,
+                    Rect::from_center_size(cr.center(), egui::Vec2::splat(22.0)),
+                    ink,
+                    icon,
+                );
+                if cresp.clicked() && !self.stroke_active() {
+                    state.goto_adjacent_key(fwd);
+                }
+                cresp.on_hover_text(hover);
+            }
+        });
+        let mut mc = self.miss_check;
+        plate::tool_latch(ui, &mut mc, Icon::Hole, "miss check").on_hover_text(
+            "hole-hunt (M): the ground goes dark; every unpainted pixel reads as a pit",
+        );
+        self.miss_check = mc;
+        ui.add_space(10.0);
+        plate::legend(ui, "lightbox");
+        ui.add_space(2.0);
+        let mut on = state.view.onion;
+        plate::latch(ui, &mut on, "onion")
+            .on_hover_text("ghost the neighbouring DRAWINGS (O) — a hold of the same drawing has no neighbour to ghost");
+        state.view.onion = on;
+        let mut lo = state.view.onion_layer_only;
+        plate::latch(ui, &mut lo, "line only")
+            .on_hover_text("ghost only the layer matching the active layer's name");
+        state.view.onion_layer_only = lo;
+        ui.add_space(2.0);
+        vline(
+            ui,
+            "strength",
+            format!("{:.0}%", self.onion_strength * 100.0),
+        );
+        ui.spacing_mut().slider_width = 96.0;
+        ui.add(egui::Slider::new(&mut self.onion_strength, 0.1..=1.0).show_value(false));
+        if let Some(pid) = state.view.ghost_pin {
+            ui.add_space(6.0);
+            let name = state
+                .cut()
+                .drawing(pid)
+                .map(|d| d.name.clone())
+                .unwrap_or_default();
+            vline(ui, "ghost", name);
+            if ui
+                .button("unpin")
+                .on_hover_text("stop ghosting the pinned drawing")
+                .clicked()
+            {
+                state.view.ghost_pin = None;
+            }
+        }
+        ui.add_space(10.0);
+        plate::legend(ui, "paper");
+        ui.add_space(2.0);
+        let mut f = self.show_field;
+        plate::latch(ui, &mut f, "field").on_hover_text("the 90% action field");
+        self.show_field = f;
+        let mut sa = self.show_safe;
+        plate::latch(ui, &mut sa, "safe").on_hover_text("the 80% safe area + centre cross");
+        self.show_safe = sa;
+        let mut pg = self.show_peg;
+        plate::latch(ui, &mut pg, "peg").on_hover_text("the registration peg bar");
+        self.show_peg = pg;
+        ui.add_space(10.0);
+        plate::legend(ui, "view");
+        ui.add_space(2.0);
+        if plate::icon_button(ui, Icon::Fit, "fit", "reset zoom & pan").clicked() {
+            self.zoom = 1.0;
+            self.pan = egui::Vec2::ZERO;
+        }
+        vline(ui, "zoom", format!("{:3.0}%", self.zoom * 100.0));
+        ui.add_space(10.0);
+        plate::legend(ui, "input");
+        ui.add_space(2.0);
+        let (_d, _h, mouse) = self.pressure_diag();
+        let val = if mouse { "mouse" } else { "pen · ink" };
+        if ui
+            .add(
+                egui::Label::new(
+                    egui::RichText::new(val)
+                        .monospace()
+                        .size(11.0)
+                        .color(plate::STRUCK),
+                )
+                .sense(Sense::click()),
+            )
+            .on_hover_text("input device — click for pen settings")
+            .clicked()
+        {
+            self.request_pen_settings = true;
+        }
+    }
+
+    /// The brush rail's content, centred on ONE axis: every slider is a
+    /// bare track (no side text), so the track's centre IS the rail's
+    /// centre — the point the hand reflexes to (owner 2026-08-17). Labels
+    /// ride ABOVE the tracks as engraved value lines.
+    fn brush_rail_ui(&mut self, ui: &mut egui::Ui) {
+        fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                &label.to_uppercase(),
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::new(9.5, plate::semibold()),
+                    color: plate::LEGEND,
+                    extra_letter_spacing: 0.9,
+                    ..Default::default()
+                },
+            );
+            job.append(
+                &format!("  {value}"),
+                0.0,
+                egui::TextFormat {
+                    font_id: egui::FontId::new(11.0, egui::FontFamily::Monospace),
+                    color: plate::STRUCK,
+                    ..Default::default()
+                },
+            );
+            ui.label(job);
+        }
+        let title = if self.erasing {
+            "eraser".to_string()
+        } else {
+            self.armed_preset.clone().unwrap_or_else(|| "brush".into())
+        };
+        plate::legend(ui, &title);
+        ui.add_space(8.0);
+        ui.spacing_mut().slider_width = 150.0;
+        value_line(ui, "size", format!("{:.0} px", self.raster_brush_px));
+        ui.add(egui::Slider::new(&mut self.raster_brush_px, 1.0..=300.0).show_value(false));
+        ui.add_space(4.0);
+        value_line(ui, "flow", format!("{:.2}", self.brush_flow));
+        ui.add(egui::Slider::new(&mut self.brush_flow, 0.05..=1.0).show_value(false));
+        ui.add_space(4.0);
+        value_line(ui, "opacity", format!("{:.2}", self.brush_opacity));
+        ui.add(egui::Slider::new(&mut self.brush_opacity, 0.05..=1.0).show_value(false));
+        ui.add_space(10.0);
+        plate::legend(ui, "pressure");
+        ui.add_space(2.0);
+        let mut ps = self.dyn_size;
+        plate::latch(ui, &mut ps, "p·size").on_hover_text("pressure drives size");
+        self.dyn_size = ps;
+        let mut po = self.dyn_opacity;
+        plate::latch(ui, &mut po, "p·opac").on_hover_text("pressure drives opacity");
+        self.dyn_opacity = po;
+        ui.add_space(4.0);
+        value_line(ui, "min size", format!("{:.2}", self.min_size));
+        ui.add(egui::Slider::new(&mut self.min_size, 0.0..=1.0).show_value(false))
+            .on_hover_text("size at zero pressure, as a fraction of the brush");
+        ui.add_space(10.0);
+        plate::legend(ui, "tilt");
+        ui.add_space(2.0);
+        let mut ts = self.tilt_size;
+        plate::latch(ui, &mut ts, "t·size").on_hover_text("tilting broadens the stroke");
+        self.tilt_size = ts;
+        let mut to = self.tilt_opacity;
+        plate::latch(ui, &mut to, "t·opac").on_hover_text("tilting lightens the stroke");
+        self.tilt_opacity = to;
+        let mut tsh = self.tilt_shape;
+        plate::latch(ui, &mut tsh, "t·shape")
+            .on_hover_text("the stamp flattens and turns with the pen's lean");
+        self.tilt_shape = tsh;
+        ui.add_space(4.0);
+        value_line(ui, "strength", format!("{:.2}", self.tilt_strength));
+        ui.add(egui::Slider::new(&mut self.tilt_strength, 0.0..=1.0).show_value(false));
+        if !self.native_active {
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("tilt flows from the native ink pen — draw once to latch it")
+                    .weak()
+                    .small(),
+            );
+        }
+    }
+
     /// Brush & tool controls — a dockable pane of its own (the old canvas
     /// toolbar). Wrapped layout: in a narrow dock it flows to more rows
     /// without pushing any other pane around.
-    pub fn brush_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState, raster_available: bool) {
+    pub fn brush_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        raster_available: bool,
+        presets: &[BrushPreset],
+    ) {
         // Sliders are the widest fixed-size widgets — scale them to the pane
         // so the toolbox keeps collapsing in narrow docks instead of hitting
         // a ~180px floor at the dock divider.
@@ -1020,139 +1951,77 @@ impl CanvasView {
         let compact = ui.available_width() < 190.0;
         let sw = (ui.available_width() * 0.45).clamp(48.0, 110.0);
         ui.spacing_mut().slider_width = sw;
+        // The raster/vector engine switch is a GPU backend choice, not a tool
+        // (spec §6 defect 2) — it lives in Settings → Performance now.
+        if !raster_available {
+            self.raster = false;
+        }
         ui.horizontal_wrapped(|ui| {
-            if raster_available {
-                if compact {
-                    if ui
-                        .selectable_label(self.raster, "🖌")
-                        .on_hover_text("raster brush engine")
-                        .clicked()
-                    {
-                        self.raster = !self.raster;
-                    }
-                } else {
-                    ui.checkbox(&mut self.raster, "raster")
-                        .on_hover_text("GPU raster brush");
-                    ui.separator();
-                }
-            } else {
-                self.raster = false;
-            }
             if self.raster {
-                let (brush_lbl, eraser_lbl) = if compact {
-                    ("✏", "▱")
-                } else {
-                    ("✏ brush", "▱ eraser")
-                };
-                if ui
-                    .selectable_label(!self.erasing, brush_lbl)
-                    .on_hover_text("paint ink")
-                    .clicked()
-                {
-                    self.erasing = false;
+                // ---- THE PENCIL BOX (genga room charter): the three named
+                // pencils + the eraser, one XL detent group with specimen
+                // strokes. Arming a pencil arms the brush; the Tally ring
+                // breaks when the live brush drifts off the preset.
+                let lbl = |s: &'static str| if compact { "" } else { s };
+                for (i, p) in presets.iter().enumerate() {
+                    if matches!(p.name.as_str(), "atari" | "genga" | "shusei") {
+                        self.pencil_slot(ui, p, i + 1, state);
+                    }
                 }
-                if ui
-                    .selectable_label(self.erasing, eraser_lbl)
-                    .on_hover_text("erase to transparency")
-                    .clicked()
-                {
-                    self.erasing = true;
-                }
-                // Alpha lock (L): ink can only recolor pixels the active
-                // layer already has coverage on — never paint outside its
-                // silhouette. Independent of brush/eraser (a toggle, not a
-                // third tool) so it combines with either sub-mode's dab
-                // geometry/pressure — though erase always wins if both are on.
-                if ui
-                    .selectable_label(self.alpha_lock, if compact { "🔒" } else { "🔒 lock" })
-                    .on_hover_text(
-                        "alpha lock (L) — ink only recolors pixels this layer \
-                         already has coverage on; the silhouette can't grow",
-                    )
-                    .clicked()
-                {
-                    self.alpha_lock = !self.alpha_lock;
-                }
+                self.eraser_slot(ui, state);
+                ui.separator();
                 // Select / transform tool (V; B returns to paint). Leaving
-                // Select commits any floating transform.
+                // Select commits any floating transform. A detent: clicking
+                // the armed position does nothing.
                 let sel_on = self.tool == CanvasTool::Select;
-                if ui
-                    .selectable_label(sel_on, if compact { "⬚" } else { "⬚ select" })
+                if plate::tool_button(ui, sel_on, Icon::Select, lbl("select"))
                     .on_hover_text(
                         "select / move / scale / rotate (V) — drag = select, drag \
-                         inside = move, corners = scale, just outside = rotate; \
-                         Enter applies, Esc cancels; Ctrl+A selects all",
+                    inside = move, corners = scale, just outside = rotate; \
+                    Enter applies, Esc cancels; Ctrl+A selects all",
                     )
                     .clicked()
+                    && !sel_on
                 {
-                    let next = if sel_on { CanvasTool::Paint } else { CanvasTool::Select };
-                    self.set_tool(next, state);
+                    self.set_tool(CanvasTool::Select, state);
                 }
-                if self.tool == CanvasTool::Select {
-                    if ui
-                        .selectable_label(self.sel_shape == SelShape::Lasso, "◌")
-                        .on_hover_text("lasso selection")
-                        .clicked()
-                    {
-                        self.sel_shape = SelShape::Lasso;
-                    }
-                    if ui
-                        .selectable_label(self.sel_shape == SelShape::Rect, "▭")
-                        .on_hover_text("rectangle selection")
-                        .clicked()
-                    {
-                        self.sel_shape = SelShape::Rect;
-                    }
-                }
+                // (Select's shape options live in the OPTIONS row below —
+                // arming a tool must never move the strip. Spec defect 4.)
                 // Fill / bucket tool (G): the shiage verb.
                 let fill_on = self.tool == CanvasTool::Fill;
-                if ui
-                    .selectable_label(fill_on, if compact { "🪣" } else { "🪣 fill" })
+                if plate::tool_button(ui, fill_on, Icon::Fill, lbl("fill"))
                     .on_hover_text(
                         "flood fill (G) — click a region; line art bounds it. \
-                         gap closes line breaks; under tucks the flat beneath \
-                         the lines; cel/layer picks the boundary reference",
+                    gap closes line breaks; under tucks the flat beneath \
+                    the lines; cel/layer picks the boundary reference",
                     )
                     .clicked()
+                    && !fill_on
                 {
-                    let next = if fill_on { CanvasTool::Paint } else { CanvasTool::Fill };
-                    self.set_tool(next, state);
+                    self.set_tool(CanvasTool::Fill, state);
                 }
-                if self.tool == CanvasTool::Fill {
-                    let mut gap = self.fill_gap;
-                    ui.add(egui::DragValue::new(&mut gap).range(0..=8).prefix("gap "));
-                    self.fill_gap = gap;
-                    let mut grow = self.fill_grow;
-                    ui.add(egui::DragValue::new(&mut grow).range(0..=4).prefix("under "));
-                    self.fill_grow = grow;
-                    if ui
-                        .selectable_label(self.fill_ref_cel, "cel")
-                        .on_hover_text("boundaries come from the whole cel (all visible layers)")
-                        .clicked()
-                    {
-                        self.fill_ref_cel = true;
-                    }
-                    if ui
-                        .selectable_label(!self.fill_ref_cel, "layer")
-                        .on_hover_text("boundaries come from the active layer only")
-                        .clicked()
-                    {
-                        self.fill_ref_cel = false;
-                    }
-                }
+                // (Fill's gap/under/boundary options live in the OPTIONS
+                // row below, same law.)
+                // ---- The latches (independent states, Tally left-edge). ----
+                // Alpha lock (L): ink can only recolor pixels the active
+                // layer already has coverage on — never paint outside its
+                // silhouette. Combines with brush or eraser.
+                let mut lock = self.alpha_lock;
+                plate::tool_latch(ui, &mut lock, Icon::Lock, lbl("lock")).on_hover_text(
+                    "alpha lock (L) — ink only recolors pixels this layer \
+                already has coverage on; the silhouette can't grow",
+                );
+                self.alpha_lock = lock;
                 // Composite view: the node graph's rendered output (review
                 // mode — painting pauses). Blocked mid-stroke: swapping the
                 // view under a live stroke would orphan its display.
-                if ui
-                    .selectable_label(self.composite_view, if compact { "🎬" } else { "🎬 comp" })
-                    .on_hover_text(
-                        "composite view — what the node graph renders \
-                         (playback/export truth). C toggles; painting pauses here.",
-                    )
-                    .clicked()
-                    && !self.stroke_active()
-                {
-                    self.composite_view = !self.composite_view;
+                let mut comp = self.composite_view;
+                plate::tool_latch(ui, &mut comp, Icon::Comp, lbl("comp")).on_hover_text(
+                    "composite view — what the node graph renders \
+                (playback/export truth). C toggles; painting pauses here.",
+                );
+                if comp != self.composite_view && !self.stroke_active() {
+                    self.composite_view = comp;
                 }
                 // Active cel-layer chip (RETAS trace-line colours). Click or A
                 // cycles; strokes land on this layer. Red = hidden. Wide mode
@@ -1160,116 +2029,63 @@ impl CanvasView {
                 // mode is the bare glyph with the name in the tooltip.
                 let lname = state.active_layer_name();
                 let hidden = state.active_layer_props().is_some_and(|p| !p.visible);
+                // Hidden is a CONFIGURATION the animator chose, not a
+                // contradiction — so it dims, it does not go red (the
+                // Warning Law, spec §3). The refusal at stroke time is
+                // where the contradiction lives.
                 let color = if hidden {
-                    Color32::from_rgb(235, 90, 80)
+                    plate::legend_dim()
                 } else {
                     layer_chip_color(&lname)
                 };
-                let chip = if compact {
-                    "▣".to_string()
-                } else {
-                    let shown: String = lname.chars().take(10).collect();
-                    format!("▣ {shown:<10}")
-                };
-                if ui
-                    .button(egui::RichText::new(chip).monospace().color(color))
-                    .on_hover_text(if hidden {
-                        format!("layer '{lname}' is HIDDEN — painting refused (A cycles)")
-                    } else {
-                        format!("active layer: {lname} — strokes land here (A cycles)")
-                    })
-                    .clicked()
-                {
+                // Seated chip (owner's audit): identity dot + name in a
+                // Well slot, same material as every other control.
+                let (crect, cresp) =
+                    ui.allocate_exact_size(vec2(96.0, plate::CTRL_H + 4.0), Sense::click());
+                if cresp.clicked() {
                     state.cycle_layer(false);
                 }
-                if compact {
-                    ui.add(
-                        egui::DragValue::new(&mut self.raster_brush_px)
-                            .range(1.0..=300.0)
-                            .suffix("px"),
-                    )
-                    .on_hover_text("brush size (drag)");
-                    ui.add(
-                        egui::DragValue::new(&mut self.brush_flow)
-                            .range(0.05..=1.0)
-                            .speed(0.01)
-                            .fixed_decimals(2),
-                    )
-                    .on_hover_text("flow (drag)");
-                    ui.add(
-                        egui::DragValue::new(&mut self.brush_opacity)
-                            .range(0.05..=1.0)
-                            .speed(0.01)
-                            .fixed_decimals(2),
-                    )
-                    .on_hover_text("opacity (drag)");
+                if ui.is_rect_visible(crect) {
+                    let pnt = ui.painter();
+                    pnt.rect_filled(crect, 0.0, plate::WELL);
+                    pnt.rect_stroke(
+                        crect,
+                        0.0,
+                        egui::Stroke::new(
+                            1.0,
+                            if cresp.hovered() {
+                                plate::LEGEND
+                            } else {
+                                plate::legend_dim()
+                            },
+                        ),
+                        egui::StrokeKind::Inside,
+                    );
+                    pnt.circle_filled(pos2(crect.left() + 10.0, crect.center().y), 4.0, color);
+                    let shown: String = lname.chars().take(10).collect();
+                    pnt.text(
+                        pos2(crect.left() + 20.0, crect.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        shown,
+                        egui::FontId::new(11.0, egui::FontFamily::Monospace),
+                        if hidden {
+                            plate::legend_dim()
+                        } else {
+                            plate::STRUCK
+                        },
+                    );
+                }
+                cresp.on_hover_text(if hidden {
+                    format!("layer '{lname}' is HIDDEN — painting refused (A cycles)")
                 } else {
-                    ui.add(
-                        egui::Slider::new(&mut self.raster_brush_px, 1.0..=300.0)
-                            .text("px")
-                            .fixed_decimals(0),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.brush_flow, 0.05..=1.0)
-                            .text("flow")
-                            .fixed_decimals(2),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.brush_opacity, 0.05..=1.0)
-                            .text("opacity")
-                            .fixed_decimals(2),
-                    );
-                }
-                ui.menu_button(if compact { "⚙" } else { "dynamics" }, |ui| {
-                    ui.checkbox(&mut self.dyn_size, "pressure → size");
-                    ui.checkbox(&mut self.dyn_opacity, "pressure → opacity");
-                    ui.add(
-                        egui::Slider::new(&mut self.min_size, 0.0..=1.0)
-                            .text("min size")
-                            .fixed_decimals(2),
-                    )
-                    .on_hover_text(
-                        "size at zero pressure, as a fraction of the brush — \
-                         keeps light touches visible on big brushes",
-                    );
-                    ui.separator();
-                    ui.checkbox(&mut self.tilt_size, "tilt → size")
-                        .on_hover_text("tilting the pen broadens the stroke, like a pencil on its side");
-                    ui.checkbox(&mut self.tilt_opacity, "tilt → opacity")
-                        .on_hover_text("tilting the pen lightens the stroke");
-                    ui.checkbox(&mut self.tilt_shape, "tilt → shape")
-                        .on_hover_text(
-                            "the stamp flattens and turns with the pen's lean — \
-                             the stroke itself shows the tilt",
-                        );
-                    ui.add(
-                        egui::Slider::new(&mut self.tilt_strength, 0.0..=1.0)
-                            .text("tilt strength")
-                            .fixed_decimals(2),
-                    )
-                    .on_hover_text(
-                        "at 1.00 a fully flat pen (60°) doubles the size \
-                         and quarters the opacity",
-                    );
-                    if !self.native_active {
-                        ui.label(
-                            egui::RichText::new("tilt flows from the native ink pen — draw once to latch it")
-                                .weak()
-                                .small(),
-                        );
-                    }
+                    format!("active layer: {lname} — strokes land here (A cycles)")
                 });
-                if ui
-                    .button(if compact { "🗑" } else { "clear cel" })
-                    .on_hover_text("clear this cel's raster (undoable)")
-                    .clicked()
-                    && !self.stroke_active()
-                {
-                    // Guarded like the keybind: clearing mid-gesture would
-                    // mutate the layer a floating transform lifted from —
-                    // the later commit would resurrect the cleared content.
-                    state.clear_current_raster();
-                }
+            // (Size, flow, opacity and the dynamics latches live in
+            // the OPTIONS row below — the strip's membership is law.)
+            // (ERASE CEL moved to the Cel Layers pane footer as a
+            // guarded DANGER control — spec §6 defects 6/7. A
+            // destructive command does not sit in the tool strip
+            // dressed like a mode switch.)
             } else {
                 ui.add(
                     egui::Slider::new(&mut self.brush_width, 0.5..=16.0)
@@ -1281,7 +2097,11 @@ impl CanvasView {
                 ui.separator();
             }
             // Custom colour picker (any RGB); the swatches beside it are presets.
-            let mut rgb = [self.brush_color[0], self.brush_color[1], self.brush_color[2]];
+            let mut rgb = [
+                self.brush_color[0],
+                self.brush_color[1],
+                self.brush_color[2],
+            ];
             if ui
                 .color_edit_button_srgb(&mut rgb)
                 .on_hover_text("brush colour")
@@ -1289,29 +2109,110 @@ impl CanvasView {
             {
                 self.brush_color = [rgb[0], rgb[1], rgb[2], self.brush_color[3]];
             }
-            for c in SWATCHES {
-                let selected = self.brush_color == c;
-                let swatch = egui::RichText::new("⬤")
-                    .size(16.0)
-                    .color(Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]));
-                if ui.selectable_label(selected, swatch).clicked() {
-                    self.brush_color = c;
+            for (i, c) in SWATCHES.iter().enumerate() {
+                let selected = self.brush_color == *c;
+                let hover = ["ink", "ao — construction", "aka — correction", "white"][i];
+                if plate::swatch(
+                    ui,
+                    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
+                    selected,
+                )
+                .on_hover_text(hover)
+                .clicked()
+                {
+                    self.brush_color = *c;
                 }
             }
             if !compact {
                 ui.separator();
             }
-            if ui
-                .button(if compact { "⌖" } else { "fit view" })
-                .on_hover_text("reset zoom & pan")
-                .clicked()
-            {
-                self.zoom = 1.0;
-                self.pan = egui::Vec2::ZERO;
-            }
+            // (fit view + zoom live on the lightbox rail now — Phase 4.)
             // NOTHING VARIABLE-WIDTH GOES IN THIS ROW (canvas-stability law):
             // diagnostics live in the status bar; PLAYING is a canvas overlay.
         });
+
+        // ---- OPTIONS row (spec defect 4): ALWAYS allocated at OPTIONS_H,
+        // even when empty, so arming select or fill NEVER moves the strip
+        // above — the armed tool's sub-elements land here and nowhere else.
+        if self.raster {
+            let full = vec2(ui.available_width(), plate::OPTIONS_H);
+            ui.allocate_ui_with_layout(
+                full,
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_size(full);
+                    match self.tool {
+                        CanvasTool::Select => {
+                            plate::legend(ui, "select");
+                            if plate::tool_button(
+                                ui,
+                                self.sel_shape == SelShape::Lasso,
+                                Icon::Lasso,
+                                "lasso",
+                            )
+                            .on_hover_text("lasso selection")
+                            .clicked()
+                            {
+                                self.sel_shape = SelShape::Lasso;
+                            }
+                            if plate::tool_button(
+                                ui,
+                                self.sel_shape == SelShape::Rect,
+                                Icon::Marquee,
+                                "rect",
+                            )
+                            .on_hover_text("rectangle selection")
+                            .clicked()
+                            {
+                                self.sel_shape = SelShape::Rect;
+                            }
+                        }
+                        CanvasTool::Fill => {
+                            plate::legend(ui, "fill");
+                            // Engraved label BEFORE, 64pt value (shiage:
+                            // leak-chasing nudges these several times a cel).
+                            plate::legend(ui, "gap");
+                            let mut gap = self.fill_gap;
+                            ui.add_sized([64.0, 20.0], egui::DragValue::new(&mut gap).range(0..=8));
+                            self.fill_gap = gap;
+                            plate::legend(ui, "under");
+                            let mut grow = self.fill_grow;
+                            ui.add_sized(
+                                [64.0, 20.0],
+                                egui::DragValue::new(&mut grow).range(0..=4),
+                            );
+                            self.fill_grow = grow;
+                            if plate::detent(ui, self.fill_ref_cel, "cel")
+                                .on_hover_text(
+                                    "boundaries come from the whole cel (all visible layers)",
+                                )
+                                .clicked()
+                            {
+                                self.fill_ref_cel = true;
+                            }
+                            if plate::detent(ui, !self.fill_ref_cel, "layer")
+                                .on_hover_text("boundaries come from the active layer only")
+                                .clicked()
+                            {
+                                self.fill_ref_cel = false;
+                            }
+                        }
+                        _ => {
+                            // Brush / eraser edits live on the RIGHT RAIL
+                            // (owner 2026-08-17): hover the canvas's right
+                            // edge. The deck stays clear; the row stays
+                            // claimed so nothing moves.
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new("brush edits → hover the canvas's right edge")
+                                    .size(10.5)
+                                    .color(plate::legend_dim()),
+                            );
+                        }
+                    }
+                },
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)] // one call site; a struct would be noise
@@ -1324,30 +2225,43 @@ impl CanvasView {
         pen: &PenConfig,
         layers_cfg: &LayersConfig,
         native_pen: &[PenSample],
+        presets: &[BrushPreset],
     ) {
         self.pen_curve = pen.pressure_curve.clone();
-        // Brush colour follows the active layer: on a switch, remember the
-        // colour picked while the previous layer was active, then load the new
-        // layer's colour (session pick, else the Settings default).
-        let layer_name = state.active_layer_name();
-        if layer_name != self.last_layer_name {
-            if !self.last_layer_name.is_empty() {
-                self.layer_colors
-                    .insert(self.last_layer_name.clone(), self.brush_color);
-            }
-            if let Some(c) = self
-                .layer_colors
-                .get(&layer_name)
-                .or_else(|| layers_cfg.colors.get(&layer_name))
-            {
-                self.brush_color = *c;
-            }
-            self.last_layer_name = layer_name;
-        }
+        // (The silent per-layer colour swap is DEAD — spec defect 16: the
+        // brush colour never changes without a gesture. The paint dish and
+        // the pencil box are the colour-arming gestures now.)
+        let _ = layers_cfg;
+
+        // The tool deck rides ON the drawing surface (owner's directive
+        // 2026-08-17): brush controls are part of the instrument, not a
+        // floating sub-window above it. The paper gets everything below.
+        let deck_raster = paint.is_some();
+        egui::Panel::top("canvas_tool_deck")
+            .show_separator_line(false)
+            .show(ui, |ui| {
+                crate::plate::surface(ui);
+                ui.add_space(2.0);
+                self.brush_ui(ui, state, deck_raster, presets);
+                ui.add_space(2.0);
+            });
+
+        // (The lightbox rail folds out from the LEFT edge now — owner's
+        // law: nothing lives fixed in the canvas but the top deck. See the
+        // fold-out beside the brush rail below.)
         let mut paint = paint;
         if paint.is_none() {
             self.raster = false;
         }
+
+        // R-FLIP: momentary, polled (not an Action — actions fire on
+        // press; the flip lives exactly as long as the key is down). Never
+        // while typing, playing, mid-stroke, or in composite review.
+        self.flip_held = ui.input(|i| i.key_down(egui::Key::R))
+            && !ui.ctx().egui_wants_keyboard_input()
+            && !self.stroke_active()
+            && !state.view.playing
+            && !self.composite_view;
 
         // ---- Canvas area --------------------------------------------------
         let rect = ui.available_rect_before_wrap();
@@ -1366,6 +2280,13 @@ impl CanvasView {
         let to_screen = |p: Pos2| -> Pos2 { origin + p.to_vec2() * scale };
         let to_paper = |s: Pos2| -> Pos2 { ((s - origin) / scale).to_pos2() };
 
+        // Session presence: our pointer, in paper space, when over the paper.
+        self.presence_pos = response
+            .hover_pos()
+            .map(|hp| to_paper(hp))
+            .filter(|pp| pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= paper_w && pp.y <= paper_h)
+            .map(|pp| [pp.x, pp.y]);
+
         // Zoom at cursor / middle-drag pan — DISABLED during playback: the pen
         // resting or hovering on the drawing display (hover scroll deltas, a
         // barrel button mapped to middle-click) must not move the view while
@@ -1374,15 +2295,15 @@ impl CanvasView {
             if response.hovered() {
                 let scroll = ui.input(|i| i.smooth_scroll_delta.y);
                 if scroll.abs() > 0.0
-                    && let Some(mouse) = response.hover_pos() {
-                        let before = to_paper(mouse);
-                        self.zoom = (self.zoom * (scroll * 0.0015).exp()).clamp(0.2, 10.0);
-                        let scale2 = fit * self.zoom;
-                        let origin2 =
-                            rect.center() - vec2(paper_w, paper_h) * scale2 * 0.5 + self.pan;
-                        let after = origin2 + before.to_vec2() * scale2;
-                        self.pan += mouse - after;
-                    }
+                    && let Some(mouse) = response.hover_pos()
+                {
+                    let before = to_paper(mouse);
+                    self.zoom = (self.zoom * (scroll * 0.0015).exp()).clamp(0.2, 10.0);
+                    let scale2 = fit * self.zoom;
+                    let origin2 = rect.center() - vec2(paper_w, paper_h) * scale2 * 0.5 + self.pan;
+                    let after = origin2 + before.to_vec2() * scale2;
+                    self.pan += mouse - after;
+                }
             }
             // Middle-drag pans.
             if response.dragged_by(egui::PointerButton::Middle) {
@@ -1393,13 +2314,61 @@ impl CanvasView {
         // ---- Paper --------------------------------------------------------
         let paper_rect =
             Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
-        painter.rect_filled(paper_rect, 2, Color32::from_rgb(242, 239, 233));
+        painter.rect_filled(
+            paper_rect,
+            2,
+            if self.miss_check {
+                crate::plate::GRAPHITE
+            } else {
+                crate::plate::PAPER
+            },
+        );
         painter.rect_stroke(
             paper_rect,
             2,
-            egui::Stroke::new(1.0, Color32::from_gray(60)),
+            egui::Stroke::new(1.0, crate::plate::legend_dim()),
             egui::StrokeKind::Outside,
         );
+        // Paper furniture (Phase 4): field / safe / peg guides in Ao — the
+        // scaffold ink, printed under the drawing like a real layout sheet.
+        {
+            let ao = Color32::from_rgba_unmultiplied(83, 137, 196, 110);
+            let g = egui::Stroke::new(1.0, ao);
+            if self.show_field {
+                painter.rect_stroke(
+                    egui::Rect::from_center_size(paper_rect.center(), paper_rect.size() * 0.9),
+                    0.0,
+                    g,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if self.show_safe {
+                painter.rect_stroke(
+                    egui::Rect::from_center_size(paper_rect.center(), paper_rect.size() * 0.8),
+                    0.0,
+                    g,
+                    egui::StrokeKind::Inside,
+                );
+                let c = paper_rect.center();
+                painter.line_segment([pos2(c.x - 10.0, c.y), pos2(c.x + 10.0, c.y)], g);
+                painter.line_segment([pos2(c.x, c.y - 10.0), pos2(c.x, c.y + 10.0)], g);
+            }
+            if self.show_peg {
+                // The peg bar: round hole centre, slot holes either side —
+                // the registration a real sheet hangs on.
+                let cy = paper_rect.bottom() - paper_rect.height() * 0.05;
+                let cx = paper_rect.center().x;
+                painter.circle_stroke(pos2(cx, cy), 5.0, g);
+                for dx in [-70.0f32, 70.0] {
+                    painter.rect_stroke(
+                        egui::Rect::from_center_size(pos2(cx + dx, cy), vec2(20.0, 9.0)),
+                        4.0,
+                        g,
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+        }
 
         // ---- Pen input (edit mode only) -----------------------------------
         if !state.view.playing {
@@ -1448,16 +2417,14 @@ impl CanvasView {
             match graph {
                 GV::Ready(id) => composite_tex = Some(id),
                 GV::NoOutput => {
-                    composite_note =
-                        Some("composite view — no graph output wired (C to edit)");
+                    composite_note = Some("composite view — no graph output wired (C to edit)");
                 }
                 GV::EvalFailed => {
                     composite_note =
                         Some("composite view — the graph failed to evaluate (C to edit)");
                 }
                 GV::NoGpu => {
-                    composite_note =
-                        Some("composite view needs the GPU — showing edit view");
+                    composite_note = Some("composite view needs the GPU — showing edit view");
                 }
                 // Off = this canvas wasn't a visible consumer; if it IS being
                 // rendered anyway, fall back honestly.
@@ -1469,7 +2436,7 @@ impl CanvasView {
         }
 
         // ---- Raster: keep the GPU layer synced to the current cel, stamp
-        //      live dabs, and read back into the engine at pen-up ----------
+        // live dabs, and read back into the engine at pen-up ----------
         if composite_tex.is_none()
             && self.raster
             && let Some(p) = paint.as_deref_mut()
@@ -1492,7 +2459,6 @@ impl CanvasView {
                 }
                 self.synced_active = state.active_layer_key();
             }
-
             if self.current.is_empty() && !self.raster_stroke_done {
                 // An abandoned stroke (e.g. playback started mid-stroke) may have
                 // left dabs in the wet buffer — drop them, they were never
@@ -1570,6 +2536,34 @@ impl CanvasView {
                         self.wet_dirty = false;
                     }
                     let tiles = p.read_tiles();
+                    // SESSION v2: a GUEST never commits — the finished
+                    // patch travels to the host, which applies it to the
+                    // same drawing + LAYER NAME and sends the truth back.
+                    if self.is_guest {
+                        if let Some(did) = state.own_key_drawing() {
+                            let name = state.active_layer_name();
+                            let wire: Vec<(i32, i32, Vec<u16>)> = tiles
+                                .into_iter()
+                                .map(|((x, y), t)| (x, y, t.rgba.to_vec()))
+                                .collect();
+                            if !wire.is_empty() {
+                                self.edit_outbox.push((did.0, name, wire));
+                                state.status = "sent to the host…".into();
+                            }
+                        } else {
+                            state.refuse(
+                                "refused — draw on
+                        a
+                        frame the host has exposed
+                        (guests cannot create cels yet)",
+                            );
+                        }
+                        // Our GPU layer keeps the paint until the host's
+                        // snapshot lands, so the stroke never blinks out.
+                        self.raster_stroke_done = true;
+                        self.current.clear();
+                        return;
+                    }
                     // Commit against the slot LATCHED at stroke start — a
                     // mid-stroke A-cycle must not retarget the readback.
                     if let Some((id, layer)) = state.commit_raster(tiles, self.stroke_layer_slot) {
@@ -1601,12 +2595,25 @@ impl CanvasView {
             // unchanged, so this is cheap) — decoupled from stroke state entirely,
             // so no current-cel/stroke predicate can ever tear a slot down. Only
             // onion-off clears the slots.
-            if state.view.onion {
+            let pin = state.view.ghost_pin;
+            if state.view.onion || pin.is_some() || self.flip_held {
                 let neighbors = state.onion_neighbors();
                 // Computed once per frame, not per neighbour: the active
                 // layer's role name is what "line-only ghost" locks onto.
-                let filter = state.view.onion_layer_only.then(|| state.active_layer_name());
-                for (slot, nid) in neighbors.iter().enumerate() {
+                // The FLIP shows the whole previous cel — no filter.
+                let filter = (!self.flip_held && state.view.onion_layer_only)
+                    .then(|| state.active_layer_name());
+                // Slot 0 = the behind-neighbour (onion; the FLIP borrows it
+                // at full identity). Slot 1 = THE GHOST PIN when set (the
+                // pinned scaffold outranks the forward neighbour); else
+                // onion's next drawing.
+                let s0 = if self.flip_held || state.view.onion {
+                    neighbors[0]
+                } else {
+                    None
+                };
+                let s1 = pin.or(if state.view.onion { neighbors[1] } else { None });
+                for (slot, nid) in [s0, s1].into_iter().enumerate() {
                     match nid.and_then(|id| state.drawing_composite(id, filter.as_deref())) {
                         Some((slices, hash)) => p.set_onion(slot, Some(&slices), hash),
                         None => p.set_onion(slot, None, 0),
@@ -1651,9 +2658,9 @@ impl CanvasView {
             painter.text(
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
                 egui::Align2::LEFT_TOP,
-                "🎬 composite",
+                "composite view",
                 egui::FontId::proportional(12.0),
-                Color32::from_rgba_unmultiplied(120, 190, 235, 200),
+                Color32::from_rgb(139, 141, 131), // Legend: the app speaking
             );
         }
         if let Some(note) = composite_note {
@@ -1662,7 +2669,8 @@ impl CanvasView {
                 egui::Align2::CENTER_CENTER,
                 note,
                 egui::FontId::proportional(13.0),
-                Color32::from_rgb(235, 180, 90),
+                Color32::from_rgb(228, 82, 47),
+                // Aka: overrules the hand
             );
         }
 
@@ -1684,15 +2692,42 @@ impl CanvasView {
                     painter.image(id, paper_rect, uv, Color32::WHITE);
                 }
                 if let Some(id) = col.resolve(frame)
-                    && let Some(d) = cut.drawing(id) {
-                        draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
-                    }
+                    && let Some(d) = cut.drawing(id)
+                {
+                    draw_strokes(
+                        &painter,
+                        &d.strokes,
+                        &to_screen,
+                        scale,
+                        None,
+                        &self.pen_curve,
+                    );
+                }
             }
         }
 
+        // 2a. THE GHOST PIN (vector path): the pinned drawing haunts every
+        // frame in Ao at the onion strength — display only, per its room.
+        if edit_view
+            && !self.flip_held
+            && let Some(pid) = state.view.ghost_pin
+            && state.resolve_at(active_col, frame) != Some(pid)
+            && let Some(d) = cut.drawing(pid)
+        {
+            let a = (255.0 * self.onion_strength.clamp(0.0, 1.0)) as u8;
+            draw_strokes(
+                &painter,
+                &d.strokes,
+                &to_screen,
+                scale,
+                Some(Color32::from_rgba_unmultiplied(83, 137, 196, a)),
+                &self.pen_curve,
+            );
+        }
+
         // 2. Onion ghosts of the active column, under its current drawing.
-        if edit_view && state.view.onion {
-            let ghosts = onion_ghosts(state, active_col, frame);
+        if edit_view && state.view.onion && !self.flip_held {
+            let ghosts = onion_ghosts(state, active_col, frame, self.onion_strength);
             for (id, tint) in ghosts {
                 if let Some(d) = cut.drawing(id) {
                     draw_strokes(
@@ -1707,12 +2742,28 @@ impl CanvasView {
             }
         }
 
-        // 3. Active column's current drawing on top.
-        if edit_view
-            && let Some(id) = state.resolve_at(active_col, frame)
-            && let Some(d) = state.cut().drawing(id) {
-                draw_strokes(&painter, &d.strokes, &to_screen, scale, None, &self.pen_curve);
+        // 3. Active column's shown drawing on top — the CURRENT one, or
+        // the PREVIOUS while the flip is held (full strength: the flip is
+        // the drawing itself, never a ghost).
+        if edit_view {
+            let shown = if self.flip_held {
+                state.onion_neighbors()[0]
+            } else {
+                state.resolve_at(active_col, frame)
+            };
+            if let Some(id) = shown
+                && let Some(d) = state.cut().drawing(id)
+            {
+                draw_strokes(
+                    &painter,
+                    &d.strokes,
+                    &to_screen,
+                    scale,
+                    None,
+                    &self.pen_curve,
+                );
             }
+        }
 
         // 3b. The raster sandwich, bottom→top: onion ghosts, BELOW projection,
         //     the ACTIVE layer at its own opacity, the live wet stroke, the
@@ -1720,14 +2771,43 @@ impl CanvasView {
         //     live — the solo shiage workflow.
         if edit_view
             && self.raster
-            && let Some(p) = paint {
-                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                // Previous cel tinted warm, next cel tinted cool, both faded.
+            && let Some(p) = paint
+        {
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            // Ghost BEHIND leans Ao (continuity), ghost AHEAD leans
+            // Legend (spec defect 14) — as multiply tints for now; the
+            // true re-ink lands on the VECTOR path in Phase 4, and the
+            // raster blit shader stays untouched (Do-NOT-build).
+            let ga = (255.0 * self.onion_strength.clamp(0.0, 1.0)) as u8;
+            if self.flip_held {
+                // THE FLIP: the previous drawing full-strength, alone —
+                // the current cel steps aside until R lifts.
                 if let Some(id) = p.onion_id(0) {
-                    painter.image(id, paper_rect, uv, Color32::from_rgba_unmultiplied(255, 180, 180, 110));
+                    painter.image(id, paper_rect, uv, Color32::WHITE);
+                }
+            } else {
+                if let Some(id) = p.onion_id(0) {
+                    painter.image(
+                        id,
+                        paper_rect,
+                        uv,
+                        Color32::from_rgba_unmultiplied(160, 195, 232, ga),
+                    );
                 }
                 if let Some(id) = p.onion_id(1) {
-                    painter.image(id, paper_rect, uv, Color32::from_rgba_unmultiplied(180, 235, 190, 110));
+                    // The pin is SCAFFOLD — it ghosts in Ao; the forward
+                    // neighbour keeps its quiet Legend lean.
+                    let t = if state.view.ghost_pin.is_some() {
+                        (160u8, 195u8, 232u8)
+                    } else {
+                        (205u8, 206u8, 199u8)
+                    };
+                    painter.image(
+                        id,
+                        paper_rect,
+                        uv,
+                        Color32::from_rgba_unmultiplied(t.0, t.1, t.2, ga),
+                    );
                 }
                 // Layers under the active one (per-layer opacities baked in).
                 painter.image(p.below_id(), paper_rect, uv, Color32::WHITE);
@@ -1762,6 +2842,7 @@ impl CanvasView {
                 // Layers over the active one.
                 painter.image(p.above_id(), paper_rect, uv, Color32::WHITE);
             }
+        }
 
         // 4. In-progress stroke preview (vector mode only — the raster layer
         //    already shows the live stroke when raster is on).
@@ -1799,20 +2880,428 @@ impl CanvasView {
                 egui::Align2::CENTER_CENTER,
                 "empty cell — draw to create a new drawing here",
                 egui::FontId::proportional(15.0),
-                Color32::from_gray(150),
+                Color32::from_rgb(139, 141, 131),
+                // Legend
             );
         }
 
         // Playback indicator as a canvas OVERLAY (painted, zero layout impact
         // — a toolbar label here used to reflow the row and shift the view).
+        if self.flip_held {
+            painter.text(
+                pos2(rect.center().x, rect.top() + 16.0),
+                egui::Align2::CENTER_CENTER,
+                "FLIP — previous drawing (release R)",
+                egui::FontId::proportional(13.0),
+                Color32::from_rgb(139, 141, 131), // Legend: the app speaking
+            );
+        }
         if state.view.playing {
             painter.text(
                 pos2(rect.center().x, rect.top() + 16.0),
                 egui::Align2::CENTER_CENTER,
                 "PLAYING — space to stop",
                 egui::FontId::proportional(13.0),
-                Color32::from_rgb(120, 220, 140),
+                Color32::from_rgb(139, 141, 131), // Legend: the app speaking
             );
+        }
+
+        // The refusal reaches the paper: a fresh refusal flashes the
+        // canvas edge in Aka, so NO is seen from the pen tip (Foot law).
+        if state.refusal_seq != self.flash_seq {
+            self.flash_seq = state.refusal_seq;
+            self.flash_since = ui.input(|i| i.time);
+        }
+        let fage = ui.input(|i| i.time) - self.flash_since;
+        if fage < 0.9 && state.refusal_seq != 0 {
+            let fppp = ui.ctx().pixels_per_point();
+            painter.rect_stroke(
+                paper_rect,
+                2.0,
+                egui::Stroke::new(crate::plate::device_px(2.0, fppp), crate::plate::AKA),
+                egui::StrokeKind::Outside,
+            );
+            ui.ctx().request_repaint();
+        }
+
+        // ---- SESSION PRESENCE (PSD-session-room): the other artists.
+        // Same-frame peers draw at full presence — Ao cursor ring, name
+        // tag, live wet ghost; peers on other frames are named at the
+        // paper's top edge in Legend (you know where they are, they never
+        // paint over your frame).
+        if !self.peers.is_empty() {
+            let mut away = 0;
+            for peer in &self.peers.clone() {
+                if peer.frame == state.view.frame {
+                    if let Some(c) = peer.cursor {
+                        let sp = to_screen(pos2(c[0], c[1]));
+                        painter.circle_stroke(sp, 5.0, egui::Stroke::new(1.5, crate::plate::AO));
+                        if peer.pen_down {
+                            painter.circle_filled(sp, 2.0, crate::plate::AO);
+                        }
+                        painter.text(
+                            pos2(sp.x + 8.0, sp.y - 8.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            &peer.name,
+                            egui::FontId::new(10.0, crate::plate::semibold()),
+                            crate::plate::AO,
+                        );
+                    }
+                    if peer.wet.len() >= 2 {
+                        let pts: Vec<Pos2> = peer
+                            .wet
+                            .iter()
+                            .map(|p| to_screen(pos2(p[0], p[1])))
+                            .collect();
+                        painter.add(egui::Shape::line(
+                            pts,
+                            egui::Stroke::new(
+                                2.0,
+                                Color32::from_rgba_unmultiplied(83, 137, 196, 200),
+                            ),
+                        ));
+                    }
+                } else {
+                    painter.text(
+                        pos2(
+                            paper_rect.left() + 8.0,
+                            paper_rect.top() + 10.0 + away as f32 * 14.0,
+                        ),
+                        egui::Align2::LEFT_CENTER,
+                        format!("{} · fr {}", peer.name, peer.frame + 1),
+                        egui::FontId::new(10.0, crate::plate::semibold()),
+                        crate::plate::legend_dim(),
+                    );
+                    away += 1;
+                }
+            }
+        }
+
+        // ---- THE RULE's mirror (spec §5.4): the active column's run
+        // marks at the canvas's left edge, at the sheet's own 18pt pitch —
+        // "how long is this hold, am I on ones, which frame" answered in
+        // peripheral vision at the pen tip, like a VU meter at a desk.
+        if !self.composite_view {
+            let count = state.frame_count();
+            let strip = Rect::from_min_max(
+                pos2(rect.left(), rect.top() + 6.0),
+                pos2(rect.left() + 14.0, rect.bottom() - 6.0),
+            );
+            let mp = painter.with_clip_rect(strip);
+            mp.rect_filled(strip, 0.0, crate::plate::WELL);
+            let ppp = ui.ctx().pixels_per_point();
+            let fps = state.fps();
+            let total = count as f32 * 18.0;
+            // The whole cut fits, or the strip follows the playhead with
+            // the current frame held at 40% height.
+            let origin = if total <= strip.height() {
+                strip.top()
+            } else {
+                (strip.top() + strip.height() * 0.4 - state.view.frame as f32 * 18.0)
+                    .clamp(strip.bottom() - total, strip.top())
+            };
+            for f in 0..=count {
+                if let Some(tier) = crate::runs::rule_tier(f, fps) {
+                    let y = crate::plate::snap(origin + f as f32 * 18.0, ppp);
+                    let (w, ink, x0) = match tier {
+                        2 => (
+                            crate::plate::device_px(2.0, ppp),
+                            crate::plate::rule_sec(),
+                            strip.left(),
+                        ),
+                        1 => (
+                            crate::plate::device_px(1.0, ppp),
+                            crate::plate::rule_half(),
+                            strip.left() + 3.0,
+                        ),
+                        _ => (
+                            crate::plate::device_px(1.0, ppp),
+                            crate::plate::rule_beat(),
+                            strip.left() + 6.0,
+                        ),
+                    };
+                    mp.line_segment(
+                        [pos2(x0, y), pos2(strip.right(), y)],
+                        egui::Stroke::new(w, ink),
+                    );
+                }
+            }
+            let active = state.view.active_column;
+            let cut = state.cut();
+            if let Some(col) = cut.xsheet.columns.iter().find(|c| c.id == active) {
+                let marks = crate::runs::column_marks(count, |f| col.key_at(f));
+                let cx = crate::plate::snap(strip.center().x, ppp);
+                for r in &marks.runs {
+                    let y0 = crate::plate::snap(origin + r.start as f32 * 18.0 + 9.0, ppp);
+                    let y1 = crate::plate::snap(origin + (r.end + 1) as f32 * 18.0, ppp) - 1.0;
+                    mp.circle_filled(pos2(cx, y0), 2.5, crate::plate::TALLY);
+                    if y1 > y0 + 2.5 {
+                        mp.line_segment(
+                            [pos2(cx, y0 + 2.5), pos2(cx, y1)],
+                            egui::Stroke::new(crate::plate::device_px(2.0, ppp), crate::plate::AO),
+                        );
+                    }
+                }
+                for f in &marks.empties {
+                    let y = crate::plate::snap(origin + *f as f32 * 18.0 + 9.0, ppp);
+                    mp.circle_stroke(
+                        pos2(cx, y),
+                        2.5,
+                        egui::Stroke::new(1.0, crate::plate::LEGEND),
+                    );
+                }
+            }
+            // The current frame: the strip's one Tally notch.
+            let ncy = origin + (state.view.frame as f32 + 0.5) * 18.0;
+            mp.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(strip.left(), ncy - 4.0),
+                    pos2(strip.left() + 5.0, ncy),
+                    pos2(strip.left(), ncy + 4.0),
+                ],
+                crate::plate::TALLY,
+                egui::Stroke::NONE,
+            ));
+        }
+
+        // ---- The brush rail (owner 2026-08-17): brush editing lives at
+        // the canvas's RIGHT edge, hidden until reached for. It floats as
+        // an overlay so the paper NEVER rescales when it opens. It cannot
+        // open mid-stroke, and it stays open through a slider drag.
+        const RAIL_W: f32 = 210.0;
+        if self.raster {
+            let hover = ui.ctx().pointer_hover_pos();
+            let zone_w = if self.rail_open { RAIL_W + 12.0 } else { 16.0 };
+            let in_zone = hover.is_some_and(|hp| {
+                hp.x >= rect.right() - zone_w
+                    && hp.x <= rect.right() + 1.0
+                    && hp.y >= rect.top()
+                    && hp.y <= rect.bottom()
+            });
+            let dragging = ui.input(|i| i.pointer.any_down());
+            self.rail_open = if self.rail_open {
+                in_zone || dragging
+            } else {
+                in_zone && !dragging && !self.stroke_active()
+            };
+            // The slide (owner 2026-08-17): in and out like a toolbar
+            // should — 160ms, overlay only, so the paper never rescales.
+            let t = ui.ctx().animate_bool_with_time(
+                egui::Id::new("brush_rail_slide"),
+                self.rail_open,
+                0.16,
+            );
+            if t > 0.001 {
+                let x = rect.right() - RAIL_W * t;
+                let panel = Rect::from_min_size(pos2(x, rect.top()), vec2(RAIL_W, rect.height()));
+                egui::Area::new(egui::Id::new("canvas_brush_rail"))
+                    .fixed_pos(panel.min)
+                    .constrain(false)
+                    .show(ui.ctx(), |aui| {
+                        // Clipped to the paper area: the slide emerges from
+                        // the edge and nothing spills over neighbours.
+                        aui.set_clip_rect(rect);
+                        let pad = ((panel.height() - self.rail_content_h) * 0.5).max(0.0);
+                        // The backing is sized to the CONTENT, not the
+                        // column (owner 2026-08-17): readable text, without
+                        // walling off the paper above and below the stack.
+                        let back = Rect::from_min_size(
+                            pos2(panel.left() + 2.0, panel.top() + pad - 12.0),
+                            vec2(RAIL_W - 8.0, self.rail_content_h + 24.0),
+                        );
+                        aui.painter().rect_filled(
+                            back,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(14, 15, 13, 242),
+                        );
+                        aui.painter().rect_stroke(
+                            back,
+                            0.0,
+                            egui::Stroke::new(1.0, crate::plate::legend_dim()),
+                            egui::StrokeKind::Inside,
+                        );
+                        aui.allocate_ui_with_layout(
+                            panel.size(),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |aui| {
+                                aui.set_min_size(panel.size());
+                                aui.add_space(pad);
+                                // Measure the STACK itself by allocation
+                                // cursor, immune to min_rect inflation (the
+                                // previous measurement fed back on itself
+                                // and decayed the pad to zero — the bug the
+                                // owner's screenshot caught).
+                                let y0 = aui.next_widget_position().y;
+                                self.brush_rail_ui(aui);
+                                let y1 = aui.next_widget_position().y;
+                                self.rail_content_h = (y1 - y0).max(50.0);
+                            },
+                        );
+                    });
+            } else {
+                // The grip: a quiet affordance while the rail is hidden.
+                let gx = rect.right() - 6.0;
+                let gcy = rect.center().y;
+                for dy in [-9.0f32, 0.0, 9.0] {
+                    painter.line_segment(
+                        [pos2(gx, gcy + dy - 3.0), pos2(gx, gcy + dy + 3.0)],
+                        egui::Stroke::new(2.0, crate::plate::legend_dim()),
+                    );
+                }
+            }
+        }
+
+        // ---- THE LIGHTBOX FOLD-OUT (owner's law, 2026-08-17): the left
+        // edge mirrors the right — hover to slide out, clipped to the
+        // paper, vertically centred, content-sized backing. Onion, paper
+        // furniture, view, and the INPUT plate field live here.
+        const LIGHT_W: f32 = 136.0;
+        {
+            let hover = ui.ctx().pointer_hover_pos();
+            let zone_w = if self.light_open {
+                LIGHT_W + 12.0
+            } else {
+                16.0
+            };
+            let in_zone = hover.is_some_and(|hp| {
+                hp.x >= rect.left() - 1.0
+                    && hp.x <= rect.left() + zone_w
+                    && hp.y >= rect.top()
+                    && hp.y <= rect.bottom()
+            });
+            let dragging = ui.input(|i| i.pointer.any_down());
+            self.light_open = if self.light_open {
+                in_zone || dragging
+            } else {
+                in_zone && !dragging && !self.stroke_active()
+            };
+            let t = ui.ctx().animate_bool_with_time(
+                egui::Id::new("lightbox_slide"),
+                self.light_open,
+                0.16,
+            );
+            if t > 0.001 {
+                let x = rect.left() - LIGHT_W * (1.0 - t);
+                let panel = Rect::from_min_size(pos2(x, rect.top()), vec2(LIGHT_W, rect.height()));
+                egui::Area::new(egui::Id::new("canvas_lightbox_rail"))
+                    .fixed_pos(panel.min)
+                    .constrain(false)
+                    .show(ui.ctx(), |aui| {
+                        aui.set_clip_rect(rect);
+                        let pad = ((panel.height() - self.light_content_h) * 0.5).max(0.0);
+                        let back = Rect::from_min_size(
+                            pos2(panel.left() + 2.0, panel.top() + pad - 12.0),
+                            vec2(LIGHT_W - 8.0, self.light_content_h + 24.0),
+                        );
+                        aui.painter().rect_filled(
+                            back,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(14, 15, 13, 242),
+                        );
+                        aui.painter().rect_stroke(
+                            back,
+                            0.0,
+                            egui::Stroke::new(1.0, crate::plate::legend_dim()),
+                            egui::StrokeKind::Inside,
+                        );
+                        aui.allocate_ui_with_layout(
+                            panel.size(),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |aui| {
+                                aui.set_min_size(panel.size());
+                                aui.add_space(pad);
+                                let y0 = aui.next_widget_position().y;
+                                self.lightbox_rail_ui(aui, state);
+                                let y1 = aui.next_widget_position().y;
+                                self.light_content_h = (y1 - y0).max(50.0);
+                            },
+                        );
+                    });
+            } else {
+                // The left grip, clear of the mirror strip.
+                let gx = rect.left() + 20.0;
+                let gcy = rect.center().y;
+                for dy in [-9.0f32, 0.0, 9.0] {
+                    painter.line_segment(
+                        [pos2(gx, gcy + dy - 3.0), pos2(gx, gcy + dy + 3.0)],
+                        egui::Stroke::new(2.0, crate::plate::legend_dim()),
+                    );
+                }
+            }
+        }
+
+        // ---- THE PAINT DISH (its room, 2026-08-17): colour folds UP from
+        // the bottom edge — the rendering stage's instrument. Fold law
+        // inherited whole; contents centred on the grip's vertical line.
+        const DISH_H: f32 = 150.0;
+        if self.raster {
+            let hover = ui.ctx().pointer_hover_pos();
+            let zone_h = if self.dish_open { DISH_H + 12.0 } else { 16.0 };
+            let in_zone = hover.is_some_and(|hp| {
+                hp.y >= rect.bottom() - zone_h
+                    && hp.y <= rect.bottom() + 1.0
+                    && hp.x >= rect.left()
+                    && hp.x <= rect.right()
+            });
+            let dragging = ui.input(|i| i.pointer.any_down());
+            self.dish_open = if self.dish_open {
+                in_zone || dragging
+            } else {
+                in_zone && !dragging && !self.stroke_active()
+            };
+            let t = ui.ctx().animate_bool_with_time(
+                egui::Id::new("paint_dish_slide"),
+                self.dish_open,
+                0.16,
+            );
+            if t > 0.001 {
+                let y = rect.bottom() - DISH_H * t;
+                let panel = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), DISH_H));
+                egui::Area::new(egui::Id::new("canvas_paint_dish"))
+                    .fixed_pos(panel.min)
+                    .constrain(false)
+                    .show(ui.ctx(), |aui| {
+                        aui.set_clip_rect(rect);
+                        let pad = ((panel.width() - self.dish_content_w) * 0.5).max(0.0);
+                        let back = Rect::from_min_size(
+                            pos2(panel.left() + pad - 12.0, panel.top() + 2.0),
+                            vec2(self.dish_content_w + 24.0, DISH_H - 6.0),
+                        );
+                        aui.painter().rect_filled(
+                            back,
+                            0.0,
+                            Color32::from_rgba_unmultiplied(14, 15, 13, 242),
+                        );
+                        aui.painter().rect_stroke(
+                            back,
+                            0.0,
+                            egui::Stroke::new(1.0, crate::plate::legend_dim()),
+                            egui::StrokeKind::Inside,
+                        );
+                        aui.allocate_ui_with_layout(
+                            panel.size(),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |aui| {
+                                aui.set_min_size(panel.size());
+                                aui.add_space(pad);
+                                let x0 = aui.next_widget_position().x;
+                                self.dish_ui(aui, state);
+                                let x1 = aui.next_widget_position().x;
+                                self.dish_content_w = (x1 - x0).max(240.0);
+                            },
+                        );
+                    });
+            } else {
+                // The dish grip: bottom centre.
+                let gy = rect.bottom() - 6.0;
+                let gcx = rect.center().x;
+                for dx in [-9.0f32, 0.0, 9.0] {
+                    painter.line_segment(
+                        [pos2(gcx + dx - 3.0, gy), pos2(gcx + dx + 3.0, gy)],
+                        egui::Stroke::new(2.0, crate::plate::legend_dim()),
+                    );
+                }
+            }
         }
 
         // ---- Brush-outline cursor (Krita-style) --------------------------
@@ -1825,12 +3314,12 @@ impl CanvasView {
         // (Future textured/mask brushes: derive this preview from the brush's
         // footprint/stamp instead of a plain circle.)
         if self.raster
-            && !state.view.playing
-            && !self.composite_view // review mode: painting refused, OS cursor back
-            && self.tool == CanvasTool::Paint // select tool keeps the OS cursor
-            && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
-            && rect.contains(pos)
-            && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
+        && !state.view.playing
+        && !self.composite_view // review mode: painting refused, OS cursor back
+        && self.tool == CanvasTool::Paint // select tool keeps the OS cursor
+        && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
+        && rect.contains(pos)
+        && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
         {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             // Exact size: what a FULL-pressure dab paints (the falloff reaches
@@ -1842,15 +3331,23 @@ impl CanvasView {
             // and feed note_tilt (pens that report no tilt in proximity keep
             // the previous stroke's carried value).
             // Floor only for visibility once a brush is sub-3px on screen.
-            let t_max = if self.dyn_size { self.pen_curve.apply(1.0) } else { 1.0 };
+            let t_max = if self.dyn_size {
+                self.pen_curve.apply(1.0)
+            } else {
+                1.0
+            };
             let min_s = self.min_size.clamp(0.0, 1.0);
             let strength = self.tilt_strength.clamp(0.0, 1.0);
             let tmag = (self.smoothed_tilt[0].powi(2) + self.smoothed_tilt[1].powi(2)).sqrt();
             let tn = (tmag / TILT_MAX_RAD).clamp(0.0, 1.0);
-            let broaden = if self.tilt_size { 1.0 + strength * tn } else { 1.0 };
-            let r = (self.raster_brush_px * (min_s + (1.0 - min_s) * t_max) * broaden * scale
-                * 0.5)
-                .max(1.5);
+            let broaden = if self.tilt_size {
+                1.0 + strength * tn
+            } else {
+                1.0
+            };
+            let r =
+                (self.raster_brush_px * (min_s + (1.0 - min_s) * t_max) * broaden * scale * 0.5)
+                    .max(1.5);
             // Tilt direction in screen space (paper axes = screen axes).
             let dir = if tmag > 1e-4 {
                 egui::vec2(self.smoothed_tilt[0] / tmag, self.smoothed_tilt[1] / tmag)
@@ -1876,11 +3373,17 @@ impl CanvasView {
                     painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
                 };
                 ellipse(r * aspect, r, Color32::from_black_alpha(170));
-                ellipse((r * aspect - 1.0).max(0.5), (r - 1.0).max(0.5),
-                    Color32::from_white_alpha(170));
+                ellipse(
+                    (r * aspect - 1.0).max(0.5),
+                    (r - 1.0).max(0.5),
+                    Color32::from_white_alpha(170),
+                );
             } else {
                 painter.circle_stroke(
-                    pos, r, egui::Stroke::new(1.0, Color32::from_black_alpha(170)));
+                    pos,
+                    r,
+                    egui::Stroke::new(1.0, Color32::from_black_alpha(170)),
+                );
                 painter.circle_stroke(
                     pos,
                     (r - 1.0).max(0.5),
@@ -1942,16 +3445,32 @@ impl CanvasView {
         let tilt_norm =
             |t: [f32; 2]| ((t[0] * t[0] + t[1] * t[1]).sqrt() / TILT_MAX_RAD).clamp(0.0, 1.0);
         let radius_of = |pr: f32, tn: f32| {
-            let t = if self.dyn_size { self.pen_curve.apply(pr) } else { 1.0 };
-            let broaden = if self.tilt_size { 1.0 + strength * tn } else { 1.0 };
+            let t = if self.dyn_size {
+                self.pen_curve.apply(pr)
+            } else {
+                1.0
+            };
+            let broaden = if self.tilt_size {
+                1.0 + strength * tn
+            } else {
+                1.0
+            };
             (self.raster_brush_px * (min_s + (1.0 - min_s) * t) * broaden * 0.5)
                 .max(0.5)
                 .min(cap)
         };
         let dab_at = |x: f32, y: f32, pr: f32, tv: [f32; 2]| {
             let tn = tilt_norm(tv);
-            let a = if self.dyn_opacity { self.pen_curve.apply(pr) } else { 1.0 };
-            let lighten = if self.tilt_opacity { 1.0 - 0.75 * strength * tn } else { 1.0 };
+            let a = if self.dyn_opacity {
+                self.pen_curve.apply(pr)
+            } else {
+                1.0
+            };
+            let lighten = if self.tilt_opacity {
+                1.0 - 0.75 * strength * tn
+            } else {
+                1.0
+            };
             let mut color = base;
             color[3] *= flow * a * lighten;
             // tilt→shape: flatten + rotate the stamp along the lean direction
@@ -1982,12 +3501,10 @@ impl CanvasView {
                 aspect,
             }
         };
-
         if pts.len() == 1 {
             dabs.push(dab_at(pts[0].x, pts[0].y, pts[0].pressure, pts[0].tilt));
             return dabs;
         }
-
         let mut carry = 0.0f32; // distance into the next segment for the next dab
         for w in pts.windows(2) {
             let (ax, ay, apr) = (w[0].x, w[0].y, w[0].pressure);
@@ -2110,12 +3627,10 @@ impl CanvasView {
                 state.status = match r {
                     FR::OffPaper => "clicked outside the paper".into(),
                     FR::OnInk => "clicked on inked pixels — fills flow into EMPTY \
-                         regions (a smaller gap shrinks the closing band; recolor \
-                         is a future tool)"
+        regions (a smaller gap shrinks the closing band; recolor \
+        is a future tool)"
                         .to_string(),
-                    FR::OutsideSelection => {
-                        "clicked outside the selection (Esc clears it)".into()
-                    }
+                    FR::OutsideSelection => "clicked outside the selection (Esc clears it)".into(),
                     FR::ClippedOut => {
                         "the selection excluded the whole region (Esc clears it)".into()
                     }
@@ -2157,17 +3672,29 @@ impl CanvasView {
         // transformed or not even including that layer). Refuse + hint, same
         // pattern as the hidden-layer guard.
         if self.composite_view {
-            state.status = "composite view — press C to edit".into();
+            // AUDIT [7]: the pen is his primary instrument — its refusal
+            // must reach the Aka lane and flash the canvas edge, exactly
+            // as the mouse path and the hidden-layer guard already do.
+            state.refuse("refused — composite view is read-only (C to edit)");
             return false;
         }
         // GUARD (CSP behavior): never paint into a layer you can't see.
         if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {
-            state.status = format!(
-                "layer '{}' is hidden — press A to switch or click its eye",
+            state.refuse(format!(
+                "refused — layer '{}' is hidden (A to switch, or click its eye)",
                 state.active_layer_name()
-            );
+            ));
             return false;
         }
+        // UNARMED (defect 16): the tracked layer name is absent on this
+        // cel — no layer receives ink; refuse instead of misrouting.
+        let Some(resolved_slot) = state.active_slot_resolved() else {
+            state.refuse(format!(
+                "refused — no '{}' layer on this cel (pick one in Cel Layers)",
+                state.view.active_layer
+            ));
+            return false;
+        };
         let p0 = force.filter(|f| *f > 0.0).unwrap_or(START_SEED);
         self.touch_active = true;
         self.seed_pending = force.filter(|f| *f > 0.0).is_none();
@@ -2185,7 +3712,7 @@ impl CanvasView {
         self.stroke_from_mouse = false;
         self.stroke_erasing = self.erasing;
         self.stroke_alpha_locked = self.alpha_lock;
-        self.stroke_layer_slot = state.view.active_layer_slot;
+        self.stroke_layer_slot = resolved_slot;
         self.cel_touched = false;
         self.dabs_flushed = 0;
         self.raster_stroke_done = false;
@@ -2226,7 +3753,6 @@ impl CanvasView {
         if self.mouse_lockout > 0 {
             self.mouse_lockout -= 1;
         }
-
         let events = ui.input(|i| i.events.clone());
         let mut touch_seen = false;
 
@@ -2295,7 +3821,6 @@ impl CanvasView {
                 return;
             }
         }
-
         for event in &events {
             if let egui::Event::Touch {
                 pos, force, phase, ..
@@ -2339,23 +3864,31 @@ impl CanvasView {
         if !self.touch_active && !touch_seen && self.mouse_lockout == 0 && !self.seen_pen {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if self.composite_view {
-                    state.status = "composite view — press C to edit".into();
+                    state.refuse("refused — composite view is read-only (C to edit)");
                     return;
                 }
                 if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {
-                    state.status = format!(
-                        "layer '{}' is hidden — press A to switch or click its eye",
+                    state.refuse(format!(
+                        "refused — layer '{}' is hidden (A to switch, or click its eye)",
                         state.active_layer_name()
-                    );
+                    ));
                     return;
                 }
+                // UNARMED (defect 16), mouse path: same law as the pen.
+                let Some(resolved_slot) = state.active_slot_resolved() else {
+                    state.refuse(format!(
+                        "refused — no '{}' layer on this cel (pick one in Cel Layers)",
+                        state.view.active_layer
+                    ));
+                    return;
+                };
                 self.current.clear();
                 self.cur_some = 0; // no tablet force will arrive; keep the
                 self.cur_none = 0; // force% diagnostic honest for this stroke
                 self.stroke_from_mouse = true;
                 self.stroke_erasing = self.erasing;
                 self.stroke_alpha_locked = self.alpha_lock;
-                self.stroke_layer_slot = state.view.active_layer_slot;
+                self.stroke_layer_slot = resolved_slot;
                 self.cel_touched = false;
                 self.dabs_flushed = 0;
                 self.raster_stroke_done = false;
@@ -2369,8 +3902,7 @@ impl CanvasView {
                         tilt: [0.0; 2], // mouse: vertical pen
                     });
                 }
-            } else if response.dragged_by(egui::PointerButton::Primary)
-                && !self.current.is_empty()
+            } else if response.dragged_by(egui::PointerButton::Primary) && !self.current.is_empty()
             {
                 // Continue ONLY a stroke whose start was ACCEPTED (current
                 // non-empty). A refused start (composite view, hidden layer)
@@ -2516,7 +4048,6 @@ impl CanvasView {
             tilt: self.smoothed_tilt,
         });
     }
-
     fn finish_stroke(&mut self, state: &mut AppState) {
         // Snapshot the captured pressure range (pre-taper) for the diagnostic.
         if !self.current.is_empty() {
@@ -2525,11 +4056,7 @@ impl CanvasView {
                 .iter()
                 .map(|p| p.pressure)
                 .fold(f32::INFINITY, f32::min);
-            self.dbg_max = self
-                .current
-                .iter()
-                .map(|p| p.pressure)
-                .fold(0.0, f32::max);
+            self.dbg_max = self.current.iter().map(|p| p.pressure).fold(0.0, f32::max);
             self.dbg_some = self.cur_some;
             self.dbg_none = self.cur_none;
         }
@@ -2538,8 +4065,7 @@ impl CanvasView {
         // never once reported force. The `cur_none > 0` guard avoids falsely
         // flagging a legitimate quick pen tap (Start+End, no Move sample at all).
         // Drives the red MOUSE badge that tells the user to fix the driver.
-        self.dbg_mouse_mode =
-            self.stroke_from_mouse || (self.cur_none > 0 && self.cur_some == 0);
+        self.dbg_mouse_mode = self.stroke_from_mouse || (self.cur_none > 0 && self.cur_some == 0);
         // Raster mode: dabs are stamped incrementally in ui(); just flag the
         // final flush + reset. No vector taper/commit needed — dab radius
         // already follows pressure, and opaque dabs don't get the tip blob.
@@ -2560,7 +4086,11 @@ impl CanvasView {
             let idx = len - 1 - k;
             // k=0 (endpoint) -> 0; k=n-1 -> ~1 (unchanged). smoothstep for a
             // soft narrowing rather than a linear wedge.
-            let t = if n > 1 { k as f32 / (n - 1) as f32 } else { 0.0 };
+            let t = if n > 1 {
+                k as f32 / (n - 1) as f32
+            } else {
+                0.0
+            };
             let factor = t * t * (3.0 - 2.0 * t);
             self.current[idx].pressure *= factor;
         }
@@ -2578,13 +4108,16 @@ impl CanvasView {
 /// correction = orange, rough = the blue-pencil convention.
 pub fn layer_chip_color(name: &str) -> Color32 {
     match name {
-        "line" => Color32::from_gray(230),
-        "color" => Color32::from_rgb(120, 200, 120),
-        "shadow" => Color32::from_rgb(110, 160, 240),
-        "highlight" => Color32::from_rgb(240, 120, 120),
-        "correction" => Color32::from_rgb(240, 170, 90),
-        "rough" => Color32::from_rgb(130, 180, 255),
-        _ => Color32::from_gray(180),
+        // Layer identity in the plate's own inks (no hue outside the eight
+        // tokens; no green anywhere — spec §3). rough is the ao-enpitsu,
+        // correction is the sakkan's aka: the pipeline's own colour code.
+        "line" => plate::STRUCK,
+        "color" => plate::LEGEND,
+        "shadow" => Color32::from_rgba_unmultiplied(83, 137, 196, 150), // ao, dimmed
+        "highlight" => plate::PAPER,
+        "correction" => plate::AKA,
+        "rough" => plate::AO,
+        _ => plate::LEGEND,
     }
 }
 
@@ -2660,23 +4193,25 @@ fn onion_ghosts(
     state: &AppState,
     column: ColumnId,
     frame: u32,
+    strength: f32,
 ) -> Vec<(anim_core::ids::DrawingId, Color32)> {
     let current = state.resolve_at(column, frame);
     let mut out = Vec::new();
-
     let mut collect = |range: Box<dyn Iterator<Item = u32>>, base: (u8, u8, u8)| {
         let mut found: Vec<anim_core::ids::DrawingId> = Vec::new();
         for f in range {
             if let Some(id) = state.resolve_at(column, f)
-                && Some(id) != current && !found.contains(&id) {
-                    found.push(id);
-                    if found.len() == 2 {
-                        break;
-                    }
+                && Some(id) != current
+                && !found.contains(&id)
+            {
+                found.push(id);
+                if found.len() == 2 {
+                    break;
                 }
+            }
         }
         for (depth, id) in found.into_iter().enumerate() {
-            let alpha = if depth == 0 { 100 } else { 55 };
+            let alpha = ((if depth == 0 { 255.0 } else { 140.0 }) * strength.clamp(0.0, 1.0)) as u8;
             out.push((
                 id,
                 Color32::from_rgba_unmultiplied(base.0, base.1, base.2, alpha),
@@ -2684,11 +4219,12 @@ fn onion_ghosts(
         }
     };
 
-    collect(Box::new((0..frame).rev()), (215, 70, 70));
-    collect(
-        Box::new(frame + 1..state.frame_count()),
-        (70, 175, 90),
-    );
+    // Ghost BEHIND = Ao (continuity — where the motion came from); ghost
+    // AHEAD = Legend (the plate stating what is next). Spec defect 14: the
+    // old red/green pair is dead — Aka never sits on the paper for hours,
+    // and there is no green in this application.
+    collect(Box::new((0..frame).rev()), (83, 137, 196));
+    collect(Box::new(frame + 1..state.frame_count()), (139, 141, 131));
     out
 }
 
@@ -2702,8 +4238,7 @@ fn draw_strokes(
 ) {
     for stroke in strokes {
         let c = stroke.color;
-        let color =
-            tint.unwrap_or_else(|| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]));
+        let color = tint.unwrap_or_else(|| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]));
         fill_stroke(
             painter,
             &stroke.points,
@@ -2747,7 +4282,6 @@ fn fill_stroke(
     // Round the starting cap.
     let start = to_screen(pos2(points[0].x, points[0].y));
     painter.circle_filled(start, half(points[0].pressure), color);
-
     for pair in points.windows(2) {
         let a = to_screen(pos2(pair[0].x, pair[0].y));
         let b = to_screen(pos2(pair[1].x, pair[1].y));
@@ -2759,11 +4293,7 @@ fn fill_stroke(
             // Perpendicular offsets → a trapezoid whose width tracks pressure.
             let n = vec2(-d.y, d.x) / len;
             let quad = vec![a + n * ha, b + n * hb, b - n * hb, a - n * ha];
-            painter.add(egui::Shape::convex_polygon(
-                quad,
-                color,
-                egui::Stroke::NONE,
-            ));
+            painter.add(egui::Shape::convex_polygon(quad, color, egui::Stroke::NONE));
         }
         // Round dab at the far vertex smooths the joint to the next segment.
         painter.circle_filled(b, hb, color);

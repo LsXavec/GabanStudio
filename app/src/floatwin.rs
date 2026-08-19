@@ -56,17 +56,13 @@ impl FloatViewer {
             })),
         }
     }
-
     pub fn is_open(&self) -> bool {
         self.open.load(Ordering::Relaxed)
     }
-
     pub fn set_open(&self, open: bool) {
         self.open.store(open, Ordering::Relaxed);
     }
-
     pub const VIEWPORT_TITLE: &'static str = "AnimStudio — Viewer";
-
     pub fn viewport_id() -> egui::ViewportId {
         egui::ViewportId::from_hash_of("animstudio_float_viewer")
     }
@@ -109,14 +105,12 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-
     let mut s = shared.write();
     let (paper_w, paper_h) = (s.paper.x.max(1.0), s.paper.y.max(1.0));
     let fit = ((rect.width() / paper_w).min(rect.height() / paper_h) * 0.94).max(0.01);
     let scale = fit * s.zoom;
     let origin = rect.center() - vec2(paper_w, paper_h) * scale * 0.5 + s.pan;
     let to_screen = |p: Pos2| -> Pos2 { origin + p.to_vec2() * scale };
-
     if response.hovered() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll.abs() > 0.0
@@ -137,17 +131,15 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
         s.zoom = 1.0;
         s.pan = egui::Vec2::ZERO;
     }
-
     let paper_rect =
         Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
-    painter.rect_filled(paper_rect, 2, Color32::from_rgb(242, 239, 233));
+    painter.rect_filled(paper_rect, 2, crate::plate::PAPER);
     painter.rect_stroke(
         paper_rect,
         2,
-        egui::Stroke::new(1.0, Color32::from_gray(60)),
+        egui::Stroke::new(1.0, crate::plate::legend_dim()),
         egui::StrokeKind::Outside,
     );
-
     match s.tex {
         Some(id) => {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
@@ -157,7 +149,7 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
                 egui::Align2::LEFT_TOP,
                 "🎬 composite (OS window)",
                 egui::FontId::proportional(12.0),
-                Color32::from_rgba_unmultiplied(120, 190, 235, 200),
+                Color32::from_rgba_unmultiplied(83, 137, 196, 200),
             );
         }
         None => {
@@ -166,7 +158,7 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
                 egui::Align2::CENTER_CENTER,
                 &s.hint,
                 egui::FontId::proportional(14.0),
-                Color32::from_gray(150),
+                crate::plate::LEGEND,
             );
         }
     }

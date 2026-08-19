@@ -7,6 +7,7 @@
 use eframe::egui;
 
 use crate::canvas::{DEFAULT_PAPER_H, DEFAULT_PAPER_W};
+use crate::plate;
 
 /// (label, width, height). Width 0 = "Custom" (leave the fields as the user set).
 const PRESETS: &[(&str, u32, u32)] = &[
@@ -55,22 +56,31 @@ pub fn form_ui(
 ) -> Option<FormAction> {
     let mut action = None;
 
-    ui.heading("New Project");
+    // THE SLATE, at rest: the first screen an artist meets should look
+    // like the instrument they are about to use — engraved legends,
+    // Struck values, one clear verb. (Repaint sweep 2026-08-18.)
+    plate::legend(ui, "new cut");
     ui.label(
-        egui::RichText::new("Set the frame resolution — this is the project's paper size.")
-            .weak(),
+        egui::RichText::new(
+            "The paper you will draw on, and how fast it plays.
+    Everything here can be changed later except the paper size.",
+        )
+        .size(11.5)
+        .color(plate::LEGEND),
     );
-    ui.add_space(10.0);
-
+    ui.add_space(12.0);
     egui::Grid::new("new_project_grid")
         .num_columns(2)
-        .spacing([12.0, 8.0])
+        .spacing([14.0, 10.0])
         .show(ui, |ui| {
-            ui.label("Name");
-            ui.text_edit_singleline(&mut form.name);
+            plate::legend(ui, "name");
+            ui.add(
+                egui::TextEdit::singleline(&mut form.name)
+                    .desired_width(220.0)
+                    .hint_text("the cut's name"),
+            );
             ui.end_row();
-
-            ui.label("Preset");
+            plate::legend(ui, "paper");
             egui::ComboBox::from_id_salt("np_preset")
                 .selected_text(PRESETS[form.preset].0)
                 .show_ui(ui, |ui| {
@@ -82,55 +92,94 @@ pub fn form_ui(
                     }
                 });
             ui.end_row();
-
-            ui.label("Dimensions");
+            plate::legend(ui, "size");
             ui.horizontal(|ui| {
                 if ui
-                    .add(egui::DragValue::new(&mut form.width).range(1..=16384).suffix(" px"))
+                    .add(
+                        egui::DragValue::new(&mut form.width)
+                            .range(1..=16384)
+                            .suffix(" px"),
+                    )
                     .changed()
                 {
                     form.preset = 0;
                 }
-                ui.label("×");
+                ui.label(egui::RichText::new("×").color(plate::LEGEND));
                 if ui
-                    .add(egui::DragValue::new(&mut form.height).range(1..=16384).suffix(" px"))
+                    .add(
+                        egui::DragValue::new(&mut form.height)
+                            .range(1..=16384)
+                            .suffix(" px"),
+                    )
                     .changed()
                 {
                     form.preset = 0;
                 }
-                if ui.button("⇄").on_hover_text("swap width/height").clicked() {
+                if plate::icon_button(ui, crate::icons::Icon::Fit, "swap", "swap width and height")
+                    .clicked()
+                {
                     std::mem::swap(&mut form.width, &mut form.height);
                     form.preset = 0;
                 }
             });
             ui.end_row();
-
-            ui.label("Frame rate");
-            ui.add(egui::DragValue::new(&mut form.fps).range(1..=120).suffix(" fps"));
+            plate::legend(ui, "frame rate");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut form.fps)
+                        .range(1..=120)
+                        .suffix(" fps"),
+                );
+                // The number an animator actually thinks in: what one
+                // second costs at this rate, on ones and on twos.
+                ui.label(
+                    egui::RichText::new(format!(
+                        "one second = {} frames · {} on twos",
+                        form.fps,
+                        form.fps / 2
+                    ))
+                    .size(10.5)
+                    .color(plate::LEGEND),
+                );
+            });
             ui.end_row();
-
-            ui.label("Resolution");
-            ui.add(egui::DragValue::new(&mut form.dpi).range(1..=1200).suffix(" dpi"));
+            plate::legend(ui, "print");
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut form.dpi)
+                        .range(1..=1200)
+                        .suffix(" dpi"),
+                );
+                ui.label(
+                    egui::RichText::new("only matters if this cut goes to paper")
+                        .size(10.5)
+                        .color(plate::LEGEND),
+                );
+            });
             ui.end_row();
         });
-
-    ui.add_space(14.0);
+    ui.add_space(16.0);
     ui.horizontal(|ui| {
         if ui
-            .add(egui::Button::new(
-                egui::RichText::new("Create Project").strong(),
-            ))
+            .add(
+                egui::Button::new(
+                    egui::RichText::new("Start drawing")
+                        .size(13.0)
+                        .color(plate::STRUCK),
+                )
+                .min_size(egui::vec2(140.0, 30.0)),
+            )
+            .on_hover_text("create the cut and open the drawing room")
             .clicked()
         {
             action = Some(FormAction::Create);
         }
-        if ui.button("Open Project…").clicked() {
+        if ui.button("Open a project…").clicked() {
             action = Some(FormAction::Open);
         }
         if allow_cancel && ui.button("Cancel").clicked() {
             action = Some(FormAction::Cancel);
         }
     });
-
     action
 }

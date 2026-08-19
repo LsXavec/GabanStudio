@@ -47,7 +47,6 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-
     let paper_w = state.engine.project.width as f32;
     let paper_h = state.engine.project.height as f32;
     let fit = ((rect.width() / paper_w).min(rect.height() / paper_h) * 0.94).max(0.01);
@@ -77,24 +76,22 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
         vs.zoom = 1.0;
         vs.pan = egui::Vec2::ZERO;
     }
-
     let paper_rect =
         Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
-    painter.rect_filled(paper_rect, 2, Color32::from_rgb(242, 239, 233));
+    painter.rect_filled(paper_rect, 2, crate::plate::PAPER);
     painter.rect_stroke(
         paper_rect,
         2,
-        egui::Stroke::new(1.0, Color32::from_gray(60)),
+        egui::Stroke::new(1.0, crate::plate::legend_dim()),
         egui::StrokeKind::Outside,
     );
-
     let hint = |painter: &egui::Painter, msg: &str| {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
             msg,
             egui::FontId::proportional(14.0),
-            Color32::from_gray(150),
+            crate::plate::LEGEND,
         );
     };
     match graph {
@@ -106,7 +103,7 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
                 egui::Align2::LEFT_TOP,
                 "🎬 composite",
                 egui::FontId::proportional(12.0),
-                Color32::from_rgba_unmultiplied(120, 190, 235, 200),
+                Color32::from_rgba_unmultiplied(83, 137, 196, 200),
             );
         }
         GraphView::NoOutput | GraphView::Off => hint(

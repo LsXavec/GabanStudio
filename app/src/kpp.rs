@@ -17,7 +17,6 @@ pub fn parse_kpp(bytes: &[u8], fallback_name: &str) -> Option<BrushPreset> {
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let reader = decoder.read_info().ok()?;
     let info = reader.info();
-
     let mut xml: Option<String> = None;
     for t in &info.uncompressed_latin1_text {
         if t.keyword == "preset" {
@@ -43,7 +42,6 @@ pub fn parse_kpp(bytes: &[u8], fallback_name: &str) -> Option<BrushPreset> {
         }
     }
     let xml = xml?;
-
     let name = attr_str(&xml, "name").unwrap_or_else(|| fallback_name.to_string());
     // Size: the paintop's brush definition carries a diameter attribute; some
     // paintops use a "Size" param instead.
@@ -55,7 +53,6 @@ pub fn parse_kpp(bytes: &[u8], fallback_name: &str) -> Option<BrushPreset> {
         .unwrap_or(1.0)
         .clamp(0.05, 1.0);
     let flow = param_f32(&xml, "FlowValue").unwrap_or(1.0).clamp(0.05, 1.0);
-
     Some(BrushPreset {
         name,
         size_px: size,
@@ -97,7 +94,10 @@ pub fn parse_bundle(bytes: &[u8]) -> Vec<BrushPreset> {
 
 /// Import .kpp/.bundle files into `presets` (skips duplicates by name).
 /// Returns (imported, skipped-duplicates, failed-files).
-pub fn import_files(paths: &[std::path::PathBuf], presets: &mut Vec<BrushPreset>) -> (usize, usize, usize) {
+pub fn import_files(
+    paths: &[std::path::PathBuf],
+    presets: &mut Vec<BrushPreset>,
+) -> (usize, usize, usize) {
     let (mut ok, mut dup, mut failed) = (0usize, 0usize, 0usize);
     for path in paths {
         let Ok(bytes) = std::fs::read(path) else {
@@ -155,9 +155,6 @@ fn param_f32(xml: &str, key: &str) -> Option<f32> {
     let after = &rest[gt + 1..];
     let end = after.find('<')?;
     // Some params wrap the value in CDATA.
-    let text = after[..end]
-        .trim()
-        .trim_start_matches("<![CDATA[")
-        .trim();
+    let text = after[..end].trim().trim_start_matches("<![CDATA[").trim();
     text.parse().ok()
 }
