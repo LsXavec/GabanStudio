@@ -82,3 +82,11 @@ build + handoff (repo name + first release need the owner).
   debug-only — now cfg-gated in plate.rs.
   S4 WAITING ON THE OWNER: repo name + visibility for the first
   release (gh authed as LsXavec).
+- 2026-08-19 — S4 SHIPPED. Owner's word: "LsXavec/AnimStudio public,
+  releases only." The repo existed (private, his July source push —
+  fully contained in local git as 3fb85c1's history, nothing lost):
+  replaced with a README-only main, master deleted, flipped public.
+  v0.1.0 published with animstudio.exe + AnimStudio-Setup.exe;
+  anonymous download verified BYTE-IDENTICAL to the built binary.
+  update_repo now DEFAULTS to LsXavec/AnimStudio — testers update with
+  zero setup; the dev build (devloop-armed) still never self-updates.

@@ -787,6 +787,10 @@ pub struct SessionConfig {
     pub last_addr: String,
 }
 
+fn default_update_repo() -> String {
+    "LsXavec/AnimStudio".into()
+}
+
 fn default_username() -> String {
     "artist".into()
 }
@@ -830,8 +834,9 @@ pub struct Config {
     #[serde(default)]
     pub session: SessionConfig,
     /// PSD-shipping: the GitHub repo ("owner/repo") whose latest release
-    /// is the published-build channel. Empty = updates off.
-    #[serde(default)]
+    /// is the published-build channel. Defaults to the app's own repo so
+    /// testers update with zero setup; empty turns checks off.
+    #[serde(default = "default_update_repo")]
     pub update_repo: String,
     #[serde(default)]
     pub pen: PenConfig,
@@ -857,7 +862,7 @@ impl Default for Config {
             perf: PerfConfig::default(),
             ui: UiConfig::default(),
             session: SessionConfig::default(),
-            update_repo: String::new(),
+            update_repo: default_update_repo(),
             pen: PenConfig::default(),
             layers: LayersConfig::default(),
             presets: default_presets(),
