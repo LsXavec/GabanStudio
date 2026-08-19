@@ -1153,6 +1153,11 @@ impl CanvasView {
         self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
     }
 
+    /// THE FORGE reads the armed engine to seed a draft.
+    pub(crate) fn armed_engine(&self) -> Option<&crate::config::EngineDef> {
+        self.brush_engine.as_ref()
+    }
+
     /// Our live wet stroke, in paper space, for session presence.
     pub(crate) fn presence_wet(&self) -> Vec<[f32; 3]> {
         self.current
@@ -4472,7 +4477,7 @@ pub fn layer_chip_color(name: &str) -> Color32 {
 
 /// PSD-brush-engine: deterministic per-dab hash (Wang) — NEVER a clock,
 /// NEVER thread RNG (NEVER-DO 2). Same stroke = same pixels, always.
-fn hash01(idx: u32, salt: u32) -> f32 {
+pub(crate) fn hash01(idx: u32, salt: u32) -> f32 {
     let mut x = idx.wrapping_mul(0x9E37_79B9) ^ salt.wrapping_mul(0x85EB_CA6B);
     x ^= x >> 16;
     x = x.wrapping_mul(0x7FEB_352D);
@@ -4484,7 +4489,7 @@ fn hash01(idx: u32, salt: u32) -> f32 {
 
 /// Piecewise-linear through the preset's own curve points; empty = the
 /// sensor's raw value (identity — no invented defaults, room NEVER-DO 5).
-fn curve_eval(points: &[[f32; 2]], x: f32) -> f32 {
+pub(crate) fn curve_eval(points: &[[f32; 2]], x: f32) -> f32 {
     if points.len() < 2 {
         return x.clamp(0.0, 1.0);
     }
@@ -4520,8 +4525,34 @@ fn sensor_input(sensor: &str, pr: f32, tv: [f32; 2], idx: u32, dist: f32) -> f32
     }
 }
 
+/// Decode PNG bytes to RGBA8 (the forge's stamp-from-file door).
+pub(crate) fn load_rgba_png_bytes(bytes: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    let (w, h) = (info.width, info.height);
+    let rgba: Vec<u8> = match info.color_type {
+        png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
+        png::ColorType::Rgb => buf[..info.buffer_size()]
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        png::ColorType::Grayscale => buf[..info.buffer_size()]
+            .iter()
+            .flat_map(|&g| [255, 255, 255, g])
+            .collect(),
+        png::ColorType::GrayscaleAlpha => buf[..info.buffer_size()]
+            .chunks_exact(2)
+            .flat_map(|p| [255, 255, 255, ((p[0] as u16 * p[1] as u16) / 255) as u8])
+            .collect(),
+        _ => return None,
+    };
+    Some((w, h, rgba))
+}
+
 /// Load a cache PNG (written by kpp.rs — always RGBA8) back as raw pixels.
-fn load_cache_png(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
+pub(crate) fn load_cache_png(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
     let bytes = std::fs::read(path).ok()?;
     let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info().ok()?;
@@ -4540,7 +4571,7 @@ fn load_cache_png(path: &std::path::Path) -> Option<(u32, u32, Vec<u8>)> {
 /// fade 1.0 = crisp edge, 0.0 = cone from the centre; "soft" uses a
 /// squared falloff. An approximation of Krita's generator, said plainly
 /// in the room log.
-fn rasterize_auto_tip(a: &crate::config::AutoTip, n: u32) -> (u32, u32, Vec<u8>) {
+pub(crate) fn rasterize_auto_tip(a: &crate::config::AutoTip, n: u32) -> (u32, u32, Vec<u8>) {
     let ratio = a.ratio.clamp(0.05, 1.0);
     let is_rect = a.shape == "rect";
     let fade = |d: f32, f: f32| -> f32 {

@@ -9,6 +9,7 @@ mod devloop;
 mod doc;
 mod export;
 mod floatcanvas;
+mod forge;
 mod floatwin;
 mod graphcomp;
 mod icons;
@@ -1355,6 +1356,8 @@ struct Editor {
     rename_buf: String,
     /// Buffer for the Presets pane's "save current as" name field.
     preset_name: String,
+    /// THE BRUSH FORGE (PSD-brush-forge): the draft under the hammer.
+    forge: forge::ForgeState,
     /// Per-instance viewer-pane state (zoom/pan), keyed by the pane's viewer
     /// id — the first multi-instance pane state (session-only).
     viewers: std::collections::HashMap<u8, viewer::ViewerView>,
@@ -1446,6 +1449,7 @@ struct EditorTabs<'a> {
     presets: &'a mut Vec<BrushPreset>,
     presets_dirty: &'a mut bool,
     preset_name: &'a mut String,
+    forge: &'a mut forge::ForgeState,
     native_pen: &'a [PenSample],
     /// The canvas is currently rendered in its own OS window this frame —
     /// the dock's Canvas tab shows a placeholder instead of double-driving
@@ -1546,6 +1550,17 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
 impl EditorTabs<'_> {
     /// The Presets pane: click applies; save the current brush under a name.
     fn presets_ui(&mut self, ui: &mut egui::Ui) {
+        // THE BRUSH FORGE rides at the pane's top so the quick list
+        // below never moves out from under a muscle-memorized click.
+        forge::ui(
+            ui,
+            self.forge,
+            self.presets,
+            self.presets_dirty,
+            self.canvas,
+            &mut self.state.status,
+        );
+        ui.separator();
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add(
@@ -1637,6 +1652,7 @@ impl Editor {
             ws_name: String::new(),
             rename_buf: String::new(),
             preset_name: String::new(),
+            forge: forge::ForgeState::default(),
             viewers: Default::default(),
             export_job: None,
             export_range: None,
@@ -1673,6 +1689,7 @@ impl Editor {
             ws_name: String::new(),
             rename_buf: String::new(),
             preset_name: String::new(),
+            forge: forge::ForgeState::default(),
             viewers: Default::default(),
             export_job: None,
             export_range: None,
@@ -3328,6 +3345,7 @@ impl Editor {
             presets,
             presets_dirty,
             preset_name: &mut self.preset_name,
+            forge: &mut self.forge,
             native_pen,
             float_canvas_open: self.float_canvas.open,
         };
