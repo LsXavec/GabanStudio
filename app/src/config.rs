@@ -1124,12 +1124,8 @@ fn session_page(
     ui.heading("Session");
     ui.label(
         egui::RichText::new(
-            "Draw together over
-    a
-    direct connection. Joining
-    a
-    room needs
-    its key AND a fresh 6-digit code from the host's authenticator.",
+            "Draw together over a direct connection. Joining a room needs \
+             its key AND a fresh 6-digit code from the host's authenticator.",
         )
         .weak(),
     );
@@ -1282,19 +1278,16 @@ fn ui_features_page(ui: &mut egui::Ui, config: &mut Config) {
     changed |= ui
         .checkbox(&mut config.ui.lock_positions, "Lock UI positions")
         .on_hover_text(
-            "freeze the pane layout: no dragging, splitting, or closing
-        windows until unlocked. The arrangement itself is kept.",
+            "freeze the pane layout: no dragging, splitting, or closing \
+             windows until unlocked. The arrangement itself is kept.",
         )
         .changed();
     changed |= ui
         .checkbox(&mut config.ui.exact_descriptions, "Exact UI descriptions")
         .on_hover_text(
-            "every control's hover
-        names
-        its kind, label and source, and the x-sheet gains
-        a
-        pointer inspector — useful for asking for
-        edits by an element's true name.",
+            "every control's hover names its kind, label and source, and the \
+             x-sheet gains a pointer inspector — useful for asking for edits \
+             by an element's true name.",
         )
         .changed();
     if changed {
@@ -1425,12 +1418,10 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
                 "Native tablet backend (Windows Ink) — applies after restart",
             )
             .on_hover_text(
-                "Direct RealTimeStylus pen input (Krita-grade). If the
-            app
-            crashes with
-            this
-            on, launch with ANIMSTUDIO_NO_TABLET=1 to force it off, then untick here. Fallback =
-            the standard pen-touch path.",
+                "Direct RealTimeStylus pen input (Krita-grade). If the app \
+                 crashes with this on, launch with ANIMSTUDIO_NO_TABLET=1 to \
+                 force it off, then untick here. Fallback = the standard \
+                 pen-touch path.",
             )
             .changed();
         if changed {

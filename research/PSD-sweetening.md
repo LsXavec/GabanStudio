@@ -100,3 +100,46 @@ and ranked by what the owner notices in daily drawing use.
       the mouse path already refused properly. Now both refuse.
       LAW: the Warning Law.
   NOT TOUCHED, by the room's law: nothing moved, renamed or re-keyed.
+- 2026-08-18 — INCIDENT: batch two's first attempt applied a regex across
+  every file in app/src to collapse space runs. Python's \s includes
+  newlines, so it deleted line breaks in all 23 files and pulled code up
+  into `//` comments. Two automated repair attempts made it worse (the
+  second folded ~2,000 legitimate code lines into comments). Recovery:
+  a corpus of known-good lines rebuilt from the session transcript
+  (Writes, Edit before/after text, file reads) plus git HEAD, cut off
+  BEFORE the damage so broken text could not poison it; each damaged
+  line decomposed back into its corpus lines; rustfmt for indentation;
+  ~15 orphaned comment fragments fixed by hand. Verified: 0 errors,
+  0 warnings (an unused-variable warning would betray any statement
+  still trapped in a comment), 20 app tests + all anim-core suites
+  green, owner confirmed the running app. Committed as 6005424 — the
+  two days of work had been sitting uncommitted, which turned a mistake
+  into a crisis.
+  STANDING RULES ADDED (owner's room, NEVER-DO 1 restated with teeth):
+  never run a pattern edit across multiple files; edit named sites only.
+  Commit before any sweep. When a repair is not converging, stop and say
+  so rather than iterating.
+- 2026-08-18 — BATCH TWO redone, named sites only (0 errors, 0 warnings,
+  20 tests):
+  [10] TEN string literals that spanned lines without a `\` continuation
+       — each baked a newline + the next line's indent into the text the
+       artist reads. Found with a stateful detector (string-state carried
+       across lines, raw strings and char literals excluded), then each
+       of the ten reassembled explicitly. Zero remain.
+  [8]  the New Project screen claimed "everything here can be changed
+       later except the paper size" — false in the opposite direction:
+       nothing on that form can be changed later. Now: "Both are fixed
+       once the cut is created."
+  [16] a failed Open on the startup screen did nothing at all — the same
+       dialog reappeared silently. NewProjectForm gained `error`, the
+       reason is carried back from the Open arm, and it prints in Aka
+       under the buttons. Cancelling clears it.
+  [31] the name field's hint could never show (Default pre-filled
+       "Untitled"). Now empty — with a fallback at Create so an untyped
+       name still makes a named cut, not a blank one.
+  [43] the on-twos hint used integer division: 25fps read "12 on twos"
+       (12.5 is right) and 1fps read "1 frames". Now floating-point,
+       singular at 1, and the clause is suppressed below 12fps.
+  [30] the dpi caption implied the value did something; it is stored and
+       read by nothing today, and now says so.
+  [32] the swap-dimensions button wore Icon::Fit, the fit-view mark.

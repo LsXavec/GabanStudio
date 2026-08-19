@@ -1257,9 +1257,7 @@ impl CanvasView {
         );
         if plate::exact() {
             hover.push_str(&format!(
-                "\n[PENCIL SLOT '{}' ·
-        canvas.rs
-        pencil_slot · preset in config.presets]",
+                "\n[PENCIL SLOT '{}' · canvas.rs pencil_slot · preset in config.presets]",
                 p.name
             ));
         }
@@ -2552,10 +2550,8 @@ impl CanvasView {
                             }
                         } else {
                             state.refuse(
-                                "refused — draw on
-                        a
-                        frame the host has exposed
-                        (guests cannot create cels yet)",
+                                "refused — draw on a frame the host has exposed \
+                                 (guests cannot create cels yet)",
                             );
                         }
                         // Our GPU layer keeps the paint until the host's

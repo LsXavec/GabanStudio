@@ -1343,12 +1343,8 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 // 2026-08-17) — this pane is a pointer, not a duplicate.
                 plate::legend(ui, "brush");
                 ui.label(
-                    "the brush deck rides on the canvas
-                now
-                — close
-                this
-                pane
-                (panes menu can reopen it)",
+                    "the brush deck rides on the canvas now — close this pane \
+                     (panes menu can reopen it)",
                 );
             }
             Pane::Presets => self.presets_ui(ui),
@@ -1466,8 +1462,15 @@ impl EditorTabs<'_> {
 
 impl Editor {
     fn from_form(form: &NewProjectForm, rs: Option<&RenderState>) -> Self {
+        // AUDIT [31] follow-on: the name field now starts EMPTY so its
+        // hint is reachable, so an untyped name must still produce a
+        // named cut rather than a blank one.
+        let name = match form.name.trim() {
+            "" => "Untitled".to_string(),
+            n => n.to_string(),
+        };
         let state = AppState::new_project(
-            form.name.clone(),
+            name,
             form.width,
             form.height,
             form.fps,
@@ -1816,8 +1819,16 @@ impl App {
                 Some(Ok(state)) => {
                     self.editor = Some(Editor::from_state(state, self.render_state.as_ref()));
                 }
-                Some(Err(_)) | None => {
-                    // Load failed or cancelled — keep the dialog open.
+                // AUDIT [16]: a failed load used to vanish — the same
+                // dialog reappeared with no reason. Carry the reason back
+                // onto the form so the screen can say what went wrong.
+                Some(Err(msg)) => {
+                    form.error = Some(format!("could not open that project — {msg}"));
+                    self.new_form = Some(form);
+                }
+                None => {
+                    // Cancelled: not a failure, and it clears any old reason.
+                    form.error = None;
                     self.new_form = Some(form);
                 }
             },

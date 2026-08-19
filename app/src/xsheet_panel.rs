@@ -264,10 +264,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     if ui
                         .button(if pinned { "unpin ghost" } else { "pin as ghost" })
                         .on_hover_text(
-                        "ghost
-                        this
-                        drawing on the light box on every frame (Ao, onion strength) — display only, \
-                        never exported, never on the sheet",
+                        "ghost this drawing on the light box on every frame \
+                         (Ao, onion strength) — display only, never exported, \
+                         never on the sheet",
                         )
                         .clicked()
                     {
@@ -824,10 +823,9 @@ fn continuation_handles(
                 Sense::click_and_drag(),
             )
             .on_hover_text(
-                "hold handle — drag out: the hold ends HERE · right-click: stow (retracts like
-            a
-            tape measure — the
-            hold runs on to the next key or the sheet's end)",
+                "hold handle — drag out: the hold ends HERE · right-click: \
+                 stow (retracts like a tape measure — the hold runs on to the \
+                 next key or the sheet's end)",
             );
 
         // While dragging, the handle (and line) follow the pointer live, clamped

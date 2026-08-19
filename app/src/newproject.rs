@@ -26,6 +26,10 @@ pub enum FormAction {
 }
 
 pub struct NewProjectForm {
+    /// AUDIT [16]: why the last Open failed. Without this, picking an
+    /// unreadable project on the startup screen silently redisplayed the
+    /// same form and the artist had no idea what happened.
+    pub error: Option<String>,
     pub name: String,
     pub width: u32,
     pub height: u32,
@@ -37,7 +41,9 @@ pub struct NewProjectForm {
 impl Default for NewProjectForm {
     fn default() -> Self {
         Self {
-            name: "Untitled".to_string(),
+            error: None,
+            // AUDIT [31]: empty, so the "name this cut" hint is reachable.
+            name: String::new(),
             width: DEFAULT_PAPER_W,
             height: DEFAULT_PAPER_H,
             fps: 24,
@@ -62,8 +68,8 @@ pub fn form_ui(
     plate::legend(ui, "new cut");
     ui.label(
         egui::RichText::new(
-            "The paper you will draw on, and how fast it plays.
-    Everything here can be changed later except the paper size.",
+            "The paper you will draw on, and how fast it plays. \
+             Both are fixed once the cut is created.",
         )
         .size(11.5)
         .color(plate::LEGEND),
@@ -115,7 +121,10 @@ pub fn form_ui(
                 {
                     form.preset = 0;
                 }
-                if plate::icon_button(ui, crate::icons::Icon::Fit, "swap", "swap width and height")
+                // AUDIT [32]: this wore Icon::Fit — the fit-view mark.
+                if ui
+                    .button("swap")
+                    .on_hover_text("swap width and height")
                     .clicked()
                 {
                     std::mem::swap(&mut form.width, &mut form.height);
@@ -132,12 +141,24 @@ pub fn form_ui(
                 );
                 // The number an animator actually thinks in: what one
                 // second costs at this rate, on ones and on twos.
+                // AUDIT [43]: integer division read "12 on twos" at 25fps.
+                let twos = form.fps as f32 / 2.0;
+                let twos_txt = if twos.fract().abs() < 0.001 {
+                    format!("{twos:.0}")
+                } else {
+                    format!("{twos:.1}")
+                };
                 ui.label(
-                    egui::RichText::new(format!(
-                        "one second = {} frames · {} on twos",
-                        form.fps,
-                        form.fps / 2
-                    ))
+                    egui::RichText::new(if form.fps == 1 {
+                        "one second = 1 frame".to_string()
+                    } else if form.fps < 12 {
+                        format!("one second = {} frames", form.fps)
+                    } else {
+                        format!(
+                            "one second = {} frames · {twos_txt} drawings on twos",
+                            form.fps
+                        )
+                    })
                     .size(10.5)
                     .color(plate::LEGEND),
                 );
@@ -151,7 +172,9 @@ pub fn form_ui(
                         .suffix(" dpi"),
                 );
                 ui.label(
-                    egui::RichText::new("only matters if this cut goes to paper")
+                    // AUDIT [30]: dpi is stored in the project and read by
+                    // nothing yet — say that rather than implying it acts.
+                    egui::RichText::new("recorded with the project; nothing uses it yet")
                         .size(10.5)
                         .color(plate::LEGEND),
                 );
@@ -181,5 +204,11 @@ pub fn form_ui(
             action = Some(FormAction::Cancel);
         }
     });
+    // AUDIT [16]: a file that would not open contradicts what was asked
+    // for — Aka, and it names the reason.
+    if let Some(err) = &form.error {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(err).color(plate::AKA));
+    }
     action
 }
