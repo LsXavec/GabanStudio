@@ -335,11 +335,20 @@ pub fn import_files(
             continue;
         }
         for p in found {
-            if presets.iter().any(|e| e.name == p.name) {
-                dup += 1;
-            } else {
-                presets.push(p);
-                ok += 1;
+            match presets.iter_mut().find(|e| e.name == p.name) {
+                // A preset imported before the engine parser existed
+                // carries None — re-importing UPGRADES it in place, so
+                // "import installed Krita's brushes" again is the whole
+                // migration.
+                Some(existing) if existing.engine.is_none() && p.engine.is_some() => {
+                    existing.engine = p.engine;
+                    ok += 1;
+                }
+                Some(_) => dup += 1,
+                None => {
+                    presets.push(p);
+                    ok += 1;
+                }
             }
         }
     }
