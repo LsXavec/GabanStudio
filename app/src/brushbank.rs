@@ -449,6 +449,15 @@ pub fn audit_deps(presets: &[BrushPreset]) -> (Vec<String>, Vec<String>) {
     (no_tip, no_grain)
 }
 
+/// Remove every already-imported preset that is not a real paint brush
+/// (the owner's order): Krita erasers and utility engines. Hand-made
+/// presets (no engine) are untouchable here.
+pub fn purge_unreal(presets: &mut Vec<BrushPreset>) -> usize {
+    let before = presets.len();
+    presets.retain(|p| !crate::kpp::is_unreal(p));
+    before - presets.len()
+}
+
 /// Every bank present, with its preset count. Bankless presets group
 /// under "" (shown as "unsorted").
 pub fn banks(presets: &[BrushPreset]) -> Vec<(String, usize)> {

@@ -2267,7 +2267,8 @@ impl Editor {
                 .pick_files()
             {
                 let r = crate::brushbank::import_any(&paths, presets);
-                if r.ok > 0 {
+                let purged = crate::brushbank::purge_unreal(presets);
+                if r.ok > 0 || purged > 0 {
                     *presets_dirty = true;
                 }
                 if r.ok == 0 && r.failed > 0 {
@@ -2296,7 +2297,8 @@ impl Editor {
                     p.bank = "krita".into();
                 }
             }
-            if ok > 0 {
+            let purged = crate::brushbank::purge_unreal(presets);
+            if ok > 0 || purged > 0 {
                 *presets_dirty = true;
             }
             if ok == 0 && dup == 0 {
@@ -2305,7 +2307,7 @@ impl Editor {
                 ));
             } else {
                 self.state.status = format!(
-                    "imported {ok} Krita brush(es) · {dup} duplicate(s) · {failed} skipped"
+                    "imported {ok} Krita brush(es) · {dup} skipped · {failed} unreadable · {purged} unreal removed"
                 );
             }
         }

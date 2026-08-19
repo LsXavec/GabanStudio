@@ -165,6 +165,7 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
         density,
         randomness,
         angle_deg,
+        eraser: param_bool(xml, "EraserMode") == Some(true),
         grain_key,
         grain_scale,
         grain_strength,
@@ -299,6 +300,36 @@ pub fn parse_bundle_with_thumbs(bytes: &[u8]) -> Vec<BrushPreset> {
     out
 }
 
+/// Engines that are TOOLS wearing a brush costume (clone, move, blur,
+/// grid…) — not paint. Imported as painters they are compatibility
+/// problem makers (owner's order, 2026-08-19): skipped at import,
+/// purged from existing configs by brushbank::purge_unreal.
+pub const UTILITY_ENGINES: [&str; 8] = [
+    "duplicate",
+    "deformbrush",
+    "filter",
+    "experimentbrush",
+    "gridbrush",
+    "dynabrush",
+    "particlebrush",
+    "tangentnormal",
+];
+
+/// A preset that is not a real paint brush here: a Krita ERASER preset
+/// (EraserMode — our eraser is a tool, not a preset) or a utility
+/// engine.
+pub fn is_unreal(p: &BrushPreset) -> bool {
+    let Some(e) = &p.engine else { return false };
+    if e.eraser {
+        return true;
+    }
+    if UTILITY_ENGINES.contains(&e.engine.as_str()) {
+        return true;
+    }
+    // Erasers imported before the eraser flag existed are named for it.
+    e.engine == "paintbrush" && p.name.to_lowercase().contains("eraser")
+}
+
 /// Import .kpp/.bundle files into `presets` (skips duplicates by name).
 /// Returns (imported, skipped-duplicates, failed-files).
 pub fn import_files(
@@ -335,6 +366,12 @@ pub fn import_files(
             continue;
         }
         for p in found {
+            // Owner's order: erasers and tool-costume engines never
+            // enter the library.
+            if is_unreal(&p) {
+                dup += 1;
+                continue;
+            }
             match presets.iter_mut().find(|e| e.name == p.name) {
                 // A preset imported before the engine parser existed
                 // carries None — re-importing UPGRADES it in place, so
@@ -735,5 +772,58 @@ mod tests {
                 println!("  no tip file for '{}' (key {key})", p.name);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod unreal_tests {
+    use super::*;
+    use crate::config::EngineDef;
+
+    fn preset(name: &str, engine: &str, eraser: bool) -> BrushPreset {
+        BrushPreset {
+            name: name.into(),
+            engine: Some(EngineDef {
+                engine: engine.into(),
+                eraser,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn erasers_and_utilities_are_unreal_paint_brushes_are_not() {
+        assert!(is_unreal(&preset("Airbrush_eraser", "paintbrush", true)));
+        assert!(is_unreal(&preset("Clone_tool", "duplicate", false)));
+        assert!(is_unreal(&preset("Move_tool", "deformbrush", false)));
+        assert!(is_unreal(&preset("FX_blur", "filter", false)));
+        // Pre-flag erasers are caught by name.
+        assert!(is_unreal(&preset("j)_Eraser_Soft", "paintbrush", false)));
+        // Real paint stays.
+        assert!(!is_unreal(&preset("Ink-2_Fineliner", "paintbrush", false)));
+        assert!(!is_unreal(&preset("Basic_mix", "colorsmudge", false)));
+        // Hand-made presets (no engine) are untouchable.
+        assert!(!is_unreal(&BrushPreset { name: "eraser-ish".into(), ..Default::default() }));
+    }
+
+    #[test]
+    fn krita_import_yields_no_unreal_presets() {
+        let paths = installed_krita_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let mut presets = Vec::new();
+        import_files(&paths, &mut presets);
+        let bad: Vec<&str> = presets
+            .iter()
+            .filter(|p| is_unreal(p))
+            .map(|p| p.name.as_str())
+            .collect();
+        assert!(bad.is_empty(), "unreal presets imported: {bad:?}");
+        assert!(
+            !presets.iter().any(|p| p.name.to_lowercase().contains("eraser")),
+            "an eraser preset slipped through"
+        );
     }
 }

@@ -90,3 +90,14 @@ dialog → import_files → presets_dirty). Commit when green (his word).
   takes all formats. Krita scan tags bank "krita".
   QUEUED NEXT: THE SHIPPING ROOM (installer + GitHub
   relaunch-to-update), then his brush-creation project.
+- 2026-08-19 — OWNER ORDER, verbatim: "there is some brushes that are
+  alpha erase brushes again remove anything that may not be a real
+  brush need or compatibility broblem maker." THE UNREAL PURGE:
+  EraserMode presets (our eraser is a TOOL, not a preset) and the
+  utility engines (duplicate/deformbrush/filter/experimentbrush/
+  gridbrush/dynabrush/particlebrush/tangentnormal) are skipped at
+  import and purged from existing configs by every import drain — his
+  next import click is the whole migration. Pre-flag erasers caught by
+  name on paintbrush engines only; hand-made presets untouchable.
+  Tested: classifier + a real-install import yields zero unreal
+  presets. 34 tests, 0 warnings.

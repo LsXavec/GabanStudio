@@ -505,6 +505,10 @@ pub struct EngineDef {
     /// Base tip angle, degrees (Brush@angle).
     #[serde(default)]
     pub angle_deg: f32,
+    /// Krita EraserMode — the preset ERASES. Never imported (our eraser
+    /// is a tool); the flag exists so the classifier can see it.
+    #[serde(default)]
+    pub eraser: bool,
     /// Paper grain: key into the brush_grains cache + scale + strength.
     #[serde(default)]
     pub grain_key: Option<String>,
@@ -1429,7 +1433,8 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config) {
             .pick_files()
     {
         let r = crate::brushbank::import_any(&paths, &mut config.presets);
-        if r.ok > 0 {
+        let purged = crate::brushbank::purge_unreal(&mut config.presets);
+        if r.ok > 0 || purged > 0 {
             config.save();
         }
         config.last_import_note = format!(
