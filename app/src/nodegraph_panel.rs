@@ -26,8 +26,11 @@ fn kind_color(kind: &NodeKind) -> Color32 {
         NodeKind::DrawingSource { .. } => Color32::from_rgb(83, 137, 196),
         NodeKind::Solid { .. } => Color32::from_rgb(139, 141, 131),
         NodeKind::ImageSource { .. } => Color32::from_rgb(228, 225, 214),
-        NodeKind::Transform { .. } => Color32::from_rgb(100, 102, 94),
-        NodeKind::Blend { .. } => Color32::from_rgb(60, 99, 141),
+        // AUDIT [28]: these two hues are in no ratified palette. Node
+        // identity comes from tokens now — Legend for an operation, Ao
+        // for the one that composites (continuity), as elsewhere.
+        NodeKind::Transform { .. } => crate::plate::LEGEND,
+        NodeKind::Blend { .. } => crate::plate::AO,
         // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
         // means refusal or destruction, and the graph's result is
         // neither. Its identity is carried by its Struck edge instead.
@@ -191,7 +194,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 state.graph_set_output(nv.id);
                 ui.close();
             }
-            if ui.button("remove node").clicked() {
+            // AUDIT [35]: destruction is found by feel — a held guard —
+            // before it is read, even when undoable.
+            if crate::plate::danger(ui, "REMOVE NODE") {
                 state.graph_remove_node(nv.id);
                 ui.close();
             }

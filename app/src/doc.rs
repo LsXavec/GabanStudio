@@ -831,7 +831,7 @@ impl AppState {
             return;
         };
         if self.cut().drawing(id).map(|d| d.layers.len()) <= Some(1) {
-            self.status = "a cel keeps at least one layer".into();
+            self.refuse("refused — a cel keeps at least one layer");
             return;
         }
         let at = self.at();
@@ -893,14 +893,14 @@ impl AppState {
     /// if none). "empty" (no rank) inserts above the active layer.
     pub fn layer_add_preset(&mut self, name: &str) {
         let Some(id) = self.own_drawing_id() else {
-            self.status = "no cel on this frame — draw or press E first".into();
+            self.refuse("refused — no cel on this frame (draw, or press E)");
             return;
         };
         let Some(d) = self.cut().drawing(id) else {
             return;
         };
         if d.layers.len() >= 8 {
-            self.status = "layer cap (8) reached on this cel".into();
+            self.refuse("refused — this cel already has 8 layers");
             return;
         }
         let index = match Self::preset_rank(name) {
@@ -1132,7 +1132,7 @@ impl AppState {
     /// if this frame doesn't already have its own key (don't overwrite a cel).
     pub fn new_drawing_at_frame(&mut self) {
         if self.own_key_drawing().is_some() {
-            self.status = "this frame already has a drawing".into();
+            self.refuse("refused — this frame already has a drawing");
             return;
         }
         let at = self.at();
@@ -1168,7 +1168,7 @@ impl AppState {
     /// Expose the selected library drawing at the current frame (a hold key).
     pub fn expose_selected(&mut self) {
         let Some(id) = self.view.selected_drawing else {
-            self.status = "select a drawing in the library first".into();
+            self.refuse("refused — pick a drawing in the library first");
             return;
         };
         let at = self.at();
@@ -1553,7 +1553,7 @@ impl AppState {
     /// Remove the selected (active) column. Keeps at least one column.
     pub fn remove_active_column(&mut self) {
         if self.cut().xsheet.columns.len() <= 1 {
-            self.status = "can't remove the last column".into();
+            self.refuse("refused — a cut keeps at least one column");
             return;
         }
         let at = self.at();
@@ -1657,7 +1657,7 @@ impl AppState {
             .cut(scene, cut)
             .and_then(|c| c.xsheet.columns.first().map(|col| (col.id, c.name.clone())));
         let Some((column, name)) = found else {
-            self.status = "that cut has no columns yet — add one first".into();
+            self.refuse("refused — that cut has no columns yet (add one first)");
             return;
         };
         self.view.scene = scene;
@@ -1678,7 +1678,7 @@ impl AppState {
         let n = self.engine.project.scenes.len() + 1;
         let scene = self.engine.add_scene(format!("SC{n:02}"));
         let Ok(cut) = self.engine.add_cut(scene, "CUT01", 48) else {
-            self.status = "new scene failed".into();
+            self.refuse("refused — the scene could not be created");
             return;
         };
         if let Err(e) = self.engine.add_column(CutRef { scene, cut }, "A") {
@@ -1700,7 +1700,7 @@ impl AppState {
             .map(|s| s.cuts.len() + 1)
             .unwrap_or(1);
         let Ok(cut) = self.engine.add_cut(scene, format!("CUT{n:02}"), 48) else {
-            self.status = "new cut failed".into();
+            self.refuse("refused — the cut could not be created");
             return;
         };
         if let Err(e) = self.engine.add_column(CutRef { scene, cut }, "A") {

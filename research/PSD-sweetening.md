@@ -205,3 +205,35 @@ and ranked by what the owner notices in daily drawing use.
   flipped on screen and never reached disk. Both latch kinds now report
   it. This is why converted controls need their call sites read, not
   just their call shape matched.
+- 2026-08-18 — BATCH FIVE, twelve mediums (0 errors, 0 warnings, 20
+  tests):
+  [20] THREE guards refused mid-stroke by returning in SILENCE — press V
+       or B with the pen down and the key looked broken rather than
+       refused. Now they refuse out loud.       LAW: the Warning Law.
+  [21] NINE plain refusals were written to the chatter lane, so the
+       machine's NO read as a grey remark that fades in 4s: the
+       last-layer guard, no-cel-on-this-frame, the 8-layer cap, frame
+       already has a drawing, no library selection, the last-column
+       guard, a cut with no columns, and both creation failures.
+                                                LAW: the colour law.
+  [34] Two of those additionally carried an emoji and named an internal
+       ("the raster engine"); they now name the switch the artist sees
+       (Settings › Performance).                LAW: writing from the
+       artist's side of the screen.
+  [22] The startup screen was the ONLY surface with no plate grain — a
+       stock Frame::group on flat Graphite, and the first thing anyone
+       sees. Now the plate, with the form seated in a Well.
+  [27] Glyph marks left the menus (a FULLWIDTH PLUS and a heavy X) —
+       exactly the class icons.rs exists to end. The remaining ✕ in the
+       tree are comments about OS window buttons.
+  [28] Two node-graph colours belonged to no ratified palette. Node
+       identity now comes from tokens: Legend for an operation, Ao for
+       the one that composites.                 LAW: the colour law.
+  [35] `remove node` was a plain one-click button; it is undoable, so
+       not data loss — but every other removal in the app is held, and
+       destruction should be found by feel before it is read.
+  NOTE: two scripted passes crashed mid-loop printing ✕ to a cp1252
+  console, having written only some files. Harmless because each fix is
+  an exact named replacement (re-running reports MISS for what already
+  landed) — but the lesson is the same as the incident's: a partial
+  write is only safe when every edit is idempotent and named.

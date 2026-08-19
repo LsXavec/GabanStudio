@@ -1809,9 +1809,14 @@ impl App {
                 });
         } else {
             egui::CentralPanel::default().show(ui, |ui| {
+                // AUDIT [22]: the only surface in the app with no plate
+                // grain — and the first one an artist ever sees.
+                plate::surface(ui);
                 ui.vertical_centered(|ui| {
                     ui.add_space(80.0);
-                    egui::Frame::group(ui.style())
+                    egui::Frame::new()
+                        .fill(plate::WELL)
+                        .stroke(egui::Stroke::new(1.0, plate::legend_dim()))
                         .inner_margin(24.0)
                         .show(ui, |ui| {
                             ui.set_max_width(440.0);

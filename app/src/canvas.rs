@@ -580,7 +580,10 @@ impl CanvasView {
             return;
         }
         if self.touch_active || !self.current.is_empty() || self.raster_stroke_done {
-            return; // mid-stroke: refuse silently, same as other guards
+            // AUDIT [20]: this returned in silence — the key looked
+            // broken rather than refused.
+            state.refuse("refused — finish the stroke first");
+            return;
         }
         // Leaving Select for ANY tool lands the floating transform.
         if self.tool == CanvasTool::Select && self.floating.is_some() {
@@ -672,7 +675,12 @@ impl CanvasView {
             return false;
         }
         if !self.raster {
-            state.status = "the select tool needs the raster engine (🖌)".into();
+            // AUDIT [34]: an emoji, in the grey lane, naming an
+            // internal instead of the switch in Settings.
+            state.refuse(
+                "refused — the select tool needs the GPU brush engine \
+                 (Settings › Performance)",
+            );
             return false;
         }
         if state.active_layer_props().is_some_and(|p| !p.visible) {
@@ -3563,7 +3571,10 @@ impl CanvasView {
             return;
         }
         if !self.raster {
-            state.status = "the fill tool needs the raster engine (🖌)".into();
+            state.refuse(
+                "refused — the fill tool needs the GPU brush engine \
+                 (Settings › Performance)",
+            );
             return;
         }
         if state.active_layer_props().is_some_and(|p| !p.visible) {

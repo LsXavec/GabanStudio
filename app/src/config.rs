@@ -1017,7 +1017,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                             Some(RebindCapture::new(action))
                         };
                     }
-                    if ui.button("✕").on_hover_text("unbind").clicked() {
+                    if ui.button("unbind").clicked() {
                         config.binding_mut(action).chord = None;
                         config.save();
                         if capturing_action == Some(action) {
@@ -1662,7 +1662,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        if ui.button("＋ new preset").clicked() {
+        if ui.button("new preset").clicked() {
             config.presets.push(BrushPreset::default());
             changed = true;
         }
