@@ -829,6 +829,10 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub session: SessionConfig,
+    /// PSD-shipping: the GitHub repo ("owner/repo") whose latest release
+    /// is the published-build channel. Empty = updates off.
+    #[serde(default)]
+    pub update_repo: String,
     #[serde(default)]
     pub pen: PenConfig,
     #[serde(default)]
@@ -853,6 +857,7 @@ impl Default for Config {
             perf: PerfConfig::default(),
             ui: UiConfig::default(),
             session: SessionConfig::default(),
+            update_repo: String::new(),
             pen: PenConfig::default(),
             layers: LayersConfig::default(),
             presets: default_presets(),
@@ -961,6 +966,8 @@ pub fn settings_window(
     hosting: bool,
     joined: bool,
     peer_names: &[String],
+    update_note: &str,
+    check_now: &mut bool,
 ) {
     if !*open {
         *capturing = None;
@@ -1049,7 +1056,9 @@ pub fn settings_window(
                     SettingsCategory::Layers => layers_page(ui, config),
                     SettingsCategory::Brushes => brushes_page(ui, config),
                     SettingsCategory::UiFeatures => ui_features_page(ui, config),
-                    SettingsCategory::Plugins => plugins_page(ui, config),
+                    SettingsCategory::Plugins => {
+                        plugins_page(ui, config, update_note, check_now)
+                    }
                     SettingsCategory::Session => session_page(
                         ui,
                         config,
@@ -1406,8 +1415,45 @@ fn session_page(
 /// PLUGINS (PSD-brush-library, owner amendment 2026-08-19): brush
 /// banks — every imported preset carries its source file as its BANK;
 /// banks remove as one; the import door takes the modern formats too.
-fn plugins_page(ui: &mut egui::Ui, config: &mut Config) {
+fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check_now: &mut bool) {
     crate::plate::legend(ui, "plugins");
+    ui.separator();
+    // PSD-shipping: the published-build channel.
+    crate::plate::legend(ui, "updates");
+    ui.horizontal(|ui| {
+        ui.label("GitHub repo");
+        if ui
+            .add(
+                egui::TextEdit::singleline(&mut config.update_repo)
+                    .desired_width(220.0)
+                    .hint_text("owner/repo"),
+            )
+            .on_hover_text(
+                "the repo whose LATEST RELEASE is the published build — \
+                 empty turns update checks off",
+            )
+            .changed()
+        {
+            config.save();
+        }
+        if ui.button("check now").clicked() {
+            *check_now = true;
+        }
+    });
+    ui.label(
+        egui::RichText::new(format!(
+            "this build: v{}{}",
+            env!("CARGO_PKG_VERSION"),
+            if update_note.is_empty() {
+                String::new()
+            } else {
+                format!(" · {update_note}")
+            }
+        ))
+        .size(11.0)
+        .color(crate::plate::legend_dim()),
+    );
+    ui.add_space(8.0);
     ui.separator();
     crate::plate::legend(ui, "brush banks");
     ui.label(

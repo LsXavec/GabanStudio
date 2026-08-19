@@ -24,6 +24,7 @@ mod palette_panel;
 mod plate;
 mod runs;
 mod uidump;
+mod update;
 mod viewer;
 mod workspace;
 mod xsheet_panel;
@@ -159,6 +160,11 @@ struct App {
     config: Config,
     settings_open: bool,
     settings_category: SettingsCategory,
+    /// PSD-shipping: the published-build channel.
+    update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateEvent>>,
+    update_ready: Option<(String, String, u64)>,
+    update_swap: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    update_note: String,
     /// In-progress rebind capture (Settings).
     capturing: Option<RebindCapture>,
     /// Active GPU backend name (for the Performance page's Renderer row).
@@ -306,6 +312,93 @@ impl App {
     }
 
     /// Once per frame: drain net events, apply snapshots, push presence.
+    /// PSD-shipping: read the updater threads' channels; light the
+    /// lamp; when a swap lands, relaunch through the devloop's proven
+    /// session-carry (NEVER-DO 2).
+    fn update_pump(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.update_rx
+            && let Ok(ev) = rx.try_recv()
+        {
+            self.update_rx = None;
+            match ev {
+                crate::update::UpdateEvent::Ready { tag, url, size } => {
+                    self.update_note = format!("update {tag} available");
+                    self.update_ready = Some((tag, url, size));
+                }
+                crate::update::UpdateEvent::UpToDate(tag) => {
+                    self.update_note = format!(
+                        "up to date (v{} · latest release {tag})",
+                        crate::update::CURRENT_VERSION
+                    );
+                }
+                crate::update::UpdateEvent::Note(n) => self.update_note = n,
+            }
+        }
+        if let Some(rx) = &self.update_swap
+            && let Ok(result) = rx.try_recv()
+        {
+            self.update_swap = None;
+            match result {
+                Ok(new_exe) => {
+                    // The new build is seated. Save the session exactly as
+                    // the devloop does, then hand over.
+                    self.relaunch_into(new_exe, ctx);
+                }
+                Err(why) => {
+                    self.update_note = format!("update failed — {why}");
+                    if let Some(ed) = &mut self.editor {
+                        ed.state.refuse(format!("update refused — {why}"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The handover into the freshly seated build: autosave + session
+    /// (the devloop's own machinery), spawn with RESUME armed, exit.
+    fn relaunch_into(&mut self, new_exe: std::path::PathBuf, ctx: &egui::Context) {
+        let Some(editor) = &mut self.editor else {
+            // No document open — nothing to carry; just hand over.
+            let _ = std::process::Command::new(&new_exe)
+                .env("ANIMSTUDIO_RESUME", "1")
+                .spawn();
+            std::process::exit(0);
+        };
+        let Some(target) = devloop::autosave_target() else {
+            self.update_note = "update seated — restart the app to finish".into();
+            return;
+        };
+        editor
+            .state
+            .palettes
+            .save_into(&mut editor.state.engine.project);
+        if let Err(e) = editor.state.engine.save(&target) {
+            self.update_note = format!("update seated, but the autosave failed ({e}) — save your work and restart");
+            return;
+        }
+        let session = devloop::Session {
+            pending: true,
+            project: Some(target),
+            origin: editor.state.file_path.clone(),
+            frame: editor.state.view.frame,
+            written_ms: devloop::session_stamp(),
+        };
+        if let Err(e) = session.save() {
+            self.update_note = format!("update seated, but the session write failed ({e}) — restart by hand");
+            return;
+        }
+        ctx.request_repaint();
+        match std::process::Command::new(&new_exe)
+            .env("ANIMSTUDIO_RESUME", "1")
+            .spawn()
+        {
+            Ok(_) => std::process::exit(0),
+            Err(e) => {
+                self.update_note = format!("could not start the new build ({e})");
+            }
+        }
+    }
+
     fn session_pump(&mut self, ctx: &egui::Context) {
         let mut events: Vec<net::NetEvent> = Vec::new();
         match &self.session {
@@ -624,8 +717,24 @@ impl App {
             render_state: cc.wgpu_render_state.clone(),
             editor: restored,
             new_form: None,
+            update_rx: {
+                // The dev channel wins: an armed dev build never
+                // self-updates (NEVER-DO 4). Sweep any stepped-aside
+                // binary — this launch worked (NEVER-DO 1).
+                crate::update::sweep_old();
+                if !devloop::armed() && !config.update_repo.trim().is_empty() {
+                    Some(crate::update::spawn_check(
+                        config.update_repo.trim().to_string(),
+                    ))
+                } else {
+                    None
+                }
+            },
             config,
             settings_open: false,
+            update_ready: None,
+            update_swap: None,
+            update_note: String::new(),
             settings_category: SettingsCategory::default(),
             capturing: None,
             backend,
@@ -1217,6 +1326,10 @@ struct Editor {
     request_new: bool,
     /// Set when the user clicks "settings".
     request_settings: bool,
+    /// PSD-shipping: UPDATE READY clicked in the Foot (App acts on it).
+    request_update: bool,
+    /// The ready update's tag, threaded from the App for the Foot lamp.
+    update_tag: Option<String>,
     /// Set by the canvas's INPUT plate field: open Settings at the pen page.
     request_settings_pen: bool,
     /// The docking shell: every UI element is a movable pane over ONE document;
@@ -1509,6 +1622,8 @@ impl Editor {
             graph,
             request_new: false,
             request_settings: false,
+            request_update: false,
+            update_tag: None,
             request_settings_pen: false,
             // Every project opens in the Drawing room — the daily driver
             // and the spine's canonical default.
@@ -1544,6 +1659,8 @@ impl Editor {
             paint,
             graph,
             request_new: false,
+            request_update: false,
+            update_tag: None,
             request_settings: false,
             request_settings_pen: false,
             dock: Stage::Drawing.dock(),
@@ -1640,6 +1757,7 @@ impl eframe::App for App {
                 )),
                 net::Session::Idle => None,
             };
+            editor.update_tag = self.update_ready.as_ref().map(|(t, _, _)| t.clone());
             editor.ui(
                 ui,
                 &pen,
@@ -1718,6 +1836,7 @@ impl eframe::App for App {
             .values()
             .map(|p| p.name.clone())
             .collect();
+        let mut check_now = false;
         let hosting = matches!(self.session, net::Session::Hosting(_));
         let joined = matches!(self.session, net::Session::Joined(_));
         config::settings_window(
@@ -1733,9 +1852,18 @@ impl eframe::App for App {
             hosting,
             joined,
             &peer_names,
+            &self.update_note,
+            &mut check_now,
         );
         if let Some(a) = session_action {
             self.session_act(a);
+        }
+        // PSD-shipping: "check now" from the Plugins page.
+        if check_now && !self.config.update_repo.trim().is_empty() {
+            self.update_note = "checking…".into();
+            self.update_rx = Some(crate::update::spawn_check(
+                self.config.update_repo.trim().to_string(),
+            ));
         }
         // THE CONNECT WINDOW: the 2FA code lives here and nowhere else.
         if let Some((addr, code)) = config::connect_window(
@@ -1749,6 +1877,26 @@ impl eframe::App for App {
             self.session_join(addr, code);
         }
         self.session_pump(ui.ctx());
+        // PSD-shipping: the published-build channel (a thread talks to
+        // GitHub; this only reads channels — never blocks the pen).
+        self.update_pump(ui.ctx());
+        // The Foot's UPDATE READY click: start the download+swap thread,
+        // guarded like a devloop handover (no stroke, no dialogs).
+        if let Some(ed) = &mut self.editor
+            && std::mem::take(&mut ed.request_update)
+        {
+            let busy = ed.canvas.stroke_active() || self.settings_open || self.new_form.is_some();
+            if busy {
+                ed.state
+                    .refuse("refused — finish the stroke / close dialogs, then update");
+            } else if let Some((_tag, url, size)) = self.update_ready.clone()
+                && self.update_swap.is_none()
+            {
+                self.update_note = "downloading the published build…".into();
+                ed.state.status = "downloading the published build…".into();
+                self.update_swap = Some(crate::update::spawn_swap(url, size));
+            }
+        }
 
         // Optional FPS overlay.
         if self.config.perf.show_fps {
@@ -2138,6 +2286,28 @@ impl Editor {
         // PERSISTENT lane: history as a tape counter, and the
         // pen diagnostics (fixed-width, never in a toolbar).
         ui.add_space(8.0);
+        // PSD-shipping: UPDATE READY — the published build moved past
+        // this one. Tally lamp; the click IS the relaunch (session
+        // carried like a dev-loop restart).
+        if let Some(tag) = self.update_tag.clone() {
+            if ui
+                .button(
+                    egui::RichText::new(format!("relaunch to update ({tag})"))
+                        .size(10.5)
+                        .color(plate::STRUCK),
+                )
+                .on_hover_text(
+                    "download the published build and relaunch — your session                      carries over exactly like a dev-loop restart",
+                )
+                .clicked()
+            {
+                self.request_update = true;
+            }
+            let (dot, _) =
+                ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().circle_filled(dot.center(), 3.5, plate::TALLY);
+            ui.separator();
+        }
         // THE ROOM LAMP (session): being in a room is a
         // CONFIGURATION — a plate fact, never Aka. It names
         // the role and who is here, so the artist never opens

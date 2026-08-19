@@ -217,7 +217,11 @@ pub fn install_fonts(ctx: &egui::Context) {
         use egui::TextStyle;
         // Debug-build red boxes on unaligned text read as Aka refusals —
         // red that is not Aka is a colour-law violation. Off.
-        style.debug.show_unaligned = false;
+        // egui's debug field exists only in debug builds.
+        #[cfg(debug_assertions)]
+        {
+            style.debug.show_unaligned = false;
+        }
         style
             .text_styles
             .insert(TextStyle::Body, FontId::new(11.5, FontFamily::Proportional));

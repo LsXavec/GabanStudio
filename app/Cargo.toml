@@ -23,6 +23,7 @@ rodio = { version = "0.21", default-features = false, features = ["playback"] }
 sha1 = "0.11.0"
 hmac = "0.13.0"
 rand = "0.10.2"
+ureq = "3.4.0"
 
 [dev-dependencies]
 # WGSL shader-string validation in tests: cargo check can't see inside the

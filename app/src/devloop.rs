@@ -45,6 +45,12 @@ pub fn armed() -> bool {
     std::env::var_os("ANIMSTUDIO_DEVLOOP").is_some()
 }
 
+/// PSD-shipping (2026-08-19): the update relaunch reuses THIS session
+/// machinery. RESUME arms only the restore path — never the watcher.
+pub fn resume_armed() -> bool {
+    std::env::var_os("ANIMSTUDIO_RESUME").is_some()
+}
+
 /// The watched binary's mtime, sampled at the TOP of `main` — before window and
 /// GPU init, which take hundreds of ms and are long enough for a rebuild to
 /// land unnoticed. Sampling it inside `App::new` (after that init) meant a
@@ -112,7 +118,7 @@ impl Session {
     /// the only pointer to the work away and started with an empty editor.
     /// The caller clears it once the document is genuinely restored.
     pub fn peek_pending() -> Option<Self> {
-        if !armed() {
+        if !armed() && !resume_armed() {
             return None;
         }
         let p = session_path()?;
