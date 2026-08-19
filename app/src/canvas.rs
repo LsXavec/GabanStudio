@@ -4107,9 +4107,12 @@ impl CanvasView {
     }
 }
 
-/// RETAS-convention trace-line colour for a layer name (orientation aid):
-/// line = near-white ink, color = green, shadow = blue, highlight = red,
-/// correction = orange, rough = the blue-pencil convention.
+/// Cel-layer identity ink for a role name (orientation aid), under the
+/// IDENTITY AMENDMENT (spec §3.5, owner-ratified 2026-08-18): the
+/// pipeline's own pencil code in the plate's own tokens — rough is the
+/// ao-enpitsu, correction is the sakkan's aka. Identity is always a
+/// small fill beside the role's NAME, never text or an edge, so it can
+/// never be read as a refusal or a ghost.
 pub fn layer_chip_color(name: &str) -> Color32 {
     match name {
         // Layer identity in the plate's own inks (no hue outside the eight

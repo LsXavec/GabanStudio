@@ -106,6 +106,18 @@ Each colour has exactly the meanings in its row. Any other use is a bug with a n
    - "layer hidden" — a configuration you chose. **Not Aka.** A struck-through row at `LEGEND_DIM`.
    - "refused — finish the stroke first" — the machine overruled your hand. **Aka**, and it flashes the canvas edge.
    - "erase cel", "delete layer", "lift key" — destruction. **Aka** edge + guarded press-hold.
+
+5. **THE IDENTITY AMENDMENT (ratified by the owner, 2026-08-18 — "amend
+   the law").** Cel-layer IDENTITY is a sanctioned use of the pencil
+   inks: a `rough` layer marked in **Ao** and a `correction` layer in
+   **Aka** is the pipeline's own colour code — the blue pencil and the
+   sakkan's red are the trade's language, and this direction exists to
+   speak it. Bounds, so identity can never be mistaken for a signal:
+   identity is always a SMALL FILL (the role dot / a menu tint) seated
+   beside the role's NAME; it is never text, never an edge, never a
+   flash, and never worn by a control that acts. Refusal keeps its
+   exclusive claim on Aka text and edges; continuity keeps its claim on
+   Ao lines and ghosts. The dot names; the ink still means.
    - "painted", "exporting…", "room: genga" — chatter. Legend, decaying.
 
    There is **no green OK lamp anywhere**. On an instrument, health is shown by a meter moving, not by a lamp saying fine. Pressure health is shown by the pen's line varying — which is the work itself.

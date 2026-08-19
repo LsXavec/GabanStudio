@@ -274,3 +274,15 @@ and ranked by what the owner notices in daily drawing use.
   [48]/[49] capitalisation conventions across menus and the New Project
   card's off-scale spacing were folded into the passes above where they
   overlapped; the remaining polish there is cosmetic and unranked.
+- 2026-08-18 — [50] RULED by the owner: "amend the law". THE IDENTITY
+  AMENDMENT is now spec §3.5: cel-layer identity is a sanctioned use of
+  the pencil inks — rough in Ao, correction in Aka IS the pipeline's
+  own colour code, and the direction exists to speak it. Bounds that
+  keep identity unconfusable with signal: always a small FILL beside
+  the role's NAME; never text, never an edge, never a flash, never on
+  a control that acts. Refusal keeps exclusive claim on Aka text/edges;
+  continuity keeps Ao lines/ghosts. layer_chip_color's stale doc
+  comment (it still described the RETAS green the body never returns)
+  now cites the amendment. With this ruling, ALL 50 verified findings
+  of the sweetening audit are closed: 19 high, 16 medium, 15 low —
+  49 fixed, 1 ruled. The pass is COMPLETE.
