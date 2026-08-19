@@ -2252,6 +2252,30 @@ impl Editor {
         ui_lock: bool,
         room: Option<(String, Vec<String>)>,
     ) {
+        // THE BRUSH LIBRARY (PSD-brush-library): the rail raised the
+        // flag; the import runs HERE, where presets are mutable, and
+        // never mid-stroke (NEVER-DO 3).
+        if self.canvas.request_brush_import && !self.canvas.stroke_active() {
+            self.canvas.request_brush_import = false;
+            if let Some(paths) = rfd::FileDialog::new()
+                .add_filter("Krita brushes", &["kpp", "bundle"])
+                .pick_files()
+            {
+                let (ok, dup, failed) = crate::kpp::import_files(&paths, presets);
+                if ok > 0 {
+                    *presets_dirty = true;
+                }
+                if ok == 0 && failed > 0 {
+                    self.state.refuse(format!(
+                        "refused — none of those files imported ({failed} unreadable)"
+                    ));
+                } else {
+                    self.state.status = format!(
+                        "imported {ok} brush(es) · {dup} duplicate(s) · {failed} failed"
+                    );
+                }
+            }
+        }
         self.poll_export();
         self.export_progress_window(ui.ctx());
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);

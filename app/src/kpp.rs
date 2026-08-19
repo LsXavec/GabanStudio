@@ -62,8 +62,9 @@ pub fn parse_kpp(bytes: &[u8], fallback_name: &str) -> Option<BrushPreset> {
     })
 }
 
-/// Extract every .kpp preset from a Krita .bundle (a zip archive).
-pub fn parse_bundle(bytes: &[u8]) -> Vec<BrushPreset> {
+/// Bundle extraction that also fills the thumbnail cache — each .kpp
+/// entry is its own icon.
+pub fn parse_bundle_with_thumbs(bytes: &[u8]) -> Vec<BrushPreset> {
     let mut out = Vec::new();
     let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return out;
@@ -86,6 +87,7 @@ pub fn parse_bundle(bytes: &[u8]) -> Vec<BrushPreset> {
             .unwrap_or(&name)
             .trim_end_matches(".kpp");
         if let Some(p) = parse_kpp(&buf, stem) {
+            save_thumb(&p.name, &buf);
             out.push(p);
         }
     }
@@ -113,8 +115,14 @@ pub fn import_files(
             .map(|e| e.to_ascii_lowercase().to_string_lossy().to_string())
             .unwrap_or_default();
         let found: Vec<BrushPreset> = match ext.as_str() {
-            "kpp" => parse_kpp(&bytes, &stem).into_iter().collect(),
-            "bundle" => parse_bundle(&bytes),
+            "kpp" => {
+                let found: Vec<BrushPreset> = parse_kpp(&bytes, &stem).into_iter().collect();
+                if let Some(p) = found.first() {
+                    save_thumb(&p.name, &bytes);
+                }
+                found
+            }
+            "bundle" => parse_bundle_with_thumbs(&bytes),
             _ => Vec::new(),
         };
         if found.is_empty() {
@@ -131,6 +139,91 @@ pub fn import_files(
         }
     }
     (ok, dup, failed)
+}
+
+/// The on-disk thumbnail cache (PSD-brush-library NEVER-DO 2: cache,
+/// never config). One 64px PNG per preset, keyed by sanitized name.
+pub fn thumb_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("APPDATA")?;
+    let dir = std::path::PathBuf::from(base)
+        .join("AnimStudio")
+        .join("brush_thumbs");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// A preset name as a cache filename: anything shady becomes '_'.
+pub fn thumb_key(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
+/// Decode the .kpp's own PNG (the preset IS its icon in Krita), downscale
+/// to a 64px max side, and write it into the cache. Unsupported pixel
+/// formats simply skip — the rail paints a dab fallback, never tofu.
+fn save_thumb(name: &str, png_bytes: &[u8]) {
+    let Some(dir) = thumb_dir() else { return };
+    let path = dir.join(format!("{}.png", thumb_key(name)));
+    if path.exists() {
+        return;
+    }
+    let decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    let Ok(mut reader) = decoder.read_info() else { return };
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let Ok(info) = reader.next_frame(&mut buf) else { return };
+    let (w, h) = (info.width as usize, info.height as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    // Expand what we understand to RGBA8; skip exotic formats.
+    let rgba: Vec<u8> = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Rgba, png::BitDepth::Eight) => buf[..w * h * 4].to_vec(),
+        (png::ColorType::Rgb, png::BitDepth::Eight) => buf[..w * h * 3]
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+        (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight) => buf[..w * h * 2]
+            .chunks_exact(2)
+            .flat_map(|p| [p[0], p[0], p[0], p[1]])
+            .collect(),
+        (png::ColorType::Grayscale, png::BitDepth::Eight) => buf[..w * h]
+            .iter()
+            .flat_map(|&g| [g, g, g, 255])
+            .collect(),
+        _ => return,
+    };
+    // Nearest-neighbour to 64 max side (a brush tip, not a photograph).
+    let scale = 64.0 / w.max(h) as f32;
+    let (tw, th) = if scale < 1.0 {
+        (
+            ((w as f32 * scale) as usize).max(1),
+            ((h as f32 * scale) as usize).max(1),
+        )
+    } else {
+        (w, h)
+    };
+    let mut small = vec![0u8; tw * th * 4];
+    for y in 0..th {
+        for x in 0..tw {
+            let sx = x * w / tw;
+            let sy = y * h / th;
+            let s = (sy * w + sx) * 4;
+            let d = (y * tw + x) * 4;
+            small[d..d + 4].copy_from_slice(&rgba[s..s + 4]);
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, tw as u32, th as u32);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let Ok(mut writer) = enc.write_header() else { return };
+        if writer.write_image_data(&small).is_err() {
+            return;
+        }
+    }
+    let _ = std::fs::write(&path, out);
 }
 
 fn attr_str(xml: &str, key: &str) -> Option<String> {

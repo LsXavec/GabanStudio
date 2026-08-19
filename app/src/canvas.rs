@@ -382,6 +382,13 @@ pub struct CanvasView {
     show_peg: bool,
     /// The INPUT plate field was clicked — open Settings at the pen page.
     pub(crate) request_pen_settings: bool,
+    /// THE BRUSH LIBRARY (PSD-brush-library): the rail arms and imports;
+    /// the import itself runs in the Editor, outside any stroke.
+    pub(crate) request_brush_import: bool,
+    brush_search: String,
+    /// Lazy thumbnail textures by preset name; None = no cached thumb
+    /// (the painted-dab fallback draws instead — never tofu).
+    thumb_cache: std::collections::HashMap<String, Option<egui::TextureHandle>>,
     /// The lightbox rail (left edge) is showing — same fold law as the
     /// brush rail (owner 2026-08-17: everything in the canvas folds).
     light_open: bool,
@@ -496,6 +503,9 @@ impl CanvasView {
             show_safe: false,
             show_peg: false,
             request_pen_settings: false,
+            request_brush_import: false,
+            brush_search: String::new(),
+            thumb_cache: std::collections::HashMap::new(),
             light_open: false,
             light_content_h: 330.0,
             dish_open: false,
@@ -1859,7 +1869,7 @@ impl CanvasView {
     /// bare track (no side text), so the track's centre IS the rail's
     /// centre — the point the hand reflexes to (owner 2026-08-17). Labels
     /// ride ABOVE the tracks as engraved value lines.
-    fn brush_rail_ui(&mut self, ui: &mut egui::Ui) {
+    fn brush_rail_ui(&mut self, ui: &mut egui::Ui, presets: &[BrushPreset]) {
         fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
             let mut job = egui::text::LayoutJob::default();
             job.append(
@@ -1935,6 +1945,154 @@ impl CanvasView {
                     .color(plate::legend_dim())
                     .small(),
             );
+        }
+
+        // ---- THE LIBRARY (PSD-brush-library): imported Krita presets,
+        // browsed and ARMED here; edited only in Settings → Brushes.
+        ui.add_space(10.0);
+        value_line(ui, "library", format!("{}", presets.len()));
+        ui.add_space(2.0);
+        if presets.len() > 6 {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.brush_search)
+                    .desired_width(168.0)
+                    .hint_text("search brushes"),
+            );
+            ui.add_space(4.0);
+        }
+        let needle = self.brush_search.trim().to_lowercase();
+        let shown: Vec<&BrushPreset> = presets
+            .iter()
+            .filter(|p| needle.is_empty() || p.name.to_lowercase().contains(&needle))
+            .collect();
+        if presets.is_empty() {
+            ui.label(
+                egui::RichText::new("no brushes yet — import Krita .kpp / .bundle below")
+                    .color(plate::legend_dim())
+                    .small(),
+            );
+        } else if shown.is_empty() {
+            ui.label(
+                egui::RichText::new("nothing matches that search")
+                    .color(plate::legend_dim())
+                    .small(),
+            );
+        }
+        let mut arm: Option<BrushPreset> = None;
+        egui::ScrollArea::vertical()
+            .id_salt("brush_library")
+            .max_height(240.0)
+            .show(ui, |ui| {
+                const CELL: f32 = 48.0;
+                const PER_ROW: usize = 3;
+                for row in shown.chunks(PER_ROW) {
+                    ui.horizontal(|ui| {
+                        for p in row {
+                            let (rect, resp) = ui.allocate_exact_size(
+                                egui::vec2(CELL, CELL),
+                                egui::Sense::click(),
+                            );
+                            let armed =
+                                self.armed_preset.as_deref() == Some(p.name.as_str());
+                            let painter = ui.painter();
+                            painter.rect_filled(rect, 0.0, plate::WELL);
+                            // The preset's own Krita icon from the cache;
+                            // a painted dab when there is none (never tofu).
+                            let tex = self
+                                .thumb_cache
+                                .entry(p.name.clone())
+                                .or_insert_with(|| {
+                                    let dir = crate::kpp::thumb_dir()?;
+                                    let path = dir.join(format!(
+                                        "{}.png",
+                                        crate::kpp::thumb_key(&p.name)
+                                    ));
+                                    let bytes = std::fs::read(path).ok()?;
+                                    let decoder = png::Decoder::new(
+                                        std::io::Cursor::new(bytes),
+                                    );
+                                    let mut reader = decoder.read_info().ok()?;
+                                    let mut buf =
+                                        vec![0u8; reader.output_buffer_size()];
+                                    let info = reader.next_frame(&mut buf).ok()?;
+                                    if info.color_type != png::ColorType::Rgba {
+                                        return None;
+                                    }
+                                    let img =
+                                        egui::ColorImage::from_rgba_unmultiplied(
+                                            [
+                                                info.width as usize,
+                                                info.height as usize,
+                                            ],
+                                            &buf[..info.buffer_size()],
+                                        );
+                                    Some(ui.ctx().load_texture(
+                                        format!("brush_thumb:{}", p.name),
+                                        img,
+                                        egui::TextureOptions::LINEAR,
+                                    ))
+                                })
+                                .clone();
+                            match tex {
+                                Some(t) => {
+                                    painter.image(
+                                        t.id(),
+                                        rect.shrink(2.0),
+                                        egui::Rect::from_min_max(
+                                            pos2(0.0, 0.0),
+                                            pos2(1.0, 1.0),
+                                        ),
+                                        Color32::WHITE,
+                                    );
+                                }
+                                None => {
+                                    let r = (p.size_px * 0.5)
+                                        .clamp(3.0, CELL * 0.38);
+                                    painter.circle_filled(
+                                        rect.center(),
+                                        r,
+                                        plate::STRUCK,
+                                    );
+                                }
+                            }
+                            if armed {
+                                painter.rect_stroke(
+                                    rect.shrink(1.0),
+                                    0.0,
+                                    egui::Stroke::new(2.0, plate::TALLY),
+                                    egui::StrokeKind::Inside,
+                                );
+                            } else if resp.hovered() {
+                                painter.rect_stroke(
+                                    rect,
+                                    0.0,
+                                    egui::Stroke::new(1.0, plate::LEGEND),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                            let hover =
+                                format!("arm '{}' · {:.0}px", p.name, p.size_px);
+                            if resp.on_hover_text(hover).clicked() {
+                                arm = Some((*p).clone());
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            });
+        if let Some(p) = arm {
+            self.apply_preset(&p);
+        }
+        ui.add_space(4.0);
+        if ui
+            .button("import brushes…")
+            .on_hover_text(
+                "Krita .kpp presets and community .bundle packs — they \
+                 paint with OUR brush at the preset's size and strength",
+            )
+            .clicked()
+        {
+            self.request_brush_import = true;
         }
     }
 
@@ -3133,7 +3291,7 @@ impl CanvasView {
                                 // and decayed the pad to zero — the bug the
                                 // owner's screenshot caught).
                                 let y0 = aui.next_widget_position().y;
-                                self.brush_rail_ui(aui);
+                                self.brush_rail_ui(aui, presets);
                                 let y1 = aui.next_widget_position().y;
                                 self.rail_content_h = (y1 - y0).max(50.0);
                             },
