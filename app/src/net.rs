@@ -400,13 +400,20 @@ pub struct Host {
 }
 
 impl Host {
-    pub fn start(port: u16, key: String, totp_secret: String) -> std::io::Result<Host> {
+    pub fn start(
+        port: u16,
+        key: String,
+        totp_secret: String,
+        room_name: String,
+        open: bool,
+    ) -> std::io::Result<Host> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
         let port = listener.local_addr()?.port();
         listener.set_nonblocking(true)?;
         let (tx, rx) = channel();
         let clients: Arc<Mutex<HashMap<u64, ClientHandle>>> = Arc::new(Mutex::new(HashMap::new()));
         let stop = Arc::new(Mutex::new(false));
+        spawn_beacon(room_name, port, open, stop.clone());
         let burned: Arc<Mutex<HashSet<(u64, u32)>>> = Arc::new(Mutex::new(HashSet::new()));
         {
             let clients = clients.clone();
@@ -464,7 +471,10 @@ impl Host {
                                 // the wire shape is unchanged and replays
                                 // still die on the nonce.
                                 let _ = (&secret, &burned);
-                                let mac_ok = mac == auth_mac(&key, &nonce, &code);
+                                // LAN-open rooms (testing phase): no key
+                                // check at all — the amendment's trade.
+                                let mac_ok =
+                                    open || mac == auth_mac(&key, &nonce, &code);
                                 if !mac_ok {
                                     let msg = serde_json::to_vec(&Msg::Refused {
                                         why: "the room key was refused".into(),
@@ -862,6 +872,96 @@ pub struct PeerView {
     pub wet: Vec<[f32; 3]>,
 }
 
+// ---------------------------------------------------------------------------
+// LAN DISCOVERY (owner amendment 2026-08-19): a hosting app broadcasts a
+// UDP beacon every 2s; every app listens and lists rooms on this network
+// for one-click joining. Testing-phase trade, recorded in the room.
+// ---------------------------------------------------------------------------
+
+const DISCOVERY_PORT: u16 = 41101;
+
+/// A room seen on this network.
+#[derive(Clone)]
+pub struct Beacon {
+    pub name: String,
+    pub addr: String,
+    pub version: String,
+    pub open: bool,
+    pub last: std::time::Instant,
+}
+
+/// The always-on listener: rooms currently visible on this network.
+pub struct Discovery {
+    pub rooms: Arc<Mutex<HashMap<String, Beacon>>>,
+}
+
+pub fn spawn_discovery() -> Discovery {
+    let rooms: Arc<Mutex<HashMap<String, Beacon>>> = Arc::new(Mutex::new(HashMap::new()));
+    let r = rooms.clone();
+    std::thread::spawn(move || {
+        let Ok(sock) = std::net::UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)) else {
+            // A second instance on this machine holds the port — the
+            // host side still beacons; only listing is lost here.
+            slog("discovery: listen port busy (another instance?)");
+            return;
+        };
+        let mut buf = [0u8; 512];
+        loop {
+            let Ok((n, src)) = sock.recv_from(&mut buf) else {
+                continue;
+            };
+            let Ok(j) = serde_json::from_slice::<serde_json::Value>(&buf[..n]) else {
+                continue;
+            };
+            if j["gaban"].as_u64() != Some(1) {
+                continue;
+            }
+            let port = j["port"].as_u64().unwrap_or(41100) as u16;
+            let addr = format!("{}:{port}", src.ip());
+            let b = Beacon {
+                name: j["name"].as_str().unwrap_or("room").to_string(),
+                addr: addr.clone(),
+                version: j["ver"].as_str().unwrap_or("?").to_string(),
+                open: j["open"].as_bool().unwrap_or(false),
+                last: std::time::Instant::now(),
+            };
+            let mut map = r.lock().unwrap();
+            map.insert(addr, b);
+            // Expire rooms that stopped beaconing.
+            map.retain(|_, b| b.last.elapsed().as_secs() < 8);
+        }
+    });
+    Discovery { rooms }
+}
+
+/// The host's beacon, alive while the room is.
+fn spawn_beacon(name: String, port: u16, open: bool, stop: Arc<Mutex<bool>>) {
+    std::thread::spawn(move || {
+        let Ok(sock) = std::net::UdpSocket::bind(("0.0.0.0", 0)) else {
+            return;
+        };
+        let _ = sock.set_broadcast(true);
+        let msg = serde_json::json!({
+            "gaban": 1,
+            "name": name,
+            "port": port,
+            "ver": crate::update::CURRENT_VERSION,
+            "open": open,
+        })
+        .to_string();
+        loop {
+            if *stop.lock().unwrap() {
+                return;
+            }
+            let _ = sock.send_to(
+                msg.as_bytes(),
+                (std::net::Ipv4Addr::BROADCAST, DISCOVERY_PORT),
+            );
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+}
+
 /// The App's session state.
 pub enum Session {
     Idle,
@@ -906,7 +1006,8 @@ mod tests {
         let key = generate_key();
         let secret_raw: [u8; 20] = rand::random();
         let secret = base32_encode(&secret_raw);
-        let host = Host::start(0, key.clone(), secret.clone()).expect("bind");
+        let host = Host::start(0, key.clone(), secret.clone(), "test room".into(), false)
+            .expect("bind");
         let code = format!("{:06}", totp_at(&secret_raw, now_unix()));
         let addr = format!("127.0.0.1:{}", host.port);
         let mut guest = Client::connect(&addr, &key, &code, "guest-a").expect("join with key+code");

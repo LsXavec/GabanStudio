@@ -792,6 +792,10 @@ pub struct SessionConfig {
     /// The last room address joined (host:port).
     #[serde(default)]
     pub last_addr: String,
+    /// Require the room key to join (OFF while the testing phase lasts —
+    /// LAN-open rooms; the owner's amendment 2026-08-19).
+    #[serde(default)]
+    pub require_key: bool,
 }
 
 fn default_update_repo() -> String {
@@ -813,6 +817,7 @@ impl Default for SessionConfig {
             totp_secret: String::new(),
             host_port: default_port(),
             last_addr: String::new(),
+            require_key: false,
         }
     }
 }
@@ -980,6 +985,8 @@ pub fn settings_window(
     peer_names: &[String],
     update_note: &str,
     check_now: &mut bool,
+    lan_rooms: &[crate::net::Beacon],
+    join_room: &mut Option<String>,
 ) {
     if !*open {
         *capturing = None;
@@ -1074,6 +1081,8 @@ pub fn settings_window(
                     SettingsCategory::Session => session_page(
                         ui,
                         config,
+                        lan_rooms,
+                        join_room,
                         session_action,
                         session_status,
                         hosting,
@@ -1266,6 +1275,8 @@ pub enum SessionAction {
 fn session_page(
     ui: &mut egui::Ui,
     config: &mut Config,
+    lan_rooms: &[crate::net::Beacon],
+    join_room: &mut Option<String>,
     action: &mut Option<SessionAction>,
     status: &str,
     hosting: bool,
@@ -1384,13 +1395,63 @@ fn session_page(
         }
     } else {
         ui.label("You are offline.");
+        // LAN DISCOVERY (testing phase): rooms on this network, one
+        // click to join — no key, no address.
+        if lan_rooms.is_empty() {
+            ui.label(
+                egui::RichText::new("no rooms on this network yet")
+                    .size(11.0)
+                    .color(crate::plate::legend_dim()),
+            );
+        } else {
+            crate::plate::legend(ui, "rooms on this network");
+            for b in lan_rooms {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&b.name)
+                            .size(11.5)
+                            .color(crate::plate::STRUCK),
+                    );
+                    if !b.open {
+                        ui.label(
+                            egui::RichText::new("key")
+                                .size(9.5)
+                                .color(crate::plate::LEGEND),
+                        )
+                        .on_hover_text("this room requires its key");
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("v{} · {}", b.version, b.addr))
+                            .monospace()
+                            .size(10.0)
+                            .color(crate::plate::LEGEND),
+                    );
+                    if ui.button("JOIN").clicked() {
+                        *join_room = Some(b.addr.clone());
+                    }
+                });
+            }
+        }
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
                 .button("Host a room")
-                .on_hover_text("open your file to invited artists")
+                .on_hover_text(
+                    "open your file to this network — the room appears in                      everyone's rooms list",
+                )
                 .clicked()
             {
                 *action = Some(SessionAction::StartHost);
+            }
+            let mut req = config.session.require_key;
+            if crate::plate::latch(ui, &mut req, "require key")
+                .on_hover_text(
+                    "off (testing): anyone on this network joins with one                      click · on: joiners must hold the room key",
+                )
+                .changed()
+            {
+                config.session.require_key = req;
+                config.save();
             }
         });
         // The host's address (owner's report: the field lived inside the

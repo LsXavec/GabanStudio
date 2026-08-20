@@ -133,3 +133,15 @@ enqueues (Out::Raw / Out::Json); EditTiles' expensive serialization
 happens on the writer; a stalled peer stalls only its own queue.
 Shipped as v0.1.7. NAMED NEXT if wire size ever hurts: EditTiles as a
 binary frame kind instead of JSON numbers (~5x smaller).
+
+OWNER AMENDMENT 2026-08-19, verbatim: "Make the application show a
+network session on the same network that way we dont need the key and
+can just easily join for the testing phase. push to the live ap."
+LAN DISCOVERY: a hosting app broadcasts a UDP beacon (name, port,
+version, open flag) every 2s on 41101; every app listens and the
+Session page lists rooms on this network with one-click JOIN. Open
+rooms (the default while the testing phase lasts) skip the key check
+entirely — a LAN-trust trade the owner chose, recorded here; the
+"require key" latch restores the gate per room, and remote/keyed
+joining is unchanged. Wire compatible: open hosts simply skip the mac
+verification, so older guests join with whatever key they hold.

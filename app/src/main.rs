@@ -188,6 +188,8 @@ struct App {
     /// for a quiet moment (guests watch strokes live via presence; the
     /// committed truth lands when the host pauses).
     frame_watch: Option<std::time::Instant>,
+    /// LAN DISCOVERY: rooms visible on this network (always listening).
+    discovery: net::Discovery,
     /// A guest asked for a fresh snapshot (their mirror slipped).
     session_resync: bool,
     /// SESSION PERF 2: the host's snapshot builder, off the UI thread
@@ -299,6 +301,8 @@ impl App {
                     cfg.host_port,
                     cfg.api_key.trim().to_string(),
                     cfg.totp_secret.trim().to_string(),
+                    format!("{}'s room", cfg.username.trim()),
+                    !cfg.require_key,
                 ) {
                     Ok(h) => {
                         self.session_status = format!("hosting on port {} — share the key", h.port);
@@ -928,6 +932,7 @@ impl App {
             session_last_snap: 0.0,
             session_last_presence: 0.0,
             frame_watch: None,
+            discovery: net::spawn_discovery(),
             session_resync: false,
             session_snap_rx: None,
             session_load_rx: None,
@@ -2060,6 +2065,12 @@ impl eframe::App for App {
             .map(|p| p.name.clone())
             .collect();
         let mut check_now = false;
+        // LAN DISCOVERY: a fresh snapshot of visible rooms for the page,
+        // and the click-out slot.
+        let mut lan_rooms: Vec<net::Beacon> =
+            self.discovery.rooms.lock().unwrap().values().cloned().collect();
+        lan_rooms.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut join_room: Option<String> = None;
         let hosting = matches!(self.session, net::Session::Hosting(_));
         let joined = matches!(self.session, net::Session::Joined(_));
         config::settings_window(
@@ -2077,9 +2088,18 @@ impl eframe::App for App {
             &peer_names,
             &self.update_note,
             &mut check_now,
+            &lan_rooms,
+            &mut join_room,
         );
         if let Some(a) = session_action {
             self.session_act(a);
+        }
+        // LAN DISCOVERY: one-click join (open rooms need no key — the
+        // host skips the check; any key string satisfies the wire).
+        if let Some(addr) = join_room {
+            self.config.session.last_addr = addr.clone();
+            self.config.save();
+            self.session_join(addr, String::new());
         }
         // PSD-shipping: "check now" from the Plugins page.
         if check_now && !self.config.update_repo.trim().is_empty() {
