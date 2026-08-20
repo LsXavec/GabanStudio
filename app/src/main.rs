@@ -412,9 +412,12 @@ impl App {
                 self.config.session.last_addr = addr;
                 self.config.save();
                 self.session_status = "connected — waiting for the host's file".into();
+                let host_ver = c.host_version.clone();
                 self.session = net::Session::Joined(c);
                 self.session_peers.clear();
                 self.session_lane_reset();
+                // v0.2.4: a newer host updates this build RIGHT AWAY.
+                self.version_gap_check(&host_ver, "the host");
                 // STAGE 0: from here on, this machine's numbered log lines
                 // ship to the host every ~2s.
                 net::slog_ship_arm(true);
@@ -938,6 +941,48 @@ impl App {
         }
     }
 
+    /// v0.2.4 (owner): "It should send right away to the Host or the
+    /// Host right away to the user" — a newer build in the room makes
+    /// the OLDER side fetch its update IMMEDIATELY, either direction,
+    /// instead of waiting out the 15-minute checker. The staged build
+    /// then installs by lamp click or on close, as always.
+    fn version_gap_check(&mut self, other_ver: &str, who: &str) {
+        if other_ver.trim().is_empty() {
+            return;
+        }
+        let mine = crate::update::parse_version(crate::update::CURRENT_VERSION);
+        let theirs = crate::update::parse_version(other_ver);
+        if theirs > mine {
+            net::slog(format!(
+                "VERSION {who} runs v{other_ver} > v{} — fetching the update NOW",
+                crate::update::CURRENT_VERSION
+            ));
+            self.update_note = format!("{who} runs v{other_ver} — updating this build now…");
+            if let Some(ed) = &mut self.editor {
+                ed.state.status =
+                    format!("{who} is on a newer build — the update is fetching now");
+            }
+            if self.update_rx.is_none()
+                && self.update_staged.is_none()
+                && !self.config.update_repo.trim().is_empty()
+            {
+                self.update_rx = Some(crate::update::spawn_check(
+                    self.config.update_repo.trim().to_string(),
+                ));
+            }
+        } else if theirs < mine {
+            net::slog(format!(
+                "VERSION {who} runs v{other_ver} < v{} — their side updates on join",
+                crate::update::CURRENT_VERSION
+            ));
+            if let Some(ed) = &mut self.editor {
+                ed.state.status = format!(
+                    "{who} is on v{other_ver} — their build is fetching the update"
+                );
+            }
+        }
+    }
+
     /// v0.2.1 (audit): strokes the canvas committed LAST frame take
     /// their numbers BEFORE this frame's arrivals are processed — the
     /// wire's seq order matches the host's document order. Guests use
@@ -1114,6 +1159,9 @@ impl App {
                     joiners.push(id);
                     self.session_snap_targets.insert(id);
                     net::slog(format!("PEER joined: {name} (client {id}, v{version})"));
+                    // v0.2.4: a newer build in the room updates THIS one
+                    // right away (and an older peer's gap is announced).
+                    self.version_gap_check(&version, &name);
                     self.session_peers.insert(
                         id,
                         net::PeerView {

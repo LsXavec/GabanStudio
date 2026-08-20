@@ -285,6 +285,10 @@ pub enum Msg {
     Welcome {
         peer_id: u64,
         peers: Vec<(u64, String)>,
+        /// v0.2.4 (owner): the HOST's build — a joining guest compares
+        /// and updates RIGHT AWAY, never "15 minutes until a press".
+        #[serde(default)]
+        version: String,
     },
     Refused {
         why: String,
@@ -920,9 +924,12 @@ impl Host {
                                     .iter()
                                     .map(|(pid, c)| (*pid, c.name.clone()))
                                     .collect();
-                                let welcome =
-                                    serde_json::to_vec(&Msg::Welcome { peer_id: id, peers })
-                                        .unwrap();
+                                let welcome = serde_json::to_vec(&Msg::Welcome {
+                                    peer_id: id,
+                                    peers,
+                                    version: crate::update::CURRENT_VERSION.to_string(),
+                                })
+                                .unwrap();
                                 if write_frame(&mut stream, FRAME_JSON, &welcome).is_err() {
                                     return;
                                 }
@@ -1315,6 +1322,8 @@ pub struct Client {
     pub events: Receiver<NetEvent>,
     tx: std::sync::mpsc::Sender<Out>,
     pub peer_id: u64,
+    /// v0.2.4: the host's build, from the Welcome ("" = pre-0.2.4 host).
+    pub host_version: String,
 }
 
 impl Client {
@@ -1351,13 +1360,17 @@ impl Client {
         .unwrap();
         write_frame(&mut stream, FRAME_JSON, &auth).map_err(|e| e.to_string())?;
         let (k, buf) = read_frame(&mut stream).map_err(|e| format!("auth: {e}"))?;
-        let peer_id = match (k == FRAME_JSON)
+        let (peer_id, host_version) = match (k == FRAME_JSON)
             .then(|| serde_json::from_slice::<Msg>(&buf).ok())
             .flatten()
         {
-            Some(Msg::Welcome { peer_id, peers }) => {
+            Some(Msg::Welcome {
+                peer_id,
+                peers,
+                version,
+            }) => {
                 let _ = peers;
-                peer_id
+                (peer_id, version)
             }
             Some(Msg::Refused { why }) => return Err(why),
             _ => return Err("auth: unexpected reply".into()),
@@ -1464,6 +1477,7 @@ impl Client {
             events: rx,
             tx: out_tx,
             peer_id,
+            host_version,
         })
     }
 

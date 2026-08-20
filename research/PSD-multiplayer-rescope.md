@@ -317,11 +317,19 @@ repairs overwriting un-echoed ink = "it takes out what they drew").
   texel blob; ~10–20× smaller than the JSON texels) — per-stroke
   convergence now costs ~tens of KB, wire-invisible on LAN.
 
-**The v0.2.3 queue (remaining, severity order):**
-1. Unified sequenced queue guest-side (Cmds/Undone apply inline while
-   stroke Ends defer through the canvas — within-frame inversion can
-   mis-target an undo).
-2. Redo re-audit (a repaired guest's redo can reintroduce drifted
+**v0.2.3 (shipped — the owner's X-sheet ruling, verbatim: "the X-sheet
+can be a problem source right now. If either user draws it must
+populate for both. Otherwise the shared files will go corrupted
+state"):** the unified sequenced queue landed — strokes, command
+batches and undos apply in ONE host order through the canvas executor
+on every guest (timeline edits can no longer overtake strokes; befores
+rebuild at application time), and the mid-stroke race is closed: a cel
+created under a live pen always broadcasts its AddDrawing/SetCell
+(X-sheet entry) whole, with the streamed stroke aborted for peers.
+Either artist drawing populates the X-sheet on both machines, always.
+
+**The v0.2.4 queue (remaining, severity order):**
+1. Redo re-audit (a repaired guest's redo can reintroduce drifted
    after-images unaudited).
 3. Robust peer identity (echo-skip/undo keyed by display name; give
    peers wire ids).

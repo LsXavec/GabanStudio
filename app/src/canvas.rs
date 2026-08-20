@@ -4182,6 +4182,23 @@ impl CanvasView {
                     // batch has landed.
                     state.rebuild_paint_befores(&mut cmds);
                     let n = cmds.len();
+                    // v0.2.4 (the X-sheet law's eye): structure edits
+                    // are the corruption-prone kind — name them.
+                    let structural = cmds
+                        .iter()
+                        .filter(|c| {
+                            matches!(
+                                c,
+                                anim_core::command::Command::AddDrawing { .. }
+                                    | anim_core::command::Command::SetCell { .. }
+                            )
+                        })
+                        .count();
+                    if structural > 0 {
+                        crate::net::slog(format!(
+                            "XSHEET {structural} structure cmd(s) from {origin} applying"
+                        ));
+                    }
                     let was = state.engine.mirror_log;
                     state.engine.mirror_log = false;
                     let prev = state.engine.author();
