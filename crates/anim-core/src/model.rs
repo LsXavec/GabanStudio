@@ -38,7 +38,7 @@ pub struct Stroke {
 
 /// Per-layer compositing properties. Kept as ONE struct so `SetCelLayerProps`
 /// replaces it wholesale — the exact inverse is trivially the prior struct.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayerProps {
     /// Free text: "line", "color", "shadow", "correction", ...
     pub name: String,
@@ -61,7 +61,7 @@ impl Default for LayerProps {
 /// color under it, shadow between, sakkan correction above). Orthogonal to
 /// X-sheet columns, which are layers ACROSS TIME. Id-addressed so commands
 /// stay exact under any undo/reorder interleaving.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CelLayer {
     pub id: LayerId,
     pub props: LayerProps,
@@ -240,7 +240,7 @@ pub struct ImageAsset {
 /// truth (saved verbatim, never re-encoded); interleaved f32 samples are
 /// decoded once at construction. The engine stays headless: hound is a pure
 /// decoder, playback lives entirely in the app.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AudioClip {
     pub name: String,
     /// Encoded source bytes (WAV), persisted verbatim.

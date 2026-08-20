@@ -16,13 +16,15 @@ use crate::xsheet::{Exposure, ParamKey};
 
 // Not `serde` — commands can carry `Arc<TileData>` (large pixel buffers), and
 // the edit history lives in memory, never persisted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CutRef {
     pub scene: SceneId,
     pub cut: CutId,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+// serde: RUNTIME wire only (the session mirror) — the disk format is
+// SQLite via store.rs and never touches these derives.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Command {
     AddDrawing {
         at: CutRef,

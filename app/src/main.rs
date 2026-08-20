@@ -45,6 +45,17 @@ use paint::PaintLayer;
 use std::time::Duration;
 use workspace::{Pane, Stage, Workspace, Workspaces};
 
+/// A peer as the room lamp's hover names them — with their build, so
+/// two machines cross-check without leaving the canvas (owner
+/// 2026-08-19: "so i can cross verify that hes on the latest").
+fn peer_tag(p: &net::PeerView) -> String {
+    if p.version.is_empty() {
+        p.name.clone()
+    } else {
+        format!("{} · v{}", p.name, p.version)
+    }
+}
+
 fn main() -> eframe::Result<()> {
     // Headless layout probe: runs the REAL panel/canvas layout on the CPU and
     // prints the canvas rect per scripted step, so any drawing-area movement
@@ -173,6 +184,11 @@ struct App {
     /// SESSION PERF: last snapshot / presence send times (throttles).
     session_last_snap: f64,
     session_last_presence: f64,
+    /// SESSION PERF 4: when the doc generation last MOVED — syncs wait
+    /// for a quiet moment (guests watch strokes live via presence; the
+    /// committed truth lands when the host pauses).
+    /// A guest asked for a fresh snapshot (their mirror slipped).
+    session_resync: bool,
     /// SESSION PERF 2: the host's snapshot builder, off the UI thread
     /// (one in flight; the UI only forwards finished bytes).
     session_snap_rx: Option<std::sync::mpsc::Receiver<Option<Vec<u8>>>>,
@@ -441,7 +457,7 @@ impl App {
         for ev in events {
             match ev {
                 net::NetEvent::Status(st) => self.session_status = st,
-                net::NetEvent::PeerJoined { id, name } => {
+                net::NetEvent::PeerJoined { id, name, version } => {
                     self.session_status = format!("{name} joined");
                     // AUDIT [44]: this reached Settings only — invisible
                     // to someone who is drawing. Chatter, not a refusal.
@@ -453,6 +469,7 @@ impl App {
                         id,
                         net::PeerView {
                             name,
+                            version,
                             frame: 0,
                             cursor: None,
                             pen_down: false,
@@ -482,6 +499,7 @@ impl App {
                         } else {
                             format!("artist {id}")
                         },
+                        version: String::new(),
                         frame,
                         cursor,
                         pen_down,
@@ -491,6 +509,29 @@ impl App {
                     e.cursor = cursor;
                     e.pen_down = pen_down;
                     e.wet = wet;
+                }
+                net::NetEvent::Commands(batch) => {
+                    // SESSION MIRROR: the 1:1 control window — tiny
+                    // patches applied to the mirror engine, no reloads.
+                    if let Some(ed) = &mut self.editor {
+                        match ed.state.engine.apply_mirror(&batch) {
+                            Ok(()) => {
+                                ed.state.doc_gen = ed.state.doc_gen.wrapping_add(1);
+                                ed.canvas.engine_changed();
+                            }
+                            Err(_) => {
+                                // The mirror slipped: ask for a fresh truth.
+                                if let net::Session::Joined(c) = &mut self.session {
+                                    c.send_resync_request();
+                                }
+                                self.session_status =
+                                    "mirror slipped — resyncing…".into();
+                            }
+                        }
+                    }
+                }
+                net::NetEvent::ResyncNeeded => {
+                    self.session_resync = true;
                 }
                 net::NetEvent::Snapshot(bytes) => {
                     // ONE TRUTH (NEVER-DO 1): the host's document replaces
@@ -620,6 +661,26 @@ impl App {
             None
         };
         let now = ctx.input(|i| i.time);
+        // SESSION MIRROR: the log rides the hosting state; every applied
+        // batch streams to guests (tiny), and whole documents go out only
+        // for joins and resyncs.
+        let hosting_now = matches!(self.session, net::Session::Hosting(_));
+        if let Some(ed) = &mut self.editor {
+            if ed.state.engine.mirror_log != hosting_now {
+                ed.state.engine.mirror_log = hosting_now;
+                let _ = ed.state.engine.drain_applied();
+            }
+        }
+        if hosting_now
+            && let Some(ed) = &mut self.editor
+        {
+            let batches = ed.state.engine.drain_applied();
+            if let net::Session::Hosting(h) = &self.session {
+                for b in batches {
+                    h.send_commands(b);
+                }
+            }
+        }
         let mut snapshot: Option<Vec<u8>> = None;
         if let net::Session::Hosting(_) = &self.session {
             // SESSION PERF: a snapshot is a FULL document save on the UI
@@ -631,9 +692,21 @@ impl App {
                 .editor
                 .as_ref()
                 .is_some_and(|ed| ed.canvas.stroke_active());
-            let due = stamp != self.session_sent_gen
+            let _ = stamp;
+            // SESSION MIRROR: the command stream carries the document.
+            // Snapshots remain for joins, guest resync requests, and the
+            // pinned undo contract (history rewrites need a fresh truth).
+            let history_moved = self
+                .editor
+                .as_mut()
+                .map(|ed| std::mem::take(&mut ed.state.history_dirty))
+                .unwrap_or(false);
+            let due = (self.session_resync || history_moved)
                 && !pen_busy
-                && now - self.session_last_snap > 2.5;
+                && now - self.session_last_snap > 1.0;
+            if due {
+                self.session_resync = false;
+            }
             if (fresh_join || due) && self.session_snap_rx.is_none() {
                 self.session_sent_gen = stamp;
                 self.session_last_snap = now;
@@ -834,6 +907,7 @@ impl App {
             update_note: String::new(),
             session_last_snap: 0.0,
             session_last_presence: 0.0,
+            session_resync: false,
             session_snap_rx: None,
             session_load_rx: None,
             settings_category: SettingsCategory::default(),
@@ -1229,6 +1303,14 @@ impl App {
                 } else {
                     s.undo();
                 }
+            }
+            // OWNER RULING 2026-08-19: a guest is a 1:1 control window —
+            // the HOST owns the file; guest strokes already live there.
+            Action::Save | Action::SaveAs if ed.canvas.is_guest => {
+                s.refuse("refused — the host owns the file; your strokes already live there");
+            }
+            Action::Open if ed.canvas.is_guest => {
+                s.refuse("refused — leave the room first (Settings › Session) to open your own file");
             }
             Action::Save => s.save(false),
             Action::SaveAs => s.save(true),
@@ -1869,17 +1951,11 @@ impl eframe::App for App {
             let room = match &self.session {
                 net::Session::Hosting(_) => Some((
                     format!("hosting · {} joined", self.session_peers.len()),
-                    self.session_peers
-                        .values()
-                        .map(|p| p.name.clone())
-                        .collect(),
+                    self.session_peers.values().map(peer_tag).collect(),
                 )),
                 net::Session::Joined(_) => Some((
                     "in a room".to_string(),
-                    self.session_peers
-                        .values()
-                        .map(|p| p.name.clone())
-                        .collect(),
+                    self.session_peers.values().map(peer_tag).collect(),
                 )),
                 net::Session::Idle => None,
             };
@@ -2438,6 +2514,15 @@ impl Editor {
         // PERSISTENT lane: history as a tape counter, and the
         // pen diagnostics (fixed-width, never in a toolbar).
         ui.add_space(8.0);
+        // The build's version — two machines cross-checked at a glance
+        // (owner 2026-08-19).
+        ui.label(
+            egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                .monospace()
+                .size(9.5)
+                .color(plate::legend_dim()),
+        );
+        ui.separator();
         // PSD-shipping: UPDATE READY — the published build moved past
         // this one. Tally lamp; the click IS the relaunch (session
         // carried like a dev-loop restart).

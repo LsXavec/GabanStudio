@@ -373,3 +373,49 @@ fn author_tags_never_reach_the_document() {
     // And the reloaded history is empty — tags cannot survive a round trip.
     assert!(!back_tagged.can_undo(), "history (and its tags) never persists");
 }
+
+// ---- SESSION MIRROR (PSD-session-v2 ruling 2026-08-19) --------------------
+
+#[test]
+fn a_mirror_replaying_the_stream_matches_the_host_exactly() {
+    // Same rig, same name, both sides.
+    let mut host = Engine::new("rig");
+    let (at, d, line, color) = two_layer_rig(&mut host);
+    let mut guest = Engine::new("rig");
+    let _ = two_layer_rig(&mut guest);
+    guest.clear_history(); // the rig's own setup steps are not the mirror's
+    assert_eq!(host.project, guest.project, "identical starting rigs");
+
+    // Host draws with the mirror log on; the guest replays the stream.
+    host.mirror_log = true;
+    host.apply("a", vec![dab(at, d, line, 10)]).unwrap();
+    host.apply("b", vec![dab(at, d, color, 40)]).unwrap();
+    for batch in host.drain_applied() {
+        guest.apply_mirror(&batch).unwrap();
+    }
+    assert_eq!(host.project, guest.project, "the stream IS the document");
+    assert!(!guest.can_undo(), "a mirror carries no history of its own");
+
+    // The honest limit, PINNED: an undo on the host is not a streamed
+    // command — after one, a pure replay diverges and the host must
+    // resync (a fresh join snapshot).
+    host.undo().unwrap();
+    host.apply("c", vec![dab(at, d, line, 20)]).unwrap();
+    for batch in host.drain_applied() {
+        guest.apply_mirror(&batch).unwrap();
+    }
+    assert_ne!(
+        host.project, guest.project,
+        "after a host undo the stream alone is NOT enough — resync required"
+    );
+}
+
+#[test]
+fn commands_roundtrip_through_serde() {
+    let mut e = Engine::new("wire");
+    let (at, d, line, _c) = two_layer_rig(&mut e);
+    let batch = vec![dab(at, d, line, 10)];
+    let bytes = serde_json::to_vec(&batch).unwrap();
+    let back: Vec<anim_core::command::Command> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(batch, back, "the wire carries commands losslessly");
+}

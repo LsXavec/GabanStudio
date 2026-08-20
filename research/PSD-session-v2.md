@@ -84,3 +84,34 @@ host-only until their own pass.
   dialog is open — iterating on the Settings page itself means
   close → blink → reopen. Working as designed (never restart over a
   modal); worth its own amendment only if it becomes a real tax.
+
+OWNER RULING 2026-08-19, verbatim: "The User besides the host is just a
+live control window like they dont get the Save functionalities of the
+host. Their strokes are written to the host pc. So now weird saving or
+anything Its just a 1:1 control schema window for a User if they are
+joined in a session. So we shouldnt be hitting those lag spikes like
+that." This IS the room's original v2 vision (the command-stream
+replica) now ordered built: the host STREAMS every applied command
+batch to guests, who apply it to their mirror engine WITHOUT history
+(one truth; the mirror never undoes on its own). Whole-document
+snapshots remain ONLY for the join. Guests lose Save/Open — refused
+with why (the host owns the file; their strokes already live there).
+anim-core gains a runtime-only applied-commands tap (no format change —
+the same discipline as the author tags).
+
+THE MIRROR BUILT 2026-08-19 (v0.1.9, same evening as the ruling):
+engine gains a runtime-only applied-commands log (mirror_log +
+drain_applied) and apply_mirror (no history — a mirror never undoes on
+its own); Command + constituents gained serde derives (RUNTIME wire
+only; the SQLite disk format untouched). The host streams every applied
+batch (its own strokes, guests' strokes, fills, retimes — everything)
+as FRAME_CMDS, serialized on the writer thread, deserialized on the
+reader. Whole-document snapshots now fire ONLY for: fresh joins, guest
+ResyncRequest (a batch that would not apply), and after any undo/redo
+on the host (history_dirty — the PINNED contract: a mirror replaying a
+stream diverges after a host undo; proven by test alongside the
+stream-equality proof and a serde roundtrip). Guests lost Save/Open
+per the ruling, refused with why. ALSO this evening (v0.1.5–v0.1.8):
+auto-update staged in background + installs on close; writer threads
+(no socket write on the UI thread — THE freeze); async snapshot save/
+load; wet-tail cap; versions visible in title/Foot/room-lamp hover.

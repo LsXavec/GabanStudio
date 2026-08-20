@@ -70,6 +70,9 @@ pub struct AppState {
     /// the hand. Separate from `status` chatter; `refusal_seq` bumps on
     /// every refusal so repeats re-flash.
     pub refusal: String,
+    /// SESSION MIRROR: true after any undo/redo — the pinned contract
+    /// says mirrors need a fresh snapshot after history rewrites.
+    pub history_dirty: bool,
     pub refusal_seq: u32,
     /// SESSION generation stamp: bumps on every reported commit and on
     /// undo/redo — the host's cheap "the document moved" signal (the
@@ -156,6 +159,7 @@ impl AppState {
             },
             file_path: None,
             refusal: String::new(),
+            history_dirty: false,
             refusal_seq: 0,
             doc_gen: 0,
             active_character: 0,
@@ -223,6 +227,7 @@ impl AppState {
             },
             file_path: Some(path),
             refusal: String::new(),
+            history_dirty: false,
             refusal_seq: 0,
             doc_gen: 0,
             active_character: 0,
@@ -350,6 +355,12 @@ impl AppState {
 
     /// Refuse the hand: routed to the Foot's Aka lane and the canvas
     /// edge flash. Chatter (`status`) is for remarks; this is for NO.
+    /// SESSION MIRROR: set whenever undo/redo rewrites the past — the
+    /// pinned contract says a mirror must be resynced after it.
+    pub fn history_moved(&mut self) {
+        self.history_dirty = true;
+    }
+
     pub fn refuse(&mut self, msg: impl Into<String>) {
         self.refusal = msg.into();
         self.refusal_seq = self.refusal_seq.wrapping_add(1);
@@ -1577,6 +1588,7 @@ impl AppState {
         if self.engine.undo().is_ok() {
             self.status = "undo".into();
             self.doc_gen = self.doc_gen.wrapping_add(1);
+            self.history_moved();
         }
         self.sanitize();
     }
@@ -1584,6 +1596,7 @@ impl AppState {
         if self.engine.redo().is_ok() {
             self.status = "redo".into();
             self.doc_gen = self.doc_gen.wrapping_add(1);
+            self.history_moved();
         }
         self.sanitize();
     }
@@ -1951,6 +1964,7 @@ impl AppState {
             Ok(label) => {
                 self.status = format!("{author}: {} {label}", if redo { "redid" } else { "undid" });
                 self.doc_gen = self.doc_gen.wrapping_add(1);
+                self.history_moved();
                 self.sanitize();
                 Ok(())
             }

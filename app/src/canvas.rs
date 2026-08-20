@@ -1179,9 +1179,16 @@ impl CanvasView {
     }
 
     /// Our live wet stroke, in paper space, for session presence.
+    /// SESSION PERF 4: only the recent TAIL — sending the whole stroke
+    /// 20×/s made long strokes O(n²) on the wire (megabytes/second),
+    /// which lagged the RECEIVING machine. The ghost is a preview of
+    /// the pen's tip; the committed stroke arrives whole via sync.
     pub(crate) fn presence_wet(&self) -> Vec<[f32; 3]> {
+        const TAIL: usize = 300;
+        let skip = self.current.len().saturating_sub(TAIL);
         self.current
             .iter()
+            .skip(skip)
             .map(|p| [p.x, p.y, p.pressure])
             .collect()
     }

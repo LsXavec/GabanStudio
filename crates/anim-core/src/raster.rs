@@ -31,7 +31,7 @@ pub type TileDiff = Vec<(TileCoord, Option<Arc<TileData>>, Option<Arc<TileData>>
 /// paths and persisted as BLOBs) — NOT a 0..=65535 normalized integer. Any
 /// CPU math over tile values must go through [`f16_bits_to_f32`] /
 /// [`f32_to_f16_bits`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TileData {
     /// Row-major RGBA16F bit patterns, length [`TILE_LEN`], premultiplied alpha.
     pub rgba: Box<[u16]>,
@@ -138,7 +138,7 @@ impl TileData {
 /// compositing properties live on the owning [`crate::model::CelLayer`], so one
 /// surface has exactly one home for each property.
 /// A missing tile is fully transparent, so a blank layer costs nothing.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct RasterLayer {
     /// BTreeMap (not HashMap) so `content_hash` folds tiles in a deterministic
     /// order — hash stability is load-bearing for the eval cache and tests.

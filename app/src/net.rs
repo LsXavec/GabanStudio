@@ -140,6 +140,8 @@ pub fn generate_key() -> String {
 
 const FRAME_JSON: u8 = 0;
 const FRAME_DOC: u8 = 1;
+/// SESSION MIRROR: a serde_json Vec<Command> batch (host → guests).
+const FRAME_CMDS: u8 = 2;
 /// Snapshots of real projects can be large; everything else is small.
 const MAX_FRAME: u32 = 256 * 1024 * 1024;
 
@@ -175,6 +177,9 @@ pub enum Msg {
         username: String,
         code: String,
         mac: String,
+        /// The guest's build (serde-default: old builds send none).
+        #[serde(default)]
+        version: String,
     },
     Welcome {
         peer_id: u64,
@@ -186,6 +191,8 @@ pub enum Msg {
     PeerJoined {
         id: u64,
         name: String,
+        #[serde(default)]
+        version: String,
     },
     PeerLeft {
         id: u64,
@@ -207,6 +214,9 @@ pub enum Msg {
         author: String,
         why: String,
     },
+    /// A guest's mirror slipped (a batch would not apply): please send
+    /// a fresh snapshot.
+    ResyncRequest {},
     /// A guest asking the host to undo/redo THEIR last step.
     UndoRequest {
         author: String,
@@ -228,6 +238,8 @@ pub enum Msg {
 enum Out {
     Raw(u8, Vec<u8>),
     Json(Box<Msg>),
+    /// Serialized ON THE WRITER (tile payloads are the expensive part).
+    Cmds(Vec<anim_core::command::Command>),
 }
 
 /// The writer: drains the queue into the socket; dies with either end.
@@ -238,6 +250,10 @@ fn spawn_writer(mut stream: TcpStream, rx: Receiver<Out>) {
                 Out::Raw(kind, payload) => write_frame(&mut stream, kind, &payload).is_ok(),
                 Out::Json(msg) => match serde_json::to_vec(&*msg) {
                     Ok(bytes) => write_frame(&mut stream, FRAME_JSON, &bytes).is_ok(),
+                    Err(_) => true,
+                },
+                Out::Cmds(batch) => match serde_json::to_vec(&batch) {
+                    Ok(bytes) => write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
                     Err(_) => true,
                 },
             };
@@ -269,6 +285,7 @@ pub enum NetEvent {
     PeerJoined {
         id: u64,
         name: String,
+        version: String,
     },
     PeerLeft {
         id: u64,
@@ -294,6 +311,10 @@ pub enum NetEvent {
     },
     /// Guest side: the host refused this artist's edit, with why.
     EditRefused(String),
+    /// Guest side: one applied batch from the host's engine.
+    Commands(Vec<anim_core::command::Command>),
+    /// Host side: a guest's mirror slipped — send a fresh snapshot.
+    ResyncNeeded,
     /// Guest side: a fresh authoritative document from the host.
     Snapshot(Vec<u8>),
     /// The connection or room ended.
@@ -379,6 +400,7 @@ impl Host {
                                     username,
                                     code,
                                     mac,
+                                    version,
                                 }) = serde_json::from_slice::<Msg>(&buf)
                                 else {
                                     return;
@@ -430,12 +452,14 @@ impl Host {
                                 let joined = serde_json::to_vec(&Msg::PeerJoined {
                                     id,
                                     name: username.clone(),
+                                    version: version.clone(),
                                 })
                                 .unwrap();
                                 broadcast_except(&clients, id, FRAME_JSON, &joined);
                                 let _ = tx.send(NetEvent::PeerJoined {
                                     id,
                                     name: username.clone(),
+                                    version,
                                 });
                                 let _ = tx
                                     .send(NetEvent::Status(format!("{username} joined ({addr})")));
@@ -457,6 +481,10 @@ impl Host {
                                                         layer_name,
                                                         tiles,
                                                     });
+                                                    continue;
+                                                }
+                                                Ok(Msg::ResyncRequest {}) => {
+                                                    let _ = tx.send(NetEvent::ResyncNeeded);
                                                     continue;
                                                 }
                                                 Ok(Msg::UndoRequest { author, redo }) => {
@@ -550,6 +578,22 @@ impl Host {
         broadcast_except(&self.clients, u64::MAX, FRAME_JSON, &msg);
     }
 
+    /// SESSION MIRROR: one applied batch, to every guest.
+    pub fn send_commands(&self, batch: Vec<anim_core::command::Command>) {
+        let mut dead = Vec::new();
+        {
+            let mut map = self.clients.lock().unwrap();
+            for (id, c) in map.iter_mut() {
+                if c.tx.send(Out::Cmds(batch.clone())).is_err() {
+                    dead.push(*id);
+                }
+            }
+            for id in &dead {
+                map.remove(id);
+            }
+        }
+    }
+
     /// The authoritative document, to every guest (join + refresh).
     pub fn send_snapshot(&self, doc: &[u8]) {
         broadcast_except(&self.clients, u64::MAX, FRAME_DOC, doc);
@@ -632,6 +676,7 @@ impl Client {
             username: username.to_string(),
             code: code.trim().to_string(),
             mac: auth_mac(key, &nonce, code.trim()),
+            version: crate::update::CURRENT_VERSION.to_string(),
         })
         .unwrap();
         write_frame(&mut stream, FRAME_JSON, &auth).map_err(|e| e.to_string())?;
@@ -659,6 +704,12 @@ impl Client {
                     Ok((FRAME_DOC, bytes)) => {
                         let _ = tx.send(NetEvent::Snapshot(bytes));
                     }
+                    Ok((FRAME_CMDS, bytes)) => {
+                        // Deserialized HERE, on the reader thread.
+                        if let Ok(batch) = serde_json::from_slice::<Vec<anim_core::command::Command>>(&bytes) {
+                            let _ = tx.send(NetEvent::Commands(batch));
+                        }
+                    }
                     Ok((FRAME_JSON, buf)) => match serde_json::from_slice::<Msg>(&buf) {
                         Ok(Msg::Presence {
                             id,
@@ -675,8 +726,9 @@ impl Client {
                                 wet,
                             });
                         }
-                        Ok(Msg::PeerJoined { id, name }) => {
-                            let _ = tx.send(NetEvent::PeerJoined { id, name });
+                        Ok(Msg::PeerJoined { id, name, version }) => {
+                            let _ =
+                                tx.send(NetEvent::PeerJoined { id, name, version });
                         }
                         Ok(Msg::PeerLeft { id }) => {
                             let _ = tx.send(NetEvent::PeerLeft { id });
@@ -719,6 +771,11 @@ impl Client {
         })));
     }
 
+    /// Tell the host our mirror slipped.
+    pub fn send_resync_request(&mut self) {
+        let _ = self.tx.send(Out::Json(Box::new(Msg::ResyncRequest {})));
+    }
+
     /// Ask the host to undo/redo THIS artist's last step (v2).
     pub fn send_undo(&mut self, author: &str, redo: bool) {
         let _ = self.tx.send(Out::Json(Box::new(Msg::UndoRequest {
@@ -741,6 +798,8 @@ impl Client {
 #[derive(Clone)]
 pub struct PeerView {
     pub name: String,
+    /// The peer's build, for the room lamp's cross-check.
+    pub version: String,
     pub frame: u32,
     pub cursor: Option<[f32; 2]>,
     pub pen_down: bool,

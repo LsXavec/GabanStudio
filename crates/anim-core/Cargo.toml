@@ -5,7 +5,7 @@ edition = "2024"
 description = "Headless engine for the node-graph 2D animation suite: document model, X-sheet, cached graph evaluator, undo, SQLite persistence."
 
 [dependencies]
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 png = "0.17"
 # WAV decode for the audio scratch track (pure decoder — no audio I/O; the

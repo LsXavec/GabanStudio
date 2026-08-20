@@ -73,6 +73,11 @@ pub struct Engine {
     pub project: Project,
     /// SESSION v2: the author the next applied step belongs to.
     current_author: Option<String>,
+    /// SESSION MIRROR (PSD-session-v2 ruling 2026-08-19): when on, every
+    /// successfully applied command batch is also logged for the host to
+    /// stream to guests. RUNTIME ONLY — never serialized.
+    pub mirror_log: bool,
+    applied_log: Vec<Vec<Command>>,
     pub evaluator: Evaluator,
     history: History,
 }
@@ -84,6 +89,8 @@ impl Engine {
             evaluator: Evaluator::new(),
             history: History::default(),
             current_author: None,
+            mirror_log: false,
+            applied_log: Vec::new(),
         }
     }
 
@@ -236,6 +243,9 @@ impl Engine {
         }
 
         self.evaluator.invalidate_nodes(&invalidate);
+        if self.mirror_log {
+            self.applied_log.push(commands.clone());
+        }
         let author = self.current_author.clone();
         self.history.undo_stack.push_back(Applied {
             label: label.into(),
@@ -364,6 +374,30 @@ impl Engine {
             .count()
     }
 
+    /// SESSION MIRROR: everything applied since the last drain (the
+    /// host streams these to guests each frame).
+    pub fn drain_applied(&mut self) -> Vec<Vec<Command>> {
+        std::mem::take(&mut self.applied_log)
+    }
+
+    /// SESSION MIRROR: apply a streamed batch to a guest's mirror —
+    /// NO history (one truth: the mirror never undoes on its own).
+    /// Best-effort: a batch that no longer fits the mirror is skipped
+    /// whole (the next join snapshot reconciles).
+    pub fn apply_mirror(&mut self, commands: &[Command]) -> Result<()> {
+        let mut invalidate: HashSet<NodeId> = HashSet::new();
+        for cmd in commands {
+            let effect = apply_command(&mut self.project, cmd)?;
+            invalidate.extend(invalidation_closure(
+                &self.project,
+                cmd.cut_ref(),
+                &effect.invalidation_roots,
+            ));
+        }
+        self.evaluator.invalidate_nodes(&invalidate);
+        Ok(())
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.history.undo_stack.is_empty()
     }
@@ -402,6 +436,8 @@ impl Engine {
             evaluator: Evaluator::new(),
             history: History::default(),
             current_author: None,
+            mirror_log: false,
+            applied_log: Vec::new(),
         })
     }
 }
