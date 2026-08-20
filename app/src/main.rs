@@ -2709,11 +2709,19 @@ impl Editor {
                 // Slate identity: filename + dirty mark, then the cut's
                 // vitals as engraved fields (transport lives in the FOOT;
                 // undo/redo live on the keys and the Foot's counter).
+                // The identity: the file's stem once one exists; before
+                // the first save, the NAME the artist gave the project
+                // (owner's report: "Drawing boog" showed as untitled).
+                // "untitled" only when both are absent.
                 let fname = self
                     .state
                     .file_path
                     .as_ref()
                     .and_then(|p| p.file_stem().map(|os| os.to_string_lossy().to_string()))
+                    .or_else(|| {
+                        let n = self.state.engine.project.name.trim();
+                        (!n.is_empty() && n != "Untitled").then(|| n.to_string())
+                    })
                     .unwrap_or_else(|| "untitled".into());
                 // AUDIT [3]: these were variable-width labels sitting
                 // BEFORE the room tabs, so the tabs slid sideways the
