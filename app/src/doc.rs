@@ -1958,15 +1958,14 @@ impl AppState {
         }
     }
 
-    /// SESSION snapshot (PSD-session-room): the document as bytes via
-    /// the SAME save path (`engine.save`) through a temp file — never a
-    /// second serialization truth (NEVER-DO 1).
-    pub fn snapshot_bytes(&mut self) -> Option<Vec<u8>> {
-        let path = std::env::temp_dir().join("animstudio_session_out.animproj");
+    /// SESSION PERF: everything a worker thread needs to build the
+    /// snapshot OFF the UI thread — a clone of the project (Arc-tiled,
+    /// cheap) with the palettes already folded in.
+    pub fn snapshot_project(&mut self) -> anim_core::model::Project {
         self.palettes.save_into(&mut self.engine.project);
-        self.engine.save(&path).ok()?;
-        std::fs::read(&path).ok()
+        self.engine.project.clone()
     }
+
     pub fn save(&mut self, force_dialog: bool) {
         let path = if force_dialog || self.file_path.is_none() {
             rfd::FileDialog::new()

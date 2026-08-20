@@ -111,3 +111,13 @@ playhead, zoom. (3) presence throttled to 20Hz (was per-frame wet
 clones + JSON both directions). Known remaining cost, named: the
 host's snapshot save itself still runs on the UI thread once per
 settle window — an async save is the future fix if it still shows.
+
+SESSION PERF 2 repair 2026-08-19 (owner mid-test: "lagging diagnose";
+measured >1 core with a live guest at 192.168.0.192): the 2.5s sync
+metronome itself was the lag — the host's full-document SQLite save and
+the guest's full parse both ran on the UI thread. Both moved to worker
+threads: the host clones the Arc-tiled project (cheap) and a worker
+runs store::save; the guest parses off-thread and the UI only swaps the
+finished AppState (drain runs every frame; mid-stroke drops it and the
+cadence brings the next). snapshot_bytes superseded and removed.
+Shipped as v0.1.6.

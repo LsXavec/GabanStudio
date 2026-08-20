@@ -173,6 +173,11 @@ struct App {
     /// SESSION PERF: last snapshot / presence send times (throttles).
     session_last_snap: f64,
     session_last_presence: f64,
+    /// SESSION PERF 2: the host's snapshot builder, off the UI thread
+    /// (one in flight; the UI only forwards finished bytes).
+    session_snap_rx: Option<std::sync::mpsc::Receiver<Option<Vec<u8>>>>,
+    /// The guest's snapshot parser, off the UI thread (latest wins).
+    session_load_rx: Option<std::sync::mpsc::Receiver<Result<doc::AppState, String>>>,
     /// In-progress rebind capture (Settings).
     capturing: Option<RebindCapture>,
     /// Active GPU backend name (for the Performance page's Renderer row).
@@ -489,55 +494,17 @@ impl App {
                 }
                 net::NetEvent::Snapshot(bytes) => {
                     // ONE TRUTH (NEVER-DO 1): the host's document replaces
-                    // ours wholesale, never merged; refused outright while a
-                    // gesture is live (the next snapshot lands instead).
-                    let busy = self
-                        .editor
-                        .as_ref()
-                        .is_some_and(|ed| ed.canvas.stroke_active());
-                    if !busy {
-                        let path = std::env::temp_dir().join("animstudio_session_in.animproj");
-                        if std::fs::write(&path, &bytes).is_ok() {
-                            match doc::AppState::load_from(path) {
-                                Ok(mut st) => {
-                                    st.file_path = None; // never ours to save over
-                                    // SESSION PERF: rebuilding the whole
-                                    // Editor tore down the GPU paint
-                                    // targets on EVERY sync — the guest's
-                                    // "buffering". Same paper size: the
-                                    // state swaps IN PLACE, keeping the
-                                    // GPU targets, playhead and zoom.
-                                    let same_size = self.editor.as_ref().is_some_and(|ed| {
-                                        ed.state.engine.project.width
-                                            == st.engine.project.width
-                                            && ed.state.engine.project.height
-                                                == st.engine.project.height
-                                    });
-                                    if same_size {
-                                        let ed = self.editor.as_mut().unwrap();
-                                        let frame = ed
-                                            .state
-                                            .view
-                                            .frame
-                                            .min(st.frame_count().saturating_sub(1));
-                                        ed.state = st;
-                                        ed.state.view.frame = frame;
-                                        ed.canvas.engine_changed();
-                                        ed.state.status = "live from the host".into();
-                                    } else {
-                                        let rs = self.render_state.as_ref();
-                                        let mut ed = Editor::from_state(st, rs);
-                                        ed.stage =
-                                            self.editor.as_ref().and_then(|o| o.stage);
-                                        ed.canvas.engine_changed();
-                                        ed.state.status = "live from the host".into();
-                                        self.editor = Some(ed);
-                                    }
-                                    self.session_status = "file synced".into();
-                                }
-                                Err(e) => self.session_status = format!("snapshot refused: {e}"),
-                            }
-                        }
+                    // ours wholesale, never merged. SESSION PERF 2: the
+                    // PARSE runs on a worker — this arm only writes the
+                    // bytes and spawns it; the swap happens in the drain
+                    // below once parsing finishes (latest snapshot wins).
+                    let path = std::env::temp_dir().join("animstudio_session_in.animproj");
+                    if std::fs::write(&path, &bytes).is_ok() {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.session_load_rx = Some(rx);
+                        std::thread::spawn(move || {
+                            let _ = tx.send(doc::AppState::load_from(path));
+                        });
                     }
                 }
                 // HOST: a guest's finished stroke. One writer — OUR engine
@@ -667,13 +634,30 @@ impl App {
             let due = stamp != self.session_sent_gen
                 && !pen_busy
                 && now - self.session_last_snap > 2.5;
-            if fresh_join || due {
+            if (fresh_join || due) && self.session_snap_rx.is_none() {
                 self.session_sent_gen = stamp;
                 self.session_last_snap = now;
-                snapshot = self
-                    .editor
-                    .as_mut()
-                    .and_then(|ed| ed.state.snapshot_bytes());
+                // SESSION PERF 2: the save runs on a WORKER — the UI
+                // thread only clones the Arc-tiled project (cheap).
+                if let Some(ed) = &mut self.editor {
+                    let project = ed.state.snapshot_project();
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.session_snap_rx = Some(rx);
+                    std::thread::spawn(move || {
+                        let path =
+                            std::env::temp_dir().join("animstudio_session_out.animproj");
+                        let bytes = anim_core::store::save(&project, &path)
+                            .ok()
+                            .and_then(|_| std::fs::read(&path).ok());
+                        let _ = tx.send(bytes);
+                    });
+                }
+            }
+            if let Some(rx) = &self.session_snap_rx
+                && let Ok(built) = rx.try_recv()
+            {
+                self.session_snap_rx = None;
+                snapshot = built;
             }
         }
         // V2: a guest's finished strokes leave here (one writer — the
@@ -709,6 +693,52 @@ impl App {
                 }
             }
             net::Session::Idle => {}
+        }
+        // SESSION PERF 2 drain: a snapshot parsed on the worker swaps in
+        // HERE (every frame, not only when new events arrive). Mid-stroke
+        // it is dropped — the cadence brings the next one (NEVER-DO 1:
+        // wholesale, never merged; never under a live gesture).
+        if let Some(rx) = &self.session_load_rx
+            && let Ok(parsed) = rx.try_recv()
+        {
+            self.session_load_rx = None;
+            let busy = self
+                .editor
+                .as_ref()
+                .is_some_and(|ed| ed.canvas.stroke_active());
+            if !busy {
+                match parsed {
+                    Ok(mut st) => {
+                        st.file_path = None; // never ours to save over
+                        let same_size = self.editor.as_ref().is_some_and(|ed| {
+                            ed.state.engine.project.width == st.engine.project.width
+                                && ed.state.engine.project.height
+                                    == st.engine.project.height
+                        });
+                        if same_size {
+                            let ed = self.editor.as_mut().unwrap();
+                            let frame = ed
+                                .state
+                                .view
+                                .frame
+                                .min(st.frame_count().saturating_sub(1));
+                            ed.state = st;
+                            ed.state.view.frame = frame;
+                            ed.canvas.engine_changed();
+                            ed.state.status = "live from the host".into();
+                        } else {
+                            let rs = self.render_state.as_ref();
+                            let mut ed = Editor::from_state(st, rs);
+                            ed.stage = self.editor.as_ref().and_then(|o| o.stage);
+                            ed.canvas.engine_changed();
+                            ed.state.status = "live from the host".into();
+                            self.editor = Some(ed);
+                        }
+                        self.session_status = "file synced".into();
+                    }
+                    Err(e) => self.session_status = format!("snapshot refused: {e}"),
+                }
+            }
         }
         let guest = matches!(self.session, net::Session::Joined(_));
         if let Some(ed) = &mut self.editor {
@@ -804,6 +834,8 @@ impl App {
             update_note: String::new(),
             session_last_snap: 0.0,
             session_last_presence: 0.0,
+            session_snap_rx: None,
+            session_load_rx: None,
             settings_category: SettingsCategory::default(),
             capturing: None,
             backend,
