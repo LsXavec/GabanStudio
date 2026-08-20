@@ -411,6 +411,56 @@ fn a_mirror_replaying_the_stream_matches_the_host_exactly() {
 }
 
 #[test]
+fn per_artist_undo_replays_identically_on_replicas() {
+    // STAGE 3 (PSD-multiplayer-rescope): every machine tags every entry
+    // with the acting author (its OWN hand included, via the session's
+    // base author), applies the one sequenced order, and replays the
+    // same per-artist undo. Two replicas must stay byte-identical
+    // through interleaved authors, undos, and redos.
+    let mut a = Engine::new("rig");
+    let (at, d, line, color) = two_layer_rig(&mut a);
+    let mut b = Engine::new("rig");
+    let _ = two_layer_rig(&mut b);
+    a.clear_history();
+    b.clear_history();
+    assert_eq!(a.project, b.project, "identical starting rigs");
+
+    // The one sequenced order, replayed on both machines.
+    let script: Vec<(&str, Vec<Command>)> = vec![
+        ("host", vec![dab(at, d, line, 10)]),
+        ("ami", vec![dab(at, d, color, 40)]),
+        ("host", vec![dab(at, d, line, 20)]),
+        ("ami", vec![dab(at, d, color, 50)]),
+    ];
+    for (author, cmds) in &script {
+        for e in [&mut a, &mut b] {
+            e.set_author(Some(author.to_string()));
+            e.apply("step", cmds.clone()).unwrap();
+        }
+    }
+    assert_eq!(a.project, b.project, "same order, same documents");
+
+    // "If they undo, Their Last stroke Gets overwritten" — ami's undo
+    // surrenders the SAME step on both machines; host ink survives.
+    let la = a.undo_last_by(Some("ami")).unwrap();
+    let lb = b.undo_last_by(Some("ami")).unwrap();
+    assert_eq!(la, lb, "both replicas surrendered the same step");
+    assert_eq!(a.project, b.project, "identical after ami's undo");
+
+    // The host's own undo obeys the same law — one law, every hand.
+    a.undo_last_by(Some("host")).unwrap();
+    b.undo_last_by(Some("host")).unwrap();
+    assert_eq!(a.project, b.project, "identical after the host's undo");
+
+    // Redos replay in reverse order of the undos, identically.
+    a.redo_last_by(Some("host")).unwrap();
+    b.redo_last_by(Some("host")).unwrap();
+    a.redo_last_by(Some("ami")).unwrap();
+    b.redo_last_by(Some("ami")).unwrap();
+    assert_eq!(a.project, b.project, "identical after both redos");
+}
+
+#[test]
 fn commands_roundtrip_through_serde() {
     let mut e = Engine::new("wire");
     let (at, d, line, _c) = two_layer_rig(&mut e);

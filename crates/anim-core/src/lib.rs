@@ -316,6 +316,14 @@ impl Engine {
         self.current_author = author;
     }
 
+    /// STAGE 3 (PSD-multiplayer-rescope): the author currently armed —
+    /// transient taggers save and RESTORE this instead of resetting to
+    /// None (a session arms the local artist's name as the base, so
+    /// every history entry carries its hand on every machine).
+    pub fn author(&self) -> Option<String> {
+        self.current_author.clone()
+    }
+
     /// Undo the most recent step authored by `author`, but ONLY while it
     /// is still safe to remove: nothing applied after it touches the same
     /// drawing+layer (NEVER-DO 3 — no out-of-order surgery). Returns the

@@ -2989,27 +2989,23 @@ impl CanvasView {
                         self.wet_dirty = false;
                     }
                     let tiles = p.read_tiles();
-                    // STAGE 1 (PSD-multiplayer-rescope): a GUEST never
-                    // commits — the dab stream already told the host
-                    // everything; End asks for the sequenced commit.
-                    // synced_active is deliberately untouched: the GPU
-                    // keeps showing this stroke until the host's echo
-                    // replays it into the engine (engine truth) and the
-                    // resync swaps in the committed pixels seamlessly.
-                    if self.is_guest {
+                    // STAGE 1/3 (PSD-multiplayer-rescope): a STREAMED
+                    // guest stroke never commits here — the dab stream
+                    // already told the host everything; End asks for the
+                    // sequenced commit, and synced_active stays
+                    // untouched so the GPU keeps showing this stroke
+                    // until the echo replays it into engine truth. An
+                    // UNSTREAMED guest stroke (a fresh cel) falls
+                    // through to the local commit below as a PREDICTION:
+                    // the command mirror carries it whole, and its new
+                    // ids live in this guest's own 2^48 partition.
+                    if self.is_guest && self.stroke_streaming {
                         let _ = &tiles; // pixels stay home (NEVER-DO 1)
-                        if self.stroke_streaming {
-                            self.stroke_outbox.push(StrokeMsg::End {
-                                stroke_id: self.stroke_wire_id,
-                            });
-                            self.stroke_streaming = false;
-                            state.status = "stroke sent — the host is inking it".into();
-                        } else {
-                            state.refuse(
-                                "refused — draw on a frame the host has exposed \
-                                 (guests cannot create cels yet)",
-                            );
-                        }
+                        self.stroke_outbox.push(StrokeMsg::End {
+                            stroke_id: self.stroke_wire_id,
+                        });
+                        self.stroke_streaming = false;
+                        state.status = "stroke sent — the host is inking it".into();
                         self.cel_touched = false;
                         self.current.clear();
                         self.dabs_flushed = 0;

@@ -209,6 +209,9 @@ struct App {
     /// replays waiting for their hashes.
     session_audit: std::collections::HashMap<u64, net::StrokeHashesWire>,
     session_done: std::collections::HashSet<u64>,
+    /// STAGE 3: the engine's base author is armed with this artist's
+    /// name while in a room (every entry carries its hand).
+    session_author_armed: bool,
     /// LAN DISCOVERY: rooms visible on this network (always listening).
     discovery: net::Discovery,
     /// A guest asked for a fresh snapshot (their mirror slipped).
@@ -325,8 +328,10 @@ struct GatherStroke {
 /// order; buffered until the join snapshot lands).
 enum SeqEv {
     End(net::StrokeEndWire),
-    Cmds(u64, Vec<anim_core::command::Command>),
+    Cmds(net::CmdBatchWire),
     Hashes(net::StrokeHashesWire),
+    /// STAGE 3: a per-artist undo/redo, replayed on identical history.
+    Undo { author: String, redo: bool, seq: u64 },
 }
 
 impl App {
@@ -519,6 +524,7 @@ impl App {
         self.session_res_announced.clear();
         self.session_audit.clear();
         self.session_done.clear();
+        self.session_author_armed = false;
         if let Some(ed) = &mut self.editor {
             ed.canvas.replay_inbox.clear();
             ed.canvas.replay_done.clear();
@@ -753,7 +759,8 @@ impl App {
                     }
                 }
             }
-            SeqEv::Cmds(seq, batch) => {
+            SeqEv::Cmds(batch) => {
+                let seq = batch.seq;
                 if seq <= self.session_applied_seq {
                     return;
                 }
@@ -768,9 +775,29 @@ impl App {
                     return;
                 }
                 self.session_applied_seq = seq;
-                net::slog(format!("APPLY cmds seq={seq} n={}", batch.len()));
+                // STAGE 3: our own echo — the prediction already applied
+                // (with our hand on it); only the number advances.
+                let mine = batch.origin == self.config.session.username.trim();
+                if mine {
+                    return;
+                }
+                net::slog(format!(
+                    "APPLY cmds seq={seq} from {} n={}",
+                    batch.origin,
+                    batch.cmds.len()
+                ));
                 if let Some(ed) = &mut self.editor {
-                    match ed.state.engine.apply_mirror(&batch) {
+                    // Authored + HISTORY-recording apply (per-artist
+                    // undo needs identical histories everywhere); the
+                    // mirror is suppressed or this would echo forever.
+                    let was = ed.state.engine.mirror_log;
+                    ed.state.engine.mirror_log = false;
+                    let prev = ed.state.engine.author();
+                    ed.state.engine.set_author(Some(batch.origin.clone()));
+                    let r = ed.state.engine.apply("remote edit", batch.cmds);
+                    ed.state.engine.set_author(prev);
+                    ed.state.engine.mirror_log = was;
+                    match r {
                         Ok(()) => {
                             ed.state.doc_gen = ed.state.doc_gen.wrapping_add(1);
                             ed.canvas.engine_changed();
@@ -782,6 +809,41 @@ impl App {
                             }
                             self.session_status = "mirror slipped — resyncing…".into();
                         }
+                    }
+                }
+            }
+            SeqEv::Undo { author, redo, seq } => {
+                if seq <= self.session_applied_seq {
+                    return;
+                }
+                if seq != self.session_applied_seq + 1 {
+                    net::slog(format!(
+                        "SEQ GAP (undo) want={} got={seq} — resync",
+                        self.session_applied_seq + 1
+                    ));
+                    if let net::Session::Joined(c) = &mut self.session {
+                        c.send_resync_request();
+                    }
+                    return;
+                }
+                self.session_applied_seq = seq;
+                net::slog(format!("UNDONE {author} redo={redo} seq={seq}"));
+                let outcome = self.editor.as_mut().map(|ed| {
+                    let was = ed.state.engine.mirror_log;
+                    ed.state.engine.mirror_log = false;
+                    let r = ed.state.remote_history(&author, redo);
+                    ed.state.engine.mirror_log = was;
+                    if r.is_ok() {
+                        ed.canvas.engine_changed();
+                    }
+                    r
+                });
+                if let Some(Err(why)) = outcome {
+                    // The entry predates our join (or histories split):
+                    // take the host's truth fresh.
+                    net::slog(format!("UNDONE {author} failed: {why} — resync"));
+                    if let net::Session::Joined(c) = &mut self.session {
+                        c.send_resync_request();
                     }
                 }
             }
@@ -908,8 +970,54 @@ impl App {
                 }
                 // STAGE 1: sequenced command batches ride the same lane
                 // as strokes — one order for everything (NEVER-DO 2).
-                net::NetEvent::Commands(seq, batch) => {
-                    self.seq_event(SeqEv::Cmds(seq, batch));
+                net::NetEvent::Commands(batch) => {
+                    self.seq_event(SeqEv::Cmds(batch));
+                }
+                // STAGE 3: a guest's predicted batch — apply with their
+                // hand on it, then it takes the next number and goes to
+                // every peer (the origin skips its own echo).
+                net::NetEvent::GuestCmds { origin, cmds } => {
+                    let outcome = self.editor.as_mut().map(|ed| {
+                        let was = ed.state.engine.mirror_log;
+                        ed.state.engine.mirror_log = false;
+                        let prev = ed.state.engine.author();
+                        ed.state.engine.set_author(Some(origin.clone()));
+                        let r = ed.state.engine.apply("remote edit", cmds.clone());
+                        ed.state.engine.set_author(prev);
+                        ed.state.engine.mirror_log = was;
+                        if r.is_ok() {
+                            ed.state.doc_gen = ed.state.doc_gen.wrapping_add(1);
+                            ed.canvas.engine_changed();
+                        }
+                        r
+                    });
+                    match outcome {
+                        Some(Ok(())) => {
+                            self.session_seq += 1;
+                            net::slog(format!(
+                                "SEQ {} cmds from {origin} n={}",
+                                self.session_seq,
+                                cmds.len()
+                            ));
+                            if let net::Session::Hosting(h) = &self.session {
+                                h.send_commands(net::CmdBatchWire {
+                                    seq: self.session_seq,
+                                    origin: origin.clone(),
+                                    cmds,
+                                });
+                            }
+                        }
+                        Some(Err(e)) => {
+                            net::slog(format!("guest cmds from {origin} refused: {e:?}"));
+                            if let net::Session::Hosting(h) = &self.session {
+                                h.send_refusal(&origin, &format!("{e:?}"));
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                net::NetEvent::Undone { author, redo, seq } => {
+                    self.seq_event(SeqEv::Undo { author, redo, seq });
                 }
                 net::NetEvent::Stroke(frame) => {
                     self.guest_stroke_frame(frame);
@@ -1045,11 +1153,17 @@ impl App {
                     }
                 }
                 // HOST: a guest asking to undo/redo their own step.
+                // STAGE 3: a successful one is SEQUENCED — every peer
+                // (the asker included) replays the same per-artist undo
+                // on its identical history. No snapshot.
                 net::NetEvent::UndoRequest { author, redo } => {
-                    let outcome = self
-                        .editor
-                        .as_mut()
-                        .map(|ed| ed.state.remote_history(&author, redo));
+                    let outcome = self.editor.as_mut().map(|ed| {
+                        let was = ed.state.engine.mirror_log;
+                        ed.state.engine.mirror_log = false;
+                        let r = ed.state.remote_history(&author, redo);
+                        ed.state.engine.mirror_log = was;
+                        r
+                    });
                     match outcome {
                         Some(Err(why)) => {
                             if let net::Session::Hosting(h) = &self.session {
@@ -1059,6 +1173,10 @@ impl App {
                         Some(Ok(())) => {
                             if let Some(ed) = &mut self.editor {
                                 ed.canvas.engine_changed();
+                            }
+                            self.session_seq += 1;
+                            if let net::Session::Hosting(h) = &self.session {
+                                h.send_undone(&author, redo, self.session_seq);
                             }
                         }
                         None => {}
@@ -1070,6 +1188,11 @@ impl App {
                         ed.state.refuse(format!("refused by the host — {why}"));
                     }
                     self.session_status = format!("refused: {why}");
+                    // STAGE 3: our refused PREDICTION may already sit in
+                    // this document — take the host's truth fresh.
+                    if let net::Session::Joined(c) = &mut self.session {
+                        c.send_resync_request();
+                    }
                 }
                 net::NetEvent::Ended(why) => {
                     self.session = net::Session::Idle;
@@ -1158,14 +1281,27 @@ impl App {
         // batch streams to guests (tiny), and whole documents go out only
         // for joins and resyncs.
         let hosting_now = matches!(self.session, net::Session::Hosting(_));
+        let in_room = !matches!(self.session, net::Session::Idle);
+        let me = self.config.session.username.trim().to_string();
         // STAGE 1: canvas knows a session is live (strokes stream).
         if let Some(ed) = &mut self.editor {
-            ed.canvas.session_live = !matches!(self.session, net::Session::Idle);
+            ed.canvas.session_live = in_room;
         }
+        // STAGE 3: BOTH roles log applied commands (the host to
+        // broadcast, a guest to send predictions), and the engine's
+        // base author is this artist's name — every history entry
+        // carries its hand, on every machine, so per-artist undo
+        // replays identically everywhere.
         if let Some(ed) = &mut self.editor {
-            if ed.state.engine.mirror_log != hosting_now {
-                ed.state.engine.mirror_log = hosting_now;
+            if ed.state.engine.mirror_log != in_room {
+                ed.state.engine.mirror_log = in_room;
                 let _ = ed.state.engine.drain_applied();
+            }
+            if self.session_author_armed != in_room {
+                self.session_author_armed = in_room;
+                ed.state
+                    .engine
+                    .set_author(in_room.then(|| me.clone()));
             }
         }
         if hosting_now {
@@ -1181,7 +1317,28 @@ impl App {
             {
                 for b in batches {
                     self.session_seq += 1;
-                    h.send_commands(self.session_seq, b);
+                    h.send_commands(net::CmdBatchWire {
+                        seq: self.session_seq,
+                        origin: me.clone(),
+                        cmds: b,
+                    });
+                }
+            }
+        } else if in_room {
+            // STAGE 3: a guest's local edits are PREDICTIONS — applied
+            // here already, sent whole to the host to be sequenced; the
+            // echo (origin == me) is skipped on arrival.
+            let batches = self
+                .editor
+                .as_mut()
+                .map(|ed| ed.state.engine.drain_applied())
+                .unwrap_or_default();
+            if !batches.is_empty()
+                && let net::Session::Joined(c) = &mut self.session
+            {
+                for b in batches {
+                    net::slog(format!("PREDICT cmds n={}", b.len()));
+                    c.send_cmds(&me, b);
                 }
             }
         }
@@ -1197,22 +1354,18 @@ impl App {
                 .as_ref()
                 .is_some_and(|ed| ed.canvas.stroke_active());
             let _ = stamp;
-            // SESSION MIRROR: the command stream carries the document.
-            // Snapshots remain for joins, guest resync requests, and the
-            // pinned undo contract (history rewrites need a fresh truth).
-            let history_moved = self
+            // STAGE 3: history rewrites are SEQUENCED (Undone) — the
+            // snapshot path serves joins and resync requests only. The
+            // old undo-snapshot contract dies with the tile wire.
+            let _ = self
                 .editor
                 .as_mut()
-                .map(|ed| std::mem::take(&mut ed.state.history_dirty))
-                .unwrap_or(false);
-            let due = (self.session_resync || history_moved)
+                .map(|ed| std::mem::take(&mut ed.state.history_dirty));
+            let due = self.session_resync
                 && !pen_busy
                 && now - self.session_last_snap > 1.0;
             if due {
-                net::slog(format!(
-                    "SNAPSHOT trigger resync={} history={history_moved}",
-                    self.session_resync
-                ));
+                net::slog("SNAPSHOT trigger: resync request");
                 self.session_resync = false;
             }
             // STAGE 1: a fresh joiner needs the session's images before
@@ -1286,7 +1439,35 @@ impl App {
             .editor
             .as_mut()
             .and_then(|ed| ed.canvas.history_request.take());
-        let me = self.config.session.username.trim().to_string();
+        // STAGE 3: the HOST's undo is per-artist too — one law for every
+        // hand. It runs through the same machinery a guest's request
+        // does, then goes out sequenced.
+        if hosting_now && let Some(redo) = history_req {
+            let outcome = self.editor.as_mut().map(|ed| {
+                let was = ed.state.engine.mirror_log;
+                ed.state.engine.mirror_log = false;
+                let r = ed.state.remote_history(&me, redo);
+                ed.state.engine.mirror_log = was;
+                r
+            });
+            match outcome {
+                Some(Ok(())) => {
+                    if let Some(ed) = &mut self.editor {
+                        ed.canvas.engine_changed();
+                    }
+                    self.session_seq += 1;
+                    if let net::Session::Hosting(h) = &self.session {
+                        h.send_undone(&me, redo, self.session_seq);
+                    }
+                }
+                Some(Err(why)) => {
+                    if let Some(ed) = &mut self.editor {
+                        ed.state.refuse(format!("refused — {why}"));
+                    }
+                }
+                None => {}
+            }
+        }
         let mut wire_frames: Vec<Vec<u8>> = Vec::new();
         for msg in &stroke_out {
             if let canvas::StrokeMsg::Begin(info) = msg {
@@ -1545,6 +1726,20 @@ impl App {
                                 ed.state.status = "live from the host".into();
                                 self.editor = Some(ed);
                             }
+                            // STAGE 3: this guest allocates ids in its
+                            // own 2^48 partition — parallel creations
+                            // can never collide with the host's or
+                            // another guest's.
+                            if let (net::Session::Joined(c), Some(ed)) =
+                                (&self.session, &mut self.editor)
+                            {
+                                let base = c.peer_id << 48;
+                                let next = &mut ed.state.engine.project.next_id;
+                                *next = (*next).max(base);
+                            }
+                            // The fresh engine lost the base author —
+                            // the pump re-arms it next frame.
+                            self.session_author_armed = false;
                             // Resume the lane exactly where the document
                             // leaves off, then apply what buffered.
                             self.session_applied_seq = meta;
@@ -1671,6 +1866,7 @@ impl App {
             session_res_announced: std::collections::HashSet::new(),
             session_audit: std::collections::HashMap::new(),
             session_done: std::collections::HashSet::new(),
+            session_author_armed: false,
             discovery: net::spawn_discovery(),
             session_resync: false,
             session_snap_rx: None,
@@ -2062,6 +2258,12 @@ impl App {
                     } else {
                         "asked the host to undo your last step…".into()
                     };
+                    return;
+                } else if ed.canvas.session_live {
+                    // STAGE 3: hosting a room, undo is per-artist for
+                    // the host too — routed through the same sequenced
+                    // path a guest's request takes (one law, every hand).
+                    ed.canvas.history_request = Some(redo);
                     return;
                 } else if redo {
                     s.redo();

@@ -1932,6 +1932,9 @@ impl AppState {
             return Ok(());
         }
         let n = diff.len();
+        // STAGE 3: restore the session's BASE author (the local artist's
+        // name), never bare None — every entry carries its hand.
+        let prev = self.engine.author();
         self.engine.set_author(Some(author.to_string()));
         let r = self.engine.apply(
             "remote stroke",
@@ -1942,7 +1945,7 @@ impl AppState {
                 diff,
             }],
         );
-        self.engine.set_author(None);
+        self.engine.set_author(prev);
         match r {
             Ok(()) => {
                 self.status = format!("{author} painted ({n} tile(s))");

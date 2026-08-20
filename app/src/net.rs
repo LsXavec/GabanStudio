@@ -337,6 +337,13 @@ pub enum Msg {
         author: String,
         redo: bool,
     },
+    /// STAGE 3: the host's sequenced verdict — every peer replays the
+    /// same per-artist undo/redo on its identical history.
+    Undone {
+        author: String,
+        redo: bool,
+        seq: u64,
+    },
     /// STAGE 0 (PSD-multiplayer-rescope): a guest's numbered wire-log
     /// lines, shipped through the join — the ordered debug channel.
     DebugLog {
@@ -391,6 +398,16 @@ pub struct StrokeHashesWire {
     pub layer_name: String,
     /// The committed after-state per touched tile: (x, y, hash; 0 = gone).
     pub tiles: Vec<(i32, i32, u64)>,
+}
+
+/// STAGE 3: one command batch on the wire — who produced it, and (host
+/// → peers) its place in the one order. Guests send seq 0; the host
+/// stamps origin from the join name, never the payload.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct CmdBatchWire {
+    pub seq: u64,
+    pub origin: String,
+    pub cmds: Vec<anim_core::command::Command>,
 }
 
 pub enum StrokeFrame {
@@ -497,8 +514,7 @@ enum Out {
     Raw(u8, Vec<u8>),
     Json(Box<Msg>),
     /// Serialized ON THE WRITER (tile payloads are the expensive part).
-    /// STAGE 1: carries the sequence stamp.
-    Cmds(u64, Vec<anim_core::command::Command>),
+    Cmds(Box<CmdBatchWire>),
 }
 
 /// The writer: drains the queue into the socket; dies with either end.
@@ -520,16 +536,12 @@ fn spawn_writer(mut stream: TcpStream, rx: Receiver<Out>) {
                     ),
                     Err(_) => (true, FRAME_JSON, 0),
                 },
-                Out::Cmds(seq, batch) => match serde_json::to_vec(&batch) {
-                    Ok(json) => {
-                        let mut bytes = seq.to_le_bytes().to_vec();
-                        bytes.extend(json);
-                        (
-                            write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
-                            FRAME_CMDS,
-                            bytes.len(),
-                        )
-                    }
+                Out::Cmds(batch) => match serde_json::to_vec(&*batch) {
+                    Ok(bytes) => (
+                        write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
+                        FRAME_CMDS,
+                        bytes.len(),
+                    ),
                     Err(_) => (true, FRAME_CMDS, 0),
                 },
             };
@@ -599,8 +611,19 @@ pub enum NetEvent {
     },
     /// Guest side: the host refused this artist's edit, with why.
     EditRefused(String),
-    /// Guest side: one sequenced batch from the host's engine.
-    Commands(u64, Vec<anim_core::command::Command>),
+    /// Guest side: one sequenced batch from the host.
+    Commands(CmdBatchWire),
+    /// Host side: a guest's predicted command batch (origin = join name).
+    GuestCmds {
+        origin: String,
+        cmds: Vec<anim_core::command::Command>,
+    },
+    /// Guest side: a sequenced per-artist undo/redo to replay.
+    Undone {
+        author: String,
+        redo: bool,
+        seq: u64,
+    },
     /// Host side: a guest's mirror slipped — send a fresh snapshot.
     ResyncNeeded,
     /// Host side: a stroke frame from one guest (author = join name).
@@ -877,6 +900,21 @@ impl Host {
                                                 });
                                             }
                                         }
+                                        Ok((FRAME_CMDS, buf)) => {
+                                            // STAGE 3: a guest's predicted
+                                            // command batch — origin is the
+                                            // JOIN name, never the payload.
+                                            if let Ok(b) =
+                                                serde_json::from_slice::<CmdBatchWire>(&buf)
+                                            {
+                                                let _ = tx.send(NetEvent::GuestCmds {
+                                                    origin: username.clone(),
+                                                    cmds: b.cmds,
+                                                });
+                                            } else {
+                                                slog("IN guest cmds: PARSE FAILED");
+                                            }
+                                        }
                                         Ok((FRAME_STROKE, buf)) => {
                                             // STAGE 1: Begin (author
                                             // stamped from the join name),
@@ -977,14 +1015,13 @@ impl Host {
         broadcast_except(&self.clients, u64::MAX, FRAME_JSON, &msg);
     }
 
-    /// SESSION MIRROR: one applied batch, to every guest — STAGE 1:
-    /// stamped with its place in the one global order.
-    pub fn send_commands(&self, seq: u64, batch: Vec<anim_core::command::Command>) {
+    /// One sequenced batch (with its origin) to every guest.
+    pub fn send_commands(&self, batch: CmdBatchWire) {
         let mut dead = Vec::new();
         {
             let mut map = self.clients.lock().unwrap();
             for (id, c) in map.iter_mut() {
-                if c.tx.send(Out::Cmds(seq, batch.clone())).is_err() {
+                if c.tx.send(Out::Cmds(Box::new(batch.clone()))).is_err() {
                     dead.push(*id);
                 }
             }
@@ -992,6 +1029,17 @@ impl Host {
                 map.remove(id);
             }
         }
+    }
+
+    /// STAGE 3: a sequenced per-artist undo/redo, to every guest.
+    pub fn send_undone(&self, author: &str, redo: bool, seq: u64) {
+        let msg = serde_json::to_vec(&Msg::Undone {
+            author: author.to_string(),
+            redo,
+            seq,
+        })
+        .unwrap();
+        broadcast_except(&self.clients, u64::MAX, FRAME_JSON, &msg);
     }
 
     /// STAGE 1: one stroke frame (Begin/Dabs/End/Res/Hashes) to every
@@ -1149,18 +1197,11 @@ impl Client {
                     }
                     Ok((FRAME_CMDS, bytes)) => {
                         // Deserialized HERE, on the reader thread.
-                        // STAGE 1: the first 8 bytes are the seq stamp.
                         slog(format!("IN cmds bytes={}", bytes.len()));
-                        if bytes.len() >= 8 {
-                            let seq = u64::from_le_bytes(bytes[..8].try_into().unwrap());
-                            if let Ok(batch) = serde_json::from_slice::<
-                                Vec<anim_core::command::Command>,
-                            >(&bytes[8..])
-                            {
-                                let _ = tx.send(NetEvent::Commands(seq, batch));
-                            } else {
-                                slog("IN cmds: PARSE FAILED");
-                            }
+                        if let Ok(batch) = serde_json::from_slice::<CmdBatchWire>(&bytes) {
+                            let _ = tx.send(NetEvent::Commands(batch));
+                        } else {
+                            slog("IN cmds: PARSE FAILED");
                         }
                     }
                     Ok((FRAME_STROKE, bytes)) => {
@@ -1200,6 +1241,9 @@ impl Client {
                         }
                         Ok(Msg::SnapshotMeta { as_of_seq }) => {
                             let _ = tx.send(NetEvent::SnapshotMeta(as_of_seq));
+                        }
+                        Ok(Msg::Undone { author, redo, seq }) => {
+                            let _ = tx.send(NetEvent::Undone { author, redo, seq });
                         }
                         Ok(Msg::RepairTiles {
                             drawing,
@@ -1242,6 +1286,15 @@ impl Client {
     /// STAGE 1: one stroke frame (Begin/Dabs/End/Res) to the host.
     pub fn send_stroke_frame(&mut self, payload: Vec<u8>) {
         let _ = self.tx.send(Out::Raw(FRAME_STROKE, payload));
+    }
+
+    /// STAGE 3: this guest's predicted command batch, to the host.
+    pub fn send_cmds(&mut self, origin: &str, cmds: Vec<anim_core::command::Command>) {
+        let _ = self.tx.send(Out::Cmds(Box::new(CmdBatchWire {
+            seq: 0,
+            origin: origin.to_string(),
+            cmds,
+        })));
     }
 
     /// STAGE 1 (audit): ask the host for exact texels of drifted tiles.
