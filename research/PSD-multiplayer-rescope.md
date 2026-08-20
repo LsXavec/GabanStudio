@@ -264,6 +264,65 @@ audits each stage against the NEVER-DO list before it ships.
    relay, binary JSON frames, and stroke-level GC of very long sessions
    remain later rooms.
 
+## 8. THE FIRST LIVE TEST + THE AUDIT (2026-08-20, same night)
+
+Two-machine test (owner hosting, tester joined): strokes replayed ok
+(6,443-dab strokes, hashes clean), but the owner reported LAG on long
+fast strokes; the log showed resync-snapshot storms with no logged
+cause, peers=0 while the socket lived, and the 47-agent adversarial
+audit returned 38 confirmed findings (4 refuted). The premortem's
+"repair fatter than the drift" came true in a shape nobody drew: the
+STROKE wire was clean — the pixels leaked around it through the
+COMMAND lane (fills, lassos, transforms, clears ship full before+after
+texels as JSON — ~4MB per 20-tile fill per receiver).
+
+**v0.2.1 (shipped that night):**
+- Command lane: PaintTiles BEFORES stripped from the wire (receivers
+  rebuild from their own identical documents — the inverse stays
+  exact) + whole batches deflate. Fills/clears drop ~20–40×.
+- The dab walk is INCREMENTAL — O(n) per stroke, was O(n²); pinned
+  bit-identical by incremental_dabs_match_full_rebuild.
+- guest_ready lifecycle: reset at every session boundary, set on the
+  editor that SURVIVES the swap (different-size joins froze forever);
+  stale-channel cleanup at lane reset; mid-stroke snapshots WAIT
+  instead of being dropped; parse failures re-request.
+- Replays + overlay run under the composite lens too (they starved).
+- Replay/audit/repair resolve layers PROJECT-WIDE, never through the
+  viewer's cut (a peer browsing another cut killed strokes).
+- Audit covers coords only THIS machine changed (drift by
+  construction); id high-water survives swaps (no re-minted ids).
+- Aborted strokes + departing peers send sequenced no-op Ends —
+  gathers and the remote overlay no longer leak/wedge.
+- Refusals go to the refused artist only (a broadcast refusal made
+  every guest resync); duplicate join names refused at the door.
+- Host seq order matches host doc order (replay_done numbers BEFORE
+  the frame's arrivals); NEVER-DO 4 repairs: every resync logs its
+  cause, joins/leaves/undones logged, STATS carries socket-truth
+  peers + queue depths.
+
+**The v0.2.2 queue (audit findings deferred, in severity order):**
+1. Unified sequenced queue guest-side (Cmds/Undone currently apply
+   inline while stroke Ends defer through the canvas — within-frame
+   inversion can mis-target an undo).
+2. Targeted snapshots (requester-only) + host holds sequenced sends
+   while a snapshot builds — kills the stale-snapshot livelock under
+   continuous drawing AND the snapshot-to-everyone cost; includes
+   as_of/doc pairing hardening and origin-prediction loss on swap.
+3. Redo re-audit (a repaired guest's redo can reintroduce drifted
+   after-images unaudited).
+4. Robust peer identity (echo-skip/undo keyed by display name; give
+   peers wire ids).
+5. Fill/lasso/transform as OPERATIONS (seed + params + audit) — the
+   true dab-class fix; v0.2.1's strip+deflate is the bridge.
+6. Replay perf: batch same-layer replays under one readback, cache
+   armed replay resources (disk reload per stroke today), bound the
+   readback to the stroke's rect.
+7. Overlay draws on the stroke's TARGET cel only; guest ungated
+   pre-snapshot predictions; snapshot temp-file races; import assets
+   deflated/deduped; STATS first-paint-per-stroke vitals.
+
+---
 *PSD gate passed 2026-08-20 — root: bit-exact stroke replay, audited
-cheaply, repaired narrowly. Stages 0–4 built same day; adversarial
-NEVER-DO audit run before ship.*
+cheaply, repaired narrowly. Stages 0–4 built same day; v0.2.0 shipped;
+first live test + 47-agent audit same night; v0.2.1 lag/correctness
+batch shipped on its heels.*

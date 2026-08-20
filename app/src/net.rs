@@ -541,14 +541,45 @@ fn spawn_writer(mut stream: TcpStream, rx: Receiver<Out>) {
                     ),
                     Err(_) => (true, FRAME_JSON, 0),
                 },
-                Out::Cmds(batch) => match serde_json::to_vec(&*batch) {
-                    Ok(bytes) => (
-                        write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
-                        FRAME_CMDS,
-                        bytes.len(),
-                    ),
-                    Err(_) => (true, FRAME_CMDS, 0),
-                },
+                Out::Cmds(mut batch) => {
+                    // v0.2.1 (audit, LAW 1): PaintTiles BEFORE-texels never
+                    // ride the wire — every peer holds the identical
+                    // document and rebuilds them locally (the same trick
+                    // apply_remote_tiles always used). Then the whole
+                    // batch deflates: fills/clears carry f16 texels that
+                    // JSON bloats ~10x and deflate crushes back.
+                    for cmd in &mut batch.cmds {
+                        if let anim_core::command::Command::PaintTiles { diff, .. } = cmd {
+                            for (_, before, _) in diff.iter_mut() {
+                                *before = None;
+                            }
+                        }
+                    }
+                    match serde_json::to_vec(&*batch) {
+                        Ok(json) => {
+                            use flate2::{Compression, write::DeflateEncoder};
+                            use std::io::Write as _;
+                            let raw = json.len();
+                            let mut enc =
+                                DeflateEncoder::new(Vec::new(), Compression::fast());
+                            let _ = enc.write_all(&json);
+                            let bytes = enc.finish().unwrap_or(json);
+                            if raw > 64 * 1024 {
+                                slog(format!(
+                                    "OUT cmds raw={raw} deflated={} seq={}",
+                                    bytes.len(),
+                                    batch.seq
+                                ));
+                            }
+                            (
+                                write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
+                                FRAME_CMDS,
+                                bytes.len(),
+                            )
+                        }
+                        Err(_) => (true, FRAME_CMDS, 0),
+                    }
+                }
             };
             let ms = t.elapsed().as_millis();
             if len > 64 * 1024 || kind != FRAME_JSON || ms > 100 {
@@ -700,6 +731,7 @@ impl Host {
         totp_secret: String,
         room_name: String,
         open: bool,
+        host_name: String,
     ) -> std::io::Result<Host> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
         let port = listener.local_addr()?.port();
@@ -727,6 +759,7 @@ impl Host {
                             let tx = tx.clone();
                             let clients = clients.clone();
                             let burned = burned.clone();
+                            let host_name = host_name.clone();
                             std::thread::spawn(move || {
                                 let mut stream = stream;
                                 // WINDOWS: a stream accepted from a
@@ -775,6 +808,30 @@ impl Host {
                                     })
                                     .unwrap();
                                     let _ = write_frame(&mut stream, FRAME_JSON, &msg);
+                                    return;
+                                }
+                                // v0.2.1 (audit): the join NAME is this
+                                // artist's wire identity (echo-skip,
+                                // per-artist undo, refusal routing) — a
+                                // duplicate would silently corrupt all
+                                // three. Refuse it at the door.
+                                let taken = username.trim().is_empty()
+                                    || username == host_name
+                                    || clients
+                                        .lock()
+                                        .unwrap()
+                                        .values()
+                                        .any(|c| c.name == username);
+                                if taken {
+                                    let msg = serde_json::to_vec(&Msg::Refused {
+                                        why: format!(
+                                            "the artist name '{username}' is already in \
+                                             this room — change yours in Settings › Session"
+                                        ),
+                                    })
+                                    .unwrap();
+                                    let _ = write_frame(&mut stream, FRAME_JSON, &msg);
+                                    slog(format!("join refused: duplicate name '{username}'"));
                                     return;
                                 }
                                 stream.set_read_timeout(None).ok();
@@ -911,8 +968,21 @@ impl Host {
                                             // STAGE 3: a guest's predicted
                                             // command batch — origin is the
                                             // JOIN name, never the payload.
+                                            // v0.2.1: deflated on the wire.
+                                            let json = {
+                                                use std::io::Read as _;
+                                                let mut out = Vec::new();
+                                                let mut dec =
+                                                    flate2::read::DeflateDecoder::new(
+                                                        buf.as_slice(),
+                                                    );
+                                                match dec.read_to_end(&mut out) {
+                                                    Ok(_) => out,
+                                                    Err(_) => buf,
+                                                }
+                                            };
                                             if let Ok(b) =
-                                                serde_json::from_slice::<CmdBatchWire>(&buf)
+                                                serde_json::from_slice::<CmdBatchWire>(&json)
                                             {
                                                 let _ = tx.send(NetEvent::GuestCmds {
                                                     origin: username.clone(),
@@ -973,7 +1043,15 @@ impl Host {
                                             }
                                         }
                                         Ok(_) => {}
-                                        Err(_) => break,
+                                        Err(e) => {
+                                            // v0.2.1 (audit): disconnects
+                                            // were invisible in the log.
+                                            slog(format!(
+                                                "peer '{username}' (client {id}) \
+                                                 disconnected: {e}"
+                                            ));
+                                            break;
+                                        }
                                     }
                                 }
                                 clients.lock().unwrap().remove(&id);
@@ -1011,15 +1089,21 @@ impl Host {
         broadcast_except(&self.clients, u64::MAX, FRAME_JSON, &msg);
     }
 
-    /// Tell every guest an edit was refused (the author filters by name —
-    /// small rooms, and a refusal is never secret from collaborators).
+    /// v0.2.1 (audit): a refusal goes to the REFUSED ARTIST's connection
+    /// only — broadcasting it made every guest flash the error and
+    /// request a resync (a room-wide snapshot per refusal).
     pub fn send_refusal(&self, author: &str, why: &str) {
         let msg = serde_json::to_vec(&Msg::EditRefused {
             author: author.to_string(),
             why: why.to_string(),
         })
         .unwrap();
-        broadcast_except(&self.clients, u64::MAX, FRAME_JSON, &msg);
+        let mut map = self.clients.lock().unwrap();
+        for c in map.values_mut() {
+            if c.name == author {
+                let _ = c.tx.send(Out::Raw(FRAME_JSON, msg.clone()));
+            }
+        }
     }
 
     /// One sequenced batch (with its origin) to every guest.
@@ -1210,8 +1294,19 @@ impl Client {
                     }
                     Ok((FRAME_CMDS, bytes)) => {
                         // Deserialized HERE, on the reader thread.
+                        // v0.2.1: the wire form is deflated JSON.
                         slog(format!("IN cmds bytes={}", bytes.len()));
-                        if let Ok(batch) = serde_json::from_slice::<CmdBatchWire>(&bytes) {
+                        let json = {
+                            use std::io::Read as _;
+                            let mut out = Vec::new();
+                            let mut dec =
+                                flate2::read::DeflateDecoder::new(bytes.as_slice());
+                            match dec.read_to_end(&mut out) {
+                                Ok(_) => out,
+                                Err(_) => bytes, // pre-0.2.1 peer sent raw
+                            }
+                        };
+                        if let Ok(batch) = serde_json::from_slice::<CmdBatchWire>(&json) {
                             let _ = tx.send(NetEvent::Commands(batch));
                         } else {
                             slog("IN cmds: PARSE FAILED");
@@ -1491,8 +1586,15 @@ mod tests {
         let key = generate_key();
         let secret_raw: [u8; 20] = rand::random();
         let secret = base32_encode(&secret_raw);
-        let host = Host::start(0, key.clone(), secret.clone(), "test room".into(), false)
-            .expect("bind");
+        let host = Host::start(
+            0,
+            key.clone(),
+            secret.clone(),
+            "test room".into(),
+            false,
+            "the-host".into(),
+        )
+        .expect("bind");
         let code = format!("{:06}", totp_at(&secret_raw, now_unix()));
         let addr = format!("127.0.0.1:{}", host.port);
         let mut guest = Client::connect(&addr, &key, &code, "guest-a").expect("join with key+code");

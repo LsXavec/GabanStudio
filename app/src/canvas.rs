@@ -241,6 +241,10 @@ pub enum StrokeMsg {
     Begin(StrokeBeginInfo),
     Dabs { stroke_id: u64, dabs: Vec<Dab> },
     End { stroke_id: u64 },
+    /// v0.2.1 (audit): a streamed stroke that died locally (playback
+    /// interrupted it, the room ended mid-stroke) — peers must drop
+    /// their gathers and overlay, or they leak for the whole session.
+    Abort { stroke_id: u64 },
 }
 
 pub struct StrokeBeginInfo {
@@ -467,6 +471,16 @@ pub struct CanvasView {
     pub(crate) remote_wet_inbox: Vec<(u64, f32, Vec<Dab>)>,
     pub(crate) remote_wet_end: Vec<u64>,
     remote_live: std::collections::HashSet<u64>,
+    /// v0.2.1 (audit): the INCREMENTAL dab walk — a long stroke used to
+    /// rebuild its whole dab list every frame (O(n²) per stroke). The
+    /// cache holds every dab emitted so far; carry/walked/skipped and
+    /// the smudge held-colour persist so only the new tail computes.
+    dab_cache: Vec<Dab>,
+    dab_carry: f32,
+    dab_walked: f32,
+    dab_skipped: u32,
+    dab_pts_done: usize,
+    dab_held: [f32; 4],
     /// A guest's pending undo(false)/redo(true) request for the host.
     pub(crate) history_request: Option<bool>,
     /// SESSION presence (PSD-session-room): peers as the canvas draws
@@ -642,6 +656,12 @@ impl CanvasView {
             remote_wet_inbox: Vec::new(),
             remote_wet_end: Vec::new(),
             remote_live: std::collections::HashSet::new(),
+            dab_cache: Vec::new(),
+            dab_carry: 0.0,
+            dab_walked: 0.0,
+            dab_skipped: 0,
+            dab_pts_done: 0,
+            dab_held: [0.0; 4],
             history_request: None,
             peers: Vec::new(),
             presence_pos: None,
@@ -2872,6 +2892,17 @@ impl CanvasView {
 
         // ---- Raster: keep the GPU layer synced to the current cel, stamp
         // live dabs, and read back into the engine at pen-up ----------
+        // v0.2.1 (audit): remote replays + the live overlay must not
+        // starve behind the composite lens — they run whenever the GPU
+        // paint layer exists, whatever the view mode. The between-
+        // strokes sync below restores the viewer's textures afterward.
+        if self.raster
+            && let Some(p) = paint.as_deref_mut()
+        {
+            p.ensure_size(state.engine.project.width, state.engine.project.height);
+            self.run_remote_wet(p);
+            self.run_replays(p, state);
+        }
         if composite_tex.is_none()
             && self.raster
             && let Some(p) = paint.as_deref_mut()
@@ -2894,11 +2925,6 @@ impl CanvasView {
                 }
                 self.synced_active = state.active_layer_key();
             }
-            // STAGE 2 (PSD-multiplayer-rescope): other artists' live ink
-            // streams into the remote overlay EVERY frame — its target
-            // is separate from active and wet, so this is safe even
-            // mid-local-stroke.
-            self.run_remote_wet(p);
             if self.current.is_empty() && !self.raster_stroke_done {
                 // An abandoned stroke (e.g. playback started mid-stroke) may have
                 // left dabs in the wet buffer — drop them, they were never
@@ -2906,6 +2932,14 @@ impl CanvasView {
                 if self.wet_dirty {
                     p.clear_wet();
                     self.wet_dirty = false;
+                }
+                // v0.2.1 (audit): an abandoned STREAMED stroke must tell
+                // the peers, or their gathers + overlay leak all session.
+                if self.stroke_streaming {
+                    self.stroke_streaming = false;
+                    self.stroke_outbox.push(StrokeMsg::Abort {
+                        stroke_id: self.stroke_wire_id,
+                    });
                 }
                 // If the abandoned stroke wrote textures directly (eraser dabs,
                 // new-cel clear), they no longer match engine truth —
@@ -2916,11 +2950,6 @@ impl CanvasView {
                     self.synced_above = None;
                     self.cel_touched = false;
                 }
-                // STAGE 1: apply queued remote strokes now — never under
-                // a live pen (the hijack borrows the ACTIVE target and
-                // the brush bind group); the sync block right below
-                // restores the viewer's layer in this same frame.
-                self.run_replays(p, state);
                 // Between strokes: re-sync whatever changed (frame switch,
                 // layer switch, undo/redo, visibility/opacity edits, reorder).
                 // Three keys, one mechanism; the blank-frame sentinel is folded
@@ -2958,27 +2987,30 @@ impl CanvasView {
                 // dabs go to the WET buffer (composited at opacity at pen-up);
                 // the eraser works on the cel directly. Tool is LATCHED at
                 // stroke start so a mid-stroke toggle can't split the stroke.
-                let dabs = self.build_stroke_dabs();
-                if dabs.len() > self.dabs_flushed {
+                // v0.2.1: incremental — only the stroke's new tail
+                // computes (O(n), was O(n²) over long strokes).
+                self.extend_stroke_dabs();
+                if self.dab_cache.len() > self.dabs_flushed {
+                    let new: Vec<Dab> = self.dab_cache[self.dabs_flushed..].to_vec();
                     // STAGE 1: stream exactly the NEW dabs — the wire's
                     // stroke unit (never pixels; NEVER-DO 1).
                     if self.stroke_streaming {
                         self.stroke_outbox.push(StrokeMsg::Dabs {
                             stroke_id: self.stroke_wire_id,
-                            dabs: dabs[self.dabs_flushed..].to_vec(),
+                            dabs: new.clone(),
                         });
                     }
                     if self.stroke_erasing {
-                        p.paint(&dabs[self.dabs_flushed..], PaintMode::Erase);
+                        p.paint(&new, PaintMode::Erase);
                         self.cel_touched = true;
                     } else if self.stroke_alpha_locked {
-                        p.paint(&dabs[self.dabs_flushed..], PaintMode::AlphaLock);
+                        p.paint(&new, PaintMode::AlphaLock);
                         self.cel_touched = true;
                     } else {
-                        p.paint_wet(&dabs[self.dabs_flushed..]);
+                        p.paint_wet(&new);
                         self.wet_dirty = true;
                     }
-                    self.dabs_flushed = dabs.len();
+                    self.dabs_flushed = self.dab_cache.len();
                 }
                 if self.raster_stroke_done {
                     // Merge the whole wet stroke onto the cel at the chosen
@@ -3986,9 +4018,9 @@ impl CanvasView {
 
     /// STAGE 1 (PSD-multiplayer-rescope): latch + announce a streaming
     /// stroke (both roles). A stroke on a not-yet-existing cel does NOT
-    /// stream — the host's command mirror carries that rare case whole
-    /// (its ids are host-allocated), and a guest's is refused at pen-up
-    /// exactly as before.
+    /// stream — the command mirror carries that boundary case whole
+    /// (host: its own ids; guest: a local PREDICTION whose fresh ids
+    /// live in the guest's own partition — see the pen-up path).
     fn begin_stream(&mut self, state: &mut AppState) {
         self.stroke_streaming = false;
         if !(self.session_live && self.raster) {
@@ -4040,6 +4072,15 @@ impl CanvasView {
     /// stroke opacity per dab; tip masks preview as the procedural
     /// falloff. The COMMIT replays them exactly.
     fn run_remote_wet(&mut self, p: &mut PaintLayer) {
+        // v0.2.1 (audit): a room that ended mid-stroke must not leave
+        // ghost ink parked in the overlay forever.
+        if !self.session_live && !self.remote_live.is_empty() {
+            self.remote_live.clear();
+            self.remote_wet_inbox.clear();
+            self.remote_wet_end.clear();
+            p.clear_remote();
+            return;
+        }
         for (stroke_id, opacity, mut dabs) in std::mem::take(&mut self.remote_wet_inbox) {
             self.remote_live.insert(stroke_id);
             for d in &mut dabs {
@@ -4104,14 +4145,11 @@ impl CanvasView {
             why: why.into(),
         };
         let did = anim_core::ids::DrawingId(rs.drawing);
-        let base = {
-            let Some(d) = state.cut().drawing(did) else {
-                return mk(false, Vec::new(), "the drawing left the cut");
-            };
-            match d.layers.iter().find(|l| l.props.name == rs.layer_name) {
-                Some(l) => l.raster.tiles.clone(),
-                None => return mk(false, Vec::new(), "the layer is gone"),
-            }
+        // v0.2.1 (audit): located PROJECT-WIDE — a stroke must land no
+        // matter which cut this viewer is browsing.
+        let base = match state.locate_layer(did, &rs.layer_name) {
+            Some(l) => l.raster.tiles.clone(),
+            None => return mk(false, Vec::new(), "the drawing/layer is gone"),
         };
         p.sync_active(&base);
         p.set_brush_resources(
@@ -4158,14 +4196,68 @@ impl CanvasView {
         }
     }
 
-    /// Walk the current stroke's points into evenly spaced dabs (paper space).
-    /// Deterministic prefix: appending points only extends the tail, so
-    /// `dabs[dabs_flushed..]` are always genuinely new.
-    fn build_stroke_dabs(&self) -> Vec<Dab> {
+    /// v0.2.1 (audit): drive the incremental walk — only the NEW tail
+    /// of the stroke computes each frame, emitting BIT-identical dabs
+    /// to a from-scratch rebuild (pinned by
+    /// incremental_dabs_match_full_rebuild). O(n) per stroke where the
+    /// old every-frame rebuild was O(n²) — the host's own long fast
+    /// strokes were paying that.
+    fn extend_stroke_dabs(&mut self) {
+        let n = self.current.len();
+        if n < self.dab_pts_done || (self.dab_pts_done <= 1 && n >= 2) {
+            // A new stroke began, or the single-tap special hands over
+            // to the pair walk (which re-folds from the start, exactly
+            // like the old rebuild did).
+            self.dab_cache.clear();
+            self.dab_carry = 0.0;
+            self.dab_walked = 0.0;
+            self.dab_skipped = 0;
+            self.dab_pts_done = if n >= 2 { 1 } else { 0 };
+            self.dab_held = [0.0; 4];
+        }
+        if n == 0 || n == self.dab_pts_done {
+            return;
+        }
+        let mut carry = self.dab_carry;
+        let mut walked = self.dab_walked;
+        let mut skipped = self.dab_skipped;
+        let start = self.dab_pts_done.saturating_sub(1);
+        let idx_base = self.dab_cache.len() as u32;
+        let (new, held) = self.build_stroke_dabs_from(
+            start,
+            &mut carry,
+            &mut walked,
+            &mut skipped,
+            self.dab_held,
+            idx_base,
+        );
+        self.dab_cache.extend(new);
+        self.dab_carry = carry;
+        self.dab_walked = walked;
+        self.dab_skipped = skipped;
+        self.dab_held = held;
+        self.dab_pts_done = n;
+    }
+
+    /// Walk stroke points into evenly spaced dabs (paper space), from
+    /// the pair starting at `start`. Deterministic prefix: appending
+    /// points only extends the tail, so `dab_cache[dabs_flushed..]` are
+    /// always genuinely new. The walk state rides in the caller's
+    /// fields; `held0` seeds the smudge fold; `idx_base` keeps the
+    /// deterministic dab index continuous across frames.
+    fn build_stroke_dabs_from(
+        &self,
+        start: usize,
+        carry_io: &mut f32,
+        walked_io: &mut f32,
+        skipped_io: &mut u32,
+        held0: [f32; 4],
+        idx_base: u32,
+    ) -> (Vec<Dab>, [f32; 4]) {
         let pts = &self.current;
         let mut dabs = Vec::new();
         if pts.is_empty() {
-            return dabs;
+            return (dabs, held0);
         }
         let base = linear_rgba(self.brush_color);
         let flow = self.brush_flow.clamp(0.0, 1.0);
@@ -4227,7 +4319,7 @@ impl CanvasView {
         // deterministic because the source tiles are the pre-stroke truth
         // and the fold recomputes identically on every prefix rebuild.
         let smudging = eng.is_some_and(|e| e.smudge_rate > 0.0) && self.smudge_src.is_some();
-        let held = std::cell::Cell::new([0.0f32; 4]);
+        let held = std::cell::Cell::new(held0);
         let dab_at = |x: f32, y: f32, pr: f32, tv: [f32; 2], idx: u32, dist: f32| {
             let tn = tilt_norm(tv);
             let a = if self.dyn_opacity {
@@ -4340,12 +4432,12 @@ impl CanvasView {
         };
         if pts.len() == 1 {
             dabs.push(dab_at(pts[0].x, pts[0].y, pts[0].pressure, pts[0].tilt, 0, 0.0));
-            return dabs;
+            return (dabs, held.get());
         }
-        let mut carry = 0.0f32; // distance into the next segment for the next dab
-        let mut walked = 0.0f32; // paper distance already covered (distance sensor)
-        let mut skipped = 0u32; // density-dropped dabs (keeps idx stable)
-        for w in pts.windows(2) {
+        let mut carry = *carry_io; // distance into the next segment for the next dab
+        let mut walked = *walked_io; // paper distance already covered (distance sensor)
+        let mut skipped = *skipped_io; // density-dropped dabs (keeps idx stable)
+        for w in pts[start..].windows(2) {
             let (ax, ay, apr) = (w[0].x, w[0].y, w[0].pressure);
             let (bx, by, bpr) = (w[1].x, w[1].y, w[1].pressure);
             // Lerp the tilt VECTOR (not the magnitude): adjacent samples point
@@ -4364,7 +4456,7 @@ impl CanvasView {
                     at2[0] + (bt2[0] - at2[0]) * t,
                     at2[1] + (bt2[1] - at2[1]) * t,
                 ];
-                let idx = dabs.len() as u32 + skipped;
+                let idx = idx_base + dabs.len() as u32 + skipped;
                 let d2 = dab_at(ax + dx * t, ay + dy * t, pr, tv, idx, walked + d);
                 let r = d2.radius;
                 // Spray density: keep a deterministic fraction of dabs.
@@ -4386,7 +4478,10 @@ impl CanvasView {
             carry = d - len;
             walked += len;
         }
-        dabs
+        *carry_io = carry;
+        *walked_io = walked;
+        *skipped_io = skipped;
+        (dabs, held.get())
     }
 
     /// LASSO FILL input (PSD-lasso-fill): drag draws the loop; release
@@ -5677,6 +5772,73 @@ mod engine_tests {
         let corner = m1[3];
         assert!(centre > 200, "solid centre (got {centre})");
         assert_eq!(corner, 0, "empty corner");
+    }
+}
+
+#[cfg(test)]
+mod dab_walk_tests {
+    use super::*;
+
+    /// v0.2.1: the incremental walk IS the old full rebuild — feeding
+    /// points one at a time must emit bit-identical dabs to feeding
+    /// them all at once (the determinism law survives the O(n) cache).
+    #[test]
+    fn incremental_dabs_match_full_rebuild() {
+        let mk_points = || -> Vec<StrokePoint> {
+            (0..120)
+                .map(|i| {
+                    let t = i as f32 * 0.37;
+                    StrokePoint {
+                        x: 100.0 + t * 13.0 + (t * 0.7).sin() * 9.0,
+                        y: 80.0 + (t * 0.9).cos() * 21.0,
+                        pressure: (0.2 + 0.8 * ((t * 0.31).sin() * 0.5 + 0.5)).min(1.0),
+                        tilt: [(t * 0.11).sin() * 0.4, (t * 0.13).cos() * 0.3],
+                    }
+                })
+                .collect()
+        };
+        // Incremental: points arrive a few per "frame".
+        let mut inc = CanvasView::new();
+        let pts = mk_points();
+        let mut fed = 0usize;
+        while fed < pts.len() {
+            let step = 1 + (fed % 7); // uneven arrival, like a real pen
+            fed = (fed + step).min(pts.len());
+            inc.current = pts[..fed].to_vec();
+            inc.extend_stroke_dabs();
+        }
+        // Full: everything at once, one walk.
+        let mut full = CanvasView::new();
+        full.current = pts;
+        full.extend_stroke_dabs();
+        assert_eq!(
+            inc.dab_cache.len(),
+            full.dab_cache.len(),
+            "same dab count either way"
+        );
+        for (i, (a, b)) in inc.dab_cache.iter().zip(full.dab_cache.iter()).enumerate() {
+            assert_eq!(a.center, b.center, "dab {i} center");
+            assert_eq!(a.radius, b.radius, "dab {i} radius");
+            assert_eq!(a.color, b.color, "dab {i} color");
+            assert_eq!(a.dir, b.dir, "dab {i} dir");
+            assert_eq!(a.aspect, b.aspect, "dab {i} aspect");
+            assert_eq!(a.tip, b.tip, "dab {i} tip");
+        }
+        // And the single-tap special hands over cleanly.
+        let mut tap = CanvasView::new();
+        tap.current = mk_points()[..1].to_vec();
+        tap.extend_stroke_dabs();
+        assert_eq!(tap.dab_cache.len(), 1, "a tap is one dab");
+        tap.current = mk_points()[..3].to_vec();
+        tap.extend_stroke_dabs();
+        let mut tap_full = CanvasView::new();
+        tap_full.current = mk_points()[..3].to_vec();
+        tap_full.extend_stroke_dabs();
+        assert_eq!(
+            tap.dab_cache.len(),
+            tap_full.dab_cache.len(),
+            "handover discards the tap dab exactly like the old rebuild"
+        );
     }
 }
 

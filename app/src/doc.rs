@@ -1956,6 +1956,49 @@ impl AppState {
         }
     }
 
+    /// v0.2.1 (audit): locate a drawing's layer ANYWHERE in the project
+    /// — replay, audit and repair must not depend on which cut the
+    /// VIEWER happens to be browsing.
+    pub fn locate_layer(
+        &self,
+        drawing: DrawingId,
+        layer_name: &str,
+    ) -> Option<&anim_core::model::CelLayer> {
+        self.engine
+            .project
+            .scenes
+            .iter()
+            .flat_map(|s| s.cuts.iter())
+            .find_map(|c| c.drawings.iter().find(|d| d.id == drawing))
+            .and_then(|d| d.layers.iter().find(|l| l.props.name == layer_name))
+    }
+
+    /// v0.2.1 (LAW 1): incoming command batches carry PaintTiles with
+    /// the BEFORE slot stripped (pixels never ride the wire twice) —
+    /// rebuild befores from THIS document, so the history inverse stays
+    /// exact. A drawing created earlier in the same batch is absent
+    /// here, and its befores are correctly None (a fresh layer).
+    pub fn rebuild_paint_befores(&self, cmds: &mut [Command]) {
+        for cmd in cmds {
+            if let Command::PaintTiles { id, layer, diff, .. } = cmd {
+                let tiles = self
+                    .engine
+                    .project
+                    .scenes
+                    .iter()
+                    .flat_map(|s| s.cuts.iter())
+                    .find_map(|c| c.drawings.iter().find(|d| d.id == *id))
+                    .and_then(|d| d.layers.iter().find(|l| l.id == *layer))
+                    .map(|l| &l.raster.tiles);
+                if let Some(tiles) = tiles {
+                    for (coord, before, _) in diff.iter_mut() {
+                        *before = tiles.get(coord).cloned();
+                    }
+                }
+            }
+        }
+    }
+
     /// STAGE 1 (PSD-multiplayer-rescope, the audit's repair): set exact
     /// tiles OUTSIDE history — the stroke's history entry stays as this
     /// machine replayed it; a later redo re-audits (NEVER-DO 3's loop).
