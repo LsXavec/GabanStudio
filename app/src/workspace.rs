@@ -47,6 +47,18 @@ impl Pane {
         Pane::NodeGraph,
     ];
 
+    /// THE FORGE ROOM (PSD-brush-forge, owner amendment 2026-08-19:
+    /// "It should really have its own workspace window"): a whole-window
+    /// arrangement for brush design — the forge tall on the left with
+    /// the quick list under it, and the canvas as the test paper.
+    pub fn forge_dock() -> DockState<Pane> {
+        let mut ds = DockState::new(vec![Pane::Canvas]);
+        let tree = ds.main_surface_mut();
+        let [_canvas, forge] = tree.split_left(NodeIndex::root(), 0.30, vec![Pane::Forge]);
+        tree.split_below(forge, 0.68, vec![Pane::Presets, Pane::Palette]);
+        ds
+    }
+
     /// How many simultaneous viewers the add-menu offers.
     pub const MAX_VIEWERS: u8 = 4;
     pub fn title(&self) -> String {

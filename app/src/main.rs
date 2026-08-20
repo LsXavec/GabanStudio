@@ -2819,6 +2819,25 @@ impl Editor {
                         }
                     });
                     ui.separator();
+                    // THE FORGE ROOM (PSD-brush-forge amendment): built in,
+                    // above the saved rooms — one click arranges the whole
+                    // window for brush design.
+                    if ui
+                        .button("Brush Forge room")
+                        .on_hover_text(
+                            "the brush-design arrangement — forge tall on the                              left, quick list and palette under it, the canvas                              as test paper",
+                        )
+                        .clicked()
+                    {
+                        if self.canvas.stroke_active() {
+                            self.state.refuse("refused — finish the stroke first");
+                        } else {
+                            self.dock = Pane::forge_dock();
+                            self.state.status = "the forge room".into();
+                        }
+                        ui.close();
+                    }
+                    ui.separator();
                     let mut apply: Option<usize> = None;
                     let mut remove: Option<usize> = None;
                     let mut assign: Option<(usize, Option<String>)> = None;

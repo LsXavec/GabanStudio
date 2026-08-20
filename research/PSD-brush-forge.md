@@ -69,3 +69,10 @@ specimen preview. Ship together; each compiles.
   returns to exactly its pre-forge shape. Saved workspace layouts are
   untouched (the new tab joins via the default layout or the panes
   menu). 38 tests, 0 warnings.
+- 2026-08-19 — OWNER AMENDMENT, verbatim: "Lets design a Brush forge
+  Layout instead. It should really have its own workspace window."
+  THE FORGE ROOM: Pane::forge_dock() — forge tall on the left (30%),
+  Presets + Palette tabbed beneath it, the canvas as the test paper —
+  reachable as the built-in "Brush Forge room" at the top of the ws
+  menu (above the saved rooms), gesture-guarded like every dock swap.
+  The Forge tab remains dockable anywhere as before.
