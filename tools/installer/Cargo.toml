@@ -1,6 +1,6 @@
 ﻿[package]
 name = "animstudio-installer"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 
 # PSD-shipping NEVER-DO 5: the installer is OUR OWN binary â€” no

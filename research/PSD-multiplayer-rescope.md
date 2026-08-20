@@ -300,26 +300,43 @@ texels as JSON — ~4MB per 20-tile fill per receiver).
   cause, joins/leaves/undones logged, STATS carries socket-truth
   peers + queue depths.
 
-**The v0.2.2 queue (audit findings deferred, in severity order):**
-1. Unified sequenced queue guest-side (Cmds/Undone currently apply
-   inline while stroke Ends defer through the canvas — within-frame
-   inversion can mis-target an undo).
-2. Targeted snapshots (requester-only) + host holds sequenced sends
-   while a snapshot builds — kills the stale-snapshot livelock under
-   continuous drawing AND the snapshot-to-everyone cost; includes
-   as_of/doc pairing hardening and origin-prediction loss on swap.
-3. Redo re-audit (a repaired guest's redo can reintroduce drifted
+**v0.2.2 (shipped, same night — the second live test's verdicts):**
+The retest measured the truth the design had to face: the two GPUs
+NEVER blend f16 identically — every guest stroke audits at 100% drift
+(38/38 tiles), so audit-and-repair is the STEADY STATE, not the edge
+case; and the stale-snapshot livelock was the big lag (three 26MB
+snapshots at ~25–30s each on the tester's link, echoes 75s late,
+repairs overwriting un-echoed ink = "it takes out what they drew").
+- **Snapshots are requester-only** (joiners + resync requesters get
+  the doc; the room never hears it), and the host HOLDS every
+  seq-assigning path while one builds (replay numbering, command
+  drains, guest cmds/undo requests re-queued) — a snapshot can no
+  longer arrive stale; the livelock is structurally dead. Join-time
+  resource/layout refreshes go to the joiner alone.
+- **Repairs are binary + deflated** (SUB_REPAIR: header + one deflated
+  texel blob; ~10–20× smaller than the JSON texels) — per-stroke
+  convergence now costs ~tens of KB, wire-invisible on LAN.
+
+**The v0.2.3 queue (remaining, severity order):**
+1. Unified sequenced queue guest-side (Cmds/Undone apply inline while
+   stroke Ends defer through the canvas — within-frame inversion can
+   mis-target an undo).
+2. Redo re-audit (a repaired guest's redo can reintroduce drifted
    after-images unaudited).
-4. Robust peer identity (echo-skip/undo keyed by display name; give
+3. Robust peer identity (echo-skip/undo keyed by display name; give
    peers wire ids).
-5. Fill/lasso/transform as OPERATIONS (seed + params + audit) — the
-   true dab-class fix; v0.2.1's strip+deflate is the bridge.
-6. Replay perf: batch same-layer replays under one readback, cache
-   armed replay resources (disk reload per stroke today), bound the
-   readback to the stroke's rect.
+4. Fill/lasso/transform as OPERATIONS (seed + params + audit) — the
+   true dab-class fix; strip+deflate is the bridge.
+5. Replay perf: batch same-layer replays under one readback, cache
+   armed replay resources, bound the readback to the stroke's rect.
+6. DESIGN FORK to weigh if repair traffic still bites: since cross-GPU
+   drift is universal, the host could ship its committed texels
+   (deflated) WITH the End for direct guest commit — trading the
+   replay's bandwidth win for zero-audit convergence on mismatched
+   GPUs, keeping dab replay for the live view only. The owner decides.
 7. Overlay draws on the stroke's TARGET cel only; guest ungated
    pre-snapshot predictions; snapshot temp-file races; import assets
-   deflated/deduped; STATS first-paint-per-stroke vitals.
+   deflated/deduped.
 
 ---
 *PSD gate passed 2026-08-20 — root: bit-exact stroke replay, audited

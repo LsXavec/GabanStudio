@@ -217,10 +217,15 @@ struct App {
     /// name field's buffer.
     session_host_layout: Option<String>,
     layout_ws_name: String,
+    /// v0.2.2: snapshots are REQUESTER-ONLY — who wants one (joiners +
+    /// resync requesters), who the in-flight build is for, and the
+    /// seq-assigning arrivals HELD while it builds (so a snapshot can
+    /// never arrive stale — the first live test's livelock).
+    session_snap_targets: std::collections::HashSet<u64>,
+    session_snap_pending: Vec<u64>,
+    session_ev_hold: Vec<net::NetEvent>,
     /// LAN DISCOVERY: rooms visible on this network (always listening).
     discovery: net::Discovery,
-    /// A guest asked for a fresh snapshot (their mirror slipped).
-    session_resync: bool,
     /// SESSION PERF 2: the host's snapshot builder, off the UI thread
     /// (one in flight; the UI only forwards finished bytes).
     session_snap_rx: Option<std::sync::mpsc::Receiver<Option<Vec<u8>>>>,
@@ -532,6 +537,9 @@ impl App {
         self.session_done.clear();
         self.session_author_armed = false;
         self.session_host_layout = None;
+        self.session_snap_targets.clear();
+        self.session_snap_pending.clear();
+        self.session_ev_hold.clear();
         // v0.2.1 (audit): stale cross-room channels must die with the
         // room — a late snapshot from an OLD room must never replace
         // this document, and guest_ready must never survive into the
@@ -586,6 +594,26 @@ impl App {
             }
             net::StrokeFrame::End(e) => self.seq_event(SeqEv::End(e)),
             net::StrokeFrame::Hashes(hw) => self.seq_event(SeqEv::Hashes(hw)),
+            // v0.2.2: binary repair — same application as the legacy
+            // JSON path, ~10-20x lighter on the wire.
+            net::StrokeFrame::Repair {
+                drawing,
+                layer_name,
+                tiles,
+            } => {
+                net::slog(format!(
+                    "REPAIR apply '{layer_name}': {} tile(s)",
+                    tiles.len()
+                ));
+                if let Some(ed) = &mut self.editor {
+                    ed.state.apply_repair_tiles(
+                        anim_core::ids::DrawingId(drawing),
+                        &layer_name,
+                        tiles,
+                    );
+                    ed.canvas.engine_changed();
+                }
+            }
         }
     }
 
@@ -681,7 +709,7 @@ impl App {
                     }
                 }
             }
-            net::StrokeFrame::Hashes(_) => {}
+            net::StrokeFrame::Hashes(_) | net::StrokeFrame::Repair { .. } => {}
         }
     }
 
@@ -946,6 +974,13 @@ impl App {
     /// wire's seq order matches the host's document order. Guests use
     /// the same drain to match audits against their replays.
     fn drain_replay_done(&mut self, me: &str) {
+        // v0.2.2: while a snapshot builds, nothing new takes a number —
+        // the document under construction must contain every seq that
+        // precedes it (host-side; a guest never builds snapshots).
+        if matches!(self.session, net::Session::Hosting(_)) && self.session_snap_rx.is_some()
+        {
+            return;
+        }
         if matches!(self.session, net::Session::Hosting(_)) {
             let dones = self
                 .editor
@@ -1064,7 +1099,26 @@ impl App {
             net::Session::Idle => {}
         }
         let mut fresh_join = false;
+        let mut joiners: Vec<u64> = Vec::new();
+        // v0.2.2: while a snapshot builds, seq-assigning arrivals HOLD —
+        // the document being built must contain everything numbered
+        // before it, so a snapshot can never arrive stale (the first
+        // live test's livelock: 26MB storms behind a moving lane).
+        let snap_building = self.session_snap_rx.is_some();
+        if !snap_building && !self.session_ev_hold.is_empty() {
+            let held = std::mem::take(&mut self.session_ev_hold);
+            events.splice(0..0, held);
+        }
         for ev in events {
+            if snap_building
+                && matches!(
+                    ev,
+                    net::NetEvent::GuestCmds { .. } | net::NetEvent::UndoRequest { .. }
+                )
+            {
+                self.session_ev_hold.push(ev);
+                continue;
+            }
             match ev {
                 net::NetEvent::Status(st) => self.session_status = st,
                 net::NetEvent::PeerJoined { id, name, version } => {
@@ -1075,6 +1129,8 @@ impl App {
                         ed.state.status = format!("{name} joined the room");
                     }
                     fresh_join = true;
+                    joiners.push(id);
+                    self.session_snap_targets.insert(id);
                     net::slog(format!("PEER joined: {name} (client {id}, v{version})"));
                     self.session_peers.insert(
                         id,
@@ -1279,8 +1335,9 @@ impl App {
                         ed.canvas.engine_changed();
                     }
                 }
-                net::NetEvent::ResyncNeeded => {
-                    self.session_resync = true;
+                net::NetEvent::ResyncNeeded { client } => {
+                    net::slog(format!("RESYNC requested by client {client}"));
+                    self.session_snap_targets.insert(client);
                 }
                 // STAGE 0: a guest machine reporting in — append its
                 // numbered lines to the host's remote log, arrival-ordered
@@ -1510,9 +1567,10 @@ impl App {
                     .set_author(in_room.then(|| me.clone()));
             }
         }
-        if hosting_now {
+        if hosting_now && self.session_snap_rx.is_none() {
             // STAGE 1: every batch takes the next number in the one
-            // global order (strokes share the same lane).
+            // global order (strokes share the same lane). v0.2.2: held
+            // while a snapshot builds (the log keeps accumulating).
             let batches = self
                 .editor
                 .as_mut()
@@ -1561,47 +1619,45 @@ impl App {
                 .is_some_and(|ed| ed.canvas.stroke_active());
             let _ = stamp;
             // STAGE 3: history rewrites are SEQUENCED (Undone) — the
-            // snapshot path serves joins and resync requests only. The
-            // old undo-snapshot contract dies with the tile wire.
+            // snapshot path serves joins and resync requests only.
             let _ = self
                 .editor
                 .as_mut()
                 .map(|ed| std::mem::take(&mut ed.state.history_dirty));
-            let due = self.session_resync
+            // v0.2.2: requester-only. A build starts when someone wants
+            // one; the finished document goes to exactly those clients.
+            let due = !self.session_snap_targets.is_empty()
                 && !pen_busy
                 && now - self.session_last_snap > 1.0;
-            if due {
-                net::slog("SNAPSHOT trigger: resync request");
-                self.session_resync = false;
-            }
-            // STAGE 1: a fresh joiner needs the session's images before
-            // any Begin that references them can replay.
-            if fresh_join
-                && !self.session_res.is_empty()
-                && let net::Session::Hosting(h) = &self.session
-            {
-                for (hash, (w, hh, b)) in &self.session_res {
-                    h.send_stroke_frame(net::enc_res(*hash, *w, *hh, b));
+            // STAGE 1/4 (v0.2.2: to the JOINER only): a fresh joiner
+            // needs the session's images before any Begin that
+            // references them, and gets the host's loadable layout.
+            if fresh_join && let net::Session::Hosting(h) = &self.session {
+                let layout = self
+                    .editor
+                    .as_ref()
+                    .map(|ed| workspace::Workspace {
+                        name: "host's layout".into(),
+                        dock: ed.dock.clone(),
+                        preset: None,
+                        view: Some(ed.canvas.snapshot_view(&ed.state)),
+                    })
+                    .and_then(|w| serde_json::to_string(&w).ok());
+                for j in &joiners {
+                    for (hash, (w, hh, b)) in &self.session_res {
+                        h.send_stroke_frame_to(*j, net::enc_res(*hash, *w, *hh, b));
+                    }
+                    if let Some(json) = &layout {
+                        h.send_layout_to(*j, json.clone());
+                    }
                 }
             }
-            // STAGE 4: the host's current arrangement rides each join —
-            // guests may LOAD it from Settings ▸ Layout; their own
-            // configured layout stays the default.
-            if fresh_join {
-                let layout = self.editor.as_ref().map(|ed| workspace::Workspace {
-                    name: "host's layout".into(),
-                    dock: ed.dock.clone(),
-                    preset: None,
-                    view: Some(ed.canvas.snapshot_view(&ed.state)),
-                });
-                if let Some(w) = layout
-                    && let Ok(json) = serde_json::to_string(&w)
-                    && let net::Session::Hosting(h) = &self.session
-                {
-                    h.send_layout(json);
-                }
-            }
-            if (fresh_join || due) && self.session_snap_rx.is_none() {
+            if due && self.session_snap_rx.is_none() {
+                self.session_snap_pending = self.session_snap_targets.drain().collect();
+                net::slog(format!(
+                    "SNAPSHOT building for {:?} as_of={}",
+                    self.session_snap_pending, self.session_seq
+                ));
                 self.session_sent_gen = stamp;
                 self.session_last_snap = now;
                 // STAGE 1: the order stamp this document will contain —
@@ -1665,7 +1721,16 @@ impl App {
         // STAGE 3: the HOST's undo is per-artist too — one law for every
         // hand. It runs through the same machinery a guest's request
         // does, then goes out sequenced.
-        if hosting_now && let Some(redo) = history_req {
+        if hosting_now
+            && let Some(redo) = history_req
+            && self.session_snap_rx.is_some()
+        {
+            // v0.2.2: held — it would take a number the building
+            // snapshot cannot contain. Re-armed for the next pump.
+            if let Some(ed) = &mut self.editor {
+                ed.canvas.history_request = Some(redo);
+            }
+        } else if hosting_now && let Some(redo) = history_req {
             let outcome = self.editor.as_mut().map(|ed| {
                 let was = ed.state.engine.mirror_log;
                 ed.state.engine.mirror_log = false;
@@ -1798,8 +1863,16 @@ impl App {
                 for f in wire_frames {
                     h.send_stroke_frame(f);
                 }
+                // v0.2.2: the finished document goes to exactly the
+                // clients that asked (joiners + resync requesters).
                 if let Some(b) = &snapshot {
-                    h.send_snapshot(self.session_snap_seq, b);
+                    for c in self.session_snap_pending.drain(..) {
+                        net::slog(format!(
+                            "SNAPSHOT sent to client {c} as_of={}",
+                            self.session_snap_seq
+                        ));
+                        h.send_snapshot_to(c, self.session_snap_seq, b);
+                    }
                 }
             }
             net::Session::Joined(c) => {
@@ -2057,8 +2130,10 @@ impl App {
             session_author_armed: false,
             session_host_layout: None,
             layout_ws_name: String::new(),
+            session_snap_targets: std::collections::HashSet::new(),
+            session_snap_pending: Vec::new(),
+            session_ev_hold: Vec::new(),
             discovery: net::spawn_discovery(),
-            session_resync: false,
             session_snap_rx: None,
             session_load_rx: None,
             settings_category: SettingsCategory::default(),

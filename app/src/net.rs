@@ -234,6 +234,10 @@ const SUB_DABS: u8 = 1;
 const SUB_END: u8 = 2;
 const SUB_RES: u8 = 3;
 const SUB_HASHES: u8 = 4;
+/// v0.2.2: audit repairs, binary + deflated — the first live test
+/// showed cross-GPU blending drifts on EVERY stroke, so this path runs
+/// constantly and JSON texels (~130KB/tile) were the remaining lag.
+const SUB_REPAIR: u8 = 5;
 /// Snapshots of real projects can be large; everything else is small.
 const MAX_FRAME: u32 = 256 * 1024 * 1024;
 
@@ -430,6 +434,75 @@ pub enum StrokeFrame {
         rgba: Vec<u8>,
     },
     Hashes(StrokeHashesWire),
+    /// v0.2.2: authoritative texels for drifted tiles (empty = gone).
+    Repair {
+        drawing: u64,
+        layer_name: String,
+        tiles: Vec<(i32, i32, Vec<u16>)>,
+    },
+}
+
+/// v0.2.2: header + one deflated texel blob (u16 LE, TILE_LEN each for
+/// every non-empty tile, in entry order).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RepairHeader {
+    drawing: u64,
+    layer_name: String,
+    /// (x, y, present) — absent tiles clear.
+    entries: Vec<(i32, i32, bool)>,
+}
+
+pub fn enc_repair(drawing: u64, layer_name: &str, tiles: &[(i32, i32, Vec<u16>)]) -> Vec<u8> {
+    use flate2::{Compression, write::DeflateEncoder};
+    use std::io::Write as _;
+    let header = RepairHeader {
+        drawing,
+        layer_name: layer_name.to_string(),
+        entries: tiles.iter().map(|(x, y, t)| (*x, *y, !t.is_empty())).collect(),
+    };
+    let hj = serde_json::to_vec(&header).unwrap();
+    let mut v = vec![SUB_REPAIR];
+    v.extend((hj.len() as u32).to_le_bytes());
+    v.extend(hj);
+    let mut enc = DeflateEncoder::new(Vec::new(), Compression::fast());
+    for (_, _, t) in tiles.iter().filter(|(_, _, t)| !t.is_empty()) {
+        let _ = enc.write_all(bytemuck::cast_slice(t));
+    }
+    v.extend(enc.finish().unwrap_or_default());
+    v
+}
+
+fn dec_repair(rest: &[u8]) -> Option<StrokeFrame> {
+    use std::io::Read as _;
+    if rest.len() < 4 {
+        return None;
+    }
+    let hl = u32::from_le_bytes(rest[..4].try_into().ok()?) as usize;
+    let header: RepairHeader = serde_json::from_slice(rest.get(4..4 + hl)?).ok()?;
+    let mut texels = Vec::new();
+    let mut dec = flate2::read::DeflateDecoder::new(rest.get(4 + hl..)?);
+    dec.read_to_end(&mut texels).ok()?;
+    let tile_bytes = anim_core::raster::TILE_LEN * 2;
+    let present = header.entries.iter().filter(|(_, _, p)| *p).count();
+    if texels.len() != present * tile_bytes {
+        return None;
+    }
+    let mut off = 0usize;
+    let mut tiles = Vec::with_capacity(header.entries.len());
+    for (x, y, p) in header.entries {
+        if p {
+            let t: Vec<u16> = bytemuck::pod_collect_to_vec(&texels[off..off + tile_bytes]);
+            off += tile_bytes;
+            tiles.push((x, y, t));
+        } else {
+            tiles.push((x, y, Vec::new()));
+        }
+    }
+    Some(StrokeFrame::Repair {
+        drawing: header.drawing,
+        layer_name: header.layer_name,
+        tiles,
+    })
 }
 
 pub fn enc_begin(b: &StrokeBeginWire) -> Vec<u8> {
@@ -508,6 +581,7 @@ pub fn dec_stroke(payload: &[u8]) -> Option<StrokeFrame> {
             Some(StrokeFrame::Res { hash, w, h, rgba })
         }
         SUB_HASHES => serde_json::from_slice(rest).ok().map(StrokeFrame::Hashes),
+        SUB_REPAIR => dec_repair(rest),
         _ => None,
     }
 }
@@ -660,8 +734,12 @@ pub enum NetEvent {
         redo: bool,
         seq: u64,
     },
-    /// Host side: a guest's mirror slipped — send a fresh snapshot.
-    ResyncNeeded,
+    /// Host side: a guest's mirror slipped — send THAT GUEST a fresh
+    /// snapshot (v0.2.2: requester-only; a room-wide 26MB broadcast per
+    /// resync was the first live test's biggest lag).
+    ResyncNeeded {
+        client: u64,
+    },
     /// Host side: a stroke frame from one guest (author = join name).
     GuestStroke {
         client: u64,
@@ -897,7 +975,9 @@ impl Host {
                                                     continue;
                                                 }
                                                 Ok(Msg::ResyncRequest {}) => {
-                                                    let _ = tx.send(NetEvent::ResyncNeeded);
+                                                    let _ = tx.send(NetEvent::ResyncNeeded {
+                                                        client: id,
+                                                    });
                                                     continue;
                                                 }
                                                 Ok(Msg::UndoRequest { author, redo }) => {
@@ -1122,12 +1202,6 @@ impl Host {
         }
     }
 
-    /// STAGE 4: the host's current arrangement, loadable guest-side.
-    pub fn send_layout(&self, json: String) {
-        let msg = serde_json::to_vec(&Msg::HostLayout { json }).unwrap();
-        broadcast_except(&self.clients, u64::MAX, FRAME_JSON, &msg);
-    }
-
     /// STAGE 3: a sequenced per-artist undo/redo, to every guest.
     pub fn send_undone(&self, author: &str, redo: bool, seq: u64) {
         let msg = serde_json::to_vec(&Msg::Undone {
@@ -1145,7 +1219,9 @@ impl Host {
         broadcast_except(&self.clients, u64::MAX, FRAME_STROKE, &payload);
     }
 
-    /// STAGE 1 (audit): exact texels to ONE guest whose tiles drifted.
+    /// STAGE 1 (audit): exact texels to ONE guest whose tiles drifted —
+    /// v0.2.2: binary + deflated (this path runs per stroke when the
+    /// GPUs disagree; JSON texels were the remaining lag).
     pub fn send_repair(
         &self,
         client: u64,
@@ -1153,35 +1229,42 @@ impl Host {
         layer_name: &str,
         tiles: Vec<(i32, i32, Vec<u16>)>,
     ) {
+        let payload = enc_repair(drawing, layer_name, &tiles);
+        slog(format!(
+            "REPAIR out client={client} tiles={} bytes={}",
+            tiles.len(),
+            payload.len()
+        ));
         if let Some(c) = self.clients.lock().unwrap().get_mut(&client) {
-            let _ = c.tx.send(Out::Json(Box::new(Msg::RepairTiles {
-                drawing,
-                layer_name: layer_name.to_string(),
-                tiles,
-            })));
+            let _ = c.tx.send(Out::Raw(FRAME_STROKE, payload));
         }
     }
 
-    /// The authoritative document, to every guest (join + refresh) —
-    /// STAGE 1: preceded by its sequence stamp on the same writer, so a
-    /// guest knows exactly which streamed events the document already
-    /// contains.
-    pub fn send_snapshot(&self, as_of_seq: u64, doc: &[u8]) {
-        let mut dead = Vec::new();
-        {
-            let mut map = self.clients.lock().unwrap();
-            for (id, c) in map.iter_mut() {
-                let meta = c
-                    .tx
-                    .send(Out::Json(Box::new(Msg::SnapshotMeta { as_of_seq })));
-                if meta.is_err()
-                    || c.tx.send(Out::Raw(FRAME_DOC, doc.to_vec())).is_err()
-                {
-                    dead.push(*id);
-                }
-            }
-            for id in &dead {
-                map.remove(id);
+    /// v0.2.2: one stroke frame to ONE guest (join-time resource and
+    /// layout refreshes are the joiner's business, not the room's).
+    pub fn send_stroke_frame_to(&self, client: u64, payload: Vec<u8>) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&client) {
+            let _ = c.tx.send(Out::Raw(FRAME_STROKE, payload));
+        }
+    }
+
+    /// v0.2.2: the host's layout, to one joiner.
+    pub fn send_layout_to(&self, client: u64, json: String) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&client) {
+            let _ = c.tx.send(Out::Json(Box::new(Msg::HostLayout { json })));
+        }
+    }
+
+    /// The authoritative document — v0.2.2: to ONE requester, preceded
+    /// by its sequence stamp on the same writer. Snapshots never go to
+    /// the whole room again.
+    pub fn send_snapshot_to(&self, client: u64, as_of_seq: u64, doc: &[u8]) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&client) {
+            let meta = c
+                .tx
+                .send(Out::Json(Box::new(Msg::SnapshotMeta { as_of_seq })));
+            if meta.is_ok() {
+                let _ = c.tx.send(Out::Raw(FRAME_DOC, doc.to_vec()));
             }
         }
     }
@@ -1707,6 +1790,31 @@ mod tests {
         }
         assert!(host_got, "the host must see the guest's Begin");
         assert!(relay_got, "the other guest must see the relayed Begin");
+    }
+
+    #[test]
+    fn repair_wire_roundtrips() {
+        // v0.2.2: binary + deflated repairs — texels bit-exact, empty
+        // markers survive, garbage refuses.
+        let full: Vec<u16> = (0..anim_core::raster::TILE_LEN as u32)
+            .map(|i| (i * 31 % 65521) as u16)
+            .collect();
+        let tiles = vec![(2, -3, full.clone()), (4, 5, Vec::new()), (0, 0, full.clone())];
+        match dec_stroke(&enc_repair(7, "line", &tiles)) {
+            Some(StrokeFrame::Repair {
+                drawing: 7,
+                layer_name,
+                tiles: t,
+            }) => {
+                assert_eq!(layer_name, "line");
+                assert_eq!(t.len(), 3);
+                assert_eq!(t[0], (2, -3, full.clone()));
+                assert_eq!(t[1], (4, 5, Vec::new()));
+                assert_eq!(t[2], (0, 0, full));
+            }
+            _ => panic!("repair must roundtrip"),
+        }
+        assert!(dec_repair(&[1, 2, 3]).is_none(), "garbage refuses");
     }
 
     #[test]
