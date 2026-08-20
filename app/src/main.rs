@@ -188,6 +188,10 @@ struct App {
     /// for a quiet moment (guests watch strokes live via presence; the
     /// committed truth lands when the host pauses).
     frame_watch: Option<std::time::Instant>,
+    /// STAGE 0: guest→host log-shipping timer, and the STATS heartbeat
+    /// window (start time, frames counted, worst frame gap ms).
+    dbg_ship_last: f64,
+    stats_window: (f64, u32, f32),
     /// LAN DISCOVERY: rooms visible on this network (always listening).
     discovery: net::Discovery,
     /// A guest asked for a fresh snapshot (their mirror slipped).
@@ -308,6 +312,19 @@ impl App {
                         self.session_status = format!("hosting on port {} — share the key", h.port);
                         self.session = net::Session::Hosting(h);
                         self.session_sent_gen = u64::MAX;
+                        // STAGE 0: a fresh room starts a fresh remote log —
+                        // guests' numbered lines land here, in order.
+                        if let Some(base) = std::env::var_os("APPDATA") {
+                            let dir = std::path::PathBuf::from(base).join("AnimStudio");
+                            let _ = std::fs::create_dir_all(&dir);
+                            let _ = std::fs::write(
+                                dir.join("session_log_remote.txt"),
+                                format!(
+                                    "remote session log · host build v{}\n",
+                                    crate::update::CURRENT_VERSION
+                                ),
+                            );
+                        }
                     }
                     Err(e) => self.session_status = format!("could not host: {e}"),
                 }
@@ -316,6 +333,7 @@ impl App {
                 self.session = net::Session::Idle;
                 self.session_peers.clear();
                 self.session_status = "offline".into();
+                net::slog_ship_arm(false);
             }
             config::SessionAction::OpenConnect => {
                 self.connect_error.clear();
@@ -340,6 +358,10 @@ impl App {
                 self.session_status = "connected — waiting for the host's file".into();
                 self.session = net::Session::Joined(c);
                 self.session_peers.clear();
+                // STAGE 0: from here on, this machine's numbered log lines
+                // ship to the host every ~2s.
+                net::slog_ship_arm(true);
+                net::slog("debug channel armed — lines ship to the host");
             }
             Err(e) => self.connect_error = e,
         }
@@ -543,6 +565,24 @@ impl App {
                 net::NetEvent::ResyncNeeded => {
                     self.session_resync = true;
                 }
+                // STAGE 0: a guest machine reporting in — append its
+                // numbered lines to the host's remote log, arrival-ordered
+                // (TCP keeps per-peer order; the #seq exposes any gap).
+                net::NetEvent::DebugLog { from, lines } => {
+                    if let Some(base) = std::env::var_os("APPDATA") {
+                        let dir = std::path::PathBuf::from(base).join("AnimStudio");
+                        if let Ok(mut f) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(dir.join("session_log_remote.txt"))
+                        {
+                            use std::io::Write as _;
+                            for l in &lines {
+                                let _ = writeln!(f, "[{from}] {l}");
+                            }
+                        }
+                    }
+                }
                 net::NetEvent::Snapshot(bytes) => {
                     // Inflate (the wire carries deflated documents).
                     let bytes = {
@@ -659,6 +699,7 @@ impl App {
                 net::NetEvent::Ended(why) => {
                     self.session = net::Session::Idle;
                     self.session_peers.clear();
+                    net::slog_ship_arm(false);
                     if let Some(ed) = &mut self.editor {
                         ed.canvas.guest_ready = false;
                     }
@@ -697,6 +738,44 @@ impl App {
             None
         };
         let now = ctx.input(|i| i.time);
+        // STAGE 0: the STATS heartbeat — 5s windows of frame rate, worst
+        // frame gap, and wire totals, both roles, only while in a room.
+        if !matches!(self.session, net::Session::Idle) {
+            let dt_ms = ctx.input(|i| i.unstable_dt) * 1000.0;
+            let peers = self.session_peers.len();
+            let (start, frames, gap_max) = &mut self.stats_window;
+            if *start == 0.0 {
+                *start = now;
+            }
+            *frames += 1;
+            *gap_max = gap_max.max(dt_ms);
+            if now - *start >= 5.0 {
+                let (tx_b, rx_b) = net::wire_totals();
+                net::slog(format!(
+                    "STATS fps={:.0} gapmax={:.0}ms tx={}KB rx={}KB peers={}",
+                    *frames as f64 / (now - *start),
+                    gap_max,
+                    tx_b / 1024,
+                    rx_b / 1024,
+                    peers,
+                ));
+                *start = now;
+                *frames = 0;
+                *gap_max = 0.0;
+            }
+        } else if self.stats_window.1 != 0 {
+            self.stats_window = (0.0, 0, 0.0);
+        }
+        // STAGE 0: a guest flushes its numbered lines to the host every 2s.
+        if matches!(self.session, net::Session::Joined(_)) && now - self.dbg_ship_last > 2.0 {
+            self.dbg_ship_last = now;
+            let lines = net::slog_ship_drain();
+            if !lines.is_empty()
+                && let net::Session::Joined(c) = &mut self.session
+            {
+                c.send_debug(lines);
+            }
+        }
         // SESSION MIRROR: the log rides the hosting state; every applied
         // batch streams to guests (tiny), and whole documents go out only
         // for joins and resyncs.
@@ -971,6 +1050,8 @@ impl App {
             session_last_snap: 0.0,
             session_last_presence: 0.0,
             frame_watch: None,
+            dbg_ship_last: 0.0,
+            stats_window: (0.0, 0, 0.0),
             discovery: net::spawn_discovery(),
             session_resync: false,
             session_snap_rx: None,

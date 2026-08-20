@@ -2,8 +2,11 @@
 
 Room opened 2026-08-20. Supersedes the wire design of PSD-session-room /
 PSD-session-v2 (their rulings stand — the mirror, the control window,
-author-tagged history — but the TRANSPORT is rescoped). Status: DRAFT —
-awaiting the owner's ratification. No build until ratified.
+author-tagged history — but the TRANSPORT is rescoped).
+
+**PSD gate passed 2026-08-20 — root: bit-exact stroke replay, audited
+cheaply, repaired narrowly.** Owner's word: "ratify push till
+completed" — all stages build to completion, then ship.
 
 ---
 
@@ -223,6 +226,5 @@ audits each stage against the NEVER-DO list before it ships.
   messages: later, only if Stage 0 stats say it matters.
 
 ---
-*PSD gate: PENDING — awaiting ratification. On "ratified": record
-"PSD gate passed <date> — root: bit-exact stroke replay, audited
-cheaply, repaired narrowly", then Stage 0 builds first.*
+*PSD gate passed 2026-08-20 — root: bit-exact stroke replay, audited
+cheaply, repaired narrowly. Stage 0 builds first.*

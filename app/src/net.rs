@@ -33,6 +33,38 @@ type HmacSha1 = Hmac<Sha1>;
 
 static SLOG: Mutex<Option<(std::fs::File, std::time::Instant)>> = Mutex::new(None);
 
+/// STAGE 0 (PSD-multiplayer-rescope): every log line is NUMBERED, and a
+/// guest in a session buffers its lines for shipping to the host — the
+/// ordered remote debug channel ("the users computer gives you what you
+/// need for the debug").
+static SLOG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SLOG_SHIP: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// STAGE 0: running wire totals for the STATS heartbeat.
+static TX_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RX_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn wire_totals() -> (u64, u64) {
+    (
+        TX_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+        RX_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// STAGE 0: arm/disarm the ship buffer (guests arm it on join, disarm
+/// when the room ends). Arming resets the buffer.
+pub fn slog_ship_arm(on: bool) {
+    *SLOG_SHIP.lock().unwrap() = if on { Some(Vec::new()) } else { None };
+}
+
+/// STAGE 0: take everything buffered since the last flush.
+pub fn slog_ship_drain() -> Vec<String> {
+    match SLOG_SHIP.lock().unwrap().as_mut() {
+        Some(buf) => std::mem::take(buf),
+        None => Vec::new(),
+    }
+}
+
 /// Open (truncate) the log. Called once at app start.
 pub fn slog_init() {
     if let Some(base) = std::env::var_os("APPDATA") {
@@ -50,9 +82,28 @@ pub fn slog_init() {
 }
 
 pub fn slog(msg: impl AsRef<str>) {
+    let seq = SLOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut shipped = None;
     if let Some((f, t0)) = SLOG.lock().unwrap().as_mut() {
         use std::io::Write as _;
-        let _ = writeln!(f, "[{:9.3}s] {}", t0.elapsed().as_secs_f64(), msg.as_ref());
+        let line = format!(
+            "[#{seq:<5} {:9.3}s] {}",
+            t0.elapsed().as_secs_f64(),
+            msg.as_ref()
+        );
+        let _ = writeln!(f, "{line}");
+        shipped = Some(line);
+    }
+    if let Some(line) = shipped
+        && let Some(buf) = SLOG_SHIP.lock().unwrap().as_mut()
+    {
+        // Bounded: a flood keeps the OLDEST lines of the window (order
+        // is the instrument) and marks the drop once.
+        if buf.len() < 800 {
+            buf.push(line);
+        } else if buf.len() == 800 {
+            buf.push("… ship buffer full — later lines dropped this window".into());
+        }
     }
 }
 
@@ -178,6 +229,10 @@ const FRAME_CMDS: u8 = 2;
 const MAX_FRAME: u32 = 256 * 1024 * 1024;
 
 fn write_frame(s: &mut TcpStream, kind: u8, payload: &[u8]) -> std::io::Result<()> {
+    TX_BYTES.fetch_add(
+        5 + payload.len() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     s.write_all(&(payload.len() as u32).to_be_bytes())?;
     s.write_all(&[kind])?;
     s.write_all(payload)
@@ -194,6 +249,7 @@ fn read_frame(s: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     s.read_exact(&mut kind)?;
     let mut buf = vec![0u8; len as usize];
     s.read_exact(&mut buf)?;
+    RX_BYTES.fetch_add(5 + len as u64, std::sync::atomic::Ordering::Relaxed);
     Ok((kind[0], buf))
 }
 
@@ -253,6 +309,11 @@ pub enum Msg {
     UndoRequest {
         author: String,
         redo: bool,
+    },
+    /// STAGE 0 (PSD-multiplayer-rescope): a guest's numbered wire-log
+    /// lines, shipped through the join — the ordered debug channel.
+    DebugLog {
+        lines: Vec<String>,
     },
     /// Presence: where an artist is and what their pen is doing.
     Presence {
@@ -367,6 +428,11 @@ pub enum NetEvent {
     Commands(Vec<anim_core::command::Command>),
     /// Host side: a guest's mirror slipped — send a fresh snapshot.
     ResyncNeeded,
+    /// Host side: a guest's numbered log lines (Stage 0 debug channel).
+    DebugLog {
+        from: String,
+        lines: Vec<String>,
+    },
     /// Guest side: a fresh authoritative document from the host.
     Snapshot(Vec<u8>),
     /// The connection or room ended.
@@ -553,6 +619,16 @@ impl Host {
                                                     let _ = tx.send(NetEvent::UndoRequest {
                                                         author,
                                                         redo,
+                                                    });
+                                                    continue;
+                                                }
+                                                Ok(Msg::DebugLog { lines }) => {
+                                                    // STAGE 0: numbered guest
+                                                    // lines for the host's
+                                                    // remote log file.
+                                                    let _ = tx.send(NetEvent::DebugLog {
+                                                        from: username.clone(),
+                                                        lines,
                                                     });
                                                     continue;
                                                 }
@@ -842,6 +918,11 @@ impl Client {
         let _ = self.tx.send(Out::Json(Box::new(Msg::ResyncRequest {})));
     }
 
+    /// STAGE 0: ship this machine's buffered log lines to the host.
+    pub fn send_debug(&mut self, lines: Vec<String>) {
+        let _ = self.tx.send(Out::Json(Box::new(Msg::DebugLog { lines })));
+    }
+
     /// Ask the host to undo/redo THIS artist's last step (v2).
     pub fn send_undo(&mut self, author: &str, redo: bool) {
         let _ = self.tx.send(Out::Json(Box::new(Msg::UndoRequest {
@@ -1070,5 +1151,20 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(got, "guest presence must reach the host");
+        // STAGE 0 (PSD-multiplayer-rescope): a guest's numbered log lines
+        // reach the host's UI events, in order, attributed by join name.
+        guest.send_debug(vec!["[#0] first".into(), "[#1] second".into()]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut got = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(NetEvent::DebugLog { from, lines }) = host.events.try_recv() {
+                assert_eq!(from, "guest-a");
+                assert_eq!(lines, vec!["[#0] first".to_string(), "[#1] second".into()]);
+                got = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(got, "guest debug lines must reach the host ordered");
     }
 }
