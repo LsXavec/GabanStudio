@@ -139,3 +139,19 @@ readback against its own live mirror BY TILE HASH and sends only
 changed tiles; an empty payload marks an erased tile (host builds
 after=None; the diff drops none→none). Status says "sent N tile(s)".
 v0.1.11 — both machines must match (room-lamp hover shows each build).
+
+THIRD CRITICAL REPAIR 2026-08-19 (owner: "they are saying my strokes
+are dissapearing and again they draw 1 single line and it just
+breaks"): THE ERASE RACE. The v0.1.11 diff compared the pen-up readback
+against the LIVE mirror — but a host batch arriving mid-stroke updates
+the mirror while the guest's GPU (resync suppressed during strokes, by
+design) still lacks it. Those tiles hash-differ → the guest's lift sent
+them as ERASES → the host's own ink vanished, then the echo removed it
+from every mirror. Fix: guest_stroke_base — the mirror frozen at
+pen-down, captured beside smudge_src at both latch sites; the diff
+(extracted as diff_guest_tiles, three tests incl. the race pin) runs
+against the base, so an untouched tile never travels no matter how the
+mirror moved. Known residue, named: a host stroke and a guest stroke
+landing on the SAME tile in the same moment resolves tile-level
+last-write (the guest's merge wins on that tile) — the CRDT-free cost
+of one-truth, acceptable at two artists. v0.1.12.

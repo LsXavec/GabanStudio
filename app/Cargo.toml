@@ -1,6 +1,6 @@
 [package]
 name = "animstudio"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 description = "Node-graph 2D animation studio - app shell"
 

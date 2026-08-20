@@ -404,6 +404,13 @@ pub struct CanvasView {
     lasso_pts: Vec<Pos2>,
     lasso_soft: f32,
     lasso_grow: f32,
+    /// THE ERASE-RACE FIX (2026-08-19): the mirror AS IT WAS when the
+    /// guest's pen touched down. Diffing the pen-up readback against the
+    /// LIVE mirror erased any host stroke that arrived mid-stroke (the
+    /// mirror had it, the GPU readback did not — "changed" — so it was
+    /// sent back as an erase). The diff compares against this frozen
+    /// base instead.
+    guest_stroke_base: Option<std::collections::BTreeMap<anim_core::raster::TileCoord, std::sync::Arc<anim_core::raster::TileData>>>,
     /// THE SMUDGE GATE: the active layer's committed tiles, snapshotted
     /// at stroke start — the PRE-STROKE truth the held colour samples
     /// (Arc clones; cannot change while the wet stroke is open).
@@ -535,6 +542,7 @@ impl CanvasView {
             tip_active: false,
             tip_frames: 1,
             smudge_src: None,
+            guest_stroke_base: None,
             lasso_pts: Vec::new(),
             lasso_soft: 0.0,
             lasso_grow: 0.0,
@@ -2846,25 +2854,15 @@ impl CanvasView {
                             // control window sends only what ITS pen
                             // changed: diff against the mirror by tile
                             // hash; an empty payload marks an erased tile.
-                            let mirror = state
-                                .active_layer_tiles()
-                                .cloned()
+                            // Against the STROKE-START base — never the
+                            // live mirror (the erase-race; see the field's
+                            // comment and diff_guest_tiles' tests).
+                            let base = self
+                                .guest_stroke_base
+                                .take()
+                                .or_else(|| state.active_layer_tiles().cloned())
                                 .unwrap_or_default();
-                            let mut wire: Vec<(i32, i32, Vec<u16>)> = Vec::new();
-                            let mut seen =
-                                std::collections::HashSet::with_capacity(tiles.len());
-                            for ((x, y), t) in &tiles {
-                                seen.insert((*x, *y));
-                                match mirror.get(&(*x, *y)) {
-                                    Some(m) if m.hash == t.hash => {}
-                                    _ => wire.push((*x, *y, t.rgba.to_vec())),
-                                }
-                            }
-                            for (c, _) in mirror.iter() {
-                                if !seen.contains(c) {
-                                    wire.push((c.0, c.1, Vec::new()));
-                                }
-                            }
+                            let wire = diff_guest_tiles(&base, &tiles);
                             if !wire.is_empty() {
                                 state.status =
                                     format!("sent {} tile(s) to the host…", wire.len());
@@ -4482,6 +4480,11 @@ impl CanvasView {
         self.raster_stroke_done = false;
         self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
         self.smudge_src = self.capture_smudge_src(state);
+        self.guest_stroke_base = if self.is_guest {
+            state.active_layer_tiles().cloned()
+        } else {
+            None
+        };
         self.current.clear();
         let p = to_paper(pos);
         self.current.push(StrokePoint {
@@ -4674,6 +4677,11 @@ impl CanvasView {
                 self.raster_stroke_done = false;
                 self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
                 self.smudge_src = self.capture_smudge_src(state);
+        self.guest_stroke_base = if self.is_guest {
+            state.active_layer_tiles().cloned()
+        } else {
+            None
+        };
                 if let Some(p) = response.interact_pointer_pos() {
                     let p = to_paper(p);
                     self.current.push(StrokePoint {
@@ -4903,6 +4911,32 @@ pub fn layer_chip_color(name: &str) -> Color32 {
         "rough" => plate::AO,
         _ => plate::LEGEND,
     }
+}
+
+/// THE ERASE-RACE FIX: what a guest's pen actually changed — readback
+/// tiles whose hash differs from the STROKE-START base, plus an empty
+/// marker for base tiles the pen erased entirely. Tiles the pen never
+/// touched are absent even when the live mirror has moved on (a host
+/// stroke arriving mid-stroke must never echo back as an erase).
+fn diff_guest_tiles(
+    base: &std::collections::BTreeMap<anim_core::raster::TileCoord, std::sync::Arc<anim_core::raster::TileData>>,
+    readback: &[(anim_core::raster::TileCoord, std::sync::Arc<anim_core::raster::TileData>)],
+) -> Vec<(i32, i32, Vec<u16>)> {
+    let mut wire: Vec<(i32, i32, Vec<u16>)> = Vec::new();
+    let mut seen = std::collections::HashSet::with_capacity(readback.len());
+    for ((x, y), t) in readback {
+        seen.insert((*x, *y));
+        match base.get(&(*x, *y)) {
+            Some(b) if b.hash == t.hash => {}
+            _ => wire.push((*x, *y, t.rgba.to_vec())),
+        }
+    }
+    for (c, _) in base.iter() {
+        if !seen.contains(c) {
+            wire.push((c.0, c.1, Vec::new()));
+        }
+    }
+    wire
 }
 
 /// THE SMUDGE GATE: sample a committed tile map at paper coords —
@@ -5428,5 +5462,60 @@ mod lasso_tests {
         let rim = alpha(4, 10, 4.0);
         assert!(rim > 0.0 && rim < 0.9, "rim ramps ({rim})");
         assert!(alpha(10, 10, 4.0) > 0.99, "centre solid");
+    }
+}
+
+#[cfg(test)]
+mod erase_race_tests {
+    use super::*;
+    use anim_core::raster::{TILE_LEN, TileData, f32_to_f16_bits};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn tile(v: f32) -> Arc<TileData> {
+        let bits = f32_to_f16_bits(v);
+        Arc::new(TileData::from_vec(vec![bits; TILE_LEN]))
+    }
+
+    /// The race that erased the host's ink: a stroke lands in the mirror
+    /// WHILE the guest's pen is down. The diff against the stroke-start
+    /// base must not mention that tile at all.
+    #[test]
+    fn a_mid_stroke_host_tile_is_never_echoed_as_an_erase() {
+        // Base at pen-down: one tile of shared history at (0,0).
+        let mut base = BTreeMap::new();
+        base.insert((0, 0), tile(0.3));
+        // Pen-up readback: the untouched (0,0) plus the guest's new (5,5).
+        let readback = vec![((0, 0), tile(0.3)), ((5, 5), tile(0.9))];
+        // (The LIVE mirror meanwhile also gained the host's (2,2) — which
+        // the readback lacks. Diffing against the live mirror would emit
+        // (2,2, empty) — the erase. Against the base it cannot.)
+        let wire = diff_guest_tiles(&base, &readback);
+        assert_eq!(wire.len(), 1, "only the guest's own tile travels: {wire:?}");
+        assert_eq!((wire[0].0, wire[0].1), (5, 5));
+        assert!(!wire[0].2.is_empty());
+    }
+
+    #[test]
+    fn a_genuinely_erased_base_tile_sends_the_empty_marker() {
+        let mut base = BTreeMap::new();
+        base.insert((1, 1), tile(0.5));
+        base.insert((2, 2), tile(0.6));
+        // The pen erased (2,2) entirely; (1,1) survives unchanged.
+        let readback = vec![((1, 1), tile(0.5))];
+        let wire = diff_guest_tiles(&base, &readback);
+        assert_eq!(wire.len(), 1);
+        assert_eq!((wire[0].0, wire[0].1), (2, 2));
+        assert!(wire[0].2.is_empty(), "empty payload = erased tile");
+    }
+
+    #[test]
+    fn a_repainted_tile_travels_with_its_new_content() {
+        let mut base = BTreeMap::new();
+        base.insert((3, 3), tile(0.2));
+        let readback = vec![((3, 3), tile(0.8))];
+        let wire = diff_guest_tiles(&base, &readback);
+        assert_eq!(wire.len(), 1);
+        assert_eq!(wire[0].2.len(), TILE_LEN);
     }
 }
