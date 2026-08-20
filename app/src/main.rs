@@ -819,6 +819,7 @@ impl App {
                     canvas::CanvasTool::Paint => "brush",
                     canvas::CanvasTool::Select => "select",
                     canvas::CanvasTool::Fill => "fill",
+                    canvas::CanvasTool::LassoFill => "lasso fill",
                 }
             },
             brush: "-",

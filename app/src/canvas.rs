@@ -109,6 +109,9 @@ pub enum CanvasTool {
     Paint,
     Select,
     Fill,
+    /// LASSO FILL (PSD-lasso-fill): loop a region freehand; it fills
+    /// with the brush colour, feathered INWARD by `lasso_soft`.
+    LassoFill,
 }
 
 /// Selection drawing shape (a rect is a 4-point polygon through the same
@@ -395,6 +398,12 @@ pub struct CanvasView {
     tip_active: bool,
     /// Frames in the armed tip's atlas (GIH pipe brushes cycle; 1 = still).
     tip_frames: u32,
+    /// LASSO FILL: the loop being drawn (paper space), and its edge
+    /// parameters — softness feathers INWARD (NEVER-DO 3), grow shifts
+    /// the edge ±px.
+    lasso_pts: Vec<Pos2>,
+    lasso_soft: f32,
+    lasso_grow: f32,
     /// THE SMUDGE GATE: the active layer's committed tiles, snapshotted
     /// at stroke start — the PRE-STROKE truth the held colour samples
     /// (Arc clones; cannot change while the wet stroke is open).
@@ -526,6 +535,9 @@ impl CanvasView {
             tip_active: false,
             tip_frames: 1,
             smudge_src: None,
+            lasso_pts: Vec::new(),
+            lasso_soft: 0.0,
+            lasso_grow: 0.0,
             request_krita_scan: false,
             brush_search: String::new(),
             thumb_cache: std::collections::HashMap::new(),
@@ -636,6 +648,8 @@ impl CanvasView {
             CanvasTool::Select => "select: drag = select, drag inside = move, corners = scale, \
         just outside corners = rotate; Enter applies, Esc cancels"
                 .into(),
+            CanvasTool::LassoFill => "lasso fill: draw a loop — it fills with the brush             colour; softness feathers inward, grow shifts the edge"
+                .into(),
             CanvasTool::Fill => "fill: click a region — line art bounds it; gap closes line \
             breaks, under tucks the flat beneath the lines"
                 .into(),
@@ -677,6 +691,7 @@ impl CanvasView {
             state.status = "workspace switched — tool/view kept (finish the stroke first)".into();
             return false;
         }
+        self.lasso_pts.clear();
         self.set_tool(v.tool, state);
         self.composite_view = v.composite_view;
         self.sel_shape = v.sel_shape;
@@ -1176,6 +1191,7 @@ impl CanvasView {
         match self.tool {
             CanvasTool::Select => "select".into(),
             CanvasTool::Fill => "fill".into(),
+            CanvasTool::LassoFill => "lasso fill".into(),
             _ if self.erasing => "eraser".into(),
             _ => self.armed_preset.clone().unwrap_or_else(|| "brush".into()),
         }
@@ -2234,6 +2250,19 @@ impl CanvasView {
                 {
                     self.set_tool(CanvasTool::Fill, state);
                 }
+                // Lasso fill: loop a region, it fills feathered.
+                let lf_on = self.tool == CanvasTool::LassoFill;
+                if plate::tool_button(ui, lf_on, Icon::Lasso, lbl("lasso fill"))
+                    .on_hover_text(
+                        "lasso fill — draw a loop and it fills with the brush \
+                    colour; softness feathers the edge inward, grow shifts \
+                    the edge; one loop = one undo step",
+                    )
+                    .clicked()
+                    && !lf_on
+                {
+                    self.set_tool(CanvasTool::LassoFill, state);
+                }
                 // (Fill's gap/under/boundary options live in the OPTIONS
                 // row below, same law.)
                 // ---- The latches (independent states, Tally left-edge). ----
@@ -2427,6 +2456,20 @@ impl CanvasView {
                             {
                                 self.fill_ref_cel = false;
                             }
+                        }
+                        CanvasTool::LassoFill => {
+                            plate::legend(ui, "lasso fill");
+                            plate::legend(ui, "softness");
+                            let mut soft = self.lasso_soft;
+                            plate::field(ui, egui::DragValue::new(&mut soft).range(0.0..=64.0));
+                            self.lasso_soft = soft;
+                            plate::legend(ui, "grow");
+                            let mut grow = self.lasso_grow;
+                            plate::field(
+                                ui,
+                                egui::DragValue::new(&mut grow).range(-16.0..=16.0),
+                            );
+                            self.lasso_grow = grow;
                         }
                         _ => {
                             // Brush / eraser edits live on the RIGHT RAIL
@@ -2630,6 +2673,9 @@ impl CanvasView {
                         state,
                         paint.as_deref_mut(),
                     );
+                }
+                CanvasTool::LassoFill => {
+                    self.lasso_fill_input(ui, &response, rect, &to_paper, state);
                 }
                 CanvasTool::Fill => {
                     self.fill_input(ui, &response, rect, &to_paper, state);
@@ -3163,6 +3209,19 @@ impl CanvasView {
                 egui::StrokeKind::Outside,
             );
             ui.ctx().request_repaint();
+        }
+
+        // ---- LASSO FILL preview: the loop so far, Ao dashed, closed.
+        if self.tool == CanvasTool::LassoFill && self.lasso_pts.len() >= 2 {
+            let mut pts: Vec<Pos2> =
+                self.lasso_pts.iter().map(|p| to_screen(*p)).collect();
+            pts.push(pts[0]);
+            painter.extend(egui::Shape::dashed_line(
+                &pts,
+                egui::Stroke::new(1.0, plate::AO),
+                4.0,
+                3.0,
+            ));
         }
 
         // ---- SESSION PRESENCE (PSD-session-room): the other artists.
@@ -3939,6 +3998,262 @@ impl CanvasView {
             walked += len;
         }
         dabs
+    }
+
+    /// LASSO FILL input (PSD-lasso-fill): drag draws the loop; release
+    /// commits ONE region edit. The fill tool's guard set, verbatim
+    /// (NEVER-DO 2), minus the GPU requirement — this path is pure CPU.
+    fn lasso_fill_input(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: Rect,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        state: &mut AppState,
+    ) {
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && !self.lasso_pts.is_empty()
+        {
+            self.lasso_pts.clear();
+            state.status = "lasso cleared".into();
+            return;
+        }
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            let Some(pos) = response.interact_pointer_pos() else {
+                return;
+            };
+            if !rect.contains(pos) {
+                return;
+            }
+            // The fill tool's guards, in the fill tool's order.
+            if self.composite_view {
+                state.refuse("refused — composite view is read-only (C to edit)");
+                return;
+            }
+            if state.active_layer_props().is_some_and(|p| !p.visible) {
+                state.status = format!(
+                    "layer '{}' is hidden — press A to switch or click its eye",
+                    state.active_layer_name()
+                );
+                return;
+            }
+            if state.own_key_drawing().is_none() {
+                state.status =
+                    "held/blank frame — a fill edits a frame's OWN cel (draw here first)"
+                        .into();
+                return;
+            }
+            self.lasso_pts.clear();
+            self.lasso_pts.push(to_paper(pos));
+            return;
+        }
+        if response.dragged_by(egui::PointerButton::Primary) && !self.lasso_pts.is_empty() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let p = to_paper(pos);
+                // Decimate: a point every ~1.5 paper px keeps loops light.
+                if self
+                    .lasso_pts
+                    .last()
+                    .is_none_or(|l| (l.x - p.x).hypot(l.y - p.y) > 1.5)
+                {
+                    self.lasso_pts.push(p);
+                }
+            }
+            return;
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) && self.lasso_pts.len() >= 3
+        {
+            let pts = std::mem::take(&mut self.lasso_pts);
+            self.commit_lasso_fill(&pts, state);
+        }
+    }
+
+    /// Rasterize the loop (scanline), feather inward (chamfer signed
+    /// distance — bounded O(area), NEVER-DO 4), composite the brush
+    /// colour over the active layer, and commit ONE region edit.
+    fn commit_lasso_fill(&mut self, pts: &[Pos2], state: &mut AppState) {
+        use anim_core::raster::{TILE, TileData, f16_bits_to_f32, f32_to_f16_bits};
+        let Some(did) = state.own_key_drawing() else { return };
+        let (kd, kl, _) = state.active_layer_key();
+        if kd != did.0 || kl == u64::MAX {
+            state.status = "no raster layer here to fill".into();
+            return;
+        }
+        let (pw, ph) = (
+            state.engine.project.width as i32,
+            state.engine.project.height as i32,
+        );
+        // The working grid: the loop's bbox, clipped to paper, padded by
+        // the feather band.
+        let pad = (self.lasso_soft + self.lasso_grow.abs()).ceil() as i32 + 2;
+        let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for p in pts {
+            x0 = x0.min(p.x.floor() as i32);
+            y0 = y0.min(p.y.floor() as i32);
+            x1 = x1.max(p.x.ceil() as i32);
+            y1 = y1.max(p.y.ceil() as i32);
+        }
+        x0 = (x0 - pad).max(0);
+        y0 = (y0 - pad).max(0);
+        x1 = (x1 + pad).min(pw - 1);
+        y1 = (y1 + pad).min(ph - 1);
+        if x0 > x1 || y0 > y1 {
+            state.status = "the loop was outside the paper".into();
+            return;
+        }
+        let (gw, gh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
+        // 1) Scanline even-odd rasterization into a hard mask.
+        let mut inside = vec![false; gw * gh];
+        for gy in 0..gh {
+            let yc = (y0 + gy as i32) as f32 + 0.5;
+            let mut xs: Vec<f32> = Vec::new();
+            for i in 0..pts.len() {
+                let a = pts[i];
+                let b = pts[(i + 1) % pts.len()];
+                if (a.y <= yc) != (b.y <= yc) {
+                    xs.push(a.x + (yc - a.y) / (b.y - a.y) * (b.x - a.x));
+                }
+            }
+            xs.sort_by(f32::total_cmp);
+            for span in xs.chunks_exact(2) {
+                let sx = (span[0].ceil() as i32).max(x0);
+                let ex = (span[1].floor() as i32).min(x1);
+                for x in sx..=ex {
+                    inside[gy * gw + (x - x0) as usize] = true;
+                }
+            }
+        }
+        // 2) Chamfer signed distance (3-4 weights, two passes each way):
+        //    dist > 0 inside, < 0 outside, in ~pixels (/3).
+        let big = 1_000_000i32;
+        let mut din = vec![big; gw * gh];
+        let mut dout = vec![big; gw * gh];
+        for i in 0..gw * gh {
+            if inside[i] {
+                dout[i] = 0;
+            } else {
+                din[i] = 0;
+            }
+        }
+        let chamfer = |d: &mut [i32]| {
+            for y in 0..gh {
+                for x in 0..gw {
+                    let i = y * gw + x;
+                    let mut v = d[i];
+                    if x > 0 {
+                        v = v.min(d[i - 1] + 3);
+                    }
+                    if y > 0 {
+                        v = v.min(d[i - gw] + 3);
+                        if x > 0 {
+                            v = v.min(d[i - gw - 1] + 4);
+                        }
+                        if x + 1 < gw {
+                            v = v.min(d[i - gw + 1] + 4);
+                        }
+                    }
+                    d[i] = v;
+                }
+            }
+            for y in (0..gh).rev() {
+                for x in (0..gw).rev() {
+                    let i = y * gw + x;
+                    let mut v = d[i];
+                    if x + 1 < gw {
+                        v = v.min(d[i + 1] + 3);
+                    }
+                    if y + 1 < gh {
+                        v = v.min(d[i + gw] + 3);
+                        if x + 1 < gw {
+                            v = v.min(d[i + gw + 1] + 4);
+                        }
+                        if x > 0 {
+                            v = v.min(d[i + gw - 1] + 4);
+                        }
+                    }
+                    d[i] = v;
+                }
+            }
+        };
+        chamfer(&mut din);
+        chamfer(&mut dout);
+        // 3) Alpha: signed distance shifted by grow, ramped over softness.
+        //    softness 0 = crisp edge exactly at the loop (+grow).
+        let soft = self.lasso_soft.max(0.0);
+        let c = linear_rgba(self.brush_color);
+        let premult = [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
+        let target = state.active_layer_tiles().cloned().unwrap_or_default();
+        let mut diff: anim_core::raster::TileDiff = Vec::new();
+        let tx0 = x0.div_euclid(TILE as i32);
+        let tx1 = x1.div_euclid(TILE as i32);
+        let ty0 = y0.div_euclid(TILE as i32);
+        let ty1 = y1.div_euclid(TILE as i32);
+        for ty in ty0..=ty1 {
+            for tx in tx0..=tx1 {
+                let before = target.get(&(tx, ty)).cloned();
+                let mut texels: Vec<u16> = before
+                    .as_ref()
+                    .map(|t| t.rgba.to_vec())
+                    .unwrap_or_else(|| vec![0u16; TILE * TILE * 4]);
+                let mut touched = false;
+                for cy in 0..TILE {
+                    let py = ty * TILE as i32 + cy as i32;
+                    if py < y0 || py > y1 {
+                        continue;
+                    }
+                    for cx in 0..TILE {
+                        let px = tx * TILE as i32 + cx as i32;
+                        if px < x0 || px > x1 {
+                            continue;
+                        }
+                        let gi =
+                            (py - y0) as usize * gw + (px - x0) as usize;
+                        let signed = if inside[gi] {
+                            din[gi] as f32 / 3.0
+                        } else {
+                            -(dout[gi] as f32 / 3.0)
+                        };
+                        let edge = signed + self.lasso_grow;
+                        let a = if soft < 0.5 {
+                            if edge > 0.0 { 1.0 } else { 0.0 }
+                        } else {
+                            (edge / soft).clamp(0.0, 1.0)
+                        };
+                        if a <= 0.0 {
+                            continue;
+                        }
+                        touched = true;
+                        let i = (cy * TILE + cx) * 4;
+                        // src-over, premultiplied.
+                        let src = [
+                            premult[0] * a,
+                            premult[1] * a,
+                            premult[2] * a,
+                            premult[3] * a,
+                        ];
+                        for ch in 0..4 {
+                            let dst = f16_bits_to_f32(texels[i + ch]);
+                            texels[i + ch] =
+                                f32_to_f16_bits(src[ch] + dst * (1.0 - src[3]));
+                        }
+                    }
+                }
+                if touched {
+                    diff.push((
+                        (tx, ty),
+                        before,
+                        Some(std::sync::Arc::new(TileData::from_vec(texels))),
+                    ));
+                }
+            }
+        }
+        if diff.is_empty() {
+            state.status = "the loop enclosed nothing".into();
+            return;
+        }
+        state.commit_region_edit("lasso fill", did, LayerId(kl), diff);
+        self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
     }
 
     /// Fill-tool input: a press flood-fills the clicked region on the ACTIVE
@@ -4978,5 +5293,84 @@ mod smudge_tests {
         let (a, b) = (fold(), fold());
         assert_eq!(a, b, "same stroke, same pixels");
         assert!(a[2] > 0.99 && a[3] > 0.99, "held colour became the canvas");
+    }
+}
+
+#[cfg(test)]
+mod lasso_tests {
+    /// The chamfer + scanline math on a synthetic square loop: crisp
+    /// edge at softness 0, ramp inside at softness N, never outward.
+    #[test]
+    fn feather_stays_inside_the_loop() {
+        // 20×20 grid, square loop 4..16. Mirror the commit's math.
+        let (gw, gh) = (20usize, 20usize);
+        let mut inside = vec![false; gw * gh];
+        for y in 4..16 {
+            for x in 4..16 {
+                inside[y * gw + x] = true;
+            }
+        }
+        let big = 1_000_000i32;
+        let mut din = vec![big; gw * gh];
+        let mut dout = vec![big; gw * gh];
+        for i in 0..gw * gh {
+            if inside[i] {
+                dout[i] = 0;
+            } else {
+                din[i] = 0;
+            }
+        }
+        let chamfer = |d: &mut Vec<i32>| {
+            for y in 0..gh {
+                for x in 0..gw {
+                    let i = y * gw + x;
+                    let mut v = d[i];
+                    if x > 0 {
+                        v = v.min(d[i - 1] + 3);
+                    }
+                    if y > 0 {
+                        v = v.min(d[i - gw] + 3);
+                    }
+                    d[i] = v;
+                }
+            }
+            for y in (0..gh).rev() {
+                for x in (0..gw).rev() {
+                    let i = y * gw + x;
+                    let mut v = d[i];
+                    if x + 1 < gw {
+                        v = v.min(d[i + 1] + 3);
+                    }
+                    if y + 1 < gh {
+                        v = v.min(d[i + gw] + 3);
+                    }
+                    d[i] = v;
+                }
+            }
+        };
+        chamfer(&mut din);
+        chamfer(&mut dout);
+        let alpha = |x: usize, y: usize, soft: f32| -> f32 {
+            let i = y * gw + x;
+            let signed = if inside[i] {
+                din[i] as f32 / 3.0
+            } else {
+                -(dout[i] as f32 / 3.0)
+            };
+            if soft < 0.5 {
+                if signed > 0.0 { 1.0 } else { 0.0 }
+            } else {
+                (signed / soft).clamp(0.0, 1.0)
+            }
+        };
+        // Crisp: solid centre, nothing outside.
+        assert_eq!(alpha(10, 10, 0.0), 1.0);
+        assert_eq!(alpha(2, 2, 0.0), 0.0);
+        // Feathered: the rim ramps INSIDE, the outside stays clean, the
+        // deep centre stays solid (NEVER-DO 3).
+        assert_eq!(alpha(2, 2, 4.0), 0.0, "feather never bleeds outward");
+        let rim = alpha(4, 10, 4.0);
+        assert!(rim > 0.0 && rim < 0.9, "rim ramps ({rim})");
+        assert!(alpha(10, 10, 4.0) > 0.99, "centre solid");
     }
 }
