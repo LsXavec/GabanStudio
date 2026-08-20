@@ -212,6 +212,11 @@ struct App {
     /// STAGE 3: the engine's base author is armed with this artist's
     /// name while in a room (every entry carries its hand).
     session_author_armed: bool,
+    /// STAGE 4: the host's arrangement (serialized Workspace), loadable
+    /// from Settings ▸ Layout while in this session; and the preset
+    /// name field's buffer.
+    session_host_layout: Option<String>,
+    layout_ws_name: String,
     /// LAN DISCOVERY: rooms visible on this network (always listening).
     discovery: net::Discovery,
     /// A guest asked for a fresh snapshot (their mirror slipped).
@@ -525,6 +530,7 @@ impl App {
         self.session_audit.clear();
         self.session_done.clear();
         self.session_author_armed = false;
+        self.session_host_layout = None;
         if let Some(ed) = &mut self.editor {
             ed.canvas.replay_inbox.clear();
             ed.canvas.replay_done.clear();
@@ -1032,6 +1038,11 @@ impl App {
                 net::NetEvent::SnapshotMeta(s) => {
                     self.session_snapshot_seq = Some(s);
                 }
+                // STAGE 4: the host's arrangement — held, never applied
+                // unasked; Settings ▸ Layout offers it as a LOAD.
+                net::NetEvent::HostLayout(json) => {
+                    self.session_host_layout = Some(json);
+                }
                 net::NetEvent::RepairRequest {
                     client,
                     drawing,
@@ -1376,6 +1387,23 @@ impl App {
             {
                 for (hash, (w, hh, b)) in &self.session_res {
                     h.send_stroke_frame(net::enc_res(*hash, *w, *hh, b));
+                }
+            }
+            // STAGE 4: the host's current arrangement rides each join —
+            // guests may LOAD it from Settings ▸ Layout; their own
+            // configured layout stays the default.
+            if fresh_join {
+                let layout = self.editor.as_ref().map(|ed| workspace::Workspace {
+                    name: "host's layout".into(),
+                    dock: ed.dock.clone(),
+                    preset: None,
+                    view: Some(ed.canvas.snapshot_view(&ed.state)),
+                });
+                if let Some(w) = layout
+                    && let Ok(json) = serde_json::to_string(&w)
+                    && let net::Session::Hosting(h) = &self.session
+                {
+                    h.send_layout(json);
                 }
             }
             if (fresh_join || due) && self.session_snap_rx.is_none() {
@@ -1867,6 +1895,8 @@ impl App {
             session_audit: std::collections::HashMap::new(),
             session_done: std::collections::HashSet::new(),
             session_author_armed: false,
+            session_host_layout: None,
+            layout_ws_name: String::new(),
             discovery: net::spawn_discovery(),
             session_resync: false,
             session_snap_rx: None,
@@ -2994,6 +3024,13 @@ impl eframe::App for App {
         plate::set_exact(self.config.ui.exact_descriptions);
 
         // Settings window (Krita-style: shortcuts + performance).
+        // STAGE 4: the Layout page's inputs (computed BEFORE the raster
+        // toggle borrows the editor mutably for the window's lifetime).
+        let layout_names: Vec<String> = self
+            .editor
+            .as_ref()
+            .map(|ed| ed.workspaces.list.iter().map(|w| w.name.clone()).collect())
+            .unwrap_or_default();
         let raster_toggle = self
             .editor
             .as_mut()
@@ -3014,6 +3051,8 @@ impl eframe::App for App {
         let mut join_room: Option<String> = None;
         let hosting = matches!(self.session, net::Session::Hosting(_));
         let joined = matches!(self.session, net::Session::Joined(_));
+        // STAGE 4: the Layout page's click-out slot.
+        let mut layout_act: Option<config::LayoutAct> = None;
         config::settings_window(
             ui.ctx(),
             &mut self.settings_open,
@@ -3031,9 +3070,69 @@ impl eframe::App for App {
             &mut check_now,
             &lan_rooms,
             &mut join_room,
+            &layout_names,
+            self.session_host_layout.is_some(),
+            &mut self.layout_ws_name,
+            &mut layout_act,
         );
         if let Some(a) = session_action {
             self.session_act(a);
+        }
+        // STAGE 4: the Layout page's verdicts — the App owns the dock
+        // and the workspace list; presets persist per-user across
+        // hosted sessions, and the host's layout loads on request only.
+        if let Some(act) = layout_act
+            && let Some(ed) = &mut self.editor
+        {
+            match act {
+                config::LayoutAct::Save(name) => {
+                    let view = Some(ed.canvas.snapshot_view(&ed.state));
+                    if let Some(w) = ed.workspaces.list.iter_mut().find(|w| w.name == name) {
+                        w.dock = ed.dock.clone();
+                        w.view = view;
+                    } else {
+                        ed.workspaces.list.push(workspace::Workspace {
+                            name,
+                            dock: ed.dock.clone(),
+                            preset: None,
+                            view,
+                        });
+                    }
+                    ed.workspaces.save();
+                }
+                config::LayoutAct::Load(name) => {
+                    if let Some(w) = ed
+                        .workspaces
+                        .list
+                        .iter()
+                        .find(|w| w.name == name)
+                        .cloned()
+                    {
+                        ed.dock = w.dock;
+                        ed.stage = None;
+                        if let Some(v) = w.view {
+                            let _ = ed.canvas.apply_view(&v, &mut ed.state);
+                        }
+                        ed.state.status = format!("layout preset: {name}");
+                    }
+                }
+                config::LayoutAct::Delete(name) => {
+                    ed.workspaces.list.retain(|w| w.name != name);
+                    ed.workspaces.save();
+                }
+                config::LayoutAct::LoadHost => {
+                    if let Some(json) = &self.session_host_layout
+                        && let Ok(w) = serde_json::from_str::<workspace::Workspace>(json)
+                    {
+                        ed.dock = w.dock;
+                        ed.stage = None;
+                        if let Some(v) = w.view {
+                            let _ = ed.canvas.apply_view(&v, &mut ed.state);
+                        }
+                        ed.state.status = "the host's layout".into();
+                    }
+                }
+            }
         }
         // LAN DISCOVERY: one-click join (open rooms need no key — the
         // host skips the check; any key string satisfies the wire).

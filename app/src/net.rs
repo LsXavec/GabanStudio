@@ -344,6 +344,11 @@ pub enum Msg {
         redo: bool,
         seq: u64,
     },
+    /// STAGE 4: the host's current arrangement (a serialized Workspace)
+    /// — LOADABLE from Settings ▸ Layout on every guest, never forced.
+    HostLayout {
+        json: String,
+    },
     /// STAGE 0 (PSD-multiplayer-rescope): a guest's numbered wire-log
     /// lines, shipped through the join — the ordered debug channel.
     DebugLog {
@@ -649,6 +654,8 @@ pub enum NetEvent {
         layer_name: String,
         tiles: Vec<(i32, i32, Vec<u16>)>,
     },
+    /// Guest side: the host's loadable layout (Settings ▸ Layout).
+    HostLayout(String),
     /// Host side: a guest's numbered log lines (Stage 0 debug channel).
     DebugLog {
         from: String,
@@ -1031,6 +1038,12 @@ impl Host {
         }
     }
 
+    /// STAGE 4: the host's current arrangement, loadable guest-side.
+    pub fn send_layout(&self, json: String) {
+        let msg = serde_json::to_vec(&Msg::HostLayout { json }).unwrap();
+        broadcast_except(&self.clients, u64::MAX, FRAME_JSON, &msg);
+    }
+
     /// STAGE 3: a sequenced per-artist undo/redo, to every guest.
     pub fn send_undone(&self, author: &str, redo: bool, seq: u64) {
         let msg = serde_json::to_vec(&Msg::Undone {
@@ -1244,6 +1257,9 @@ impl Client {
                         }
                         Ok(Msg::Undone { author, redo, seq }) => {
                             let _ = tx.send(NetEvent::Undone { author, redo, seq });
+                        }
+                        Ok(Msg::HostLayout { json }) => {
+                            let _ = tx.send(NetEvent::HostLayout(json));
                         }
                         Ok(Msg::RepairTiles {
                             drawing,

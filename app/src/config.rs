@@ -769,8 +769,20 @@ pub enum SettingsCategory {
     Layers,
     Brushes,
     UiFeatures,
+    /// STAGE 4 (PSD-multiplayer-rescope): application-layout presets —
+    /// per-user by default; the host's layout is loadable in a session.
+    Layout,
     Session,
     Plugins,
+}
+
+/// STAGE 4: what the Layout page asked for (handled by the App, which
+/// owns the dock + the workspace list).
+pub enum LayoutAct {
+    Save(String),
+    Load(String),
+    Delete(String),
+    LoadHost,
 }
 
 /// THE SESSION's identity + connection config (PSD-session-room).
@@ -987,6 +999,10 @@ pub fn settings_window(
     check_now: &mut bool,
     lan_rooms: &[crate::net::Beacon],
     join_room: &mut Option<String>,
+    layout_names: &[String],
+    host_layout: bool,
+    layout_name: &mut String,
+    layout_act: &mut Option<LayoutAct>,
 ) {
     if !*open {
         *capturing = None;
@@ -1058,6 +1074,7 @@ pub fn settings_window(
                         (SettingsCategory::Layers, "layers"),
                         (SettingsCategory::Brushes, "brushes"),
                         (SettingsCategory::UiFeatures, "ui features"),
+                        (SettingsCategory::Layout, "layout"),
                         (SettingsCategory::Session, "session"),
                         (SettingsCategory::Plugins, "plugins"),
                     ] {
@@ -1075,6 +1092,9 @@ pub fn settings_window(
                     SettingsCategory::Layers => layers_page(ui, config),
                     SettingsCategory::Brushes => brushes_page(ui, config),
                     SettingsCategory::UiFeatures => ui_features_page(ui, config),
+                    SettingsCategory::Layout => {
+                        layout_page(ui, layout_names, host_layout, layout_name, layout_act)
+                    }
                     SettingsCategory::Plugins => {
                         plugins_page(ui, config, update_note, check_now)
                     }
@@ -1272,6 +1292,79 @@ pub enum SessionAction {
 /// Settings -> Session (PSD-session-room): username, the room key, host
 /// controls, and the connect button. The 2FA CODE is entered in a separate
 /// window (see `connect_window`) — never on this page.
+/// STAGE 4 (PSD-multiplayer-rescope): application-layout presets. Every
+/// user's default stays their own installed/configured arrangement; the
+/// host's layout is LOADABLE here during a session, never forced.
+fn layout_page(
+    ui: &mut egui::Ui,
+    names: &[String],
+    host_layout: bool,
+    name_buf: &mut String,
+    act: &mut Option<LayoutAct>,
+) {
+    crate::plate::legend(ui, "layout presets");
+    ui.label(
+        egui::RichText::new(
+            "save the current arrangement (panes + tool/view) under a \
+             name, and load any preset — the same rooms as the ws menu, \
+             kept here so they persist across hosted sessions.",
+        )
+        .size(11.0)
+        .color(crate::plate::legend_dim()),
+    );
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.text_edit_singleline(name_buf);
+        let name = name_buf.trim().to_string();
+        if ui.button("save current as").clicked() && !name.is_empty() {
+            *act = Some(LayoutAct::Save(name));
+            name_buf.clear();
+        }
+    });
+    ui.add_space(6.0);
+    if host_layout {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new("host's layout")
+                    .size(11.5)
+                    .color(crate::plate::STRUCK),
+            );
+            ui.label(
+                egui::RichText::new("from this session")
+                    .size(10.0)
+                    .color(crate::plate::LEGEND),
+            );
+            if ui.button("LOAD").clicked() {
+                *act = Some(LayoutAct::LoadHost);
+            }
+        });
+        ui.add_space(4.0);
+    }
+    if names.is_empty() {
+        ui.label(
+            egui::RichText::new("no presets saved yet")
+                .size(11.0)
+                .color(crate::plate::legend_dim()),
+        );
+    } else {
+        for n in names {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(n)
+                        .size(11.5)
+                        .color(crate::plate::STRUCK),
+                );
+                if ui.button("LOAD").clicked() {
+                    *act = Some(LayoutAct::Load(n.clone()));
+                }
+                if crate::plate::danger(ui, "DELETE") {
+                    *act = Some(LayoutAct::Delete(n.clone()));
+                }
+            });
+        }
+    }
+}
+
 fn session_page(
     ui: &mut egui::Ui,
     config: &mut Config,
