@@ -89,3 +89,13 @@ foundation: rooms, burning auth, presence both ways, host-doc mirror.
   handshake read returned WouldBlock and dropped the connection until
   `set_nonblocking(false)` was called on the accepted stream. Cost one
   red test; the loopback test now guards it.
+
+OWNER AMENDMENT 2026-08-19, verbatim: "lets remove the authy for now
+its confusing." The KEY is the gate: the challenge-response HMAC stays
+(key never on the wire, nonce kills replays) but the TOTP code no
+longer validates — dormant, not deleted (verify_totp, the enrollment
+UI, and the 2FA connect window remain in the tree behind allow/false
+gates). Wire shape UNCHANGED: the mac covers whatever code string the
+guest sends, so a v0.1.3 guest typing any code still joins a new host.
+New guests join with address + key only; the Connect button joins
+directly. Loopback test amended: wrong KEY refuses; codeless joins.

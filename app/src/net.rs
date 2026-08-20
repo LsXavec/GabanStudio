@@ -108,6 +108,7 @@ fn now_unix() -> u64 {
 
 /// Verify a 6-digit code against the secret with a ±1-step window; a
 /// verified (window, code) pair is BURNED — replay refused (NEVER-DO 3).
+#[allow(dead_code)] // dormant with the 2FA flow (owner 2026-08-19)
 fn verify_totp(secret: &[u8], code: &str, burned: &mut HashSet<(u64, u32)>) -> bool {
     let Ok(c) = code.trim().parse::<u32>() else {
         return false;
@@ -354,13 +355,17 @@ impl Host {
                                 else {
                                     return;
                                 };
-                                let secret_bytes = base32_decode(&secret).unwrap_or_default();
-                                let code_ok =
-                                    verify_totp(&secret_bytes, &code, &mut burned.lock().unwrap());
+                                // OWNER AMENDMENT 2026-08-19: TOTP is
+                                // dormant — the KEY is the gate. The mac
+                                // still covers whatever code string the
+                                // guest sent (older builds type one), so
+                                // the wire shape is unchanged and replays
+                                // still die on the nonce.
+                                let _ = (&secret, &burned);
                                 let mac_ok = mac == auth_mac(&key, &nonce, &code);
-                                if !code_ok || !mac_ok {
+                                if !mac_ok {
                                     let msg = serde_json::to_vec(&Msg::Refused {
-                                        why: "key or code refused".into(),
+                                        why: "the room key was refused".into(),
                                     })
                                     .unwrap();
                                     let _ = write_frame(&mut stream, FRAME_JSON, &msg);
@@ -760,12 +765,20 @@ mod tests {
         let code = format!("{:06}", totp_at(&secret_raw, now_unix()));
         let addr = format!("127.0.0.1:{}", host.port);
         let mut guest = Client::connect(&addr, &key, &code, "guest-a").expect("join with key+code");
-        // Wrong code refuses; the just-used code is burned and also refuses.
-        assert!(Client::connect(&addr, &key, "000000", "bad").is_err());
+        // OWNER AMENDMENT 2026-08-19: the KEY is the gate. A wrong key
+        // refuses; the code no longer gates (older builds may send one).
         assert!(
-            Client::connect(&addr, &key, &code, "replay").is_err(),
-            "burned code must refuse replay"
+            Client::connect(&addr, &generate_key(), "000000", "bad").is_err(),
+            "a wrong key must refuse"
         );
+        let mut second =
+            Client::connect(&addr, &key, "", "codeless").expect("key alone joins");
+        second.send_presence(&PresenceOut {
+            frame: 0,
+            cursor: None,
+            pen_down: false,
+            wet: vec![],
+        });
         // Host presence reaches the guest.
         std::thread::sleep(std::time::Duration::from_millis(150));
         host.send_presence(&PresenceOut {

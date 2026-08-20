@@ -1167,6 +1167,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
 /// THE CONNECT WINDOW (owner's brief): the 2FA code is entered HERE, in
 /// its own window, and nowhere else. Returns Some((addr, code)) once the
 /// artist commits — the App performs the join.
+#[allow(dead_code)] // dormant with the 2FA flow (owner 2026-08-19)
 pub fn connect_window(
     ctx: &egui::Context,
     open: &mut bool,
@@ -1302,7 +1303,9 @@ fn session_page(
     // ENROLLMENT — shown whenever this machine holds a room secret,
     // hosting or not: you enroll in Authy BEFORE you open the room, and
     // the live code is how you check the enrollment took.
-    if !config.session.totp_secret.trim().is_empty() {
+    // OWNER AMENDMENT 2026-08-19: Authy is dormant — the key alone
+    // gates. The enrollment UI stays in the tree for the day it returns.
+    if false && !config.session.totp_secret.trim().is_empty() {
         ui.separator();
         ui.label(
             egui::RichText::new("Authenticator (host only — guests never need this)")
@@ -1391,7 +1394,7 @@ fn session_page(
             }
             if ui
                 .button("Connect to a room…")
-                .on_hover_text("join a host with the key + their 2FA code")
+                .on_hover_text("join a host with their address and the room key")
                 .clicked()
             {
                 *action = Some(SessionAction::OpenConnect);

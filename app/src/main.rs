@@ -1881,15 +1881,15 @@ impl eframe::App for App {
             ));
         }
         // THE CONNECT WINDOW: the 2FA code lives here and nowhere else.
-        if let Some((addr, code)) = config::connect_window(
-            ui.ctx(),
-            &mut self.connect_open,
-            &mut self.connect_addr,
-            &mut self.connect_code,
-            &self.connect_error,
-            false,
-        ) {
-            self.session_join(addr, code);
+        // OWNER AMENDMENT 2026-08-19: the 2FA window is dormant — the
+        // Connect click joins with the key alone (code "").
+        if std::mem::take(&mut self.connect_open) {
+            let addr = self.connect_addr.trim().to_string();
+            if addr.is_empty() {
+                self.session_status = "enter the host's address first".into();
+            } else {
+                self.session_join(addr, String::new());
+            }
         }
         self.session_pump(ui.ctx());
         // PSD-shipping: the published-build channel (a thread talks to
