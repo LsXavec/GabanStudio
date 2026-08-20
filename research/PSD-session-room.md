@@ -121,3 +121,15 @@ runs store::save; the guest parses off-thread and the UI only swaps the
 finished AppState (drain runs every frame; mid-stroke drops it and the
 cadence brings the next). snapshot_bytes superseded and removed.
 Shipped as v0.1.6.
+
+SESSION PERF 3 repair 2026-08-19 (owner: "still freezing ... on my pc
+and the users"): the true root — EVERY outbound socket write ran
+blocking on the UI thread. The host froze pushing the multi-MB snapshot
+into TCP (broadcast_except wrote inline); the guest froze pushing
+stroke tiles (whose JSON encodes each u16 texel as ~5 ASCII bytes —
+megabytes per stroke — serialized inline too). Symmetric freezes,
+exactly as reported. Fix: one WRITER THREAD per connection; the UI
+enqueues (Out::Raw / Out::Json); EditTiles' expensive serialization
+happens on the writer; a stalled peer stalls only its own queue.
+Shipped as v0.1.7. NAMED NEXT if wire size ever hurts: EditTiles as a
+binary frame kind instead of JSON numbers (~5x smaller).

@@ -222,6 +222,32 @@ pub enum Msg {
     },
 }
 
+/// SESSION PERF 3: what a writer thread carries. Raw frames go as-is;
+/// Json is serialized ON THE WRITER (EditTiles' tile payloads are the
+/// expensive ones — never on the UI thread).
+enum Out {
+    Raw(u8, Vec<u8>),
+    Json(Box<Msg>),
+}
+
+/// The writer: drains the queue into the socket; dies with either end.
+fn spawn_writer(mut stream: TcpStream, rx: Receiver<Out>) {
+    std::thread::spawn(move || {
+        for out in rx {
+            let ok = match out {
+                Out::Raw(kind, payload) => write_frame(&mut stream, kind, &payload).is_ok(),
+                Out::Json(msg) => match serde_json::to_vec(&*msg) {
+                    Ok(bytes) => write_frame(&mut stream, FRAME_JSON, &bytes).is_ok(),
+                    Err(_) => true,
+                },
+            };
+            if !ok {
+                return;
+            }
+        }
+    });
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -288,7 +314,9 @@ pub struct PresenceOut {
 
 struct ClientHandle {
     name: String,
-    stream: TcpStream,
+    /// SESSION PERF 3: the outbound queue; a writer thread owns the
+    /// socket. A stalled peer stalls its own queue, never the UI.
+    tx: std::sync::mpsc::Sender<Out>,
 }
 
 pub struct Host {
@@ -389,11 +417,13 @@ impl Host {
                                     Ok(r) => r,
                                     Err(_) => return,
                                 };
+                                let (out_tx, out_rx) = channel();
+                                spawn_writer(stream, out_rx);
                                 clients.lock().unwrap().insert(
                                     id,
                                     ClientHandle {
                                         name: username.clone(),
-                                        stream,
+                                        tx: out_tx,
                                     },
                                 );
                                 // Announce to everyone else + the UI.
@@ -545,6 +575,7 @@ fn broadcast_except(
     kind: u8,
     payload: &[u8],
 ) {
+    // SESSION PERF 3: enqueue only — the writer threads own the sockets.
     let mut dead = Vec::new();
     {
         let mut map = clients.lock().unwrap();
@@ -552,7 +583,7 @@ fn broadcast_except(
             if *id == except {
                 continue;
             }
-            if write_frame(&mut c.stream, kind, payload).is_err() {
+            if c.tx.send(Out::Raw(kind, payload.to_vec())).is_err() {
                 dead.push(*id);
             }
         }
@@ -568,7 +599,7 @@ fn broadcast_except(
 
 pub struct Client {
     pub events: Receiver<NetEvent>,
-    stream: TcpStream,
+    tx: std::sync::mpsc::Sender<Out>,
     pub peer_id: u64,
 }
 
@@ -618,7 +649,10 @@ impl Client {
         };
         stream.set_read_timeout(None).ok();
         let (tx, rx) = channel();
-        let mut reader = stream.try_clone().map_err(|e| e.to_string())?;
+        let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
+        let (out_tx, out_rx) = channel();
+        spawn_writer(stream, out_rx);
+        let mut reader = reader_stream;
         std::thread::spawn(move || {
             loop {
                 match read_frame(&mut reader) {
@@ -662,7 +696,7 @@ impl Client {
         });
         Ok(Client {
             events: rx,
-            stream,
+            tx: out_tx,
             peer_id,
         })
     }
@@ -675,35 +709,31 @@ impl Client {
         layer_name: &str,
         tiles: Vec<(i32, i32, Vec<u16>)>,
     ) {
-        let msg = serde_json::to_vec(&Msg::EditTiles {
+        // SESSION PERF 3: the tile payload's JSON is the expensive part —
+        // it serializes on the WRITER thread, never here.
+        let _ = self.tx.send(Out::Json(Box::new(Msg::EditTiles {
             author: author.to_string(),
             drawing,
             layer_name: layer_name.to_string(),
             tiles,
-        })
-        .unwrap();
-        let _ = write_frame(&mut self.stream, FRAME_JSON, &msg);
+        })));
     }
 
     /// Ask the host to undo/redo THIS artist's last step (v2).
     pub fn send_undo(&mut self, author: &str, redo: bool) {
-        let msg = serde_json::to_vec(&Msg::UndoRequest {
+        let _ = self.tx.send(Out::Json(Box::new(Msg::UndoRequest {
             author: author.to_string(),
             redo,
-        })
-        .unwrap();
-        let _ = write_frame(&mut self.stream, FRAME_JSON, &msg);
+        })));
     }
     pub fn send_presence(&mut self, p: &PresenceOut) {
-        let msg = serde_json::to_vec(&Msg::Presence {
+        let _ = self.tx.send(Out::Json(Box::new(Msg::Presence {
             id: self.peer_id,
             frame: p.frame,
             cursor: p.cursor,
             pen_down: p.pen_down,
             wet: p.wet.clone(),
-        })
-        .unwrap();
-        let _ = write_frame(&mut self.stream, FRAME_JSON, &msg);
+        })));
     }
 }
 
