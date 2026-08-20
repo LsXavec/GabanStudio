@@ -1392,9 +1392,28 @@ fn session_page(
             {
                 *action = Some(SessionAction::StartHost);
             }
+        });
+        // The host's address (owner's report: the field lived inside the
+        // dormant 2FA window, so removing Authy orphaned it — join needs
+        // it HERE, beside the button that uses it).
+        ui.horizontal(|ui| {
+            ui.label("Host address");
             if ui
-                .button("Connect to a room…")
-                .on_hover_text("join a host with their address and the room key")
+                .add(
+                    egui::TextEdit::singleline(&mut config.session.last_addr)
+                        .desired_width(180.0)
+                        .hint_text("192.168.1.23 or host:port"),
+                )
+                .on_hover_text(
+                    "the host's IP (they run ipconfig) — port 41100 is                      assumed unless you add :port",
+                )
+                .changed()
+            {
+                config.save();
+            }
+            if ui
+                .button("Connect")
+                .on_hover_text("join with this address and the room key above")
                 .clicked()
             {
                 *action = Some(SessionAction::OpenConnect);
