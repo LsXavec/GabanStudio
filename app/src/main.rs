@@ -187,6 +187,7 @@ struct App {
     /// SESSION PERF 4: when the doc generation last MOVED — syncs wait
     /// for a quiet moment (guests watch strokes live via presence; the
     /// committed truth lands when the host pauses).
+    frame_watch: Option<std::time::Instant>,
     /// A guest asked for a fresh snapshot (their mirror slipped).
     session_resync: bool,
     /// SESSION PERF 2: the host's snapshot builder, off the UI thread
@@ -511,6 +512,7 @@ impl App {
                     e.wet = wet;
                 }
                 net::NetEvent::Commands(batch) => {
+                    net::slog(format!("APPLY cmds n={}", batch.len()));
                     // SESSION MIRROR: the 1:1 control window — tiny
                     // patches applied to the mirror engine, no reloads.
                     if let Some(ed) = &mut self.editor {
@@ -519,7 +521,8 @@ impl App {
                                 ed.state.doc_gen = ed.state.doc_gen.wrapping_add(1);
                                 ed.canvas.engine_changed();
                             }
-                            Err(_) => {
+                            Err(e) => {
+                                net::slog(format!("APPLY cmds FAILED: {e:?}"));
                                 // The mirror slipped: ask for a fresh truth.
                                 if let net::Session::Joined(c) = &mut self.session {
                                     c.send_resync_request();
@@ -557,6 +560,11 @@ impl App {
                     layer_name,
                     tiles,
                 } => {
+                    net::slog(format!(
+                        "EDIT from {author} tiles={} empty={}",
+                        tiles.len(),
+                        tiles.iter().filter(|(_, _, t)| t.is_empty()).count()
+                    ));
                     let tiles: Vec<(
                         anim_core::raster::TileCoord,
                         Option<std::sync::Arc<anim_core::raster::TileData>>,
@@ -712,6 +720,10 @@ impl App {
                 && !pen_busy
                 && now - self.session_last_snap > 1.0;
             if due {
+                net::slog(format!(
+                    "SNAPSHOT trigger resync={} history={history_moved}",
+                    self.session_resync
+                ));
                 self.session_resync = false;
             }
             if (fresh_join || due) && self.session_snap_rx.is_none() {
@@ -897,6 +909,7 @@ impl App {
                 // self-updates (NEVER-DO 4). Sweep any stepped-aside
                 // binary — this launch worked (NEVER-DO 1).
                 crate::update::sweep_old();
+                net::slog_init();
                 if !devloop::armed() && !config.update_repo.trim().is_empty() {
                     Some(crate::update::spawn_check(
                         config.update_repo.trim().to_string(),
@@ -914,6 +927,7 @@ impl App {
             update_note: String::new(),
             session_last_snap: 0.0,
             session_last_presence: 0.0,
+            frame_watch: None,
             session_resync: false,
             session_snap_rx: None,
             session_load_rx: None,
@@ -2084,6 +2098,18 @@ impl eframe::App for App {
             } else {
                 self.session_join(addr, String::new());
             }
+        }
+        // WIRE LOG: frame stalls while a session is live are the lag —
+        // log them with what the frame was doing.
+        {
+            let now = std::time::Instant::now();
+            if let Some(last) = self.frame_watch {
+                let gap = now.duration_since(last).as_millis();
+                if gap > 100 && !matches!(self.session, net::Session::Idle) {
+                    net::slog(format!("STALL frame-gap={gap}ms"));
+                }
+            }
+            self.frame_watch = Some(now);
         }
         self.session_pump(ui.ctx());
         // PSD-shipping: the published-build channel (a thread talks to

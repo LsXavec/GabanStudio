@@ -25,6 +25,38 @@ use sha1::Sha1;
 type HmacSha1 = Hmac<Sha1>;
 
 // ---------------------------------------------------------------------------
+// SESSION WIRE LOG (2026-08-19, diagnosis instrument): every significant
+// session event lands in %APPDATA%/AnimStudio/session_log.txt with a
+// timestamp — sizes, counts, stalls — so a lag report reads as data,
+// not deduction. Truncated at every app start; cheap enough to stay on.
+// ---------------------------------------------------------------------------
+
+static SLOG: Mutex<Option<(std::fs::File, std::time::Instant)>> = Mutex::new(None);
+
+/// Open (truncate) the log. Called once at app start.
+pub fn slog_init() {
+    if let Some(base) = std::env::var_os("APPDATA") {
+        let dir = std::path::PathBuf::from(base).join("AnimStudio");
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(f) = std::fs::File::create(dir.join("session_log.txt")) {
+            *SLOG.lock().unwrap() = Some((f, std::time::Instant::now()));
+        }
+    }
+    slog(format!(
+        "session log · build v{} · {}",
+        env!("CARGO_PKG_VERSION"),
+        std::env::var("COMPUTERNAME").unwrap_or_default()
+    ));
+}
+
+pub fn slog(msg: impl AsRef<str>) {
+    if let Some((f, t0)) = SLOG.lock().unwrap().as_mut() {
+        use std::io::Write as _;
+        let _ = writeln!(f, "[{:9.3}s] {}", t0.elapsed().as_secs_f64(), msg.as_ref());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Base32 (RFC 4648, no padding) — for keys and Authy manual entry.
 // ---------------------------------------------------------------------------
 
@@ -246,18 +278,38 @@ enum Out {
 fn spawn_writer(mut stream: TcpStream, rx: Receiver<Out>) {
     std::thread::spawn(move || {
         for out in rx {
-            let ok = match out {
-                Out::Raw(kind, payload) => write_frame(&mut stream, kind, &payload).is_ok(),
+            let t = std::time::Instant::now();
+            let (ok, kind, len) = match out {
+                Out::Raw(kind, payload) => (
+                    write_frame(&mut stream, kind, &payload).is_ok(),
+                    kind,
+                    payload.len(),
+                ),
                 Out::Json(msg) => match serde_json::to_vec(&*msg) {
-                    Ok(bytes) => write_frame(&mut stream, FRAME_JSON, &bytes).is_ok(),
-                    Err(_) => true,
+                    Ok(bytes) => (
+                        write_frame(&mut stream, FRAME_JSON, &bytes).is_ok(),
+                        FRAME_JSON,
+                        bytes.len(),
+                    ),
+                    Err(_) => (true, FRAME_JSON, 0),
                 },
                 Out::Cmds(batch) => match serde_json::to_vec(&batch) {
-                    Ok(bytes) => write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
-                    Err(_) => true,
+                    Ok(bytes) => (
+                        write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
+                        FRAME_CMDS,
+                        bytes.len(),
+                    ),
+                    Err(_) => (true, FRAME_CMDS, 0),
                 },
             };
+            let ms = t.elapsed().as_millis();
+            if len > 64 * 1024 || kind != FRAME_JSON || ms > 100 {
+                slog(format!(
+                    "OUT kind={kind} bytes={len} write={ms}ms ok={ok}"
+                ));
+            }
             if !ok {
+                slog("writer: socket closed");
                 return;
             }
         }
@@ -702,12 +754,16 @@ impl Client {
             loop {
                 match read_frame(&mut reader) {
                     Ok((FRAME_DOC, bytes)) => {
+                        slog(format!("IN snapshot bytes={}", bytes.len()));
                         let _ = tx.send(NetEvent::Snapshot(bytes));
                     }
                     Ok((FRAME_CMDS, bytes)) => {
                         // Deserialized HERE, on the reader thread.
+                        slog(format!("IN cmds bytes={}", bytes.len()));
                         if let Ok(batch) = serde_json::from_slice::<Vec<anim_core::command::Command>>(&bytes) {
                             let _ = tx.send(NetEvent::Commands(batch));
+                        } else {
+                            slog("IN cmds: PARSE FAILED");
                         }
                     }
                     Ok((FRAME_JSON, buf)) => match serde_json::from_slice::<Msg>(&buf) {
