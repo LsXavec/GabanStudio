@@ -682,7 +682,7 @@ impl App {
                 match self.resolve_replay(e.stroke_id, g) {
                     Ok(rs) => {
                         if let Some(ed) = &mut self.editor {
-                            ed.canvas.replay_inbox.push_back(rs);
+                            ed.canvas.replay_inbox.push_back(canvas::SeqTask::Stroke(rs));
                         }
                     }
                     Err(why) => {
@@ -807,7 +807,7 @@ impl App {
                 match self.resolve_replay(e.stroke_id, g) {
                     Ok(rs) => {
                         if let Some(ed) = &mut self.editor {
-                            ed.canvas.replay_inbox.push_back(rs);
+                            ed.canvas.replay_inbox.push_back(canvas::SeqTask::Stroke(rs));
                         }
                     }
                     Err(why) => {
@@ -844,37 +844,18 @@ impl App {
                     return;
                 }
                 net::slog(format!(
-                    "APPLY cmds seq={seq} from {} n={}",
+                    "SEQ {seq} cmds from {} n={} — queued",
                     batch.origin,
                     batch.cmds.len()
                 ));
+                // v0.2.3 (the X-sheet law): commands ride the SAME
+                // ordered queue as strokes — a delete-frame can no
+                // longer leapfrog the stroke it follows.
                 if let Some(ed) = &mut self.editor {
-                    // Authored + HISTORY-recording apply (per-artist
-                    // undo needs identical histories everywhere); the
-                    // mirror is suppressed or this would echo forever.
-                    // v0.2.1 (LAW 1): rebuild the wire-stripped befores.
-                    let mut cmds = batch.cmds;
-                    ed.state.rebuild_paint_befores(&mut cmds);
-                    let was = ed.state.engine.mirror_log;
-                    ed.state.engine.mirror_log = false;
-                    let prev = ed.state.engine.author();
-                    ed.state.engine.set_author(Some(batch.origin.clone()));
-                    let r = ed.state.engine.apply("remote edit", cmds);
-                    ed.state.engine.set_author(prev);
-                    ed.state.engine.mirror_log = was;
-                    match r {
-                        Ok(()) => {
-                            ed.state.doc_gen = ed.state.doc_gen.wrapping_add(1);
-                            ed.canvas.engine_changed();
-                        }
-                        Err(e) => {
-                            net::slog(format!("APPLY cmds FAILED: {e:?}"));
-                            if let net::Session::Joined(c) = &mut self.session {
-                                c.send_resync_request();
-                            }
-                            self.session_status = "mirror slipped — resyncing…".into();
-                        }
-                    }
+                    ed.canvas.replay_inbox.push_back(canvas::SeqTask::Cmds {
+                        origin: batch.origin,
+                        cmds: batch.cmds,
+                    });
                 }
             }
             SeqEv::Undo { author, redo, seq } => {
@@ -892,24 +873,12 @@ impl App {
                     return;
                 }
                 self.session_applied_seq = seq;
-                net::slog(format!("UNDONE {author} redo={redo} seq={seq}"));
-                let outcome = self.editor.as_mut().map(|ed| {
-                    let was = ed.state.engine.mirror_log;
-                    ed.state.engine.mirror_log = false;
-                    let r = ed.state.remote_history(&author, redo);
-                    ed.state.engine.mirror_log = was;
-                    if r.is_ok() {
-                        ed.canvas.engine_changed();
-                    }
-                    r
-                });
-                if let Some(Err(why)) = outcome {
-                    // The entry predates our join (or histories split):
-                    // take the host's truth fresh.
-                    net::slog(format!("UNDONE {author} failed: {why} — resync"));
-                    if let net::Session::Joined(c) = &mut self.session {
-                        c.send_resync_request();
-                    }
+                net::slog(format!("SEQ {seq} UNDONE {author} redo={redo} — queued"));
+                // v0.2.3: undos ride the one ordered queue too.
+                if let Some(ed) = &mut self.editor {
+                    ed.canvas
+                        .replay_inbox
+                        .push_back(canvas::SeqTask::Undo { author, redo });
                 }
             }
             SeqEv::Hashes(hw) => {
@@ -1076,6 +1045,19 @@ impl App {
                     self.audit_stroke(&hw, &d.changed);
                 } else {
                     self.session_done.insert(d.stroke_id, d.changed);
+                }
+            }
+            // v0.2.3: a queued command batch or undo that would not
+            // apply — our document split from the host's: resync.
+            let fails = self
+                .editor
+                .as_mut()
+                .map(|ed| std::mem::take(&mut ed.canvas.seq_task_fail))
+                .unwrap_or_default();
+            for why in fails {
+                net::slog(format!("SEQ TASK failed: {why} — resync"));
+                if let net::Session::Joined(c) = &mut self.session {
+                    c.send_resync_request();
                 }
             }
         }
@@ -1970,7 +1952,10 @@ impl App {
                                     .canvas
                                     .replay_inbox
                                     .iter()
-                                    .map(|r| r.stroke_id)
+                                    .filter_map(|t| match t {
+                                        canvas::SeqTask::Stroke(r) => Some(r.stroke_id),
+                                        _ => None,
+                                    })
                                     .collect();
                                 for sid in stale {
                                     ed.canvas.remote_wet_end.push(sid);

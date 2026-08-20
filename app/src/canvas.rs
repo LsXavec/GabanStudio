@@ -259,6 +259,23 @@ pub struct StrokeBeginInfo {
     pub grain: Option<(WireGrain, std::sync::Arc<Vec<u8>>)>,
 }
 
+/// v0.2.3 (the X-sheet law): ONE ordered queue for everything the host
+/// sequenced — strokes, command batches, undos. Guests used to apply
+/// commands inline while strokes deferred through the canvas, so a
+/// delete-frame could leapfrog the stroke it followed and the X-sheet
+/// forked. Now every machine applies the one order, whole.
+pub enum SeqTask {
+    Stroke(ReplayStroke),
+    Cmds {
+        origin: String,
+        cmds: Vec<anim_core::command::Command>,
+    },
+    Undo {
+        author: String,
+        redo: bool,
+    },
+}
+
 /// A remote stroke ready to replay: dabs + resolved resource bytes.
 pub struct ReplayStroke {
     pub stroke_id: u64,
@@ -449,10 +466,12 @@ pub struct CanvasView {
     pub(crate) session_live: bool,
     /// Outgoing stroke wire (Begin/Dabs/End), drained by the App.
     pub(crate) stroke_outbox: Vec<StrokeMsg>,
-    /// Incoming remote strokes to replay (host order) + what each
-    /// replay committed.
-    pub(crate) replay_inbox: std::collections::VecDeque<ReplayStroke>,
+    /// v0.2.3: the one ordered queue of sequenced work (strokes, cmds,
+    /// undos — host order preserved) + what each stroke committed and
+    /// any cmd/undo failures (the App resyncs on those).
+    pub(crate) replay_inbox: std::collections::VecDeque<SeqTask>,
     pub(crate) replay_done: Vec<ReplayDone>,
+    pub(crate) seq_task_fail: Vec<String>,
     /// This stroke is streaming (latched at stroke start).
     stroke_streaming: bool,
     stroke_wire_id: u64,
@@ -647,6 +666,7 @@ impl CanvasView {
             stroke_outbox: Vec::new(),
             replay_inbox: std::collections::VecDeque::new(),
             replay_done: Vec::new(),
+            seq_task_fail: Vec::new(),
             stroke_streaming: false,
             stroke_wire_id: 0,
             stroke_salt: rand::random(),
@@ -3052,7 +3072,21 @@ impl CanvasView {
                     // App turns replay_done into the sequenced End +
                     // hash audit for every peer.
                     let streamed = std::mem::take(&mut self.stroke_streaming);
-                    let changed: Vec<(i32, i32)> = if streamed {
+                    // v0.2.3 (the X-SHEET LAW): the cel can vanish MID-
+                    // STROKE (a sequenced delete or undo). Then this
+                    // commit CREATES structure (AddDrawing + SetCell —
+                    // an X-sheet entry) which MUST ride the command
+                    // mirror whole, or the room forks silently; the
+                    // streamed stroke is aborted for the peers instead
+                    // (their gathers target a dead drawing).
+                    let target_alive = state.own_key_drawing().is_some();
+                    let stream_commit = streamed && target_alive;
+                    if streamed && !target_alive {
+                        self.stroke_outbox.push(StrokeMsg::Abort {
+                            stroke_id: self.stroke_wire_id,
+                        });
+                    }
+                    let changed: Vec<(i32, i32)> = if stream_commit {
                         let base = state.active_layer_tiles().cloned().unwrap_or_default();
                         diff_guest_tiles(&base, &tiles)
                             .into_iter()
@@ -3062,7 +3096,7 @@ impl CanvasView {
                         Vec::new()
                     };
                     let was_mirror = state.engine.mirror_log;
-                    if streamed {
+                    if stream_commit {
                         state.engine.mirror_log = false;
                     }
                     let committed = state.commit_raster(tiles, self.stroke_layer_slot);
@@ -3078,7 +3112,7 @@ impl CanvasView {
                         // exclude the active layer, so their stacks are
                         // unchanged by this commit.
                         self.synced_active = (id.0, layer.0, h);
-                        if streamed {
+                        if stream_commit {
                             let layer_name = state
                                 .cut()
                                 .drawing(id)
@@ -3100,7 +3134,7 @@ impl CanvasView {
                         // engine never accepted — invalidate so the next frame
                         // restores truth, not a phantom.
                         self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
-                        if streamed {
+                        if stream_commit {
                             self.replay_done.push(ReplayDone {
                                 stroke_id: self.stroke_wire_id,
                                 author: String::new(),
@@ -4106,32 +4140,93 @@ impl CanvasView {
     /// layer and armed brush are restored (keys invalidated; the sync
     /// block runs in this same frame).
     fn run_replays(&mut self, p: &mut PaintLayer, state: &mut AppState) {
-        if self.replay_inbox.is_empty() || self.touch_active {
+        if self.replay_inbox.is_empty() {
             return;
         }
-        while let Some(rs) = self.replay_inbox.pop_front() {
-            let done = self.replay_one(p, state, &rs);
-            // STAGE 2: the commit landed (or died) — the live overlay
-            // for this stroke drops next drain, seamlessly replaced by
-            // the committed pixels the sync below uploads.
-            self.remote_wet_end.push(rs.stroke_id);
-            crate::net::slog(format!(
-                "REPLAY stroke={} author={} dabs={} ok={} changed={} {}",
-                rs.stroke_id,
-                rs.author,
-                rs.dabs.len(),
-                done.ok,
-                done.changed.len(),
-                done.why
-            ));
-            self.replay_done.push(done);
+        let mut did_stroke = false;
+        let mut did_any = false;
+        loop {
+            // v0.2.3: strokes hijack the ACTIVE target — never under a
+            // live pen; and NOTHING may overtake a waiting stroke (the
+            // one order is the whole point).
+            if matches!(self.replay_inbox.front(), Some(SeqTask::Stroke(_)))
+                && self.touch_active
+            {
+                break;
+            }
+            let Some(task) = self.replay_inbox.pop_front() else {
+                break;
+            };
+            did_any = true;
+            match task {
+                SeqTask::Stroke(rs) => {
+                    let done = self.replay_one(p, state, &rs);
+                    // STAGE 2: the commit landed (or died) — the live
+                    // overlay for this stroke drops next drain.
+                    self.remote_wet_end.push(rs.stroke_id);
+                    crate::net::slog(format!(
+                        "REPLAY stroke={} author={} dabs={} ok={} changed={} {}",
+                        rs.stroke_id,
+                        rs.author,
+                        rs.dabs.len(),
+                        done.ok,
+                        done.changed.len(),
+                        done.why
+                    ));
+                    self.replay_done.push(done);
+                    did_stroke = true;
+                }
+                SeqTask::Cmds { origin, mut cmds } => {
+                    // Befores rebuild HERE — against the document as of
+                    // APPLICATION, after every queued stroke before this
+                    // batch has landed.
+                    state.rebuild_paint_befores(&mut cmds);
+                    let n = cmds.len();
+                    let was = state.engine.mirror_log;
+                    state.engine.mirror_log = false;
+                    let prev = state.engine.author();
+                    state.engine.set_author(Some(origin.clone()));
+                    let r = state.engine.apply("remote edit", cmds);
+                    state.engine.set_author(prev);
+                    state.engine.mirror_log = was;
+                    match r {
+                        Ok(()) => {
+                            state.doc_gen = state.doc_gen.wrapping_add(1);
+                            crate::net::slog(format!("APPLY cmds from {origin} n={n}"));
+                        }
+                        Err(e) => self
+                            .seq_task_fail
+                            .push(format!("cmds from {origin}: {e:?}")),
+                    }
+                }
+                SeqTask::Undo { author, redo } => {
+                    let was = state.engine.mirror_log;
+                    state.engine.mirror_log = false;
+                    let r = state.remote_history(&author, redo);
+                    state.engine.mirror_log = was;
+                    match r {
+                        Ok(()) => {
+                            crate::net::slog(format!("APPLY undone {author} redo={redo}"));
+                        }
+                        Err(why) => self
+                            .seq_task_fail
+                            .push(format!("undone {author}: {why}")),
+                    }
+                }
+            }
         }
-        // The hijack armed the STROKE's tip/grain and overwrote the
-        // active texture: restore the viewer's world.
-        self.brush_res_dirty = true;
-        self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
-        self.synced_below = None;
-        self.synced_above = None;
+        if did_stroke {
+            // The hijack armed the STROKE's tip/grain: restore the
+            // viewer's brush.
+            self.brush_res_dirty = true;
+        }
+        if did_any {
+            // Engine truth moved (strokes, timeline edits, undos alike)
+            // — restore every viewer texture from it.
+            self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+            self.synced_below = None;
+            self.synced_above = None;
+        }
     }
 
     fn replay_one(&mut self, p: &mut PaintLayer, state: &mut AppState, rs: &ReplayStroke) -> ReplayDone {
