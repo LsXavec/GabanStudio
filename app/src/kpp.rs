@@ -117,6 +117,26 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
             parse_sensors(&sx, target, &mut curves);
         }
     }
+    // THE SMUDGE GATE: dulling rates, colorsmudge only. Their pressure
+    // curves ride the existing machinery under their own targets.
+    let (smudge_rate, color_rate) = if engine == "colorsmudge" {
+        if param_bool(xml, "PressureSmudgeRate") == Some(true)
+            && let Some(sx) = param_str(xml, "SmudgeRateSensor")
+        {
+            parse_sensors(&sx, "smudge", &mut curves);
+        }
+        if param_bool(xml, "PressureColorRate") == Some(true)
+            && let Some(sx) = param_str(xml, "ColorRateSensor")
+        {
+            parse_sensors(&sx, "color_rate", &mut curves);
+        }
+        (
+            param_f32(xml, "SmudgeRateValue").unwrap_or(0.5).clamp(0.0, 1.0),
+            param_f32(xml, "ColorRateValue").unwrap_or(0.3).clamp(0.0, 1.0),
+        )
+    } else {
+        (0.0, 0.0)
+    };
     // Scatter/density: only where the engine's core IS scatter — the
     // paintbrush's own enable flag is not reliably recoverable from the
     // XML (room log), so an inky fineliner never starts spraying.
@@ -165,6 +185,8 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
         density,
         randomness,
         angle_deg,
+        smudge_rate,
+        color_rate,
         eraser: param_bool(xml, "EraserMode") == Some(true),
         grain_key,
         grain_scale,
@@ -377,7 +399,14 @@ pub fn import_files(
                 // carries None — re-importing UPGRADES it in place, so
                 // "import installed Krita's brushes" again is the whole
                 // migration.
-                Some(existing) if existing.engine.is_none() && p.engine.is_some() => {
+                Some(existing)
+                    if p.engine.is_some()
+                        && (existing.engine.is_none() || existing.engine != p.engine) =>
+                {
+                    // The parser learned something new (smudge rates, a
+                    // fixed curve): re-import refreshes the machinery.
+                    // Forge brushes live in bank "my brushes" and never
+                    // collide with import names.
                     existing.engine = p.engine;
                     ok += 1;
                 }

@@ -395,6 +395,10 @@ pub struct CanvasView {
     tip_active: bool,
     /// Frames in the armed tip's atlas (GIH pipe brushes cycle; 1 = still).
     tip_frames: u32,
+    /// THE SMUDGE GATE: the active layer's committed tiles, snapshotted
+    /// at stroke start — the PRE-STROKE truth the held colour samples
+    /// (Arc clones; cannot change while the wet stroke is open).
+    smudge_src: Option<std::collections::BTreeMap<anim_core::raster::TileCoord, std::sync::Arc<anim_core::raster::TileData>>>,
     /// One click imports the INSTALLED Krita's own brushes (bundles +
     /// presets + the user's %APPDATA%/krita).
     pub(crate) request_krita_scan: bool,
@@ -521,6 +525,7 @@ impl CanvasView {
             brush_res_dirty: false,
             tip_active: false,
             tip_frames: 1,
+            smudge_src: None,
             request_krita_scan: false,
             brush_search: String::new(),
             thumb_cache: std::collections::HashMap::new(),
@@ -2108,9 +2113,12 @@ impl CanvasView {
                             let hover = match &p.engine {
                                 Some(e) => {
                                     let honest = match e.engine.as_str() {
-                                        "paintbrush" | "spraybrush" | "roundmarker" | "" => {
-                                            String::new()
-                                        }
+                                        "paintbrush" | "spraybrush" | "roundmarker"
+                                        | "forge" | "stamp-import" | "" => String::new(),
+                                        // NEVER-DO 2: dulling, said plainly.
+                                        "colorsmudge" => " — picks up committed colour \
+                                             (no self-smear within a stroke)"
+                                            .into(),
                                         other => {
                                             format!(" — {other} engine paints as our dab")
                                         }
@@ -3683,6 +3691,25 @@ impl CanvasView {
         (tip, frames.max(1), grain)
     }
 
+    /// THE SMUDGE GATE: snapshot the active layer's committed tiles at
+    /// stroke start (Arc clones — the pre-stroke truth, NEVER-DO 1).
+    /// None when the armed engine doesn't smudge.
+    fn capture_smudge_src(
+        &self,
+        state: &AppState,
+    ) -> Option<std::collections::BTreeMap<anim_core::raster::TileCoord, std::sync::Arc<anim_core::raster::TileData>>>
+    {
+        let e = self.brush_engine.as_ref()?;
+        if e.smudge_rate <= 0.0 {
+            return None;
+        }
+        let id = state.own_key_drawing()?;
+        let d = state.cut().drawing(id)?;
+        let slot = self.stroke_layer_slot.min(d.layers.len().saturating_sub(1));
+        let layer = &d.layers[d.layers.len() - 1 - slot];
+        Some(layer.raster.tiles.clone())
+    }
+
     /// Walk the current stroke's points into evenly spaced dabs (paper space).
     /// Deterministic prefix: appending points only extends the tail, so
     /// `dabs[dabs_flushed..]` are always genuinely new.
@@ -3748,6 +3775,11 @@ impl CanvasView {
                 .max(0.5)
                 .min(cap)
         };
+        // THE SMUDGE GATE: the held colour, folded over dab order —
+        // deterministic because the source tiles are the pre-stroke truth
+        // and the fold recomputes identically on every prefix rebuild.
+        let smudging = eng.is_some_and(|e| e.smudge_rate > 0.0) && self.smudge_src.is_some();
+        let held = std::cell::Cell::new([0.0f32; 4]);
         let dab_at = |x: f32, y: f32, pr: f32, tv: [f32; 2], idx: u32, dist: f32| {
             let tn = tilt_norm(tv);
             let a = if self.dyn_opacity {
@@ -3789,6 +3821,31 @@ impl CanvasView {
             let mut color = color;
             let mut dir = dir;
             let mut aspect = aspect;
+            if let Some(e) = eng
+                && smudging
+            {
+                let s_rate = (e.smudge_rate
+                    * curve_fac("smudge", pr, tv, idx, dist))
+                .clamp(0.0, 1.0);
+                let c_rate = (e.color_rate
+                    * curve_fac("color_rate", pr, tv, idx, dist))
+                .clamp(0.0, 1.0);
+                let sample = sample_tiles(self.smudge_src.as_ref().unwrap(), x, y);
+                let mut h = held.get();
+                for c in 0..4 {
+                    h[c] += (sample[c] - h[c]) * s_rate;
+                }
+                held.set(h);
+                // Deposit: brush colour re-inks by c_rate over the held
+                // pickup; alpha rides the held coverage so blenders fade
+                // to nothing over empty paper instead of painting paste.
+                let mut mixed = color;
+                for c in 0..3 {
+                    mixed[c] = h[c] * (1.0 - c_rate) + color[c] * c_rate;
+                }
+                mixed[3] = color[3] * (h[3] * (1.0 - c_rate) + c_rate).clamp(0.0, 1.0);
+                color = mixed;
+            }
             if let Some(e) = eng {
                 let sf = curve_fac("size", pr, tv, idx, dist);
                 radius = (radius * sf.max(0.01)).max(0.35);
@@ -4068,6 +4125,7 @@ impl CanvasView {
         self.dabs_flushed = 0;
         self.raster_stroke_done = false;
         self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
+        self.smudge_src = self.capture_smudge_src(state);
         self.current.clear();
         let p = to_paper(pos);
         self.current.push(StrokePoint {
@@ -4244,6 +4302,7 @@ impl CanvasView {
                 self.dabs_flushed = 0;
                 self.raster_stroke_done = false;
                 self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
+                self.smudge_src = self.capture_smudge_src(state);
                 if let Some(p) = response.interact_pointer_pos() {
                     let p = to_paper(p);
                     self.current.push(StrokePoint {
@@ -4472,6 +4531,36 @@ pub fn layer_chip_color(name: &str) -> Color32 {
         "correction" => plate::AKA,
         "rough" => plate::AO,
         _ => plate::LEGEND,
+    }
+}
+
+/// THE SMUDGE GATE: sample a committed tile map at paper coords —
+/// straight (un-premultiplied) linear RGBA, transparent where no tile.
+fn sample_tiles(
+    tiles: &std::collections::BTreeMap<anim_core::raster::TileCoord, std::sync::Arc<anim_core::raster::TileData>>,
+    x: f32,
+    y: f32,
+) -> [f32; 4] {
+    use anim_core::raster::{TILE, f16_bits_to_f32};
+    let (xi, yi) = (x.floor() as i32, y.floor() as i32);
+    let coord = (xi.div_euclid(TILE as i32), yi.div_euclid(TILE as i32));
+    let Some(tile) = tiles.get(&coord) else {
+        return [0.0; 4];
+    };
+    let cx = xi.rem_euclid(TILE as i32) as usize;
+    let cy = yi.rem_euclid(TILE as i32) as usize;
+    let i = (cy * TILE + cx) * 4;
+    let p = [
+        f16_bits_to_f32(tile.rgba[i]),
+        f16_bits_to_f32(tile.rgba[i + 1]),
+        f16_bits_to_f32(tile.rgba[i + 2]),
+        f16_bits_to_f32(tile.rgba[i + 3]),
+    ];
+    // Tiles are premultiplied; the dab wants straight colour.
+    if p[3] > 1e-4 {
+        [p[0] / p[3], p[1] / p[3], p[2] / p[3], p[3]]
+    } else {
+        [0.0; 4]
     }
 }
 
@@ -4837,5 +4926,57 @@ mod engine_tests {
         let corner = m1[3];
         assert!(centre > 200, "solid centre (got {centre})");
         assert_eq!(corner, 0, "empty corner");
+    }
+}
+
+#[cfg(test)]
+mod smudge_tests {
+    use super::*;
+    use anim_core::raster::{TILE, TILE_LEN, TileData, f32_to_f16_bits};
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    fn one_tile_map(rgba: [f32; 4]) -> BTreeMap<(i32, i32), Arc<TileData>> {
+        // Premultiplied, as committed tiles are.
+        let pm = [rgba[0] * rgba[3], rgba[1] * rgba[3], rgba[2] * rgba[3], rgba[3]];
+        let mut t = vec![0u16; TILE_LEN];
+        for i in 0..(TILE * TILE) {
+            for c in 0..4 {
+                t[i * 4 + c] = f32_to_f16_bits(pm[c]);
+            }
+        }
+        let mut m = BTreeMap::new();
+        m.insert((0, 0), Arc::new(TileData::from_vec(t)));
+        m
+    }
+
+    #[test]
+    fn sampling_unpremultiplies_and_misses_are_transparent() {
+        let m = one_tile_map([0.8, 0.4, 0.2, 0.5]);
+        let s = sample_tiles(&m, 3.0, 3.0);
+        assert!((s[0] - 0.8).abs() < 0.01, "straight red, got {}", s[0]);
+        assert!((s[3] - 0.5).abs() < 0.01);
+        // Outside the only tile: transparent, never an error.
+        assert_eq!(sample_tiles(&m, -200.0, -200.0), [0.0; 4]);
+    }
+
+    #[test]
+    fn the_held_chain_is_deterministic_and_dulls_toward_the_canvas() {
+        // Fold the held colour twice over the same sequence — identical;
+        // and it converges toward the sampled colour.
+        let m = one_tile_map([0.0, 0.0, 1.0, 1.0]); // blue canvas
+        let fold = || {
+            let mut h = [0.0f32; 4];
+            for i in 0..24 {
+                let s = sample_tiles(&m, 4.0 + i as f32, 4.0);
+                for c in 0..4 {
+                    h[c] += (s[c] - h[c]) * 0.5;
+                }
+            }
+            h
+        };
+        let (a, b) = (fold(), fold());
+        assert_eq!(a, b, "same stroke, same pixels");
+        assert!(a[2] > 0.99 && a[3] > 0.99, "held colour became the canvas");
     }
 }

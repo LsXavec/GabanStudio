@@ -505,6 +505,13 @@ pub struct EngineDef {
     /// Base tip angle, degrees (Brush@angle).
     #[serde(default)]
     pub angle_deg: f32,
+    /// THE SMUDGE GATE (PSD-smudge): dulling colorsmudge. How fast the
+    /// held colour picks up the canvas (0 = engine off)…
+    #[serde(default)]
+    pub smudge_rate: f32,
+    /// …and how much brush colour re-inks each dab (blenders: 0).
+    #[serde(default)]
+    pub color_rate: f32,
     /// Krita EraserMode — the preset ERASES. Never imported (our eraser
     /// is a tool); the flag exists so the classifier can see it.
     #[serde(default)]
