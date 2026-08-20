@@ -224,7 +224,16 @@ pub fn generate_key() -> String {
 const FRAME_JSON: u8 = 0;
 const FRAME_DOC: u8 = 1;
 /// SESSION MIRROR: a serde_json Vec<Command> batch (host → guests).
+/// STAGE 1: prefixed with the 8-byte LE sequence stamp.
 const FRAME_CMDS: u8 = 2;
+/// STAGE 1 (PSD-multiplayer-rescope): a stroke frame — payload[0] is
+/// the subkind; dab batches are raw Pod bytes (48 B/dab), never JSON.
+const FRAME_STROKE: u8 = 3;
+const SUB_BEGIN: u8 = 0;
+const SUB_DABS: u8 = 1;
+const SUB_END: u8 = 2;
+const SUB_RES: u8 = 3;
+const SUB_HASHES: u8 = 4;
 /// Snapshots of real projects can be large; everything else is small.
 const MAX_FRAME: u32 = 256 * 1024 * 1024;
 
@@ -305,6 +314,24 @@ pub enum Msg {
     /// A guest's mirror slipped (a batch would not apply): please send
     /// a fresh snapshot.
     ResyncRequest {},
+    /// STAGE 1: the snapshot that follows on this writer is the host's
+    /// document as of this sequence stamp.
+    SnapshotMeta {
+        as_of_seq: u64,
+    },
+    /// STAGE 1 (audit): a guest found drifted tiles — wants exact texels.
+    RepairRequest {
+        drawing: u64,
+        layer_name: String,
+        coords: Vec<(i32, i32)>,
+    },
+    /// STAGE 1 (audit): authoritative texels for drifted tiles (host →
+    /// one guest). Empty texels = the tile is gone.
+    RepairTiles {
+        drawing: u64,
+        layer_name: String,
+        tiles: Vec<(i32, i32, Vec<u16>)>,
+    },
     /// A guest asking the host to undo/redo THEIR last step.
     UndoRequest {
         author: String,
@@ -325,6 +352,144 @@ pub enum Msg {
     },
 }
 
+// ---------------------------------------------------------------------------
+// STAGE 1: the stroke wire. Begin/End/Hashes are small JSON after the
+// tag byte; dab batches are raw Pod bytes; resource images deflate.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct StrokeBeginWire {
+    pub author: String,
+    pub stroke_id: u64,
+    pub drawing: u64,
+    pub layer_name: String,
+    /// 0 = ink, 1 = erase, 2 = alpha-lock.
+    pub mode: u8,
+    pub opacity: f32,
+    /// (content hash, w, h, GIH frames)
+    pub tip: Option<(u64, u32, u32, u32)>,
+    /// (content hash, w, h, scale, strength)
+    pub grain: Option<(u64, u32, u32, f32, f32)>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct StrokeEndWire {
+    pub author: String,
+    pub stroke_id: u64,
+    /// Host → peers: the global order stamp. Guest → host: 0.
+    pub seq: u64,
+    /// false = the stroke never landed (peers drop it; the seq is a
+    /// sequenced no-op so the lane stays in step).
+    pub ok: bool,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct StrokeHashesWire {
+    pub stroke_id: u64,
+    pub seq: u64,
+    pub drawing: u64,
+    pub layer_name: String,
+    /// The committed after-state per touched tile: (x, y, hash; 0 = gone).
+    pub tiles: Vec<(i32, i32, u64)>,
+}
+
+pub enum StrokeFrame {
+    Begin(StrokeBeginWire),
+    Dabs {
+        stroke_id: u64,
+        dabs: Vec<crate::paint::Dab>,
+    },
+    End(StrokeEndWire),
+    /// A content-addressed RGBA image (tip atlas / grain paper).
+    Res {
+        hash: u64,
+        w: u32,
+        h: u32,
+        rgba: Vec<u8>,
+    },
+    Hashes(StrokeHashesWire),
+}
+
+pub fn enc_begin(b: &StrokeBeginWire) -> Vec<u8> {
+    let mut v = vec![SUB_BEGIN];
+    v.extend(serde_json::to_vec(b).unwrap());
+    v
+}
+
+pub fn enc_dabs(stroke_id: u64, dabs: &[crate::paint::Dab]) -> Vec<u8> {
+    let mut v =
+        Vec::with_capacity(9 + std::mem::size_of_val(dabs));
+    v.push(SUB_DABS);
+    v.extend(stroke_id.to_le_bytes());
+    v.extend_from_slice(bytemuck::cast_slice(dabs));
+    v
+}
+
+pub fn enc_end(e: &StrokeEndWire) -> Vec<u8> {
+    let mut v = vec![SUB_END];
+    v.extend(serde_json::to_vec(e).unwrap());
+    v
+}
+
+pub fn enc_res(hash: u64, w: u32, h: u32, rgba: &[u8]) -> Vec<u8> {
+    use flate2::{Compression, write::DeflateEncoder};
+    use std::io::Write as _;
+    let mut v = vec![SUB_RES];
+    v.extend(hash.to_le_bytes());
+    v.extend(w.to_le_bytes());
+    v.extend(h.to_le_bytes());
+    let mut enc = DeflateEncoder::new(Vec::new(), Compression::fast());
+    let _ = enc.write_all(rgba);
+    v.extend(enc.finish().unwrap_or_else(|_| rgba.to_vec()));
+    v
+}
+
+pub fn enc_hashes(hw: &StrokeHashesWire) -> Vec<u8> {
+    let mut v = vec![SUB_HASHES];
+    v.extend(serde_json::to_vec(hw).unwrap());
+    v
+}
+
+pub fn dec_stroke(payload: &[u8]) -> Option<StrokeFrame> {
+    let (&sub, rest) = payload.split_first()?;
+    match sub {
+        SUB_BEGIN => serde_json::from_slice(rest).ok().map(StrokeFrame::Begin),
+        SUB_DABS => {
+            if rest.len() < 8 {
+                return None;
+            }
+            let stroke_id = u64::from_le_bytes(rest[..8].try_into().ok()?);
+            let body = &rest[8..];
+            if body.len() % std::mem::size_of::<crate::paint::Dab>() != 0 {
+                return None;
+            }
+            Some(StrokeFrame::Dabs {
+                stroke_id,
+                dabs: bytemuck::pod_collect_to_vec(body),
+            })
+        }
+        SUB_END => serde_json::from_slice(rest).ok().map(StrokeFrame::End),
+        SUB_RES => {
+            if rest.len() < 16 {
+                return None;
+            }
+            let hash = u64::from_le_bytes(rest[..8].try_into().ok()?);
+            let w = u32::from_le_bytes(rest[8..12].try_into().ok()?);
+            let h = u32::from_le_bytes(rest[12..16].try_into().ok()?);
+            use std::io::Read as _;
+            let mut rgba = Vec::new();
+            let mut dec = flate2::read::DeflateDecoder::new(&rest[16..]);
+            dec.read_to_end(&mut rgba).ok()?;
+            if rgba.len() != (w as usize) * (h as usize) * 4 {
+                return None;
+            }
+            Some(StrokeFrame::Res { hash, w, h, rgba })
+        }
+        SUB_HASHES => serde_json::from_slice(rest).ok().map(StrokeFrame::Hashes),
+        _ => None,
+    }
+}
+
 /// SESSION PERF 3: what a writer thread carries. Raw frames go as-is;
 /// Json is serialized ON THE WRITER (EditTiles' tile payloads are the
 /// expensive ones — never on the UI thread).
@@ -332,7 +497,8 @@ enum Out {
     Raw(u8, Vec<u8>),
     Json(Box<Msg>),
     /// Serialized ON THE WRITER (tile payloads are the expensive part).
-    Cmds(Vec<anim_core::command::Command>),
+    /// STAGE 1: carries the sequence stamp.
+    Cmds(u64, Vec<anim_core::command::Command>),
 }
 
 /// The writer: drains the queue into the socket; dies with either end.
@@ -354,12 +520,16 @@ fn spawn_writer(mut stream: TcpStream, rx: Receiver<Out>) {
                     ),
                     Err(_) => (true, FRAME_JSON, 0),
                 },
-                Out::Cmds(batch) => match serde_json::to_vec(&batch) {
-                    Ok(bytes) => (
-                        write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
-                        FRAME_CMDS,
-                        bytes.len(),
-                    ),
+                Out::Cmds(seq, batch) => match serde_json::to_vec(&batch) {
+                    Ok(json) => {
+                        let mut bytes = seq.to_le_bytes().to_vec();
+                        bytes.extend(json);
+                        (
+                            write_frame(&mut stream, FRAME_CMDS, &bytes).is_ok(),
+                            FRAME_CMDS,
+                            bytes.len(),
+                        )
+                    }
                     Err(_) => (true, FRAME_CMDS, 0),
                 },
             };
@@ -410,11 +580,16 @@ pub enum NetEvent {
         pen_down: bool,
         wet: Vec<[f32; 3]>,
     },
-    /// Host side: a guest's finished stroke, to apply locally.
+    /// LEGACY (pre-rescope builds only): a guest's finished stroke as
+    /// tiles. Stage 1 refuses it with an update hint — the payload is
+    /// never read again.
     EditTiles {
         author: String,
+        #[allow(dead_code)]
         drawing: u64,
+        #[allow(dead_code)]
         layer_name: String,
+        #[allow(dead_code)]
         tiles: Vec<(i32, i32, Vec<u16>)>,
     },
     /// Host side: a guest asking to undo/redo their own last step.
@@ -424,10 +599,33 @@ pub enum NetEvent {
     },
     /// Guest side: the host refused this artist's edit, with why.
     EditRefused(String),
-    /// Guest side: one applied batch from the host's engine.
-    Commands(Vec<anim_core::command::Command>),
+    /// Guest side: one sequenced batch from the host's engine.
+    Commands(u64, Vec<anim_core::command::Command>),
     /// Host side: a guest's mirror slipped — send a fresh snapshot.
     ResyncNeeded,
+    /// Host side: a stroke frame from one guest (author = join name).
+    GuestStroke {
+        client: u64,
+        author: String,
+        frame: StrokeFrame,
+    },
+    /// Guest side: a stroke frame from the host's broadcast.
+    Stroke(StrokeFrame),
+    /// Guest side: the next snapshot is the doc as of this seq.
+    SnapshotMeta(u64),
+    /// Host side: a guest's audit found drift — send exact tiles back.
+    RepairRequest {
+        client: u64,
+        drawing: u64,
+        layer_name: String,
+        coords: Vec<(i32, i32)>,
+    },
+    /// Guest side: authoritative texels for drifted tiles.
+    RepairTiles {
+        drawing: u64,
+        layer_name: String,
+        tiles: Vec<(i32, i32, Vec<u16>)>,
+    },
     /// Host side: a guest's numbered log lines (Stage 0 debug channel).
     DebugLog {
         from: String,
@@ -632,6 +830,19 @@ impl Host {
                                                     });
                                                     continue;
                                                 }
+                                                Ok(Msg::RepairRequest {
+                                                    drawing,
+                                                    layer_name,
+                                                    coords,
+                                                }) => {
+                                                    let _ = tx.send(NetEvent::RepairRequest {
+                                                        client: id,
+                                                        drawing,
+                                                        layer_name,
+                                                        coords,
+                                                    });
+                                                    continue;
+                                                }
                                                 _ => {}
                                             }
                                             if let Ok(Msg::Presence {
@@ -664,6 +875,56 @@ impl Host {
                                                     pen_down,
                                                     wet,
                                                 });
+                                            }
+                                        }
+                                        Ok((FRAME_STROKE, buf)) => {
+                                            // STAGE 1: Begin (author
+                                            // stamped from the join name),
+                                            // Dabs and Res relay LIVE to
+                                            // the other guests; End stays
+                                            // here — the host replays and
+                                            // sequences it.
+                                            match dec_stroke(&buf) {
+                                                Some(StrokeFrame::Begin(mut b)) => {
+                                                    b.author = username.clone();
+                                                    broadcast_except(
+                                                        &clients,
+                                                        id,
+                                                        FRAME_STROKE,
+                                                        &enc_begin(&b),
+                                                    );
+                                                    let _ = tx.send(NetEvent::GuestStroke {
+                                                        client: id,
+                                                        author: username.clone(),
+                                                        frame: StrokeFrame::Begin(b),
+                                                    });
+                                                }
+                                                Some(
+                                                    frame @ (StrokeFrame::Dabs { .. }
+                                                    | StrokeFrame::Res { .. }),
+                                                ) => {
+                                                    broadcast_except(
+                                                        &clients,
+                                                        id,
+                                                        FRAME_STROKE,
+                                                        &buf,
+                                                    );
+                                                    let _ = tx.send(NetEvent::GuestStroke {
+                                                        client: id,
+                                                        author: username.clone(),
+                                                        frame,
+                                                    });
+                                                }
+                                                Some(frame) => {
+                                                    let _ = tx.send(NetEvent::GuestStroke {
+                                                        client: id,
+                                                        author: username.clone(),
+                                                        frame,
+                                                    });
+                                                }
+                                                None => {
+                                                    slog("IN stroke frame: PARSE FAILED");
+                                                }
                                             }
                                         }
                                         Ok(_) => {}
@@ -716,13 +977,14 @@ impl Host {
         broadcast_except(&self.clients, u64::MAX, FRAME_JSON, &msg);
     }
 
-    /// SESSION MIRROR: one applied batch, to every guest.
-    pub fn send_commands(&self, batch: Vec<anim_core::command::Command>) {
+    /// SESSION MIRROR: one applied batch, to every guest — STAGE 1:
+    /// stamped with its place in the one global order.
+    pub fn send_commands(&self, seq: u64, batch: Vec<anim_core::command::Command>) {
         let mut dead = Vec::new();
         {
             let mut map = self.clients.lock().unwrap();
             for (id, c) in map.iter_mut() {
-                if c.tx.send(Out::Cmds(batch.clone())).is_err() {
+                if c.tx.send(Out::Cmds(seq, batch.clone())).is_err() {
                     dead.push(*id);
                 }
             }
@@ -732,9 +994,51 @@ impl Host {
         }
     }
 
-    /// The authoritative document, to every guest (join + refresh).
-    pub fn send_snapshot(&self, doc: &[u8]) {
-        broadcast_except(&self.clients, u64::MAX, FRAME_DOC, doc);
+    /// STAGE 1: one stroke frame (Begin/Dabs/End/Res/Hashes) to every
+    /// guest.
+    pub fn send_stroke_frame(&self, payload: Vec<u8>) {
+        broadcast_except(&self.clients, u64::MAX, FRAME_STROKE, &payload);
+    }
+
+    /// STAGE 1 (audit): exact texels to ONE guest whose tiles drifted.
+    pub fn send_repair(
+        &self,
+        client: u64,
+        drawing: u64,
+        layer_name: &str,
+        tiles: Vec<(i32, i32, Vec<u16>)>,
+    ) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&client) {
+            let _ = c.tx.send(Out::Json(Box::new(Msg::RepairTiles {
+                drawing,
+                layer_name: layer_name.to_string(),
+                tiles,
+            })));
+        }
+    }
+
+    /// The authoritative document, to every guest (join + refresh) —
+    /// STAGE 1: preceded by its sequence stamp on the same writer, so a
+    /// guest knows exactly which streamed events the document already
+    /// contains.
+    pub fn send_snapshot(&self, as_of_seq: u64, doc: &[u8]) {
+        let mut dead = Vec::new();
+        {
+            let mut map = self.clients.lock().unwrap();
+            for (id, c) in map.iter_mut() {
+                let meta = c
+                    .tx
+                    .send(Out::Json(Box::new(Msg::SnapshotMeta { as_of_seq })));
+                if meta.is_err()
+                    || c.tx.send(Out::Raw(FRAME_DOC, doc.to_vec())).is_err()
+                {
+                    dead.push(*id);
+                }
+            }
+            for id in &dead {
+                map.remove(id);
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -845,11 +1149,27 @@ impl Client {
                     }
                     Ok((FRAME_CMDS, bytes)) => {
                         // Deserialized HERE, on the reader thread.
+                        // STAGE 1: the first 8 bytes are the seq stamp.
                         slog(format!("IN cmds bytes={}", bytes.len()));
-                        if let Ok(batch) = serde_json::from_slice::<Vec<anim_core::command::Command>>(&bytes) {
-                            let _ = tx.send(NetEvent::Commands(batch));
-                        } else {
-                            slog("IN cmds: PARSE FAILED");
+                        if bytes.len() >= 8 {
+                            let seq = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+                            if let Ok(batch) = serde_json::from_slice::<
+                                Vec<anim_core::command::Command>,
+                            >(&bytes[8..])
+                            {
+                                let _ = tx.send(NetEvent::Commands(seq, batch));
+                            } else {
+                                slog("IN cmds: PARSE FAILED");
+                            }
+                        }
+                    }
+                    Ok((FRAME_STROKE, bytes)) => {
+                        // STAGE 1: the host's stroke broadcast.
+                        match dec_stroke(&bytes) {
+                            Some(frame) => {
+                                let _ = tx.send(NetEvent::Stroke(frame));
+                            }
+                            None => slog("IN stroke frame: PARSE FAILED"),
                         }
                     }
                     Ok((FRAME_JSON, buf)) => match serde_json::from_slice::<Msg>(&buf) {
@@ -878,6 +1198,20 @@ impl Client {
                         Ok(Msg::EditRefused { why, .. }) => {
                             let _ = tx.send(NetEvent::EditRefused(why));
                         }
+                        Ok(Msg::SnapshotMeta { as_of_seq }) => {
+                            let _ = tx.send(NetEvent::SnapshotMeta(as_of_seq));
+                        }
+                        Ok(Msg::RepairTiles {
+                            drawing,
+                            layer_name,
+                            tiles,
+                        }) => {
+                            let _ = tx.send(NetEvent::RepairTiles {
+                                drawing,
+                                layer_name,
+                                tiles,
+                            });
+                        }
                         _ => {}
                     },
                     Ok(_) => {}
@@ -895,24 +1229,6 @@ impl Client {
         })
     }
 
-    /// Send a finished stroke to the host for application (v2).
-    pub fn send_edit(
-        &mut self,
-        author: &str,
-        drawing: u64,
-        layer_name: &str,
-        tiles: Vec<(i32, i32, Vec<u16>)>,
-    ) {
-        // SESSION PERF 3: the tile payload's JSON is the expensive part —
-        // it serializes on the WRITER thread, never here.
-        let _ = self.tx.send(Out::Json(Box::new(Msg::EditTiles {
-            author: author.to_string(),
-            drawing,
-            layer_name: layer_name.to_string(),
-            tiles,
-        })));
-    }
-
     /// Tell the host our mirror slipped.
     pub fn send_resync_request(&mut self) {
         let _ = self.tx.send(Out::Json(Box::new(Msg::ResyncRequest {})));
@@ -921,6 +1237,25 @@ impl Client {
     /// STAGE 0: ship this machine's buffered log lines to the host.
     pub fn send_debug(&mut self, lines: Vec<String>) {
         let _ = self.tx.send(Out::Json(Box::new(Msg::DebugLog { lines })));
+    }
+
+    /// STAGE 1: one stroke frame (Begin/Dabs/End/Res) to the host.
+    pub fn send_stroke_frame(&mut self, payload: Vec<u8>) {
+        let _ = self.tx.send(Out::Raw(FRAME_STROKE, payload));
+    }
+
+    /// STAGE 1 (audit): ask the host for exact texels of drifted tiles.
+    pub fn send_repair_request(
+        &mut self,
+        drawing: u64,
+        layer_name: &str,
+        coords: Vec<(i32, i32)>,
+    ) {
+        let _ = self.tx.send(Out::Json(Box::new(Msg::RepairRequest {
+            drawing,
+            layer_name: layer_name.to_string(),
+            coords,
+        })));
     }
 
     /// Ask the host to undo/redo THIS artist's last step (v2).
@@ -1166,5 +1501,118 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         assert!(got, "guest debug lines must reach the host ordered");
+        // STAGE 1: a guest's Begin reaches the host (author = the JOIN
+        // name, never the payload's claim) AND relays live to the other
+        // guest with that author stamped.
+        guest.send_stroke_frame(enc_begin(&StrokeBeginWire {
+            author: "liar".into(),
+            stroke_id: 5,
+            drawing: 1,
+            layer_name: "genga".into(),
+            mode: 0,
+            opacity: 1.0,
+            tip: None,
+            grain: None,
+        }));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let (mut host_got, mut relay_got) = (false, false);
+        while std::time::Instant::now() < deadline && !(host_got && relay_got) {
+            if let Ok(NetEvent::GuestStroke {
+                author,
+                frame: StrokeFrame::Begin(b),
+                ..
+            }) = host.events.try_recv()
+            {
+                assert_eq!(author, "guest-a");
+                assert_eq!(b.author, "guest-a", "the join name must overwrite the claim");
+                assert_eq!(b.stroke_id, 5);
+                host_got = true;
+            }
+            if let Ok(NetEvent::Stroke(StrokeFrame::Begin(b))) = second.events.try_recv() {
+                assert_eq!(b.author, "guest-a");
+                relay_got = true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(host_got, "the host must see the guest's Begin");
+        assert!(relay_got, "the other guest must see the relayed Begin");
+    }
+
+    #[test]
+    fn stroke_wire_roundtrips() {
+        // Begin: JSON after the tag byte.
+        let b = StrokeBeginWire {
+            author: "ami".into(),
+            stroke_id: 7,
+            drawing: 3,
+            layer_name: "genga".into(),
+            mode: 1,
+            opacity: 0.5,
+            tip: Some((0xabc, 256, 256, 4)),
+            grain: None,
+        };
+        match dec_stroke(&enc_begin(&b)) {
+            Some(StrokeFrame::Begin(d)) => {
+                assert_eq!(d.author, "ami");
+                assert_eq!(d.stroke_id, 7);
+                assert_eq!(d.mode, 1);
+                assert_eq!(d.tip, Some((0xabc, 256, 256, 4)));
+            }
+            _ => panic!("begin must roundtrip"),
+        }
+        // Dabs: raw Pod bytes — BIT-exact both ways (the determinism
+        // law's wire form: same dabs in, same dabs out, no JSON float
+        // laundering).
+        let dabs = vec![crate::paint::Dab {
+            center: [1.5, -2.25],
+            radius: 3.75,
+            hardness: 0.85,
+            color: [0.1, 0.2, 0.3, 0.4],
+            dir: [1.0, 0.0],
+            aspect: 1.0,
+            tip: 0.0,
+        }];
+        match dec_stroke(&enc_dabs(9, &dabs)) {
+            Some(StrokeFrame::Dabs { stroke_id, dabs: d }) => {
+                assert_eq!(stroke_id, 9);
+                assert_eq!(d.len(), 1);
+                assert_eq!(d[0].center, [1.5, -2.25]);
+                assert_eq!(d[0].color, [0.1, 0.2, 0.3, 0.4]);
+            }
+            _ => panic!("dabs must roundtrip"),
+        }
+        // Res: deflated image, size-checked on arrival.
+        let rgba: Vec<u8> = (0..16 * 16 * 4).map(|i| (i % 251) as u8).collect();
+        match dec_stroke(&enc_res(42, 16, 16, &rgba)) {
+            Some(StrokeFrame::Res {
+                hash: 42,
+                w: 16,
+                h: 16,
+                rgba: r,
+            }) => assert_eq!(r, rgba),
+            _ => panic!("res must roundtrip (deflate + size check)"),
+        }
+        match dec_stroke(&enc_end(&StrokeEndWire {
+            author: "ami".into(),
+            stroke_id: 7,
+            seq: 12,
+            ok: true,
+        })) {
+            Some(StrokeFrame::End(e)) => {
+                assert_eq!(e.seq, 12);
+                assert!(e.ok);
+            }
+            _ => panic!("end must roundtrip"),
+        }
+        match dec_stroke(&enc_hashes(&StrokeHashesWire {
+            stroke_id: 7,
+            seq: 12,
+            drawing: 3,
+            layer_name: "genga".into(),
+            tiles: vec![(0, -1, 99)],
+        })) {
+            Some(StrokeFrame::Hashes(h)) => assert_eq!(h.tiles, vec![(0, -1, 99)]),
+            _ => panic!("hashes must roundtrip"),
+        }
     }
 }

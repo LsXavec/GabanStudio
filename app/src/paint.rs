@@ -1245,6 +1245,51 @@ impl PaintLayer {
         self.clear_view(&view, "clear_wet");
     }
 
+    /// PSD-multiplayer-rescope Stage 1: replay a remote stroke's INK dabs
+    /// through the SAME pipelines a local stroke uses — dabs stamped into
+    /// the (transient) scratch target, then one over-blend onto ACTIVE at
+    /// the stroke's opacity. The wet buffer is deliberately untouched: a
+    /// guest keeps its own stroke wet until the host's echo, and a replay
+    /// must never eat that. Erase/AlphaLock replays use `paint` directly,
+    /// exactly like local strokes.
+    pub fn replay_ink(&mut self, dabs: &[Dab], opacity: f32) {
+        let scratch = self.scratch.view.clone();
+        self.clear_view(&scratch, "clear_replay");
+        self.paint_into(&scratch, dabs, PaintMode::Ink);
+        self.queue.write_buffer(
+            &self.opacity_buf,
+            0,
+            bytemuck::bytes_of(&[opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0]),
+        );
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("composite_replay"),
+            });
+        {
+            let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("replay_over_active"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.active.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.composite_pipeline);
+            pass.set_bind_group(0, &self.composite_bind_scratch, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit(Some(enc.finish()));
+    }
+
     /// egui texture id of the wet buffer (drawn over the active layer at the
     /// stroke opacity while a brush stroke is live).
     pub fn wet_id(&self) -> egui::TextureId {

@@ -1953,6 +1953,37 @@ impl AppState {
         }
     }
 
+    /// STAGE 1 (PSD-multiplayer-rescope, the audit's repair): set exact
+    /// tiles OUTSIDE history — the stroke's history entry stays as this
+    /// machine replayed it; a later redo re-audits (NEVER-DO 3's loop).
+    /// Empty texels remove the tile.
+    pub fn apply_repair_tiles(
+        &mut self,
+        drawing: DrawingId,
+        layer_name: &str,
+        tiles: Vec<(i32, i32, Vec<u16>)>,
+    ) {
+        let layer = self
+            .engine
+            .project
+            .scenes
+            .iter_mut()
+            .flat_map(|s| s.cuts.iter_mut())
+            .find_map(|c| c.drawings.iter_mut().find(|d| d.id == drawing))
+            .and_then(|d| d.layers.iter_mut().find(|l| l.props.name == layer_name));
+        let Some(l) = layer else { return };
+        for (x, y, t) in tiles {
+            if t.is_empty() {
+                l.raster.tiles.remove(&(x, y));
+            } else if t.len() == anim_core::raster::TILE_LEN {
+                l.raster
+                    .tiles
+                    .insert((x, y), Arc::new(TileData::from_vec(t)));
+            }
+        }
+        self.doc_gen = self.doc_gen.wrapping_add(1);
+    }
+
     /// SESSION v2: undo/redo one artist's own last step (the host runs it
     /// for everyone — one writer). Err(why) is sent home to that artist.
     pub fn remote_history(&mut self, author: &str, redo: bool) -> Result<(), String> {

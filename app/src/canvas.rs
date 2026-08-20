@@ -197,6 +197,89 @@ pub enum PenPhase {
     Hover,
 }
 
+// ---------------------------------------------------------------------------
+// STAGE 1 (PSD-multiplayer-rescope): a stroke ON THE WIRE is its resolved
+// dab list plus the few facts replay needs — mode, opacity, target, and
+// the tip/grain images by content hash. Pixels never ride the stroke
+// path (NEVER-DO 1); every machine grows the same pixels by replaying
+// the same dabs through the same pipelines.
+// ---------------------------------------------------------------------------
+
+/// FNV-1a 64 — the content address for wire resources. Fixed constants,
+/// no per-process keying: the SAME bytes hash the SAME on every machine.
+pub fn wire_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// A tip atlas on the wire: content hash + dims + GIH frame count.
+#[derive(Clone)]
+pub struct WireRes {
+    pub hash: u64,
+    pub w: u32,
+    pub h: u32,
+    pub frames: u32,
+}
+
+/// A grain image on the wire: content hash + dims + the armed scale and
+/// strength (params ride the stroke; the image rides the cache).
+#[derive(Clone)]
+pub struct WireGrain {
+    pub hash: u64,
+    pub w: u32,
+    pub h: u32,
+    pub scale: f32,
+    pub strength: f32,
+}
+
+/// One outgoing stroke event (canvas → App → wire).
+pub enum StrokeMsg {
+    Begin(StrokeBeginInfo),
+    Dabs { stroke_id: u64, dabs: Vec<Dab> },
+    End { stroke_id: u64 },
+}
+
+pub struct StrokeBeginInfo {
+    pub stroke_id: u64,
+    pub drawing: u64,
+    pub layer_name: String,
+    /// 0 = ink, 1 = erase, 2 = alpha-lock (the latched sub-tool).
+    pub mode: u8,
+    pub opacity: f32,
+    /// Header + bytes: the App announces unseen images once per session.
+    pub tip: Option<(WireRes, std::sync::Arc<Vec<u8>>)>,
+    pub grain: Option<(WireGrain, std::sync::Arc<Vec<u8>>)>,
+}
+
+/// A remote stroke ready to replay: dabs + resolved resource bytes.
+pub struct ReplayStroke {
+    pub stroke_id: u64,
+    pub author: String,
+    pub drawing: u64,
+    pub layer_name: String,
+    pub mode: u8,
+    pub opacity: f32,
+    pub dabs: Vec<Dab>,
+    pub tip: Option<(u32, u32, std::sync::Arc<Vec<u8>>, u32)>,
+    pub grain: Option<(u32, u32, std::sync::Arc<Vec<u8>>, f32, f32)>,
+}
+
+/// What a replay (or a local streamed commit) actually changed — the
+/// audit's raw material (host broadcasts these tiles' hashes).
+pub struct ReplayDone {
+    pub stroke_id: u64,
+    pub author: String,
+    pub drawing: u64,
+    pub layer_name: String,
+    pub changed: Vec<(i32, i32)>,
+    pub ok: bool,
+    pub why: String,
+}
+
 pub struct CanvasView {
     zoom: f32,
     pan: egui::Vec2,
@@ -357,8 +440,26 @@ pub struct CanvasView {
     /// SESSION v2: this app is a GUEST in someone's room — finished
     /// strokes are SENT, never committed locally (one writer, NEVER-DO 1).
     pub(crate) is_guest: bool,
-    /// Outbox: (drawing id, layer name, tiles) the App ships to the host.
-    pub(crate) edit_outbox: Vec<(u64, String, Vec<(i32, i32, Vec<u16>)>)>,
+    /// STAGE 1 (PSD-multiplayer-rescope): a session is live (either
+    /// role) — strokes stream as dab batches while they happen.
+    pub(crate) session_live: bool,
+    /// Outgoing stroke wire (Begin/Dabs/End), drained by the App.
+    pub(crate) stroke_outbox: Vec<StrokeMsg>,
+    /// Incoming remote strokes to replay (host order) + what each
+    /// replay committed.
+    pub(crate) replay_inbox: std::collections::VecDeque<ReplayStroke>,
+    pub(crate) replay_done: Vec<ReplayDone>,
+    /// This stroke is streaming (latched at stroke start).
+    stroke_streaming: bool,
+    stroke_wire_id: u64,
+    /// Wire identity only — never touches pixels, so the no-RNG stroke
+    /// law is intact (uniqueness across peers, that's all).
+    stroke_salt: u64,
+    stroke_next_id: u64,
+    /// The armed preset's content-addressed wire resources (header +
+    /// bytes), refreshed whenever the brush resources re-arm.
+    pub(crate) armed_tip_wire: Option<(WireRes, std::sync::Arc<Vec<u8>>)>,
+    pub(crate) armed_grain_wire: Option<(WireGrain, std::sync::Arc<Vec<u8>>)>,
     /// A guest's pending undo(false)/redo(true) request for the host.
     pub(crate) history_request: Option<bool>,
     /// SESSION presence (PSD-session-room): peers as the canvas draws
@@ -409,13 +510,6 @@ pub struct CanvasView {
     lasso_pts: Vec<Pos2>,
     lasso_soft: f32,
     lasso_grow: f32,
-    /// THE ERASE-RACE FIX (2026-08-19): the mirror AS IT WAS when the
-    /// guest's pen touched down. Diffing the pen-up readback against the
-    /// LIVE mirror erased any host stroke that arrived mid-stroke (the
-    /// mirror had it, the GPU readback did not — "changed" — so it was
-    /// sent back as an erase). The diff compares against this frozen
-    /// base instead.
-    guest_stroke_base: Option<std::collections::BTreeMap<anim_core::raster::TileCoord, std::sync::Arc<anim_core::raster::TileData>>>,
     /// THE SMUDGE GATE: the active layer's committed tiles, snapshotted
     /// at stroke start — the PRE-STROKE truth the held colour samples
     /// (Arc clones; cannot change while the wet stroke is open).
@@ -528,7 +622,16 @@ impl CanvasView {
             rail_open: false,
             rail_content_h: 420.0,
             is_guest: false,
-            edit_outbox: Vec::new(),
+            session_live: false,
+            stroke_outbox: Vec::new(),
+            replay_inbox: std::collections::VecDeque::new(),
+            replay_done: Vec::new(),
+            stroke_streaming: false,
+            stroke_wire_id: 0,
+            stroke_salt: rand::random(),
+            stroke_next_id: 0,
+            armed_tip_wire: None,
+            armed_grain_wire: None,
             history_request: None,
             peers: Vec::new(),
             presence_pos: None,
@@ -548,7 +651,6 @@ impl CanvasView {
             tip_active: false,
             tip_frames: 1,
             smudge_src: None,
-            guest_stroke_base: None,
             lasso_pts: Vec::new(),
             lasso_soft: 0.0,
             lasso_grow: 0.0,
@@ -2532,6 +2634,31 @@ impl CanvasView {
                 let (tip, frames, grain) = self.build_brush_resources();
                 self.tip_active = tip.is_some();
                 self.tip_frames = frames;
+                // STAGE 1: the armed resources' wire form — content
+                // hashed so a session announces each image once.
+                self.armed_tip_wire = tip.as_ref().map(|(w, h, b)| {
+                    (
+                        WireRes {
+                            hash: wire_hash(b),
+                            w: *w,
+                            h: *h,
+                            frames,
+                        },
+                        std::sync::Arc::new(b.clone()),
+                    )
+                });
+                self.armed_grain_wire = grain.as_ref().map(|(w, h, b, sc, st)| {
+                    (
+                        WireGrain {
+                            hash: wire_hash(b),
+                            w: *w,
+                            h: *h,
+                            scale: *sc,
+                            strength: *st,
+                        },
+                        std::sync::Arc::new(b.clone()),
+                    )
+                });
                 p.set_brush_resources(tip, frames, grain);
             }
         }
@@ -2786,6 +2913,11 @@ impl CanvasView {
                     self.synced_above = None;
                     self.cel_touched = false;
                 }
+                // STAGE 1: apply queued remote strokes now — never under
+                // a live pen (the hijack borrows the ACTIVE target and
+                // the brush bind group); the sync block right below
+                // restores the viewer's layer in this same frame.
+                self.run_replays(p, state);
                 // Between strokes: re-sync whatever changed (frame switch,
                 // layer switch, undo/redo, visibility/opacity edits, reorder).
                 // Three keys, one mechanism; the blank-frame sentinel is folded
@@ -2825,6 +2957,14 @@ impl CanvasView {
                 // stroke start so a mid-stroke toggle can't split the stroke.
                 let dabs = self.build_stroke_dabs();
                 if dabs.len() > self.dabs_flushed {
+                    // STAGE 1: stream exactly the NEW dabs — the wire's
+                    // stroke unit (never pixels; NEVER-DO 1).
+                    if self.stroke_streaming {
+                        self.stroke_outbox.push(StrokeMsg::Dabs {
+                            stroke_id: self.stroke_wire_id,
+                            dabs: dabs[self.dabs_flushed..].to_vec(),
+                        });
+                    }
                     if self.stroke_erasing {
                         p.paint(&dabs[self.dabs_flushed..], PaintMode::Erase);
                         self.cel_touched = true;
@@ -2846,50 +2986,27 @@ impl CanvasView {
                         self.wet_dirty = false;
                     }
                     let tiles = p.read_tiles();
-                    // SESSION v2: a GUEST never commits — the finished
-                    // patch travels to the host, which applies it to the
-                    // same drawing + LAYER NAME and sends the truth back.
+                    // STAGE 1 (PSD-multiplayer-rescope): a GUEST never
+                    // commits — the dab stream already told the host
+                    // everything; End asks for the sequenced commit.
+                    // synced_active is deliberately untouched: the GPU
+                    // keeps showing this stroke until the host's echo
+                    // replays it into the engine (engine truth) and the
+                    // resync swaps in the committed pixels seamlessly.
                     if self.is_guest {
-                        if let Some(did) = state.own_key_drawing() {
-                            let name = state.active_layer_name();
-                            // THE SECOND FLOOD (2026-08-19): the readback is
-                            // the WHOLE layer — every inked tile, including
-                            // all of the HOST's artwork. Sending it, then
-                            // receiving it doubled in the mirror echo, was
-                            // tens of MB per lift over a real drawing. A
-                            // control window sends only what ITS pen
-                            // changed: diff against the mirror by tile
-                            // hash; an empty payload marks an erased tile.
-                            // Against the STROKE-START base — never the
-                            // live mirror (the erase-race; see the field's
-                            // comment and diff_guest_tiles' tests).
-                            let base = self
-                                .guest_stroke_base
-                                .take()
-                                .or_else(|| state.active_layer_tiles().cloned())
-                                .unwrap_or_default();
-                            let wire = diff_guest_tiles(&base, &tiles);
-                            if !wire.is_empty() {
-                                state.status =
-                                    format!("sent {} tile(s) to the host…", wire.len());
-                                self.edit_outbox.push((did.0, name, wire));
-                            }
+                        let _ = &tiles; // pixels stay home (NEVER-DO 1)
+                        if self.stroke_streaming {
+                            self.stroke_outbox.push(StrokeMsg::End {
+                                stroke_id: self.stroke_wire_id,
+                            });
+                            self.stroke_streaming = false;
+                            state.status = "stroke sent — the host is inking it".into();
                         } else {
                             state.refuse(
                                 "refused — draw on a frame the host has exposed \
                                  (guests cannot create cels yet)",
                             );
                         }
-                        // Stroke epilogue — the same one the host path
-                        // runs (BUG 2026-08-19: raster_stroke_done stayed
-                        // TRUE here, so this block re-ran EVERY FRAME,
-                        // re-sending the whole layer 60×/s after the
-                        // guest's first pen lift — the desync flood).
-                        // synced_active is deliberately untouched: the
-                        // engine hash still matches, so no resync fires
-                        // and the GPU keeps showing the wet stroke until
-                        // the host's echo applies (engine_changed) and
-                        // uploads the committed truth seamlessly.
                         self.cel_touched = false;
                         self.current.clear();
                         self.dabs_flushed = 0;
@@ -2898,7 +3015,28 @@ impl CanvasView {
                     }
                     // Commit against the slot LATCHED at stroke start — a
                     // mid-stroke A-cycle must not retarget the readback.
-                    if let Some((id, layer)) = state.commit_raster(tiles, self.stroke_layer_slot) {
+                    // STAGE 1: a STREAMED stroke's PaintTiles must not
+                    // ride the command mirror (that would ship pixels —
+                    // NEVER-DO 1): the dab broadcast IS the stroke; the
+                    // App turns replay_done into the sequenced End +
+                    // hash audit for every peer.
+                    let streamed = std::mem::take(&mut self.stroke_streaming);
+                    let changed: Vec<(i32, i32)> = if streamed {
+                        let base = state.active_layer_tiles().cloned().unwrap_or_default();
+                        diff_guest_tiles(&base, &tiles)
+                            .into_iter()
+                            .map(|(x, y, _)| (x, y))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let was_mirror = state.engine.mirror_log;
+                    if streamed {
+                        state.engine.mirror_log = false;
+                    }
+                    let committed = state.commit_raster(tiles, self.stroke_layer_slot);
+                    state.engine.mirror_log = was_mirror;
+                    if let Some((id, layer)) = committed {
                         let h = state
                             .cut()
                             .drawing(id)
@@ -2909,11 +3047,39 @@ impl CanvasView {
                         // exclude the active layer, so their stacks are
                         // unchanged by this commit.
                         self.synced_active = (id.0, layer.0, h);
+                        if streamed {
+                            let layer_name = state
+                                .cut()
+                                .drawing(id)
+                                .and_then(|d| d.layer(layer))
+                                .map(|l| l.props.name.clone())
+                                .unwrap_or_default();
+                            self.replay_done.push(ReplayDone {
+                                stroke_id: self.stroke_wire_id,
+                                author: String::new(),
+                                drawing: id.0,
+                                layer_name,
+                                changed,
+                                ok: true,
+                                why: String::new(),
+                            });
+                        }
                     } else {
                         // Commit refused: the GPU layer holds a stroke the
                         // engine never accepted — invalidate so the next frame
                         // restores truth, not a phantom.
                         self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+                        if streamed {
+                            self.replay_done.push(ReplayDone {
+                                stroke_id: self.stroke_wire_id,
+                                author: String::new(),
+                                drawing: 0,
+                                layer_name: String::new(),
+                                changed: Vec::new(),
+                                ok: false,
+                                why: "the commit was refused".into(),
+                            });
+                        }
                     }
                     self.cel_touched = false;
                     self.current.clear();
@@ -3814,6 +3980,152 @@ impl CanvasView {
         Some(layer.raster.tiles.clone())
     }
 
+    /// STAGE 1 (PSD-multiplayer-rescope): latch + announce a streaming
+    /// stroke (both roles). A stroke on a not-yet-existing cel does NOT
+    /// stream — the host's command mirror carries that rare case whole
+    /// (its ids are host-allocated), and a guest's is refused at pen-up
+    /// exactly as before.
+    fn begin_stream(&mut self, state: &mut AppState) {
+        self.stroke_streaming = false;
+        if !(self.session_live && self.raster) {
+            return;
+        }
+        let Some(did) = state.own_key_drawing() else {
+            return;
+        };
+        // The LATCHED slot's layer name — a mid-stroke A-cycle must not
+        // retarget the wire (same law as the local commit).
+        let layer_name = state
+            .cut()
+            .drawing(did)
+            .and_then(|d| {
+                let slot = self.stroke_layer_slot.min(d.layers.len().saturating_sub(1));
+                d.layers.get(d.layers.len() - 1 - slot)
+            })
+            .map(|l| l.props.name.clone());
+        let Some(layer_name) = layer_name else {
+            return;
+        };
+        self.stroke_next_id = self.stroke_next_id.wrapping_add(1);
+        self.stroke_wire_id = self.stroke_salt.wrapping_add(self.stroke_next_id);
+        self.stroke_streaming = true;
+        self.stroke_outbox.push(StrokeMsg::Begin(StrokeBeginInfo {
+            stroke_id: self.stroke_wire_id,
+            drawing: did.0,
+            layer_name,
+            mode: if self.stroke_erasing {
+                1
+            } else if self.stroke_alpha_locked {
+                2
+            } else {
+                0
+            },
+            opacity: self.brush_opacity,
+            tip: if self.tip_active {
+                self.armed_tip_wire.clone()
+            } else {
+                None
+            },
+            grain: self.armed_grain_wire.clone(),
+        }));
+    }
+
+    /// STAGE 1: replay queued remote strokes through the SAME machinery
+    /// local strokes use — sync the target layer's engine tiles into the
+    /// ACTIVE target, stamp the dabs, composite, read back, commit with
+    /// the author's name. Never under a live pen. Afterward the viewer's
+    /// layer and armed brush are restored (keys invalidated; the sync
+    /// block runs in this same frame).
+    fn run_replays(&mut self, p: &mut PaintLayer, state: &mut AppState) {
+        if self.replay_inbox.is_empty() || self.touch_active {
+            return;
+        }
+        while let Some(rs) = self.replay_inbox.pop_front() {
+            let done = self.replay_one(p, state, &rs);
+            crate::net::slog(format!(
+                "REPLAY stroke={} author={} dabs={} ok={} changed={} {}",
+                rs.stroke_id,
+                rs.author,
+                rs.dabs.len(),
+                done.ok,
+                done.changed.len(),
+                done.why
+            ));
+            self.replay_done.push(done);
+        }
+        // The hijack armed the STROKE's tip/grain and overwrote the
+        // active texture: restore the viewer's world.
+        self.brush_res_dirty = true;
+        self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+        self.synced_below = None;
+        self.synced_above = None;
+    }
+
+    fn replay_one(&mut self, p: &mut PaintLayer, state: &mut AppState, rs: &ReplayStroke) -> ReplayDone {
+        let mk = |ok: bool, changed: Vec<(i32, i32)>, why: &str| ReplayDone {
+            stroke_id: rs.stroke_id,
+            author: rs.author.clone(),
+            drawing: rs.drawing,
+            layer_name: rs.layer_name.clone(),
+            changed,
+            ok,
+            why: why.into(),
+        };
+        let did = anim_core::ids::DrawingId(rs.drawing);
+        let base = {
+            let Some(d) = state.cut().drawing(did) else {
+                return mk(false, Vec::new(), "the drawing left the cut");
+            };
+            match d.layers.iter().find(|l| l.props.name == rs.layer_name) {
+                Some(l) => l.raster.tiles.clone(),
+                None => return mk(false, Vec::new(), "the layer is gone"),
+            }
+        };
+        p.sync_active(&base);
+        p.set_brush_resources(
+            rs.tip.as_ref().map(|(w, h, b, _)| (*w, *h, b.as_ref().clone())),
+            rs.tip.as_ref().map(|(_, _, _, f)| *f).unwrap_or(1),
+            rs.grain
+                .as_ref()
+                .map(|(w, h, b, sc, st)| (*w, *h, b.as_ref().clone(), *sc, *st)),
+        );
+        match rs.mode {
+            1 => p.paint(&rs.dabs, PaintMode::Erase),
+            2 => p.paint(&rs.dabs, PaintMode::AlphaLock),
+            _ => p.replay_ink(&rs.dabs, rs.opacity),
+        }
+        let tiles = p.read_tiles();
+        let wire = diff_guest_tiles(&base, &tiles);
+        let changed: Vec<(i32, i32)> = wire.iter().map(|(x, y, _)| (*x, *y)).collect();
+        if wire.is_empty() {
+            return mk(true, changed, "");
+        }
+        let apply: Vec<(
+            anim_core::raster::TileCoord,
+            Option<std::sync::Arc<anim_core::raster::TileData>>,
+        )> = wire
+            .into_iter()
+            .map(|(x, y, t)| {
+                let after = if t.is_empty() {
+                    None
+                } else {
+                    Some(std::sync::Arc::new(anim_core::raster::TileData::from_vec(t)))
+                };
+                ((x, y), after)
+            })
+            .collect();
+        // NEVER-DO 1: this PaintTiles must not ride the command mirror
+        // (pixels) — the dab stream carried the stroke to every peer.
+        let was = state.engine.mirror_log;
+        state.engine.mirror_log = false;
+        let r = state.apply_remote_tiles(&rs.author, did, &rs.layer_name, apply);
+        state.engine.mirror_log = was;
+        match r {
+            Ok(()) => mk(true, changed, ""),
+            Err(why) => mk(false, Vec::new(), &why),
+        }
+    }
+
     /// Walk the current stroke's points into evenly spaced dabs (paper space).
     /// Deterministic prefix: appending points only extends the tail, so
     /// `dabs[dabs_flushed..]` are always genuinely new.
@@ -4490,11 +4802,7 @@ impl CanvasView {
         self.raster_stroke_done = false;
         self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
         self.smudge_src = self.capture_smudge_src(state);
-        self.guest_stroke_base = if self.is_guest {
-            state.active_layer_tiles().cloned()
-        } else {
-            None
-        };
+        self.begin_stream(state);
         self.current.clear();
         let p = to_paper(pos);
         self.current.push(StrokePoint {
@@ -4687,11 +4995,7 @@ impl CanvasView {
                 self.raster_stroke_done = false;
                 self.raster_new_cel = self.raster && state.own_key_drawing().is_none();
                 self.smudge_src = self.capture_smudge_src(state);
-        self.guest_stroke_base = if self.is_guest {
-            state.active_layer_tiles().cloned()
-        } else {
-            None
-        };
+                self.begin_stream(state);
                 if let Some(p) = response.interact_pointer_pos() {
                     let p = to_paper(p);
                     self.current.push(StrokePoint {

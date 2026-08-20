@@ -192,6 +192,23 @@ struct App {
     /// window (start time, frames counted, worst frame gap ms).
     dbg_ship_last: f64,
     stats_window: (f64, u32, f32),
+    /// STAGE 1: the one global order. Host: last assigned. Guest: last
+    /// applied; the snapshot's meta tells where to resume.
+    session_seq: u64,
+    session_applied_seq: u64,
+    session_snapshot_seq: Option<u64>,
+    session_snap_seq: u64,
+    /// Guest: sequenced arrivals before the snapshot lands buffer here.
+    session_buffer: Vec<SeqEv>,
+    /// In-flight remote strokes + the session's content-addressed
+    /// tip/grain images + which images THIS machine already announced.
+    session_gather: std::collections::HashMap<u64, GatherStroke>,
+    session_res: std::collections::HashMap<u64, (u32, u32, std::sync::Arc<Vec<u8>>)>,
+    session_res_announced: std::collections::HashSet<u64>,
+    /// Audit bookkeeping: hashes waiting for our replay to land, and
+    /// replays waiting for their hashes.
+    session_audit: std::collections::HashMap<u64, net::StrokeHashesWire>,
+    session_done: std::collections::HashSet<u64>,
     /// LAN DISCOVERY: rooms visible on this network (always listening).
     discovery: net::Discovery,
     /// A guest asked for a fresh snapshot (their mirror slipped).
@@ -291,6 +308,27 @@ struct ExportJob {
     encoding: bool,
 }
 
+/// STAGE 1 (PSD-multiplayer-rescope): a remote stroke being gathered
+/// off the wire — Begin's facts + the dab batches as they stream in.
+struct GatherStroke {
+    author: String,
+    drawing: u64,
+    layer_name: String,
+    mode: u8,
+    opacity: f32,
+    tip: Option<(u64, u32, u32, u32)>,
+    grain: Option<(u64, u32, u32, f32, f32)>,
+    dabs: Vec<crate::paint::Dab>,
+}
+
+/// STAGE 1: one sequenced arrival on the guest lane (applied in host
+/// order; buffered until the join snapshot lands).
+enum SeqEv {
+    End(net::StrokeEndWire),
+    Cmds(u64, Vec<anim_core::command::Command>),
+    Hashes(net::StrokeHashesWire),
+}
+
 impl App {
     // ---- THE SESSION (research/PSD-session-room.md) ----------------------
     fn session_act(&mut self, a: config::SessionAction) {
@@ -312,6 +350,7 @@ impl App {
                         self.session_status = format!("hosting on port {} — share the key", h.port);
                         self.session = net::Session::Hosting(h);
                         self.session_sent_gen = u64::MAX;
+                        self.session_lane_reset();
                         // STAGE 0: a fresh room starts a fresh remote log —
                         // guests' numbered lines land here, in order.
                         if let Some(base) = std::env::var_os("APPDATA") {
@@ -334,6 +373,7 @@ impl App {
                 self.session_peers.clear();
                 self.session_status = "offline".into();
                 net::slog_ship_arm(false);
+                self.session_lane_reset();
             }
             config::SessionAction::OpenConnect => {
                 self.connect_error.clear();
@@ -358,6 +398,7 @@ impl App {
                 self.session_status = "connected — waiting for the host's file".into();
                 self.session = net::Session::Joined(c);
                 self.session_peers.clear();
+                self.session_lane_reset();
                 // STAGE 0: from here on, this machine's numbered log lines
                 // ship to the host every ~2s.
                 net::slog_ship_arm(true);
@@ -465,6 +506,304 @@ impl App {
         }
     }
 
+    /// STAGE 1: forget everything session-scoped (order lane, gathers,
+    /// resource cache). Runs at every room start/join/end.
+    fn session_lane_reset(&mut self) {
+        self.session_seq = 0;
+        self.session_applied_seq = 0;
+        self.session_snapshot_seq = None;
+        self.session_snap_seq = 0;
+        self.session_buffer.clear();
+        self.session_gather.clear();
+        self.session_res.clear();
+        self.session_res_announced.clear();
+        self.session_audit.clear();
+        self.session_done.clear();
+        if let Some(ed) = &mut self.editor {
+            ed.canvas.replay_inbox.clear();
+            ed.canvas.replay_done.clear();
+            ed.canvas.stroke_outbox.clear();
+        }
+    }
+
+    /// Guest side: one stroke frame off the host's broadcast.
+    fn guest_stroke_frame(&mut self, frame: net::StrokeFrame) {
+        match frame {
+            net::StrokeFrame::Res { hash, w, h, rgba } => {
+                self.session_res
+                    .insert(hash, (w, h, std::sync::Arc::new(rgba)));
+            }
+            net::StrokeFrame::Begin(b) => {
+                self.session_gather.insert(
+                    b.stroke_id,
+                    GatherStroke {
+                        author: b.author,
+                        drawing: b.drawing,
+                        layer_name: b.layer_name,
+                        mode: b.mode,
+                        opacity: b.opacity,
+                        tip: b.tip,
+                        grain: b.grain,
+                        dabs: Vec::new(),
+                    },
+                );
+            }
+            net::StrokeFrame::Dabs { stroke_id, dabs } => {
+                if let Some(g) = self.session_gather.get_mut(&stroke_id) {
+                    g.dabs.extend(dabs);
+                }
+            }
+            net::StrokeFrame::End(e) => self.seq_event(SeqEv::End(e)),
+            net::StrokeFrame::Hashes(hw) => self.seq_event(SeqEv::Hashes(hw)),
+        }
+    }
+
+    /// Host side: one stroke frame from a guest's pen.
+    fn host_stroke_frame(&mut self, _client: u64, author: String, frame: net::StrokeFrame) {
+        match frame {
+            net::StrokeFrame::Res { hash, w, h, rgba } => {
+                self.session_res
+                    .insert(hash, (w, h, std::sync::Arc::new(rgba)));
+            }
+            net::StrokeFrame::Begin(b) => {
+                self.session_gather.insert(
+                    b.stroke_id,
+                    GatherStroke {
+                        author,
+                        drawing: b.drawing,
+                        layer_name: b.layer_name,
+                        mode: b.mode,
+                        opacity: b.opacity,
+                        tip: b.tip,
+                        grain: b.grain,
+                        dabs: Vec::new(),
+                    },
+                );
+            }
+            net::StrokeFrame::Dabs { stroke_id, dabs } => {
+                if let Some(g) = self.session_gather.get_mut(&stroke_id) {
+                    g.dabs.extend(dabs);
+                }
+            }
+            net::StrokeFrame::End(e) => {
+                let Some(g) = self.session_gather.remove(&e.stroke_id) else {
+                    net::slog(format!(
+                        "END for unknown stroke {} from {author}",
+                        e.stroke_id
+                    ));
+                    return;
+                };
+                match self.resolve_replay(e.stroke_id, g) {
+                    Ok(rs) => {
+                        if let Some(ed) = &mut self.editor {
+                            ed.canvas.replay_inbox.push_back(rs);
+                        }
+                    }
+                    Err(why) => {
+                        net::slog(format!(
+                            "stroke {} from {author} refused: {why}",
+                            e.stroke_id
+                        ));
+                        // A sequenced no-op keeps every lane in step and
+                        // clears the other guests' gathers.
+                        self.session_seq += 1;
+                        if let net::Session::Hosting(h) = &self.session {
+                            h.send_stroke_frame(net::enc_end(&net::StrokeEndWire {
+                                author: author.clone(),
+                                stroke_id: e.stroke_id,
+                                seq: self.session_seq,
+                                ok: false,
+                            }));
+                            h.send_refusal(&author, &why);
+                        }
+                    }
+                }
+            }
+            net::StrokeFrame::Hashes(_) => {}
+        }
+    }
+
+    /// Both roles: turn a finished gather into a replay-ready stroke
+    /// (resource hashes resolve to the session cache's bytes).
+    fn resolve_replay(
+        &self,
+        stroke_id: u64,
+        g: GatherStroke,
+    ) -> Result<canvas::ReplayStroke, String> {
+        let tip = match g.tip {
+            None => None,
+            Some((hash, _, _, frames)) => match self.session_res.get(&hash) {
+                Some((w, h, b)) => Some((*w, *h, b.clone(), frames)),
+                None => return Err(format!("tip image {hash:016x} never arrived")),
+            },
+        };
+        let grain = match g.grain {
+            None => None,
+            Some((hash, _, _, scale, strength)) => match self.session_res.get(&hash) {
+                Some((w, h, b)) => Some((*w, *h, b.clone(), scale, strength)),
+                None => return Err(format!("grain image {hash:016x} never arrived")),
+            },
+        };
+        Ok(canvas::ReplayStroke {
+            stroke_id,
+            author: g.author,
+            drawing: g.drawing,
+            layer_name: g.layer_name,
+            mode: g.mode,
+            opacity: g.opacity,
+            dabs: g.dabs,
+            tip,
+            grain,
+        })
+    }
+
+    /// Guest lane: sequenced arrivals apply in host order once the join
+    /// snapshot has landed; before that they buffer (NEVER-DO 2).
+    fn seq_event(&mut self, ev: SeqEv) {
+        let ready = self
+            .editor
+            .as_ref()
+            .is_some_and(|ed| ed.canvas.guest_ready);
+        if !ready {
+            self.session_buffer.push(ev);
+            return;
+        }
+        self.apply_seq_event(ev);
+    }
+
+    fn apply_seq_event(&mut self, ev: SeqEv) {
+        match ev {
+            SeqEv::End(e) => {
+                if e.seq <= self.session_applied_seq {
+                    // Already inside the snapshot we applied.
+                    self.session_gather.remove(&e.stroke_id);
+                    return;
+                }
+                if e.seq != self.session_applied_seq + 1 {
+                    net::slog(format!(
+                        "SEQ GAP want={} got={} — resync",
+                        self.session_applied_seq + 1,
+                        e.seq
+                    ));
+                    if let net::Session::Joined(c) = &mut self.session {
+                        c.send_resync_request();
+                    }
+                    return;
+                }
+                self.session_applied_seq = e.seq;
+                let Some(g) = self.session_gather.remove(&e.stroke_id) else {
+                    if e.ok {
+                        net::slog(format!(
+                            "SEQ {} unknown stroke {} — resync",
+                            e.seq, e.stroke_id
+                        ));
+                        if let net::Session::Joined(c) = &mut self.session {
+                            c.send_resync_request();
+                        }
+                    }
+                    return;
+                };
+                if !e.ok {
+                    return;
+                }
+                match self.resolve_replay(e.stroke_id, g) {
+                    Ok(rs) => {
+                        if let Some(ed) = &mut self.editor {
+                            ed.canvas.replay_inbox.push_back(rs);
+                        }
+                    }
+                    Err(why) => {
+                        net::slog(format!(
+                            "SEQ {} stroke {}: {why} — resync",
+                            e.seq, e.stroke_id
+                        ));
+                        if let net::Session::Joined(c) = &mut self.session {
+                            c.send_resync_request();
+                        }
+                    }
+                }
+            }
+            SeqEv::Cmds(seq, batch) => {
+                if seq <= self.session_applied_seq {
+                    return;
+                }
+                if seq != self.session_applied_seq + 1 {
+                    net::slog(format!(
+                        "SEQ GAP (cmds) want={} got={seq} — resync",
+                        self.session_applied_seq + 1
+                    ));
+                    if let net::Session::Joined(c) = &mut self.session {
+                        c.send_resync_request();
+                    }
+                    return;
+                }
+                self.session_applied_seq = seq;
+                net::slog(format!("APPLY cmds seq={seq} n={}", batch.len()));
+                if let Some(ed) = &mut self.editor {
+                    match ed.state.engine.apply_mirror(&batch) {
+                        Ok(()) => {
+                            ed.state.doc_gen = ed.state.doc_gen.wrapping_add(1);
+                            ed.canvas.engine_changed();
+                        }
+                        Err(e) => {
+                            net::slog(format!("APPLY cmds FAILED: {e:?}"));
+                            if let net::Session::Joined(c) = &mut self.session {
+                                c.send_resync_request();
+                            }
+                            self.session_status = "mirror slipped — resyncing…".into();
+                        }
+                    }
+                }
+            }
+            SeqEv::Hashes(hw) => {
+                // Ordered after its End; the replay itself lands on the
+                // next canvas frame — match whichever side arrives last.
+                if self.session_done.remove(&hw.stroke_id) {
+                    self.audit_stroke(&hw);
+                } else {
+                    self.session_audit.insert(hw.stroke_id, hw);
+                }
+            }
+        }
+    }
+
+    /// NEVER-DO 3: compare the committed tiles against the host's
+    /// hashes; drifted coords get exact texels back, quietly, logged.
+    fn audit_stroke(&mut self, hw: &net::StrokeHashesWire) {
+        let bad: Vec<(i32, i32)> = self
+            .editor
+            .as_ref()
+            .and_then(|ed| {
+                let did = anim_core::ids::DrawingId(hw.drawing);
+                ed.state
+                    .cut()
+                    .drawing(did)
+                    .and_then(|d| d.layers.iter().find(|l| l.props.name == hw.layer_name))
+                    .map(|l| {
+                        hw.tiles
+                            .iter()
+                            .filter(|(x, y, h)| {
+                                l.raster.tiles.get(&(*x, *y)).map(|t| t.hash).unwrap_or(0)
+                                    != *h
+                            })
+                            .map(|(x, y, _)| (*x, *y))
+                            .collect()
+                    })
+            })
+            .unwrap_or_default();
+        if bad.is_empty() {
+            return;
+        }
+        net::slog(format!(
+            "AUDIT stroke={} drift={} tile(s) — repairing",
+            hw.stroke_id,
+            bad.len()
+        ));
+        if let net::Session::Joined(c) = &mut self.session {
+            c.send_repair_request(hw.drawing, &hw.layer_name, bad);
+        }
+    }
+
     fn session_pump(&mut self, ctx: &egui::Context) {
         let mut events: Vec<net::NetEvent> = Vec::new();
         match &self.session {
@@ -537,29 +876,82 @@ impl App {
                     e.pen_down = pen_down;
                     e.wet = wet;
                 }
-                net::NetEvent::Commands(batch) => {
-                    net::slog(format!("APPLY cmds n={}", batch.len()));
-                    if let Some(ed) = &mut self.editor {
-                        ed.canvas.guest_ready = true;
+                // STAGE 1: sequenced command batches ride the same lane
+                // as strokes — one order for everything (NEVER-DO 2).
+                net::NetEvent::Commands(seq, batch) => {
+                    self.seq_event(SeqEv::Cmds(seq, batch));
+                }
+                net::NetEvent::Stroke(frame) => {
+                    self.guest_stroke_frame(frame);
+                }
+                net::NetEvent::GuestStroke {
+                    client,
+                    author,
+                    frame,
+                } => {
+                    self.host_stroke_frame(client, author, frame);
+                }
+                net::NetEvent::SnapshotMeta(s) => {
+                    self.session_snapshot_seq = Some(s);
+                }
+                net::NetEvent::RepairRequest {
+                    client,
+                    drawing,
+                    layer_name,
+                    coords,
+                } => {
+                    net::slog(format!(
+                        "REPAIR req client={client} drawing={drawing} '{layer_name}' tiles={}",
+                        coords.len()
+                    ));
+                    let tiles: Vec<(i32, i32, Vec<u16>)> = self
+                        .editor
+                        .as_ref()
+                        .and_then(|ed| {
+                            ed.state
+                                .cut()
+                                .drawing(anim_core::ids::DrawingId(drawing))
+                                .and_then(|d| {
+                                    d.layers.iter().find(|l| l.props.name == layer_name)
+                                })
+                                .map(|l| {
+                                    coords
+                                        .iter()
+                                        .map(|(x, y)| {
+                                            (
+                                                *x,
+                                                *y,
+                                                l.raster
+                                                    .tiles
+                                                    .get(&(*x, *y))
+                                                    .map(|t| t.rgba.to_vec())
+                                                    .unwrap_or_default(),
+                                            )
+                                        })
+                                        .collect()
+                                })
+                        })
+                        .unwrap_or_default();
+                    if let net::Session::Hosting(h) = &self.session {
+                        h.send_repair(client, drawing, &layer_name, tiles);
                     }
-                    // SESSION MIRROR: the 1:1 control window — tiny
-                    // patches applied to the mirror engine, no reloads.
+                }
+                net::NetEvent::RepairTiles {
+                    drawing,
+                    layer_name,
+                    tiles,
+                } => {
+                    net::slog(format!(
+                        "REPAIR apply '{layer_name}': {} tile(s)",
+                        tiles.len()
+                    ));
                     if let Some(ed) = &mut self.editor {
-                        match ed.state.engine.apply_mirror(&batch) {
-                            Ok(()) => {
-                                ed.state.doc_gen = ed.state.doc_gen.wrapping_add(1);
-                                ed.canvas.engine_changed();
-                            }
-                            Err(e) => {
-                                net::slog(format!("APPLY cmds FAILED: {e:?}"));
-                                // The mirror slipped: ask for a fresh truth.
-                                if let net::Session::Joined(c) = &mut self.session {
-                                    c.send_resync_request();
-                                }
-                                self.session_status =
-                                    "mirror slipped — resyncing…".into();
-                            }
-                        }
+                        ed.state.apply_repair_tiles(
+                            anim_core::ids::DrawingId(drawing),
+                            &layer_name,
+                            tiles,
+                        );
+                        ed.canvas.engine_changed();
                     }
                 }
                 net::NetEvent::ResyncNeeded => {
@@ -609,64 +1001,17 @@ impl App {
                         });
                     }
                 }
-                // HOST: a guest's finished stroke. One writer — OUR engine
-                // applies it, by drawing id + layer NAME, tagged with its
-                // author; a refusal goes home instead of a guess.
-                net::NetEvent::EditTiles {
-                    author,
-                    drawing,
-                    layer_name,
-                    tiles,
-                } => {
+                // STAGE 1: the tile wire is RETIRED — a peer still
+                // sending EditTiles runs a pre-rescope build.
+                net::NetEvent::EditTiles { author, .. } => {
                     net::slog(format!(
-                        "EDIT from {author} tiles={} empty={}",
-                        tiles.len(),
-                        tiles.iter().filter(|(_, _, t)| t.is_empty()).count()
+                        "LEGACY EditTiles from {author} — build predates the stroke wire"
                     ));
-                    let tiles: Vec<(
-                        anim_core::raster::TileCoord,
-                        Option<std::sync::Arc<anim_core::raster::TileData>>,
-                    )> = tiles
-                        .into_iter()
-                        // TileData::from_vec re-hashes on arrival, so a
-                        // malformed patch can never poison the host's
-                        // content addressing — and it length-checks. An
-                        // EMPTY payload marks an erased tile (after=None).
-                        .filter(|(_, _, t)| {
-                            t.is_empty() || t.len() == anim_core::raster::TILE_LEN
-                        })
-                        .map(|(x, y, texels)| {
-                            let after = if texels.is_empty() {
-                                None
-                            } else {
-                                Some(std::sync::Arc::new(
-                                    anim_core::raster::TileData::from_vec(texels),
-                                ))
-                            };
-                            ((x, y), after)
-                        })
-                        .collect();
-                    let outcome = self.editor.as_mut().map(|ed| {
-                        ed.state.apply_remote_tiles(
+                    if let net::Session::Hosting(h) = &self.session {
+                        h.send_refusal(
                             &author,
-                            anim_core::ids::DrawingId(drawing),
-                            &layer_name,
-                            tiles,
-                        )
-                    });
-                    match outcome {
-                        Some(Err(why)) => {
-                            if let net::Session::Hosting(h) = &self.session {
-                                h.send_refusal(&author, &why);
-                            }
-                            self.session_status = format!("{author}'s edit refused: {why}");
-                        }
-                        Some(Ok(())) => {
-                            if let Some(ed) = &mut self.editor {
-                                ed.canvas.engine_changed();
-                            }
-                        }
-                        None => {}
+                            "your build predates the stroke wire — update Gaban Studio",
+                        );
                     }
                 }
                 // HOST: a guest asking to undo/redo their own step.
@@ -700,6 +1045,7 @@ impl App {
                     self.session = net::Session::Idle;
                     self.session_peers.clear();
                     net::slog_ship_arm(false);
+                    self.session_lane_reset();
                     if let Some(ed) = &mut self.editor {
                         ed.canvas.guest_ready = false;
                     }
@@ -780,19 +1126,30 @@ impl App {
         // batch streams to guests (tiny), and whole documents go out only
         // for joins and resyncs.
         let hosting_now = matches!(self.session, net::Session::Hosting(_));
+        // STAGE 1: canvas knows a session is live (strokes stream).
+        if let Some(ed) = &mut self.editor {
+            ed.canvas.session_live = !matches!(self.session, net::Session::Idle);
+        }
         if let Some(ed) = &mut self.editor {
             if ed.state.engine.mirror_log != hosting_now {
                 ed.state.engine.mirror_log = hosting_now;
                 let _ = ed.state.engine.drain_applied();
             }
         }
-        if hosting_now
-            && let Some(ed) = &mut self.editor
-        {
-            let batches = ed.state.engine.drain_applied();
-            if let net::Session::Hosting(h) = &self.session {
+        if hosting_now {
+            // STAGE 1: every batch takes the next number in the one
+            // global order (strokes share the same lane).
+            let batches = self
+                .editor
+                .as_mut()
+                .map(|ed| ed.state.engine.drain_applied())
+                .unwrap_or_default();
+            if !batches.is_empty()
+                && let net::Session::Hosting(h) = &self.session
+            {
                 for b in batches {
-                    h.send_commands(b);
+                    self.session_seq += 1;
+                    h.send_commands(self.session_seq, b);
                 }
             }
         }
@@ -826,9 +1183,23 @@ impl App {
                 ));
                 self.session_resync = false;
             }
+            // STAGE 1: a fresh joiner needs the session's images before
+            // any Begin that references them can replay.
+            if fresh_join
+                && !self.session_res.is_empty()
+                && let net::Session::Hosting(h) = &self.session
+            {
+                for (hash, (w, hh, b)) in &self.session_res {
+                    h.send_stroke_frame(net::enc_res(*hash, *w, *hh, b));
+                }
+            }
             if (fresh_join || due) && self.session_snap_rx.is_none() {
                 self.session_sent_gen = stamp;
                 self.session_last_snap = now;
+                // STAGE 1: the order stamp this document will contain —
+                // the clone below happens in this same frame, before any
+                // later seq is assigned.
+                self.session_snap_seq = self.session_seq;
                 // SESSION PERF 2: the save runs on a WORKER — the UI
                 // thread only clones the Arc-tiled project (cheap).
                 if let Some(ed) = &mut self.editor {
@@ -871,39 +1242,219 @@ impl App {
                 snapshot = built;
             }
         }
-        // V2: a guest's finished strokes leave here (one writer — the
-        // host applies them and sends the truth back).
-        let outbox: Vec<(u64, String, Vec<(i32, i32, Vec<u16>)>)> = self
+        // STAGE 1 (PSD-multiplayer-rescope): the stroke wire.
+        // Begin/Dabs/End leave here; unseen tip/grain images are
+        // announced FIRST on the same writer (order is the contract).
+        let stroke_out: Vec<canvas::StrokeMsg> = self
             .editor
             .as_mut()
-            .map(|ed| std::mem::take(&mut ed.canvas.edit_outbox))
+            .map(|ed| std::mem::take(&mut ed.canvas.stroke_outbox))
             .unwrap_or_default();
         let history_req = self
             .editor
             .as_mut()
             .and_then(|ed| ed.canvas.history_request.take());
         let me = self.config.session.username.trim().to_string();
+        let mut wire_frames: Vec<Vec<u8>> = Vec::new();
+        for msg in &stroke_out {
+            if let canvas::StrokeMsg::Begin(info) = msg {
+                for (hash, w, h, bytes) in [
+                    info.tip.as_ref().map(|(r, b)| (r.hash, r.w, r.h, b.clone())),
+                    info.grain
+                        .as_ref()
+                        .map(|(g, b)| (g.hash, g.w, g.h, b.clone())),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if self.session_res_announced.insert(hash) {
+                        self.session_res.insert(hash, (w, h, bytes.clone()));
+                        wire_frames.push(net::enc_res(hash, w, h, &bytes));
+                    }
+                }
+            }
+        }
+        for msg in stroke_out {
+            match msg {
+                canvas::StrokeMsg::Begin(info) => {
+                    let b = net::StrokeBeginWire {
+                        author: me.clone(),
+                        stroke_id: info.stroke_id,
+                        drawing: info.drawing,
+                        layer_name: info.layer_name.clone(),
+                        mode: info.mode,
+                        opacity: info.opacity,
+                        tip: info
+                            .tip
+                            .as_ref()
+                            .map(|(r, _)| (r.hash, r.w, r.h, r.frames)),
+                        grain: info
+                            .grain
+                            .as_ref()
+                            .map(|(g, _)| (g.hash, g.w, g.h, g.scale, g.strength)),
+                    };
+                    // A guest registers its OWN stroke too — the echo
+                    // replays from this gather like anyone else's.
+                    if matches!(self.session, net::Session::Joined(_)) {
+                        self.session_gather.insert(
+                            info.stroke_id,
+                            GatherStroke {
+                                author: me.clone(),
+                                drawing: b.drawing,
+                                layer_name: b.layer_name.clone(),
+                                mode: b.mode,
+                                opacity: b.opacity,
+                                tip: b.tip,
+                                grain: b.grain,
+                                dabs: Vec::new(),
+                            },
+                        );
+                    }
+                    wire_frames.push(net::enc_begin(&b));
+                }
+                canvas::StrokeMsg::Dabs { stroke_id, dabs } => {
+                    if let Some(g) = self.session_gather.get_mut(&stroke_id) {
+                        g.dabs.extend(dabs.iter().copied());
+                    }
+                    wire_frames.push(net::enc_dabs(stroke_id, &dabs));
+                }
+                canvas::StrokeMsg::End { stroke_id } => {
+                    wire_frames.push(net::enc_end(&net::StrokeEndWire {
+                        author: me.clone(),
+                        stroke_id,
+                        seq: 0,
+                        ok: true,
+                    }));
+                }
+            }
+        }
         match &mut self.session {
             net::Session::Hosting(h) => {
                 if let Some(p) = &presence {
                     h.send_presence(p);
                 }
+                for f in wire_frames {
+                    h.send_stroke_frame(f);
+                }
                 if let Some(b) = &snapshot {
-                    h.send_snapshot(b);
+                    h.send_snapshot(self.session_snap_seq, b);
                 }
             }
             net::Session::Joined(c) => {
                 if let Some(p) = &presence {
                     c.send_presence(p);
                 }
-                for (drawing, layer_name, tiles) in outbox {
-                    c.send_edit(&me, drawing, &layer_name, tiles);
+                for f in wire_frames {
+                    c.send_stroke_frame(f);
                 }
                 if let Some(redo) = history_req {
                     c.send_undo(&me, redo);
                 }
             }
             net::Session::Idle => {}
+        }
+        // STAGE 1 (host): every landed stroke takes the next number in
+        // the one order + broadcasts its audit hashes. Own strokes and
+        // guests' replays alike (canvas pushed them into replay_done).
+        if matches!(self.session, net::Session::Hosting(_)) {
+            let dones = self
+                .editor
+                .as_mut()
+                .map(|ed| std::mem::take(&mut ed.canvas.replay_done))
+                .unwrap_or_default();
+            for d in dones {
+                self.session_seq += 1;
+                let seq = self.session_seq;
+                let author = if d.author.is_empty() {
+                    me.clone()
+                } else {
+                    d.author.clone()
+                };
+                let hashes: Vec<(i32, i32, u64)> = if d.ok {
+                    self.editor
+                        .as_ref()
+                        .and_then(|ed| {
+                            ed.state
+                                .cut()
+                                .drawing(anim_core::ids::DrawingId(d.drawing))
+                                .and_then(|dr| {
+                                    dr.layers
+                                        .iter()
+                                        .find(|l| l.props.name == d.layer_name)
+                                })
+                                .map(|l| {
+                                    d.changed
+                                        .iter()
+                                        .map(|(x, y)| {
+                                            (
+                                                *x,
+                                                *y,
+                                                l.raster
+                                                    .tiles
+                                                    .get(&(*x, *y))
+                                                    .map(|t| t.hash)
+                                                    .unwrap_or(0),
+                                            )
+                                        })
+                                        .collect()
+                                })
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                net::slog(format!(
+                    "SEQ {seq} stroke={} author={author} ok={} tiles={}",
+                    d.stroke_id,
+                    d.ok,
+                    d.changed.len()
+                ));
+                if let net::Session::Hosting(h) = &self.session {
+                    h.send_stroke_frame(net::enc_end(&net::StrokeEndWire {
+                        author: author.clone(),
+                        stroke_id: d.stroke_id,
+                        seq,
+                        ok: d.ok,
+                    }));
+                    if d.ok {
+                        h.send_stroke_frame(net::enc_hashes(&net::StrokeHashesWire {
+                            stroke_id: d.stroke_id,
+                            seq,
+                            drawing: d.drawing,
+                            layer_name: d.layer_name.clone(),
+                            tiles: hashes,
+                        }));
+                    } else if !d.author.is_empty() {
+                        h.send_refusal(&d.author, &d.why);
+                    }
+                }
+            }
+        }
+        // STAGE 1 (guest): a replay landed — run any waiting audit; a
+        // failed replay means our mirror slipped somewhere: resync.
+        if matches!(self.session, net::Session::Joined(_)) {
+            let dones = self
+                .editor
+                .as_mut()
+                .map(|ed| std::mem::take(&mut ed.canvas.replay_done))
+                .unwrap_or_default();
+            for d in dones {
+                if !d.ok {
+                    net::slog(format!(
+                        "REPLAY failed stroke={} ({}) — resync",
+                        d.stroke_id, d.why
+                    ));
+                    if let net::Session::Joined(c) = &mut self.session {
+                        c.send_resync_request();
+                    }
+                    continue;
+                }
+                if let Some(hw) = self.session_audit.remove(&d.stroke_id) {
+                    self.audit_stroke(&hw);
+                } else {
+                    self.session_done.insert(d.stroke_id);
+                }
+            }
         }
         // SESSION PERF 2 drain: a snapshot parsed on the worker swaps in
         // HERE (every frame, not only when new events arrive). Mid-stroke
@@ -921,34 +1472,60 @@ impl App {
                 match parsed {
                     Ok(mut st) => {
                         st.file_path = None; // never ours to save over
-                        let same_size = self.editor.as_ref().is_some_and(|ed| {
-                            ed.state.engine.project.width == st.engine.project.width
-                                && ed.state.engine.project.height
-                                    == st.engine.project.height
-                        });
-                        if let Some(ed) = &mut self.editor {
-                            ed.canvas.guest_ready = true;
-                        }
-                        if same_size {
-                            let ed = self.editor.as_mut().unwrap();
-                            let frame = ed
-                                .state
-                                .view
-                                .frame
-                                .min(st.frame_count().saturating_sub(1));
-                            ed.state = st;
-                            ed.state.view.frame = frame;
-                            ed.canvas.engine_changed();
-                            ed.state.status = "live from the host".into();
+                        // STAGE 1: the meta says which sequenced events
+                        // this document already contains. One older than
+                        // what we've applied would step the lane BACKWARD
+                        // — refuse it and ask for a fresh truth instead.
+                        let meta = self.session_snapshot_seq.take().unwrap_or(0);
+                        if meta < self.session_applied_seq {
+                            net::slog(format!(
+                                "SNAPSHOT stale as_of={meta} applied={} — re-requesting",
+                                self.session_applied_seq
+                            ));
+                            if let net::Session::Joined(c) = &mut self.session {
+                                c.send_resync_request();
+                            }
                         } else {
-                            let rs = self.render_state.as_ref();
-                            let mut ed = Editor::from_state(st, rs);
-                            ed.stage = self.editor.as_ref().and_then(|o| o.stage);
-                            ed.canvas.engine_changed();
-                            ed.state.status = "live from the host".into();
-                            self.editor = Some(ed);
+                            let same_size = self.editor.as_ref().is_some_and(|ed| {
+                                ed.state.engine.project.width == st.engine.project.width
+                                    && ed.state.engine.project.height
+                                        == st.engine.project.height
+                            });
+                            if let Some(ed) = &mut self.editor {
+                                ed.canvas.guest_ready = true;
+                            }
+                            if same_size {
+                                let ed = self.editor.as_mut().unwrap();
+                                let frame = ed
+                                    .state
+                                    .view
+                                    .frame
+                                    .min(st.frame_count().saturating_sub(1));
+                                ed.state = st;
+                                ed.state.view.frame = frame;
+                                ed.canvas.engine_changed();
+                                ed.state.status = "live from the host".into();
+                            } else {
+                                let rs = self.render_state.as_ref();
+                                let mut ed = Editor::from_state(st, rs);
+                                ed.stage = self.editor.as_ref().and_then(|o| o.stage);
+                                ed.canvas.engine_changed();
+                                ed.state.status = "live from the host".into();
+                                self.editor = Some(ed);
+                            }
+                            // Resume the lane exactly where the document
+                            // leaves off, then apply what buffered.
+                            self.session_applied_seq = meta;
+                            net::slog(format!(
+                                "SNAPSHOT applied as_of={meta}, draining {} buffered",
+                                self.session_buffer.len()
+                            ));
+                            let buffered = std::mem::take(&mut self.session_buffer);
+                            for ev in buffered {
+                                self.apply_seq_event(ev);
+                            }
+                            self.session_status = "file synced".into();
                         }
-                        self.session_status = "file synced".into();
                     }
                     Err(e) => self.session_status = format!("snapshot refused: {e}"),
                 }
@@ -1052,6 +1629,16 @@ impl App {
             frame_watch: None,
             dbg_ship_last: 0.0,
             stats_window: (0.0, 0, 0.0),
+            session_seq: 0,
+            session_applied_seq: 0,
+            session_snapshot_seq: None,
+            session_snap_seq: 0,
+            session_buffer: Vec::new(),
+            session_gather: std::collections::HashMap::new(),
+            session_res: std::collections::HashMap::new(),
+            session_res_announced: std::collections::HashSet::new(),
+            session_audit: std::collections::HashMap::new(),
+            session_done: std::collections::HashSet::new(),
             discovery: net::spawn_discovery(),
             session_resync: false,
             session_snap_rx: None,
