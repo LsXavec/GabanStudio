@@ -166,6 +166,9 @@ struct App {
     update_ready: Option<(String, String, u64)>,
     update_swap: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     update_note: String,
+    /// SESSION PERF: last snapshot / presence send times (throttles).
+    session_last_snap: f64,
+    session_last_presence: f64,
     /// In-progress rebind capture (Settings).
     capturing: Option<RebindCapture>,
     /// Active GPU backend name (for the Performance page's Renderer row).
@@ -482,20 +485,41 @@ impl App {
                         let path = std::env::temp_dir().join("animstudio_session_in.animproj");
                         if std::fs::write(&path, &bytes).is_ok() {
                             match doc::AppState::load_from(path) {
-                                Ok(st) => {
-                                    let rs = self.render_state.as_ref();
-                                    let mut ed = Editor::from_state(st, rs);
-                                    ed.stage = self.editor.as_ref().and_then(|o| o.stage);
-                                    ed.canvas.engine_changed();
-                                    // The mirror is not ours to save over.
-                                    ed.state.file_path = None;
-                                    ed.state.status = "live from the host".into();
-                                    self.editor = Some(ed);
-                                    self.session_status = "file synced".into();
-                                    if let Some(ed) = &mut self.editor {
-                                        ed.state.status =
-                                            "the host's file arrived".into();
+                                Ok(mut st) => {
+                                    st.file_path = None; // never ours to save over
+                                    // SESSION PERF: rebuilding the whole
+                                    // Editor tore down the GPU paint
+                                    // targets on EVERY sync — the guest's
+                                    // "buffering". Same paper size: the
+                                    // state swaps IN PLACE, keeping the
+                                    // GPU targets, playhead and zoom.
+                                    let same_size = self.editor.as_ref().is_some_and(|ed| {
+                                        ed.state.engine.project.width
+                                            == st.engine.project.width
+                                            && ed.state.engine.project.height
+                                                == st.engine.project.height
+                                    });
+                                    if same_size {
+                                        let ed = self.editor.as_mut().unwrap();
+                                        let frame = ed
+                                            .state
+                                            .view
+                                            .frame
+                                            .min(st.frame_count().saturating_sub(1));
+                                        ed.state = st;
+                                        ed.state.view.frame = frame;
+                                        ed.canvas.engine_changed();
+                                        ed.state.status = "live from the host".into();
+                                    } else {
+                                        let rs = self.render_state.as_ref();
+                                        let mut ed = Editor::from_state(st, rs);
+                                        ed.stage =
+                                            self.editor.as_ref().and_then(|o| o.stage);
+                                        ed.canvas.engine_changed();
+                                        ed.state.status = "live from the host".into();
+                                        self.editor = Some(ed);
                                     }
+                                    self.session_status = "file synced".into();
                                 }
                                 Err(e) => self.session_status = format!("snapshot refused: {e}"),
                             }
@@ -593,19 +617,45 @@ impl App {
                 }
             }
         }
-        let presence = self.editor.as_ref().map(|ed| net::PresenceOut {
-            frame: ed.state.view.frame,
-            cursor: ed.canvas.presence_pos,
-            pen_down: ed.canvas.stroke_active(),
-            wet: ed.canvas.presence_wet(),
-        });
+        // SESSION PERF: presence at 20Hz, not frame rate — the wet
+        // clone + JSON per frame was measurable on both ends.
+        let presence_due = {
+            let t = ctx.input(|i| i.time);
+            if t - self.session_last_presence > 0.05 {
+                self.session_last_presence = t;
+                true
+            } else {
+                false
+            }
+        };
+        let presence = if presence_due {
+            self.editor.as_ref().map(|ed| net::PresenceOut {
+                frame: ed.state.view.frame,
+                cursor: ed.canvas.presence_pos,
+                pen_down: ed.canvas.stroke_active(),
+                wet: ed.canvas.presence_wet(),
+            })
+        } else {
+            None
+        };
+        let now = ctx.input(|i| i.time);
         let mut snapshot: Option<Vec<u8>> = None;
         if let net::Session::Hosting(_) = &self.session {
-            // Change-driven: undo depth is a cheap generation stamp; a
-            // fresh join always forces one.
+            // SESSION PERF: a snapshot is a FULL document save on the UI
+            // thread — it must never ride a pen-up directly. Send only
+            // when the doc changed, the pen is up, and the last one is
+            // at least 2.5s old (a fresh join always forces one).
             let stamp = self.editor.as_ref().map_or(0u64, |ed| ed.state.doc_gen);
-            if fresh_join || stamp != self.session_sent_gen {
+            let pen_busy = self
+                .editor
+                .as_ref()
+                .is_some_and(|ed| ed.canvas.stroke_active());
+            let due = stamp != self.session_sent_gen
+                && !pen_busy
+                && now - self.session_last_snap > 2.5;
+            if fresh_join || due {
                 self.session_sent_gen = stamp;
+                self.session_last_snap = now;
                 snapshot = self
                     .editor
                     .as_mut()
@@ -736,6 +786,8 @@ impl App {
             update_ready: None,
             update_swap: None,
             update_note: String::new(),
+            session_last_snap: 0.0,
+            session_last_presence: 0.0,
             settings_category: SettingsCategory::default(),
             capturing: None,
             backend,

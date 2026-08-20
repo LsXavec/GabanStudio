@@ -99,3 +99,15 @@ gates). Wire shape UNCHANGED: the mac covers whatever code string the
 guest sends, so a v0.1.3 guest typing any code still joins a new host.
 New guests join with address + key only; the Connect button joins
 directly. Loopback test amended: wrong KEY refuses; codeless joins.
+
+SESSION PERF repair 2026-08-19 (owner: both machines "pausing and
+unfreezing" rhythmically in-session). Three compounding causes fixed:
+(1) HOST: every pen-up's doc_gen bump triggered a FULL document save on
+the UI thread next frame — snapshots now require changed + pen-up +
+2.5s settle (fresh joins still force one). (2) GUEST: every snapshot
+rebuilt the whole Editor incl. GPU paint targets — the "buffering";
+same-paper-size snapshots now swap state IN PLACE keeping GPU targets,
+playhead, zoom. (3) presence throttled to 20Hz (was per-frame wet
+clones + JSON both directions). Known remaining cost, named: the
+host's snapshot save itself still runs on the UI thread once per
+settle window — an async save is the future fix if it still shows.
