@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "animstudio"
-version = "0.1.15"
+version = "0.2.0"
 dependencies = [
  "anim-core",
  "bytemuck",
@@ -136,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "animstudio-installer"
-version = "0.1.15"
+version = "0.2.0"
 dependencies = [
  "winresource",
 ]

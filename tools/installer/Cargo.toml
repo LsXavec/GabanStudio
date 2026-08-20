@@ -1,9 +1,9 @@
-[package]
+﻿[package]
 name = "animstudio-installer"
-version = "0.1.15"
+version = "0.2.0"
 edition = "2024"
 
-# PSD-shipping NEVER-DO 5: the installer is OUR OWN binary — no
+# PSD-shipping NEVER-DO 5: the installer is OUR OWN binary â€” no
 # third-party installer framework. It embeds the release exe at build
 # time, so `cargo build --release -p animstudio` must run first.
 

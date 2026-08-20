@@ -226,5 +226,44 @@ audits each stage against the NEVER-DO list before it ships.
   messages: later, only if Stage 0 stats say it matters.
 
 ---
+
+## 7. BUILD AMENDMENTS (2026-08-20, derived during the build)
+
+1. **The replay unit is the DAB LIST, not the point list.** The dab
+   builder proved pure over (points + latched params), and `Dab` is a
+   48-byte Pod — a bit-exact wire cast. Shipping dabs collapses ALL
+   brush-def replication (curves, jitter, scatter, spacing, density,
+   smudge color — smudge is FOLDED IN, immune to ordering) down to:
+   tip image + grain image (content-addressed, announced once per
+   session) + mode + opacity. Bit-exactness got strictly stronger;
+   points+def replay is retired as premortem risk.
+2. **The one boundary exception:** a stroke that CREATES its cel rides
+   the command lane whole (tiles included, once) — its fresh ids are
+   the reason (see 4). Steady-state strokes never ship pixels.
+3. **Stage 2 approximations (visual only, commit exact):** the live
+   overlay pre-scales alpha per dab and previews tip masks as the
+   procedural falloff; the sequenced commit replays exactly. Presence
+   wet ghosts retired — the dab stream IS the live view.
+4. **Id partition:** every guest allocates entity ids in its own 2^48
+   `next_id` range (armed at snapshot swap from peer_id). Parallel
+   creations cannot collide; the engine is untouched.
+5. **One law, every hand:** while in a room the engine's BASE author is
+   the local artist's name — every history entry carries its hand on
+   every machine (pinned by
+   `per_artist_undo_replays_identically_on_replicas`). Undo is a
+   sequenced `Undone{author}` event replayed via `undo_last_by`
+   everywhere — the HOST's undo included, routed through the same lane.
+   Snapshot-on-undo is retired; snapshots serve joins + resyncs only.
+   In-session undo reaches back to the session's start (solo entries
+   are untagged — deliberately out of a room's reach).
+6. **Guest predictions:** a guest's UI edits apply locally at once and
+   travel whole to be sequenced; the origin skips its echo. A refused
+   or conflicting prediction is healed by resync (LAN window ~ms; the
+   seq lane detects divergence). Save/SaveAs/Open stay host-only.
+7. **Known deferred:** host layout re-broadcast is join-only; internet
+   relay, binary JSON frames, and stroke-level GC of very long sessions
+   remain later rooms.
+
 *PSD gate passed 2026-08-20 — root: bit-exact stroke replay, audited
-cheaply, repaired narrowly. Stage 0 builds first.*
+cheaply, repaired narrowly. Stages 0–4 built same day; adversarial
+NEVER-DO audit run before ship.*
