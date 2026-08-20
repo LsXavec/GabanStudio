@@ -4531,7 +4531,16 @@ impl CanvasView {
                 for s in native_pen {
                     match s.phase {
                         PenPhase::Down => {
-                            self.stroke_start(s.pos, s.pressure, s.tilt, rect, to_paper, state);
+                            // CLICKTHROUGH FIX (owner 2026-08-19): raw pen
+                            // samples bypass egui's layering, so a pen-down
+                            // on a fold-out / window / panel floating over
+                            // the paper used to stroke THROUGH it. Same
+                            // layer test the brush cursor already uses.
+                            if ui.ctx().layer_id_at(s.pos) == Some(ui.layer_id()) {
+                                self.stroke_start(
+                                    s.pos, s.pressure, s.tilt, rect, to_paper, state,
+                                );
+                            }
                         }
                         PenPhase::Move => {
                             if self.touch_active {
@@ -4562,7 +4571,13 @@ impl CanvasView {
                         // would seed from last_tilt, which hover samples now
                         // update WITHOUT latching native — a hovered pen's
                         // angle must not leak into a finger/fallback stroke.
-                        self.stroke_start(*pos, *force, Some([0.0, 0.0]), rect, to_paper, state);
+                        // (Same clickthrough gate as the native path: raw
+                        // Touch events also bypass egui's layering.)
+                        if ui.ctx().layer_id_at(*pos) == Some(ui.layer_id()) {
+                            self.stroke_start(
+                                *pos, *force, Some([0.0, 0.0]), rect, to_paper, state,
+                            );
+                        }
                     }
                     egui::TouchPhase::Move => {
                         if !self.touch_active {
