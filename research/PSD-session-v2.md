@@ -115,3 +115,15 @@ per the ruling, refused with why. ALSO this evening (v0.1.5–v0.1.8):
 auto-update staged in background + installs on close; writer threads
 (no socket write on the UI thread — THE freeze); async snapshot save/
 load; wet-tail cap; versions visible in title/Foot/room-lamp hover.
+
+CRITICAL REPAIR 2026-08-19 (owner: "The first lift of the users pen it
+desyncs and I cant see their drawings after that. they say their
+drawings dissapera"): the guest pen-up branch set raster_stroke_done
+TRUE and returned — only the host path ever cleared it — so the commit
+block re-ran EVERY FRAME, re-reading and re-sending the guest's whole
+layer at 60 Hz after their first lift. One flag, every symptom: the
+flood desynced the host, the echo storm drowned the wire, and the
+wedged latch swallowed all later strokes. Fixed with the host path's
+own epilogue (latch cleared, dabs reset), synced_active deliberately
+untouched so the wet stroke stays visible until the host's echo applies
+via engine_changed. v0.1.10.

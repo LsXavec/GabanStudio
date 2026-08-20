@@ -2852,10 +2852,20 @@ impl CanvasView {
                                  (guests cannot create cels yet)",
                             );
                         }
-                        // Our GPU layer keeps the paint until the host's
-                        // snapshot lands, so the stroke never blinks out.
-                        self.raster_stroke_done = true;
+                        // Stroke epilogue — the same one the host path
+                        // runs (BUG 2026-08-19: raster_stroke_done stayed
+                        // TRUE here, so this block re-ran EVERY FRAME,
+                        // re-sending the whole layer 60×/s after the
+                        // guest's first pen lift — the desync flood).
+                        // synced_active is deliberately untouched: the
+                        // engine hash still matches, so no resync fires
+                        // and the GPU keeps showing the wet stroke until
+                        // the host's echo applies (engine_changed) and
+                        // uploads the committed truth seamlessly.
+                        self.cel_touched = false;
                         self.current.clear();
+                        self.dabs_flushed = 0;
+                        self.raster_stroke_done = false;
                         return;
                     }
                     // Commit against the slot LATCHED at stroke start — a
