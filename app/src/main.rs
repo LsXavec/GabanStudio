@@ -165,6 +165,10 @@ struct App {
     update_rx: Option<std::sync::mpsc::Receiver<crate::update::UpdateEvent>>,
     update_ready: Option<(String, String, u64)>,
     update_swap: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    /// AUTO-UPDATE: the fully-downloaded build waiting beside the exe.
+    /// Lamp click = instant relaunch; normal close = silent swap.
+    update_staged: Option<std::path::PathBuf>,
+    update_next_check: f64,
     update_note: String,
     /// SESSION PERF: last snapshot / presence send times (throttles).
     session_last_snap: f64,
@@ -319,14 +323,21 @@ impl App {
     /// PSD-shipping: read the updater threads' channels; light the
     /// lamp; when a swap lands, relaunch through the devloop's proven
     /// session-carry (NEVER-DO 2).
-    fn update_pump(&mut self, ctx: &egui::Context) {
+    fn update_pump(&mut self, _ctx: &egui::Context) {
         if let Some(rx) = &self.update_rx
             && let Ok(ev) = rx.try_recv()
         {
             self.update_rx = None;
             match ev {
                 crate::update::UpdateEvent::Ready { tag, url, size } => {
-                    self.update_note = format!("update {tag} available");
+                    // AUTO-UPDATE: stage immediately in the background —
+                    // the lamp click becomes instant, and a normal close
+                    // installs it silently.
+                    self.update_note = format!("update {tag} downloading…");
+                    if self.update_swap.is_none() && self.update_staged.is_none() {
+                        self.update_swap =
+                            Some(crate::update::spawn_stage(url.clone(), size));
+                    }
                     self.update_ready = Some((tag, url, size));
                 }
                 crate::update::UpdateEvent::UpToDate(tag) => {
@@ -343,16 +354,19 @@ impl App {
         {
             self.update_swap = None;
             match result {
-                Ok(new_exe) => {
-                    // The new build is seated. Save the session exactly as
-                    // the devloop does, then hand over.
-                    self.relaunch_into(new_exe, ctx);
+                Ok(staged) => {
+                    // Downloaded, verified, waiting. The Foot lamp offers
+                    // the instant relaunch; closing installs it silently.
+                    let tag = self
+                        .update_ready
+                        .as_ref()
+                        .map(|(t, _, _)| t.clone())
+                        .unwrap_or_default();
+                    self.update_note = format!("update {tag} ready");
+                    self.update_staged = Some(staged);
                 }
                 Err(why) => {
                     self.update_note = format!("update failed — {why}");
-                    if let Some(ed) = &mut self.editor {
-                        ed.state.refuse(format!("update refused — {why}"));
-                    }
                 }
             }
         }
@@ -785,6 +799,8 @@ impl App {
             settings_open: false,
             update_ready: None,
             update_swap: None,
+            update_staged: None,
+            update_next_check: 0.0,
             update_note: String::new(),
             session_last_snap: 0.0,
             session_last_presence: 0.0,
@@ -1755,6 +1771,17 @@ impl Editor {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self) {
+        // AUTO-UPDATE (owner's word: "on close it should update"): a
+        // FULLY-staged build installs silently at exit, so the next
+        // launch is the new version. Never blocks exit on an unfinished
+        // download; a devloop-armed build never stages one.
+        if let Some(staged) = self.update_staged.take() {
+            let _ = crate::update::swap_staged(&staged);
+        }
+    }
+
+
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // Native tablet backend: build on the FIRST frame — the message pump
         // is running now, so RealTimeStylus init can't deadlock on window
@@ -1947,6 +1974,24 @@ impl eframe::App for App {
         // PSD-shipping: the published-build channel (a thread talks to
         // GitHub; this only reads channels — never blocks the pen).
         self.update_pump(ui.ctx());
+        // AUTO-UPDATE: long sessions re-check every 15 minutes (launch
+        // checked once already; dev builds have update_rx wired off).
+        {
+            let t = ui.ctx().input(|i| i.time);
+            if self.update_next_check == 0.0 {
+                self.update_next_check = t + 900.0;
+            } else if t > self.update_next_check
+                && self.update_rx.is_none()
+                && self.update_ready.is_none()
+                && !devloop::armed()
+                && !self.config.update_repo.trim().is_empty()
+            {
+                self.update_next_check = t + 900.0;
+                self.update_rx = Some(crate::update::spawn_check(
+                    self.config.update_repo.trim().to_string(),
+                ));
+            }
+        }
         // The Foot's UPDATE READY click: start the download+swap thread,
         // guarded like a devloop handover (no stroke, no dialogs).
         if let Some(ed) = &mut self.editor
@@ -1956,12 +2001,20 @@ impl eframe::App for App {
             if busy {
                 ed.state
                     .refuse("refused — finish the stroke / close dialogs, then update");
-            } else if let Some((_tag, url, size)) = self.update_ready.clone()
-                && self.update_swap.is_none()
-            {
-                self.update_note = "downloading the published build…".into();
-                ed.state.status = "downloading the published build…".into();
-                self.update_swap = Some(crate::update::spawn_swap(url, size));
+            } else if let Some(staged) = self.update_staged.clone() {
+                // Already downloaded: swap and relaunch NOW.
+                match crate::update::swap_staged(&staged) {
+                    Ok(new_exe) => {
+                        self.update_staged = None;
+                        self.relaunch_into(new_exe, ui.ctx());
+                    }
+                    Err(why) => {
+                        self.update_note = format!("update failed — {why}");
+                        ed.state.refuse(format!("update refused — {why}"));
+                    }
+                }
+            } else if self.update_ready.is_some() {
+                ed.state.status = "still downloading the update…".into();
             }
         }
 

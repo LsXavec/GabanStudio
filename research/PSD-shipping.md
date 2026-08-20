@@ -100,3 +100,15 @@ build + handoff (repo name + first release need the owner).
   release (bare exe, no installer machinery — least suspicious path).
   v0.1.4 assets re-cut. THE REAL FIX is code signing (an EV/OV cert or
   Azure Trusted Signing) — named as a future gate with a real cost.
+- 2026-08-19 — OWNER AMENDMENT, verbatim: "again make the application
+  updatable on the other users pc so I dont have to reinstall from git
+  every time on close it should update." Two causes, two fixes:
+  (1) DISCIPLINE: same-tag asset re-cuts are INVISIBLE to installed
+  apps (0.1.4 == 0.1.4 → "up to date"). Every shipped fix now bumps the
+  patch version — no more --clobber re-cuts. (2) AUTO-UPDATE: when the
+  checker finds a newer release the download STAGES in the background
+  (length-checked as before, swap NOT performed); the Foot lamp becomes
+  an instant relaunch; and on normal app close a fully-staged build is
+  swapped silently so the NEXT launch is the new version. Never blocks
+  exit on an unfinished download; never touches a devloop-armed build;
+  the rename dance stays reversible.

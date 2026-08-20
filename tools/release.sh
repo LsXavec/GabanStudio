@@ -8,7 +8,10 @@ REPO="${2:-}"
 cargo test -p animstudio -p anim-core
 cargo build --release -p animstudio
 cargo build --release -p animstudio-installer
-echo "built: target/release/animstudio.exe + AnimStudio-Setup.exe"
+# Portable zip: the bare app, no installer machinery — the least
+# AV-suspicious download.
+powershell -NoProfile -Command "Compress-Archive -Force -Path target/release/animstudio.exe -DestinationPath target/release/GabanStudio-portable.zip"
+echo "built: exe + setup + portable zip"
 if [ -n "$REPO" ]; then
   # The updater looks for an asset named animstudio*.exe (not *setup*);
   # testers download AnimStudio-Setup.exe.

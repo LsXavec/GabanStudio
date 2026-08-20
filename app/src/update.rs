@@ -128,11 +128,10 @@ fn download(url: &str, expect: u64, to: &std::path::Path) -> Result<(), String> 
     std::fs::write(to, &bytes).map_err(|e| e.to_string())
 }
 
-/// The whole swap, run on a thread after the owner clicks: download →
-/// rename the RUNNING exe aside (Windows allows renaming, not deleting)
-/// → seat the new exe → report ready-to-relaunch. The caller then saves
-/// the session (devloop's own path) and spawns the new binary.
-pub fn spawn_swap(url: String, size: u64) -> Receiver<Result<std::path::PathBuf, String>> {
+/// Stage the new build beside the running exe (download + length check
+/// only — NOTHING is swapped). Runs on a thread; the caller decides
+/// when the swap happens: lamp click (relaunch) or app close (silent).
+pub fn spawn_stage(url: String, size: u64) -> Receiver<Result<std::path::PathBuf, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let result = (|| -> Result<std::path::PathBuf, String> {
@@ -140,21 +139,32 @@ pub fn spawn_swap(url: String, size: u64) -> Receiver<Result<std::path::PathBuf,
             let dir = me.parent().ok_or("no parent dir")?.to_path_buf();
             let staged = dir.join("animstudio-new.exe");
             download(&url, size, &staged)?;
-            let old = dir.join("animstudio-old.exe");
-            let _ = std::fs::remove_file(&old);
-            std::fs::rename(&me, &old).map_err(|e| format!("could not step aside: {e}"))?;
-            match std::fs::rename(&staged, &me) {
-                Ok(()) => Ok(me),
-                Err(e) => {
-                    // Roll back: the old exe returns to its seat.
-                    let _ = std::fs::rename(&old, &me);
-                    Err(format!("could not seat the new build: {e}"))
-                }
-            }
+            Ok(staged)
         })();
         let _ = tx.send(result);
     });
     rx
+}
+
+/// The swap itself: rename the RUNNING exe aside (Windows allows
+/// renaming, not deleting), seat the staged build, roll back on failure
+/// (NEVER-DO 1). Instant — the download already happened.
+pub fn swap_staged(staged: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let me = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = me.parent().ok_or("no parent dir")?.to_path_buf();
+    if !staged.exists() {
+        return Err("no staged build".into());
+    }
+    let old = dir.join("animstudio-old.exe");
+    let _ = std::fs::remove_file(&old);
+    std::fs::rename(&me, &old).map_err(|e| format!("could not step aside: {e}"))?;
+    match std::fs::rename(staged, &me) {
+        Ok(()) => Ok(me),
+        Err(e) => {
+            let _ = std::fs::rename(&old, &me);
+            Err(format!("could not seat the new build: {e}"))
+        }
+    }
 }
 
 /// A later successful launch sweeps the stepped-aside binary
