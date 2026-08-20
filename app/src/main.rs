@@ -559,18 +559,25 @@ impl App {
                 } => {
                     let tiles: Vec<(
                         anim_core::raster::TileCoord,
-                        std::sync::Arc<anim_core::raster::TileData>,
+                        Option<std::sync::Arc<anim_core::raster::TileData>>,
                     )> = tiles
                         .into_iter()
                         // TileData::from_vec re-hashes on arrival, so a
                         // malformed patch can never poison the host's
-                        // content addressing — and it length-checks.
-                        .filter(|(_, _, t)| t.len() == anim_core::raster::TILE_LEN)
+                        // content addressing — and it length-checks. An
+                        // EMPTY payload marks an erased tile (after=None).
+                        .filter(|(_, _, t)| {
+                            t.is_empty() || t.len() == anim_core::raster::TILE_LEN
+                        })
                         .map(|(x, y, texels)| {
-                            (
-                                (x, y),
-                                std::sync::Arc::new(anim_core::raster::TileData::from_vec(texels)),
-                            )
+                            let after = if texels.is_empty() {
+                                None
+                            } else {
+                                Some(std::sync::Arc::new(
+                                    anim_core::raster::TileData::from_vec(texels),
+                                ))
+                            };
+                            ((x, y), after)
                         })
                         .collect();
                     let outcome = self.editor.as_mut().map(|ed| {

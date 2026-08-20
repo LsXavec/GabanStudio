@@ -2838,13 +2838,37 @@ impl CanvasView {
                     if self.is_guest {
                         if let Some(did) = state.own_key_drawing() {
                             let name = state.active_layer_name();
-                            let wire: Vec<(i32, i32, Vec<u16>)> = tiles
-                                .into_iter()
-                                .map(|((x, y), t)| (x, y, t.rgba.to_vec()))
-                                .collect();
+                            // THE SECOND FLOOD (2026-08-19): the readback is
+                            // the WHOLE layer — every inked tile, including
+                            // all of the HOST's artwork. Sending it, then
+                            // receiving it doubled in the mirror echo, was
+                            // tens of MB per lift over a real drawing. A
+                            // control window sends only what ITS pen
+                            // changed: diff against the mirror by tile
+                            // hash; an empty payload marks an erased tile.
+                            let mirror = state
+                                .active_layer_tiles()
+                                .cloned()
+                                .unwrap_or_default();
+                            let mut wire: Vec<(i32, i32, Vec<u16>)> = Vec::new();
+                            let mut seen =
+                                std::collections::HashSet::with_capacity(tiles.len());
+                            for ((x, y), t) in &tiles {
+                                seen.insert((*x, *y));
+                                match mirror.get(&(*x, *y)) {
+                                    Some(m) if m.hash == t.hash => {}
+                                    _ => wire.push((*x, *y, t.rgba.to_vec())),
+                                }
+                            }
+                            for (c, _) in mirror.iter() {
+                                if !seen.contains(c) {
+                                    wire.push((c.0, c.1, Vec::new()));
+                                }
+                            }
                             if !wire.is_empty() {
+                                state.status =
+                                    format!("sent {} tile(s) to the host…", wire.len());
                                 self.edit_outbox.push((did.0, name, wire));
-                                state.status = "sent to the host…".into();
                             }
                         } else {
                             state.refuse(

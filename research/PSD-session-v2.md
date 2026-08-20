@@ -127,3 +127,15 @@ wedged latch swallowed all later strokes. Fixed with the host path's
 own epilogue (latch cleared, dabs reset), synced_active deliberately
 untouched so the wet stroke stays visible until the host's echo applies
 via engine_changed. v0.1.10.
+
+SECOND CRITICAL REPAIR 2026-08-19 (owner: "Still same bug ... 1 stroke
+and lift and everything goes mayhem" — through the v0.1.10 flag fix):
+the guest's pen-up read back and sent the ENTIRE layer — every inked
+tile, including all of the HOST's artwork — and the mirror echo
+returned it doubled (before+after). One lift over a real drawing = tens
+of MB of JSON through the connection's FIFO queue, with presence and
+commands jammed behind it. THE CONTROL-WINDOW FIX: the guest diffs the
+readback against its own live mirror BY TILE HASH and sends only
+changed tiles; an empty payload marks an erased tile (host builds
+after=None; the diff drops none→none). Status says "sent N tile(s)".
+v0.1.11 — both machines must match (room-lamp hover shows each build).

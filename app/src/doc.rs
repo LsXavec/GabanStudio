@@ -1901,7 +1901,7 @@ impl AppState {
         author: &str,
         drawing: DrawingId,
         layer_name: &str,
-        tiles: Vec<(TileCoord, Arc<TileData>)>,
+        tiles: Vec<(TileCoord, Option<Arc<TileData>>)>,
     ) -> Result<(), String> {
         let at = self.at();
         let Some(d) = self.cut().drawing(drawing) else {
@@ -1925,7 +1925,8 @@ impl AppState {
             .unwrap_or_default();
         let diff: TileDiff = tiles
             .into_iter()
-            .map(|(c, t)| (c, before.get(&c).cloned(), Some(t)))
+            .map(|(c, t)| (c, before.get(&c).cloned(), t))
+            .filter(|(_, b, a)| !(b.is_none() && a.is_none()))
             .collect();
         if diff.is_empty() {
             return Ok(());
