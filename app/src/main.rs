@@ -517,6 +517,9 @@ impl App {
                 }
                 net::NetEvent::Commands(batch) => {
                     net::slog(format!("APPLY cmds n={}", batch.len()));
+                    if let Some(ed) = &mut self.editor {
+                        ed.canvas.guest_ready = true;
+                    }
                     // SESSION MIRROR: the 1:1 control window — tiny
                     // patches applied to the mirror engine, no reloads.
                     if let Some(ed) = &mut self.editor {
@@ -541,6 +544,17 @@ impl App {
                     self.session_resync = true;
                 }
                 net::NetEvent::Snapshot(bytes) => {
+                    // Inflate (the wire carries deflated documents).
+                    let bytes = {
+                        use std::io::Read as _;
+                        let mut dec =
+                            flate2::read::DeflateDecoder::new(bytes.as_slice());
+                        let mut out = Vec::new();
+                        match dec.read_to_end(&mut out) {
+                            Ok(_) => out,
+                            Err(_) => bytes, // pre-compression peer
+                        }
+                    };
                     // ONE TRUTH (NEVER-DO 1): the host's document replaces
                     // ours wholesale, never merged. SESSION PERF 2: the
                     // PARSE runs on a worker — this arm only writes the
@@ -645,6 +659,9 @@ impl App {
                 net::NetEvent::Ended(why) => {
                     self.session = net::Session::Idle;
                     self.session_peers.clear();
+                    if let Some(ed) = &mut self.editor {
+                        ed.canvas.guest_ready = false;
+                    }
                     // AUDIT [13]: this reached ONLY the Settings page, so
                     // the artist kept drawing believing they were still
                     // in the room. Losing the room contradicts what they
@@ -744,7 +761,26 @@ impl App {
                             std::env::temp_dir().join("animstudio_session_out.animproj");
                         let bytes = anim_core::store::save(&project, &path)
                             .ok()
-                            .and_then(|_| std::fs::read(&path).ok());
+                            .and_then(|_| std::fs::read(&path).ok())
+                            .map(|raw| {
+                                // 90MB LOG LINE (2026-08-19): raster f16
+                                // tiles deflate hugely — compress on this
+                                // worker before the wire.
+                                use flate2::{Compression, write::DeflateEncoder};
+                                use std::io::Write as _;
+                                let raw_len = raw.len();
+                                let mut enc = DeflateEncoder::new(
+                                    Vec::new(),
+                                    Compression::fast(),
+                                );
+                                let _ = enc.write_all(&raw);
+                                let out = enc.finish().unwrap_or(raw);
+                                crate::net::slog(format!(
+                                    "SNAPSHOT built raw={raw_len} deflated={} bytes",
+                                    out.len()
+                                ));
+                                out
+                            });
                         let _ = tx.send(bytes);
                     });
                 }
@@ -811,6 +847,9 @@ impl App {
                                 && ed.state.engine.project.height
                                     == st.engine.project.height
                         });
+                        if let Some(ed) = &mut self.editor {
+                            ed.canvas.guest_ready = true;
+                        }
                         if same_size {
                             let ed = self.editor.as_mut().unwrap();
                             let frame = ed
@@ -2099,6 +2138,9 @@ impl eframe::App for App {
         if let Some(addr) = join_room {
             self.config.session.last_addr = addr.clone();
             self.config.save();
+            if let Some(ed) = &mut self.editor {
+                ed.canvas.guest_ready = false;
+            }
             self.session_join(addr, String::new());
         }
         // PSD-shipping: "check now" from the Plugins page.

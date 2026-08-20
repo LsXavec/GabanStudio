@@ -393,6 +393,11 @@ pub struct CanvasView {
     /// holds the paint layer.
     brush_engine: Option<crate::config::EngineDef>,
     brush_res_dirty: bool,
+    /// LAN-JOIN GUARD (2026-08-19): a guest whose mirror has not yet
+    /// arrived sees a blank canvas — a stroke committed against that
+    /// blank REPLACES the host's inked tiles at their lift. Refuse
+    /// strokes until the first snapshot/commands land.
+    pub(crate) guest_ready: bool,
     /// The paint layer holds a real tip mask right now (dabs carry the
     /// tip flag only while true).
     tip_active: bool,
@@ -539,6 +544,7 @@ impl CanvasView {
             request_brush_import: false,
             brush_engine: None,
             brush_res_dirty: false,
+            guest_ready: false,
             tip_active: false,
             tip_frames: 1,
             smudge_src: None,
@@ -4438,6 +4444,10 @@ impl CanvasView {
             // must reach the Aka lane and flash the canvas edge, exactly
             // as the mouse path and the hidden-layer guard already do.
             state.refuse("refused — composite view is read-only (C to edit)");
+            return false;
+        }
+        if self.is_guest && !self.guest_ready {
+            state.refuse("refused — the host's file is still arriving");
             return false;
         }
         // GUARD (CSP behavior): never paint into a layer you can't see.

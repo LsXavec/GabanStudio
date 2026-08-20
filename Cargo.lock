@@ -110,12 +110,13 @@ dependencies = [
 
 [[package]]
 name = "animstudio"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "anim-core",
  "bytemuck",
  "eframe",
  "egui_dock",
+ "flate2",
  "hmac",
  "naga",
  "octotablet",
@@ -135,7 +136,7 @@ dependencies = [
 
 [[package]]
 name = "animstudio-installer"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "winresource",
 ]

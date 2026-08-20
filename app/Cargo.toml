@@ -1,6 +1,6 @@
 [package]
 name = "animstudio"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 description = "Node-graph 2D animation studio - app shell"
 
@@ -24,6 +24,7 @@ sha1 = "0.11.0"
 hmac = "0.13.0"
 rand = "0.10.2"
 ureq = "3.4.0"
+flate2 = "1.1.9"
 
 [dev-dependencies]
 # WGSL shader-string validation in tests: cargo check can't see inside the

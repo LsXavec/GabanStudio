@@ -145,3 +145,16 @@ entirely — a LAN-trust trade the owner chose, recorded here; the
 "require key" latch restores the gate per room, and remote/keyed
 joining is unchanged. Wire compatible: open hosts simply skip the mac
 verification, so older guests join with whatever key they hold.
+
+THE 90MB LINE 2026-08-19 (first catch by the wire log, one line:
+"OUT kind=1 bytes=89960448"): the join snapshot was 90MB of
+uncompressed f16 raster — a minute over wifi. Everything the owner
+reported cascaded from it: "very delayed" (the transfer), "file
+drawings not showing" (mirror still in flight), "lift your pen it
+removes" (the guest drew against the BLANK mirror; their lift replaced
+the host's inked tiles with blank-merged ones), "still lags" (the pipe
+stayed saturated). Fixes: FRAME_DOC deflates on the snapshot worker and
+inflates on the reader (Compression::fast; raw+deflated sizes logged);
+and guests REFUSE strokes until the first snapshot/commands arrive
+("the host's file is still arriving") — a blank mirror can never again
+eat the host's ink. v0.1.15; both ends must match (deflated wire).
