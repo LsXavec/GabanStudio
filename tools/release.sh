@@ -14,7 +14,7 @@ if [ -n "$REPO" ]; then
   # testers download AnimStudio-Setup.exe.
   gh release create "$TAG" \
     --repo "$REPO" \
-    --title "AnimStudio $TAG" \
+    --title "Gaban Studio $TAG" \
     --notes "Draft build for testers." \
     "target/release/animstudio.exe" \
     "target/release/AnimStudio-Setup.exe"

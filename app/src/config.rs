@@ -795,7 +795,7 @@ pub struct SessionConfig {
 }
 
 fn default_update_repo() -> String {
-    "LsXavec/AnimStudio".into()
+    "LsXavec/GabanStudio".into()
 }
 
 fn default_username() -> String {

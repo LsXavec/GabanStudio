@@ -82,7 +82,7 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1720.0, 960.0])
-            .with_title("AnimStudio"),
+            .with_title("Gaban Studio"),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             surface,
             ..Default::default()
@@ -90,7 +90,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "AnimStudio",
+        "Gaban Studio",
         native_options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(plate::visuals());

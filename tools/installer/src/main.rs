@@ -1,4 +1,4 @@
-//! AnimStudio-Setup (research/PSD-shipping.md, gate 2026-08-19): our own
+//! Gaban Studio setup (research/PSD-shipping.md + PSD-rename): our own
 //! installer — the release exe embedded at build time, seated into
 //! %LOCALAPPDATA%\AnimStudio with a Start-Menu shortcut and a per-user
 //! uninstall entry. Never touches HKLM or anything system-wide
@@ -21,7 +21,7 @@ fn install_dir() -> Option<PathBuf> {
 fn start_menu_lnk() -> Option<PathBuf> {
     Some(
         PathBuf::from(std::env::var_os("APPDATA")?)
-            .join("Microsoft/Windows/Start Menu/Programs/AnimStudio.lnk"),
+            .join("Microsoft/Windows/Start Menu/Programs/Gaban Studio.lnk"),
     )
 }
 
@@ -43,7 +43,7 @@ fn main() {
 }
 
 fn run_install() {
-    println!("AnimStudio {VERSION} — installing (per-user, no admin needed)");
+    println!("Gaban Studio {VERSION} — installing (per-user, no admin needed)");
     let Some(dir) = install_dir() else {
         println!("no LOCALAPPDATA on this machine — cannot install.");
         pause_and_exit(1);
@@ -59,7 +59,7 @@ fn run_install() {
         let old = dir.join("animstudio-old.exe");
         let _ = std::fs::remove_file(&old);
         if let Err(e) = std::fs::rename(&exe, &old) {
-            println!("an AnimStudio is running and could not step aside ({e}).");
+            println!("a Gaban Studio is running and could not step aside ({e}).");
             println!("close it and run this installer again.");
             pause_and_exit(1);
         }
@@ -84,7 +84,7 @@ fn run_install() {
         let script = format!(
             "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{}');\
              $s.TargetPath='{}';$s.WorkingDirectory='{}';\
-             $s.Description='AnimStudio';$s.Save()",
+             $s.Description='Gaban Studio';$s.Save()",
             lnk.display(),
             exe.display(),
             dir.display()
@@ -103,10 +103,10 @@ fn run_install() {
     // Per-user uninstall entry (HKCU only — NEVER-DO 5).
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\AnimStudio";
     for (name, value) in [
-        ("DisplayName", "AnimStudio".to_string()),
+        ("DisplayName", "Gaban Studio".to_string()),
         ("DisplayVersion", VERSION.to_string()),
         ("InstallLocation", dir.display().to_string()),
-        ("Publisher", "AnimStudio".to_string()),
+        ("Publisher", "Gaban Studio".to_string()),
         (
             "UninstallString",
             format!("\"{}\" --uninstall", uninst.display()),
@@ -118,13 +118,13 @@ fn run_install() {
     }
     println!("  registered the uninstall entry (per-user)");
 
-    println!("\ninstalled. launching AnimStudio…");
+    println!("\ninstalled. launching Gaban Studio…");
     let _ = std::process::Command::new(&exe).current_dir(&dir).spawn();
     pause_and_exit(0);
 }
 
 fn run_uninstall() {
-    println!("AnimStudio — uninstalling");
+    println!("Gaban Studio — uninstalling");
     let Some(dir) = install_dir() else {
         pause_and_exit(1);
     };
@@ -132,7 +132,9 @@ fn run_uninstall() {
     let _ = std::fs::remove_file(dir.join("animstudio-old.exe"));
     let _ = std::fs::remove_file(dir.join("animstudio-new.exe"));
     if let Some(lnk) = start_menu_lnk() {
-        let _ = std::fs::remove_file(lnk);
+        let _ = std::fs::remove_file(&lnk);
+        // Installs made before the rename left the old shortcut name.
+        let _ = std::fs::remove_file(lnk.with_file_name("AnimStudio.lnk"));
     }
     let _ = std::process::Command::new("reg")
         .args([
