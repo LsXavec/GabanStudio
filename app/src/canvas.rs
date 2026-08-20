@@ -460,6 +460,13 @@ pub struct CanvasView {
     /// bytes), refreshed whenever the brush resources re-arm.
     pub(crate) armed_tip_wire: Option<(WireRes, std::sync::Arc<Vec<u8>>)>,
     pub(crate) armed_grain_wire: Option<(WireGrain, std::sync::Arc<Vec<u8>>)>,
+    /// STAGE 2: other artists' live ink — incoming dab batches
+    /// (stroke id, stroke opacity, dabs), the strokes currently wet in
+    /// the remote overlay, and the strokes whose commits landed (their
+    /// overlay clears once all are done).
+    pub(crate) remote_wet_inbox: Vec<(u64, f32, Vec<Dab>)>,
+    pub(crate) remote_wet_end: Vec<u64>,
+    remote_live: std::collections::HashSet<u64>,
     /// A guest's pending undo(false)/redo(true) request for the host.
     pub(crate) history_request: Option<bool>,
     /// SESSION presence (PSD-session-room): peers as the canvas draws
@@ -632,6 +639,9 @@ impl CanvasView {
             stroke_next_id: 0,
             armed_tip_wire: None,
             armed_grain_wire: None,
+            remote_wet_inbox: Vec::new(),
+            remote_wet_end: Vec::new(),
+            remote_live: std::collections::HashSet::new(),
             history_request: None,
             peers: Vec::new(),
             presence_pos: None,
@@ -1294,20 +1304,8 @@ impl CanvasView {
         self.brush_engine.as_ref()
     }
 
-    /// Our live wet stroke, in paper space, for session presence.
-    /// SESSION PERF 4: only the recent TAIL — sending the whole stroke
-    /// 20×/s made long strokes O(n²) on the wire (megabytes/second),
-    /// which lagged the RECEIVING machine. The ghost is a preview of
-    /// the pen's tip; the committed stroke arrives whole via sync.
-    pub(crate) fn presence_wet(&self) -> Vec<[f32; 3]> {
-        const TAIL: usize = 300;
-        let skip = self.current.len().saturating_sub(TAIL);
-        self.current
-            .iter()
-            .skip(skip)
-            .map(|p| [p.x, p.y, p.pressure])
-            .collect()
-    }
+    // (presence_wet is RETIRED — STAGE 2's dab stream IS the live view;
+    // peers with old builds still send wet points and they still draw.)
 
     /// The slate's arming line: what the pen does right now, in a word.
     pub fn arming_pencil(&self) -> String {
@@ -2896,6 +2894,11 @@ impl CanvasView {
                 }
                 self.synced_active = state.active_layer_key();
             }
+            // STAGE 2 (PSD-multiplayer-rescope): other artists' live ink
+            // streams into the remote overlay EVERY frame — its target
+            // is separate from active and wet, so this is safe even
+            // mid-local-stroke.
+            self.run_remote_wet(p);
             if self.current.is_empty() && !self.raster_stroke_done {
                 // An abandoned stroke (e.g. playback started mid-stroke) may have
                 // left dabs in the wet buffer — drop them, they were never
@@ -3339,6 +3342,11 @@ impl CanvasView {
                 }
                 // Layers over the active one.
                 painter.image(p.above_id(), paper_rect, uv, Color32::WHITE);
+                // STAGE 2: other artists' LIVE ink, straight from their
+                // dab streams (alpha pre-scaled; cleared at commit).
+                if !self.remote_live.is_empty() {
+                    painter.image(p.remote_id(), paper_rect, uv, Color32::WHITE);
+                }
             }
         }
 
@@ -4030,6 +4038,30 @@ impl CanvasView {
         }));
     }
 
+    /// STAGE 2: drain incoming remote dab batches into the overlay and
+    /// clear it once every live remote stroke's commit has replayed.
+    /// Preview approximations (room-documented): alpha carries the
+    /// stroke opacity per dab; tip masks preview as the procedural
+    /// falloff. The COMMIT replays them exactly.
+    fn run_remote_wet(&mut self, p: &mut PaintLayer) {
+        for (stroke_id, opacity, mut dabs) in std::mem::take(&mut self.remote_wet_inbox) {
+            self.remote_live.insert(stroke_id);
+            for d in &mut dabs {
+                d.color[3] *= opacity.clamp(0.0, 1.0);
+                d.tip = 0.0;
+            }
+            p.paint_remote(&dabs);
+        }
+        let mut any_ended = false;
+        for id in std::mem::take(&mut self.remote_wet_end) {
+            self.remote_live.remove(&id);
+            any_ended = true;
+        }
+        if any_ended && self.remote_live.is_empty() {
+            p.clear_remote();
+        }
+    }
+
     /// STAGE 1: replay queued remote strokes through the SAME machinery
     /// local strokes use — sync the target layer's engine tiles into the
     /// ACTIVE target, stamp the dabs, composite, read back, commit with
@@ -4042,6 +4074,10 @@ impl CanvasView {
         }
         while let Some(rs) = self.replay_inbox.pop_front() {
             let done = self.replay_one(p, state, &rs);
+            // STAGE 2: the commit landed (or died) — the live overlay
+            // for this stroke drops next drain, seamlessly replaced by
+            // the committed pixels the sync below uploads.
+            self.remote_wet_end.push(rs.stroke_id);
             crate::net::slog(format!(
                 "REPLAY stroke={} author={} dabs={} ok={} changed={} {}",
                 rs.stroke_id,

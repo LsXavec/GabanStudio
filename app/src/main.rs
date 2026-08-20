@@ -550,7 +550,16 @@ impl App {
             }
             net::StrokeFrame::Dabs { stroke_id, dabs } => {
                 if let Some(g) = self.session_gather.get_mut(&stroke_id) {
-                    g.dabs.extend(dabs);
+                    g.dabs.extend(dabs.iter().copied());
+                    // STAGE 2: ink strokes preview LIVE in the overlay
+                    // (erase/alpha-lock appear at commit).
+                    if g.mode == 0
+                        && let Some(ed) = &mut self.editor
+                    {
+                        ed.canvas
+                            .remote_wet_inbox
+                            .push((stroke_id, g.opacity, dabs));
+                    }
                 }
             }
             net::StrokeFrame::End(e) => self.seq_event(SeqEv::End(e)),
@@ -582,7 +591,16 @@ impl App {
             }
             net::StrokeFrame::Dabs { stroke_id, dabs } => {
                 if let Some(g) = self.session_gather.get_mut(&stroke_id) {
-                    g.dabs.extend(dabs);
+                    g.dabs.extend(dabs.iter().copied());
+                    // STAGE 2: ink strokes preview LIVE in the overlay
+                    // (erase/alpha-lock appear at commit).
+                    if g.mode == 0
+                        && let Some(ed) = &mut self.editor
+                    {
+                        ed.canvas
+                            .remote_wet_inbox
+                            .push((stroke_id, g.opacity, dabs));
+                    }
                 }
             }
             net::StrokeFrame::End(e) => {
@@ -604,6 +622,10 @@ impl App {
                             "stroke {} from {author} refused: {why}",
                             e.stroke_id
                         ));
+                        // STAGE 2: drop its live overlay on the host too.
+                        if let Some(ed) = &mut self.editor {
+                            ed.canvas.remote_wet_end.push(e.stroke_id);
+                        }
                         // A sequenced no-op keeps every lane in step and
                         // clears the other guests' gathers.
                         self.session_seq += 1;
@@ -701,9 +723,17 @@ impl App {
                             c.send_resync_request();
                         }
                     }
+                    if let Some(ed) = &mut self.editor {
+                        ed.canvas.remote_wet_end.push(e.stroke_id);
+                    }
                     return;
                 };
                 if !e.ok {
+                    // STAGE 2: the stroke died at the host — its live
+                    // overlay drops.
+                    if let Some(ed) = &mut self.editor {
+                        ed.canvas.remote_wet_end.push(e.stroke_id);
+                    }
                     return;
                 }
                 match self.resolve_replay(e.stroke_id, g) {
@@ -1078,7 +1108,9 @@ impl App {
                 frame: ed.state.view.frame,
                 cursor: ed.canvas.presence_pos,
                 pen_down: ed.canvas.stroke_active(),
-                wet: ed.canvas.presence_wet(),
+                // STAGE 2: the wet ghost is RETIRED — the dab stream IS
+                // the live view now, at zero extra wire cost.
+                wet: Vec::new(),
             })
         } else {
             None

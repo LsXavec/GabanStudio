@@ -185,6 +185,10 @@ pub struct PaintLayer {
     // pen-up (composite_wet), so overlapping dabs never build past the opacity
     // ceiling — Krita's temporaryTarget / indirect-painting model.
     wet: Target,
+    /// STAGE 2 (PSD-multiplayer-rescope): other artists' LIVE ink —
+    /// their dab batches accumulate here as they stream; drawn over the
+    /// art and cleared when the strokes' commits replay.
+    remote: Target,
 
     /// Fullscreen pass blending a sampled texture × opacity onto a target.
     composite_pipeline: wgpu::RenderPipeline,
@@ -454,6 +458,15 @@ impl PaintLayer {
             height,
             filter,
         );
+        let remote = Self::make_target(
+            &device,
+            &renderer,
+            &queue,
+            &uniform_buf,
+            width,
+            height,
+            filter,
+        );
         let below = Self::make_target(
             &device,
             &renderer,
@@ -601,6 +614,7 @@ impl PaintLayer {
             above,
             scratch,
             wet,
+            remote,
             composite_pipeline,
             composite_layout,
             composite_bind_wet,
@@ -937,6 +951,7 @@ impl PaintLayer {
             for t in [
                 &self.active,
                 &self.wet,
+                &self.remote,
                 &self.below,
                 &self.above,
                 &self.scratch,
@@ -965,6 +980,7 @@ impl PaintLayer {
         };
         self.active = mk(self);
         self.wet = mk(self);
+        self.remote = mk(self);
         self.below = mk(self);
         self.above = mk(self);
         self.scratch = mk(self);
@@ -1243,6 +1259,22 @@ impl PaintLayer {
     pub fn clear_wet(&mut self) {
         let view = self.wet.view.clone();
         self.clear_view(&view, "clear_wet");
+    }
+
+    /// STAGE 2: other artists' live ink — dabs accumulate as their
+    /// batches stream in (alpha pre-scaled by the canvas).
+    pub fn paint_remote(&mut self, dabs: &[Dab]) {
+        let view = self.remote.view.clone();
+        self.paint_into(&view, dabs, PaintMode::Ink);
+    }
+
+    pub fn clear_remote(&mut self) {
+        let view = self.remote.view.clone();
+        self.clear_view(&view, "clear_remote");
+    }
+
+    pub fn remote_id(&self) -> egui::TextureId {
+        self.remote.tex_id
     }
 
     /// PSD-multiplayer-rescope Stage 1: replay a remote stroke's INK dabs
