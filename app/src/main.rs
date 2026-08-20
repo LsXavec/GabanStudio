@@ -2833,6 +2833,12 @@ impl Editor {
                             self.state.refuse("refused — finish the stroke first");
                         } else {
                             self.dock = Pane::forge_dock();
+                            // Off-spine like every custom room (saved rooms
+                            // do the same): otherwise a forge room entered
+                            // from LAYOUT kept the stage, and the Canvas
+                            // pane stayed the read-only composite PREVIEW
+                            // instead of test paper — the owner's report.
+                            self.stage = None;
                             self.state.status = "the forge room".into();
                         }
                         ui.close();
