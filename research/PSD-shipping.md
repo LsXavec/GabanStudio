@@ -90,3 +90,13 @@ build + handoff (repo name + first release need the owner).
   anonymous download verified BYTE-IDENTICAL to the built binary.
   update_repo now DEFAULTS to LsXavec/AnimStudio — testers update with
   zero setup; the dev build (devloop-armed) still never self-updates.
+- 2026-08-19 — AV FALSE-POSITIVE AMENDMENT (owner: "its flagging the
+  other machine as a virus"). Causes named: unsigned fresh binary with
+  ZERO version metadata, a setup exe that embeds+writes another exe
+  (dropper pattern), and the cmd/ping self-delete idiom (textbook
+  malware tell). Shipped: winresource version metadata on both exes
+  (verified in the built binary), self-delete REMOVED (uninstall.exe
+  stays behind, says why), and GabanStudio-portable.zip added to every
+  release (bare exe, no installer machinery — least suspicious path).
+  v0.1.4 assets re-cut. THE REAL FIX is code signing (an EV/OV cert or
+  Azure Trusted Signing) — named as a future gate with a real cost.

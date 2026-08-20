@@ -17,7 +17,7 @@ if [ -n "$REPO" ]; then
     --title "Gaban Studio $TAG" \
     --notes "Draft build for testers." \
     "target/release/animstudio.exe" \
-    "target/release/AnimStudio-Setup.exe"
+    "target/release/AnimStudio-Setup.exe" \n    "target/release/GabanStudio-portable.zip"
   echo "published $TAG to $REPO"
 else
   echo "no repo given — binaries built, nothing published"

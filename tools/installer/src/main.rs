@@ -147,14 +147,10 @@ fn run_uninstall() {
     // deliberately left in place. Say so.
     println!("removed the app, shortcut and registry entry.");
     println!("your projects, brushes and settings in %APPDATA%/AnimStudio were kept.");
-    // Self-delete last, via a detached cmd that waits for this process.
-    if let Ok(me) = std::env::current_exe() {
-        let _ = std::process::Command::new("cmd")
-            .args([
-                "/C",
-                &format!("ping -n 3 127.0.0.1 >nul & del \"{}\"", me.display()),
-            ])
-            .spawn();
-    }
+    // NO self-delete: the cmd/ping-delay delete idiom is a textbook
+    // malware heuristic (owner's tester got flagged). uninstall.exe
+    // stays behind as an inert leftover the user can bin by hand.
+    println!("(you can delete uninstall.exe yourself — self-deleting");
+    println!(" programs look like malware to antivirus heuristics.)");
     pause_and_exit(0);
 }

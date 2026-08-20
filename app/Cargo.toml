@@ -30,3 +30,6 @@ ureq = "3.4.0"
 # shader source constants, and a typo there is otherwise a STARTUP PANIC.
 # Same major as wgpu (they release in lockstep).
 naga = { version = "29", features = ["wgsl-in"] }
+
+[build-dependencies]
+winresource = "0.1.31"
