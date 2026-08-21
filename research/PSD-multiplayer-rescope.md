@@ -328,7 +328,16 @@ created under a live pen always broadcasts its AddDrawing/SetCell
 (X-sheet entry) whole, with the streamed stroke aborted for peers.
 Either artist drawing populates the X-sheet on both machines, always.
 
-**The v0.2.4 queue (remaining, severity order):**
+**v0.2.4 (shipped — owner: "It should send right away to the Host or
+the Host right away to the user"):** version sync rides the session —
+the host's build travels in the Welcome, peers' in PeerJoined; the
+OLDER side fetches its update immediately, both directions. The
+X-sheet no-populate report was a mixed-build window (the logs proved
+matched builds apply cel structure in 75ms: OUT cmds raw=234313
+deflated=5477 → APPLY 75ms later); the room now keeps builds matched
+by itself. XSHEET structure-command vitals added.
+
+**The v0.2.5 queue (remaining, severity order):**
 1. Redo re-audit (a repaired guest's redo can reintroduce drifted
    after-images unaudited).
 3. Robust peer identity (echo-skip/undo keyed by display name; give

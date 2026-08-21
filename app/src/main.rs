@@ -224,6 +224,11 @@ struct App {
     session_snap_targets: std::collections::HashSet<u64>,
     session_snap_pending: Vec<u64>,
     session_ev_hold: Vec<net::NetEvent>,
+    /// v0.2.5 (the shared pencil box): hosting — the serialized bank of
+    /// this machine's usable brushes; joined — the host's presets,
+    /// usable alongside our own (session-scoped, never saved).
+    session_bank_json: Option<String>,
+    session_presets: Vec<config::BrushPreset>,
     /// LAN DISCOVERY: rooms visible on this network (always listening).
     discovery: net::Discovery,
     /// SESSION PERF 2: the host's snapshot builder, off the UI thread
@@ -334,6 +339,20 @@ struct GatherStroke {
     dabs: Vec<crate::paint::Dab>,
 }
 
+/// v0.2.5 (the shared pencil box): the bank a guest's presets arrive
+/// under — filtered out of every config save, cleared with the room.
+const SESSION_BANK: &str = "host session";
+
+/// v0.2.5: one host preset on the wire — engine keys rewritten to
+/// content hashes whose images already rode the session res cache.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BankEntry {
+    preset: config::BrushPreset,
+    /// (tip image hash, GIH frame count)
+    tip: Option<(u64, u32)>,
+    grain: Option<u64>,
+}
+
 /// STAGE 1: one sequenced arrival on the guest lane (applied in host
 /// order; buffered until the join snapshot lands).
 enum SeqEv {
@@ -367,6 +386,9 @@ impl App {
                         self.session = net::Session::Hosting(h);
                         self.session_sent_gen = u64::MAX;
                         self.session_lane_reset();
+                        // v0.2.5: the shared pencil box — built once,
+                        // every joiner receives it.
+                        self.build_session_bank();
                         // STAGE 0: a fresh room starts a fresh remote log —
                         // guests' numbered lines land here, in order.
                         if let Some(base) = std::env::var_os("APPDATA") {
@@ -543,6 +565,8 @@ impl App {
         self.session_snap_targets.clear();
         self.session_snap_pending.clear();
         self.session_ev_hold.clear();
+        self.session_bank_json = None;
+        self.session_presets.clear();
         // v0.2.1 (audit): stale cross-room channels must die with the
         // room — a late snapshot from an OLD room must never replace
         // this document, and guest_ready must never survive into the
@@ -941,6 +965,123 @@ impl App {
         }
     }
 
+    /// v0.2.5 (owner: "after you join all the hosts Usable brushes work
+    /// alongside your own installed ones"): serialize this machine's
+    /// preset list for the room. Tip/grain images go content-addressed
+    /// into the session res cache (every joiner receives that whole
+    /// cache already); the presets travel with rewritten "net<hash>"
+    /// keys. Runs once per hosting start.
+    fn build_session_bank(&mut self) {
+        let mut entries: Vec<BankEntry> = Vec::new();
+        for p in &self.config.presets {
+            let mut e = BankEntry {
+                preset: p.clone(),
+                tip: None,
+                grain: None,
+            };
+            if let Some(eng) = &mut e.preset.engine {
+                if let Some(key) = eng.tip_key.clone()
+                    && let Some(dir) = crate::kpp::tips_dir()
+                    && let Some((w, h, bytes)) =
+                        canvas::load_cache_png(&dir.join(format!("{key}.png")))
+                {
+                    let frames: u32 = std::fs::read_to_string(dir.join(format!("{key}.frames")))
+                        .ok()
+                        .and_then(|t| t.trim().parse().ok())
+                        .unwrap_or(1);
+                    let hash = canvas::wire_hash(&bytes);
+                    self.session_res
+                        .insert(hash, (w, h, std::sync::Arc::new(bytes)));
+                    eng.tip_key = Some(format!("net{hash:016x}"));
+                    e.tip = Some((hash, frames));
+                } else if eng.tip_key.is_some() {
+                    // The tip file is missing on THIS machine — the
+                    // preset paints procedurally here, so it does there.
+                    eng.tip_key = None;
+                }
+                if let Some(key) = eng.grain_key.clone()
+                    && let Some(dir) = crate::kpp::grains_dir()
+                    && let Some((w, h, bytes)) =
+                        canvas::load_cache_png(&dir.join(format!("{key}.png")))
+                {
+                    let hash = canvas::wire_hash(&bytes);
+                    self.session_res
+                        .insert(hash, (w, h, std::sync::Arc::new(bytes)));
+                    eng.grain_key = Some(format!("net{hash:016x}"));
+                    e.grain = Some(hash);
+                } else if eng.grain_key.is_some() {
+                    eng.grain_key = None;
+                }
+            }
+            entries.push(e);
+        }
+        let n = entries.len();
+        self.session_bank_json = serde_json::to_string(&entries).ok();
+        net::slog(format!(
+            "BANK built: {n} preset(s), {} image(s) in the session cache",
+            self.session_res.len()
+        ));
+    }
+
+    /// v0.2.5: install the host's bank — materialize the images this
+    /// machine lacks into its brush caches (content-hash names, exact
+    /// bytes), and shelve the presets session-scoped beside our own.
+    fn install_session_bank(&mut self, json: &str) {
+        let Ok(entries) = serde_json::from_str::<Vec<BankEntry>>(json) else {
+            net::slog("BANK parse failed");
+            return;
+        };
+        let mut installed = Vec::with_capacity(entries.len());
+        for mut e in entries {
+            if let Some((hash, frames)) = e.tip {
+                if let (Some(dir), Some((w, h, bytes))) =
+                    (crate::kpp::tips_dir(), self.session_res.get(&hash))
+                {
+                    let path = dir.join(format!("net{hash:016x}.png"));
+                    if !path.exists()
+                        && let Err(err) = crate::kpp::write_cache_png(&path, *w, *h, bytes)
+                    {
+                        net::slog(format!("BANK tip write failed: {err}"));
+                    }
+                    let _ = std::fs::write(
+                        dir.join(format!("net{hash:016x}.frames")),
+                        frames.to_string(),
+                    );
+                } else if let Some(eng) = &mut e.preset.engine {
+                    net::slog(format!("BANK tip image {hash:016x} missing — procedural"));
+                    eng.tip_key = None;
+                }
+            }
+            if let Some(hash) = e.grain {
+                if let (Some(dir), Some((w, h, bytes))) =
+                    (crate::kpp::grains_dir(), self.session_res.get(&hash))
+                {
+                    let path = dir.join(format!("net{hash:016x}.png"));
+                    if !path.exists()
+                        && let Err(err) = crate::kpp::write_cache_png(&path, *w, *h, bytes)
+                    {
+                        net::slog(format!("BANK grain write failed: {err}"));
+                    }
+                } else if let Some(eng) = &mut e.preset.engine {
+                    eng.grain_key = None;
+                }
+            }
+            // Marked by name AND bank: visible whose it is, filtered
+            // out of every config save, gone with the room.
+            e.preset.name = format!("⌂ {}", e.preset.name);
+            e.preset.bank = SESSION_BANK.to_string();
+            installed.push(e.preset);
+        }
+        net::slog(format!("BANK installed: {} host preset(s)", installed.len()));
+        if let Some(ed) = &mut self.editor {
+            ed.state.status = format!(
+                "the host's pencil box arrived — {} brush(es) beside your own",
+                installed.len()
+            );
+        }
+        self.session_presets = installed;
+    }
+
     /// v0.2.4 (owner): "It should send right away to the Host or the
     /// Host right away to the user" — a newer build in the room makes
     /// the OLDER side fetch its update IMMEDIATELY, either direction,
@@ -1307,6 +1448,11 @@ impl App {
                 // unasked; Settings ▸ Layout offers it as a LOAD.
                 net::NetEvent::HostLayout(json) => {
                     self.session_host_layout = Some(json);
+                }
+                // v0.2.5: the host's pencil box — usable alongside our
+                // own for the session's life.
+                net::NetEvent::BrushBank(json) => {
+                    self.install_session_bank(&json);
                 }
                 net::NetEvent::RepairRequest {
                     client,
@@ -1679,6 +1825,11 @@ impl App {
                     }
                     if let Some(json) = &layout {
                         h.send_layout_to(*j, json.clone());
+                    }
+                    // v0.2.5: the host's usable brushes, after their
+                    // images (same writer — ordered).
+                    if let Some(json) = &self.session_bank_json {
+                        h.send_bank_to(*j, json.clone());
                     }
                 }
             }
@@ -2166,6 +2317,8 @@ impl App {
             session_snap_targets: std::collections::HashSet::new(),
             session_snap_pending: Vec::new(),
             session_ev_hold: Vec::new(),
+            session_bank_json: None,
+            session_presets: Vec::new(),
             discovery: net::spawn_discovery(),
             session_snap_rx: None,
             session_load_rx: None,
@@ -3201,6 +3354,10 @@ impl eframe::App for App {
         let pen = self.config.pen.clone();
         let layers_cfg = self.config.layers.clone();
         let mut presets = self.config.presets.clone();
+        // v0.2.5: the host's brushes ride beside our own while joined
+        // (marked ⌂; the save-back below filters them out — session-
+        // scoped, never persisted).
+        presets.extend(self.session_presets.iter().cloned());
         let mut presets_dirty = false;
         let native_pen = self.pump_tablet();
 
@@ -3236,7 +3393,12 @@ impl eframe::App for App {
                 room,
             );
             if presets_dirty {
-                self.config.presets = presets.clone();
+                // v0.2.5: the host's session brushes never persist.
+                self.config.presets = presets
+                    .iter()
+                    .filter(|p| p.bank != SESSION_BANK)
+                    .cloned()
+                    .collect();
                 self.config.save();
             }
             if editor.request_new {

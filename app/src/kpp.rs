@@ -464,6 +464,24 @@ pub fn installed_krita_paths() -> Vec<std::path::PathBuf> {
 }
 
 /// The tip-mask cache (stage A): stamp images decoded to RGBA PNG.
+/// v0.2.5 (the shared pencil box): write a raw RGBA image into a brush
+/// cache EXACTLY — no premultiply roundtrip; the bytes that arrive are
+/// the bytes that land.
+pub fn write_cache_png(
+    path: &std::path::Path,
+    w: u32,
+    h: u32,
+    rgba: &[u8],
+) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut writer = enc.write_header().map_err(|e| e.to_string())?;
+    writer.write_image_data(rgba).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn tips_dir() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA")?;
     let dir = std::path::PathBuf::from(base)

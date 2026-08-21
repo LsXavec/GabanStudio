@@ -357,6 +357,13 @@ pub enum Msg {
     HostLayout {
         json: String,
     },
+    /// v0.2.5 (owner: "after you join all the hosts Usable brushes work
+    /// alongside your own installed ones"): the host's preset list,
+    /// keys rewritten to content hashes whose images already rode the
+    /// session res cache. Session-scoped guest-side, never saved.
+    BrushBank {
+        json: String,
+    },
     /// STAGE 0 (PSD-multiplayer-rescope): a guest's numbered wire-log
     /// lines, shipped through the join — the ordered debug channel.
     DebugLog {
@@ -769,6 +776,8 @@ pub enum NetEvent {
     },
     /// Guest side: the host's loadable layout (Settings ▸ Layout).
     HostLayout(String),
+    /// Guest side: the host's usable brushes (v0.2.5).
+    BrushBank(String),
     /// Host side: a guest's numbered log lines (Stage 0 debug channel).
     DebugLog {
         from: String,
@@ -1262,6 +1271,14 @@ impl Host {
         }
     }
 
+    /// v0.2.5: the host's usable brushes, to one joiner (after the res
+    /// images on the same writer — order is the contract).
+    pub fn send_bank_to(&self, client: u64, json: String) {
+        if let Some(c) = self.clients.lock().unwrap().get_mut(&client) {
+            let _ = c.tx.send(Out::Json(Box::new(Msg::BrushBank { json })));
+        }
+    }
+
     /// The authoritative document — v0.2.2: to ONE requester, preceded
     /// by its sequence stamp on the same writer. Snapshots never go to
     /// the whole room again.
@@ -1451,6 +1468,9 @@ impl Client {
                         }
                         Ok(Msg::HostLayout { json }) => {
                             let _ = tx.send(NetEvent::HostLayout(json));
+                        }
+                        Ok(Msg::BrushBank { json }) => {
+                            let _ = tx.send(NetEvent::BrushBank(json));
                         }
                         Ok(Msg::RepairTiles {
                             drawing,
