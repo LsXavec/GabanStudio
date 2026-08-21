@@ -776,16 +776,40 @@ impl App {
 
     /// Guest lane: sequenced arrivals apply in host order once the join
     /// snapshot has landed; before that they buffer (NEVER-DO 2).
+    /// v0.2.6 (third live test's log): the lane ALSO freezes the moment
+    /// a snapshot is announced (meta seen) until its swap — applying
+    /// events during the transfer/parse window advanced applied_seq
+    /// past the doc's as_of, and on a slow link every snapshot arrived
+    /// "stale" forever (the livelock's second life). Buffered events
+    /// with seq ≤ meta skip at the drain; the rest apply in order.
     fn seq_event(&mut self, ev: SeqEv) {
         let ready = self
             .editor
             .as_ref()
             .is_some_and(|ed| ed.canvas.guest_ready);
-        if !ready {
+        let snapshot_inbound =
+            self.session_snapshot_seq.is_some() || self.session_load_rx.is_some();
+        if !ready || snapshot_inbound {
             self.session_buffer.push(ev);
             return;
         }
         self.apply_seq_event(ev);
+    }
+
+    /// v0.2.6: unfreeze the lane — drain everything buffered while a
+    /// snapshot was inbound (dups vs the doc skip via the seq gate).
+    fn drain_session_buffer(&mut self) {
+        if self.session_buffer.is_empty() {
+            return;
+        }
+        net::slog(format!(
+            "LANE thaw: draining {} buffered event(s)",
+            self.session_buffer.len()
+        ));
+        let buffered = std::mem::take(&mut self.session_buffer);
+        for ev in buffered {
+            self.apply_seq_event(ev);
+        }
     }
 
     fn apply_seq_event(&mut self, ev: SeqEv) {
@@ -2104,6 +2128,9 @@ impl App {
                             if let net::Session::Joined(c) = &mut self.session {
                                 c.send_resync_request();
                             }
+                            // v0.2.6: the lane is unfrozen until the
+                            // fresh meta arrives — let it flow.
+                            self.drain_session_buffer();
                         } else {
                             let same_size = self.editor.as_ref().is_some_and(|ed| {
                                 ed.state.engine.project.width == st.engine.project.width
@@ -2180,14 +2207,8 @@ impl App {
                             // Resume the lane exactly where the document
                             // leaves off, then apply what buffered.
                             self.session_applied_seq = meta;
-                            net::slog(format!(
-                                "SNAPSHOT applied as_of={meta}, draining {} buffered",
-                                self.session_buffer.len()
-                            ));
-                            let buffered = std::mem::take(&mut self.session_buffer);
-                            for ev in buffered {
-                                self.apply_seq_event(ev);
-                            }
+                            net::slog(format!("SNAPSHOT applied as_of={meta}"));
+                            self.drain_session_buffer();
                             self.session_status = "file synced".into();
                         }
                     }
@@ -2196,9 +2217,13 @@ impl App {
                         // joining guest just hung. Log + ask again.
                         net::slog(format!("SNAPSHOT parse refused: {e} — re-requesting"));
                         self.session_status = format!("snapshot refused: {e}");
+                        // v0.2.6: the meta paired with THIS failed doc
+                        // must not freeze the lane or mislabel the next.
+                        self.session_snapshot_seq = None;
                         if let net::Session::Joined(c) = &mut self.session {
                             c.send_resync_request();
                         }
+                        self.drain_session_buffer();
                     }
                 }
             }

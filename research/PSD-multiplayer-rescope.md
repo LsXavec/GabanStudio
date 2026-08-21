@@ -337,7 +337,21 @@ matched builds apply cel structure in 75ms: OUT cmds raw=234313
 deflated=5477 → APPLY 75ms later); the room now keeps builds matched
 by itself. XSHEET structure-command vitals added.
 
-**The v0.2.5 queue (remaining, severity order):**
+**v0.2.5 (shipped — owner: "Compile the brushes into the joined
+session so after you join all the hosts Usable brushes work allongside
+your own installed oones"):** the shared pencil box. The host
+serializes its preset list at hosting start; tip/grain images ride the
+content-addressed session res cache every joiner already receives
+(keys rewritten to net<hash>); the guest materializes images into its
+brush caches (exact bytes, .frames sidecars) and shelves the presets
+session-scoped — ⌂-marked, filtered from every config save, cleared
+with the room. Amends the Stage-4 personalization law cleanly: your
+own brushes stay exactly yours; the host's are a loan for the room's
+life. (A guest's own forge brushes already worked in the room via the
+inline stroke defs — this closes the other direction: ARMING the
+host's brushes yourself.)
+
+**The v0.2.6 queue (remaining, severity order):**
 1. Redo re-audit (a repaired guest's redo can reintroduce drifted
    after-images unaudited).
 3. Robust peer identity (echo-skip/undo keyed by display name; give
