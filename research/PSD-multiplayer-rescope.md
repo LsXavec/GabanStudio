@@ -351,7 +351,18 @@ life. (A guest's own forge brushes already worked in the room via the
 inline stroke defs — this closes the other direction: ARMING the
 host's brushes yourself.)
 
-**The v0.2.6 queue (remaining, severity order):**
+**v0.2.6 (shipped, from the log alone — no owner report needed):** the
+two-guest run's tail showed the stale-snapshot loop REBORN on a slow
+link: the host-side hold (v0.2.2) froze the build, but the guest kept
+applying live events through the ~10s transfer + parse, so applied_seq
+outran every doc's as_of (plus one meta mislabeled as_of=0 — the
+take() side channel from the audit). Now the GUEST lane freezes the
+moment a snapshot is announced and buffers until the swap; ≤as_of
+skips, the rest drains in order; stale/parse-fail branches thaw
+explicitly. The instrument paid for itself: NEVER-DO 4's channel
+caught and diagnosed this with the owner away.
+
+**The v0.2.7 queue (remaining, severity order):**
 1. Redo re-audit (a repaired guest's redo can reintroduce drifted
    after-images unaudited).
 3. Robust peer identity (echo-skip/undo keyed by display name; give
