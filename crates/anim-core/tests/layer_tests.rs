@@ -141,6 +141,7 @@ fn add_remove_move_setprops_all_undo_exactly() {
                     name: "shadow 2".into(),
                     visible: false,
                     opacity: 0.5,
+                    ..LayerProps::default()
                 },
             }],
         )
@@ -269,6 +270,7 @@ fn interleaved_layer_ops_fuzz_undo_all_redo_all() {
                             name: format!("renamed {step}"),
                             visible: step % 2 == 0,
                             opacity: (step as f32 % 10.0) / 10.0,
+                            ..LayerProps::default()
                         },
                     }],
                 )
@@ -440,6 +442,7 @@ fn out_of_range_opacity_is_rejected() {
                     name: "line".into(),
                     visible: true,
                     opacity: bad,
+                    ..LayerProps::default()
                 },
             }],
         );
@@ -543,6 +546,7 @@ fn hash_law_pixels_order_props_count_rename_does_not() {
                     name: "linework".into(),
                     visible: false,
                     opacity: 1.0,
+                    ..LayerProps::default()
                 },
             }],
         )
@@ -563,6 +567,7 @@ fn hash_law_pixels_order_props_count_rename_does_not() {
                     name: "linework".into(),
                     visible: true,
                     opacity: 0.5,
+                    ..LayerProps::default()
                 },
             }],
         )
@@ -662,6 +667,7 @@ fn flatten_composites_opacity_overlap_and_missing_tiles() {
                         name: "line".into(),
                         visible: true,
                         opacity: 0.5,
+                        ..LayerProps::default()
                     },
                 },
             ],
@@ -698,6 +704,7 @@ fn flatten_composites_opacity_overlap_and_missing_tiles() {
                     name: "line".into(),
                     visible: false,
                     opacity: 0.5,
+                    ..LayerProps::default()
                 },
             }],
         )
@@ -802,6 +809,7 @@ fn three_layer_stack_survives_sqlite_roundtrip() {
                         name: "shadow".into(),
                         visible: false,
                         opacity: 0.25,
+                        ..LayerProps::default()
                     },
                 },
             ],
@@ -914,8 +922,140 @@ fn v4_file_migrates_to_one_layer() {
         let v: String = conn
             .query_row("SELECT value FROM meta WHERE key='schema_version'", (), |r| r.get(0))
             .unwrap();
-        assert_eq!(v, "8", "re-save writes the current schema");
+        assert_eq!(v, "9", "re-save writes the current schema");
     }
+
+    std::fs::remove_file(&path).unwrap();
+}
+
+// ---- PSD-cel-layers: roles + definitions ------------------------------------
+
+#[test]
+fn role_keys_roundtrip_and_names_infer_once() {
+    use anim_core::model::LayerRole;
+    for r in LayerRole::ALL {
+        assert_eq!(LayerRole::from_key(r.key()), Some(r), "key {} roundtrips", r.key());
+    }
+    // Legacy names map to their pipeline roles; unknown names stay Custom.
+    assert_eq!(LayerRole::infer("line"), LayerRole::Line);
+    assert_eq!(LayerRole::infer(" Color "), LayerRole::Color);
+    assert_eq!(LayerRole::infer("shadow"), LayerRole::Shadow);
+    assert_eq!(LayerRole::infer("kage-sen"), LayerRole::ShadowLine);
+    assert_eq!(LayerRole::infer("correction"), LayerRole::Correction);
+    assert_eq!(LayerRole::infer("paint"), LayerRole::Custom, "merged v4 surface: no guess");
+    assert_eq!(LayerRole::infer("my weird layer"), LayerRole::Custom);
+    // Ranks are a strict pipeline order; Custom has none.
+    let ranks: Vec<u8> = LayerRole::ALL.iter().filter_map(|r| r.rank()).collect();
+    assert!(ranks.windows(2).all(|w| w[0] < w[1]), "ranks strictly increase");
+    assert_eq!(LayerRole::Custom.rank(), None);
+    assert!(LayerRole::ShadowLine.is_line() && !LayerRole::Shadow.is_line());
+    // CelLayer::new infers; with_role is explicit.
+    let l = CelLayer::new(LayerId(1), "line");
+    assert_eq!(l.props.role, LayerRole::Line);
+}
+
+#[test]
+fn definitions_never_change_the_content_hash() {
+    // NEVER-DO 1's twin: role / chip / lock / onion DEFINE the layer, they
+    // don't paint it — eval cache and GPU sync must never churn on them.
+    use anim_core::model::LayerRole;
+    let mut f = layer_fixture();
+    let h0 = drawing(&f).content_hash();
+    let mut props = drawing(&f).layer(f.line).unwrap().props.clone();
+    props.role = LayerRole::Correction;
+    props.chip = Some([1, 2, 3, 255]);
+    props.locked = true;
+    props.onion = false;
+    f.engine
+        .apply(
+            "define",
+            vec![Command::SetCelLayerProps {
+                at: f.at,
+                drawing: f.d,
+                layer: f.line,
+                props,
+            }],
+        )
+        .unwrap();
+    assert_eq!(drawing(&f).content_hash(), h0, "definitions are not pixels");
+    // ...and the inverse restores the old definition exactly.
+    let before = drawing(&f).layer(f.line).unwrap().props.clone();
+    f.engine.undo().unwrap();
+    assert_eq!(drawing(&f).layer(f.line).unwrap().props.role, LayerRole::Line);
+    f.engine.redo().unwrap();
+    assert_eq!(drawing(&f).layer(f.line).unwrap().props, before);
+}
+
+#[test]
+fn definitions_survive_save_and_old_files_infer_roles() {
+    use anim_core::model::LayerRole;
+    let mut f = layer_fixture();
+    // Rename the line layer AND redefine it: the role must survive the
+    // rename through the file (the premortem's first failure).
+    let mut props = drawing(&f).layer(f.line).unwrap().props.clone();
+    props.name = "genga L".into();
+    props.chip = Some([10, 20, 30, 255]);
+    props.locked = true;
+    props.onion = false;
+    f.engine
+        .apply(
+            "define",
+            vec![Command::SetCelLayerProps {
+                at: f.at,
+                drawing: f.d,
+                layer: f.line,
+                props,
+            }],
+        )
+        .unwrap();
+
+    let dir = std::env::temp_dir().join("anim_core_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("defs_{}.animproj", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    f.engine.save(&path).unwrap();
+    let loaded = Engine::load(&path).unwrap();
+    assert_eq!(f.engine.project, loaded.project, "v9 round-trip is exact");
+    let d = loaded
+        .project
+        .cut(f.at.scene, f.at.cut)
+        .unwrap()
+        .drawing(f.d)
+        .unwrap();
+    let line = d.layer(f.line).unwrap();
+    assert_eq!(line.props.name, "genga L");
+    assert_eq!(line.props.role, LayerRole::Line, "role survives the rename");
+    assert_eq!(line.props.chip, Some([10, 20, 30, 255]));
+    assert!(line.props.locked && !line.props.onion);
+
+    // Forge the SAME file as a v8 save: no defs rows, old version stamp.
+    // Roles must come back inferred from the names, the rest defaults.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "DELETE FROM cel_layer_defs;
+             UPDATE meta SET value='8' WHERE key='schema_version';",
+        )
+        .unwrap();
+    }
+    let old = Engine::load(&path).unwrap();
+    let d = old
+        .project
+        .cut(f.at.scene, f.at.cut)
+        .unwrap()
+        .drawing(f.d)
+        .unwrap();
+    assert_eq!(d.layer(f.color).unwrap().props.role, LayerRole::Color);
+    assert_eq!(d.layer(f.shadow).unwrap().props.role, LayerRole::Shadow);
+    // "genga L" is not a legacy name — inference refuses to guess.
+    assert_eq!(d.layer(f.line).unwrap().props.role, LayerRole::Custom);
+    assert!(!d.layer(f.line).unwrap().props.locked);
+    assert!(d.layer(f.line).unwrap().props.onion);
+    // Re-save writes v9 defs; the inferred roles are now persisted.
+    old.save(&path).unwrap();
+    let again = Engine::load(&path).unwrap();
+    assert_eq!(old.project, again.project);
 
     std::fs::remove_file(&path).unwrap();
 }

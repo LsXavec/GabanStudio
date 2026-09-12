@@ -36,15 +36,161 @@ pub struct Stroke {
     pub color: [u8; 4],
 }
 
-/// Per-layer compositing properties. Kept as ONE struct so `SetCelLayerProps`
-/// replaces it wholesale — the exact inverse is trivially the prior struct.
+/// What a cel layer IS in the anime pipeline (PSD-cel-layers). The ROLE —
+/// never the display name — drives behaviour: stack position, identity
+/// colour, the line guard, frame-to-frame follow. Names are labels.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+pub enum LayerRole {
+    /// LO / BG plate to draw against.
+    Reference,
+    /// Shiage base paint.
+    Color,
+    /// Kage — the shadow colour region.
+    Shadow,
+    /// Hi — the highlight colour region.
+    Highlight,
+    /// Blue-pencil rough.
+    Rough,
+    /// Kage-sen — the shadow boundary trace line.
+    ShadowLine,
+    /// Hi-sen — the highlight boundary trace line.
+    HighlightLine,
+    /// The main trace line (genga / douga clean line).
+    Line,
+    /// Sakkan correction overlay.
+    Correction,
+    /// Anything else — no pipeline position.
+    #[default]
+    Custom,
+}
+
+impl LayerRole {
+    /// Every role, in pipeline order (bottom → top), Custom last.
+    pub const ALL: [LayerRole; 10] = [
+        LayerRole::Reference,
+        LayerRole::Color,
+        LayerRole::Shadow,
+        LayerRole::Highlight,
+        LayerRole::Rough,
+        LayerRole::ShadowLine,
+        LayerRole::HighlightLine,
+        LayerRole::Line,
+        LayerRole::Correction,
+        LayerRole::Custom,
+    ];
+
+    /// Stable persisted key (file + config). Never rename these.
+    pub fn key(self) -> &'static str {
+        match self {
+            LayerRole::Reference => "reference",
+            LayerRole::Color => "color",
+            LayerRole::Shadow => "shadow",
+            LayerRole::Highlight => "highlight",
+            LayerRole::Rough => "rough",
+            LayerRole::ShadowLine => "shadow_line",
+            LayerRole::HighlightLine => "highlight_line",
+            LayerRole::Line => "line",
+            LayerRole::Correction => "correction",
+            LayerRole::Custom => "custom",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<LayerRole> {
+        LayerRole::ALL.into_iter().find(|r| r.key() == key)
+    }
+
+    /// Display label (the anime term in parentheses where it helps).
+    pub fn label(self) -> &'static str {
+        match self {
+            LayerRole::Reference => "reference (LO)",
+            LayerRole::Color => "color",
+            LayerRole::Shadow => "shadow (kage)",
+            LayerRole::Highlight => "highlight (hi)",
+            LayerRole::Rough => "rough",
+            LayerRole::ShadowLine => "shadow line (kage-sen)",
+            LayerRole::HighlightLine => "highlight line (hi-sen)",
+            LayerRole::Line => "line",
+            LayerRole::Correction => "correction (sakkan)",
+            LayerRole::Custom => "custom",
+        }
+    }
+
+    /// Pipeline stack rank, bottom → top. Custom has none (it inserts
+    /// beside the active layer instead).
+    pub fn rank(self) -> Option<u8> {
+        match self {
+            LayerRole::Reference => Some(0),
+            LayerRole::Color => Some(1),
+            LayerRole::Shadow => Some(2),
+            LayerRole::Highlight => Some(3),
+            LayerRole::Rough => Some(4),
+            LayerRole::ShadowLine => Some(5),
+            LayerRole::HighlightLine => Some(6),
+            LayerRole::Line => Some(7),
+            LayerRole::Correction => Some(8),
+            LayerRole::Custom => None,
+        }
+    }
+
+    /// Trace-line roles — what the line guard protects.
+    pub fn is_line(self) -> bool {
+        matches!(
+            self,
+            LayerRole::Line | LayerRole::ShadowLine | LayerRole::HighlightLine
+        )
+    }
+
+    /// The role a legacy layer NAME implies — applied ONCE, when a file
+    /// saved before roles existed loads (and when code creates a layer by
+    /// name). Unknown names are Custom: guessing wrong is worse.
+    pub fn infer(name: &str) -> LayerRole {
+        let n = name.trim().to_lowercase();
+        match n.as_str() {
+            "line" | "lines" | "genga" | "douga" | "clean" | "trace" | "ink" => LayerRole::Line,
+            "color" | "colour" | "paint fill" | "fill" | "base" => LayerRole::Color,
+            "shadow" | "kage" => LayerRole::Shadow,
+            "highlight" | "hi" => LayerRole::Highlight,
+            "rough" | "roughs" | "sketch" => LayerRole::Rough,
+            "shadow line" | "shadow_line" | "kage-sen" | "kagesen" => LayerRole::ShadowLine,
+            "highlight line" | "highlight_line" | "hi-sen" | "hisen" => {
+                LayerRole::HighlightLine
+            }
+            "correction" | "sakkan" | "corrections" => LayerRole::Correction,
+            "reference" | "ref" | "lo" | "layout" | "bg" => LayerRole::Reference,
+            _ => LayerRole::Custom,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Per-layer properties. Kept as ONE struct so `SetCelLayerProps` replaces
+/// it wholesale — the exact inverse is trivially the prior struct.
+/// PSD-cel-layers: role / chip / locked / onion DEFINE the layer; none of
+/// them changes composited pixels, so `content_hash` excludes them (the
+/// same exclusion the name has).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayerProps {
-    /// Free text: "line", "color", "shadow", "correction", ...
+    /// Display label — free text. Behaviour keys off `role`, never this.
     pub name: String,
     pub visible: bool,
     /// 0..=1, applied when compositing this layer into the cel.
     pub opacity: f32,
+    #[serde(default)]
+    pub role: LayerRole,
+    /// Identity colour override (None = the role's convention colour).
+    #[serde(default)]
+    pub chip: Option<[u8; 4]>,
+    /// Edit-lock: every painting tool refuses on a locked layer.
+    #[serde(default)]
+    pub locked: bool,
+    /// Participates in onion ghosts.
+    #[serde(default = "yes")]
+    pub onion: bool,
 }
 
 impl Default for LayerProps {
@@ -53,6 +199,10 @@ impl Default for LayerProps {
             name: "paint".into(),
             visible: true,
             opacity: 1.0,
+            role: LayerRole::Custom,
+            chip: None,
+            locked: false,
+            onion: true,
         }
     }
 }
@@ -69,11 +219,27 @@ pub struct CelLayer {
 }
 
 impl CelLayer {
+    /// A fresh layer; its role is inferred from the name.
     pub fn new(id: LayerId, name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            id,
+            props: LayerProps {
+                role: LayerRole::infer(&name),
+                name,
+                ..LayerProps::default()
+            },
+            raster: RasterLayer::empty(),
+        }
+    }
+
+    /// A fresh layer with an explicit role.
+    pub fn with_role(id: LayerId, name: impl Into<String>, role: LayerRole) -> Self {
         Self {
             id,
             props: LayerProps {
                 name: name.into(),
+                role,
                 ..LayerProps::default()
             },
             raster: RasterLayer::empty(),

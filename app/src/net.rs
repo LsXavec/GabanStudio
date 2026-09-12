@@ -221,6 +221,17 @@ pub fn generate_key() -> String {
 // document snapshot bytes.
 // ---------------------------------------------------------------------------
 
+/// PSD-cel-layers NEVER-DO 4: the oldest build whose wire this one
+/// speaks. Layer DEFINITIONS (role, chip, lock, onion) ride inside every
+/// command that carries LayerProps; an older peer would deserialize them
+/// as defaults and the room would fork on definitions nobody can see.
+/// Both sides refuse across the floor, with an update hint.
+pub const MIN_PEER_VERSION: &str = "0.3.0";
+
+fn below_floor(version: &str) -> bool {
+    crate::update::parse_version(version) < crate::update::parse_version(MIN_PEER_VERSION)
+}
+
 const FRAME_JSON: u8 = 0;
 const FRAME_DOC: u8 = 1;
 /// SESSION MIRROR: a serde_json Vec<Command> batch (host → guests).
@@ -901,6 +912,28 @@ impl Host {
                                     let _ = write_frame(&mut stream, FRAME_JSON, &msg);
                                     return;
                                 }
+                                // PSD-cel-layers NEVER-DO 4: a build
+                                // below the wire floor can't carry layer
+                                // definitions — refuse with the fix.
+                                if below_floor(&version) {
+                                    let shown = if version.is_empty() {
+                                        "an older build".to_string()
+                                    } else {
+                                        format!("v{version}")
+                                    };
+                                    let msg = serde_json::to_vec(&Msg::Refused {
+                                        why: format!(
+                                            "this room needs Gaban Studio v{MIN_PEER_VERSION} \
+                                             or newer (you run {shown}) — update, then join"
+                                        ),
+                                    })
+                                    .unwrap();
+                                    let _ = write_frame(&mut stream, FRAME_JSON, &msg);
+                                    slog(format!(
+                                        "join refused: '{username}' runs {shown} < floor v{MIN_PEER_VERSION}"
+                                    ));
+                                    return;
+                                }
                                 // v0.2.1 (audit): the join NAME is this
                                 // artist's wire identity (echo-skip,
                                 // per-artist undo, refusal routing) — a
@@ -1392,6 +1425,19 @@ impl Client {
             Some(Msg::Refused { why }) => return Err(why),
             _ => return Err("auth: unexpected reply".into()),
         };
+        // PSD-cel-layers NEVER-DO 4, the other direction: a host below
+        // the floor would strip our layer definitions.
+        if below_floor(&host_version) {
+            let shown = if host_version.is_empty() {
+                "an older build".to_string()
+            } else {
+                format!("v{host_version}")
+            };
+            return Err(format!(
+                "the host runs {shown} — this room needs v{MIN_PEER_VERSION}+ on both \
+                 machines; ask the host to update"
+            ));
+        }
         stream.set_read_timeout(None).ok();
         let (tx, rx) = channel();
         let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
@@ -1824,6 +1870,34 @@ mod tests {
         }
         assert!(host_got, "the host must see the guest's Begin");
         assert!(relay_got, "the other guest must see the relayed Begin");
+    }
+
+    #[test]
+    fn a_build_below_the_wire_floor_is_refused_at_the_door() {
+        // PSD-cel-layers NEVER-DO 4: an older build would strip layer
+        // definitions from every command it relays. Forge its handshake.
+        let host = Host::start(0, generate_key(), String::new(), "floor".into(), true, "h".into())
+            .expect("bind");
+        let mut s = TcpStream::connect(("127.0.0.1", host.port)).expect("connect");
+        s.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+        let (_, hello) = read_frame(&mut s).expect("nonce");
+        assert!(matches!(serde_json::from_slice::<Msg>(&hello), Ok(Msg::Nonce { .. })));
+        let auth = serde_json::to_vec(&Msg::Auth {
+            username: "old-timer".into(),
+            code: String::new(),
+            mac: String::new(),
+            version: "0.2.6".into(),
+        })
+        .unwrap();
+        write_frame(&mut s, FRAME_JSON, &auth).unwrap();
+        let (_, reply) = read_frame(&mut s).expect("reply");
+        match serde_json::from_slice::<Msg>(&reply) {
+            Ok(Msg::Refused { why }) => {
+                assert!(why.contains(MIN_PEER_VERSION), "the refusal names the fix: {why}")
+            }
+            _ => panic!("a below-floor build must be refused"),
+        }
+        assert!(!below_floor(crate::update::CURRENT_VERSION), "this build meets its own floor");
     }
 
     #[test]

@@ -947,7 +947,15 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         .on_hover_text("add a layer at its pipeline position");
     });
 
-    // Owned snapshot so row actions can mutate state freely.
+    // Owned snapshot so row actions can mutate state freely. The FULL props
+    // ride along: every row action clones-and-modifies, so a rename or an
+    // eye click can never strip a layer's definition (PSD-cel-layers
+    // NEVER-DO 1).
+    let full: Vec<LayerProps> = state
+        .strip_layers()
+        .iter()
+        .map(|(_, l)| l.props.clone())
+        .collect();
     let rows: Vec<(LayerId, String, bool, f32)> = state
         .strip_layers()
         .iter()
@@ -970,8 +978,9 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         ui.add_space(2.0);
         return;
     }
-    for (lid, name, visible, opacity) in rows.iter() {
+    for (row_i, (lid, name, visible, opacity)) in rows.iter().enumerate() {
         let is_active = state.view.active_layer == *name;
+        let props = full[row_i].clone();
         ui.horizontal(|ui| {
             // Eye: visibility toggle (one click = one undo step). Hidden is a
             // configuration, so the struck eye dims — it does not go red.
@@ -980,9 +989,8 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 state.layer_set_props(
                     *lid,
                     LayerProps {
-                        name: name.clone(),
                         visible: !visible,
-                        opacity: *opacity,
+                        ..props.clone()
                     },
                 );
             }
@@ -1015,12 +1023,13 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                         if done {
                             let trimmed = buf.trim();
                             if !escaped && !trimmed.is_empty() && trimmed != name {
+                                // A rename is a LABEL change — the role
+                                // (and with it every behaviour) stays.
                                 state.layer_set_props(
                                     *lid,
                                     LayerProps {
                                         name: trimmed.to_string(),
-                                        visible: *visible,
-                                        opacity: *opacity,
+                                        ..props.clone()
                                     },
                                 );
                             }
@@ -1099,9 +1108,8 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                     state.layer_set_props(
                         *lid,
                         LayerProps {
-                            name: name.clone(),
-                            visible: *visible,
                             opacity: live,
+                            ..props.clone()
                         },
                     );
                 }
@@ -1112,9 +1120,8 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 state.layer_set_props(
                     *lid,
                     LayerProps {
-                        name: name.clone(),
-                        visible: *visible,
                         opacity: live,
+                        ..props.clone()
                     },
                 );
             }

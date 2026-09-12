@@ -3,7 +3,11 @@
 Room opened 2026-09-12. Extends research/layers-per-cel-design.md
 (ratified 2026-07-18 — its laws stand: id-addressed layers, one gesture
 = one undo step, hidden-layer guard, soft cap 8, clone-the-held-stack).
-Status: DRAFT — awaiting the owner's ratification. No build until then.
+**PSD gate passed 2026-09-12 — root: an explicit, persisted,
+wire-carried layer ROLE, separate from its name.** Owner: "ratified
+push till completed". Calls taken as recommended: Stage 5 (rendered
+Multiply) OUT — its own room later; held-stack clone keeps precedence
+over the preset.
 
 ---
 
@@ -173,5 +177,5 @@ renamed line and refuses on ambiguity; lock guard refuses pen, eraser,
 fill, and lasso; the join floor refuses an older build.
 
 ---
-*PSD gate: PENDING — awaiting ratification (premortem, NEVER-DOs, and
-the Stage 5 in/out call).*
+*PSD gate passed 2026-09-12 — root: explicit persisted role. Stages
+1–4 build; Stage 5 deferred to its own room.*

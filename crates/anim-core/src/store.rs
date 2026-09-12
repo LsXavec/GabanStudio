@@ -12,11 +12,11 @@ use rusqlite::Connection;
 use crate::error::{EngineError, Result};
 use crate::graph::{Graph, Node, NodeKind};
 use crate::ids::*;
-use crate::model::{CelLayer, Cut, Drawing, LayerProps, Project, Scene};
+use crate::model::{CelLayer, Cut, Drawing, LayerProps, LayerRole, Project, Scene};
 use crate::raster::{RasterLayer, TileData};
 use crate::xsheet::{Column, Exposure, ParamColumn, ParamInterp, ParamKey, XSheet};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -65,7 +65,16 @@ CREATE TABLE IF NOT EXISTS param_keys(
     PRIMARY KEY(column_id, frame));
 CREATE TABLE IF NOT EXISTS cut_audio(
     cut_id INTEGER PRIMARY KEY, name TEXT NOT NULL, bytes BLOB NOT NULL);
+CREATE TABLE IF NOT EXISTS cel_layer_defs(
+    layer_id INTEGER PRIMARY KEY, role TEXT NOT NULL, chip INTEGER,
+    locked INTEGER NOT NULL, onion INTEGER NOT NULL);
 ";
+// v9 (PSD-cel-layers): layer DEFINITIONS live in their own side table, not
+// new cel_layers columns — saves rewrite INTO the existing file, and
+// CREATE IF NOT EXISTS would keep an old file's cel_layers shape, so new
+// columns there would break every re-save of a v5..v8 file. A missing
+// defs row (older file, or a row an older build left stale) means: infer
+// the role from the name, defaults for the rest.
 // `raster_layers`/`tiles` are the LEGACY (schema <= 4) single-raster tables.
 // They stay in the schema + the DELETE batch (uniform create+purge pattern, and
 // re-saving an opened v4 file empties them in the same transaction), but
@@ -86,7 +95,7 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
          DELETE FROM cel_layers; DELETE FROM cel_tiles;
          DELETE FROM cut_images;
          DELETE FROM param_columns; DELETE FROM param_keys;
-         DELETE FROM cut_audio;",
+         DELETE FROM cut_audio; DELETE FROM cel_layer_defs;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -142,6 +151,10 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
         let mut ins_tile = tx.prepare(
             "INSERT INTO cel_tiles(layer_id, tx, ty, bytes) VALUES (?1, ?2, ?3, ?4)",
         )?;
+        let mut ins_def = tx.prepare(
+            "INSERT INTO cel_layer_defs(layer_id, role, chip, locked, onion)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
         let mut ins_audio = tx.prepare(
             "INSERT INTO cut_audio(cut_id, name, bytes) VALUES (?1, ?2, ?3)",
         )?;
@@ -177,6 +190,13 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                             &layer.props.name,
                             layer.props.visible as i64,
                             layer.props.opacity as f64,
+                        ))?;
+                        ins_def.execute((
+                            layer.id.0 as i64,
+                            layer.props.role.key(),
+                            layer.props.chip.map(|c| u32::from_be_bytes(c) as i64),
+                            layer.props.locked as i64,
+                            layer.props.onion as i64,
                         ))?;
                         for ((tx_c, ty_c), tile) in &layer.raster.tiles {
                             ins_tile.execute((
@@ -254,6 +274,37 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
 
     tx.commit()?;
     Ok(())
+}
+
+/// PSD-cel-layers: one layer's v9 definition row. Only "no row" means
+/// "infer" — a malformed row surfaces as Corrupt (a silent drop would be
+/// destroyed for good by the next re-save). An unknown role key (a newer
+/// build's role) degrades to Custom rather than refusing the file.
+fn load_layer_def(
+    conn: &Connection,
+    layer_id: i64,
+) -> Result<Option<(LayerRole, Option<[u8; 4]>, bool, bool)>> {
+    match conn.query_row(
+        "SELECT role, chip, locked, onion FROM cel_layer_defs WHERE layer_id = ?1",
+        (layer_id,),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, i64>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        },
+    ) {
+        Ok((role, chip, locked, onion)) => Ok(Some((
+            LayerRole::from_key(&role).unwrap_or(LayerRole::Custom),
+            chip.map(|c| (c as u32).to_be_bytes()),
+            locked != 0,
+            onion != 0,
+        ))),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(EngineError::Corrupt(format!("layer {layer_id} def: {e}"))),
+    }
 }
 
 /// Clamp a persisted opacity into the command-validated domain (0..=1,
@@ -422,6 +473,11 @@ pub fn load(path: &Path) -> Result<Project> {
                         "SELECT tx, ty, bytes FROM cel_tiles WHERE layer_id = ?1",
                     )?;
                     for (layer_id, lname, visible, opacity) in layer_rows {
+                        let def = if version >= 9 {
+                            load_layer_def(&conn, layer_id)?
+                        } else {
+                            None
+                        };
                         let mut raster = RasterLayer::empty();
                         let tile_rows: Vec<(i64, i64, Vec<u8>)> = tstmt
                             .query_map((layer_id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -436,6 +492,14 @@ pub fn load(path: &Path) -> Result<Project> {
                                 .tiles
                                 .insert((tx_c as i32, ty_c as i32), std::sync::Arc::new(tile));
                         }
+                        // PSD-cel-layers: a v9 defs row wins; a missing one
+                        // (older file) infers the role from the name ONCE.
+                        let (role, chip, locked, onion) = def.unwrap_or((
+                            LayerRole::infer(&lname),
+                            None,
+                            false,
+                            true,
+                        ));
                         layers.push(CelLayer {
                             id: LayerId(layer_id as u64),
                             props: LayerProps {
@@ -445,6 +509,10 @@ pub fn load(path: &Path) -> Result<Project> {
                                 // validate 0..=1, so the model must never hold
                                 // an out-of-range/NaN value from a file.
                                 opacity: sane_opacity(opacity),
+                                role,
+                                chip,
+                                locked,
+                                onion,
                             },
                             raster,
                         });
@@ -487,6 +555,7 @@ pub fn load(path: &Path) -> Result<Project> {
                                 name: "paint".into(),
                                 visible: true,
                                 opacity: sane_opacity(opacity),
+                                ..LayerProps::default()
                             },
                             raster,
                         }]
