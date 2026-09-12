@@ -8,7 +8,7 @@ use anim_core::xsheet::Exposure;
 use eframe::egui;
 use egui::{Color32, Rect, Sense, pos2, vec2};
 
-use crate::canvas::layer_chip_color;
+use crate::canvas::{props_chip_color, role_chip_color};
 use crate::doc::AppState;
 use crate::icons::Icon;
 use crate::plate;
@@ -935,16 +935,26 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 );
                 return;
             }
-            for preset in ["rough", "shadow", "highlight", "correction", "empty"] {
-                let text = egui::RichText::new(preset).color(layer_chip_color(preset));
+            // PSD-cel-layers: the menu lists ROLES, top of the pipeline
+            // first; each lands at its role's rank (custom: above active).
+            for role in anim_core::model::LayerRole::ALL.iter().rev().skip(1) {
+                let text = egui::RichText::new(role.label()).color(role_chip_color(*role));
                 if ui.button(text).clicked() {
-                    state.layer_add_preset(preset);
+                    state.layer_add_role(*role);
                     ui.close();
                 }
             }
+            ui.separator();
+            if ui
+                .button(egui::RichText::new("custom layer").color(plate::LEGEND))
+                .clicked()
+            {
+                state.layer_add_role(anim_core::model::LayerRole::Custom);
+                ui.close();
+            }
         })
         .response
-        .on_hover_text("add a layer at its pipeline position");
+        .on_hover_text("add a layer — it lands at its role's pipeline position");
     });
 
     // Owned snapshot so row actions can mutate state freely. The FULL props
@@ -970,16 +980,25 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         state.strip_rename = None;
     }
     if rows.is_empty() {
+        // Say what a stroke here will ACTUALLY create (the held cel's
+        // cloned stack, else the chosen preset) — never a fixed pair.
+        let names: Vec<String> = state
+            .new_cel_specs()
+            .iter()
+            .rev()
+            .map(|p| p.name.clone())
+            .collect();
         ui.label(
-            egui::RichText::new("held/empty frame — a new cel gets color + line")
+            egui::RichText::new(format!("held/empty frame — a new cel gets {}", names.join(" · ")))
                 .color(plate::legend_dim())
                 .small(),
         );
         ui.add_space(2.0);
         return;
     }
+    let armed_id = state.active_layer_id();
     for (row_i, (lid, name, visible, opacity)) in rows.iter().enumerate() {
-        let is_active = state.view.active_layer == *name;
+        let is_active = armed_id == Some(*lid);
         let props = full[row_i].clone();
         ui.horizontal(|ui| {
             // Eye: visibility toggle (one click = one undo step). Hidden is a
@@ -997,7 +1016,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // RETAS colour dot — painted, in the layer's identity ink.
             let (dot_rect, _) = ui.allocate_exact_size(vec2(12.0, 18.0), Sense::hover());
             ui.painter()
-                .circle_filled(dot_rect.center(), 4.0, layer_chip_color(name));
+                .circle_filled(dot_rect.center(), 4.0, props_chip_color(&props));
 
             // Name: click = activate, double-click = rename — in a FIXED
             // cell (spec defect 10): the columns after it never drift with
@@ -1025,13 +1044,16 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                             if !escaped && !trimmed.is_empty() && trimmed != name {
                                 // A rename is a LABEL change — the role
                                 // (and with it every behaviour) stays.
-                                state.layer_set_props(
-                                    *lid,
-                                    LayerProps {
-                                        name: trimmed.to_string(),
-                                        ..props.clone()
-                                    },
-                                );
+                                let renamed = LayerProps {
+                                    name: trimmed.to_string(),
+                                    ..props.clone()
+                                };
+                                state.layer_set_props(*lid, renamed.clone());
+                                // The armed layer stays armed under its
+                                // new label.
+                                if is_active {
+                                    state.arm_layer(&renamed);
+                                }
                             }
                         } else {
                             resp.request_focus();
@@ -1040,7 +1062,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                     } else {
                         // LINE GUARD (shiage): the guarded line row wears the
                         // shackle; tapping it refuses instead of arming.
-                        if state.view.line_guard && name == "line" {
+                        if state.view.line_guard && props.role.is_line() {
                             let (sr, _) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::hover());
                             crate::icons::paint(
                                 ui.painter(),
@@ -1063,12 +1085,12 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                         if resp.double_clicked() {
                             state.strip_rename = Some((*lid, name.clone()));
                         } else if resp.clicked() {
-                            if state.view.line_guard && name == "line" {
+                            if state.view.line_guard && props.role.is_line() {
                                 state.refuse(
-                                    "refused — line guard is on (unlatch it to arm the line layer)",
+                                    "refused — line guard is on (unlatch it to arm a line layer)",
                                 );
                             } else {
-                                state.view.active_layer = name.clone();
+                                state.arm_layer(&props);
                             }
                         }
                     }
@@ -1141,12 +1163,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         "while on, the line layer cannot be ARMED as the ink target — cycling skips it, tapping refuses",
         );
         state.view.line_guard = lg;
-        let
-        active_lid =
-        rows
-            .iter()
-            .find(|(_, nm, ..)| *nm == state.view.active_layer)
-            .map(|(id, ..)| *id);
+        let active_lid = state.active_layer_id();
             if plate::danger(ui, "ERASE CEL") && gesture_safe {
             // Pixels, not exposure: clears this cel's raster (undoable).
             state.clear_current_raster();

@@ -949,6 +949,11 @@ fn role_keys_roundtrip_and_names_infer_once() {
     assert!(ranks.windows(2).all(|w| w[0] < w[1]), "ranks strictly increase");
     assert_eq!(LayerRole::Custom.rank(), None);
     assert!(LayerRole::ShadowLine.is_line() && !LayerRole::Shadow.is_line());
+    // A fresh layer's default name infers back to its own role (so even
+    // a role-less round-trip through an old build can't mislabel it).
+    for r in LayerRole::ALL {
+        assert_eq!(LayerRole::infer(r.default_name()), r, "default name of {}", r.key());
+    }
     // CelLayer::new infers; with_role is explicit.
     let l = CelLayer::new(LayerId(1), "line");
     assert_eq!(l.props.role, LayerRole::Line);

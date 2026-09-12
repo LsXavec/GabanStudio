@@ -912,6 +912,9 @@ impl CanvasView {
             );
             return false;
         }
+        if state.refuse_if_locked() {
+            return false;
+        }
         let Some(did) = state.own_key_drawing() else {
             state.status =
                 "held/blank frame — a transform edits a frame's OWN cel (draw here first)".into();
@@ -2457,10 +2460,15 @@ impl CanvasView {
                 // contradiction — so it dims, it does not go red (the
                 // Warning Law, spec §3). The refusal at stroke time is
                 // where the contradiction lives.
+                // Identity by DEFINITION (chip override, else role) — the
+                // armed role when this frame has no own cel yet.
                 let color = if hidden {
                     plate::legend_dim()
                 } else {
-                    layer_chip_color(&lname)
+                    match state.active_layer_props() {
+                        Some(p) => props_chip_color(p),
+                        None => role_chip_color(state.view.active_role),
+                    }
                 };
                 // Seated chip (owner's audit): identity dot + name in a
                 // Well slot, same material as every other control.
@@ -3176,8 +3184,11 @@ impl CanvasView {
                     None
                 };
                 let s1 = pin.or(if state.view.onion { neighbors[1] } else { None });
+                // PSD-cel-layers: ghosts honour each layer's onion flag;
+                // the FLIP shows the whole previous cel (not a ghost).
+                let ghost = !self.flip_held;
                 for (slot, nid) in [s0, s1].into_iter().enumerate() {
-                    match nid.and_then(|id| state.drawing_composite(id, filter.as_deref())) {
+                    match nid.and_then(|id| state.drawing_composite(id, filter.as_deref(), ghost)) {
                         Some((slices, hash)) => p.set_onion(slot, Some(&slices), hash),
                         None => p.set_onion(slot, None, 0),
                     }
@@ -4634,6 +4645,9 @@ impl CanvasView {
                 );
                 return;
             }
+            if state.refuse_if_locked() {
+                return;
+            }
             if state.own_key_drawing().is_none() {
                 state.status =
                     "held/blank frame — a fill edits a frame's OWN cel (draw here first)"
@@ -4899,6 +4913,9 @@ impl CanvasView {
             );
             return;
         }
+        if state.refuse_if_locked() {
+            return;
+        }
         let Some(did) = state.own_key_drawing() else {
             state.status =
                 "held/blank frame — a fill edits a frame's OWN cel (draw here first)".into();
@@ -5007,6 +5024,9 @@ impl CanvasView {
                 "refused — layer '{}' is hidden (A to switch, or click its eye)",
                 state.active_layer_name()
             ));
+            return false;
+        }
+        if self.raster && state.refuse_if_locked() {
             return false;
         }
         // UNARMED (defect 16): the tracked layer name is absent on this
@@ -5212,6 +5232,9 @@ impl CanvasView {
                         "refused — layer '{}' is hidden (A to switch, or click its eye)",
                         state.active_layer_name()
                     ));
+                    return;
+                }
+                if self.raster && state.refuse_if_locked() {
                     return;
                 }
                 // UNARMED (defect 16), mouse path: same law as the pen.
@@ -5451,18 +5474,33 @@ impl CanvasView {
 /// ao-enpitsu, correction is the sakkan's aka. Identity is always a
 /// small fill beside the role's NAME, never text or an edge, so it can
 /// never be read as a refusal or a ghost.
-pub fn layer_chip_color(name: &str) -> Color32 {
-    match name {
-        // Layer identity in the plate's own inks (no hue outside the eight
-        // tokens; no green anywhere — spec §3). rough is the ao-enpitsu,
-        // correction is the sakkan's aka: the pipeline's own colour code.
-        "line" => plate::STRUCK,
-        "color" => plate::LEGEND,
-        "shadow" => Color32::from_rgba_unmultiplied(83, 137, 196, 150), // ao, dimmed
-        "highlight" => plate::PAPER,
-        "correction" => plate::AKA,
-        "rough" => plate::AO,
-        _ => plate::LEGEND,
+/// PSD-cel-layers: identity ink by ROLE — the plate's own tokens (no hue
+/// outside the eight; no green anywhere — spec §3), with the colour-trace
+/// convention carried as strength: the boundary LINES wear their region's
+/// ink at full strength, the regions wear it dimmed.
+pub fn role_chip_color(role: anim_core::model::LayerRole) -> Color32 {
+    use anim_core::model::LayerRole as R;
+    let [ar, ag, ab, _] = plate::AO.to_array();
+    let [kr, kg, kb, _] = plate::AKA.to_array();
+    match role {
+        R::Line => plate::STRUCK,
+        R::Color => plate::LEGEND,
+        R::Shadow => Color32::from_rgba_unmultiplied(ar, ag, ab, 150), // ao, dimmed
+        R::Highlight => plate::PAPER,
+        R::Rough => plate::AO,
+        R::ShadowLine => Color32::from_rgba_unmultiplied(ar, ag, ab, 230),
+        R::HighlightLine => Color32::from_rgba_unmultiplied(kr, kg, kb, 170),
+        R::Correction => plate::AKA,
+        R::Reference => plate::legend_dim(),
+        R::Custom => plate::LEGEND,
+    }
+}
+
+/// A layer's identity ink: its own chip override, else its role's.
+pub fn props_chip_color(p: &anim_core::model::LayerProps) -> Color32 {
+    match p.chip {
+        Some([r, g, b, a]) => Color32::from_rgba_unmultiplied(r, g, b, a),
+        None => role_chip_color(p.role),
     }
 }
 

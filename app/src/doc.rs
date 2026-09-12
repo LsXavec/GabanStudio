@@ -18,6 +18,20 @@ use anim_core::xsheet::Exposure;
 /// Bottom→top display slices of cel layers: (tiles, effective opacity).
 pub type LayerSlices<'a> = Vec<(&'a BTreeMap<TileCoord, Arc<TileData>>, f32)>;
 
+/// The merged solo douga/shiage pair — "color" bottom, "line" top — the
+/// fallback new-cel template (and the Solo merged stack preset).
+pub fn solo_template() -> Vec<LayerProps> {
+    use anim_core::model::LayerRole;
+    [LayerRole::Color, LayerRole::Line]
+        .into_iter()
+        .map(|r| LayerProps {
+            name: r.default_name().into(),
+            role: r,
+            ..LayerProps::default()
+        })
+        .collect()
+}
+
 /// The user's CURSOR into the document: which scene/cut/frame/column/layer
 /// is being looked at, and how (onion, playback). This is LENS-DOCK Phase
 /// 2's ViewContext, split from the document so panels can eventually hold or
@@ -44,6 +58,11 @@ pub struct ViewContext {
     /// refuses. Silence is never an acceptable response to state changing
     /// under the hand.
     pub active_layer: String,
+    /// PSD-cel-layers: the ROLE of the armed layer, remembered beside its
+    /// name. Follow matches by name first; when a cel has no layer of
+    /// that name, exactly one layer holding this role is the target (a
+    /// rename no longer unarms the pen). Custom never falls back.
+    pub active_role: anim_core::model::LayerRole,
     /// Loop playback at the end of the cut (off = stop on the last frame).
     pub loop_playback: bool,
     /// LINE GUARD (shiage charter): while on, the `line`-named layer
@@ -100,6 +119,13 @@ pub struct AppState {
     /// Transient layer-strip UI state: an in-progress opacity drag
     /// (layer, live value) — committed as ONE SetCelLayerProps at gesture end.
     pub strip_opacity: Option<(LayerId, f32)>,
+    /// PSD-cel-layers: the stack (bottom → top, structure only) a stroke
+    /// on an empty frame creates when there's no held cel to clone. Set
+    /// by the App from the chosen stack preset every frame; defaults to
+    /// the merged solo pair.
+    pub new_cel_template: Vec<LayerProps>,
+    /// The layer a fresh template cel arms (by name + role).
+    pub new_cel_active: (String, anim_core::model::LayerRole),
     /// Node-graph pane: world position per node (session-only for now; the
     /// engine graph itself is persisted and undoable, positions are view
     /// furniture).
@@ -153,6 +179,7 @@ impl AppState {
                 onion: true,
                 onion_layer_only: false,
                 active_layer: "line".into(),
+                active_role: anim_core::model::LayerRole::Line,
                 loop_playback: true,
                 ghost_pin: None,
                 line_guard: false,
@@ -171,6 +198,8 @@ impl AppState {
             strip_rename: None,
             drawing_rename: None,
             strip_opacity: None,
+            new_cel_template: solo_template(),
+            new_cel_active: ("line".into(), anim_core::model::LayerRole::Line),
             node_positions: HashMap::new(),
             pending_wire: None,
             selected_node: None,
@@ -221,6 +250,7 @@ impl AppState {
                 onion: true,
                 onion_layer_only: false,
                 active_layer: "line".into(),
+                active_role: anim_core::model::LayerRole::Line,
                 loop_playback: true,
                 ghost_pin: None,
                 line_guard: false,
@@ -240,6 +270,8 @@ impl AppState {
             strip_rename: None,
             drawing_rename: None,
             strip_opacity: None,
+            new_cel_template: solo_template(),
+            new_cel_active: ("line".into(), anim_core::model::LayerRole::Line),
             node_positions: HashMap::new(),
             pending_wire: None,
             selected_node: None,
@@ -629,27 +661,69 @@ impl AppState {
     /// column start, right after an Empty terminator, or a legacy
     /// vector-only held drawing (no layers).
     fn new_cel_layers(&mut self) -> Vec<CelLayer> {
-        // Collect owned props first — self.cut() borrows self.engine.project
+        // Structure first (owned) — self.cut() borrows self.engine.project
         // immutably, which would collide with alloc_layer_id()'s &mut below.
+        let specs = self.new_cel_specs();
+        specs
+            .into_iter()
+            .map(|props| CelLayer {
+                id: self.engine.alloc_layer_id(),
+                props,
+                raster: Default::default(),
+            })
+            .collect()
+    }
+
+    /// The STRUCTURE (bottom → top) a new cel on this frame would get:
+    /// the held cel's stack cloned (ratified precedence — pro stacks are
+    /// per-scene consistent), else the chosen stack preset.
+    pub fn new_cel_specs(&self) -> Vec<LayerProps> {
         let prev_props: Vec<LayerProps> = self
             .resolve_at(self.view.active_column, self.view.frame)
             .and_then(|id| self.cut().drawing(id))
             .map(|d| d.layers.iter().map(|l| l.props.clone()).collect())
             .unwrap_or_default();
         if !prev_props.is_empty() {
-            return prev_props
-                .into_iter()
-                .map(|props| CelLayer {
-                    id: self.engine.alloc_layer_id(),
-                    props,
-                    raster: Default::default(),
-                })
-                .collect();
+            return prev_props;
         }
-        vec![
-            CelLayer::new(self.engine.alloc_layer_id(), "color"), // bottom
-            CelLayer::new(self.engine.alloc_layer_id(), "line"),  // top
-        ]
+        if self.new_cel_template.is_empty() {
+            solo_template()
+        } else {
+            self.new_cel_template.clone()
+        }
+    }
+
+    /// PSD-cel-layers: resolve the armed layer in a stack — by NAME first,
+    /// then by ROLE when that name is absent and exactly ONE layer holds
+    /// the armed role (a renamed layer keeps its job). Custom never falls
+    /// back; ambiguity never guesses. Returns the stack index (bottom = 0).
+    fn resolve_armed(&self, props: &[&LayerProps]) -> Option<usize> {
+        if let Some(i) = props
+            .iter()
+            .rposition(|p| p.name == self.view.active_layer)
+        {
+            return Some(i);
+        }
+        let role = self.view.active_role;
+        if role == anim_core::model::LayerRole::Custom {
+            return None;
+        }
+        let mut hits = props
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.role == role)
+            .map(|(i, _)| i);
+        let first = hits.next()?;
+        if hits.next().is_some() {
+            return None;
+        }
+        Some(first)
+    }
+
+    /// Arm a layer as the ink target: name AND role, together, always.
+    pub fn arm_layer(&mut self, props: &LayerProps) {
+        self.view.active_layer = props.name.clone();
+        self.view.active_role = props.role;
     }
 
     /// Resolve a layer SLOT (counted from the top, clamped) to a concrete
@@ -662,32 +736,26 @@ impl AppState {
         d.layers.get(d.layers.len() - 1 - slot)
     }
 
-    /// The live active layer of `d` — resolved BY NAME (defect 16).
+    /// The live active layer of `d` — by NAME (defect 16), then by ROLE
+    /// when the name is absent (PSD-cel-layers; see `resolve_armed`).
     fn active_layer_of<'a>(&self, d: &'a anim_core::model::Drawing) -> Option<&'a CelLayer> {
-        d.layers
-            .iter()
-            .rev()
-            .find(|l| l.props.name == self.view.active_layer)
+        let props: Vec<&LayerProps> = d.layers.iter().map(|l| &l.props).collect();
+        self.resolve_armed(&props).map(|i| &d.layers[i])
     }
 
-    /// Resolve the active layer NAME to a top-first slot on the current
-    /// cel — or on the fresh-cel template for held/blank frames. None =
-    /// UNARMED: the pen must refuse rather than misroute (defect 16).
+    /// Resolve the armed layer to a top-first slot on the current cel — or
+    /// on the REAL new-cel template for held/blank frames (the held cel's
+    /// cloned stack, else the chosen preset — never a hardcoded pair).
+    /// None = UNARMED: the pen must refuse rather than misroute (defect 16).
     pub fn active_slot_resolved(&self) -> Option<usize> {
         if let Some(id) = self.own_key_drawing() {
             let d = self.cut().drawing(id)?;
-            return d
-                .layers
-                .iter()
-                .rev()
-                .position(|l| l.props.name == self.view.active_layer);
+            let props: Vec<&LayerProps> = d.layers.iter().map(|l| &l.props).collect();
+            return self.resolve_armed(&props).map(|i| d.layers.len() - 1 - i);
         }
-        // Fresh-cel template is [color, line]; slot 0 = line (top).
-        match self.view.active_layer.as_str() {
-            "line" => Some(0),
-            "color" => Some(1),
-            _ => None,
-        }
+        let specs = self.new_cel_specs();
+        let props: Vec<&LayerProps> = specs.iter().collect();
+        self.resolve_armed(&props).map(|i| specs.len() - 1 - i)
     }
 
     /// Props of the layer the NEXT stroke will actually edit — based on the
@@ -700,6 +768,29 @@ impl AppState {
         self.active_layer_of(d).map(|l| &l.props)
     }
 
+    /// The armed layer on this frame's OWN cel, as resolved (name, then
+    /// role) — what the strip highlights and DELETE LAYER targets.
+    pub fn active_layer_id(&self) -> Option<LayerId> {
+        let id = self.own_key_drawing()?;
+        let d = self.cut().drawing(id)?;
+        self.active_layer_of(d).map(|l| l.id)
+    }
+
+    /// PSD-cel-layers: the edit-lock guard, shared by every painting
+    /// tool (pen, mouse, fill, lasso fill, select). True = refused (the
+    /// refusal is already on the Aka lane). A lock is the artist's own
+    /// "don't touch this" — overruling the hand is exactly a refusal.
+    pub fn refuse_if_locked(&mut self) -> bool {
+        if self.active_layer_props().is_some_and(|p| p.locked) {
+            self.refuse(format!(
+                "refused — layer '{}' is locked (unlock it in its layer card)",
+                self.active_layer_name()
+            ));
+            return true;
+        }
+        false
+    }
+
     /// Name of the active layer — template names on held/blank frames
     /// (the layer the next stroke will land on).
     pub fn active_layer_name(&self) -> String {
@@ -709,37 +800,40 @@ impl AppState {
     /// Cycle the active layer (A / Shift+A). Wraps within the OWN cel's stack
     /// depth; on held/blank frames, the new-cel template depth (2).
     pub fn cycle_layer(&mut self, back: bool) {
-        let names: Vec<String> = self
+        // Top-first, like the strip. Held/blank frames cycle the REAL
+        // new-cel template (cloned held stack, else the chosen preset).
+        let stack: Vec<LayerProps> = self
             .own_key_drawing()
             .and_then(|id| self.cut().drawing(id))
-            .map(|d| {
-                d.layers
-                    .iter()
-                    .rev()
-                    .map(|l| l.props.name.clone())
-                    .collect()
-            })
-            .filter(|v: &Vec<String>| !v.is_empty())
-            .unwrap_or_else(|| vec!["line".into(), "color".into()]);
-        // LINE GUARD: cycling skips the line layer while guarded (unless
-        // nothing else exists to arm).
-        let names: Vec<String> = if self.view.line_guard {
-            let filtered: Vec<String> = names.iter().filter(|n| *n != "line").cloned().collect();
-            if filtered.is_empty() { names } else { filtered }
+            .map(|d| d.layers.iter().rev().map(|l| l.props.clone()).collect())
+            .filter(|v: &Vec<LayerProps>| !v.is_empty())
+            .unwrap_or_else(|| self.new_cel_specs().into_iter().rev().collect());
+        // LINE GUARD: cycling skips every LINE-ROLE layer while guarded —
+        // renamed or not (PSD-cel-layers NEVER-DO 1) — unless nothing else
+        // exists to arm.
+        let stack: Vec<LayerProps> = if self.view.line_guard {
+            let filtered: Vec<LayerProps> =
+                stack.iter().filter(|p| !p.role.is_line()).cloned().collect();
+            if filtered.is_empty() { stack } else { filtered }
         } else {
-            names
+            stack
         };
-        let cur = names
-            .iter()
-            .position(|n| *n == self.view.active_layer)
+        if stack.is_empty() {
+            return;
+        }
+        let bottom_first: Vec<&LayerProps> = stack.iter().rev().collect();
+        let cur = self
+            .resolve_armed(&bottom_first)
+            .map(|i| stack.len() - 1 - i)
             .unwrap_or(0);
-        let n = names.len();
+        let n = stack.len();
         let next = if back {
             (cur + n - 1) % n
         } else {
             (cur + 1) % n
         };
-        self.view.active_layer = names[next].clone();
+        let pick = stack[next].clone();
+        self.arm_layer(&pick);
         self.status = format!("layer: {}", self.active_layer_name());
     }
 
@@ -887,24 +981,28 @@ impl AppState {
         self.report(r, "layer moved");
     }
 
-    /// Anime-pipeline stack rank for the preset names (bottom → top):
-    /// color < shadow < highlight < rough < line < correction.
-    fn preset_rank(name: &str) -> Option<u8> {
-        match name {
-            "color" => Some(0),
-            "shadow" => Some(1),
-            "highlight" => Some(2),
-            "rough" => Some(3),
-            "line" => Some(4),
-            "correction" => Some(5),
-            _ => None,
+    /// PSD-cel-layers: where a layer of `role` belongs in `stack` (bottom
+    /// → top): directly above the topmost layer whose ROLE rank is <= its
+    /// own (bottom if none). Custom has no rank: above `custom_at`.
+    pub fn rank_insert_index(
+        stack: &[&LayerProps],
+        role: anim_core::model::LayerRole,
+        custom_at: usize,
+    ) -> usize {
+        match role.rank() {
+            Some(rank) => stack
+                .iter()
+                .rposition(|p| p.role.rank().is_some_and(|r| r <= rank))
+                .map(|i| i + 1)
+                .unwrap_or(0),
+            None => custom_at.min(stack.len()),
         }
     }
 
-    /// Add a preset layer at its anime-correct stack position: directly above
-    /// the topmost existing layer whose known rank is <= the preset's (bottom
-    /// if none). "empty" (no rank) inserts above the active layer.
-    pub fn layer_add_preset(&mut self, name: &str) {
+    /// Add a layer of `role` at its pipeline position (ranked by ROLE, not
+    /// by name — a renamed shadow still orders as a shadow). Custom inserts
+    /// above the active layer. Arms the new layer. One undo step.
+    pub fn layer_add_role(&mut self, role: anim_core::model::LayerRole) {
         let Some(id) = self.own_drawing_id() else {
             self.refuse("refused — no cel on this frame (draw, or press E)");
             return;
@@ -916,26 +1014,16 @@ impl AppState {
             self.refuse("refused — this cel already has 8 layers");
             return;
         }
-        let index = match Self::preset_rank(name) {
-            Some(rank) => d
-                .layers
-                .iter()
-                .rposition(|l| Self::preset_rank(&l.props.name).is_some_and(|r| r <= rank))
-                .map(|i| i + 1)
-                .unwrap_or(0),
-            None => {
-                // "empty": directly above the active layer.
-                self.active_layer_of(d)
-                    .and_then(|l| d.layer_index(l.id))
-                    .map(|i| i + 1)
-                    .unwrap_or(d.layers.len())
-            }
-        };
+        let above_active = self
+            .active_layer_of(d)
+            .and_then(|l| d.layer_index(l.id))
+            .map(|i| i + 1)
+            .unwrap_or(d.layers.len());
+        let stack: Vec<&LayerProps> = d.layers.iter().map(|l| &l.props).collect();
+        let index = Self::rank_insert_index(&stack, role, above_active);
         let at = self.at();
-        // The generic "empty" menu item makes a plain renameable "layer".
-        let lname = if name == "empty" { "layer" } else { name };
-        let layer = CelLayer::new(self.engine.alloc_layer_id(), lname);
-        let new_id = layer.id;
+        let layer = CelLayer::with_role(self.engine.alloc_layer_id(), role.default_name(), role);
+        let props = layer.props.clone();
         let r = self.engine.apply(
             "add layer",
             vec![Command::AddCelLayer {
@@ -946,12 +1034,7 @@ impl AppState {
             }],
         );
         if r.is_ok() {
-            // Activate the new layer (slot counted from the top).
-            if let Some(d) = self.cut().drawing(id)
-                && let Some(i) = d.layer_index(new_id)
-            {
-                self.view.active_layer = d.layers[i].props.name.clone();
-            }
+            self.arm_layer(&props);
         }
         self.report(r, "layer added");
     }
@@ -999,10 +1082,15 @@ impl AppState {
     /// Composite of `id`'s visible layers, optionally restricted to layers
     /// matching `filter_name` (the per-layer onion: a neighbour cel with no
     /// layer of that name contributes nothing, not a wrong-role ghost).
+    /// `ghost` = this composite feeds an ONION ghost: layers whose
+    /// definition opts out of ghosting (`onion: false`) are skipped. Real
+    /// displays (multi-column view, the flip) pass false — the flag is a
+    /// ghosting choice, never a visibility one.
     pub fn drawing_composite(
         &self,
         id: DrawingId,
         filter_name: Option<&str>,
+        ghost: bool,
     ) -> Option<(LayerSlices<'_>, u64)> {
         let d = self.cut().drawing(id)?;
         let mut bytes: Vec<u8> = Vec::new();
@@ -1010,6 +1098,7 @@ impl AppState {
         for l in &d.layers {
             if l.props.visible
                 && l.props.opacity > 0.0
+                && (!ghost || l.props.onion)
                 && filter_name.is_none_or(|n| l.props.name == n)
             {
                 bytes.extend_from_slice(&l.content_hash().to_le_bytes());
@@ -1028,7 +1117,7 @@ impl AppState {
     /// resolves to a vector-only drawing.
     pub fn column_composite(&self, column: ColumnId) -> Option<(LayerSlices<'_>, u64)> {
         let id = self.resolve_at(column, self.view.frame)?;
-        self.drawing_composite(id, None)
+        self.drawing_composite(id, None, false)
     }
 
     /// Which drawing the GPU canvas layer should DISPLAY at the current frame:
@@ -1429,8 +1518,13 @@ impl AppState {
         }
 
         // One drawing per distinct cell number (sorted for stable library
-        // order), each with the standard colour+line stack; then the keys.
+        // order), each with the CHOSEN stack preset; then the keys.
         // ONE batch = one undo step for the whole timing import.
+        let template = if self.new_cel_template.is_empty() {
+            solo_template()
+        } else {
+            self.new_cel_template.clone()
+        };
         let mut cells: Vec<String> = sheet
             .columns
             .iter()
@@ -1442,10 +1536,14 @@ impl AppState {
         let mut drawing_of = std::collections::HashMap::new();
         for (index, cell) in cells.iter().enumerate() {
             let id = self.engine.alloc_drawing_id();
-            let layers = vec![
-                CelLayer::new(self.engine.alloc_layer_id(), "color"),
-                CelLayer::new(self.engine.alloc_layer_id(), "line"),
-            ];
+            let layers: Vec<CelLayer> = template
+                .iter()
+                .map(|props| CelLayer {
+                    id: self.engine.alloc_layer_id(),
+                    props: props.clone(),
+                    raster: Default::default(),
+                })
+                .collect();
             drawing_of.insert(cell.clone(), id);
             commands.push(Command::AddDrawing {
                 at,
@@ -1681,7 +1779,10 @@ impl AppState {
         self.view.frame = 0;
         self.view.selected_drawing = None;
         self.view.playing = false;
-        self.view.active_layer = "line".into();
+        // A fresh cut arms the template's own target (name + role).
+        let (n, r) = self.new_cel_active.clone();
+        self.view.active_layer = n;
+        self.view.active_role = r;
         self.status = format!("cut: {name}");
     }
 
@@ -2142,5 +2243,152 @@ mod transport_tests {
         assert!(s.view.playing);
         s.tick(1.0 / 24.0);
         assert_eq!(s.view.frame, 21);
+    }
+}
+
+#[cfg(test)]
+mod layer_role_tests {
+    //! PSD-cel-layers Stage 2 pins: behaviour keys off ROLE, never name.
+    use super::AppState;
+    use anim_core::model::{LayerProps, LayerRole};
+    use anim_core::raster::{TILE_LEN, TileData};
+    use std::sync::Arc;
+
+    fn state() -> AppState {
+        AppState::new_project("t", 64, 48, 24, 72.0)
+    }
+
+    fn spec(role: LayerRole) -> LayerProps {
+        LayerProps {
+            name: role.default_name().into(),
+            role,
+            ..LayerProps::default()
+        }
+    }
+
+    /// Paint one tile on the current (empty) frame: creates a template cel.
+    fn make_cel(s: &mut AppState) {
+        let slot = s.active_slot_resolved().expect("armed on the template");
+        let tile = Arc::new(TileData::from_vec(vec![0x3C00; TILE_LEN]));
+        s.commit_raster(vec![((0, 0), tile)], slot).expect("cel created");
+    }
+
+    fn stack(s: &AppState) -> Vec<(String, LayerRole)> {
+        s.strip_layers()
+            .iter()
+            .rev()
+            .map(|(_, l)| (l.props.name.clone(), l.props.role))
+            .collect()
+    }
+
+    #[test]
+    fn a_new_cel_gets_the_chosen_template_with_roles() {
+        let mut s = state();
+        s.new_cel_template = vec![
+            spec(LayerRole::Color),
+            spec(LayerRole::Shadow),
+            spec(LayerRole::ShadowLine),
+            spec(LayerRole::Line),
+        ];
+        s.view.active_layer = "shadow".into();
+        s.view.active_role = LayerRole::Shadow;
+        make_cel(&mut s);
+        let got = stack(&s);
+        assert_eq!(got.len(), 4);
+        assert_eq!(got[1], ("shadow".into(), LayerRole::Shadow));
+        assert_eq!(got[2].1, LayerRole::ShadowLine);
+        // The stroke landed on the ARMED template layer (shadow), not a
+        // hardcoded "line = top slot".
+        let armed = s.active_layer_props().unwrap();
+        assert_eq!(armed.role, LayerRole::Shadow);
+    }
+
+    #[test]
+    fn a_renamed_layer_keeps_the_pen_armed_by_role() {
+        let mut s = state();
+        make_cel(&mut s); // solo template, armed on line
+        let lid = s.active_layer_id().expect("line armed");
+        let props = s.active_layer_props().unwrap().clone();
+        // Rename WITHOUT re-arming (as a peer's edit would): the old name
+        // is gone, the role still finds its layer (the premortem's first
+        // failure — a rename stripping a layer of its job).
+        s.layer_set_props(
+            lid,
+            LayerProps {
+                name: "genga L".into(),
+                ..props
+            },
+        );
+        assert_eq!(s.active_layer_id(), Some(lid), "role fallback resolves");
+        assert!(s.active_slot_resolved().is_some(), "the pen stays armed");
+        // Ambiguity never guesses: a SECOND line-role layer unarms.
+        s.layer_add_role(LayerRole::Line);
+        s.view.active_layer = "gone".into();
+        s.view.active_role = LayerRole::Line;
+        assert_eq!(s.active_layer_id(), None, "two line layers: refuse to guess");
+    }
+
+    #[test]
+    fn the_line_guard_skips_every_line_role_renamed_or_not() {
+        let mut s = state();
+        s.new_cel_template = vec![
+            spec(LayerRole::Color),
+            spec(LayerRole::ShadowLine),
+            LayerProps {
+                name: "clean".into(),
+                role: LayerRole::Line,
+                ..LayerProps::default()
+            },
+        ];
+        s.view.active_layer = "color".into();
+        s.view.active_role = LayerRole::Color;
+        make_cel(&mut s);
+        s.view.line_guard = true;
+        for _ in 0..6 {
+            s.cycle_layer(false);
+            assert!(
+                !s.active_layer_props().unwrap().role.is_line(),
+                "guarded cycling never arms a line role"
+            );
+        }
+    }
+
+    #[test]
+    fn layers_insert_at_their_role_rank() {
+        let mut s = state();
+        make_cel(&mut s); // [color, line]
+        s.layer_add_role(LayerRole::Correction);
+        s.layer_add_role(LayerRole::Shadow);
+        s.layer_add_role(LayerRole::ShadowLine);
+        let roles: Vec<LayerRole> = stack(&s).into_iter().map(|(_, r)| r).collect();
+        assert_eq!(
+            roles,
+            vec![
+                LayerRole::Color,
+                LayerRole::Shadow,
+                LayerRole::ShadowLine,
+                LayerRole::Line,
+                LayerRole::Correction
+            ],
+            "pipeline order by ROLE rank"
+        );
+    }
+
+    #[test]
+    fn a_locked_layer_refuses_the_pen() {
+        let mut s = state();
+        make_cel(&mut s);
+        let lid = s.active_layer_id().unwrap();
+        let props = s.active_layer_props().unwrap().clone();
+        assert!(!s.refuse_if_locked());
+        s.layer_set_props(
+            lid,
+            LayerProps {
+                locked: true,
+                ..props
+            },
+        );
+        assert!(s.refuse_if_locked(), "locked = refused");
+        assert!(s.refusal.contains("locked"));
     }
 }

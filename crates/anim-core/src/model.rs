@@ -117,6 +117,23 @@ impl LayerRole {
         }
     }
 
+    /// The name a fresh layer of this role gets (renameable — the role
+    /// stays). Chosen so `infer(default_name)` returns the role back.
+    pub fn default_name(self) -> &'static str {
+        match self {
+            LayerRole::Reference => "reference",
+            LayerRole::Color => "color",
+            LayerRole::Shadow => "shadow",
+            LayerRole::Highlight => "highlight",
+            LayerRole::Rough => "rough",
+            LayerRole::ShadowLine => "shadow line",
+            LayerRole::HighlightLine => "highlight line",
+            LayerRole::Line => "line",
+            LayerRole::Correction => "correction",
+            LayerRole::Custom => "layer",
+        }
+    }
+
     /// Pipeline stack rank, bottom → top. Custom has none (it inserts
     /// beside the active layer instead).
     pub fn rank(self) -> Option<u8> {
