@@ -18,6 +18,16 @@ use anim_core::xsheet::Exposure;
 /// Bottom→top display slices of cel layers: (tiles, effective opacity).
 pub type LayerSlices<'a> = Vec<(&'a BTreeMap<TileCoord, Arc<TileData>>, f32)>;
 
+/// PSD-cel-layers Stage 4: what the strip asks of the App (which owns the
+/// config and the room binding).
+#[derive(Debug, Clone)]
+pub enum StackRequest {
+    /// Bind this stack to the current room's new cels.
+    Pick(String),
+    /// Save this cel's STRUCTURE as a user stack under this name.
+    Save(String),
+}
+
 /// The merged solo douga/shiage pair — "color" bottom, "line" top — the
 /// fallback new-cel template (and the Solo merged stack preset).
 pub fn solo_template() -> Vec<LayerProps> {
@@ -126,6 +136,14 @@ pub struct AppState {
     pub new_cel_template: Vec<LayerProps>,
     /// The layer a fresh template cel arms (by name + role).
     pub new_cel_active: (String, anim_core::model::LayerRole),
+    /// PSD-cel-layers Stage 4: every pickable stack (built-in + the
+    /// artist's own) and the one bound to the current room — refreshed by
+    /// the App each frame; the strip's `stack ▾` menu reads them.
+    pub stacks: Vec<crate::config::StackPreset>,
+    pub stack_current: String,
+    /// Strip → App requests (the App owns the config).
+    pub stack_request: Option<StackRequest>,
+    pub stack_name_buf: String,
     /// Node-graph pane: world position per node (session-only for now; the
     /// engine graph itself is persisted and undoable, positions are view
     /// furniture).
@@ -200,6 +218,10 @@ impl AppState {
             strip_opacity: None,
             new_cel_template: solo_template(),
             new_cel_active: ("line".into(), anim_core::model::LayerRole::Line),
+            stacks: Vec::new(),
+            stack_current: String::new(),
+            stack_request: None,
+            stack_name_buf: String::new(),
             node_positions: HashMap::new(),
             pending_wire: None,
             selected_node: None,
@@ -272,6 +294,10 @@ impl AppState {
             strip_opacity: None,
             new_cel_template: solo_template(),
             new_cel_active: ("line".into(), anim_core::model::LayerRole::Line),
+            stacks: Vec::new(),
+            stack_current: String::new(),
+            stack_request: None,
+            stack_name_buf: String::new(),
             node_positions: HashMap::new(),
             pending_wire: None,
             selected_node: None,
@@ -781,7 +807,19 @@ impl AppState {
     /// refusal is already on the Aka lane). A lock is the artist's own
     /// "don't touch this" — overruling the hand is exactly a refusal.
     pub fn refuse_if_locked(&mut self) -> bool {
-        if self.active_layer_props().is_some_and(|p| p.locked) {
+        // On a held/blank frame the stroke will CREATE a cel from the
+        // template — a locked template layer (the Shiage preset locks its
+        // lines) must refuse exactly like a locked layer on a real cel.
+        let locked = match self.active_layer_props() {
+            Some(p) => p.locked,
+            None if self.own_key_drawing().is_none() => {
+                let specs = self.new_cel_specs();
+                let props: Vec<&LayerProps> = specs.iter().collect();
+                self.resolve_armed(&props).is_some_and(|i| specs[i].locked)
+            }
+            None => false,
+        };
+        if locked {
             self.refuse(format!(
                 "refused — layer '{}' is locked (unlock it in its layer card)",
                 self.active_layer_name()
@@ -1037,6 +1075,157 @@ impl AppState {
             self.arm_layer(&props);
         }
         self.report(r, "layer added");
+    }
+
+    /// PSD-cel-layers NEVER-DO 2: plan the ADDITIVE conform of one cel to
+    /// `preset` — only the layers it LACKS (by role; custom layers by
+    /// name), each inserted at its role rank in a simulated stack so the
+    /// batch's indices stay exact in order. Painted layers are never
+    /// touched, renamed, or moved. None = the result would pass the cap
+    /// (checked BEFORE any id is allocated).
+    fn plan_conform(
+        &mut self,
+        at: CutRef,
+        drawing: DrawingId,
+        existing: &[LayerProps],
+        preset: &crate::config::StackPreset,
+    ) -> Option<Vec<Command>> {
+        use anim_core::model::LayerRole;
+        let mut sim: Vec<LayerProps> = existing.to_vec();
+        let missing: Vec<LayerProps> = preset
+            .layers
+            .iter()
+            .filter(|spec| {
+                if spec.role == LayerRole::Custom {
+                    !existing.iter().any(|p| p.name == spec.name)
+                } else {
+                    !existing.iter().any(|p| p.role == spec.role)
+                }
+            })
+            .cloned()
+            .collect();
+        if sim.len() + missing.len() > 8 {
+            return None;
+        }
+        let mut cmds = Vec::with_capacity(missing.len());
+        for spec in missing {
+            let idx = {
+                let refs: Vec<&LayerProps> = sim.iter().collect();
+                Self::rank_insert_index(&refs, spec.role, sim.len())
+            };
+            let layer = CelLayer {
+                id: self.engine.alloc_layer_id(),
+                props: spec.clone(),
+                raster: Default::default(),
+            };
+            sim.insert(idx, spec);
+            cmds.push(Command::AddCelLayer {
+                at,
+                drawing,
+                index: idx,
+                layer,
+            });
+        }
+        Some(cmds)
+    }
+
+    fn stack_named(&self, name: &str) -> Option<crate::config::StackPreset> {
+        self.stacks.iter().find(|s| s.name == name).cloned()
+    }
+
+    /// Give THIS cel the layers of `preset` it lacks — one undo step.
+    pub fn apply_stack_to_cel(&mut self, preset_name: &str) {
+        let Some(preset) = self.stack_named(preset_name) else {
+            return;
+        };
+        let Some(id) = self.own_drawing_id() else {
+            self.refuse("refused — no cel on this frame (draw, or press E)");
+            return;
+        };
+        let existing: Vec<LayerProps> = match self.cut().drawing(id) {
+            Some(d) if !d.layers.is_empty() => d.layers.iter().map(|l| l.props.clone()).collect(),
+            _ => {
+                self.refuse("refused — this cel has no layer stack (paint on it first)");
+                return;
+            }
+        };
+        let at = self.at();
+        match self.plan_conform(at, id, &existing, &preset) {
+            None => self.refuse(format!(
+                "refused — '{}' would take this cel past 8 layers",
+                preset.name
+            )),
+            Some(cmds) if cmds.is_empty() => {
+                self.status = format!("this cel already has every '{}' layer", preset.name);
+            }
+            Some(cmds) => {
+                let n = cmds.len();
+                let r = self.engine.apply("apply layer stack", cmds);
+                self.report(r, &format!("added {n} layer(s) from '{}'", preset.name));
+            }
+        }
+    }
+
+    /// Conform EVERY layered cel in this cut to `preset` (additive) — one
+    /// undo step for the whole cut. Cels the preset would push past the
+    /// cap are skipped, and counted in the status.
+    pub fn conform_cut(&mut self, preset_name: &str) {
+        let Some(preset) = self.stack_named(preset_name) else {
+            return;
+        };
+        let at = self.at();
+        let cels: Vec<(DrawingId, Vec<LayerProps>)> = self
+            .cut()
+            .drawings
+            .iter()
+            .filter(|d| !d.layers.is_empty())
+            .map(|d| (d.id, d.layers.iter().map(|l| l.props.clone()).collect()))
+            .collect();
+        let mut cmds = Vec::new();
+        let (mut touched, mut skipped) = (0usize, 0usize);
+        for (id, existing) in cels {
+            match self.plan_conform(at, id, &existing, &preset) {
+                None => skipped += 1,
+                Some(c) if c.is_empty() => {}
+                Some(c) => {
+                    touched += 1;
+                    cmds.extend(c);
+                }
+            }
+        }
+        if cmds.is_empty() {
+            self.status = if skipped > 0 {
+                format!("nothing added — {skipped} cel(s) would pass 8 layers")
+            } else {
+                format!("every cel already has the '{}' layers", preset.name)
+            };
+            return;
+        }
+        let r = self.engine.apply("conform cut", cmds);
+        let msg = if skipped > 0 {
+            format!("'{}' → {touched} cel(s) conformed, {skipped} skipped (cap 8)", preset.name)
+        } else {
+            format!("'{}' → {touched} cel(s) conformed", preset.name)
+        };
+        self.report(r, &msg);
+    }
+
+    /// This cel's STRUCTURE as a stack preset (never pixels).
+    pub fn current_stack_as_preset(&self, name: &str) -> Option<crate::config::StackPreset> {
+        let id = self.own_key_drawing()?;
+        let d = self.cut().drawing(id)?;
+        if d.layers.is_empty() {
+            return None;
+        }
+        let active = self
+            .active_layer_of(d)
+            .map(|l| l.props.name.clone())
+            .unwrap_or_else(|| d.layers.last().unwrap().props.name.clone());
+        Some(crate::config::StackPreset {
+            name: name.to_string(),
+            layers: d.layers.iter().map(|l| l.props.clone()).collect(),
+            active,
+        })
     }
 
     /// Nearest distinct drawings before / after the current frame on the active
@@ -2372,6 +2561,122 @@ mod layer_role_tests {
             ],
             "pipeline order by ROLE rank"
         );
+    }
+
+    fn with_stacks(s: &mut AppState) {
+        s.stacks = crate::config::builtin_stacks();
+    }
+
+    #[test]
+    fn applying_a_stack_only_adds_and_never_touches_pixels() {
+        // NEVER-DO 2: the Shiage stack onto a painted [color, line] cel.
+        let mut s = state();
+        with_stacks(&mut s);
+        make_cel(&mut s); // paints the armed line layer
+        let before: Vec<(anim_core::ids::LayerId, u64)> = s
+            .strip_layers()
+            .iter()
+            .map(|(_, l)| (l.id, l.raster.content_hash()))
+            .collect();
+        let doc_before = s.engine.project.clone();
+        s.apply_stack_to_cel("Shiage (full)");
+        let roles: Vec<LayerRole> = stack(&s).into_iter().map(|(_, r)| r).collect();
+        assert_eq!(
+            roles,
+            vec![
+                LayerRole::Color,
+                LayerRole::Shadow,
+                LayerRole::Highlight,
+                LayerRole::ShadowLine,
+                LayerRole::HighlightLine,
+                LayerRole::Line,
+                LayerRole::Correction
+            ]
+        );
+        // Every pre-existing layer: same id, same pixels.
+        for (id, h) in &before {
+            let l = s
+                .strip_layers()
+                .into_iter()
+                .find(|(_, l)| l.id == *id)
+                .map(|(_, l)| l.raster.content_hash());
+            assert_eq!(l, Some(*h), "painted layers untouched");
+        }
+        // One undo step restores the document exactly.
+        s.undo();
+        assert_eq!(s.engine.project.scenes, doc_before.scenes, "one step, exact");
+    }
+
+    #[test]
+    fn a_stack_that_would_pass_the_cap_is_refused_whole() {
+        let mut s = state();
+        with_stacks(&mut s);
+        make_cel(&mut s); // 2 layers
+        for _ in 0..5 {
+            s.layer_add_role(LayerRole::Custom); // → 7 layers
+        }
+        let snapshot = s.engine.project.scenes.clone();
+        s.apply_stack_to_cel("Shiage (full)"); // needs 5 more → 12 > 8
+        assert_eq!(s.engine.project.scenes, snapshot, "atomic refusal");
+        assert!(s.refusal.contains("8 layers"));
+    }
+
+    #[test]
+    fn conform_cut_is_one_undo_step_across_every_cel() {
+        let mut s = state();
+        with_stacks(&mut s);
+        make_cel(&mut s);
+        s.goto(3);
+        make_cel(&mut s);
+        let snapshot = s.engine.project.scenes.clone();
+        s.conform_cut("Genga"); // adds rough + correction to both
+        let cels: Vec<usize> = s.cut().drawings.iter().map(|d| d.layers.len()).collect();
+        assert_eq!(cels, vec![4, 4], "both cels conformed");
+        s.undo();
+        assert_eq!(s.engine.project.scenes, snapshot, "one undo step for the cut");
+    }
+
+    #[test]
+    fn a_locked_template_layer_refuses_on_a_blank_frame() {
+        // The hole found while wiring Stage 4: no own cel yet, so the lock
+        // must come from the TEMPLATE layer the stroke would create.
+        let mut s = state();
+        let shiage = crate::config::builtin_stacks()
+            .into_iter()
+            .find(|p| p.name == "Shiage (full)")
+            .unwrap();
+        s.new_cel_template = shiage.layers.clone();
+        s.view.active_layer = "line".into();
+        s.view.active_role = LayerRole::Line;
+        assert!(s.own_key_drawing().is_none(), "blank frame");
+        assert!(s.refuse_if_locked(), "the template's line is locked");
+        s.view.active_layer = "color".into();
+        s.view.active_role = LayerRole::Color;
+        assert!(!s.refuse_if_locked(), "color is not");
+    }
+
+    #[test]
+    fn the_builtin_stacks_are_sound() {
+        let all = crate::config::builtin_stacks();
+        assert!(all.iter().any(|s| s.name == "Solo merged"));
+        for s in &all {
+            assert!(s.layers.len() <= 8, "{}: within the cap", s.name);
+            let ranks: Vec<u8> = s.layers.iter().filter_map(|l| l.role.rank()).collect();
+            assert!(
+                ranks.windows(2).all(|w| w[0] < w[1]),
+                "{}: bottom→top in pipeline order",
+                s.name
+            );
+            assert!(
+                s.layers.iter().any(|l| l.name == s.active),
+                "{}: its armed layer exists",
+                s.name
+            );
+        }
+        // A room bound to a deleted stack falls back, never strands.
+        let mut cfg = crate::config::LayersConfig::default();
+        cfg.room_stack.insert("drawing".into(), "gone".into());
+        assert_eq!(cfg.stack_for_room("drawing").name, "Solo merged");
     }
 
     #[test]

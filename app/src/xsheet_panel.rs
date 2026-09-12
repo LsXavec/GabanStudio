@@ -1096,6 +1096,63 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         })
         .response
         .on_hover_text("add a layer — it lands at its role's pipeline position");
+
+        // PSD-cel-layers Stage 4: the stack presets. Picking binds the
+        // CURRENT room's new cels; apply/conform only ever ADD layers.
+        ui.menu_button("stack", |ui| {
+            ui.set_min_width(240.0);
+            plate::legend(ui, "new cels in this room get");
+            let stacks = state.stacks.clone();
+            for s in &stacks {
+                let on = s.name == state.stack_current;
+                ui.horizontal(|ui| {
+                    if plate::detent(ui, on, &s.name).clicked() && !on {
+                        state.stack_request = Some(crate::doc::StackRequest::Pick(s.name.clone()));
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(s.summary())
+                        .size(10.0)
+                        .color(plate::legend_dim()),
+                );
+            }
+            ui.separator();
+            let cur = state.stack_current.clone();
+            let can = have_cel;
+            if ui
+                .add_enabled(can, egui::Button::new(format!("add missing '{cur}' layers to this cel")))
+                .on_hover_text("adds only the layers this cel lacks — never deletes, renames, or moves painted layers")
+                .clicked()
+            {
+                state.apply_stack_to_cel(&cur);
+                ui.close();
+            }
+            if ui
+                .button(format!("conform the whole cut to '{cur}'"))
+                .on_hover_text("the same additive apply for every layered cel in this cut — one undo step")
+                .clicked()
+            {
+                state.conform_cut(&cur);
+                ui.close();
+            }
+            ui.separator();
+            plate::legend(ui, "save this cel's stack");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut state.stack_name_buf).desired_width(130.0));
+                let name = state.stack_name_buf.trim().to_string();
+                if ui
+                    .add_enabled(can && !name.is_empty(), egui::Button::new("save"))
+                    .on_hover_text("structure only — names, roles, inks, locks, opacity; never pixels")
+                    .clicked()
+                {
+                    state.stack_request = Some(crate::doc::StackRequest::Save(name));
+                    state.stack_name_buf.clear();
+                    ui.close();
+                }
+            });
+        })
+        .response
+        .on_hover_text("layer-stack presets for the modern pipeline — LO, genga, douga, shiage");
     });
 
     // Owned snapshot so row actions can mutate state freely. The FULL props

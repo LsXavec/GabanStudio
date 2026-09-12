@@ -48,6 +48,18 @@ use workspace::{Pane, Stage, Workspace, Workspaces};
 /// A peer as the room lamp's hover names them — with their build, so
 /// two machines cross-check without leaving the canvas (owner
 /// 2026-08-19: "so i can cross verify that hes on the latest").
+/// PSD-cel-layers Stage 4: the key a room's stack binding lives under
+/// (off-spine custom rooms share one binding).
+fn stage_key(stage: Option<Stage>) -> &'static str {
+    match stage {
+        Some(Stage::Layout) => "layout",
+        Some(Stage::Drawing) => "drawing",
+        Some(Stage::Finishing) => "finishing",
+        Some(Stage::Edit) => "edit",
+        None => "custom",
+    }
+}
+
 fn peer_tag(p: &net::PeerView) -> String {
     if p.version.is_empty() {
         p.name.clone()
@@ -229,6 +241,9 @@ struct App {
     /// usable alongside our own (session-scoped, never saved).
     session_bank_json: Option<String>,
     session_presets: Vec<config::BrushPreset>,
+    /// PSD-cel-layers: the room whose stack last armed the pen (a room
+    /// change re-arms its stack's working layer once).
+    stack_room_seen: &'static str,
     /// LAN DISCOVERY: rooms visible on this network (always listening).
     discovery: net::Discovery,
     /// SESSION PERF 2: the host's snapshot builder, off the UI thread
@@ -2344,6 +2359,7 @@ impl App {
             session_ev_hold: Vec::new(),
             session_bank_json: None,
             session_presets: Vec::new(),
+            stack_room_seen: "",
             discovery: net::spawn_discovery(),
             session_snap_rx: None,
             session_load_rx: None,
@@ -3407,6 +3423,24 @@ impl eframe::App for App {
                 net::Session::Idle => None,
             };
             editor.update_tag = self.update_ready.as_ref().map(|(t, _, _)| t.clone());
+            // PSD-cel-layers Stage 4: the current ROOM's stack becomes the
+            // new-cel template (held-stack clone still wins inside doc),
+            // and the strip gets the pickable list.
+            let room_key = stage_key(editor.stage);
+            let stack = layers_cfg.stack_for_room(room_key);
+            // Entering a room arms its stack's working layer (shiage →
+            // color, LO → rough), the way a room re-arms its tool. Never
+            // under a live pen.
+            if self.stack_room_seen != room_key && !editor.canvas.stroke_active() {
+                self.stack_room_seen = room_key;
+                let (n, r) = stack.armed();
+                editor.state.view.active_layer = n;
+                editor.state.view.active_role = r;
+            }
+            editor.state.new_cel_active = stack.armed();
+            editor.state.new_cel_template = stack.layers.clone();
+            editor.state.stack_current = stack.name.clone();
+            editor.state.stacks = layers_cfg.all_stacks();
             editor.ui(
                 ui,
                 &pen,
@@ -3417,6 +3451,35 @@ impl eframe::App for App {
                 self.config.ui.lock_positions,
                 room,
             );
+            // Stage 4: the strip's stack requests (the App owns config).
+            if let Some(req) = editor.state.stack_request.take() {
+                match req {
+                    doc::StackRequest::Pick(name) => {
+                        editor.state.status = format!("new cels in this room get '{name}'");
+                        self.config
+                            .layers
+                            .room_stack
+                            .insert(room_key.to_string(), name);
+                        self.config.save();
+                    }
+                    doc::StackRequest::Save(name) => {
+                        match editor.state.current_stack_as_preset(&name) {
+                            Some(preset) => {
+                                let stacks = &mut self.config.layers.stacks;
+                                match stacks.iter_mut().find(|s| s.name == name) {
+                                    Some(s) => *s = preset,
+                                    None => stacks.push(preset),
+                                }
+                                self.config.save();
+                                editor.state.status = format!("stack '{name}' saved");
+                            }
+                            None => editor
+                                .state
+                                .refuse("refused — no layered cel on this frame to save"),
+                        }
+                    }
+                }
+            }
             if presets_dirty {
                 // v0.2.5: the host's session brushes never persist.
                 self.config.presets = presets

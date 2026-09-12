@@ -723,13 +723,156 @@ pub fn default_presets() -> Vec<BrushPreset> {
 pub struct LayersConfig {
     #[serde(default = "default_layer_colors")]
     pub colors: std::collections::BTreeMap<String, [u8; 4]>,
+    /// PSD-cel-layers: the artist's OWN stack presets (built-ins are
+    /// compiled in and never stored). Per-user — never on the wire.
+    #[serde(default)]
+    pub stacks: Vec<StackPreset>,
+    /// Which stack each room's new cels get (room key → preset name).
+    /// Picking a stack in the strip rebinds the CURRENT room.
+    #[serde(default = "default_room_stacks")]
+    pub room_stack: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for LayersConfig {
     fn default() -> Self {
         Self {
             colors: default_layer_colors(),
+            stacks: Vec::new(),
+            room_stack: default_room_stacks(),
         }
+    }
+}
+
+/// PSD-cel-layers: a layer-stack preset — STRUCTURE only (names, roles,
+/// identity, lock, onion, opacity, visibility; never pixels).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StackPreset {
+    pub name: String,
+    /// Bottom → top.
+    pub layers: Vec<anim_core::model::LayerProps>,
+    /// The layer (by name) a fresh cel from this stack arms.
+    pub active: String,
+}
+
+impl StackPreset {
+    /// "color · shadow · line" — top-first, like the strip.
+    pub fn summary(&self) -> String {
+        self.layers
+            .iter()
+            .rev()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+
+    /// The armed layer's (name, role) — the named one, else the top.
+    pub fn armed(&self) -> (String, anim_core::model::LayerRole) {
+        self.layers
+            .iter()
+            .find(|l| l.name == self.active)
+            .or(self.layers.last())
+            .map(|l| (l.name.clone(), l.role))
+            .unwrap_or(("line".into(), anim_core::model::LayerRole::Line))
+    }
+}
+
+/// The built-in stacks for the modern digital anime pipeline (research/
+/// PSD-cel-layers.md §4). Compiled in, read-only (duplicate to edit).
+pub fn builtin_stacks() -> Vec<StackPreset> {
+    use anim_core::model::{LayerProps, LayerRole as R};
+    let l = |role: R, opacity: f32, locked: bool| LayerProps {
+        name: role.default_name().into(),
+        role,
+        opacity,
+        locked,
+        ..LayerProps::default()
+    };
+    vec![
+        StackPreset {
+            name: "Solo merged".into(),
+            layers: vec![l(R::Color, 1.0, false), l(R::Line, 1.0, false)],
+            active: "line".into(),
+        },
+        StackPreset {
+            name: "Layout (LO)".into(),
+            layers: vec![l(R::Reference, 0.4, true), l(R::Rough, 1.0, false)],
+            active: "rough".into(),
+        },
+        StackPreset {
+            name: "Genga".into(),
+            layers: vec![
+                l(R::Rough, 0.5, false),
+                l(R::Line, 1.0, false),
+                l(R::Correction, 1.0, false),
+            ],
+            active: "line".into(),
+        },
+        StackPreset {
+            name: "Douga".into(),
+            layers: vec![
+                l(R::ShadowLine, 1.0, false),
+                l(R::HighlightLine, 1.0, false),
+                l(R::Line, 1.0, false),
+            ],
+            active: "line".into(),
+        },
+        StackPreset {
+            name: "Shiage (full)".into(),
+            layers: vec![
+                l(R::Color, 1.0, false),
+                l(R::Shadow, 1.0, false),
+                l(R::Highlight, 1.0, false),
+                l(R::ShadowLine, 1.0, true),
+                l(R::HighlightLine, 1.0, true),
+                l(R::Line, 1.0, true),
+                l(R::Correction, 1.0, false),
+            ],
+            active: "color".into(),
+        },
+    ]
+}
+
+/// Room → stack defaults: layout rooms block against the plate, the
+/// drawing room keeps the merged solo pair, shiage gets the full stack.
+pub fn default_room_stacks() -> std::collections::BTreeMap<String, String> {
+    [
+        ("layout", "Layout (LO)"),
+        ("drawing", "Solo merged"),
+        ("finishing", "Shiage (full)"),
+        ("edit", "Solo merged"),
+        ("custom", "Solo merged"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+impl LayersConfig {
+    /// Every stack the artist can pick: built-ins first, then their own
+    /// (a user stack sharing a built-in's name shadows it).
+    pub fn all_stacks(&self) -> Vec<StackPreset> {
+        let mut out: Vec<StackPreset> = builtin_stacks()
+            .into_iter()
+            .filter(|b| !self.stacks.iter().any(|u| u.name == b.name))
+            .collect();
+        out.extend(self.stacks.iter().cloned());
+        out
+    }
+
+    /// The stack bound to `room` (falls back to Solo merged if the bound
+    /// name no longer exists — a deleted user stack never strands a room).
+    pub fn stack_for_room(&self, room: &str) -> StackPreset {
+        let all = self.all_stacks();
+        let want = self
+            .room_stack
+            .get(room)
+            .cloned()
+            .unwrap_or_else(|| "Solo merged".into());
+        all.iter()
+            .find(|s| s.name == want)
+            .cloned()
+            .or_else(|| all.into_iter().next())
+            .expect("built-ins are never empty")
     }
 }
 
@@ -1970,17 +2113,113 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
 /// layer loads its colour; a colour picked during the session overrides the
 /// default for that layer name until the app closes.
 fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
-    crate::plate::legend(ui, "layers");
-    ui.add_space(4.0);
+    let mut changed = false;
+    // ---- PSD-cel-layers Stage 4: stack presets + room bindings ----------
+    crate::plate::legend(ui, "layer stacks");
     ui.label(
         egui::RichText::new(
-            "Default brush colour per layer. Switching to a layer loads its colour \
-    (picking a colour while on a layer remembers it for this session).",
+            "The layer stack a new cel gets in each room (a held cel's stack is \
+             cloned first). Built-ins follow the modern pipeline; build your own \
+             in the Cel Layers strip and save it from its stack menu.",
         )
+        .size(11.0)
+        .color(crate::plate::legend_dim()),
+    );
+    ui.add_space(4.0);
+    let all = config.layers.all_stacks();
+    for (room, label) in [
+        ("layout", "layout room"),
+        ("drawing", "genga room"),
+        ("finishing", "shiage room"),
+        ("edit", "henshū room"),
+        ("custom", "custom rooms"),
+    ] {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(label)
+                    .size(11.5)
+                    .color(crate::plate::STRUCK),
+            );
+            let current = config.layers.stack_for_room(room).name;
+            ui.menu_button(current.clone(), |ui| {
+                for s in &all {
+                    if crate::plate::detent(ui, s.name == current, &s.name).clicked() {
+                        config.layers.room_stack.insert(room.to_string(), s.name.clone());
+                        changed = true;
+                        ui.close();
+                    }
+                }
+            });
+        });
+    }
+    ui.add_space(6.0);
+    let builtins = builtin_stacks();
+    let mut duplicate: Option<StackPreset> = None;
+    let mut delete: Option<String> = None;
+    for s in &all {
+        let is_builtin = builtins.iter().any(|b| b.name == s.name)
+            && !config.layers.stacks.iter().any(|u| u.name == s.name);
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(&s.name)
+                    .size(11.5)
+                    .color(crate::plate::STRUCK),
+            );
+            if is_builtin {
+                ui.label(
+                    egui::RichText::new("built-in")
+                        .size(10.0)
+                        .color(crate::plate::LEGEND),
+                );
+                if ui
+                    .small_button("duplicate")
+                    .on_hover_text("make an editable copy under your own stacks")
+                    .clicked()
+                {
+                    duplicate = Some(s.clone());
+                }
+            } else if crate::plate::danger(ui, "DELETE") {
+                delete = Some(s.name.clone());
+            }
+        });
+        ui.label(
+            egui::RichText::new(s.summary())
+                .monospace()
+                .size(10.0)
+                .color(crate::plate::legend_dim()),
+        );
+    }
+    if let Some(mut s) = duplicate {
+        let base = format!("{} copy", s.name);
+        let mut name = base.clone();
+        let mut n = 2;
+        while config.layers.all_stacks().iter().any(|x| x.name == name) {
+            name = format!("{base} {n}");
+            n += 1;
+        }
+        s.name = name;
+        config.layers.stacks.push(s);
+        changed = true;
+    }
+    if let Some(name) = delete {
+        config.layers.stacks.retain(|s| s.name != name);
+        changed = true;
+    }
+    ui.add_space(10.0);
+
+    // The name-keyed colour map predates roles. Its automatic per-layer
+    // brush swap was retired (spec defect 16 — the brush colour never
+    // changes without a gesture), so these are REFERENCE inks only.
+    crate::plate::legend(ui, "reference inks");
+    ui.label(
+        egui::RichText::new(
+            "Reference colours per layer name (the automatic brush swap on layer \
+             change is retired — pick ink with the paint dish or pencil box).",
+        )
+        .size(11.0)
         .color(crate::plate::legend_dim()),
     );
     ui.add_space(8.0);
-    let mut changed = false;
     for name in LAYER_COLOR_ORDER {
         let entry = config
             .layers
