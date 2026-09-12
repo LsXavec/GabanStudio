@@ -907,6 +907,147 @@ fn truncate_name(name: &str) -> String {
     }
 }
 
+// ---- The layer card (PSD-cel-layers Stage 3) ---------------------------------
+// Right-click a layer's name or colour dot: what the layer IS (role), how
+// it's known (identity ink), whether it's editable (lock) and whether it
+// ghosts (onion). Every change is ONE SetCelLayerProps — one undo step —
+// and always clone-and-modify (NEVER-DO 1: a definition is never lost).
+
+/// Identity inks the card offers: the plate's own tokens (spec §3 — no
+/// hue outside them; Tally is the armed lamp, never identity).
+fn identity_swatches() -> [(&'static str, [u8; 4]); 7] {
+    let c = |col: egui::Color32| col.to_array();
+    let dim = |col: egui::Color32| {
+        let [r, g, b, _] = col.to_array();
+        [r, g, b, 150]
+    };
+    [
+        ("struck", c(plate::STRUCK)),
+        ("legend", c(plate::LEGEND)),
+        ("paper", c(plate::PAPER)),
+        ("ao", c(plate::AO)),
+        ("ao, dim", dim(plate::AO)),
+        ("aka", c(plate::AKA)),
+        ("aka, dim", dim(plate::AKA)),
+    ]
+}
+
+fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &LayerProps, armed: bool) {
+    use anim_core::model::LayerRole;
+    ui.set_min_width(220.0);
+    plate::legend(ui, "layer card");
+    ui.label(
+        egui::RichText::new(&props.name)
+            .size(12.5)
+            .strong()
+            .color(props_chip_color(props)),
+    );
+    ui.label(
+        egui::RichText::new("double-click the name in the strip to rename")
+            .size(10.0)
+            .color(plate::legend_dim()),
+    );
+    ui.add_space(4.0);
+
+    // ROLE — what drives behaviour. Changing it re-labels only a layer
+    // still wearing its old role's default name (a custom name is the
+    // artist's; never overwritten).
+    plate::legend(ui, "role");
+    for role in LayerRole::ALL.iter().rev() {
+        let on = props.role == *role;
+        ui.horizontal(|ui| {
+            let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
+            ui.painter()
+                .circle_filled(dot.center(), 3.5, role_chip_color(*role));
+            if plate::detent(ui, on, role.label()).clicked() && !on {
+                let name = if props.name == props.role.default_name() {
+                    role.default_name().to_string()
+                } else {
+                    props.name.clone()
+                };
+                let next = LayerProps {
+                    role: *role,
+                    name,
+                    ..props.clone()
+                };
+                state.layer_set_props(lid, next.clone());
+                if armed {
+                    state.arm_layer(&next);
+                }
+            }
+        });
+    }
+    ui.add_space(4.0);
+
+    // IDENTITY INK — the chip; "role" returns to the convention colour.
+    plate::legend(ui, "identity ink");
+    ui.horizontal_wrapped(|ui| {
+        let role_pick = props.chip.is_none();
+        if plate::detent(ui, role_pick, "role").clicked() && !role_pick {
+            state.layer_set_props(
+                lid,
+                LayerProps {
+                    chip: None,
+                    ..props.clone()
+                },
+            );
+        }
+        for (label, rgba) in identity_swatches() {
+            let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
+            let [cr, cg, cb, ca] = rgba;
+            ui.painter().circle_filled(
+                r.center(),
+                6.0,
+                egui::Color32::from_rgba_unmultiplied(cr, cg, cb, ca),
+            );
+            if props.chip == Some(rgba) {
+                ui.painter().circle_stroke(
+                    r.center(),
+                    7.5,
+                    egui::Stroke::new(1.0, plate::STRUCK),
+                );
+            }
+            if resp.on_hover_text(label).clicked() && props.chip != Some(rgba) {
+                state.layer_set_props(
+                    lid,
+                    LayerProps {
+                        chip: Some(rgba),
+                        ..props.clone()
+                    },
+                );
+            }
+        }
+    });
+    ui.add_space(4.0);
+
+    // LOCK + ONION — latches, one undo step each.
+    let mut locked = props.locked;
+    plate::latch(ui, &mut locked, "locked").on_hover_text(
+        "every painting tool refuses on a locked layer (pen, eraser, fill, lasso, select)",
+    );
+    if locked != props.locked {
+        state.layer_set_props(
+            lid,
+            LayerProps {
+                locked,
+                ..props.clone()
+            },
+        );
+    }
+    let mut onion = props.onion;
+    plate::latch(ui, &mut onion, "in onion ghosts")
+        .on_hover_text("off: this layer never appears in onion-skin ghosts (the flip still shows it)");
+    if onion != props.onion {
+        state.layer_set_props(
+            lid,
+            LayerProps {
+                onion,
+                ..props.clone()
+            },
+        );
+    }
+}
+
 // ---- Cel Layers strip -------------------------------------------------------
 // The layers INSIDE this frame's own cel, top-first (Krita/CSP convention).
 // Row: [eye] [colour dot] [name] [↑][↓][–] [opacity]. Click = activate,
@@ -1013,10 +1154,48 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                     },
                 );
             }
-            // RETAS colour dot — painted, in the layer's identity ink.
-            let (dot_rect, _) = ui.allocate_exact_size(vec2(12.0, 18.0), Sense::hover());
+            // PSD-cel-layers: the lock, beside the eye — one click = one
+            // undo step. Unlocked is the quiet state (dim shackle).
+            let lock_color = if props.locked {
+                plate::STRUCK
+            } else {
+                plate::legend_dim()
+            };
+            let (lock_rect, lock_resp) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::click());
+            crate::icons::paint(
+                ui.painter(),
+                Rect::from_center_size(lock_rect.center(), vec2(11.0, 11.0)),
+                lock_color,
+                Icon::Lock,
+            );
+            if lock_resp
+                .on_hover_text(if props.locked {
+                    "locked — click to unlock"
+                } else {
+                    "lock this layer (every painting tool refuses)"
+                })
+                .clicked()
+            {
+                state.layer_set_props(
+                    *lid,
+                    LayerProps {
+                        locked: !props.locked,
+                        ..props.clone()
+                    },
+                );
+            }
+            // RETAS colour dot — the layer's identity ink. Click or
+            // right-click: the layer card.
+            let (dot_rect, dot_resp) = ui.allocate_exact_size(vec2(12.0, 18.0), Sense::click());
             ui.painter()
                 .circle_filled(dot_rect.center(), 4.0, props_chip_color(&props));
+            let dot_resp = dot_resp.on_hover_text(format!(
+                "{} — click: define this layer",
+                props.role.label()
+            ));
+            egui::Popup::menu(&dot_resp).show(|ui| {
+                layer_card(ui, state, *lid, &props, is_active);
+            });
 
             // Name: click = activate, double-click = rename — in a FIXED
             // cell (spec defect 10): the columns after it never drift with
@@ -1024,7 +1203,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // Reserve what the row's fixed furniture actually needs —
             // eye 27 + dot 12 + two chevrons 54 + slider 60 + "100%" 34 +
             // spacing — or the percentage clips off the panel's edge.
-            let name_w = (ui.available_width() - 205.0).max(48.0);
+            let name_w = (ui.available_width() - 190.0).max(48.0);
             ui.allocate_ui_with_layout(
                 vec2(name_w, 20.0),
                 egui::Layout::left_to_right(egui::Align::Center),
@@ -1079,9 +1258,12 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                         } else {
                             egui::RichText::new(shown).color(plate::LEGEND)
                         };
-                        let resp = ui
-                            .selectable_label(is_active, text)
-                            .on_hover_text("click: edit this layer — double-click: rename");
+                        let resp = ui.selectable_label(is_active, text).on_hover_text(
+                            "click: edit this layer — double-click: rename — right-click: define",
+                        );
+                        resp.context_menu(|ui| {
+                            layer_card(ui, state, *lid, &props, is_active);
+                        });
                         if resp.double_clicked() {
                             state.strip_rename = Some((*lid, name.clone()));
                         } else if resp.clicked() {
