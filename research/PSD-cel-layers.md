@@ -176,6 +176,36 @@ layers byte-identical, one history entry); follow-by-role resolves a
 renamed line and refuses on ambiguity; lock guard refuses pen, eraser,
 fill, and lasso; the join floor refuses an older build.
 
+## 8. BUILD NOTES (2026-09-12, derived during the build)
+
+1. **Definitions live in a side table** (`cel_layer_defs`, schema v9),
+   not new `cel_layers` columns: saves rewrite INTO the existing file
+   and `CREATE TABLE IF NOT EXISTS` keeps an old file's shape, so new
+   columns would have broken every re-save of a v5–v8 file.
+2. **The strip's row actions rebuilt props from name/visible/opacity**
+   — every eye click, rename or opacity drag would have erased a
+   layer's role. All row actions now clone-and-modify.
+3. **Lock-guard hole on blank frames:** with no own cel, the guard saw
+   nothing, so a stroke could create a Shiage cel and ink its LOCKED
+   line. The guard now reads the template layer the stroke will make.
+4. **The line-only onion ghost filtered by name**; it now matches the
+   armed name OR its non-custom role.
+5. **Room arming:** entering a room arms its stack's working layer
+   (shiage → color, LO → rough), like a room re-arms its tool.
+6. **The name-keyed colour map is vestigial** — its automatic brush
+   swap was retired by spec defect 16, so nothing consumes it. Not
+   migrated to roles (no consumer); its Settings caption now says
+   "reference inks" instead of promising the dead swap.
+7. **Known, outside this room's blast radius:** the session wire still
+   addresses a layer by drawing id + NAME (PSD-session-v2 NEVER-DO 2).
+   Renames are safe (props travel with the command) but two layers
+   sharing one name in one cel could misroute a remote stroke. Queue
+   for the multiplayer room if it ever bites.
+8. Verified in the real app through the UI dump hook (owner declined
+   screen control): strip renders lock + identity dot + name without
+   clipping the opacity readout; a pre-role document loads with roles
+   inferred (line → struck ink, color → legend ink).
+
 ---
 *PSD gate passed 2026-09-12 — root: explicit persisted role. Stages
-1–4 build; Stage 5 deferred to its own room.*
+1–4 built and shipped as v0.3.0; Stage 5 deferred to its own room.*

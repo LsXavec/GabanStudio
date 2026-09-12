@@ -1268,9 +1268,11 @@ impl AppState {
 
     /// WHOLE-CEL composite of a drawing's visible layers (bottom→top slices +
     /// composite hash) — the onion ghost is the cel as it looks, all layers.
-    /// Composite of `id`'s visible layers, optionally restricted to layers
-    /// matching `filter_name` (the per-layer onion: a neighbour cel with no
-    /// layer of that name contributes nothing, not a wrong-role ghost).
+    /// Composite of `id`'s visible layers, optionally restricted to the
+    /// layer the pen is armed on — matched by NAME or by its non-custom
+    /// ROLE (PSD-cel-layers: a neighbour whose line layer is called
+    /// "clean" still ghosts under "line-only"). A neighbour with no such
+    /// layer contributes nothing, never a wrong-role ghost.
     /// `ghost` = this composite feeds an ONION ghost: layers whose
     /// definition opts out of ghosting (`onion: false`) are skipped. Real
     /// displays (multi-column view, the flip) pass false — the flag is a
@@ -1278,17 +1280,21 @@ impl AppState {
     pub fn drawing_composite(
         &self,
         id: DrawingId,
-        filter_name: Option<&str>,
+        filter: Option<(&str, anim_core::model::LayerRole)>,
         ghost: bool,
     ) -> Option<(LayerSlices<'_>, u64)> {
+        use anim_core::model::LayerRole;
         let d = self.cut().drawing(id)?;
         let mut bytes: Vec<u8> = Vec::new();
         let mut slices = Vec::new();
         for l in &d.layers {
+            let matches = filter.is_none_or(|(n, r)| {
+                l.props.name == n || (r != LayerRole::Custom && l.props.role == r)
+            });
             if l.props.visible
                 && l.props.opacity > 0.0
                 && (!ghost || l.props.onion)
-                && filter_name.is_none_or(|n| l.props.name == n)
+                && matches
             {
                 bytes.extend_from_slice(&l.content_hash().to_le_bytes());
                 slices.push((&l.raster.tiles, l.props.opacity));

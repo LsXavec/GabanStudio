@@ -3173,7 +3173,7 @@ impl CanvasView {
                 // layer's role name is what "line-only ghost" locks onto.
                 // The FLIP shows the whole previous cel — no filter.
                 let filter = (!self.flip_held && state.view.onion_layer_only)
-                    .then(|| state.active_layer_name());
+                    .then(|| (state.active_layer_name(), state.view.active_role));
                 // Slot 0 = the behind-neighbour (onion; the FLIP borrows it
                 // at full identity). Slot 1 = THE GHOST PIN when set (the
                 // pinned scaffold outranks the forward neighbour); else
@@ -3188,7 +3188,8 @@ impl CanvasView {
                 // the FLIP shows the whole previous cel (not a ghost).
                 let ghost = !self.flip_held;
                 for (slot, nid) in [s0, s1].into_iter().enumerate() {
-                    match nid.and_then(|id| state.drawing_composite(id, filter.as_deref(), ghost)) {
+                    let f = filter.as_ref().map(|(n, r)| (n.as_str(), *r));
+                    match nid.and_then(|id| state.drawing_composite(id, f, ghost)) {
                         Some((slices, hash)) => p.set_onion(slot, Some(&slices), hash),
                         None => p.set_onion(slot, None, 0),
                     }
