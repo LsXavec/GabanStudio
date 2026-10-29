@@ -44,14 +44,93 @@ pub fn solo_template() -> Vec<LayerProps> {
 }
 
 /// GM6: the spacing-chart presets (タイミング指示) — marks between the keys,
-/// 0..1: even halves / thirds / quarters, or bunched toward one key.
-pub const CHART_PRESETS: &[(&str, &[f32])] = &[
-    ("halves", &[0.5]),
-    ("thirds", &[1.0 / 3.0, 2.0 / 3.0]),
-    ("quarters", &[0.25, 0.5, 0.75]),
-    ("favour start", &[0.125, 0.25, 0.5]),
-    ("favour end", &[0.5, 0.75, 0.875]),
+/// 0..1: even halves / thirds / quarters, or bunched toward one key; each
+/// with the line its button says on hover.
+pub const CHART_PRESETS: &[(&str, &[f32], &str)] = &[
+    ("halves", &[0.5], "one inbetween, halfway between the keys"),
+    ("thirds", &[1.0 / 3.0, 2.0 / 3.0], "two inbetweens, a third of the way apart"),
+    ("quarters", &[0.25, 0.5, 0.75], "three inbetweens, evenly a quarter apart"),
+    (
+        "favour start",
+        &[0.125, 0.25, 0.5],
+        "three inbetweens halving toward this key (1/8, 1/4, 1/2): the motion leaves it slowly",
+    ),
+    (
+        "favour end",
+        &[0.5, 0.75, 0.875],
+        "three inbetweens halving toward the next key (1/2, 3/4, 7/8): the motion arrives slowly",
+    ),
 ];
+
+/// GM6: the most marks the chart editor makes (inbetweens between two keys).
+pub const CHART_MAX_MARKS: usize = 15;
+
+/// GM6: how the chart editor lays `n` marks between the keys — evenly, or
+/// closing up (tsume) toward one key on a quadratic ease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChartSpacing {
+    Even,
+    /// mae-zume: the marks close up toward this key (a slow out).
+    FavourStart,
+    /// ato-zume: the marks close up toward the next key (a slow in).
+    FavourEnd,
+}
+
+impl ChartSpacing {
+    pub const ALL: [ChartSpacing; 3] = [
+        ChartSpacing::Even,
+        ChartSpacing::FavourStart,
+        ChartSpacing::FavourEnd,
+    ];
+
+    /// The editor's button (D7: romaji plus English).
+    pub fn label(self) -> &'static str {
+        match self {
+            ChartSpacing::Even => "even",
+            ChartSpacing::FavourStart => "mae-zume (slow out)",
+            ChartSpacing::FavourEnd => "ato-zume (slow in)",
+        }
+    }
+
+    pub fn help(self) -> &'static str {
+        match self {
+            ChartSpacing::Even => "the marks evenly apart between the keys",
+            ChartSpacing::FavourStart => "the marks close up toward this key: the motion leaves it slowly",
+            ChartSpacing::FavourEnd => "the marks close up toward the next key: the motion arrives slowly",
+        }
+    }
+}
+
+/// GM6: `n` chart marks (clamped to 1..=CHART_MAX_MARKS), ascending, each
+/// strictly between the keys.
+pub fn chart_marks(spacing: ChartSpacing, n: usize) -> Vec<f32> {
+    let n = n.clamp(1, CHART_MAX_MARKS);
+    (1..=n)
+        .map(|i| {
+            let t = i as f32 / (n + 1) as f32;
+            match spacing {
+                ChartSpacing::Even => t,
+                ChartSpacing::FavourStart => t * t,
+                ChartSpacing::FavourEnd => 1.0 - (1.0 - t) * (1.0 - t),
+            }
+        })
+        .collect()
+}
+
+/// GM6: drag mark `i` of a chart to `t`: it stays strictly between its
+/// neighbours (and the keys), so the marks keep their order.
+pub fn move_chart_mark(marks: &[f32], i: usize, t: f32) -> Vec<f32> {
+    let mut out = marks.to_vec();
+    if i < out.len() && t.is_finite() {
+        const GAP: f32 = 0.005;
+        let lo = if i == 0 { 0.0 } else { out[i - 1] } + GAP;
+        let hi = out.get(i + 1).copied().unwrap_or(1.0) - GAP;
+        if lo <= hi {
+            out[i] = t.clamp(lo, hi);
+        }
+    }
+    out
+}
 
 /// GM6: where `n` inbetweens land between keys exposed at `fa` and `fb`:
 /// the span split into n+1 equal steps, rounded, each at least one frame
@@ -97,15 +176,37 @@ pub fn inbetween_names(
         && (p, s) == (p2, s2)
     {
         let (lo, hi) = (a.min(b), a.max(b));
-        let free: Vec<String> = (lo + 1..hi)
-            .map(|k| format!("{p}{k}{s}"))
-            .filter(|name| !taken.contains(name))
+        // The taken numbers strictly between, sorted: the free ones are
+        // counted and picked from these, never listed (keys 1 and 99999999
+        // must not build a hundred million names).
+        let mut held: Vec<u64> = taken
+            .iter()
+            .filter_map(|t| {
+                let (tp, k, ts) = split_number(t)?;
+                ((tp, ts) == (p, s) && k > lo && k < hi && *t == format!("{p}{k}{s}")).then_some(k)
+            })
             .collect();
-        let m = free.len();
-        if m >= n {
-            // The j-th of n picks sits nearest (j+1)/(n+1) of the way along.
-            let at = |j: usize| (2 * (j + 1) * (m + 1) + n + 1) / (2 * (n + 1)) - 1;
-            let mut picked: Vec<String> = (0..n).map(|j| free[at(j)].clone()).collect();
+        held.sort_unstable();
+        held.dedup();
+        let m = (hi - lo).saturating_sub(1) - held.len() as u64;
+        if m >= n as u64 {
+            // The j-th of n picks sits nearest (j+1)/(n+1) of the way along
+            // the m free numbers (u128: no overflow for any key numbers).
+            let (m, n1) = (m as u128, n as u128 + 1);
+            let at = |j: usize| ((2 * (j as u128 + 1) * (m + 1) + n1) / (2 * n1) - 1) as u64;
+            // The i-th free number: step over every taken one at or below.
+            let free = |i: u64| {
+                let mut k = lo + 1 + i;
+                for h in &held {
+                    if *h <= k {
+                        k += 1;
+                    } else {
+                        break;
+                    }
+                }
+                k
+            };
+            let mut picked: Vec<String> = (0..n).map(|j| format!("{p}{}{s}", free(at(j)))).collect();
             if a > b {
                 picked.reverse();
             }
@@ -274,6 +375,10 @@ pub struct AppState {
     /// GM6: the pixel clipboard — the last copied selection of a layer, at
     /// its paper position (session-only; the cell clipboard is sheet_ui's).
     pub pixel_clip: Option<anim_core::edit::ClipImage>,
+    /// GM6: the text the canvas handed the system clipboard for that copy
+    /// (None = not handed yet), so the paste key's text can tell our own
+    /// pixels from text copied elsewhere since.
+    pub pixel_clip_text: Option<String>,
 }
 
 impl AppState {
@@ -349,6 +454,7 @@ impl AppState {
             sheet_ui: Default::default(),
             curves: Default::default(),
             pixel_clip: None,
+            pixel_clip_text: None,
         }
     }
 
@@ -432,6 +538,7 @@ impl AppState {
             sheet_ui: Default::default(),
             curves: Default::default(),
             pixel_clip: None,
+            pixel_clip_text: None,
         })
     }
 
@@ -1498,7 +1605,14 @@ impl AppState {
             None
         } else {
             let col = self.cut().xsheet.column(self.view.active_column);
-            let start = col.and_then(|c| c.keys_referencing(id).first().copied());
+            // From the exposure under the cursor when it shows this drawing
+            // (a drawing exposed twice charts toward the key after the one
+            // you are on), else from its first exposure.
+            let here = col
+                .filter(|c| c.resolve(self.view.frame) == Some(id))
+                .and_then(|c| c.exposure_at(self.view.frame))
+                .map(|(f, _)| f);
+            let start = here.or_else(|| col.and_then(|c| c.keys_referencing(id).first().copied()));
             match col.zip(start).and_then(|(c, f)| c.next_key(f, |d| d != id)) {
                 Some((_, to)) => Some(SpacingChart {
                     to,
@@ -1576,33 +1690,56 @@ impl AppState {
             .ok_or("this drawing has no spacing chart")?;
         let col = self.cut().xsheet.column(column).ok_or("no active column")?;
         let (fa, _) = col.exposure_at(self.view.frame).ok_or("nothing exposed here")?;
-        let (fb, _) = col
-            .next_key(fa, |d| d == chart.to)
-            .ok_or("the chart's next key is not exposed after this one in this column")?;
+        let name_of = |d: DrawingId| self.cut().drawing(d).map(|x| x.name.clone()).unwrap_or_default();
+        // The very next key must be the chart's: whatever else sits between
+        // the two (a breakdown, a key, earlier inbetweens, a blank) is the
+        // animator's work and is never cleared — it refuses instead.
+        let lost = "the chart's next key is not exposed after this one in this column";
+        let (fb, next) = col.keys().find(|(f, _)| *f > fa).ok_or(lost)?;
+        match next {
+            Exposure::Drawing(d) if d == chart.to => {}
+            Exposure::Drawing(d) => {
+                if col.next_key(fa, |k| k == chart.to).is_none() {
+                    return Err(lost.into());
+                }
+                let at = fb + 1;
+                return Err(match self.cut().drawing_kind(d) {
+                    DrawingKind::Inbetween => format!(
+                        "inbetween {} is already timed between these keys (frame {at}); undo or clear its cells first",
+                        name_of(d)
+                    ),
+                    kind => format!(
+                        "{} {} sits between these keys (frame {at}); chart {} toward it instead",
+                        match kind {
+                            DrawingKind::Breakdown => "breakdown",
+                            DrawingKind::Key => "key",
+                            _ => "drawing",
+                        },
+                        name_of(d),
+                        name_of(from),
+                    ),
+                });
+            }
+            Exposure::Empty => {
+                if col.next_key(fa, |k| k == chart.to).is_none() {
+                    return Err(lost.into());
+                }
+                return Err(format!(
+                    "a blank cell sits between these keys (frame {}); clear it first",
+                    fb + 1
+                ));
+            }
+        }
         let n = chart.marks.len();
         let frames = inbetween_frames(fa, fb, n)
             .ok_or_else(|| format!("{n} inbetweens need at least {} frames between the keys", n + 1))?;
-        let between: Vec<u32> = col
-            .keys()
-            .map(|(f, _)| f)
-            .filter(|f| *f > fa && *f < fb)
-            .collect();
-        let name_of = |d: DrawingId| self.cut().drawing(d).map(|x| x.name.clone()).unwrap_or_default();
         let taken: HashSet<String> = self.cut().drawings.iter().map(|d| d.name.clone()).collect();
         let names = inbetween_names(&name_of(from), &name_of(chart.to), n, &taken);
         let specs: Vec<LayerProps> = match self.cut().drawing(from) {
             Some(d) if !d.layers.is_empty() => d.layers.iter().map(|l| l.props.clone()).collect(),
             _ => self.new_cel_specs(),
         };
-        let mut cmds: Vec<Command> = between
-            .into_iter()
-            .map(|frame| Command::SetCell {
-                at,
-                column,
-                frame,
-                key: None,
-            })
-            .collect();
+        let mut cmds: Vec<Command> = Vec::new();
         let mut index = self.cut().drawings.len();
         for (name, frame) in names.into_iter().zip(frames) {
             let id = self.engine.alloc_drawing_id();
@@ -1663,25 +1800,31 @@ impl AppState {
             })
             .collect();
         let index = self.cut().drawings.len();
-        let r = self.engine.apply(
-            "duplicate cel",
-            vec![
-                Command::AddDrawing {
-                    at,
-                    id,
-                    index,
-                    name: name.clone(),
-                    strokes: src.strokes.clone(),
-                    layers,
-                },
-                Command::SetCell {
-                    at,
-                    column: self.view.active_column,
-                    frame: self.view.frame,
-                    key: Some(Exposure::Drawing(id)),
-                },
-            ],
-        );
+        let mut cmds = vec![Command::AddDrawing {
+            at,
+            id,
+            index,
+            name: name.clone(),
+            strokes: src.strokes.clone(),
+            layers,
+        }];
+        // The copy keeps what the original is (its kind and chart).
+        let def = self.cut().drawing_def(src.id);
+        if def != anim_core::model::DrawingDef::default() {
+            cmds.push(Command::SetDrawingDef {
+                at,
+                drawing: id,
+                before: Default::default(),
+                after: def,
+            });
+        }
+        cmds.push(Command::SetCell {
+            at,
+            column: self.view.active_column,
+            frame: self.view.frame,
+            key: Some(Exposure::Drawing(id)),
+        });
+        let r = self.engine.apply("duplicate cel", cmds);
         if r.is_ok() {
             self.view.selected_drawing = Some(id);
         }
@@ -1699,6 +1842,8 @@ impl AppState {
         match clip {
             Some(c) => {
                 self.pixel_clip = Some(c);
+                // The canvas hands the system clipboard fresh text for it.
+                self.pixel_clip_text = None;
                 self.status = "pixels copied".into();
                 true
             }
@@ -4216,9 +4361,16 @@ mod lighttable_tests {
     use anim_core::raster::{TILE, TILE_LEN, TileData, f32_to_f16_bits};
     use eframe::egui;
 
-    use super::{AppState, inbetween_frames, inbetween_names};
+    use anim_core::command::Command;
+    use anim_core::xsheet::Exposure;
+
+    use super::{
+        AppState, CHART_MAX_MARKS, ChartSpacing, chart_marks, inbetween_frames, inbetween_names,
+        move_chart_mark,
+    };
     use crate::canvas::{
-        ONION_AHEAD_TINT, ONION_BEHIND_TINT, OnionCfg, OnionMode, PinShift, onion_set, shift_tiles,
+        ONION_AHEAD_TINT, ONION_BEHIND_TINT, OnionCfg, OnionMode, PinShift, onion_ghosts,
+        onion_set, onion_slot_plan, shift_tiles, vector_onion_set,
     };
     use crate::config::{Action, Config};
     use crate::plate;
@@ -4274,6 +4426,21 @@ mod lighttable_tests {
 
     fn hashes(s: &AppState) -> Vec<u64> {
         s.cut().drawings.iter().map(|d| d.content_hash()).collect()
+    }
+
+    /// Expose drawing `d` at `frame` of the active column (one SetCell).
+    fn expose(s: &mut AppState, frame: u32, d: DrawingId) {
+        let (at, column) = (s.at(), s.view.active_column);
+        let key = Some(Exposure::Drawing(d));
+        s.engine
+            .apply("expose", vec![Command::SetCell { at, column, frame, key }])
+            .expect("exposed");
+    }
+
+    /// The canvas pane's centre in the drawing room.
+    fn canvas_center(h: &EditorHarness) -> egui::Pos2 {
+        let c = h.editor().pane_rects.iter().find(|(p, _)| *p == Pane::Canvas).map(|(_, r)| r.center());
+        c.expect("the drawing room docks the canvas")
     }
 
     #[test]
@@ -4606,5 +4773,494 @@ mod lighttable_tests {
         let (back, _) = Config::load_from(dir.path());
         assert_eq!(back.onion, cfg.onion);
         assert_eq!(back.light_table, cfg.light_table);
+    }
+
+    #[test]
+    fn lighttable_vector_ghosts_look_past_the_held_drawing() {
+        let (mut h, d) = keyed(&[0, 4]);
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        let vector = |s: &AppState, f: u32, cfg: &OnionCfg| -> Vec<(DrawingId, i32)> {
+            vector_onion_set(s.cut(), col, f, cfg).into_iter().map(|(d, o, _)| (d, o)).collect()
+        };
+        let ghosts = |s: &AppState, f: u32, cfg: &OnionCfg| -> Vec<DrawingId> {
+            onion_ghosts(s, col, f, cfg).into_iter().map(|(d, _)| d).collect()
+        };
+        let cfg = OnionCfg::default();
+        // Mid-hold the GPU slot ghosts the held drawing behind (the cel you
+        // draw the next one over); the vector path draws it as the frame
+        // itself, so its ghost behind is the drawing before.
+        assert_eq!(set_at(s, 5, &cfg), vec![(d[1], -1)]);
+        assert_eq!(vector(s, 5, &cfg), vec![(d[0], -1)]);
+        assert_eq!(ghosts(s, 5, &cfg), vec![d[0]]);
+        // On the key itself the two agree.
+        assert_eq!(set_at(s, 4, &cfg), vec![(d[0], -1)]);
+        assert_eq!(vector(s, 4, &cfg), vec![(d[0], -1)]);
+        assert_eq!(ghosts(s, 4, &cfg), vec![d[0]]);
+        // Keys mode looks past it the same way.
+        for k in [d[0], d[1]] {
+            s.set_drawing_kind(k, DrawingKind::Key);
+        }
+        let keys = depth(1, 1, OnionMode::Keys);
+        assert_eq!(set_at(s, 5, &keys), vec![(d[1], -1)]);
+        assert_eq!(vector(s, 5, &keys), vec![(d[0], -1)]);
+        assert_eq!(ghosts(s, 5, &keys), vec![d[0]]);
+    }
+
+    #[test]
+    fn lighttable_onion_set_matrix_every_mode_depth_and_side() {
+        let (mut h, d) = keyed(&[0, 2, 4, 6, 8, 10, 12]);
+        let s = h.state_mut();
+        let a = s.view.active_column;
+        for k in [d[0], d[2], d[4], d[6]] {
+            s.set_drawing_kind(k, DrawingKind::Key);
+        }
+        s.add_column();
+        s.goto(0);
+        s.new_drawing_at_frame();
+        let e = s.current_drawing().expect("column B's drawing");
+        use OnionMode::{Drawings, Frames, Keys};
+        // Frame 6 shows d3 (not a key); d0, d2, d4 and d6 are keys.
+        let table = [
+            (Drawings, (0, 0), vec![]),
+            (Drawings, (1, 1), vec![(d[2], -1), (d[4], 1)]),
+            (Drawings, (2, 0), vec![(d[2], -1), (d[1], -2)]),
+            (Drawings, (0, 2), vec![(d[4], 1), (d[5], 2)]),
+            (
+                Drawings,
+                (5, 5),
+                vec![(d[2], -1), (d[1], -2), (d[0], -3), (d[4], 1), (d[5], 2), (d[6], 3)],
+            ),
+            (Frames, (0, 0), vec![]),
+            (Frames, (1, 1), vec![(d[2], -1)]),
+            (Frames, (5, 5), vec![(d[2], -1), (d[1], -3), (d[0], -5), (d[4], 2), (d[5], 4)]),
+            (Keys, (0, 0), vec![]),
+            (Keys, (1, 1), vec![(d[2], -1), (d[4], 1)]),
+            (Keys, (5, 5), vec![(d[2], -1), (d[0], -2), (d[4], 1), (d[6], 2)]),
+        ];
+        for (mode, (before, after), want) in table {
+            for others in [false, true] {
+                let cfg = OnionCfg {
+                    other_columns: others,
+                    ..depth(before, after, mode)
+                };
+                let got: Vec<(DrawingId, i32)> =
+                    onion_set(s.cut(), a, 6, &cfg).into_iter().map(|(d, o, _)| (d, o)).collect();
+                // Column B holds its one drawing over frame 6: it ghosts one
+                // behind, never ahead (it is held there), and never in keys
+                // mode (it is not marked).
+                let mut want = want.clone();
+                if others && before > 0 && mode != Keys {
+                    want.push((e, -1));
+                }
+                assert_eq!(got, want, "{mode:?} {before}/{after}, other columns {others}");
+            }
+        }
+    }
+
+    #[test]
+    fn lighttable_onion_gpu_budget_is_three_textures_and_no_new_shaders() {
+        let (h, d) = keyed(&[0, 2, 4, 6, 8, 10, 12]);
+        let s = h.state();
+        let set = onion_set(s.cut(), s.view.active_column, 6, &depth(5, 5, OnionMode::Drawings));
+        let pins: Vec<(DrawingId, PinShift)> =
+            [d[0], d[3], d[6]].into_iter().map(|p| (p, PinShift::default())).collect();
+        // Depth 5 on both sides and three pins: still three textures.
+        let plan = onion_slot_plan(&set, &pins);
+        assert_eq!(crate::paint::ONION_SLOTS, 3);
+        let ids = |slot: &[(DrawingId, f32)]| slot.iter().map(|x| x.0).collect::<Vec<_>>();
+        // Farthest first, so the nearest lies on top.
+        assert_eq!(ids(&plan[0]), vec![d[0], d[1], d[2]]);
+        assert_eq!(ids(&plan[1]), vec![d[6], d[5], d[4]]);
+        assert_eq!(ids(&plan[2]), vec![d[0], d[3], d[6]]);
+        // Each ghost weighs against its side's nearest (the slot's tint
+        // carries that one's opacity).
+        let f = OnionCfg::default().falloff;
+        for slot in &plan[..2] {
+            let k: Vec<f32> = slot.iter().map(|x| x.1).collect();
+            assert!(k.iter().zip([f * f, f, 1.0]).all(|(a, b)| (a - b).abs() < 1e-5), "{k:?}");
+        }
+        assert!(plan[2].iter().all(|x| x.1 == 1.0));
+        // No new shader: the slots go through the paint pipeline's onion
+        // pass (the needles are split so this file never counts itself).
+        let (mut modules, mut stages, mut wgsl) = (0, 0, 0);
+        let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        for entry in std::fs::read_dir(src).expect("the app's sources") {
+            let path = entry.expect("a source entry").path();
+            match path.extension().and_then(|x| x.to_str()) {
+                Some("rs") => {
+                    let text = std::fs::read_to_string(&path).expect("a source file");
+                    modules += text.matches(concat!("create_shader", "_module(")).count();
+                    for stage in ["vertex", "fragment", "compute"] {
+                        stages += text.matches(&format!("@{stage}")).count();
+                    }
+                }
+                Some("wgsl") => wgsl += 1,
+                _ => {}
+            }
+        }
+        assert!((1..=4).contains(&modules), "{modules} shader modules (4 before GM6)");
+        assert!(stages <= 8, "{stages} shader entry points (8 before GM6)");
+        assert_eq!(wgsl, 0, "no .wgsl files");
+    }
+
+    #[test]
+    fn lighttable_make_inbetweens_refuses_rather_than_clear_a_drawing_between() {
+        let (mut h, d) = keyed(&[0, 8]);
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        s.set_chart(d[0], &[0.25, 0.5, 0.75]);
+        // A breakdown drawn between the keys after the chart was set.
+        s.goto(4);
+        s.new_drawing_at_frame();
+        let bd = s.current_drawing().expect("the breakdown");
+        s.set_drawing_kind(bd, DrawingKind::Breakdown);
+        s.goto(0);
+        let (count, steps) = (s.cut().drawings.len(), s.engine.position());
+        assert!(!s.make_inbetweens());
+        assert!(s.refusal.contains("breakdown"), "{}", s.refusal);
+        let key = |s: &AppState, f: u32| s.cut().xsheet.column(col).unwrap().key_at(f);
+        assert_eq!(key(s, 4), Some(Exposure::Drawing(bd)), "the breakdown stays");
+        assert_eq!((s.cut().drawings.len(), s.engine.position()), (count, steps));
+        // Charted toward the breakdown instead, it fills.
+        s.set_chart(d[0], &[0.5]);
+        assert_eq!(s.cut().drawing_def(d[0]).chart.map(|c| c.to), Some(bd));
+        assert!(s.make_inbetweens(), "{}", s.refusal);
+        let frames: Vec<u32> = s.cut().xsheet.column(col).unwrap().keys().map(|(f, _)| f).collect();
+        assert_eq!(frames, vec![0, 2, 4, 8]);
+        assert_eq!(s.cut().drawing_kind(bd), DrawingKind::Breakdown);
+        // A blank cell between is the animator's too.
+        s.goto(4);
+        s.set_chart(bd, &[0.5]);
+        let (at, column) = (s.at(), col);
+        let blank = Some(Exposure::Empty);
+        s.engine
+            .apply("blank", vec![Command::SetCell { at, column, frame: 6, key: blank }])
+            .expect("a blank cell");
+        let steps = s.engine.position();
+        assert!(!s.make_inbetweens());
+        assert!(s.refusal.contains("blank"), "{}", s.refusal);
+        assert_eq!(key(s, 6), Some(Exposure::Empty));
+        assert_eq!(s.engine.position(), steps);
+    }
+
+    #[test]
+    fn lighttable_a_chart_points_from_the_exposure_under_the_cursor() {
+        // A at 0, B at 4, A again at 8, X at 12, B again at 16.
+        let (mut h, d) = keyed(&[0, 4]);
+        let (a, b) = (d[0], d[1]);
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        expose(s, 8, a);
+        s.goto(12);
+        s.new_drawing_at_frame();
+        let x = s.current_drawing().expect("X");
+        expose(s, 16, b);
+        s.goto(0);
+        s.set_chart(a, &[0.5]);
+        assert_eq!(s.cut().drawing_def(a).chart.map(|c| c.to), Some(b));
+        // On A's second exposure that chart's key (B) is not next: X is,
+        // and X is never cleared.
+        s.goto(8);
+        let steps = s.engine.position();
+        assert!(!s.make_inbetweens());
+        assert!(s.refusal.contains("sits between these keys"), "{}", s.refusal);
+        assert_eq!(s.resolve_at(col, 12), Some(x));
+        assert_eq!(s.engine.position(), steps);
+        // Charted from here, it points at X and fills 8..12.
+        s.set_chart(a, &[0.5]);
+        assert_eq!(s.cut().drawing_def(a).chart.map(|c| c.to), Some(x));
+        assert!(s.make_inbetweens(), "{}", s.refusal);
+        let ib = s.resolve_at(col, 10).expect("the inbetween");
+        assert_eq!(s.cut().drawing_kind(ib), DrawingKind::Inbetween);
+        assert_eq!((s.resolve_at(col, 12), s.resolve_at(col, 16)), (Some(x), Some(b)));
+    }
+
+    #[test]
+    fn lighttable_chart_editor_marks_any_count_and_seven_land_on_ones() {
+        for spacing in ChartSpacing::ALL {
+            for n in [1, 3, 7, CHART_MAX_MARKS] {
+                let m = chart_marks(spacing, n);
+                assert_eq!(m.len(), n, "{spacing:?} {n}");
+                assert!(m.windows(2).all(|w| w[0] < w[1]), "{spacing:?}: {m:?}");
+                assert!(m.iter().all(|t| *t > 0.0 && *t < 1.0), "{spacing:?}: {m:?}");
+            }
+        }
+        assert_eq!(chart_marks(ChartSpacing::Even, 1), vec![0.5]);
+        assert_eq!(chart_marks(ChartSpacing::Even, 99).len(), CHART_MAX_MARKS);
+        assert_eq!(chart_marks(ChartSpacing::Even, 0).len(), 1);
+        // Mae-zume closes up toward this key, ato-zume toward the next.
+        let start = chart_marks(ChartSpacing::FavourStart, 3);
+        let end = chart_marks(ChartSpacing::FavourEnd, 3);
+        assert!(start[1] - start[0] < start[2] - start[1], "{start:?}");
+        assert!(end[2] - end[1] < end[1] - end[0], "{end:?}");
+        // A dragged mark stays strictly between its neighbours and the keys.
+        let q = [0.25, 0.5, 0.75];
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-6;
+        assert_eq!(move_chart_mark(&q, 1, 0.6), vec![0.25, 0.6, 0.75]);
+        assert!(near(move_chart_mark(&q, 0, -3.0)[0], 0.005));
+        assert!(near(move_chart_mark(&q, 1, 0.9)[1], 0.745));
+        assert!(near(move_chart_mark(&q, 2, 2.0)[2], 0.995));
+        assert_eq!(move_chart_mark(&q, 5, 0.1), q.to_vec());
+        assert_eq!(move_chart_mark(&q, 1, f32::NAN), q.to_vec());
+        // Seven marks between keys eight frames apart: douga on ones (the
+        // marks space the drawing, the frames split evenly).
+        let (mut h, d) = keyed(&[0, 8]);
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        s.set_chart(d[0], &chart_marks(ChartSpacing::FavourEnd, 7));
+        assert!(s.make_inbetweens(), "{}", s.refusal);
+        let frames: Vec<u32> = s.cut().xsheet.column(col).unwrap().keys().map(|(f, _)| f).collect();
+        assert_eq!(frames, (0..=8).collect::<Vec<u32>>());
+        for f in 1..8 {
+            let ib = s.resolve_at(col, f).expect("an inbetween");
+            assert_eq!(s.cut().drawing_kind(ib), DrawingKind::Inbetween, "frame {f}");
+        }
+    }
+
+    #[test]
+    fn lighttable_system_copy_and_paste_events_reach_the_canvas() {
+        let (mut h, _) = keyed(&[0, 8]);
+        ink_tile(&mut h, (1, 1), 0.5);
+        let src = h.state().active_layer_tiles().and_then(|m| m.get(&(1, 1)).cloned());
+        let src = src.expect("the inked tile");
+        let square = [(56.0, 56.0), (136.0, 56.0), (136.0, 136.0), (56.0, 136.0)];
+        let poly = square.iter().map(|&(x, y)| egui::pos2(x, y)).collect();
+        h.editor_mut().canvas.set_selection(poly);
+        h.point_at(canvas_center(&h));
+        // Ctrl+C reaches the app as a Copy event, with no key event.
+        h.event(egui::Event::Copy);
+        h.run();
+        assert!(h.state().pixel_clip.is_some(), "{}", h.state().refusal);
+        let text = h.state().pixel_clip_text.clone().expect("the system clipboard's text");
+        // Text copied elsewhere is not pixels.
+        let steps = h.state().engine.position();
+        h.event(egui::Event::Paste("a line of text".into()));
+        assert!(h.state().refusal.contains("not pixels"), "{}", h.state().refusal);
+        assert_eq!(h.state().engine.position(), steps);
+        // Ctrl+V hands the copy's text back (the system's line end on it):
+        // the pixels paste in place on frame 9's drawing.
+        h.state_mut().goto(8);
+        h.run();
+        h.event(egui::Event::Paste(format!("{text}\r\n")));
+        assert_eq!(h.state().engine.position(), steps + 1, "one undo step");
+        let got = h.state().active_layer_tiles().and_then(|m| m.get(&(1, 1)).cloned());
+        assert_eq!(got.expect("pasted in place").rgba, src.rgba);
+    }
+
+    #[test]
+    fn lighttable_shift_and_trace_says_the_pen_rests_and_a_click_ends_it() {
+        let (mut h, d) = keyed(&[0, 4]);
+        h.perform(Action::PinToLightTable);
+        assert!(h.state().view.light.is_pinned(d[0]));
+        h.state_mut().goto(4);
+        h.run();
+        let chip = "shift & trace: pen resting (click to end)";
+        assert!(!h.has(chip));
+        // Alt+T latches it, in both presets.
+        h.key_mods(egui::Modifiers::ALT, egui::Key::T);
+        assert!(h.state().view.light.shift_trace, "{}", h.describe());
+        assert!(h.has(chip), "{}", h.describe());
+        h.click(chip);
+        assert!(!h.state().view.light.shift_trace);
+        assert!(!h.has(chip));
+        assert!(h.state().status.contains("the pen draws again"), "{}", h.state().status);
+    }
+
+    #[test]
+    fn lighttable_a_cells_context_menu_marks_its_drawing_kind() {
+        let (mut h, d) = keyed(&[0, 4]);
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::XSheet]);
+        h.run();
+        h.run();
+        let cell = |h: &EditorHarness, f: u32| h.state().sheet_ui.cell_center(0, f).expect("the sheet's rows");
+        let steps = h.state().engine.position();
+        // A held cell marks the drawing held there.
+        h.right_click_pos(cell(&h, 2));
+        h.click("genga (key)");
+        assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Key);
+        assert_eq!(h.state().engine.position(), steps + 1, "one undo step");
+        assert!(h.has_text_containing("at frame 1: genga (key)"), "{}", h.describe());
+        // The cursor's own cell (the typed entry sits on it) answers too.
+        h.right_click_pos(cell(&h, 0));
+        h.click("breakdown");
+        assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Breakdown);
+        h.right_click_pos(cell(&h, 6));
+        h.click("douga (inbetween)");
+        assert_eq!(h.state().cut().drawing_kind(d[1]), DrawingKind::Inbetween);
+        assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Breakdown);
+        assert_eq!(h.state().engine.position(), steps + 3);
+    }
+
+    #[test]
+    fn lighttable_the_chart_shows_on_the_paper_of_its_key() {
+        let (mut h, d) = keyed(&[0, 8]);
+        let said = "spacing chart on the paper: 3 marks toward";
+        assert!(!h.has_text_containing(said));
+        h.state_mut().set_chart(d[0], &[0.25, 0.5, 0.75]);
+        h.run();
+        let to = h.state().cut().drawing(d[1]).map(|x| x.name.clone()).expect("the next key");
+        assert!(h.has_text_containing(&format!("{said} {to}")), "{}", h.describe());
+        // Over the key's hold too; the next key has no chart of its own.
+        h.state_mut().goto(5);
+        h.run();
+        assert!(h.has_text_containing(said));
+        h.state_mut().goto(8);
+        h.run();
+        assert!(!h.has_text_containing(said));
+    }
+
+    #[test]
+    fn lighttable_removing_a_drawing_undoes_with_its_kind_and_chart() {
+        let (mut h, d) = keyed(&[0, 8]);
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        s.set_chart(d[0], &[0.25, 0.5, 0.75]);
+        let def = s.cut().drawing_def(d[0]);
+        assert_eq!((def.kind, def.chart.as_ref().map(|c| c.to)), (DrawingKind::Key, Some(d[1])));
+        s.remove_drawing_from_library(d[0]);
+        assert!(s.cut().drawing(d[0]).is_none());
+        assert_eq!(s.cut().drawing_def(d[0]), Default::default(), "the definition goes with it");
+        s.undo();
+        assert!(s.cut().drawing(d[0]).is_some());
+        assert_eq!(s.cut().drawing_def(d[0]), def, "and comes back with it");
+        assert_eq!(s.cut().xsheet.column(col).unwrap().key_at(0), Some(Exposure::Drawing(d[0])));
+        s.redo();
+        assert_eq!(s.cut().drawing_def(d[0]), Default::default());
+        s.undo();
+        assert_eq!(s.cut().drawing_def(d[0]), def);
+    }
+
+    #[test]
+    fn lighttable_duplicate_cel_keeps_the_kind_under_the_next_free_number() {
+        let (mut h, d) = keyed(&[0, 8]);
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        s.set_chart(d[0], &[0.5]);
+        let def = s.cut().drawing_def(d[0]);
+        // Column A shows two drawings: the copy is the third.
+        let want = s.next_drawing_name();
+        assert_eq!(want, "D3A");
+        s.duplicate_cel();
+        let dup = s.resolve_at(col, 0).expect("the copy");
+        assert_ne!(dup, d[0]);
+        assert_eq!(s.cut().drawing(dup).map(|x| x.name.as_str()), Some("D3A"));
+        assert_eq!(s.cut().drawing_def(dup), def, "the copy is what the original is");
+        s.undo();
+        assert!(s.cut().drawing(dup).is_none());
+        assert_eq!(s.cut().drawing_def(dup), Default::default());
+        assert_eq!(s.cut().drawing_def(d[0]), def);
+    }
+
+    #[test]
+    fn lighttable_inbetween_names_skip_taken_numbers_and_never_list_the_span() {
+        let taken: HashSet<String> = ["5".to_string()].into();
+        assert_eq!(inbetween_names("1", "9", 3, &taken), ["3", "6", "7"]);
+        // "05" is a different name from 5: only the plain number holds it.
+        let padded: HashSet<String> = ["05".to_string()].into();
+        assert_eq!(inbetween_names("1", "9", 1, &padded), ["5"]);
+        // Keys a hundred billion apart pick without listing the span.
+        let none = HashSet::new();
+        assert_eq!(inbetween_names("1", "100000000001", 1, &none), ["50000000001"]);
+        // The largest number never overflows: no room between, so letters.
+        let max = u64::MAX.to_string();
+        assert_eq!(inbetween_names(&max, &max, 2, &none), [format!("{max}a"), format!("{max}b")]);
+    }
+
+    #[test]
+    fn lighttable_the_chart_editor_lays_and_drags_the_marks() {
+        let (mut h, d) = keyed(&[0, 8]);
+        // The lightbox fold-out slides out at the canvas's left edge; its
+        // genga · douga section opens on a click.
+        let edge = {
+            let r = h.editor().canvas.dbg_rect;
+            egui::pos2(r.left() + 4.0, r.top() + 4.0)
+        };
+        h.point_at(edge);
+        h.wait(0.5);
+        h.click("genga · douga");
+        h.click("genga (key)");
+        assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Key);
+        // Open, the section runs past the harness's short paper: the
+        // fold-out scrolls to what is below its foot.
+        h.scroll_to("ato-zume (slow in)");
+        h.click("ato-zume (slow in)");
+        let chart = h.state().cut().drawing_def(d[0]).chart.expect("a chart");
+        assert_eq!((chart.to, chart.marks.clone()), (d[1], chart_marks(ChartSpacing::FavourEnd, 3)));
+        // Drag the middle mark up to 0.6 of the way: one undo step.
+        let steps = h.state().engine.position();
+        let editor = "spacing chart: 3 marks (drag a mark to move it)";
+        h.scroll_to(editor);
+        let r = h.rect(editor);
+        let paper = h.editor().canvas.dbg_rect;
+        assert!(paper.contains_rect(r), "the chart editor shows: {r:?} in {paper:?}");
+        let at = |t: f32| egui::pos2(r.center().x, r.top() + 8.0 + (r.height() - 16.0) * t);
+        h.drag(at(chart.marks[1]), at(0.6), 6);
+        let moved = h.state().cut().drawing_def(d[0]).chart.expect("the chart").marks;
+        assert_eq!(h.state().engine.position(), steps + 1, "one undo step");
+        assert!((moved[1] - 0.6).abs() < 1e-3, "{moved:?}");
+        assert_eq!((moved[0], moved[2]), (chart.marks[0], chart.marks[2]));
+        // And its inbetweens land between the keys.
+        h.scroll_to("make inbetweens");
+        h.click("make inbetweens");
+        let col = h.state().view.active_column;
+        let frames: Vec<u32> = h.state().cut().xsheet.column(col).unwrap().keys().map(|(f, _)| f).collect();
+        assert_eq!(frames, vec![0, 2, 4, 6, 8]);
+    }
+
+    #[test]
+    fn lighttable_shift_tiles_turns_a_sparse_cel_texel_for_texel() {
+        // Two inked tiles far apart, turned and moved: skipping the empty
+        // bounds and caching the lookups change no texel of the plain map.
+        let tile = |v: f32| {
+            let mut px = vec![0u16; TILE_LEN];
+            for (i, x) in px.iter_mut().enumerate() {
+                // A ramp, so a texel read from the wrong place shows.
+                *x = f32_to_f16_bits(v * (i % 97) as f32 / 97.0);
+            }
+            Arc::new(TileData::from_vec(px))
+        };
+        let mut tiles = BTreeMap::new();
+        tiles.insert((2, 1), tile(0.5));
+        tiles.insert((12, 7), tile(1.0));
+        let center = egui::pos2(960.0, 540.0);
+        let shift = PinShift {
+            dx: 37.0,
+            dy: -11.0,
+            rot: 0.3,
+        };
+        let got = shift_tiles(&tiles, shift, center);
+        let t = TILE as i32;
+        let mut want = BTreeMap::new();
+        for ty in -8..28 {
+            for tx in -8..40 {
+                let mut px = vec![0u16; TILE_LEN];
+                let mut any = false;
+                for row in 0..TILE {
+                    for col in 0..TILE {
+                        let q = egui::pos2(
+                            (tx * t + col as i32) as f32 + 0.5,
+                            (ty * t + row as i32) as f32 + 0.5,
+                        );
+                        let s = shift.invert(q, center);
+                        let (sx, sy) = (s.x.floor() as i32, s.y.floor() as i32);
+                        if let Some(src) = tiles.get(&(sx.div_euclid(t), sy.div_euclid(t))) {
+                            let si = (sy.rem_euclid(t) * t + sx.rem_euclid(t)) as usize * 4;
+                            let di = (row * TILE + col) * 4;
+                            px[di..di + 4].copy_from_slice(&src.rgba[si..si + 4]);
+                            any |= src.rgba[si + 3] != 0;
+                        }
+                    }
+                }
+                if any {
+                    want.insert((tx, ty), px);
+                }
+            }
+        }
+        assert!(want.len() >= 2, "{:?}", want.keys().collect::<Vec<_>>());
+        assert_eq!(got.keys().collect::<Vec<_>>(), want.keys().collect::<Vec<_>>());
+        for (k, px) in &want {
+            assert!(got[k].rgba[..] == px[..], "tile {k:?}");
+        }
     }
 }

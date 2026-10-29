@@ -151,6 +151,11 @@ struct Uniforms {
     misc: [f32; 4],
 }
 
+/// GM6: the onion's GPU budget — slot 0 the ghosts behind, 1 the ghosts
+/// ahead, 2 the light table's pins (`canvas::onion_slot_plan` fills them):
+/// any depth and any number of pins, never one texture per ghost.
+pub const ONION_SLOTS: usize = 3;
+
 /// An onion-skin ghost texture (adjacent cel composite), drawn tinted under
 /// the current cel's sandwich.
 struct OnionSlot {
@@ -200,7 +205,7 @@ pub struct PaintLayer {
     /// whole-cel composites, weighted, in ONE texture — GM6: depth 5 adds
     /// no textures), [2]=the light table's pins. Three paper-size textures
     /// at most, never one per ghost.
-    onion: [Option<OnionSlot>; 3],
+    onion: [Option<OnionSlot>; ONION_SLOTS],
     /// Raster projections of OTHER columns' cels at the current frame —
     /// edit-view multi-column display (B4). Same shape/lifecycle as an
     /// onion slot (content-hash gated, size-checked), keyed by column so
@@ -657,7 +662,7 @@ impl PaintLayer {
             width,
             height,
             filter,
-            onion: [None, None, None],
+            onion: Default::default(),
             other_cols: std::collections::HashMap::new(),
             active,
             below,
@@ -1036,7 +1041,7 @@ impl PaintLayer {
         self.scratch = mk(self);
         self.width = width;
         self.height = height;
-        self.onion = [None, None, None]; // stale size
+        self.onion = Default::default(); // stale size
         self.other_cols.clear(); // stale size
         self.composite_bind_wet = Self::make_composite_bind(
             &self.device,

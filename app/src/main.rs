@@ -6753,6 +6753,10 @@ impl Editor {
         for action in std::mem::take(&mut self.state.curves.asked) {
             self.invoke(action, ui.ctx());
         }
+        // GM6: and the canvas's (the system Copy / Paste events over it).
+        for action in std::mem::take(&mut self.canvas.asked) {
+            self.invoke(action, ui.ctx());
+        }
 
         // Phase 5 step 2: the canvas in its own OS window. Tabs' borrows of
         // state/canvas/paint end above, so this can borrow them fresh.

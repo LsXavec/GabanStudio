@@ -443,10 +443,10 @@ impl Action {
             Action::CopyPixels => "Copy pixels",
             Action::PastePixels => "Paste pixels",
             Action::DuplicateCel => "Duplicate cel",
-            Action::MakeInbetweens => "Make inbetweens (douga)",
-            Action::KindKey => "Mark drawing: key (genga)",
+            Action::MakeInbetweens => "Make douga (inbetweens)",
+            Action::KindKey => "Mark drawing: genga (key)",
             Action::KindBreakdown => "Mark drawing: breakdown",
-            Action::KindInbetween => "Mark drawing: inbetween (douga)",
+            Action::KindInbetween => "Mark drawing: douga (inbetween)",
             Action::KindUnset => "Mark drawing: unmarked",
             Action::PinToLightTable => "Pin to light table",
             Action::ShiftTrace => "Shift & trace",
@@ -560,9 +560,9 @@ impl Action {
             PastePixels => "Paste the copied pixels in place on this frame's cel — one undo step.",
             DuplicateCel => "Copy this frame's drawing and its layer stack under the next free number, exposed here.",
             MakeInbetweens => "Turn this key's spacing chart into blank inbetween drawings, exposed between the keys.",
-            KindKey => "Mark this frame's drawing as a key (genga): its number is circled on the sheet.",
+            KindKey => "Mark this frame's drawing as a genga (key): its number is circled on the sheet.",
             KindBreakdown => "Mark this frame's drawing as a breakdown: its number is underlined on the sheet.",
-            KindInbetween => "Mark this frame's drawing as an inbetween (douga).",
+            KindInbetween => "Mark this frame's drawing as a douga (inbetween).",
             KindUnset => "Clear this frame's drawing kind (and its spacing chart).",
             PinToLightTable => "Pin or unpin this frame's drawing on the light table: it shows on every frame.",
             ShiftTrace => "Shift & trace: drag moves the selected light-table ghost, Shift+drag turns it (view only).",
@@ -676,10 +676,10 @@ impl Action {
             CopyPixels => "Edit/Copy pixels",
             PastePixels => "Edit/Paste pixels",
             DuplicateCel => "Edit/Duplicate cel",
-            MakeInbetweens => "Sheet/Make inbetweens (douga)",
-            KindKey => "Sheet/Drawing kind/key (genga)",
+            MakeInbetweens => "Sheet/Make douga (inbetweens)",
+            KindKey => "Sheet/Drawing kind/genga (key)",
             KindBreakdown => "Sheet/Drawing kind/breakdown",
-            KindInbetween => "Sheet/Drawing kind/inbetween (douga)",
+            KindInbetween => "Sheet/Drawing kind/douga (inbetween)",
             KindUnset => "Sheet/Drawing kind/unmarked",
             PinToLightTable => "View/Light table/Pin this drawing",
             ShiftTrace => "View/Light table/Shift & trace",
@@ -797,7 +797,8 @@ impl Action {
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll
-            | BrushSmaller | BrushBigger | CopyPixels | PastePixels => Ctx::Canvas,
+            | BrushSmaller | BrushBigger | CopyPixels | PastePixels | KindKey | KindBreakdown
+            | KindInbetween | KindUnset => Ctx::Canvas,
             NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames | DeleteFrames | HoldPlus
             | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees | Reverse | ColumnKindCel
             | ColumnKindBg | ColumnKindBook | ColumnKindRef | ToggleColumnHidden
@@ -1012,16 +1013,27 @@ impl Action {
                 ..k("F")
             }),
             // GM6: the same clipboard keys over the canvas act on pixels
-            // (D6: one chord, two panes); the rest live in the menus, the
-            // palette and the light box.
+            // (D6: one chord, two panes; the system's Copy / Paste events
+            // reach the canvas's own handler).
             CopyPixels => Some(ctrl("C")),
             PastePixels => Some(ctrl("V")),
+            // GM6: the genga-to-douga verbs on Alt, the same in both
+            // presets — never R (the flip), never Alt+Shift (the Windows
+            // layout switch). The kinds share Alt+K / Alt+B with the
+            // column kinds: over the canvas they mark the drawing.
+            DuplicateCel => Some(alt("D")),
+            MakeInbetweens => Some(alt("M")),
+            KindKey => Some(alt("K")),
+            KindBreakdown => Some(alt("B")),
+            KindInbetween => Some(alt("I")),
+            KindUnset => Some(alt("U")),
+            PinToLightTable => Some(alt("P")),
+            ShiftTrace => Some(alt("T")),
+            ResetShift => Some(alt("0")),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomEdit | ShowCurves | InterpHold | InterpLinear | InterpEase
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
-            | HandlesFlat | HandlesBroken | DuplicateCel | MakeInbetweens | KindKey
-            | KindBreakdown | KindInbetween | KindUnset | PinToLightTable | ShiftTrace
-            | ResetShift => None,
+            | HandlesFlat | HandlesBroken => None,
         }
     }
 }

@@ -224,6 +224,17 @@ impl EditorHarness {
         self.run();
     }
 
+    /// GM6: scroll the ONE widget with this name into view (an AccessKit
+    /// ScrollIntoView, as a screen reader asks) — a control below a scroll
+    /// area's fold is clicked where it then shows.
+    #[track_caller]
+    pub fn scroll_to(&mut self, label: &str) {
+        let count = self.h.query_all_by_label(label).count();
+        assert!(count == 1, "scroll_to({label:?}): {count} widget(s)\n{}", self.describe());
+        self.h.get_by_label(label).scroll_to_me();
+        self.run();
+    }
+
     /// Give the n-th text field keyboard focus the way Tab or a screen
     /// reader does (an AccessKit Focus action; fields carry no name of
     /// their own). A pointer click would also land, but inside a menu it

@@ -60,6 +60,9 @@ pub struct SheetUi {
     /// The cursor (cut, frame) the sheet last scrolled to: a new one is
     /// scrolled into view, so the entry stays laid out under the keys.
     followed: Option<(anim_core::ids::CutId, u32)>,
+    /// GM6: the cell (column, frame) whose context menu is open — its
+    /// drawing's kind is marked from there.
+    menu_cell: Option<(ColumnId, u32)>,
 }
 
 impl SheetUi {
@@ -357,6 +360,14 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
             "type a drawing name (x = empty; a digit over the sheet starts it): Enter enters it \
              and moves down, Tab moves right",
         );
+    // GM6: the cursor's own cell answers a right-click like every other
+    // cell — its drawing's kind (the entry sits over the cells' own menu).
+    resp.context_menu(|ui| match state.resolve_at(state.view.active_column, state.view.frame) {
+        Some(drawing) => kind_menu(ui, state, drawing),
+        None => {
+            ui.label(egui::RichText::new("a blank cell: no drawing to mark").color(plate::LEGEND));
+        }
+    });
     let (enter, tab) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Tab)));
     let tabbed = tab && resp.has_focus();
     if !(resp.lost_focus() || tabbed) {
@@ -617,7 +628,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             let resp = ui
                     .selectable_label(state.view.selected_drawing == Some(id), &name)
                     .on_hover_text(
-                    "click: select — double-click: rename — right-click: remove",
+                    "click: select — double-click: rename — right-click: kind, pin, remove",
                     );
                     resp.context_menu(|ui| {
                     // THE GHOST PIN (room ratified 2026-08-17): display
@@ -626,7 +637,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     // GM6: the light table's pins (the ghost pin is the first).
                     let pinned = state.view.light.is_pinned(id);
                     if ui
-                        .button(if pinned { "unpin ghost" } else { "pin as ghost" })
+                        .button(if pinned { "unpin from light table" } else { "pin to light table" })
                         .on_hover_text(
                         "ghost this drawing on the light table on every frame \
                          (Ao, the light table's opacity) — display only, never \
@@ -638,6 +649,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     state.view.light.toggle(col, id);
                     ui.close();
                     }
+                    // GM6: and the drawing's kind, as on its cells.
+                    kind_menu(ui, state, id);
                     // Held DANGER: removal lifts the drawing's keys and
                     // deletes it from the library, one undoable step.
                     if plate::danger(ui, "REMOVE DRAWING") {
@@ -1057,6 +1070,28 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 {
                     state.select_cells(anchor, col, f);
                 }
+                // GM6: a right-click on a cell opens its drawing's kind —
+                // the drawing exposed or held there.
+                if cresp.secondary_clicked()
+                    && let Some(p) = cresp.interact_pointer_pos().or(cresp.hover_pos())
+                {
+                    state.sheet_ui.menu_cell = match cell_at(p) {
+                        (Some(col), f, _) => Some((col, f)),
+                        _ => None,
+                    };
+                }
+                cresp.context_menu(|ui| match state.sheet_ui.menu_cell {
+                    Some((col, f)) => match state.resolve_at(col, f) {
+                        Some(drawing) => kind_menu(ui, state, drawing),
+                        None => {
+                            ui.label(
+                                egui::RichText::new("a blank cell: no drawing to mark")
+                                    .color(plate::LEGEND),
+                            );
+                        }
+                    },
+                    None => ui.close(),
+                });
             }
 
             // THE GUTTER SCRUB LANE (henshu delta 9): dragging in the
@@ -1207,12 +1242,19 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                             CellMark::None => {}
                         }
                         if let Some(chart) = &def.chart {
+                            // The chart runs beside the number from this key
+                            // down to the next key's row (three rows when
+                            // that key is not exposed after it), as the key
+                            // animator draws it on the sheet.
+                            let top = ctop + r.start as f32 * ROW_H + 3.0;
+                            let end = col
+                                .next_key(r.start, |d| d == chart.to)
+                                .map_or(r.start + 3, |(f, _)| f);
+                            let bottom = (ctop + end as f32 * ROW_H + ROW_H * 0.5).max(top + 2.0 * ROW_H);
+                            let x = (text_rect.right() + 5.0).min(cx - 22.0 + COL_W - 12.0);
                             crate::canvas::chart_glyph(
                                 &sheet_painter,
-                                Rect::from_min_size(
-                                    pos2(text_rect.right() + 6.0, text_rect.top()),
-                                    vec2(6.0, text_rect.height()),
-                                ),
+                                Rect::from_min_max(pos2(x, top), pos2(x + 9.0, bottom)),
                                 &chart.marks,
                                 plate::AO,
                             );
@@ -1591,6 +1633,26 @@ pub fn cell_mark(kind: anim_core::model::DrawingKind) -> CellMark {
         DrawingKind::Key => CellMark::Circle,
         DrawingKind::Breakdown => CellMark::Underline,
         DrawingKind::Inbetween | DrawingKind::Unset => CellMark::None,
+    }
+}
+
+/// GM6: a context menu's drawing-kind entries (a cell's and the
+/// library's): genga (key), breakdown, douga (inbetween), unmarked — the
+/// drawing's own kind checked. A pick is one undo step.
+fn kind_menu(ui: &mut egui::Ui, state: &mut AppState, drawing: anim_core::ids::DrawingId) {
+    use anim_core::model::DrawingKind;
+    plate::legend(ui, "drawing kind");
+    let now = state.cut().drawing_kind(drawing);
+    for k in [
+        DrawingKind::Key,
+        DrawingKind::Breakdown,
+        DrawingKind::Inbetween,
+        DrawingKind::Unset,
+    ] {
+        if ui.selectable_label(now == k, k.label()).clicked() {
+            state.set_drawing_kind(drawing, k);
+            ui.close();
+        }
     }
 }
 

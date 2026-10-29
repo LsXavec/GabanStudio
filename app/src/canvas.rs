@@ -675,6 +675,15 @@ pub struct CanvasView {
     pub(crate) light_table_request: Option<LightTableCfg>,
     /// GM6: a shift & trace drag in flight (its last paper point).
     shift_drag: Option<Pos2>,
+    /// GM6: the chart editor's mark count, and a chart tick being dragged
+    /// (the drawing, the mark, the marks so far — committed on release as
+    /// one undo step).
+    chart_count: usize,
+    chart_drag: Option<(DrawingId, usize, Vec<f32>)>,
+    /// GM6: the verbs the canvas asked for (Ctrl+C / Ctrl+V arrive as the
+    /// system's Copy / Paste events, not keys); the Editor runs them
+    /// through the one dispatch after the panes (D6).
+    pub(crate) asked: Vec<crate::config::Action>,
     /// Paper furniture: field / safe-area / peg-bar guides, in Ao.
     show_field: bool,
     show_safe: bool,
@@ -900,6 +909,9 @@ impl CanvasView {
             onion_request: None,
             light_table_request: None,
             shift_drag: None,
+            chart_count: 3,
+            chart_drag: None,
+            asked: Vec::new(),
             show_field: false,
             show_safe: false,
             show_peg: false,
@@ -2381,6 +2393,66 @@ impl CanvasView {
         ui.add_space(8.0);
     }
 
+    /// GM6: the chart editor's chart — this key at the top rule, the next
+    /// key at the bottom; drag a mark up or down to move it between its
+    /// neighbours. The drag shows live and lands as ONE undo step on
+    /// release.
+    fn chart_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        state: &mut AppState,
+        here: DrawingId,
+        marks: &[f32],
+        busy: bool,
+    ) {
+        let (r, resp) = ui.allocate_exact_size(vec2(40.0, 112.0), Sense::drag());
+        let g = r.shrink2(vec2(8.0, 8.0));
+        let t_at = |y: f32| (y - g.top()) / g.height();
+        if resp.drag_started()
+            && !busy
+            && let Some(p) = resp.interact_pointer_pos()
+        {
+            let t = t_at(p.y);
+            let nearest = marks
+                .iter()
+                .enumerate()
+                .min_by(|a, b| (a.1 - t).abs().total_cmp(&(b.1 - t).abs()))
+                .map(|(i, _)| i);
+            self.chart_drag = nearest.map(|i| (here, i, marks.to_vec()));
+        }
+        if resp.dragged()
+            && let Some(p) = resp.interact_pointer_pos()
+            && let Some((d, i, live)) = &mut self.chart_drag
+            && *d == here
+        {
+            *live = crate::doc::move_chart_mark(live, *i, t_at(p.y));
+        }
+        let shown = match &self.chart_drag {
+            Some((d, _, live)) if *d == here => live.clone(),
+            _ => marks.to_vec(),
+        };
+        if resp.drag_stopped()
+            && let Some((d, _, live)) = self.chart_drag.take()
+            && d == here
+            && !busy
+        {
+            state.set_chart(here, &live);
+        }
+        let lit = resp.hovered() || resp.dragged();
+        ui.painter().rect_filled(r, 0.0, plate::WELL);
+        chart_glyph(ui.painter(), g, &shown, if lit { plate::STRUCK } else { plate::AO });
+        if lit {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        plate::speak(
+            &resp,
+            egui::WidgetType::Slider,
+            None,
+            &format!("spacing chart: {} marks (drag a mark to move it)", shown.len()),
+        );
+        resp.on_hover_text("drag a mark up or down to move that inbetween's spacing (one undo step)");
+    }
+
     /// The lightbox fold-out's content: onion + strength (with a value
     /// line — a silent dial reads as a bug), paper furniture, view, INPUT.
     fn lightbox_rail_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
@@ -2502,7 +2574,7 @@ impl CanvasView {
                         .on_hover_text(match m {
                             OnionMode::Drawings => "ghost the previous and next distinct drawings",
                             OnionMode::Frames => "ghost what the column shows 1, 2, … frames away",
-                            OnionMode::Keys => "ghost the previous and next key (genga) drawings",
+                            OnionMode::Keys => "ghost the previous and next genga (key) drawings",
                         })
                         .clicked()
                     {
@@ -2510,6 +2582,17 @@ impl CanvasView {
                     }
                 }
             });
+            // Keys mode ghosts only marked keys: say so when there are none
+            // (a silent empty onion reads as a bug).
+            if cfg.mode == OnionMode::Keys
+                && !state.cut().drawing_defs.values().any(|d| d.kind == DrawingKind::Key)
+            {
+                ui.label(
+                    egui::RichText::new("no drawings marked genga (key) yet — mark one from its cell's menu")
+                        .small()
+                        .color(plate::LEGEND),
+                );
+            }
             plate::latch(ui, &mut cfg.other_columns, "other columns")
                 .on_hover_text("ghost every other column that renders too");
         });
@@ -2577,13 +2660,15 @@ impl CanvasView {
                 let kind = state.cut().drawing_kind(here);
                 vline(ui, "kind", kind.label().to_string());
                 ui.horizontal_wrapped(|ui| {
-                    for (k, label) in [
-                        (DrawingKind::Key, "key"),
-                        (DrawingKind::Breakdown, "breakdown"),
-                        (DrawingKind::Inbetween, "inbetween"),
-                        (DrawingKind::Unset, "unmarked"),
+                    for (k, verb) in [
+                        (DrawingKind::Key, Action::KindKey),
+                        (DrawingKind::Breakdown, Action::KindBreakdown),
+                        (DrawingKind::Inbetween, Action::KindInbetween),
+                        (DrawingKind::Unset, Action::KindUnset),
                     ] {
-                        if ui.selectable_label(kind == k, label).on_hover_text(k.label()).clicked() && !busy {
+                        if ui.selectable_label(kind == k, k.label()).on_hover_text(verb.help()).clicked()
+                            && !busy
+                        {
                             state.set_drawing_kind(here, k);
                         }
                     }
@@ -2596,13 +2681,8 @@ impl CanvasView {
                         chart.as_ref().map_or("none".to_string(), |c| format!("{} marks", c.marks.len())),
                     );
                     ui.horizontal_wrapped(|ui| {
-                        for (name, marks) in crate::doc::CHART_PRESETS {
-                            if ui
-                                .small_button(*name)
-                                .on_hover_text("a spacing chart toward the next key")
-                                .clicked()
-                                && !busy
-                            {
+                        for (name, marks, tip) in crate::doc::CHART_PRESETS {
+                            if ui.small_button(*name).on_hover_text(*tip).clicked() && !busy {
                                 state.set_chart(here, marks);
                             }
                         }
@@ -2613,6 +2693,21 @@ impl CanvasView {
                             state.set_chart(here, &[]);
                         }
                     });
+                    // The chart editor: any count of marks, even or closing
+                    // up toward one key; then drag a mark on the chart.
+                    vline(ui, "marks", self.chart_count.to_string());
+                    ui.add(egui::DragValue::new(&mut self.chart_count).range(1..=crate::doc::CHART_MAX_MARKS))
+                        .on_hover_text("how many inbetweens the chart asks for (1–15)");
+                    ui.horizontal_wrapped(|ui| {
+                        for spacing in crate::doc::ChartSpacing::ALL {
+                            if ui.small_button(spacing.label()).on_hover_text(spacing.help()).clicked() && !busy {
+                                state.set_chart(here, &crate::doc::chart_marks(spacing, self.chart_count));
+                            }
+                        }
+                    });
+                    if let Some(c) = &chart {
+                        self.chart_editor(ui, state, here, &c.marks, busy);
+                    }
                     if chart.is_some()
                         && ui
                             .button("make inbetweens")
@@ -3422,6 +3517,7 @@ impl CanvasView {
         self.dbg_rect = rect;
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
+        self.clipboard_events(ui, rect, state);
 
         // Paper size = the project's chosen resolution (set at creation).
         let paper_w = state.engine.project.width as f32;
@@ -3637,15 +3733,23 @@ impl CanvasView {
 
         // ---- Pen input (edit mode only) -----------------------------------
         self.retire_line_anchor(state);
-        if hand && !state.view.playing {
-            // GM4: the Space hand has the pointer — no tool input, no tap.
-        } else if !state.view.playing
+        // GM6: shift & trace has the pointer while its latch is on and a pin
+        // is there to move — the pen rests, and the chip below says so.
+        let tracing = !state.view.playing
+            && !hand
             && state.view.light.shift_trace
             && state.view.light.target().is_some()
-            && !self.pen_busy()
-        {
-            // GM6: shift & trace has the pointer — the pen rests.
+            && !self.pen_busy();
+        if hand && !state.view.playing {
+            // GM4: the Space hand has the pointer — no tool input, no tap.
+        } else if tracing {
             self.shift_trace_input(ui, &response, &to_paper, pos2(paper_w * 0.5, paper_h * 0.5), state);
+            // The move hand, not the brush ring: a drag shifts the pin.
+            if response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            } else if response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Move);
+            }
         } else if !state.view.playing {
             match self.tool {
                 CanvasTool::Paint => {
@@ -3988,17 +4092,13 @@ impl CanvasView {
                         state.view.frame,
                         &self.onion,
                     );
-                    for (slot, behind) in [(0, true), (1, false)] {
-                        let mut side: Vec<&(DrawingId, i32, f32)> =
-                            set.iter().filter(|g| (g.1 < 0) == behind).collect();
-                        side.sort_by_key(|g| std::cmp::Reverse(g.1.unsigned_abs()));
-                        let near = side.iter().map(|g| g.2).fold(0.0f32, f32::max);
+                    let plan = onion_slot_plan(&set, &pins);
+                    for slot in [0, 1] {
                         let mut slices = Vec::new();
                         let mut bytes = Vec::new();
-                        for &&(id, _, w) in &side {
+                        for &(id, k) in &plan[slot] {
                             // PSD-cel-layers: ghosts honour each layer's onion flag.
                             if let Some((s, h)) = state.drawing_composite(id, f, true) {
-                                let k = if near > 0.0 { w / near } else { 1.0 };
                                 slices.extend(s.into_iter().map(|(t, o)| (t, o * k)));
                                 bytes.extend_from_slice(&h.to_le_bytes());
                                 bytes.extend_from_slice(&k.to_bits().to_le_bytes());
@@ -4334,6 +4434,29 @@ impl CanvasView {
             );
         }
 
+        // GM6: the key's spacing chart (タイミング指示) where the key animator
+        // draws it — in the paper's top-right margin, in Ao (the blue pencil
+        // that never photographs): this key at the top rule, the next key
+        // at the bottom one, a tick per inbetween.
+        if edit_view
+            && !state.view.playing
+            && let Some(here) = state.current_drawing()
+            && let Some(chart) = state.cut().drawing_def(here).chart
+        {
+            let h = (paper_rect.height() * 0.3).clamp(48.0, 160.0);
+            let anchor = to_screen(pos2(paper_w * 0.96, paper_h * 0.05));
+            let glyph = Rect::from_min_size(anchor - vec2(16.0, 0.0), vec2(16.0, h));
+            chart_glyph(&painter, glyph, &chart.marks, plate::AO);
+            let to = state.cut().drawing(chart.to).map(|d| d.name.clone()).unwrap_or_default();
+            let resp = ui.interact(glyph, ui.id().with("canvas_chart"), Sense::hover());
+            plate::speak(
+                &resp,
+                egui::WidgetType::Label,
+                None,
+                &format!("spacing chart on the paper: {} marks toward {to}", chart.marks.len()),
+            );
+        }
+
         // Playback indicator as a canvas OVERLAY (painted, zero layout impact
         // — a toolbar label here used to reflow the row and shift the view).
         if self.flip_held {
@@ -4353,6 +4476,33 @@ impl CanvasView {
                 egui::FontId::proportional(13.0),
                 Color32::from_rgb(139, 141, 131), // Legend: the app speaking
             );
+        }
+        // GM6: shift & trace rests the pen — the paper says so (the Tally
+        // dot: the latch is ARMED), and a click on the chip ends the latch.
+        if tracing {
+            let text = "SHIFT & TRACE — pen resting · click to end";
+            let font = egui::FontId::proportional(12.0);
+            let w = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), plate::LEGEND).size().x);
+            // Below the FLIP line and composite view's note.
+            let chip = Rect::from_center_size(pos2(rect.center().x, rect.top() + 58.0), vec2(w + 30.0, 20.0));
+            let resp = ui.interact(chip, ui.id().with("shift_trace_chip"), Sense::click());
+            plate::speak(&resp, egui::WidgetType::Button, Some(true), "shift & trace: pen resting (click to end)");
+            painter.rect_filled(chip, 3.0, plate::WELL);
+            painter.circle_filled(pos2(chip.left() + 11.0, chip.center().y), 3.5, plate::TALLY);
+            painter.text(
+                pos2(chip.left() + 21.0, chip.center().y),
+                egui::Align2::LEFT_CENTER,
+                text,
+                font,
+                plate::LEGEND,
+            );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                state.view.light.shift_trace = false;
+                state.status = "shift & trace off — the pen draws again".into();
+            }
         }
 
         // The refusal reaches the paper: a fresh refusal flashes the
@@ -4673,10 +4823,14 @@ impl CanvasView {
                             |aui| {
                                 aui.set_min_size(panel.size());
                                 aui.add_space(pad);
-                                let y0 = aui.next_widget_position().y;
-                                self.lightbox_rail_ui(aui, state);
-                                let y1 = aui.next_widget_position().y;
-                                self.light_content_h = (y1 - y0).max(50.0);
+                                // GM6: taller than the paper (genga · douga
+                                // open on a small window) the fold-out
+                                // scrolls, so no control falls off its foot.
+                                let out = egui::ScrollArea::vertical()
+                                    .id_salt("lightbox_scroll")
+                                    .max_height(panel.height())
+                                    .show(aui, |aui| self.lightbox_rail_ui(aui, state));
+                                self.light_content_h = out.content_size.y.max(50.0);
                             },
                         );
                     });
@@ -4781,6 +4935,7 @@ impl CanvasView {
         && !self.composite_view // review mode: painting refused, OS cursor back
         && self.tool == CanvasTool::Paint // select tool keeps the OS cursor
         && !hand // GM4: the Space hand shows its own grab cursor
+        && !tracing // GM6: shift & trace's move hand (the pen rests)
         && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
         && rect.contains(pos)
         && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
@@ -5487,9 +5642,6 @@ impl CanvasView {
         (dabs, held.get())
     }
 
-    /// LASSO FILL input (PSD-lasso-fill): drag draws the loop; release
-    /// commits ONE region edit. The fill tool's guard set, verbatim
-    /// (NEVER-DO 2), minus the GPU requirement — this path is pure CPU.
     /// GM6: shift & trace — a drag moves the selected pin by the paper
     /// distance travelled; Shift+drag turns it about the paper centre.
     /// View state only: no command, no undo step, no pixel touched.
@@ -5522,6 +5674,64 @@ impl CanvasView {
         }
     }
 
+    /// GM6: the system clipboard keys over the canvas. egui-winit turns
+    /// Ctrl+C / Ctrl+V into Copy / Paste events (no key event), so the
+    /// canvas answers them here, when the pointer is over it and no field
+    /// is typing: Copy asks for Copy pixels; a Paste carrying the text the
+    /// canvas handed over for the last pixel copy asks for Paste pixels,
+    /// and other text is refused. A frame that also carries the chord's key
+    /// leaves it to the action, so one press never acts twice.
+    fn clipboard_events(&mut self, ui: &egui::Ui, rect: Rect, state: &mut AppState) {
+        use crate::config::Action;
+        // A fresh pixel copy (keys, menu or palette) hands the system
+        // clipboard its marker text, so the paste key sends it back.
+        if let Some(clip) = &state.pixel_clip
+            && state.pixel_clip_text.is_none()
+        {
+            let p = &clip.patch;
+            let text = format!("Gaban Studio pixels: {}x{} at {}, {}", p.w, p.h, p.x0, p.y0);
+            ui.ctx().copy_text(text.clone());
+            state.pixel_clip_text = Some(text);
+        }
+        if !ui.rect_contains_pointer(rect) || ui.ctx().text_edit_focused() {
+            return;
+        }
+        let (copy, paste, keyed) = ui.input(|i| {
+            let mut out = (false, None, false);
+            for e in &i.events {
+                match e {
+                    egui::Event::Copy => out.0 = true,
+                    egui::Event::Paste(text) => out.1 = Some(text.clone()),
+                    _ => {}
+                }
+            }
+            out.2 = i.modifiers.command
+                && [egui::Key::C, egui::Key::V]
+                    .iter()
+                    .any(|k| i.key_pressed(*k));
+            out
+        });
+        if keyed {
+            return;
+        }
+        if copy {
+            self.asked.push(Action::CopyPixels);
+        } else if let Some(text) = paste {
+            // The system hands text back with its own line ends.
+            let plain = |t: &str| t.replace("\r\n", "\n").trim_end().to_string();
+            if state.pixel_clip.is_some()
+                && state.pixel_clip_text.as_deref().map(plain) == Some(plain(&text))
+            {
+                self.asked.push(Action::PastePixels);
+            } else {
+                state.refuse("refused — the clipboard holds text, not pixels (copy pixels first)");
+            }
+        }
+    }
+
+    /// LASSO FILL input (PSD-lasso-fill): drag draws the loop; release
+    /// commits ONE region edit. The fill tool's guard set, verbatim
+    /// (NEVER-DO 2), minus the GPU requirement — this path is pure CPU.
     fn lasso_fill_input(
         &mut self,
         ui: &egui::Ui,
@@ -7013,12 +7223,59 @@ impl Default for LightTableCfg {
 /// ghosts once (the nearest wins), and the drawing held over the frame
 /// never ghosts ahead. At depth 1 in drawings mode this is exactly
 /// `AppState::onion_neighbors`. With `other_columns`, every other column
-/// that renders adds its own set after the active column's.
+/// that renders adds its own set after the active column's. This is the
+/// GPU slots' set (on a held frame the held drawing is the reference you
+/// draw the new cel over, so it ghosts behind).
 pub fn onion_set(
     cut: &anim_core::model::Cut,
     column: ColumnId,
     frame: u32,
     cfg: &OnionCfg,
+) -> Vec<(DrawingId, i32, f32)> {
+    onion_set_with(cut, column, frame, cfg, false)
+}
+
+/// GM6: the vector path's onion — [`onion_set`], except that the drawing a
+/// column shows at `frame` never ghosts there: the vector path draws it as
+/// the frame itself, so on a held frame the side behind looks past it to
+/// the drawing before instead of spending a rank on it.
+pub fn vector_onion_set(
+    cut: &anim_core::model::Cut,
+    column: ColumnId,
+    frame: u32,
+    cfg: &OnionCfg,
+) -> Vec<(DrawingId, i32, f32)> {
+    onion_set_with(cut, column, frame, cfg, true)
+}
+
+/// GM6: what each GPU onion texture holds — slot 0 every ghost behind,
+/// slot 1 every ghost ahead (farthest first, each with its weight over its
+/// side's nearest: the nearest lies on top at full and the slot's tint
+/// carries its opacity), slot 2 every light-table pin. Depth 5 on both
+/// sides and any number of pins still fill [`crate::paint::ONION_SLOTS`]
+/// textures (the spec's GPU budget).
+pub fn onion_slot_plan(
+    set: &[(DrawingId, i32, f32)],
+    pins: &[(DrawingId, PinShift)],
+) -> [Vec<(DrawingId, f32)>; crate::paint::ONION_SLOTS] {
+    let side = |behind: bool| -> Vec<(DrawingId, f32)> {
+        let mut side: Vec<&(DrawingId, i32, f32)> =
+            set.iter().filter(|g| (g.1 < 0) == behind).collect();
+        side.sort_by_key(|g| std::cmp::Reverse(g.1.unsigned_abs()));
+        let near = side.iter().map(|g| g.2).fold(0.0f32, f32::max);
+        side.into_iter()
+            .map(|&(id, _, w)| (id, if near > 0.0 { w / near } else { 1.0 }))
+            .collect()
+    };
+    [side(true), side(false), pins.iter().map(|(id, _)| (*id, 1.0)).collect()]
+}
+
+fn onion_set_with(
+    cut: &anim_core::model::Cut,
+    column: ColumnId,
+    frame: u32,
+    cfg: &OnionCfg,
+    past_shown: bool,
 ) -> Vec<(DrawingId, i32, f32)> {
     let mut out = Vec::new();
     let mut cols = vec![column];
@@ -7028,7 +7285,7 @@ pub fn onion_set(
     }
     for c in cols {
         if let Some(col) = cut.xsheet.column(c) {
-            column_onion(cut, col, frame, cfg, &mut out);
+            column_onion(cut, col, frame, cfg, past_shown, &mut out);
         }
     }
     out
@@ -7039,16 +7296,23 @@ fn column_onion(
     col: &anim_core::xsheet::Column,
     frame: u32,
     cfg: &OnionCfg,
+    past_shown: bool,
     out: &mut Vec<(DrawingId, i32, f32)>,
 ) {
     use anim_core::model::DrawingKind;
     use anim_core::xsheet::Exposure;
     let count = cut.frame_count.max(1);
-    let own = match col.key_at(frame) {
-        Some(Exposure::Drawing(d)) => Some(d),
-        _ => None,
-    };
     let held = col.resolve(frame);
+    // The drawing that never ghosts here: the frame's own key, or (the
+    // vector path) whatever the frame shows, held or keyed.
+    let own = if past_shown {
+        held
+    } else {
+        match col.key_at(frame) {
+            Some(Exposure::Drawing(d)) => Some(d),
+            _ => None,
+        }
+    };
     let before = cfg.before.min(OnionCfg::MAX_DEPTH) as u32;
     let after = cfg.after.min(OnionCfg::MAX_DEPTH) as u32;
     // True when `d` joined the set at this offset.
@@ -7266,8 +7530,28 @@ pub fn shift_tiles(
     let mut out = BTreeMap::new();
     for ty in t0y..=t1y {
         for tx in t0x..=t1x {
+            // A turned sparse cel leaves most of its bounds empty: a tile
+            // whose corners map back to no source tile reads nothing, so it
+            // is skipped whole (the map is affine — the corners bound it).
+            let (mut slo, mut shi) = (pos2(f32::MAX, f32::MAX), pos2(f32::MIN, f32::MIN));
+            for (cx, cy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let s = shift.invert(pos2(((tx + cx) * t) as f32, ((ty + cy) * t) as f32), center);
+                slo = slo.min(s);
+                shi = shi.max(s);
+            }
+            let (s0x, s0y) = ((slo.x.floor() as i32).div_euclid(t), (slo.y.floor() as i32).div_euclid(t));
+            let (s1x, s1y) = ((shi.x.ceil() as i32).div_euclid(t), (shi.y.ceil() as i32).div_euclid(t));
+            if !tiles
+                .keys()
+                .any(|&(x, y)| (s0x..=s1x).contains(&x) && (s0y..=s1y).contains(&y))
+            {
+                continue;
+            }
             let mut px = vec![0u16; TILE_LEN];
             let mut any = false;
+            // Neighbouring texels read the same source tile: look it up
+            // once per change, not once per texel.
+            let mut cached: (TileCoord, Option<&Arc<TileData>>) = ((i32::MIN, i32::MIN), None);
             for row in 0..TILE {
                 for col in 0..TILE {
                     let q = pos2(
@@ -7276,7 +7560,11 @@ pub fn shift_tiles(
                     );
                     let s = shift.invert(q, center);
                     let (sx, sy) = (s.x.floor() as i32, s.y.floor() as i32);
-                    let Some(src) = tiles.get(&(sx.div_euclid(t), sy.div_euclid(t))) else {
+                    let key = (sx.div_euclid(t), sy.div_euclid(t));
+                    if cached.0 != key {
+                        cached = (key, tiles.get(&key));
+                    }
+                    let Some(src) = cached.1 else {
                         continue;
                     };
                     let si = (sy.rem_euclid(t) * t + sx.rem_euclid(t)) as usize * 4;
@@ -7298,15 +7586,16 @@ pub fn shift_tiles(
 /// = Ao (continuity — where the motion came from); ghost AHEAD = Legend
 /// (the plate stating what is next). Spec defect 14: the old red/green
 /// pair is dead — Aka never sits on the paper for hours, and there is no
-/// green in this application. The drawing shown here never ghosts.
-fn onion_ghosts(
+/// green in this application. The drawing shown here never ghosts, and on
+/// a held frame the side behind starts past it ([`vector_onion_set`]).
+pub(crate) fn onion_ghosts(
     state: &AppState,
     column: ColumnId,
     frame: u32,
     cfg: &OnionCfg,
 ) -> Vec<(anim_core::ids::DrawingId, Color32)> {
     let current = state.resolve_at(column, frame);
-    let mut set: Vec<(DrawingId, i32, f32)> = onion_set(state.cut(), column, frame, cfg)
+    let mut set: Vec<(DrawingId, i32, f32)> = vector_onion_set(state.cut(), column, frame, cfg)
         .into_iter()
         .filter(|(id, _, _)| Some(*id) != current)
         .collect();
@@ -7324,7 +7613,7 @@ fn onion_ghosts(
 /// from the key (top) to the next key (bottom), long ticks at both keys and
 /// a short tick at each mark.
 pub fn chart_glyph(painter: &egui::Painter, rect: Rect, marks: &[f32], ink: Color32) {
-    let stroke = egui::Stroke::new(1.0, ink);
+    let stroke = egui::Stroke::new(plate::device_px(1.0, painter.ctx().pixels_per_point()), ink);
     let x = rect.center().x;
     painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], stroke);
     let w = rect.width() * 0.5;
