@@ -282,9 +282,11 @@ impl CelLayer {
 /// (the legacy pre-v5 case); the app keeps raster cels at >= 1 layer by
 /// policy, but the ENGINE allows zero (matching the remove-column precedent).
 ///
-/// Not `serde` — the store persists drawings field-by-field (strokes as JSON,
-/// tiles as BLOBs), and layers hold large pixel buffers.
-#[derive(Debug, Clone, PartialEq)]
+/// The store persists drawings field-by-field (strokes as JSON, tiles as
+/// BLOBs). GM5: serde only for the session wire, where a cut snapshot
+/// (AddCut) carries its drawings — the same payload AddDrawing's layers
+/// already carry.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Drawing {
     pub id: DrawingId,
     pub name: String,
@@ -450,6 +452,22 @@ impl PartialEq for AudioClip {
             && self.sample_rate == other.sample_rate
             && self.channels == other.channels
             && (std::sync::Arc::ptr_eq(&self.bytes, &other.bytes) || self.bytes == other.bytes)
+    }
+}
+
+/// GM5: on the session wire an image is its id, name and ORIGINAL bytes
+/// (the persisted truth); the tiles are re-derived on arrival, exactly as
+/// a load does.
+impl serde::Serialize for ImageAsset {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        serde::Serialize::serialize(&(self.id, &self.name, self.bytes.as_slice()), s)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ImageAsset {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let (id, name, bytes): (ImageId, String, Vec<u8>) = serde::Deserialize::deserialize(d)?;
+        ImageAsset::from_png(id, name, bytes).map_err(serde::de::Error::custom)
     }
 }
 
@@ -644,7 +662,10 @@ impl ImageAsset {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// GM5: serde so a whole cut rides the session wire inside AddCut (the
+/// inverse of RemoveCut carries the snapshot); the disk format is still
+/// store.rs, field by field.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cut {
     pub id: CutId,
     pub name: String,
@@ -657,9 +678,91 @@ pub struct Cut {
     /// The scratch audio track (C4): at most ONE clip per cut, aligned to
     /// frame 0. Timing reference only — audio never enters the render graph.
     pub audio: Option<AudioClip>,
+    /// GM5 (D3): namespaced keys (`camera.paper`, `prod.status`, ...) whose
+    /// values are JSON owned by the part that defines the key. Edited only
+    /// through SetCutMeta; unknown keys round-trip untouched.
+    pub meta: std::collections::BTreeMap<String, String>,
+    /// GM5: the memo/dialogue row — text per frame (セリフ, action notes).
+    /// Frame-indexed, so InsertFrames/DeleteFrames ripple it (D4).
+    pub memos: std::collections::BTreeMap<u32, String>,
+    /// GM5: each column's definition (kind, hidden, locked). Only
+    /// non-default definitions are stored: a missing entry is a plain cel
+    /// column, so legacy cuts are all Cel.
+    pub column_defs: std::collections::BTreeMap<ColumnId, crate::xsheet::ColumnDef>,
 }
 
 impl Cut {
+    /// GM5: an empty cut (no drawings, columns or graph).
+    pub fn new(id: CutId, name: impl Into<String>, frame_count: u32) -> Self {
+        Self {
+            id,
+            name: name.into(),
+            frame_count,
+            drawings: Vec::new(),
+            xsheet: XSheet::default(),
+            graph: Graph::default(),
+            images: Vec::new(),
+            audio: None,
+            meta: Default::default(),
+            memos: Default::default(),
+            column_defs: Default::default(),
+        }
+    }
+
+    /// GM5: a column's definition (the default for a plain cel column).
+    pub fn column_def(&self, id: ColumnId) -> crate::xsheet::ColumnDef {
+        self.column_defs.get(&id).copied().unwrap_or_default()
+    }
+
+    /// GM5: set a column's definition, keeping the map canonical (the
+    /// default is never stored), so undo restores structural equality.
+    pub fn set_column_def(&mut self, id: ColumnId, def: crate::xsheet::ColumnDef) {
+        if def == crate::xsheet::ColumnDef::default() {
+            self.column_defs.remove(&id);
+        } else {
+            self.column_defs.insert(id, def);
+        }
+    }
+
+    /// GM5: does this column reach the composite (not hidden, not Ref)?
+    /// A missing column renders nothing either way.
+    pub fn column_renders(&self, id: ColumnId) -> bool {
+        self.column_def(id).renders()
+    }
+
+    /// GM5: the column path's order, bottom → top: BG, then Cel, then Book,
+    /// each band in sheet order; hidden and Ref columns are skipped. Every
+    /// render path (export, eval, the canvas, graphcomp) goes through this.
+    pub fn render_order(&self) -> Vec<ColumnId> {
+        let mut order: Vec<(u8, usize, ColumnId)> = self
+            .xsheet
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| self.column_renders(c.id))
+            .map(|(i, c)| (self.column_def(c.id).kind.band(), i, c.id))
+            .collect();
+        order.sort();
+        order.into_iter().map(|(_, _, id)| id).collect()
+    }
+
+    /// GM5: the render order split around `active`: the columns drawn under
+    /// it and those drawn over it. An active column that does not render
+    /// (hidden, Ref) still splits where its band puts it.
+    pub fn render_split(&self, active: ColumnId) -> (Vec<ColumnId>, Vec<ColumnId>) {
+        let rank = |id: ColumnId| {
+            let i = self.xsheet.columns.iter().position(|c| c.id == id);
+            (self.column_def(id).kind.band(), i.unwrap_or(usize::MAX))
+        };
+        let me = rank(active);
+        let (below, above): (Vec<ColumnId>, Vec<ColumnId>) = self
+            .render_order()
+            .into_iter()
+            .filter(|&id| id != active)
+            .partition(|&id| rank(id) < me);
+        (below, above)
+    }
+
     pub fn drawing(&self, id: DrawingId) -> Option<&Drawing> {
         self.drawings.iter().find(|d| d.id == id)
     }

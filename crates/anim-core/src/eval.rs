@@ -78,6 +78,9 @@ impl Evaluator {
                 // changes accordingly.
                 match cut.xsheet.column(*column) {
                     None => Value::image(format!("missing-column({column})")),
+                    // Hidden or Ref (GM5): transparent, like every frame
+                    // renderer draws it.
+                    Some(_) if !cut.column_renders(*column) => Value::image("empty".to_string()),
                     Some(col) => match col.resolve(frame) {
                         Some(d) => match cut.drawing(d) {
                             // Content hash in the recipe: editing artwork

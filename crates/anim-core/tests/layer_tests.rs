@@ -922,7 +922,7 @@ fn v4_file_migrates_to_one_layer() {
         let v: String = conn
             .query_row("SELECT value FROM meta WHERE key='schema_version'", (), |r| r.get(0))
             .unwrap();
-        assert_eq!(v, "9", "re-save writes the current schema");
+        assert_eq!(v, "11", "re-save writes the current schema");
     }
 
     std::fs::remove_file(&path).unwrap();

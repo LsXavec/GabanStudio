@@ -2337,3 +2337,19 @@ what was not verified.
   86. Left: two-finger touch rotation, per-viewer flip (stretch). Not verified: the real window, the
   mesh and aliased shader on a GPU, tablet tilt on hardware, and the Legacy colour law on a repainted
   pick (GM7).
+- 2026-10-29 — The X-sheet engine part (GM5), engine half: schema v11 with the side tables `cut_meta`,
+  `column_defs` and `cut_memos` (created on save, probed on load; a v10 file loads as v9 plus tables it
+  does not know, which survive re-saves; v12 and later are refused as "made by a newer Gaban Studio");
+  `Cut.meta`, `Cut.memos`, `Cut.column_defs`; `ColumnKind { Cel, Bg, Book, Ref }` and
+  `ColumnDef { kind, hidden, locked }`; `Cut::render_order()` in the CPU column render, `composite_pixel`,
+  the CPU graph render, eval and the GPU graph compositor (a hidden or Ref DrawingSource is transparent).
+  16 new Commands with exact inverses (Add/Remove/Rename/MoveColumn, Add/RemoveParamColumn,
+  Add/Remove/RenameCut, SetFrameCount, Insert/DeleteFrames, SetCells, SetCutMeta, SetColumnDef, SetMemo);
+  a locked column refuses cell edits, paint and frame ripples with "column X is locked". New
+  `sheet_ops.rs`: `hold_delta`, `retime_range`, `reverse_range`, `expose_by_name`, `copy_block`,
+  `paste_block` (Overwrite / Insert). Raster tiles now serialize as (coord, tile) pairs so a cut snapshot
+  passes the serde_json Command wire. 25 `sheet_edit_tests`; the layer test's current-schema check reads
+  11. Left: the app half — doc.rs scaffolding through the Commands (with the cursor fixed up after an
+  undo), the canvas below/above stacks on `render_split`, the config.rs sheet Actions with their aliases
+  and perform arms, and the app-side lock refusal before a stroke starts. Not verified: the canvas and
+  the app with kinds and locks (no app path sets them yet), and the GPU compositor's skip on a GPU.

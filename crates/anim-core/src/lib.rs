@@ -21,6 +21,7 @@ pub mod graph;
 pub mod ids;
 pub mod model;
 pub mod raster;
+pub mod sheet_ops;
 pub mod store;
 pub mod value;
 pub mod xdts;
@@ -148,8 +149,10 @@ impl Engine {
 
     // ---- Structure setup (non-undoable scaffolding ops) -------------------
     // Creating scenes/cuts/columns is project scaffolding; editing inside a
-    // cut is the undoable workflow. This split matches how artists work and
-    // keeps M1's command set focused. Revisit if scaffolding needs undo.
+    // cut is the undoable workflow. GM5 (D4): columns, param columns and
+    // cuts now have undoable Commands (AddColumn, RemoveCut, ...) and the
+    // app goes through them; these direct forms stay for setup code and
+    // tests that build a document before its history starts.
 
     pub fn add_scene(&mut self, name: impl Into<String>) -> SceneId {
         let id = SceneId(self.project.alloc_id());
@@ -173,16 +176,7 @@ impl Engine {
             .project
             .scene_mut(scene)
             .ok_or(EngineError::UnknownScene(scene))?;
-        scene_ref.cuts.push(Cut {
-            id,
-            name,
-            frame_count,
-            drawings: Vec::new(),
-            xsheet: Default::default(),
-            graph: Default::default(),
-            images: Vec::new(),
-            audio: None,
-        });
+        scene_ref.cuts.push(Cut::new(id, name, frame_count));
         Ok(id)
     }
 
@@ -256,6 +250,20 @@ impl Engine {
 
     pub fn alloc_image_id(&mut self) -> ImageId {
         ImageId(self.project.alloc_id())
+    }
+
+    /// GM5: ids for the scaffolding Commands (AddColumn, AddParamColumn,
+    /// AddCut) — minted here, never reused, so a redo stays valid.
+    pub fn alloc_column_id(&mut self) -> ColumnId {
+        ColumnId(self.project.alloc_id())
+    }
+
+    pub fn alloc_param_id(&mut self) -> ParamId {
+        ParamId(self.project.alloc_id())
+    }
+
+    pub fn alloc_cut_id(&mut self) -> CutId {
+        CutId(self.project.alloc_id())
     }
 
     // ---- Editing (undoable) ----------------------------------------------

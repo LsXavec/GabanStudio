@@ -36,6 +36,10 @@ pub enum EngineError {
     Serde(#[from] serde_json::Error),
     #[error("unsupported project schema version {0}")]
     SchemaVersion(i64),
+    /// GM5 (D2): a file from a later release (schema above ours). Refused
+    /// rather than loaded with its newer data silently dropped on re-save.
+    #[error("this project was made by a newer Gaban Studio (schema version {0}); update to open it")]
+    NewerFile(i64),
     #[error("corrupt project file: {0}")]
     Corrupt(String),
     #[error("file error: {0}")]

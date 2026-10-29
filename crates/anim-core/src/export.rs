@@ -66,10 +66,12 @@ fn over_texel(dst: &mut [f32], s: &[u16]) {
     }
 }
 
-/// Premultiplied f32 full-frame composite of every column at `frame`.
+/// Premultiplied f32 full-frame composite of every rendering column at
+/// `frame`, in [`Cut::render_order`] (BG, Cel, Book bands; hidden and Ref
+/// columns skipped — an all-Cel cut keeps plain sheet order).
 fn composite(cut: &Cut, frame: u32, width: u32, height: u32) -> Vec<f32> {
     let mut acc = vec![0.0f32; width as usize * height as usize * 4];
-    for col in &cut.xsheet.columns {
+    for col in cut.render_order().into_iter().filter_map(|id| cut.xsheet.column(id)) {
         let Some(id) = col.resolve(frame) else {
             continue;
         };
@@ -89,7 +91,7 @@ pub fn composite_pixel(cut: &Cut, frame: u32, x: u32, y: u32) -> [f32; 4] {
     let coord = ((x / t) as i32, (y / t) as i32);
     let i = (((y % t) * t + x % t) * 4) as usize;
     let mut px = [0.0f32; 4];
-    for col in &cut.xsheet.columns {
+    for col in cut.render_order().into_iter().filter_map(|id| cut.xsheet.column(id)) {
         let Some(id) = col.resolve(frame) else {
             continue;
         };
@@ -350,7 +352,9 @@ fn render_node(
     let out = match &node.kind {
         NodeKind::DrawingSource { column } => {
             let mut acc = empty();
+            // A hidden or Ref column yields transparent (GM5).
             if let Some(col) = cut.xsheet.column(*column)
+                && cut.column_renders(*column)
                 && let Some(did) = col.resolve(frame)
                 && let Some(d) = cut.drawing(did)
             {

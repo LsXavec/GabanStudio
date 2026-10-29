@@ -7,16 +7,16 @@
 
 use std::path::Path;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::{EngineError, Result};
-use crate::graph::{Graph, Node, NodeKind};
+use crate::graph::{Node, NodeKind};
 use crate::ids::*;
 use crate::model::{CelLayer, Cut, Drawing, LayerProps, LayerRole, Project, Scene};
 use crate::raster::{RasterLayer, TileData};
-use crate::xsheet::{Column, Exposure, ParamColumn, ParamInterp, ParamKey, XSheet};
+use crate::xsheet::{Column, ColumnDef, Exposure, ParamColumn, ParamInterp, ParamKey};
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 11;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -68,7 +68,19 @@ CREATE TABLE IF NOT EXISTS cut_audio(
 CREATE TABLE IF NOT EXISTS cel_layer_defs(
     layer_id INTEGER PRIMARY KEY, role TEXT NOT NULL, chip INTEGER,
     locked INTEGER NOT NULL, onion INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS cut_meta(
+    cut_id INTEGER NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL,
+    PRIMARY KEY(cut_id, key));
+CREATE TABLE IF NOT EXISTS column_defs(
+    column_id INTEGER PRIMARY KEY, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS cut_memos(
+    cut_id INTEGER NOT NULL, frame INTEGER NOT NULL, text TEXT NOT NULL,
+    PRIMARY KEY(cut_id, frame));
 ";
+// v11 (GM5, D2): cut meta, column kinds and the memo row are side tables
+// too, created on save only; a file without them reads them as empty. v10
+// was never written by this branch: it loads as v9 plus tables we do not
+// know, which survive re-saves because save only clears the tables it owns.
 // v9 (PSD-cel-layers): layer DEFINITIONS live in their own side table, not
 // new cel_layers columns — saves rewrite INTO the existing file, and
 // CREATE IF NOT EXISTS would keep an old file's cel_layers shape, so new
@@ -141,7 +153,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
          DELETE FROM cel_layers; DELETE FROM cel_tiles;
          DELETE FROM cut_images;
          DELETE FROM param_columns; DELETE FROM param_keys;
-         DELETE FROM cut_audio; DELETE FROM cel_layer_defs;",
+         DELETE FROM cut_audio; DELETE FROM cel_layer_defs;
+         DELETE FROM cut_meta; DELETE FROM column_defs; DELETE FROM cut_memos;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -207,6 +220,12 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
         let mut ins_image = tx.prepare(
             "INSERT INTO cut_images(id, cut_id, ord, name, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
         )?;
+        let mut ins_cut_meta =
+            tx.prepare("INSERT INTO cut_meta(cut_id, key, value) VALUES (?1, ?2, ?3)")?;
+        let mut ins_column_def =
+            tx.prepare("INSERT INTO column_defs(column_id, json) VALUES (?1, ?2)")?;
+        let mut ins_memo =
+            tx.prepare("INSERT INTO cut_memos(cut_id, frame, text) VALUES (?1, ?2, ?3)")?;
 
         for (s_ord, scene) in project.scenes.iter().enumerate() {
             ins_scene.execute((scene.id.0 as i64, &scene.name, s_ord as i64))?;
@@ -219,6 +238,17 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                     cut.graph.output.map(|n| n.0 as i64),
                     c_ord as i64,
                 ))?;
+                for (key, value) in &cut.meta {
+                    ins_cut_meta.execute((cut.id.0 as i64, key, value))?;
+                }
+                for (frame, text) in &cut.memos {
+                    ins_memo.execute((cut.id.0 as i64, *frame as i64, text))?;
+                }
+                // Only non-default defs are stored (set_column_def keeps the
+                // map canonical); a column without a row is a plain Cel.
+                for (column, def) in &cut.column_defs {
+                    ins_column_def.execute((column.0 as i64, def.to_json()))?;
+                }
                 for (d_ord, d) in cut.drawings.iter().enumerate() {
                     let payload = serde_json::to_string(&d.strokes)?;
                     ins_drawing.execute((
@@ -384,9 +414,26 @@ pub fn load(path: &Path) -> Result<Project> {
         .map_err(|_| EngineError::Corrupt("bad schema_version".into()))?;
     // Accept this version and older (fields added in later versions default);
     // reject only future/unknown versions we can't understand.
+    if version > SCHEMA_VERSION {
+        return Err(EngineError::NewerFile(version));
+    }
     if !(1..=SCHEMA_VERSION).contains(&version) {
         return Err(EngineError::SchemaVersion(version));
     }
+    // v11 side tables: created on save only, so probe before reading (a v11
+    // file always has them; anything older reads them as empty).
+    let has_table = |name: &str| -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            (name,),
+            |_| Ok(()),
+        )
+        .is_ok()
+    };
+    let side_tables = version >= 11
+        && has_table("cut_meta")
+        && has_table("column_defs")
+        && has_table("cut_memos");
 
     let mut project = Project::new(get_meta("name")?);
     project.fps = get_meta("fps")?
@@ -445,16 +492,19 @@ pub fn load(path: &Path) -> Result<Project> {
             .collect::<std::result::Result<_, _>>()?;
 
         for (cut_id, cut_name, frame_count, output_node) in cuts {
-            let mut cut = Cut {
-                id: CutId(cut_id as u64),
-                name: cut_name,
-                frame_count: frame_count as u32,
-                drawings: Vec::new(),
-                xsheet: XSheet::default(),
-                graph: Graph::default(),
-                images: Vec::new(),
-                audio: None,
-            };
+            let mut cut = Cut::new(CutId(cut_id as u64), cut_name, frame_count as u32);
+            if side_tables {
+                let mut stmt = conn.prepare("SELECT key, value FROM cut_meta WHERE cut_id = ?1")?;
+                cut.meta = stmt
+                    .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<std::result::Result<_, _>>()?;
+                let mut stmt =
+                    conn.prepare("SELECT frame, text FROM cut_memos WHERE cut_id = ?1")?;
+                let memos: Vec<(i64, String)> = stmt
+                    .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<std::result::Result<_, _>>()?;
+                cut.memos = memos.into_iter().map(|(f, t)| (f as u32, t)).collect();
+            }
 
             // Image assets: added in schema v6 (older files have none — and
             // no cut_images table to query).
@@ -643,6 +693,21 @@ pub fn load(path: &Path) -> Result<Project> {
                         }
                     };
                     column.set_key(frame as u32, exposure);
+                }
+                if side_tables {
+                    let json: Option<String> = conn
+                        .query_row(
+                            "SELECT json FROM column_defs WHERE column_id = ?1",
+                            (col_id,),
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(json) = json {
+                        let def = ColumnDef::from_json(&json).ok_or_else(|| {
+                            EngineError::Corrupt(format!("bad column def for column {col_id}"))
+                        })?;
+                        cut.set_column_def(column.id, def);
+                    }
                 }
                 cut.xsheet.columns.push(column);
             }

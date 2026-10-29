@@ -12,7 +12,18 @@ use crate::graph::{Node, NodeKind};
 use crate::ids::*;
 use crate::model::{AudioClip, CelLayer, Cut, Drawing, LayerProps, Project, Stroke};
 use crate::raster::TileDiff;
-use crate::xsheet::{Exposure, ParamKey};
+use crate::xsheet::{Column, ColumnDef, Exposure, ParamColumn, ParamKey};
+
+/// GM5: one cell of a SetCells batch. `before` is what the cell holds now
+/// (checked on apply, so a stale batch refuses instead of drifting) and
+/// `after` what it gets; None = no key there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CellEdit {
+    pub column: ColumnId,
+    pub frame: u32,
+    pub before: Option<Exposure>,
+    pub after: Option<Exposure>,
+}
 
 // Not `serde` — commands can carry `Arc<TileData>` (large pixel buffers), and
 // the edit history lives in memory, never persisted.
@@ -178,6 +189,78 @@ pub enum Command {
         at: CutRef,
         node: Option<NodeId>,
     },
+
+    // ---- GM5: sheet scaffolding and sheet edits (D4) ---------------------
+    /// Insert a drawing column at `index` (0 = first in the sheet). Usually
+    /// a fresh empty column; carries its keys and definition when it is the
+    /// inverse of a RemoveColumn, so undo restores id, keys and def.
+    AddColumn {
+        at: CutRef,
+        index: usize,
+        column: Column,
+        def: ColumnDef,
+    },
+    /// Remove a column with its keys and definition (the engine allows the
+    /// last one; "keep >= 1" is app policy).
+    RemoveColumn { at: CutRef, id: ColumnId },
+    RenameColumn {
+        at: CutRef,
+        id: ColumnId,
+        name: String,
+    },
+    /// Move a column to `to_index` (remove-then-insert, like MoveCelLayer).
+    MoveColumn {
+        at: CutRef,
+        id: ColumnId,
+        to_index: usize,
+    },
+    AddParamColumn {
+        at: CutRef,
+        index: usize,
+        column: ParamColumn,
+    },
+    RemoveParamColumn { at: CutRef, id: ParamId },
+    /// Insert a whole cut into `scene` at `index`: a fresh cut, or the
+    /// snapshot a RemoveCut took.
+    AddCut {
+        scene: SceneId,
+        index: usize,
+        cut: Box<Cut>,
+    },
+    RemoveCut { at: CutRef },
+    RenameCut { at: CutRef, name: String },
+    /// The cut's length. Keys past the new end are kept (hidden), never
+    /// deleted, so shortening and lengthening again loses nothing.
+    SetFrameCount { at: CutRef, frames: u32 },
+    /// Open `count` frames at `frame` across the WHOLE cut (D4): every
+    /// column's keys, every param key and every memo at or after it move
+    /// later, and the cut grows by `count`.
+    InsertFrames { at: CutRef, frame: u32, count: u32 },
+    /// Close `count` frames at `frame` across the whole cut. The inverse
+    /// re-opens them and restores the removed keys, param keys and memos.
+    DeleteFrames { at: CutRef, frame: u32, count: u32 },
+    /// A batch of cell edits as one command; the inverse is the batch
+    /// reversed with before/after swapped.
+    SetCells { at: CutRef, cells: Vec<CellEdit> },
+    /// D3: set (Some) or remove (None) a cut meta key. `before` must match.
+    SetCutMeta {
+        at: CutRef,
+        key: String,
+        before: Option<String>,
+        after: Option<String>,
+    },
+    SetColumnDef {
+        at: CutRef,
+        column: ColumnId,
+        def: ColumnDef,
+    },
+    /// The memo/dialogue row: Some(text) sets the frame's memo, None (or
+    /// empty text) clears it.
+    SetMemo {
+        at: CutRef,
+        frame: u32,
+        text: Option<String>,
+    },
 }
 
 impl Command {
@@ -203,9 +286,62 @@ impl Command {
             | Command::Connect { at, .. }
             | Command::Disconnect { at, .. }
             | Command::SetNodeKind { at, .. }
-            | Command::SetOutput { at, .. } => *at,
+            | Command::SetOutput { at, .. }
+            | Command::AddColumn { at, .. }
+            | Command::RemoveColumn { at, .. }
+            | Command::RenameColumn { at, .. }
+            | Command::MoveColumn { at, .. }
+            | Command::AddParamColumn { at, .. }
+            | Command::RemoveParamColumn { at, .. }
+            | Command::RemoveCut { at }
+            | Command::RenameCut { at, .. }
+            | Command::SetFrameCount { at, .. }
+            | Command::InsertFrames { at, .. }
+            | Command::DeleteFrames { at, .. }
+            | Command::SetCells { at, .. }
+            | Command::SetCutMeta { at, .. }
+            | Command::SetColumnDef { at, .. }
+            | Command::SetMemo { at, .. } => *at,
+            Command::AddCut { scene, cut, .. } => CutRef {
+                scene: *scene,
+                cut: cut.id,
+            },
         }
     }
+}
+
+/// GM5: a locked column's art and timing are protected — paint on a
+/// drawing it exposes refuses, naming the column (the app shows the reason
+/// on the Aka lane).
+fn refuse_locked_art(cut: &Cut, id: DrawingId) -> Result<()> {
+    for col in &cut.xsheet.columns {
+        if cut.column_def(col.id).locked && !col.keys_referencing(id).is_empty() {
+            return Err(locked(&col.name));
+        }
+    }
+    Ok(())
+}
+
+/// GM5: the refusal every locked-column check returns.
+fn locked(name: &str) -> EngineError {
+    EngineError::InvalidCommand(format!("column {name} is locked"))
+}
+
+/// GM5: an insert or delete at `frame` would move (or remove) the keys of
+/// a locked column at or after it — refused, the lock holds its timing.
+fn refuse_locked_ripple(cut: &Cut, frame: u32) -> Result<()> {
+    for col in &cut.xsheet.columns {
+        if cut.column_def(col.id).locked && col.last_key().is_some_and(|l| l >= frame) {
+            return Err(locked(&col.name));
+        }
+    }
+    Ok(())
+}
+
+/// GM5: every node of a cut — the invalidation roots of an edit that moves
+/// the whole timeline (or the whole cut).
+fn all_nodes(cut: &Cut) -> Vec<NodeId> {
+    cut.graph.nodes().map(|n| n.id).collect()
 }
 
 /// Result of applying one command.
@@ -376,6 +512,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             diff,
         } => {
             let cut = cut_mut(project, *at)?;
+            refuse_locked_art(cut, *id)?;
             let roots = artwork_invalidation_roots(cut, *id);
             let drawing = cut
                 .drawings
@@ -540,6 +677,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
 
         Command::AddStroke { at, id, stroke } => {
             let cut = cut_mut(project, *at)?;
+            refuse_locked_art(cut, *id)?;
             let roots = artwork_invalidation_roots(cut, *id);
             let drawing = cut
                 .drawings
@@ -555,6 +693,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
 
         Command::PopStroke { at, id } => {
             let cut = cut_mut(project, *at)?;
+            refuse_locked_art(cut, *id)?;
             let roots = artwork_invalidation_roots(cut, *id);
             let drawing = cut
                 .drawings
@@ -576,6 +715,8 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
 
         Command::RemoveDrawing { at, id } => {
             let cut = cut_mut(project, *at)?;
+            // It lifts keys from every column that exposes it.
+            refuse_locked_art(cut, *id)?;
             let idx = cut
                 .drawings
                 .iter()
@@ -635,6 +776,11 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 && cut.drawing(*d).is_none() {
                     return Err(EngineError::UnknownDrawing(*d));
                 }
+            if cut.column_def(*column).locked
+                && let Some(c) = cut.xsheet.column(*column)
+            {
+                return Err(locked(&c.name));
+            }
             let col = cut
                 .xsheet
                 .column_mut(*column)
@@ -882,6 +1028,463 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     node: prev,
                 }],
                 // Per-node caches are unaffected by which node is "the output".
+                invalidation_roots: vec![],
+            })
+        }
+
+        // ---- GM5 ----------------------------------------------------------
+        Command::AddColumn {
+            at,
+            index,
+            column,
+            def,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            if cut.xsheet.column(column.id).is_some() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "column {} already exists",
+                    column.id
+                )));
+            }
+            if *index > cut.xsheet.columns.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "column index {index} out of range (sheet has {})",
+                    cut.xsheet.columns.len()
+                )));
+            }
+            for (_, e) in column.keys() {
+                if let Exposure::Drawing(d) = e
+                    && cut.drawing(d).is_none()
+                {
+                    return Err(EngineError::UnknownDrawing(d));
+                }
+            }
+            cut.xsheet.columns.insert(*index, column.clone());
+            cut.set_column_def(column.id, *def);
+            Ok(AppliedEffect {
+                inverse: vec![Command::RemoveColumn {
+                    at: *at,
+                    id: column.id,
+                }],
+                // A DrawingSource left reading this id resolves again.
+                invalidation_roots: cut.graph.sources_of_column(column.id),
+            })
+        }
+
+        Command::RemoveColumn { at, id } => {
+            let cut = cut_mut(project, *at)?;
+            let idx = cut
+                .xsheet
+                .columns
+                .iter()
+                .position(|c| c.id == *id)
+                .ok_or(EngineError::UnknownColumn(*id))?;
+            let column = cut.xsheet.columns.remove(idx);
+            let def = cut.column_defs.remove(id).unwrap_or_default();
+            Ok(AppliedEffect {
+                inverse: vec![Command::AddColumn {
+                    at: *at,
+                    index: idx,
+                    column,
+                    def,
+                }],
+                // Its DrawingSources now read a missing column (transparent).
+                invalidation_roots: cut.graph.sources_of_column(*id),
+            })
+        }
+
+        Command::RenameColumn { at, id, name } => {
+            let cut = cut_mut(project, *at)?;
+            let col = cut
+                .xsheet
+                .column_mut(*id)
+                .ok_or(EngineError::UnknownColumn(*id))?;
+            let prev = std::mem::replace(&mut col.name, name.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::RenameColumn {
+                    at: *at,
+                    id: *id,
+                    name: prev,
+                }],
+                // Column names never enter eval recipes.
+                invalidation_roots: vec![],
+            })
+        }
+
+        Command::MoveColumn { at, id, to_index } => {
+            let cut = cut_mut(project, *at)?;
+            let from = cut
+                .xsheet
+                .columns
+                .iter()
+                .position(|c| c.id == *id)
+                .ok_or(EngineError::UnknownColumn(*id))?;
+            if *to_index >= cut.xsheet.columns.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "move target {to_index} out of range (sheet has {})",
+                    cut.xsheet.columns.len()
+                )));
+            }
+            let moved = cut.xsheet.columns.remove(from);
+            cut.xsheet.columns.insert(*to_index, moved);
+            Ok(AppliedEffect {
+                inverse: vec![Command::MoveColumn {
+                    at: *at,
+                    id: *id,
+                    to_index: from,
+                }],
+                // Sheet order steers the column path only; graph values
+                // read columns by id.
+                invalidation_roots: vec![],
+            })
+        }
+
+        Command::AddParamColumn { at, index, column } => {
+            if column.keys().any(|(_, k)| !k.value.is_finite()) {
+                return Err(EngineError::InvalidCommand(
+                    "param column carries a non-finite key".into(),
+                ));
+            }
+            let cut = cut_mut(project, *at)?;
+            if cut.xsheet.param(column.id).is_some() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "param column {} already exists",
+                    column.id
+                )));
+            }
+            if *index > cut.xsheet.params.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "param column index {index} out of range (sheet has {})",
+                    cut.xsheet.params.len()
+                )));
+            }
+            cut.xsheet.params.insert(*index, column.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::RemoveParamColumn {
+                    at: *at,
+                    id: column.id,
+                }],
+                invalidation_roots: cut.graph.sources_of_param(column.id),
+            })
+        }
+
+        Command::RemoveParamColumn { at, id } => {
+            let cut = cut_mut(project, *at)?;
+            let idx = cut
+                .xsheet
+                .params
+                .iter()
+                .position(|p| p.id == *id)
+                .ok_or_else(|| EngineError::InvalidCommand(format!("unknown param column {id}")))?;
+            let column = cut.xsheet.params.remove(idx);
+            Ok(AppliedEffect {
+                inverse: vec![Command::AddParamColumn {
+                    at: *at,
+                    index: idx,
+                    column,
+                }],
+                // Bound transforms fall back to their static values.
+                invalidation_roots: cut.graph.sources_of_param(*id),
+            })
+        }
+
+        Command::AddCut { scene, index, cut } => {
+            if project
+                .scenes
+                .iter()
+                .any(|s| s.cuts.iter().any(|c| c.id == cut.id))
+            {
+                return Err(EngineError::InvalidCommand(format!(
+                    "cut {} already exists",
+                    cut.id
+                )));
+            }
+            let s = project
+                .scene_mut(*scene)
+                .ok_or(EngineError::UnknownScene(*scene))?;
+            if *index > s.cuts.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "cut index {index} out of range (scene has {})",
+                    s.cuts.len()
+                )));
+            }
+            s.cuts.insert(*index, (**cut).clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::RemoveCut {
+                    at: CutRef {
+                        scene: *scene,
+                        cut: cut.id,
+                    },
+                }],
+                invalidation_roots: all_nodes(cut),
+            })
+        }
+
+        Command::RemoveCut { at } => {
+            let s = project
+                .scene_mut(at.scene)
+                .ok_or(EngineError::UnknownScene(at.scene))?;
+            let idx = s
+                .cuts
+                .iter()
+                .position(|c| c.id == at.cut)
+                .ok_or(EngineError::UnknownCut(at.cut))?;
+            let cut = s.cuts.remove(idx);
+            let roots = all_nodes(&cut);
+            Ok(AppliedEffect {
+                inverse: vec![Command::AddCut {
+                    scene: at.scene,
+                    index: idx,
+                    cut: Box::new(cut),
+                }],
+                invalidation_roots: roots,
+            })
+        }
+
+        Command::RenameCut { at, name } => {
+            let cut = cut_mut(project, *at)?;
+            let prev = std::mem::replace(&mut cut.name, name.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::RenameCut { at: *at, name: prev }],
+                invalidation_roots: vec![],
+            })
+        }
+
+        Command::SetFrameCount { at, frames } => {
+            if *frames == 0 {
+                return Err(EngineError::InvalidCommand(
+                    "a cut keeps at least one frame".into(),
+                ));
+            }
+            let cut = cut_mut(project, *at)?;
+            let prev = std::mem::replace(&mut cut.frame_count, *frames);
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetFrameCount {
+                    at: *at,
+                    frames: prev,
+                }],
+                // Per-frame values do not depend on the cut's length.
+                invalidation_roots: vec![],
+            })
+        }
+
+        Command::InsertFrames { at, frame, count } => {
+            let cut = cut_mut(project, *at)?;
+            if *count == 0 || *frame > cut.frame_count {
+                return Err(EngineError::InvalidCommand(format!(
+                    "insert of {count} frame(s) at {frame} is outside the cut ({} frames)",
+                    cut.frame_count
+                )));
+            }
+            let grown = cut.frame_count.checked_add(*count);
+            let fits = |last: Option<u32>| last.is_none_or(|l| l < *frame || l.checked_add(*count).is_some());
+            if grown.is_none()
+                || !cut.xsheet.columns.iter().all(|c| fits(c.last_key()))
+                || !cut.xsheet.params.iter().all(|p| fits(p.keys().last().map(|k| k.0)))
+                || !fits(cut.memos.keys().next_back().copied())
+            {
+                return Err(EngineError::InvalidCommand(
+                    "insert would push a key past the last frame number".into(),
+                ));
+            }
+            refuse_locked_ripple(cut, *frame)?;
+            for col in &mut cut.xsheet.columns {
+                col.insert_frames(*frame, *count);
+            }
+            for p in &mut cut.xsheet.params {
+                p.insert_frames(*frame, *count);
+            }
+            crate::xsheet::insert_frames_in(&mut cut.memos, *frame, *count);
+            cut.frame_count = grown.expect("checked above");
+            Ok(AppliedEffect {
+                inverse: vec![Command::DeleteFrames {
+                    at: *at,
+                    frame: *frame,
+                    count: *count,
+                }],
+                invalidation_roots: all_nodes(cut),
+            })
+        }
+
+        Command::DeleteFrames { at, frame, count } => {
+            let cut = cut_mut(project, *at)?;
+            if *count == 0
+                || *count >= cut.frame_count
+                || frame.checked_add(*count).is_none_or(|end| end > cut.frame_count)
+            {
+                return Err(EngineError::InvalidCommand(format!(
+                    "delete of {count} frame(s) at {frame} does not fit the cut ({} frames; \
+                     at least one stays)",
+                    cut.frame_count
+                )));
+            }
+            refuse_locked_ripple(cut, *frame)?;
+            let mut inverse = vec![Command::InsertFrames {
+                at: *at,
+                frame: *frame,
+                count: *count,
+            }];
+            let mut cells = Vec::new();
+            for col in &mut cut.xsheet.columns {
+                for (f, e) in col.delete_frames(*frame, *count) {
+                    cells.push(CellEdit {
+                        column: col.id,
+                        frame: f,
+                        before: None,
+                        after: Some(e),
+                    });
+                }
+            }
+            if !cells.is_empty() {
+                inverse.push(Command::SetCells { at: *at, cells });
+            }
+            for p in &mut cut.xsheet.params {
+                for (f, k) in p.delete_frames(*frame, *count) {
+                    inverse.push(Command::SetParamKey {
+                        at: *at,
+                        column: p.id,
+                        frame: f,
+                        key: Some(k),
+                    });
+                }
+            }
+            for (f, text) in crate::xsheet::delete_frames_in(&mut cut.memos, *frame, *count) {
+                inverse.push(Command::SetMemo {
+                    at: *at,
+                    frame: f,
+                    text: Some(text),
+                });
+            }
+            cut.frame_count -= *count;
+            Ok(AppliedEffect {
+                inverse,
+                invalidation_roots: all_nodes(cut),
+            })
+        }
+
+        Command::SetCells { at, cells } => {
+            let cut = cut_mut(project, *at)?;
+            // Validate the whole batch first (in order, so a cell edited
+            // twice checks against its first edit), then apply: a refused
+            // batch leaves the sheet untouched.
+            let mut seen: std::collections::HashMap<(ColumnId, u32), Option<Exposure>> =
+                std::collections::HashMap::new();
+            for c in cells {
+                let col = cut
+                    .xsheet
+                    .column(c.column)
+                    .ok_or(EngineError::UnknownColumn(c.column))?;
+                if cut.column_def(c.column).locked {
+                    return Err(locked(&col.name));
+                }
+                if let Some(Exposure::Drawing(d)) = c.after
+                    && cut.drawing(d).is_none()
+                {
+                    return Err(EngineError::UnknownDrawing(d));
+                }
+                let now = seen
+                    .get(&(c.column, c.frame))
+                    .copied()
+                    .unwrap_or_else(|| col.key_at(c.frame));
+                if now != c.before {
+                    return Err(EngineError::InvalidCommand(format!(
+                        "cell {}@{} changed since this edit was made",
+                        col.name, c.frame
+                    )));
+                }
+                seen.insert((c.column, c.frame), c.after);
+            }
+            let mut roots = Vec::new();
+            for c in cells {
+                let col = cut.xsheet.column_mut(c.column).expect("validated above");
+                match c.after {
+                    Some(e) => col.set_key(c.frame, e),
+                    None => col.clear_key(c.frame),
+                };
+                roots.extend(cut.graph.sources_of_column(c.column));
+            }
+            roots.sort();
+            roots.dedup();
+            let inverse_cells = cells
+                .iter()
+                .rev()
+                .map(|c| CellEdit {
+                    before: c.after,
+                    after: c.before,
+                    ..*c
+                })
+                .collect();
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetCells {
+                    at: *at,
+                    cells: inverse_cells,
+                }],
+                invalidation_roots: roots,
+            })
+        }
+
+        Command::SetCutMeta {
+            at,
+            key,
+            before,
+            after,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            if key.is_empty() {
+                return Err(EngineError::InvalidCommand("empty cut meta key".into()));
+            }
+            if cut.meta.get(key) != before.as_ref() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "cut meta '{key}' changed since this edit was made"
+                )));
+            }
+            match after {
+                Some(v) => cut.meta.insert(key.clone(), v.clone()),
+                None => cut.meta.remove(key),
+            };
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetCutMeta {
+                    at: *at,
+                    key: key.clone(),
+                    before: after.clone(),
+                    after: before.clone(),
+                }],
+                // A key's owner part invalidates what it renders (D3).
+                invalidation_roots: all_nodes(cut),
+            })
+        }
+
+        Command::SetColumnDef { at, column, def } => {
+            let cut = cut_mut(project, *at)?;
+            if cut.xsheet.column(*column).is_none() {
+                return Err(EngineError::UnknownColumn(*column));
+            }
+            let prev = cut.column_def(*column);
+            cut.set_column_def(*column, *def);
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetColumnDef {
+                    at: *at,
+                    column: *column,
+                    def: prev,
+                }],
+                // Hidden/Ref turn its DrawingSources transparent.
+                invalidation_roots: cut.graph.sources_of_column(*column),
+            })
+        }
+
+        Command::SetMemo { at, frame, text } => {
+            let cut = cut_mut(project, *at)?;
+            let prev = match text.as_deref().filter(|t| !t.is_empty()) {
+                Some(t) => cut.memos.insert(*frame, t.to_string()),
+                None => cut.memos.remove(frame),
+            };
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetMemo {
+                    at: *at,
+                    frame: *frame,
+                    text: prev,
+                }],
+                // Memos never reach pixels.
                 invalidation_roots: vec![],
             })
         }

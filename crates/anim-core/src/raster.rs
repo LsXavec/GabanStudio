@@ -142,7 +142,33 @@ impl TileData {
 pub struct RasterLayer {
     /// BTreeMap (not HashMap) so `content_hash` folds tiles in a deterministic
     /// order — hash stability is load-bearing for the eval cache and tests.
+    #[serde(with = "tile_pairs")]
     pub tiles: BTreeMap<TileCoord, Arc<TileData>>,
+}
+
+/// JSON map keys must be strings, so the tile grid travels as (coord, tile)
+/// pairs (GM5: a whole-cut snapshot rides the serde_json Command wire).
+/// Never persisted — the store writes tiles as rows.
+mod tile_pairs {
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::{TileCoord, TileData};
+
+    pub fn serialize<S: Serializer>(
+        tiles: &BTreeMap<TileCoord, Arc<TileData>>,
+        s: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        s.collect_seq(tiles.iter())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<BTreeMap<TileCoord, Arc<TileData>>, D::Error> {
+        Ok(Vec::<(TileCoord, Arc<TileData>)>::deserialize(d)?.into_iter().collect())
+    }
 }
 
 impl RasterLayer {

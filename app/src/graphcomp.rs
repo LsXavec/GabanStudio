@@ -462,7 +462,9 @@ impl GraphCompositor {
         let slot = match &kind {
             NodeKind::DrawingSource { column } => {
                 let slot = self.acquire_cleared();
+                // A hidden or Ref column yields transparent (GM5).
                 if let Some(col) = cut.xsheet.column(*column)
+                    && cut.column_renders(*column)
                     && let Some(did) = col.resolve(frame)
                     && let Some(d) = cut.drawing(did)
                 {
