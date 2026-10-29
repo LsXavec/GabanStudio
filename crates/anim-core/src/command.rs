@@ -310,9 +310,9 @@ impl Command {
     }
 }
 
-/// GM5: a locked column's art and timing are protected — paint on a
-/// drawing it exposes refuses, naming the column (the app shows the reason
-/// on the Aka lane).
+/// GM5: a locked column's art and timing are protected — paint, strokes and
+/// cel-layer edits (add, remove, move, props) on a drawing it exposes
+/// refuse, naming the column (the app shows the reason on the Aka lane).
 fn refuse_locked_art(cut: &Cut, id: DrawingId) -> Result<()> {
     for col in &cut.xsheet.columns {
         if cut.column_def(col.id).locked && !col.keys_referencing(id).is_empty() {
@@ -559,6 +559,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             layer,
         } => {
             let cut = cut_mut(project, *at)?;
+            refuse_locked_art(cut, *drawing)?;
             let roots = artwork_invalidation_roots(cut, *drawing);
             validate_layer_id_free(cut, layer.id)?;
             validate_props(&layer.props)?;
@@ -590,6 +591,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             layer,
         } => {
             let cut = cut_mut(project, *at)?;
+            refuse_locked_art(cut, *drawing)?;
             let roots = artwork_invalidation_roots(cut, *drawing);
             let d = cut
                 .drawings
@@ -618,6 +620,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             to_index,
         } => {
             let cut = cut_mut(project, *at)?;
+            refuse_locked_art(cut, *drawing)?;
             let roots = artwork_invalidation_roots(cut, *drawing);
             let d = cut
                 .drawings
@@ -654,6 +657,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
         } => {
             validate_props(props)?;
             let cut = cut_mut(project, *at)?;
+            refuse_locked_art(cut, *drawing)?;
             let roots = artwork_invalidation_roots(cut, *drawing);
             let d = cut
                 .drawings
@@ -1052,6 +1056,15 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     cut.xsheet.columns.len()
                 )));
             }
+            // A locked column cannot be removed, so it is never added
+            // locked either: the inverse (RemoveColumn) must always apply.
+            // Add it, then lock it with SetColumnDef.
+            if def.locked {
+                return Err(EngineError::InvalidCommand(format!(
+                    "column {} is added unlocked; lock it after",
+                    column.name
+                )));
+            }
             for (_, e) in column.keys() {
                 if let Exposure::Drawing(d) = e
                     && cut.drawing(d).is_none()
@@ -1079,6 +1092,10 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 .iter()
                 .position(|c| c.id == *id)
                 .ok_or(EngineError::UnknownColumn(*id))?;
+            // The lock protects the column itself, not only its cells.
+            if cut.column_def(*id).locked {
+                return Err(locked(&cut.xsheet.columns[idx].name));
+            }
             let column = cut.xsheet.columns.remove(idx);
             let def = cut.column_defs.remove(id).unwrap_or_default();
             Ok(AppliedEffect {
@@ -1124,6 +1141,9 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     "move target {to_index} out of range (sheet has {})",
                     cut.xsheet.columns.len()
                 )));
+            }
+            if cut.column_def(*id).locked {
+                return Err(locked(&cut.xsheet.columns[from].name));
             }
             let moved = cut.xsheet.columns.remove(from);
             cut.xsheet.columns.insert(*to_index, moved);
@@ -1189,6 +1209,11 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
         }
 
         Command::AddCut { scene, index, cut } => {
+            if cut.frame_count == 0 {
+                return Err(EngineError::InvalidCommand(
+                    "a cut keeps at least one frame".into(),
+                ));
+            }
             if project
                 .scenes
                 .iter()
@@ -1270,9 +1295,13 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
 
         Command::InsertFrames { at, frame, count } => {
             let cut = cut_mut(project, *at)?;
-            if *count == 0 || *frame > cut.frame_count {
+            // Frames in messages are 1-based, as the sheet shows them. A
+            // cut with no frames is refused: its inverse would delete
+            // every frame, which a cut never allows.
+            if *count == 0 || *frame > cut.frame_count || cut.frame_count == 0 {
                 return Err(EngineError::InvalidCommand(format!(
-                    "insert of {count} frame(s) at {frame} is outside the cut ({} frames)",
+                    "cannot insert {count} frame(s) at frame {}: the cut has {}",
+                    *frame as u64 + 1,
                     cut.frame_count
                 )));
             }
@@ -1313,8 +1342,9 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 || frame.checked_add(*count).is_none_or(|end| end > cut.frame_count)
             {
                 return Err(EngineError::InvalidCommand(format!(
-                    "delete of {count} frame(s) at {frame} does not fit the cut ({} frames; \
-                     at least one stays)",
+                    "cannot delete {count} frame(s) at frame {}: the cut has {} and keeps at \
+                     least one",
+                    *frame as u64 + 1,
                     cut.frame_count
                 )));
             }
@@ -1324,9 +1354,24 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 frame: *frame,
                 count: *count,
             }];
+            // The frames after the range keep showing what they showed: a
+            // column whose removed key held over them gets a key at `frame`
+            // (Column::delete_frames). Once the inverse re-opens the range
+            // that key sits at frame + count; it is lifted ahead of the
+            // restore of the removed keys.
+            let mut lifts = Vec::new();
             let mut cells = Vec::new();
             for col in &mut cut.xsheet.columns {
-                for (f, e) in col.delete_frames(*frame, *count) {
+                let (gone, rekey) = col.delete_frames(*frame, *count);
+                if let Some(e) = rekey {
+                    lifts.push(CellEdit {
+                        column: col.id,
+                        frame: *frame + *count,
+                        before: Some(e),
+                        after: None,
+                    });
+                }
+                for (f, e) in gone {
                     cells.push(CellEdit {
                         column: col.id,
                         frame: f,
@@ -1335,8 +1380,12 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     });
                 }
             }
-            if !cells.is_empty() {
-                inverse.push(Command::SetCells { at: *at, cells });
+            lifts.extend(cells);
+            if !lifts.is_empty() {
+                inverse.push(Command::SetCells {
+                    at: *at,
+                    cells: lifts,
+                });
             }
             for p in &mut cut.xsheet.params {
                 for (f, k) in p.delete_frames(*frame, *count) {
@@ -1388,8 +1437,9 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     .unwrap_or_else(|| col.key_at(c.frame));
                 if now != c.before {
                     return Err(EngineError::InvalidCommand(format!(
-                        "cell {}@{} changed since this edit was made",
-                        col.name, c.frame
+                        "column {}, frame {} changed since this edit was made",
+                        col.name,
+                        c.frame as u64 + 1
                     )));
                 }
                 seen.insert((c.column, c.frame), c.after);

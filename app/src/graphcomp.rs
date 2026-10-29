@@ -21,8 +21,8 @@
 
 use anim_core::export::srgb_to_linear;
 use anim_core::graph::{BlendMode, NodeKind};
-use anim_core::ids::NodeId;
-use anim_core::model::Cut;
+use anim_core::ids::{ColumnId, NodeId};
+use anim_core::model::{Cut, Drawing};
 use eframe::egui;
 use eframe::egui_wgpu::{RenderState, Renderer};
 use egui::mutex::RwLock;
@@ -463,11 +463,7 @@ impl GraphCompositor {
             NodeKind::DrawingSource { column } => {
                 let slot = self.acquire_cleared();
                 // A hidden or Ref column yields transparent (GM5).
-                if let Some(col) = cut.xsheet.column(*column)
-                    && cut.column_renders(*column)
-                    && let Some(did) = col.resolve(frame)
-                    && let Some(d) = cut.drawing(did)
-                {
+                if let Some(d) = source_drawing(cut, *column, frame) {
                     // Same visibility/opacity filter as the CPU flatten law.
                     let slices: Vec<LayerSlice<'_>> = d
                         .layers
@@ -759,6 +755,17 @@ impl GraphCompositor {
     }
 }
 
+/// The drawing a DrawingSource on `column` shows at `frame`. A hidden or
+/// Ref column yields none, so its slot stays transparent (GM5) — the same
+/// rule as the CPU reference's `render_graph_frame`.
+fn source_drawing(cut: &Cut, column: ColumnId, frame: u32) -> Option<&Drawing> {
+    let col = cut.xsheet.column(column)?;
+    if !cut.column_renders(column) {
+        return None;
+    }
+    cut.drawing(col.resolve(frame)?)
+}
+
 #[cfg(test)]
 mod shader_tests {
     // cargo check never parses the WGSL strings — without this, a shader
@@ -767,5 +774,32 @@ mod shader_tests {
     fn shaders_parse_as_valid_wgsl() {
         naga::front::wgsl::parse_str(super::XFORM_SHADER).expect("XFORM_SHADER");
         naga::front::wgsl::parse_str(super::BLEND_SHADER).expect("BLEND_SHADER");
+    }
+}
+
+#[cfg(test)]
+mod source_tests {
+    use crate::config::Action;
+    use crate::testkit::EditorHarness;
+
+    /// The GPU path's slot selection, without a device: a hidden or Ref
+    /// column feeds its DrawingSource nothing; BG, Book and Cel feed it.
+    #[test]
+    fn graphcomp_hidden_and_ref_columns_feed_their_source_nothing() {
+        let mut h = EditorHarness::new();
+        let col = h.state().view.active_column;
+        let shown = |h: &EditorHarness| super::source_drawing(h.state().cut(), col, 0).is_some();
+        assert!(shown(&h), "the cel feeds its source");
+        h.perform(Action::ToggleColumnHidden);
+        assert!(!shown(&h), "hidden feeds nothing");
+        h.perform(Action::ToggleColumnHidden);
+        for (verb, renders) in [
+            (Action::ColumnKindRef, false),
+            (Action::ColumnKindBg, true),
+            (Action::ColumnKindBook, true),
+        ] {
+            h.perform(verb);
+            assert_eq!(shown(&h), renders, "{verb:?}");
+        }
     }
 }

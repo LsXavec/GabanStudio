@@ -2353,3 +2353,20 @@ what was not verified.
   undo), the canvas below/above stacks on `render_split`, the config.rs sheet Actions with their aliases
   and perform arms, and the app-side lock refusal before a stroke starts. Not verified: the canvas and
   the app with kinds and locks (no app path sets them yet), and the GPU compositor's skip on a GPU.
+- 2026-10-29 — GM5 review fixes, the app half: doc.rs adds and removes columns, param columns and cuts
+  through AddColumn / RemoveColumn / AddParamColumn / AddCut, one undo step each; `keep_view_live` puts
+  the view back on a live cut and column after an undo, a redo or a peer's edit. 14 sheet Actions on the
+  sheet cursor (Sheet menu; palette words ones, twos, threes, hold, insert frames, delete frames, reverse,
+  haikei; the same chords in both keymaps: Insert, Shift+Delete over the sheet only, = and -, Alt+1/2/3,
+  Alt+V reverse, Alt+C/B/K/G kinds, Alt+H hide, Alt+L lock), each refusing on the Aka lane with the
+  reason. The canvas stacks come from `render_split`: hidden and Ref columns never draw, a BG draws under
+  the active cel, a later cel or a Book over it. A locked column refuses the stroke at pen-down ("column A
+  is locked: unlock it in the sheet to draw"). Engine: DeleteFrames re-keys the first frame after the
+  range (the fuzz checks it); the lock covers the cel-layer edits, RemoveColumn and MoveColumn; no cut
+  has 0 frames (add_cut, load, AddCut); refusals count frames from 1; Hold +1 on the last drawing says
+  why; a multi-column retime pads every column to one end and kara keeps its length; a cross-cut paste
+  renames a copy whose name is taken; badges Cel / BG / Book / Ref with tooltips; `Engine::remove_column`
+  drops the def. 32 `sheet_edit_tests`, 9 `sheetedit_*` app tests, and the GPU compositor's source
+  selection tested without a device. Left: a column kind from a later build still reads as Cel and is
+  re-saved as Cel (needs a raw pass-through of the def row; first needed by the camera part). Not
+  verified: the real window (menus, chords over the real sheet pane) and the GPU compositor on a GPU.

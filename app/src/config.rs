@@ -78,6 +78,22 @@ pub enum Action {
     MirrorView,
     BrushSmaller,
     BrushBigger,
+    // GM5: the sheet verbs, on the sheet cursor (the current cell, or the
+    // active column from the cursor down).
+    InsertFrames,
+    DeleteFrames,
+    HoldPlus,
+    HoldMinus,
+    RetimeOnes,
+    RetimeTwos,
+    RetimeThrees,
+    Reverse,
+    ColumnKindCel,
+    ColumnKindBg,
+    ColumnKindBook,
+    ColumnKindRef,
+    ToggleColumnHidden,
+    ToggleColumnLocked,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -246,6 +262,20 @@ impl Action {
         Action::MirrorView,
         Action::BrushSmaller,
         Action::BrushBigger,
+        Action::InsertFrames,
+        Action::DeleteFrames,
+        Action::HoldPlus,
+        Action::HoldMinus,
+        Action::RetimeOnes,
+        Action::RetimeTwos,
+        Action::RetimeThrees,
+        Action::Reverse,
+        Action::ColumnKindCel,
+        Action::ColumnKindBg,
+        Action::ColumnKindBook,
+        Action::ColumnKindRef,
+        Action::ToggleColumnHidden,
+        Action::ToggleColumnLocked,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -314,6 +344,20 @@ impl Action {
             Action::MirrorView => "Mirror view (display only)",
             Action::BrushSmaller => "Brush smaller",
             Action::BrushBigger => "Brush bigger",
+            Action::InsertFrames => "Insert frame",
+            Action::DeleteFrames => "Delete frame",
+            Action::HoldPlus => "Hold +1",
+            Action::HoldMinus => "Hold -1",
+            Action::RetimeOnes => "Retime to 1s (on ones)",
+            Action::RetimeTwos => "Retime to 2s (on twos)",
+            Action::RetimeThrees => "Retime to 3s (on threes)",
+            Action::Reverse => "Reverse timing",
+            Action::ColumnKindCel => "Column kind: Cel",
+            Action::ColumnKindBg => "Column kind: BG (haikei)",
+            Action::ColumnKindBook => "Column kind: Book (overlay)",
+            Action::ColumnKindRef => "Column kind: Ref (guide)",
+            Action::ToggleColumnHidden => "Hide column",
+            Action::ToggleColumnLocked => "Lock column",
         }
     }
 
@@ -380,6 +424,22 @@ impl Action {
             MirrorView => "Flip the view left to right; the drawing itself is untouched.",
             BrushSmaller => "Step the brush size down the size ladder.",
             BrushBigger => "Step the brush size up the size ladder.",
+            InsertFrames => "Insert a frame at the cursor in every column; the cut grows by one frame.",
+            DeleteFrames => "Delete the cursor's frame from every column; the cut is one frame shorter.",
+            HoldPlus => "Hold +1: the exposure under the cursor holds one frame longer; the column ripples.",
+            HoldMinus => "Hold -1: the exposure under the cursor holds one frame less; a 1-frame one goes.",
+            RetimeOnes => "Retime to 1s (on ones): each drawing in the column from the cursor down holds 1 frame.",
+            RetimeTwos => "Retime to 2s (on twos): each drawing in the column from the cursor down holds 2 frames.",
+            RetimeThrees => {
+                "Retime to 3s (on threes): each drawing in the column from the cursor down holds 3 frames."
+            }
+            Reverse => "Reverse the drawing order from the cursor down; each exposure keeps its length.",
+            ColumnKindCel => "Make the column a cel: a drawing column, composited in sheet order.",
+            ColumnKindBg => "Make the column haikei (background): drawn under every cel.",
+            ColumnKindBook => "Make the column a book: an overlay held above the cels.",
+            ColumnKindRef => "Make the column a ref (guide): shown for reference, never rendered.",
+            ToggleColumnHidden => "Hide or show the column: a hidden column is left out of every composite.",
+            ToggleColumnLocked => "Lock or unlock the column: a locked column refuses paint and sheet edits.",
         }
     }
 
@@ -394,7 +454,10 @@ impl Action {
             PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop => {
                 Group::Playback
             }
-            PrevKey | NextKey | NewDrawing | ClearFrameKey | RemoveColumn => Group::Sheet,
+            PrevKey | NextKey | NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames
+            | DeleteFrames | HoldPlus | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees
+            | Reverse | ColumnKindCel | ColumnKindBg | ColumnKindBook | ColumnKindRef
+            | ToggleColumnHidden | ToggleColumnLocked => Group::Sheet,
             PrevCut | NextCut => Group::Cut,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
@@ -444,6 +507,20 @@ impl Action {
             NewDrawing => "Sheet/New drawing",
             ClearFrameKey => "Sheet/Lift key",
             RemoveColumn => "Sheet/Remove column",
+            InsertFrames => "Sheet/Insert frame",
+            DeleteFrames => "Sheet/Delete frame",
+            HoldPlus => "Sheet/Hold +1",
+            HoldMinus => "Sheet/Hold -1",
+            RetimeOnes => "Sheet/Retime to 1s (on ones)",
+            RetimeTwos => "Sheet/Retime to 2s (on twos)",
+            RetimeThrees => "Sheet/Retime to 3s (on threes)",
+            Reverse => "Sheet/Reverse timing",
+            ColumnKindCel => "Sheet/Column kind: Cel",
+            ColumnKindBg => "Sheet/Column kind: BG (haikei)",
+            ColumnKindBook => "Sheet/Column kind: Book (overlay)",
+            ColumnKindRef => "Sheet/Column kind: Ref (guide)",
+            ToggleColumnHidden => "Sheet/Hide column",
+            ToggleColumnLocked => "Sheet/Lock column",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             // Each item is its room detent's Stage::name (a test holds them
@@ -504,6 +581,21 @@ impl Action {
             RoomDrawing => &["drawing", "douga"],
             RoomFinishing => &["paint", "ink", "colour"],
             RoomEdit => &["edit", "henshu", "editing"],
+            // GM5: the sheet verbs by the words a timing sheet uses.
+            InsertFrames => &["insert frames", "add frame", "open a frame"],
+            DeleteFrames => &["delete frames", "remove frame", "close a frame"],
+            HoldPlus => &["hold", "extend", "longer"],
+            HoldMinus => &["hold", "shorten", "shorter"],
+            RetimeOnes => &["ones", "1s", "retime"],
+            RetimeTwos => &["twos", "2s", "retime"],
+            RetimeThrees => &["threes", "3s", "retime"],
+            Reverse => &["reverse", "backwards", "play backwards"],
+            ColumnKindCel => &["column kind", "cel column"],
+            ColumnKindBg => &["column kind", "background", "haikei"],
+            ColumnKindBook => &["column kind", "overlay", "held cel"],
+            ColumnKindRef => &["column kind", "guide", "reference"],
+            ToggleColumnHidden => &["hide", "show column", "visibility"],
+            ToggleColumnLocked => &["lock", "unlock", "protect"],
             _ => &[],
         }
     }
@@ -516,7 +608,10 @@ impl Action {
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll
             | BrushSmaller | BrushBigger => Ctx::Canvas,
-            NewDrawing | ClearFrameKey | RemoveColumn => Ctx::Sheet,
+            NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames | DeleteFrames | HoldPlus
+            | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees | Reverse | ColumnKindCel
+            | ColumnKindBg | ColumnKindBook | ColumnKindRef | ToggleColumnHidden
+            | ToggleColumnLocked => Ctx::Sheet,
             _ => Ctx::Global,
         }
     }
@@ -524,9 +619,12 @@ impl Action {
     /// GM3: a destructive verb whose chord fires only over its own pane,
     /// even when no other action shares the chord (a painter's Delete over
     /// the canvas must not remove the sheet's column). E (new drawing)
-    /// still fires anywhere: genga artists press it over the canvas.
+    /// still fires anywhere: genga artists press it over the canvas, and so
+    /// do GM5's timing keys (= / - hold, Insert, Alt+1/2/3). GM5: Shift+
+    /// Delete deletes a frame only over the sheet (Industry's painter clears
+    /// the whole cel with it over the canvas).
     pub fn pane_only(self) -> bool {
-        matches!(self, Action::RemoveColumn)
+        matches!(self, Action::RemoveColumn | Action::DeleteFrames)
     }
 
     /// GM3: the verb that arms pencil-box slot `digit` (1-based), if any.
@@ -579,6 +677,10 @@ impl Action {
         use Action::*;
         let k = |name: &str| Chord::plain(name);
         let ctrl = |name: &str| Chord::ctrl(name);
+        let alt = |name: &str| Chord {
+            alt: true,
+            ..Chord::plain(name)
+        };
         match self {
             PlayPause => Some(k("Space")),
             NextFrame => Some(k("F")),
@@ -659,6 +761,26 @@ impl Action {
             MirrorView => Some(k("H")),
             BrushSmaller => Some(k("OpenBracket")),
             BrushBigger => Some(k("CloseBracket")),
+            // GM5: the sheet verbs, the same in both presets. Timing on bare
+            // keys (= / - hold, Insert), the frame's delete on Shift+Delete
+            // (over the sheet only), the rest on Alt — never R (the flip).
+            InsertFrames => Some(k("Insert")),
+            DeleteFrames => Some(Chord {
+                shift: true,
+                ..k("Delete")
+            }),
+            HoldPlus => Some(k("Equals")),
+            HoldMinus => Some(k("Minus")),
+            RetimeOnes => Some(alt("1")),
+            RetimeTwos => Some(alt("2")),
+            RetimeThrees => Some(alt("3")),
+            Reverse => Some(alt("V")),
+            ColumnKindCel => Some(alt("C")),
+            ColumnKindBg => Some(alt("B")),
+            ColumnKindBook => Some(alt("K")),
+            ColumnKindRef => Some(alt("G")),
+            ToggleColumnHidden => Some(alt("H")),
+            ToggleColumnLocked => Some(alt("L")),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomEdit => None,
         }

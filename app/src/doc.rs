@@ -13,7 +13,8 @@ use anim_core::ids::*;
 use anim_core::model::{CelLayer, LayerProps};
 use anim_core::model::{Cut, Stroke};
 use anim_core::raster::{TileCoord, TileData, TileDiff};
-use anim_core::xsheet::Exposure;
+use anim_core::sheet_ops;
+use anim_core::xsheet::{Column, ColumnDef, ColumnKind, Exposure, ParamColumn};
 
 /// Bottom→top display slices of cel layers: (tiles, effective opacity).
 pub type LayerSlices<'a> = Vec<(&'a BTreeMap<TileCoord, Arc<TileData>>, f32)>;
@@ -376,6 +377,21 @@ impl AppState {
             Some(Exposure::Drawing(d)) => Some(d),
             _ => None,
         }
+    }
+
+    /// GM5: the exposure under the sheet cursor — its key frame and the
+    /// next key's frame (None = it holds to the end). None before the
+    /// active column's first key.
+    pub fn exposure_here(&self) -> Option<(u32, Option<u32>)> {
+        self.cut()
+            .xsheet
+            .column(self.view.active_column)?
+            .exposure_at(self.view.frame)
+    }
+
+    /// GM5: the active column's definition (kind, hidden, locked).
+    pub fn active_column_def(&self) -> ColumnDef {
+        self.cut().column_def(self.view.active_column)
     }
 
     /// Per-column drawing name, e.g. D1A, D2A on column A; D1B on column B.
@@ -829,6 +845,10 @@ impl AppState {
     /// refusal is already on the Aka lane). A lock is the artist's own
     /// "don't touch this" — overruling the hand is exactly a refusal.
     pub fn refuse_if_locked(&mut self) -> bool {
+        // GM5: the column lock first — it covers every layer of the cel.
+        if self.refuse_if_column_locked() {
+            return true;
+        }
         // On a held/blank frame the stroke will CREATE a cel from the
         // template — a locked template layer (the Shiage preset locks its
         // lines) must refuse exactly like a locked layer on a real cel.
@@ -849,6 +869,33 @@ impl AppState {
             return true;
         }
         false
+    }
+
+    /// GM5: the column lock, checked at pen-down before any ink — the
+    /// artist never draws a whole stroke the engine then drops (D7: the pen
+    /// comes first). The engine's rule: the active column is locked, or this
+    /// frame's own drawing is exposed by a locked column. True = refused
+    /// (the refusal is already on the Aka lane).
+    pub fn refuse_if_column_locked(&mut self) -> bool {
+        let cut = self.cut();
+        let active = self.view.active_column;
+        let own = self.own_key_drawing();
+        let locked = |id: ColumnId| cut.column_def(id).locked;
+        let by_active = cut.xsheet.column(active).filter(|c| locked(c.id));
+        let by_exposure = || {
+            let d = own?;
+            cut.xsheet
+                .columns
+                .iter()
+                .find(|c| locked(c.id) && !c.keys_referencing(d).is_empty())
+        };
+        let Some(name) = by_active.or_else(by_exposure).map(|c| c.name.clone()) else {
+            return false;
+        };
+        self.refuse(format!(
+            "refused — column {name} is locked: unlock it in the sheet to draw"
+        ));
+        true
     }
 
     /// Name of the active layer — template names on held/blank frames
@@ -1619,20 +1666,203 @@ impl AppState {
         );
         self.report(r, "key cleared");
     }
+    /// Add a drawing column at the end of the sheet and make it active —
+    /// one undo step (GM5: Command::AddColumn).
     pub fn add_column(&mut self) {
         let at = self.at();
-        let name = format!(
-            "{}",
-            (b'A' + (self.cut().xsheet.columns.len() as u8 % 26)) as char
+        let index = self.cut().xsheet.columns.len();
+        let name = format!("{}", (b'A' + (index as u8 % 26)) as char);
+        let id = self.engine.alloc_column_id();
+        let r = self.engine.apply(
+            "add column",
+            vec![Command::AddColumn {
+                at,
+                index,
+                column: Column::new(id, name),
+                def: ColumnDef::default(),
+            }],
         );
-        match self.engine.add_column(at, name) {
-            Ok(id) => {
-                self.view.active_column = id;
-                self.meta_dirty = true;
-                self.status = "column added".into();
-            }
-            Err(e) => self.refuse(format!("could not add a column — {e}")),
+        if r.is_ok() {
+            self.view.active_column = id;
         }
+        self.report(r, "column added");
+    }
+
+    // ---- GM5: the sheet verbs, on the sheet cursor ------------------------
+    // The current cell (active column, current frame), or the active column
+    // from the cursor down. Each is one undo step; a refusal says why on
+    // the Aka lane (a locked column, nothing to hold, the last frame).
+
+    /// Apply a sheet_ops builder's batch as one undo step. `done` is the
+    /// remark when it lands, `nothing` the remark when there is nothing to
+    /// change (the column is already on twos, say).
+    fn apply_sheet(
+        &mut self,
+        label: &str,
+        built: anim_core::error::Result<Vec<Command>>,
+        done: &str,
+        nothing: &str,
+    ) {
+        match built {
+            Ok(cmds) if cmds.is_empty() => self.status = nothing.into(),
+            Ok(cmds) => {
+                let r = self.engine.apply(label, cmds);
+                self.report(r, done);
+            }
+            Err(e) => self.report(Err(e), done),
+        }
+    }
+
+    /// The active column's name, for the sheet verbs' remarks.
+    fn active_column_name(&self) -> String {
+        self.cut()
+            .xsheet
+            .column(self.view.active_column)
+            .map(|c| c.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// Insert one frame at the cursor across the whole cut (D4): every
+    /// column's keys, the param keys and the memos from here on move one
+    /// frame later, and the cut grows by one.
+    pub fn insert_frame(&mut self) {
+        let at = self.at();
+        let frame = self.view.frame;
+        let r = self.engine.apply(
+            "insert frame",
+            vec![Command::InsertFrames {
+                at,
+                frame,
+                count: 1,
+            }],
+        );
+        self.report(r, &format!("frame inserted at {}", frame + 1));
+    }
+
+    /// Delete the cursor's frame across the whole cut (D4); what the next
+    /// frame showed stays shown. A cut keeps at least one frame.
+    pub fn delete_frame(&mut self) {
+        let at = self.at();
+        let frame = self.view.frame;
+        let r = self.engine.apply(
+            "delete frame",
+            vec![Command::DeleteFrames {
+                at,
+                frame,
+                count: 1,
+            }],
+        );
+        if r.is_ok() {
+            self.view.frame = frame.min(self.frame_count() - 1);
+        }
+        self.report(r, &format!("frame {} deleted", frame + 1));
+    }
+
+    /// Hold ±1 on the exposure under the cursor, rippling the column; −1 on
+    /// a one-frame exposure removes it.
+    pub fn hold(&mut self, delta: i32) {
+        let built = sheet_ops::hold_delta(
+            &self.engine.project,
+            self.at(),
+            self.view.active_column,
+            self.view.frame,
+            delta,
+        );
+        let label = if delta > 0 { "hold +1" } else { "hold -1" };
+        self.apply_sheet(label, built, label, "nothing to hold here");
+    }
+
+    /// Retime the active column from the cursor down to `step`s (on ones,
+    /// twos or threes): each drawing holds `step` frames, a kara run keeps
+    /// its length, the cursor's frame stays put and what follows ripples.
+    pub fn retime(&mut self, step: u32) {
+        let (from, to) = (self.view.frame, self.frame_count());
+        let built = sheet_ops::retime_range(
+            &self.engine.project,
+            self.at(),
+            &[self.view.active_column],
+            from,
+            to,
+            step,
+        );
+        let nothing = format!("already on {step}s from frame {} down", from + 1);
+        self.apply_sheet(
+            &format!("retime to {step}s"),
+            built,
+            &format!("retimed to {step}s"),
+            &nothing,
+        );
+    }
+
+    /// Reverse the active column's timing from the cursor down: the drawing
+    /// order flips and each exposure keeps its length.
+    pub fn reverse_timing(&mut self) {
+        let (from, to) = (self.view.frame, self.frame_count());
+        let built = sheet_ops::reverse_range(
+            &self.engine.project,
+            self.at(),
+            &[self.view.active_column],
+            from,
+            to,
+        );
+        self.apply_sheet(
+            "reverse timing",
+            built,
+            "timing reversed",
+            "nothing to reverse from here down",
+        );
+    }
+
+    /// Set the active column's definition — one undo step. Allowed on a
+    /// locked column: that is how it unlocks.
+    fn set_active_column_def(&mut self, label: &str, def: ColumnDef, done: &str) {
+        let at = self.at();
+        let column = self.view.active_column;
+        let r = self
+            .engine
+            .apply(label, vec![Command::SetColumnDef { at, column, def }]);
+        self.report(r, done);
+    }
+
+    /// The active column's kind: Cel, BG (haikei), Book (an overlay held
+    /// above the cels) or Ref (a guide, never rendered).
+    pub fn set_column_kind(&mut self, kind: ColumnKind) {
+        let name = self.active_column_name();
+        let def = self.active_column_def();
+        if def.kind == kind {
+            self.status = format!("column {name} is already {}", kind.label());
+            return;
+        }
+        let done = format!("column {name} is now {}", kind.label());
+        self.set_active_column_def("column kind", ColumnDef { kind, ..def }, &done);
+    }
+
+    /// Hide or show the active column: a hidden column is out of every
+    /// composite (the canvas, export and the graph).
+    pub fn toggle_column_hidden(&mut self) {
+        let name = self.active_column_name();
+        let def = self.active_column_def();
+        let hidden = !def.hidden;
+        let (label, done) = if hidden {
+            ("hide column", format!("column {name} hidden"))
+        } else {
+            ("show column", format!("column {name} shown"))
+        };
+        self.set_active_column_def(label, ColumnDef { hidden, ..def }, &done);
+    }
+
+    /// Lock or unlock the active column: a locked column refuses paint and
+    /// sheet edits until it is unlocked.
+    pub fn toggle_column_locked(&mut self) {
+        let name = self.active_column_name();
+        let def = self.active_column_def();
+        let locked = !def.locked;
+        let (label, done) = if locked {
+            ("lock column", format!("column {name} locked"))
+        } else {
+            ("unlock column", format!("column {name} unlocked"))
+        };
+        self.set_active_column_def(label, ColumnDef { locked, ..def }, &done);
     }
 
     /// Import a WAV as this cut's scratch audio track (one undo step;
@@ -1873,21 +2103,24 @@ impl AppState {
         }
     }
 
-    /// Add a PARAMETER column (camera etc.) — scaffolding, like add_column;
-    /// keys on it are undoable. Returns the new id for immediate binding.
+    /// Add a PARAMETER column (camera etc.) — one undo step (GM5:
+    /// Command::AddParamColumn), like add_column; keys on it are undoable
+    /// too. Returns the new id for immediate binding.
     pub fn add_param_column(&mut self, name: &str) -> Option<anim_core::ids::ParamId> {
         let at = self.at();
-        match self.engine.add_param_column(at, name) {
-            Ok(id) => {
-                self.meta_dirty = true;
-                self.status = format!("param column '{name}' added");
-                Some(id)
-            }
-            Err(e) => {
-                self.status = format!("error: {e}");
-                None
-            }
-        }
+        let index = self.cut().xsheet.params.len();
+        let id = self.engine.alloc_param_id();
+        let r = self.engine.apply(
+            "add param column",
+            vec![Command::AddParamColumn {
+                at,
+                index,
+                column: ParamColumn::new(id, name),
+            }],
+        );
+        let added = r.is_ok();
+        self.report(r, &format!("param column '{name}' added"));
+        added.then_some(id)
     }
 
     /// Set/clear a key on a parameter column at the current frame (one
@@ -1917,7 +2150,9 @@ impl AppState {
         }
     }
 
-    /// Remove the selected (active) column. Keeps at least one column.
+    /// Remove the selected (active) column — one undo step (GM5:
+    /// Command::RemoveColumn; undo brings it back with its keys and
+    /// definition). Keeps at least one column; a locked column refuses.
     pub fn remove_active_column(&mut self) {
         if self.cut().xsheet.columns.len() <= 1 {
             self.refuse("refused — a cut keeps at least one column");
@@ -1925,7 +2160,7 @@ impl AppState {
         }
         let at = self.at();
         let removed = self.view.active_column;
-        // Pick a neighbour to become active before removing.
+        // The neighbour that becomes active once it is gone.
         let cols: Vec<ColumnId> = self.cut().xsheet.columns.iter().map(|c| c.id).collect();
         let idx = cols.iter().position(|&c| c == removed).unwrap_or(0);
         let new_active = cols
@@ -1933,11 +2168,14 @@ impl AppState {
             .or_else(|| idx.checked_sub(1).and_then(|i| cols.get(i)))
             .copied()
             .unwrap_or(removed);
-        self.engine.remove_column(at, removed);
-        self.meta_dirty = true;
-        self.view.active_column = new_active;
-        self.view.selected_drawing = None;
-        self.status = "column removed".into();
+        let r = self
+            .engine
+            .apply("remove column", vec![Command::RemoveColumn { at, id: removed }]);
+        if r.is_ok() {
+            self.view.active_column = new_active;
+            self.view.selected_drawing = None;
+        }
+        self.report(r, "column removed");
     }
     pub fn undo(&mut self) {
         if self.engine.undo().is_ok() {
@@ -1973,15 +2211,50 @@ impl AppState {
         self.sanitize();
     }
 
+    /// GM5: undo, redo or a peer's edit can take away the cut or the column
+    /// the view stands on (undo of New cut, of Add column) or shorten the
+    /// cut under the cursor: step onto a live one — the scene's last cut,
+    /// else the first cut anywhere; the last column — before anything
+    /// reads `cut()`.
+    pub fn keep_view_live(&mut self) {
+        let p = &self.engine.project;
+        if p.cut(self.view.scene, self.view.cut).is_none() {
+            let here = p
+                .scenes
+                .iter()
+                .find(|s| s.id == self.view.scene)
+                .and_then(|s| s.cuts.last().map(|c| (s.id, c)));
+            let anywhere = || p.scenes.iter().find_map(|s| s.cuts.first().map(|c| (s.id, c)));
+            let Some((scene, cut)) = here.or_else(anywhere) else {
+                return; // no cut at all: nothing to stand on
+            };
+            let (cut, first) = (cut.id, cut.xsheet.columns.first().map(|c| c.id));
+            self.view.scene = scene;
+            self.view.cut = cut;
+            self.view.active_column = first.unwrap_or(self.view.active_column);
+            self.view.frame = 0;
+            self.view.selected_drawing = None;
+            self.view.playing = false;
+        }
+        let cut = self.cut();
+        let last = cut.xsheet.columns.last().map(|c| c.id);
+        if cut.xsheet.column(self.view.active_column).is_none()
+            && let Some(last) = last
+        {
+            self.view.active_column = last;
+        }
+        self.view.frame = self.view.frame.min(self.frame_count() - 1);
+    }
+
     /// Selection can dangle after undo of a creation command — never let a
     /// dead id escape into the UI.
     fn sanitize(&mut self) {
+        self.keep_view_live();
         if let Some(id) = self.view.selected_drawing
             && self.cut().drawing(id).is_none()
         {
             self.view.selected_drawing = None;
         }
-        self.view.frame = self.view.frame.min(self.frame_count() - 1);
         // The param keying strip's value buffer mirrors engine state that
         // undo/redo may have just moved — force a reseed so the strip never
         // shows (and silently re-keys) an undone value.
@@ -2080,26 +2353,36 @@ impl AppState {
     }
 
     /// Add a new cut (+ its first column) to an existing scene, and switch
-    /// to it.
+    /// to it — one undo step (GM5: Command::AddCut; undoing it steps the
+    /// view back onto the scene's last cut).
     pub fn new_cut(&mut self, scene: SceneId) {
-        let n = self
+        let index = self
             .engine
             .project
             .scenes
             .iter()
             .find(|s| s.id == scene)
-            .map(|s| s.cuts.len() + 1)
-            .unwrap_or(1);
-        self.meta_dirty = true;
-        let Ok(cut) = self.engine.add_cut(scene, format!("CUT{n:02}"), 48) else {
-            self.refuse("refused — the cut could not be created");
-            return;
-        };
-        if let Err(e) = self.engine.add_column(CutRef { scene, cut }, "A") {
-            self.refuse(format!("refused — the cut could not be created ({e})"));
-            return;
+            .map(|s| s.cuts.len())
+            .unwrap_or(0);
+        let id = self.engine.alloc_cut_id();
+        let mut cut = Cut::new(id, format!("CUT{:02}", index + 1), 48);
+        let column = self.engine.alloc_column_id();
+        cut.xsheet.columns.push(Column::new(column, "A"));
+        let r = self.engine.apply(
+            "new cut",
+            vec![Command::AddCut {
+                scene,
+                index,
+                cut: Box::new(cut),
+            }],
+        );
+        match r {
+            Ok(()) => {
+                self.doc_gen = self.doc_gen.wrapping_add(1);
+                self.goto_cut(scene, id);
+            }
+            Err(e) => self.refuse(format!("refused — the cut could not be created ({e})")),
         }
-        self.goto_cut(scene, cut);
     }
     pub fn tick(&mut self, dt: f32) {
         if !self.view.playing {
@@ -2922,5 +3205,404 @@ mod layer_role_tests {
         );
         assert!(s.refuse_if_locked(), "locked = refused");
         assert!(s.refusal.contains("locked"));
+    }
+}
+
+/// GM5: the sheet verbs through `Editor::perform` — the one dispatch the
+/// menus, the palette and the chords share (D6) — and what the canvas does
+/// with the column definitions.
+#[cfg(test)]
+mod sheetedit_tests {
+    use anim_core::command::Command;
+    use anim_core::ids::{ColumnId, DrawingId};
+    use anim_core::xsheet::{ColumnKind, Exposure};
+    use eframe::egui;
+
+    use crate::Performed;
+    use crate::config::{self, Action, Ctx, Group, Keymap};
+    use crate::testkit::{CTRL, EditorHarness};
+    use crate::workspace::Pane;
+
+    /// Every GM5 verb.
+    const VERBS: [Action; 14] = [
+        Action::InsertFrames,
+        Action::DeleteFrames,
+        Action::HoldPlus,
+        Action::HoldMinus,
+        Action::RetimeOnes,
+        Action::RetimeTwos,
+        Action::RetimeThrees,
+        Action::Reverse,
+        Action::ColumnKindCel,
+        Action::ColumnKindBg,
+        Action::ColumnKindBook,
+        Action::ColumnKindRef,
+        Action::ToggleColumnHidden,
+        Action::ToggleColumnLocked,
+    ];
+
+    /// A harness whose column A shows drawings keyed at frames 0, 4 and 8
+    /// of 48 (the last holds to the end), the cursor on frame 0.
+    fn three_drawings() -> (EditorHarness, [DrawingId; 3]) {
+        let mut h = EditorHarness::new();
+        let s = h.state_mut();
+        for f in [4, 8] {
+            s.goto(f);
+            s.new_drawing_at_frame();
+        }
+        s.goto(0);
+        let ids = [0, 4, 8].map(|f| s.resolve_at(s.view.active_column, f).expect("keyed"));
+        h.run();
+        (h, ids)
+    }
+
+    /// The active column's keys.
+    fn keys(h: &EditorHarness) -> Vec<(u32, Exposure)> {
+        let s = h.state();
+        let col = s.cut().xsheet.column(s.view.active_column).expect("active column");
+        col.keys().collect()
+    }
+
+    /// Keys `frames[i]` → `drawings[i]`.
+    fn drawn(frames: &[u32], drawings: &[DrawingId]) -> Vec<(u32, Exposure)> {
+        frames
+            .iter()
+            .zip(drawings)
+            .map(|(f, d)| (*f, Exposure::Drawing(*d)))
+            .collect()
+    }
+
+    fn strokes(h: &EditorHarness) -> usize {
+        h.state().cut().drawings.iter().map(|d| d.strokes.len()).sum()
+    }
+
+    fn sheet_centre(h: &EditorHarness) -> egui::Pos2 {
+        let r = h.editor().pane_rects.iter().find(|(p, _)| *p == Pane::XSheet);
+        r.map(|(_, r)| r.center()).expect("the drawing room docks the sheet")
+    }
+
+    #[test]
+    fn sheetedit_timing_verbs_work_on_the_cursor_and_undo_exactly() {
+        let (mut h, [d0, d1, d2]) = three_drawings();
+        let start = keys(&h);
+        assert_eq!(start, drawn(&[0, 4, 8], &[d0, d1, d2]));
+        let steps = h.state().engine.position();
+        let cases = [
+            (4, Action::HoldPlus, drawn(&[0, 4, 9], &[d0, d1, d2]), 48),
+            (4, Action::HoldMinus, drawn(&[0, 4, 7], &[d0, d1, d2]), 48),
+            (4, Action::InsertFrames, drawn(&[0, 5, 9], &[d0, d1, d2]), 49),
+            (2, Action::DeleteFrames, drawn(&[0, 3, 7], &[d0, d1, d2]), 47),
+            (0, Action::RetimeOnes, drawn(&[0, 1, 2], &[d0, d1, d2]), 48),
+            (0, Action::RetimeTwos, drawn(&[0, 2, 4], &[d0, d1, d2]), 48),
+            (0, Action::RetimeThrees, drawn(&[0, 3, 6], &[d0, d1, d2]), 48),
+            // Each exposure keeps its length; past the cut's end the frames
+            // keep showing what they showed (a hidden key at 48).
+            (0, Action::Reverse, drawn(&[0, 40, 44, 48], &[d2, d1, d0, d2]), 48),
+        ];
+        for (frame, verb, want, frames) in cases {
+            h.state_mut().goto(frame);
+            assert_eq!(h.perform(verb), Performed::Done, "{verb:?}: {}", h.state().refusal);
+            assert_eq!(keys(&h), want, "{verb:?}");
+            assert_eq!(h.state().frame_count(), frames, "{verb:?}");
+            assert_eq!(h.state().engine.position(), steps + 1, "{verb:?} is one step");
+            assert_eq!(h.perform(Action::Undo), Performed::Done);
+            assert_eq!(keys(&h), start, "{verb:?} undone exactly");
+            assert_eq!(h.state().frame_count(), 48, "{verb:?} undone exactly");
+        }
+    }
+
+    #[test]
+    fn sheetedit_refusals_say_why_on_the_aka_lane() {
+        let (mut h, _) = three_drawings();
+        // Hold +1 on the bottom drawing: it already holds to the end.
+        h.state_mut().goto(8);
+        let why = "the last drawing already holds to the end of the cut";
+        assert_eq!(h.editor().can_perform(Action::HoldPlus), Err(why));
+        assert_eq!(h.perform(Action::HoldPlus), Performed::Ignored);
+        assert!(h.state().refusal.contains("lengthen the cut first"), "{}", h.state().refusal);
+        // A locked column refuses timing edits, naming the column.
+        assert_eq!(h.perform(Action::ToggleColumnLocked), Performed::Done);
+        assert_eq!(h.editor().is_on(Action::ToggleColumnLocked), Some(true));
+        h.state_mut().goto(4);
+        assert_eq!(h.editor().can_perform(Action::HoldMinus), Err("this column is locked"));
+        let steps = h.state().engine.position();
+        for verb in [
+            Action::HoldMinus,
+            Action::RetimeTwos,
+            Action::Reverse,
+            Action::InsertFrames,
+            Action::DeleteFrames,
+        ] {
+            let seq = h.state().refusal_seq;
+            assert_eq!(h.perform(verb), Performed::Ignored, "{verb:?}");
+            assert_ne!(h.state().refusal_seq, seq, "{verb:?} said no");
+            assert!(h.state().refusal.contains("column A is locked"), "{verb:?}: {}", h.state().refusal);
+        }
+        assert_eq!(h.state().engine.position(), steps, "nothing landed");
+        // The lock never locks itself: it comes off, and the edit lands.
+        assert_eq!(h.perform(Action::ToggleColumnLocked), Performed::Done);
+        assert_eq!(h.editor().is_on(Action::ToggleColumnLocked), Some(false));
+        assert_eq!(h.perform(Action::HoldMinus), Performed::Done);
+    }
+
+    #[test]
+    fn sheetedit_column_kind_and_hidden_are_undoable_toggles() {
+        let mut h = EditorHarness::new();
+        let kind = |h: &EditorHarness| h.state().active_column_def().kind;
+        assert_eq!(h.editor().is_on(Action::ColumnKindCel), Some(true));
+        let kinds = [
+            (Action::ColumnKindBg, ColumnKind::Bg),
+            (Action::ColumnKindBook, ColumnKind::Book),
+            (Action::ColumnKindRef, ColumnKind::Ref),
+            (Action::ColumnKindCel, ColumnKind::Cel),
+        ];
+        for (verb, k) in kinds {
+            assert_eq!(h.perform(verb), Performed::Done, "{verb:?}");
+            assert_eq!(kind(&h), k);
+            assert_eq!(h.editor().is_on(verb), Some(true), "{verb:?} shows checked");
+        }
+        // The kind it already has is a remark, not a step.
+        let steps = h.state().engine.position();
+        h.perform(Action::ColumnKindCel);
+        assert_eq!(h.state().engine.position(), steps);
+        assert!(h.state().status.contains("already Cel"), "{}", h.state().status);
+        h.perform(Action::ToggleColumnHidden);
+        assert!(h.state().active_column_def().hidden);
+        assert_eq!(h.editor().is_on(Action::ToggleColumnHidden), Some(true));
+        // Undo walks it all back: shown, then Ref, Book, BG and Cel.
+        h.perform(Action::Undo);
+        assert!(!h.state().active_column_def().hidden);
+        for k in [ColumnKind::Ref, ColumnKind::Book, ColumnKind::Bg, ColumnKind::Cel] {
+            assert_eq!(h.perform(Action::Undo), Performed::Done);
+            assert_eq!(kind(&h), k);
+        }
+    }
+
+    #[test]
+    fn sheetedit_remove_column_then_undo_brings_it_back_with_its_keys() {
+        let mut h = EditorHarness::new();
+        let a = h.state().view.active_column;
+        h.state_mut().add_column();
+        let b = h.state().view.active_column;
+        assert_ne!(a, b, "the new column is active");
+        let s = h.state_mut();
+        s.new_drawing_at_frame();
+        s.goto(3);
+        s.new_drawing_at_frame();
+        assert_eq!(h.perform(Action::ColumnKindBook), Performed::Done);
+        let col = |h: &EditorHarness| h.state().cut().xsheet.column(b).cloned();
+        let before = col(&h).expect("column B");
+        assert_eq!(before.keys().count(), 2);
+        assert_eq!(h.perform(Action::RemoveColumn), Performed::Done);
+        assert!(col(&h).is_none(), "B is gone");
+        assert_eq!(h.state().view.active_column, a, "its neighbour is active");
+        assert_eq!(h.perform(Action::Undo), Performed::Done);
+        assert_eq!(col(&h), Some(before), "B is back, keys and all");
+        assert_eq!(h.state().cut().column_def(b).kind, ColumnKind::Book, "and its kind");
+        // The steps before the removal still undo: the kind, both drawings,
+        // then the column itself, and the view steps onto a live column.
+        for _ in 0..3 {
+            assert_eq!(h.perform(Action::Undo), Performed::Done);
+        }
+        h.state_mut().view.active_column = b;
+        assert_eq!(h.perform(Action::Undo), Performed::Done);
+        assert!(col(&h).is_none(), "undo of Add column takes B away");
+        assert_eq!(h.state().view.active_column, a, "the view stands on a live column");
+        assert_eq!(h.perform(Action::Redo), Performed::Done);
+        assert!(col(&h).is_some_and(|c| c.keys().count() == 0), "redo adds it back, empty");
+    }
+
+    #[test]
+    fn sheetedit_new_cut_and_param_column_are_undo_steps() {
+        let mut h = EditorHarness::new();
+        let (scene, cut0) = (h.state().view.scene, h.state().view.cut);
+        h.state_mut().new_cut(scene);
+        h.run();
+        let cut1 = h.state().view.cut;
+        assert_ne!(cut1, cut0, "the view moved onto the new cut");
+        assert_eq!(h.state().cut().name, "CUT02");
+        assert_eq!(h.state().cut().xsheet.columns.len(), 1, "with its column A");
+        assert_eq!(h.perform(Action::Undo), Performed::Done);
+        assert!(h.state().engine.project.cut(scene, cut1).is_none(), "the cut is gone");
+        assert_eq!(h.state().view.cut, cut0, "the view is back on a live cut");
+        let a = h.state().view.active_column;
+        assert!(h.state().cut().xsheet.column(a).is_some(), "and a live column");
+        assert_eq!(h.perform(Action::Redo), Performed::Done);
+        assert!(h.state().engine.project.cut(scene, cut1).is_some(), "redo brings it back");
+        // A parameter column (camera) is one step too.
+        let p = h.state_mut().add_param_column("cam").expect("added");
+        assert!(h.state().cut().xsheet.param(p).is_some());
+        assert_eq!(h.perform(Action::Undo), Performed::Done);
+        assert!(h.state().cut().xsheet.param(p).is_none(), "undo takes it away");
+    }
+
+    #[test]
+    fn sheetedit_canvas_stacks_follow_the_render_order() {
+        let mut h = EditorHarness::new();
+        let mut cols: Vec<ColumnId> = vec![h.state().view.active_column];
+        for _ in 0..4 {
+            h.state_mut().add_column();
+            cols.push(h.state().view.active_column);
+        }
+        let [a, b, c, d, e] = cols[..] else {
+            unreachable!("five columns")
+        };
+        // B is a BG right of A on the sheet, C a Ref guide, D hidden.
+        let defs = [
+            (b, Action::ColumnKindBg),
+            (c, Action::ColumnKindRef),
+            (d, Action::ToggleColumnHidden),
+        ];
+        for (col, verb) in defs {
+            h.state_mut().view.active_column = col;
+            assert_eq!(h.perform(verb), Performed::Done, "{verb:?}");
+        }
+        h.state_mut().view.active_column = a;
+        h.run();
+        let (below, above) = h.editor().canvas.stacks.clone();
+        assert_eq!(below, vec![b], "the BG draws under the active cel");
+        assert_eq!(above, vec![e], "the cel after it draws over it");
+        // From the last cel the whole render order is under it.
+        h.state_mut().view.active_column = e;
+        h.run();
+        assert_eq!(h.editor().canvas.stacks, (vec![b, a], vec![]));
+        // The Ref and the hidden column are in neither stack.
+        for (below, above) in [h.editor().canvas.stacks.clone()] {
+            assert!(!below.contains(&c) && !above.contains(&c), "Ref never draws");
+            assert!(!below.contains(&d) && !above.contains(&d), "hidden never draws");
+        }
+    }
+
+    #[test]
+    fn sheetedit_a_locked_column_refuses_the_stroke_at_pen_down() {
+        let mut h = EditorHarness::new();
+        let c = h.editor().canvas.dbg_rect.center();
+        let path = [c, c + egui::vec2(30.0, 0.0), c + egui::vec2(60.0, 10.0)];
+        assert_eq!(h.perform(Action::ToggleColumnLocked), Performed::Done);
+        let (steps, rows, n) = (
+            h.state().engine.position(),
+            h.state().engine.history_len(),
+            strokes(&h),
+        );
+        // On its own cel, and on a held frame (a new cel would land in it).
+        for frame in [0, 5] {
+            h.state_mut().goto(frame);
+            let seq = h.state().refusal_seq;
+            h.drag_path(&path);
+            assert_ne!(h.state().refusal_seq, seq, "frame {frame}: refused");
+            let want = "column A is locked: unlock it in the sheet to draw";
+            assert!(h.state().refusal.contains(want), "{}", h.state().refusal);
+            assert!(h.editor().canvas.stroke_tap.is_empty(), "no stroke began");
+        }
+        assert_eq!(h.state().engine.position(), steps, "no history entry");
+        assert_eq!(h.state().engine.history_len(), rows);
+        assert_eq!(strokes(&h), n);
+        // A cel a locked column exposes is locked wherever it is drawn on
+        // (the engine's rule): B shows A's cel and B is locked.
+        h.perform(Action::ToggleColumnLocked);
+        h.state_mut().goto(0);
+        let a = h.state().view.active_column;
+        let d0 = h.state().own_key_drawing().expect("A's cel");
+        h.state_mut().add_column();
+        let b = h.state().view.active_column;
+        let at = h.state().at();
+        let expose = Command::SetCell {
+            at,
+            column: b,
+            frame: 0,
+            key: Some(Exposure::Drawing(d0)),
+        };
+        h.state_mut().engine.apply("expose", vec![expose]).expect("exposed");
+        h.perform(Action::ToggleColumnLocked);
+        h.state_mut().view.active_column = a;
+        h.drag_path(&path);
+        assert!(h.state().refusal.contains("column B is locked"), "{}", h.state().refusal);
+        assert_eq!(strokes(&h), n);
+        // Unlocked, the same stroke lands.
+        h.state_mut().view.active_column = b;
+        h.perform(Action::ToggleColumnLocked);
+        h.state_mut().view.active_column = a;
+        h.drag_path(&path);
+        assert_eq!(strokes(&h), n + 1, "{}", h.state().refusal);
+    }
+
+    #[test]
+    fn sheetedit_verbs_are_sheet_actions_with_free_chords_in_both_keymaps() {
+        for km in Keymap::ALL {
+            let binds = config::default_binds(*km);
+            assert_eq!(config::clashes(&binds), vec![], "{km:?} has no chord conflict");
+            for a in VERBS {
+                assert!(Action::ALL.contains(&a));
+                assert_eq!((a.group(), a.context()), (Group::Sheet, Ctx::Sheet), "{a:?}");
+                assert!(a.menu().is_some_and(|m| m.starts_with("Sheet/")), "{a:?}");
+                assert!((1..=120).contains(&a.help().chars().count()), "{a:?} has help");
+                let b = binds.iter().find(|b| b.action == a).expect("bound");
+                let c = b.chord.as_ref().unwrap_or_else(|| panic!("{a:?} has a chord in {km:?}"));
+                for k in &c.keys {
+                    assert!(egui::Key::from_name(k).is_some(), "{k} is a key");
+                    assert_ne!(k, "R", "R stays the flip");
+                }
+            }
+        }
+        // The palette finds them by the sheet's own words.
+        let words = [
+            ("twos", Action::RetimeTwos),
+            ("ones", Action::RetimeOnes),
+            ("threes", Action::RetimeThrees),
+            ("hold", Action::HoldPlus),
+            ("insert frames", Action::InsertFrames),
+            ("delete frames", Action::DeleteFrames),
+            ("reverse", Action::Reverse),
+            ("haikei", Action::ColumnKindBg),
+        ];
+        for (query, want) in words {
+            assert_eq!(crate::cmdpal::ranked(query, &[])[0], want, "{query}");
+        }
+    }
+
+    #[test]
+    fn sheetedit_chords_and_the_palette_reach_the_sheet_cursor() {
+        let (mut h, [d0, d1, d2]) = three_drawings();
+        let start = keys(&h);
+        h.point_at(sheet_centre(&h));
+        // = and - hold the cursor's drawing a frame longer, then shorter.
+        h.key(egui::Key::Equals);
+        assert_eq!(keys(&h), drawn(&[0, 5, 9], &[d0, d1, d2]));
+        h.key(egui::Key::Minus);
+        assert_eq!(keys(&h), start);
+        // Alt+2 retimes the column to twos; Ctrl+Z takes it back.
+        let alt = egui::Modifiers {
+            alt: true,
+            ..egui::Modifiers::NONE
+        };
+        h.key_mods(alt, egui::Key::Num2);
+        assert_eq!(keys(&h), drawn(&[0, 2, 4], &[d0, d1, d2]));
+        h.key_mods(CTRL, egui::Key::Z);
+        assert_eq!(keys(&h), start);
+        // Insert opens a frame at the cursor.
+        h.key(egui::Key::Insert);
+        assert_eq!(h.state().frame_count(), 49);
+        // Shift+Delete closes it — over the sheet only.
+        let shift = egui::Modifiers {
+            shift: true,
+            ..egui::Modifiers::NONE
+        };
+        h.point_at(h.editor().canvas.dbg_rect.center());
+        h.key_mods(shift, egui::Key::Delete);
+        assert_eq!(h.state().frame_count(), 49, "Shift+Delete over the canvas kept the frame");
+        h.point_at(sheet_centre(&h));
+        h.key_mods(shift, egui::Key::Delete);
+        assert_eq!(h.state().frame_count(), 48);
+        assert_eq!(keys(&h), start, "frame 0 still shows d0");
+        // Alt+L locks the column and unlocks it again.
+        h.key_mods(alt, egui::Key::L);
+        assert!(h.state().active_column_def().locked);
+        h.key_mods(alt, egui::Key::L);
+        assert!(!h.state().active_column_def().locked);
+        // The palette runs a verb by its sheet word.
+        h.perform(Action::CommandPalette);
+        h.type_text("threes");
+        h.key(egui::Key::Enter);
+        assert_eq!(keys(&h), drawn(&[0, 3, 6], &[d0, d1, d2]));
     }
 }

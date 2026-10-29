@@ -50,6 +50,19 @@ fn column_at(cut: &Cut, id: ColumnId) -> Result<&Column> {
     cut.xsheet.column(id).ok_or(EngineError::UnknownColumn(id))
 }
 
+/// `name` when it is free, else the first free of `name` + a, b, ... z,
+/// then `name`-2, -3, ... (a pasted "1" beside the cut's own "1" is "1a").
+fn free_name(name: &str, taken: &std::collections::HashSet<String>) -> String {
+    if !taken.contains(name) {
+        return name.to_string();
+    }
+    ('a'..='z')
+        .map(|c| format!("{name}{c}"))
+        .chain((2u32..).map(|n| format!("{name}-{n}")))
+        .find(|n| !taken.contains(n))
+        .expect("an unbounded sequence has a free name")
+}
+
 /// The cell edits that turn `before` into `after` (same column).
 pub fn cells_diff(before: &Column, after: &Column) -> Vec<CellEdit> {
     let mut frames: Vec<u32> = before.keys().chain(after.keys()).map(|(f, _)| f).collect();
@@ -98,8 +111,10 @@ fn edit_columns(
 }
 
 /// Hold ±`delta` on the exposure in force at `frame`, rippling the column.
-/// −1 on a one-frame exposure removes it. Empty when nothing changes (no
-/// exposure there, or growing the open last one).
+/// −1 on a one-frame exposure removes it. Refused, saying why, when
+/// nothing is exposed there or +1 would grow the last exposure (it already
+/// holds to the end of the cut). Frames in messages are 1-based, as the
+/// sheet shows them.
 pub fn hold_delta(
     project: &Project,
     at: CutRef,
@@ -107,16 +122,35 @@ pub fn hold_delta(
     frame: u32,
     delta: i32,
 ) -> Result<Vec<Command>> {
-    let end = cut_at(project, at)?.frame_count;
+    let cut = cut_at(project, at)?;
+    let end = cut.frame_count;
+    match column_at(cut, column)?.exposure_at(frame) {
+        None => {
+            return Err(EngineError::InvalidCommand(format!(
+                "nothing is exposed at frame {} to hold",
+                frame as u64 + 1
+            )));
+        }
+        Some((_, None)) if delta > 0 => {
+            return Err(EngineError::InvalidCommand(
+                "the last drawing already holds to the end of the cut: lengthen the cut first"
+                    .into(),
+            ));
+        }
+        _ => {}
+    }
     edit_columns(project, at, &[column], |c| {
         c.hold_delta(frame, delta, end);
         true
     })
 }
 
-/// Retime `[from, to)` of each column to `step`s (1, 2 or 3): each exposure
-/// in the range holds `step` frames, the range start stays and what
-/// follows ripples.
+/// Retime `[from, to)` of each column to `step`s (1, 2 or 3): each drawing
+/// in the range holds `step` frames and an empty (kara) run keeps its
+/// length. The range start stays and what follows ripples — by the same
+/// amount in every column, so a block (a body and its mouth) stays in
+/// sync: a column with fewer drawings holds its last exposure on until the
+/// longest column's new range ends.
 pub fn retime_range(
     project: &Project,
     at: CutRef,
@@ -130,7 +164,32 @@ pub fn retime_range(
             "retime needs a range and a step of at least 1".into(),
         ));
     }
-    edit_columns(project, at, columns, |c| c.retime(from, to, step))
+    let cut = cut_at(project, at)?;
+    let mut plans = Vec::new();
+    for &id in columns {
+        let col = column_at(cut, id)?;
+        plans.push((col, col.retimed_runs(from, to, step)));
+    }
+    let length = |runs: &[(Exposure, u32)]| runs.iter().map(|r| r.1 as u64).sum::<u64>();
+    let longest = plans.iter().map(|(_, runs)| length(runs)).max().unwrap_or(0);
+    let too_far = || EngineError::InvalidCommand("edit would push a key past the last frame number".into());
+    let mut cells = Vec::new();
+    for (col, mut runs) in plans {
+        let pad = u32::try_from(longest - length(&runs)).map_err(|_| too_far())?;
+        if let Some(last) = runs.last_mut() {
+            last.1 = last.1.checked_add(pad).ok_or_else(too_far)?;
+        }
+        let mut copy = col.clone();
+        if !copy.splice(from, to - from, &runs) {
+            return Err(too_far());
+        }
+        cells.extend(cells_diff(col, &copy));
+    }
+    Ok(if cells.is_empty() {
+        vec![]
+    } else {
+        vec![Command::SetCells { at, cells }]
+    })
 }
 
 /// Reverse `[from, to)` of each column: the drawing order flips and each
@@ -270,8 +329,14 @@ pub fn paste_block(
 
     let mut commands = Vec::new();
     let mut map: Vec<(DrawingId, DrawingId)> = Vec::new();
+    // A copy never takes a name the target cut already uses: typed entry
+    // finds a drawing by its name, so "1" must stay the one it was.
+    let mut taken: std::collections::HashSet<String> =
+        cut.drawings.iter().map(|d| d.name.clone()).collect();
     if at != block.source {
         for (i, d) in block.drawings.iter().enumerate() {
+            let name = free_name(&d.name, &taken);
+            taken.insert(name.clone());
             let id = DrawingId(project.alloc_id());
             let layers = d
                 .layers
@@ -285,7 +350,7 @@ pub fn paste_block(
                 at,
                 id,
                 index: library_len + i,
-                name: d.name.clone(),
+                name,
                 strokes: d.strokes.clone(),
                 layers,
             });

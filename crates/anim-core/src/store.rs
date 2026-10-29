@@ -492,7 +492,10 @@ pub fn load(path: &Path) -> Result<Project> {
             .collect::<std::result::Result<_, _>>()?;
 
         for (cut_id, cut_name, frame_count, output_node) in cuts {
-            let mut cut = Cut::new(CutId(cut_id as u64), cut_name, frame_count as u32);
+            // GM5: a cut keeps at least one frame in memory (a 0-frame one,
+            // from a 0-length XDTS import, reads as the 1 the app showed).
+            let frames = (frame_count as u32).max(1);
+            let mut cut = Cut::new(CutId(cut_id as u64), cut_name, frames);
             if side_tables {
                 let mut stmt = conn.prepare("SELECT key, value FROM cut_meta WHERE cut_id = ?1")?;
                 cut.meta = stmt

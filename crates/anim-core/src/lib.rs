@@ -176,7 +176,10 @@ impl Engine {
             .project
             .scene_mut(scene)
             .ok_or(EngineError::UnknownScene(scene))?;
-        scene_ref.cuts.push(Cut::new(id, name, frame_count));
+        // GM5: a cut keeps at least one frame (a 0-frame cut's InsertFrames
+        // and SetFrameCount could not be undone); the app always showed
+        // one frame for it anyway.
+        scene_ref.cuts.push(Cut::new(id, name, frame_count.max(1)));
         Ok(id)
     }
 
@@ -226,10 +229,14 @@ impl Engine {
     }
 
     /// Remove a column and its exposures. Scaffolding op (not undoable — matches
-    /// `add_column`). Drawings themselves stay in the cut library.
+    /// `add_column`). Drawings themselves stay in the cut library. Setup
+    /// code only: it ignores the column's lock — the app removes columns
+    /// through `Command::RemoveColumn`, which honours it and is undoable.
     pub fn remove_column(&mut self, at: CutRef, column: ColumnId) {
         if let Some(cut) = self.project.cut_mut(at.scene, at.cut) {
             cut.xsheet.columns.retain(|c| c.id != column);
+            // GM5: its definition goes with it (never an orphan row).
+            cut.column_defs.remove(&column);
             // A DrawingSource for this column now resolves nothing; clear caches.
             self.evaluator.invalidate_all();
         }

@@ -765,6 +765,10 @@ pub struct CanvasView {
     /// view mapping and the stabilizer; cleared at stroke start, recorded
     /// with or without a paint layer.
     pub stroke_tap: Vec<StrokeSample>,
+    /// GM5: the last frame's column stacks around the active column
+    /// (`Cut::render_split`: below, above) — what the edit view drew; the
+    /// headless tests read it.
+    pub stacks: (Vec<ColumnId>, Vec<ColumnId>),
     /// GM4: the stabilizer level (pen config), the live string, and the
     /// last raw paper point fed to it (the pen-up point).
     stabilizer: u8,
@@ -923,6 +927,7 @@ impl CanvasView {
             hand_turn: None,
             hand_view: (1.0, egui::Vec2::ZERO, 0.0, false),
             stroke_tap: Vec::new(),
+            stacks: Default::default(),
             stabilizer: 0,
             stab: None,
             stab_raw: Pos2::ZERO,
@@ -3838,14 +3843,16 @@ impl CanvasView {
             // ---- Multi-column raster display (B4): every OTHER column's
             // own resolved cel, refreshed every frame like onion (cheap —
             // sync_other_column is a no-op when the content hash matches).
-            // Prune first so a removed column's texture doesn't leak.
-            let live_cols: Vec<anim_core::ids::ColumnId> =
-                state.cut().xsheet.columns.iter().map(|c| c.id).collect();
-            p.prune_other_columns(&live_cols);
+            // GM5: only the columns that render (render_split skips hidden
+            // and Ref ones). Prune first so a removed or hidden column's
+            // texture doesn't leak; the active column's is kept for when
+            // another column becomes active (as before).
+            let active = state.view.active_column;
+            let (below, above) = state.cut().render_split(active);
+            let live_cols: Vec<ColumnId> = below.into_iter().chain(above).collect();
+            let keep: Vec<ColumnId> = live_cols.iter().copied().chain([active]).collect();
+            p.prune_other_columns(&keep);
             for &col in &live_cols {
-                if col == state.view.active_column {
-                    continue;
-                }
                 let composite = state.column_composite(col);
                 p.sync_other_column(col, composite.as_ref().map(|(s, h)| (s.as_slice(), *h)));
             }
@@ -3884,34 +3891,44 @@ impl CanvasView {
             );
         }
 
-        // 1. Non-active columns (in sheet order = layer order): each
+        // 1. The columns UNDER the active one (GM5: Cut::render_split, the
+        // order export, eval and graphcomp use — BG, then Cel, then Book,
+        // each band in sheet order; hidden and Ref columns never draw): each
         // column's own resolved RASTER cel (B4 — was invisible in edit view
         // before; only composite view showed it) plus any legacy vector
-        // strokes. Reborrow, not move — `paint` is consumed by value at 3b
-        // below, which must still see it.
+        // strokes. The columns OVER it draw at 3c. Reborrow, not move —
+        // `paint` is consumed by value at 3b below, so the over stack's
+        // textures are looked up here.
+        let (below, above) = cut.render_split(active_col);
+        self.stacks = (below.clone(), above.clone());
+        let other_tex = paint.as_deref(); // Option<&PaintLayer>, Copy
+        let tex_of = |col: ColumnId| {
+            other_tex
+                .filter(|_| self.raster)
+                .and_then(|p| p.other_column_id(col))
+        };
+        let above: Vec<(ColumnId, Option<egui::TextureId>)> =
+            above.into_iter().map(|col| (col, tex_of(col))).collect();
+        let draw_column = |col: ColumnId, tex: Option<egui::TextureId>| {
+            if let Some(id) = tex {
+                paint_paper_image(&painter, &xf, id, Color32::WHITE);
+            }
+            if let Some(id) = cut.xsheet.column(col).and_then(|c| c.resolve(frame))
+                && let Some(d) = cut.drawing(id)
+            {
+                draw_strokes(
+                    &painter,
+                    &d.strokes,
+                    &to_screen,
+                    scale,
+                    None,
+                    &self.pen_curve,
+                );
+            }
+        };
         if edit_view {
-            let other_tex = paint.as_deref(); // Option<&PaintLayer>, Copy
-            for col in &cut.xsheet.columns {
-                if col.id == active_col {
-                    continue;
-                }
-                if self.raster
-                    && let Some(id) = other_tex.and_then(|p| p.other_column_id(col.id))
-                {
-                    paint_paper_image(&painter, &xf, id, Color32::WHITE);
-                }
-                if let Some(id) = col.resolve(frame)
-                    && let Some(d) = cut.drawing(id)
-                {
-                    draw_strokes(
-                        &painter,
-                        &d.strokes,
-                        &to_screen,
-                        scale,
-                        None,
-                        &self.pen_curve,
-                    );
-                }
+            for &col in &below {
+                draw_column(col, tex_of(col));
             }
         }
 
@@ -4054,6 +4071,15 @@ impl CanvasView {
                 if !self.remote_live.is_empty() {
                     paint_paper_image(&painter, &xf, p.remote_id(), Color32::WHITE);
                 }
+            }
+        }
+
+        // 3c. The columns OVER the active one (GM5: render_split's upper
+        // part — a Book overlay, the cels after it in sheet order): raster
+        // cel and vector strokes, above the active column and its sandwich.
+        if edit_view {
+            for &(col, tex) in &above {
+                draw_column(col, tex);
             }
         }
 
@@ -4856,6 +4882,8 @@ impl CanvasView {
                     match r {
                         Ok(()) => {
                             state.doc_gen = state.doc_gen.wrapping_add(1);
+                            // GM5: a peer may have removed our cut or column.
+                            state.keep_view_live();
                             crate::net::slog(format!("APPLY cmds from {origin} n={n}"));
                         }
                         Err(e) => self
@@ -5671,6 +5699,11 @@ impl CanvasView {
             state.refuse("refused — the host's file is still arriving");
             return false;
         }
+        // GM5: a locked column refuses at pen-down, before any ink (raster
+        // or vector) — never a whole stroke drawn, then dropped.
+        if state.refuse_if_column_locked() {
+            return false;
+        }
         // GUARD (CSP behavior): never paint into a layer you can't see.
         if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {
             state.refuse(format!(
@@ -6028,6 +6061,10 @@ impl CanvasView {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if self.composite_view {
                     state.refuse("refused — composite view is read-only (C to edit)");
+                    return;
+                }
+                // GM5: the column lock, as at the pen's pen-down.
+                if state.refuse_if_column_locked() {
                     return;
                 }
                 if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {

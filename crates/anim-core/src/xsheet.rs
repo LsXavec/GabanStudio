@@ -106,10 +106,18 @@ impl Column {
     }
 
     /// Close `n` frames at `frame`: keys inside `[frame, frame + n)` are
-    /// removed and returned (the inverse restores them), later keys move
-    /// `n` earlier.
-    pub fn delete_frames(&mut self, frame: u32, n: u32) -> Vec<(u32, Exposure)> {
-        delete_frames_in(&mut self.keys, frame, n)
+    /// removed and returned first (the inverse restores them), later keys
+    /// move `n` earlier, and the frames after keep showing what they
+    /// showed: when a removed key was holding over them, a key re-exposing
+    /// it lands at `frame`, returned second (the inverse lifts it).
+    pub fn delete_frames(&mut self, frame: u32, n: u32) -> (Vec<(u32, Exposure)>, Option<Exposure>) {
+        let tail = frame.checked_add(n).map(|end| self.shown(end));
+        let gone = delete_frames_in(&mut self.keys, frame, n);
+        let rekey = tail.filter(|&t| !self.keys.contains_key(&frame) && self.shown(frame) != t);
+        if let Some(t) = rekey {
+            self.keys.insert(frame, t);
+        }
+        (gone, rekey)
     }
 
     /// Hold ±: lengthen (+) or shorten (−) the exposure in force at `frame`
@@ -201,14 +209,23 @@ impl Column {
         true
     }
 
-    /// Retime `[from, to)` to `step`s: each exposure in the range holds
-    /// `step` frames. The range start stays put; what follows ripples.
-    pub fn retime(&mut self, from: u32, to: u32, step: u32) -> bool {
-        let runs: Vec<(Exposure, u32)> = self
-            .runs(from, to)
+    /// The runs a retime to `step`s writes over `[from, to)`: each drawing
+    /// holds `step` frames; an empty (kara) run is a deliberate blank and
+    /// keeps its length.
+    pub fn retimed_runs(&self, from: u32, to: u32, step: u32) -> Vec<(Exposure, u32)> {
+        self.runs(from, to)
             .into_iter()
-            .map(|(e, _)| (e, step.max(1)))
-            .collect();
+            .map(|(e, len)| match e {
+                Exposure::Drawing(_) => (e, step.max(1)),
+                Exposure::Empty => (e, len),
+            })
+            .collect()
+    }
+
+    /// Retime `[from, to)` to `step`s (see [`Column::retimed_runs`]). The
+    /// range start stays put; what follows ripples.
+    pub fn retime(&mut self, from: u32, to: u32, step: u32) -> bool {
+        let runs = self.retimed_runs(from, to, step);
         self.splice(from, to.saturating_sub(from), &runs)
     }
 
@@ -293,10 +310,20 @@ impl ColumnKind {
     /// The badge on the sheet.
     pub fn label(self) -> &'static str {
         match self {
-            ColumnKind::Cel => "cel",
+            ColumnKind::Cel => "Cel",
             ColumnKind::Bg => "BG",
-            ColumnKind::Book => "book",
-            ColumnKind::Ref => "ref",
+            ColumnKind::Book => "Book",
+            ColumnKind::Ref => "Ref",
+        }
+    }
+
+    /// The badge's tooltip: the studio term, then what it does (D7).
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            ColumnKind::Cel => "cel: a drawing column, composited in sheet order",
+            ColumnKind::Bg => "haikei (background): drawn under every cel",
+            ColumnKind::Book => "book: an overlay held above the cels",
+            ColumnKind::Ref => "ref (guide): shown for reference, never rendered",
         }
     }
 

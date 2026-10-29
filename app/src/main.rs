@@ -43,6 +43,7 @@ mod workspace;
 mod worksafe;
 mod xsheet_panel;
 
+use anim_core::xsheet::ColumnKind;
 use canvas::{PenPhase, PenSample};
 use config::{
     Action, BrushPreset, Config, FrameLatency, LayersConfig, PenConfig, RebindCapture,
@@ -1540,6 +1541,8 @@ impl App {
                         ed.state.engine.mirror_log = was;
                         if r.is_ok() {
                             ed.state.doc_gen = ed.state.doc_gen.wrapping_add(1);
+                            // GM5: a guest may have removed our cut or column.
+                            ed.state.keep_view_live();
                             ed.canvas.engine_changed();
                         }
                         r
@@ -3058,6 +3061,22 @@ impl Editor {
             Action::ClearCelAll => s.clear_current_cel_all(),
             Action::ClearFrameKey => s.clear_key_at_frame(),
             Action::RemoveColumn => s.remove_active_column(),
+            // GM5: the sheet verbs, on the sheet cursor (the current cell,
+            // or the active column from the cursor down).
+            Action::InsertFrames => s.insert_frame(),
+            Action::DeleteFrames => s.delete_frame(),
+            Action::HoldPlus => s.hold(1),
+            Action::HoldMinus => s.hold(-1),
+            Action::RetimeOnes => s.retime(1),
+            Action::RetimeTwos => s.retime(2),
+            Action::RetimeThrees => s.retime(3),
+            Action::Reverse => s.reverse_timing(),
+            Action::ColumnKindCel => s.set_column_kind(ColumnKind::Cel),
+            Action::ColumnKindBg => s.set_column_kind(ColumnKind::Bg),
+            Action::ColumnKindBook => s.set_column_kind(ColumnKind::Book),
+            Action::ColumnKindRef => s.set_column_kind(ColumnKind::Ref),
+            Action::ToggleColumnHidden => s.toggle_column_hidden(),
+            Action::ToggleColumnLocked => s.toggle_column_locked(),
             Action::ToggleOnion => s.view.onion = !s.view.onion,
             Action::ToggleEraser
             | Action::ToggleAlphaLock
@@ -3196,6 +3215,21 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::Redo
             | Action::PrevCut
             | Action::NextCut
+            // GM5: the sheet never changes under a live stroke.
+            | Action::InsertFrames
+            | Action::DeleteFrames
+            | Action::HoldPlus
+            | Action::HoldMinus
+            | Action::RetimeOnes
+            | Action::RetimeTwos
+            | Action::RetimeThrees
+            | Action::Reverse
+            | Action::ColumnKindCel
+            | Action::ColumnKindBg
+            | Action::ColumnKindBook
+            | Action::ColumnKindRef
+            | Action::ToggleColumnHidden
+            | Action::ToggleColumnLocked
     )
 }
 
@@ -4127,6 +4161,24 @@ impl Editor {
             Action::ClearCel | Action::ClearCelAll if s.own_key_drawing().is_none() => {
                 Err("no drawing of this frame's own to clear")
             }
+            // GM5: the sheet verbs that would refuse.
+            Action::DeleteFrames if s.frame_count() <= 1 => Err("a cut keeps at least one frame"),
+            Action::HoldPlus
+            | Action::HoldMinus
+            | Action::RetimeOnes
+            | Action::RetimeTwos
+            | Action::RetimeThrees
+            | Action::Reverse
+                if s.active_column_def().locked =>
+            {
+                Err("this column is locked")
+            }
+            Action::HoldPlus | Action::HoldMinus if s.exposure_here().is_none() => {
+                Err("nothing is exposed on this frame")
+            }
+            Action::HoldPlus if s.exposure_here().is_some_and(|(_, next)| next.is_none()) => {
+                Err("the last drawing already holds to the end of the cut")
+            }
             _ => Ok(()),
         }
     }
@@ -4140,6 +4192,13 @@ impl Editor {
             Action::MissCheck => Some(self.canvas.miss_check),
             Action::ToggleLoop => Some(self.state.view.loop_playback),
             Action::MirrorView => Some(self.canvas.view_mirrored()),
+            // GM5: the active column's definition.
+            Action::ToggleColumnHidden => Some(self.state.active_column_def().hidden),
+            Action::ToggleColumnLocked => Some(self.state.active_column_def().locked),
+            Action::ColumnKindCel => Some(self.state.active_column_def().kind == ColumnKind::Cel),
+            Action::ColumnKindBg => Some(self.state.active_column_def().kind == ColumnKind::Bg),
+            Action::ColumnKindBook => Some(self.state.active_column_def().kind == ColumnKind::Book),
+            Action::ColumnKindRef => Some(self.state.active_column_def().kind == ColumnKind::Ref),
             _ => None,
         }
     }

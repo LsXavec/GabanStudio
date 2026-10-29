@@ -334,8 +334,23 @@ fn inverse_fuzz_200_sheet_commands_undo_all_restores_everything() {
             }
         };
         let Ok(cmds) = cmds else { continue };
+        let deleted = match cmds.as_slice() {
+            [Command::DeleteFrames { frame, count, .. }] => Some((*frame, *count)),
+            _ => None,
+        };
         if !cmds.is_empty() && fx.engine.apply("fuzz", cmds).is_ok() {
             applied += 1;
+            // A delete closes its range: every frame after it still shows
+            // what it showed (a key held over from inside the range is
+            // re-keyed, never lost).
+            if let Some((frame, count)) = deleted {
+                for col in &cut.xsheet.columns {
+                    let now = fx.cut().xsheet.column(col.id).unwrap();
+                    for f in frame + count..cut.frame_count + 4 {
+                        assert_eq!(now.shown(f - count), col.shown(f), "step {step}: {} at {f}", col.name);
+                    }
+                }
+            }
         }
     }
     assert!(applied >= 120, "only {applied} of 200 fuzz commands applied");
@@ -413,6 +428,61 @@ fn delete_frames_undo_restores_removed_keys_params_and_memos() {
     assert!(r.is_err());
 }
 
+#[test]
+fn delete_frames_keeps_what_the_frames_after_the_range_show() {
+    // b's key at 10 falls inside the deleted range [8, 12); the frames
+    // after it showed b and must still show b, not fall back to a.
+    let mut fx = fixture(24, 2, 2);
+    let (a, b) = (fx.dr(0), fx.dr(1));
+    fx.key(0, &[(0, a), (10, b), (20, Exposure::Empty)]);
+    fx.key(1, &[(0, b), (9, Exposure::Empty)]);
+    let at = fx.at;
+    let before = fx.engine.project.scenes.clone();
+    let shown = |fx: &Fx, i: usize| -> Vec<Exposure> { (0..24).map(|f| fx.col(i).shown(f)).collect() };
+    let (was0, was1) = (shown(&fx, 0), shown(&fx, 1));
+    fx.apply(vec![Command::DeleteFrames { at, frame: 8, count: 4 }]);
+    assert_eq!(fx.keys(0), vec![(0, a), (8, b), (16, Exposure::Empty)]);
+    for (i, was) in [was0, was1].iter().enumerate() {
+        let now = shown(&fx, i);
+        assert_eq!(now[..8], was[..8], "column {i}: frames before the range are untouched");
+        assert_eq!(now[8..20], was[12..], "column {i}: frames after the range show what they showed");
+    }
+    // Column B's Empty at 9 was inside the range too: its tail stays blank.
+    assert_eq!(fx.keys(1), vec![(0, b), (8, Exposure::Empty)]);
+    let after = fx.engine.project.scenes.clone();
+    fx.engine.undo().unwrap();
+    assert_eq!(fx.engine.project.scenes, before, "undo restores exactly");
+    fx.engine.redo().unwrap();
+    assert_eq!(fx.engine.project.scenes, after, "redo replays exactly");
+}
+
+#[test]
+fn refusals_name_frames_one_based_and_a_frameless_cut_takes_no_insert() {
+    let mut fx = fixture(48, 1, 1);
+    let at = fx.at;
+    let stale = Command::SetCells {
+        at,
+        cells: vec![CellEdit { column: fx.cols[0], frame: 10, before: Some(Exposure::Empty), after: None }],
+    };
+    let err = fx.engine.apply("cells", vec![stale]).unwrap_err().to_string();
+    assert!(err.contains("column A, frame 11 changed"), "{err}");
+    let err = fx.engine.apply("ins", vec![Command::InsertFrames { at, frame: 60, count: 3 }]).unwrap_err().to_string();
+    assert!(err.contains("at frame 61: the cut has 48"), "{err}");
+    let err = fx.engine.apply("del", vec![Command::DeleteFrames { at, frame: 47, count: 2 }]).unwrap_err().to_string();
+    assert!(err.contains("at frame 48: the cut has 48"), "{err}");
+    // A 0-frame cut could not undo an insert (or a length change): no live
+    // cut has 0 frames. Scaffolding gives it one, a 0-frame AddCut is
+    // refused, and an insert into one (built by hand) is refused too.
+    let one = fx.engine.add_cut(at.scene, "zero", 0).unwrap();
+    assert_eq!(fx.engine.project.cut(at.scene, one).unwrap().frame_count, 1);
+    let id = fx.engine.alloc_cut_id();
+    let add = Command::AddCut { scene: at.scene, index: 0, cut: Box::new(Cut::new(id, "z", 0)) };
+    assert!(fx.engine.apply("add", vec![add]).is_err());
+    fx.engine.project.scenes[0].cuts.push(Cut::new(id, "z", 0));
+    let zero = CutRef { scene: at.scene, cut: id };
+    assert!(fx.engine.apply("ins", vec![Command::InsertFrames { at: zero, frame: 0, count: 3 }]).is_err());
+}
+
 // ---- 3-5: retime, hold, reverse --------------------------------------------
 
 #[test]
@@ -457,6 +527,45 @@ fn hold_minus_one_on_a_one_frame_exposure_removes_it_and_ripples() {
     let cmds = sheet_ops::hold_delta(&fx.engine.project, fx.at, fx.cols[0], 0, -1).unwrap();
     fx.apply(cmds);
     assert_eq!(fx.keys(0), vec![(0, a), (1, c), (3, a)]);
+}
+
+#[test]
+fn hold_on_nothing_or_past_the_last_exposure_says_why() {
+    let mut fx = fixture(24, 1, 2);
+    let (a, b) = (fx.dr(0), fx.dr(1));
+    fx.key(0, &[(3, a), (6, b)]);
+    let (project, at, col) = (&fx.engine.project, fx.at, fx.cols[0]);
+    let err = sheet_ops::hold_delta(project, at, col, 1, 1).unwrap_err().to_string();
+    assert!(err.contains("nothing is exposed at frame 2"), "{err}");
+    // b holds to the end of the cut: +1 cannot grow it, and says so.
+    let err = sheet_ops::hold_delta(project, at, col, 9, 1).unwrap_err().to_string();
+    assert!(err.contains("lengthen the cut first"), "{err}");
+    // −1 on that last exposure still ends it a frame early.
+    let cmds = sheet_ops::hold_delta(project, at, col, 9, -1).unwrap();
+    fx.apply(cmds);
+    assert_eq!(fx.keys(0), vec![(3, a), (6, b), (23, Exposure::Empty)]);
+}
+
+#[test]
+fn retime_keeps_a_block_in_sync_and_kara_keeps_its_length() {
+    // A body on ones (a b c d) and its mouth (m held 4): retimed to 2s
+    // together, the mouth holds on so both ripple by the same 4 frames.
+    let mut fx = fixture(24, 2, 4);
+    let (a, b, c, d) = (fx.dr(0), fx.dr(1), fx.dr(2), fx.dr(3));
+    fx.key(0, &[(0, a), (1, b), (2, c), (3, d), (4, a)]);
+    fx.key(1, &[(0, c), (4, d)]);
+    let cmds = sheet_ops::retime_range(&fx.engine.project, fx.at, &fx.cols, 0, 4, 2).unwrap();
+    fx.apply(cmds);
+    assert_eq!(fx.keys(0), vec![(0, a), (2, b), (4, c), (6, d), (8, a)]);
+    assert_eq!(fx.keys(1), vec![(0, c), (8, d)], "the mouth still changes with the body at 8");
+    // A deliberate blank (kara) of 3 frames keeps its 3 frames; only the
+    // drawings take the step.
+    let mut fx = fixture(24, 1, 2);
+    let (a, b) = (fx.dr(0), fx.dr(1));
+    fx.key(0, &[(0, a), (1, Exposure::Empty), (4, b), (5, a)]);
+    let cmds = sheet_ops::retime_range(&fx.engine.project, fx.at, &fx.cols, 0, 5, 2).unwrap();
+    fx.apply(cmds);
+    assert_eq!(fx.keys(0), vec![(0, a), (2, Exposure::Empty), (5, b), (7, a)]);
 }
 
 #[test]
@@ -563,6 +672,34 @@ fn paste_across_cuts_copies_drawings_with_new_ids_in_one_step() {
     }
     fx.engine.undo().unwrap();
     assert_eq!(fx.engine.project.scenes, before, "the paste is one undo step");
+}
+
+#[test]
+fn paste_across_cuts_renames_a_copy_whose_name_is_taken() {
+    let mut fx = fixture(24, 1, 2);
+    let (a, b) = (fx.dr(0), fx.dr(1));
+    fx.key(0, &[(0, a), (2, b)]);
+    let block = sheet_ops::copy_block(&fx.engine.project, fx.at, &fx.cols, 0, 4).unwrap();
+    // The target cut already has its own "1" and "1a".
+    let other = fx.engine.add_cut(fx.at.scene, "C2", 24).unwrap();
+    let to = CutRef { scene: fx.at.scene, cut: other };
+    let t0 = fx.engine.add_column(to, "A").unwrap();
+    let layers = |fx: &mut Fx| vec![CelLayer::new(fx.engine.alloc_layer_id(), "paint")];
+    let (own1, own1a) = (fx.engine.alloc_drawing_id(), fx.engine.alloc_drawing_id());
+    let (l1, l1a) = (layers(&mut fx), layers(&mut fx));
+    fx.apply(vec![
+        Command::AddDrawing { at: to, id: own1, index: 0, name: "1".into(), strokes: vec![], layers: l1 },
+        Command::AddDrawing { at: to, id: own1a, index: 1, name: "1a".into(), strokes: vec![], layers: l1a },
+    ]);
+    let cmds = sheet_ops::paste_block(&mut fx.engine.project, &block, to, t0, 5, PasteMode::Overwrite).unwrap();
+    fx.engine.apply("paste", cmds).unwrap();
+    let dst = fx.engine.project.cut(to.scene, to.cut).unwrap();
+    let names: Vec<&str> = dst.drawings.iter().map(|d| d.name.as_str()).collect();
+    assert_eq!(names, vec!["1", "1a", "1b", "2"], "the copy of '1' takes the first free name");
+    // Typed entry "1" still finds the cut's own drawing, not the copy.
+    let cmds = sheet_ops::expose_by_name(&mut fx.engine.project, to, t0, 0, "1", vec![]).unwrap();
+    assert!(matches!(cmds.as_slice(), [Command::SetCells { cells, .. }]
+        if cells[0].after == Some(Exposure::Drawing(own1))), "{cmds:?}");
 }
 
 #[test]
@@ -920,6 +1057,59 @@ fn locked_column_refuses_sheet_edits_and_paint_with_the_reason() {
     fx.def(0, ColumnDef::default());
     fx.key(0, &[(2, b)]);
     assert_eq!(fx.col(0).key_at(2), Some(b));
+}
+
+#[test]
+fn locked_column_refuses_layer_edits_removal_and_moves() {
+    let mut fx = fixture(24, 2, 2);
+    let a = fx.dr(0);
+    fx.key(0, &[(0, a)]);
+    let at = fx.at;
+    // A drawing on a locked column keeps its layers: add, remove, move and
+    // props all refuse, naming the column.
+    let extra = CelLayer::new(fx.engine.alloc_layer_id(), "shadow");
+    fx.apply(vec![Command::AddCelLayer { at, drawing: fx.d[0], index: 1, layer: extra.clone() }]);
+    fx.def(0, ColumnDef { locked: true, ..ColumnDef::default() });
+    let before = fx.engine.project.scenes.clone();
+    let props = fx.cut().drawing(fx.d[0]).unwrap().layers[0].props.clone();
+    let fresh = CelLayer::new(fx.engine.alloc_layer_id(), "hi");
+    let refused = [
+        Command::AddCelLayer { at, drawing: fx.d[0], index: 0, layer: fresh },
+        Command::RemoveCelLayer { at, drawing: fx.d[0], layer: extra.id },
+        Command::MoveCelLayer { at, drawing: fx.d[0], layer: extra.id, to_index: 0 },
+        Command::SetCelLayerProps { at, drawing: fx.d[0], layer: fx.layers[0], props },
+        Command::RemoveColumn { at, id: fx.cols[0] },
+        Command::MoveColumn { at, id: fx.cols[0], to_index: 1 },
+    ];
+    for cmd in refused {
+        let err = fx.engine.apply("x", vec![cmd.clone()]).unwrap_err().to_string();
+        assert!(err.contains("column A is locked"), "{cmd:?}: {err}");
+    }
+    // A column is added unlocked (its undo, a remove, must always apply).
+    let column = Column::new(fx.engine.alloc_column_id(), "L");
+    let def = ColumnDef { locked: true, ..ColumnDef::default() };
+    assert!(fx.engine.apply("add", vec![Command::AddColumn { at, index: 0, column, def }]).is_err());
+    assert_eq!(fx.engine.project.scenes, before, "every refusal leaves the cut untouched");
+    // The other drawing (column B's) is not protected; unlocking frees A.
+    let other = fx.cut().drawing(fx.d[1]).unwrap().layers[0].props.clone();
+    fx.apply(vec![Command::SetCelLayerProps { at, drawing: fx.d[1], layer: fx.layers[1], props: other }]);
+    fx.def(0, ColumnDef::default());
+    fx.apply(vec![Command::MoveColumn { at, id: fx.cols[0], to_index: 1 }]);
+    fx.apply(vec![Command::RemoveColumn { at, id: fx.cols[0] }]);
+    assert!(fx.cut().xsheet.column(fx.cols[0]).is_none());
+}
+
+#[test]
+fn direct_remove_column_drops_its_def_and_kinds_name_their_badges() {
+    let mut fx = fixture(24, 2, 0);
+    fx.def(1, kind(ColumnKind::Bg));
+    fx.engine.remove_column(fx.at, fx.cols[1]);
+    assert!(fx.cut().column_defs.is_empty(), "no orphan column_defs row is left to save");
+    let labels: Vec<&str> = ColumnKind::ALL.iter().map(|k| k.label()).collect();
+    assert_eq!(labels, vec!["Cel", "BG", "Book", "Ref"]);
+    assert!(ColumnKind::Bg.tooltip().starts_with("haikei (background)"));
+    assert!(ColumnKind::Book.tooltip().contains("above the cels"));
+    assert!(ColumnKind::Ref.tooltip().contains("never rendered"));
 }
 
 // ---- wire ------------------------------------------------------------------
