@@ -555,6 +555,45 @@ pub struct AppState {
     /// GM8: the Build composite DANGER confirm is open — the graph shaped
     /// by hand it would replace has this many nodes.
     pub auto_comp_confirm: Option<usize>,
+    /// GM12: each cut's loop range (in..=out, 0-based), set by Loop in and
+    /// Loop out — session view state, rippled by frame inserts and deletes.
+    pub loop_ranges: HashMap<(SceneId, CutId), (u32, u32)>,
+    /// GM12: the sound file decoding on a worker (one at a time).
+    pub sound_import: Option<SoundImport>,
+    /// GM12: RAM preview — the composites of the play range held in memory.
+    pub ram: crate::playback::RamPreview,
+}
+
+/// GM12: a sound file on its way in — read and decoded off the UI thread
+/// (NEVER-DO 6), applied as one edit when it arrives.
+pub struct SoundImport {
+    /// The file's name, for the status line.
+    pub name: String,
+    at: CutRef,
+    /// Add sound track (a further track) rather than Import sound (the
+    /// first track while the cut has none).
+    as_track: bool,
+    stem: String,
+    rx: std::sync::mpsc::Receiver<Result<anim_core::model::AudioClip, String>>,
+}
+
+/// Read and decode a sound file (the import worker's job): WAV, MP3, OGG
+/// Vorbis or FLAC, routed by the file's magic bytes
+/// (`AudioClip::from_bytes`); the bytes are kept verbatim.
+fn read_sound(path: &std::path::Path, name: String) -> Result<anim_core::model::AudioClip, String> {
+    // Size gate BEFORE reading: the picker filters by extension only, so
+    // a mislabeled multi-GB file must fail here, not after a full read.
+    let len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    let max = anim_core::model::MAX_AUDIO_BYTES as u64;
+    if len > max {
+        return Err(format!(
+            "the file is {} MB, the limit {} MB",
+            len / (1024 * 1024),
+            max / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    anim_core::model::AudioClip::from_bytes(name, bytes)
 }
 
 impl AppState {
@@ -638,6 +677,9 @@ impl AppState {
             render_queue: Default::default(),
             convert_confirm: false,
             auto_comp_confirm: None,
+            loop_ranges: HashMap::new(),
+            sound_import: None,
+            ram: Default::default(),
         }
     }
 
@@ -729,6 +771,9 @@ impl AppState {
             render_queue: Default::default(),
             convert_confirm: false,
             auto_comp_confirm: None,
+            loop_ranges: HashMap::new(),
+            sound_import: None,
+            ram: Default::default(),
         })
     }
 
@@ -2482,6 +2527,9 @@ impl AppState {
                 count: 1,
             }],
         );
+        if r.is_ok() {
+            self.ripple_loop(frame, true);
+        }
         self.report(r, &format!("frame inserted at {}", frame + 1));
     }
 
@@ -2500,8 +2548,73 @@ impl AppState {
         );
         if r.is_ok() {
             self.view.frame = frame.min(self.frame_count() - 1);
+            self.ripple_loop(frame, false);
         }
         self.report(r, &format!("frame {} deleted", frame + 1));
+    }
+
+    /// GM12: the loop range rides a frame insert or delete like the sheet
+    /// (D4); a range whose every frame was deleted goes.
+    fn ripple_loop(&mut self, frame: u32, inserted: bool) {
+        let key = (self.view.scene, self.view.cut);
+        if let Some(r) = self.loop_ranges.get(&key).copied() {
+            match crate::playback::ripple_range(r, frame, inserted) {
+                Some(r) => self.loop_ranges.insert(key, r),
+                None => self.loop_ranges.remove(&key),
+            };
+        }
+    }
+
+    // ---- GM12: the loop range -----------------------------------------------
+
+    /// This cut's loop range, when one is set.
+    pub fn loop_range(&self) -> Option<(u32, u32)> {
+        self.loop_ranges
+            .get(&(self.view.scene, self.view.cut))
+            .copied()
+    }
+
+    /// The play range: the loop range when it lies inside the cut, else
+    /// the whole cut.
+    pub fn play_range(&self) -> (u32, u32) {
+        crate::playback::play_range(self.loop_range(), self.frame_count())
+    }
+
+    /// The range a run started at `from` plays: the play range, or the
+    /// whole cut when it starts past the range's end (play from the
+    /// cursor never jumps back).
+    pub fn run_range(&self, from: u32) -> (u32, u32) {
+        let range = self.play_range();
+        if from > range.1 {
+            (0, self.frame_count() - 1)
+        } else {
+            range
+        }
+    }
+
+    /// Loop in: the range starts at the cursor (its end moves up to it).
+    pub fn set_loop_in(&mut self) {
+        let here = self.view.frame;
+        let (_, hi) = self.play_range();
+        let r = (here, hi.max(here));
+        self.loop_ranges.insert((self.view.scene, self.view.cut), r);
+        self.status = format!("loop range {}–{}", r.0 + 1, r.1 + 1);
+    }
+
+    /// Loop out: the range ends at the cursor (its start moves down to it).
+    pub fn set_loop_out(&mut self) {
+        let here = self.view.frame;
+        let (lo, _) = self.play_range();
+        let r = (lo.min(here), here);
+        self.loop_ranges.insert((self.view.scene, self.view.cut), r);
+        self.status = format!("loop range {}–{}", r.0 + 1, r.1 + 1);
+    }
+
+    /// Clear this cut's loop range; false when it had none.
+    pub fn clear_loop(&mut self) -> bool {
+        self.loop_ranges
+            .remove(&(self.view.scene, self.view.cut))
+            .is_some()
     }
 
     /// Hold ±1 on the exposure under the cursor, rippling the column; −1 on
@@ -2821,68 +2934,143 @@ impl AppState {
         self.report(r, label);
     }
 
-    /// Read a sound file as a clip, or say why not in the status line.
-    /// GM12: WAV, MP3, OGG Vorbis or FLAC, routed by the file's magic bytes
-    /// (`AudioClip::from_bytes`); the bytes are kept verbatim.
-    fn read_audio(&mut self, path: &std::path::Path) -> Option<anim_core::model::AudioClip> {
-        // Size gate BEFORE reading: the picker filters by extension only,
-        // so a mislabeled multi-GB file must fail here, not after a full
-        // read into memory.
-        match std::fs::metadata(path) {
-            Ok(m) if m.len() > anim_core::model::MAX_AUDIO_BYTES as u64 => {
-                self.status = format!(
-                    "audio import failed: file is {} MB (max {} MB)",
-                    m.len() / (1024 * 1024),
-                    anim_core::model::MAX_AUDIO_BYTES / (1024 * 1024)
-                );
-                return None;
-            }
-            Err(e) => {
-                self.status = format!("audio read failed: {e}");
-                return None;
-            }
-            Ok(_) => {}
+    /// GM12: File ▸ Import sound… (`as_track` false: the cut's first track
+    /// while it has none, else a further one) or Add sound track… (true).
+    /// The file is read and decoded on a worker (NEVER-DO 6: a long MP3
+    /// never stalls the pen); [`Self::poll_sound_import`] applies it as one
+    /// edit when it arrives. One file at a time.
+    pub fn begin_sound_import(
+        &mut self,
+        path: &std::path::Path,
+        as_track: bool,
+        repaint: Option<eframe::egui::Context>,
+    ) {
+        if let Some(job) = &self.sound_import {
+            let msg = format!("refused — {} is still decoding", job.name);
+            self.refuse(msg);
+            return;
         }
-        let bytes = match std::fs::read(path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.status = format!("audio read failed: {e}");
-                return None;
-            }
-        };
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "audio.wav".into());
-        match anim_core::model::AudioClip::from_bytes(name, bytes) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                self.status = format!("audio import failed: {e}");
-                None
-            }
-        }
-    }
-
-    /// GM12: add a sound file as a further track of this cut (one undo
-    /// step), named after the file, of the effects kind.
-    pub fn add_audio_track(&mut self, path: &std::path::Path) {
-        let Some(clip) = self.read_audio(path) else {
-            return;
-        };
-        let at = self.at();
-        let index = self.cut().tracks.len() + 1;
+            .unwrap_or_else(|| "sound".into());
         let stem = path
             .file_stem()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "track".into());
-        let track = anim_core::audio::AudioTrack {
-            props: anim_core::audio::TrackProps::new(&stem, anim_core::audio::TrackKind::Effects),
-            clip,
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (file, clip_name) = (path.to_path_buf(), name.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(read_sound(&file, clip_name));
+            if let Some(ctx) = repaint {
+                ctx.request_repaint();
+            }
+        });
+        self.status = format!("decoding {name}…");
+        self.sound_import = Some(SoundImport {
+            name,
+            at: self.at(),
+            as_track,
+            stem,
+            rx,
+        });
+    }
+
+    /// GM12: take the decoded file when it is in (each UI frame): the cut's
+    /// first track when it has none (Import sound), else a further track
+    /// named after the file, of the kind its name suggests — one undo step
+    /// either way. A file that did not decode is refused, saying why.
+    pub fn poll_sound_import(&mut self) {
+        let Some(job) = &self.sound_import else {
+            return;
         };
-        let r = self
-            .engine
-            .apply("add sound track", vec![Command::AddTrack { at, index, track }]);
-        self.report(r, "add sound track");
+        let got = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the decoder stopped".to_string())
+            }
+        };
+        let job = self.sound_import.take().expect("checked above");
+        self.apply_sound(job, got);
+    }
+
+    /// Tests: block until the file on the worker is in, then apply it (no
+    /// sleep, no clock).
+    #[cfg(test)]
+    pub fn wait_sound_import(&mut self) {
+        if let Some(job) = self.sound_import.take() {
+            let got = job
+                .rx
+                .recv()
+                .unwrap_or_else(|_| Err("the decoder stopped".to_string()));
+            self.apply_sound(job, got);
+        }
+    }
+
+    fn apply_sound(
+        &mut self,
+        job: SoundImport,
+        got: Result<anim_core::model::AudioClip, String>,
+    ) {
+        use anim_core::audio::{AudioTrack, TrackKind, TrackProps};
+        let clip = match got {
+            Ok(c) => c,
+            Err(e) => {
+                self.refuse(format!("refused — {} did not import ({e})", job.name));
+                return;
+            }
+        };
+        let Some(cut) = self.engine.project.cut(job.at.scene, job.at.cut) else {
+            self.refuse(format!(
+                "refused — {} did not import (its cut is gone)",
+                job.name
+            ));
+            return;
+        };
+        let first_sound = anim_core::audio::tracks_iter(cut).next().is_none();
+        let (secs, at) = (clip.seconds(), job.at);
+        let (label, cmds) = if !job.as_track && cut.audio.is_none() {
+            // The first track keeps its dialogue kind unless the file's
+            // name says otherwise; its name becomes the file's.
+            let before = cut.audio_props.clone();
+            let after = TrackProps {
+                name: job.stem.clone(),
+                kind: TrackKind::named(&job.stem).unwrap_or(before.kind),
+                ..before.clone()
+            };
+            let mut cmds = vec![Command::SetCutAudio {
+                at,
+                audio: Some(clip),
+            }];
+            if after != before {
+                cmds.push(Command::SetTrackProps {
+                    at,
+                    index: 0,
+                    before,
+                    after,
+                });
+            }
+            ("import sound", cmds)
+        } else {
+            let track = AudioTrack {
+                props: TrackProps::new(&job.stem, TrackKind::guess(&job.stem)),
+                clip,
+            };
+            let index = cut.tracks.len() + 1;
+            ("add sound track", vec![Command::AddTrack { at, index, track }])
+        };
+        let r = self.engine.apply(label, cmds);
+        let ok = r.is_ok();
+        self.report(r, label);
+        if ok {
+            self.status = format!("{label}: {} ({secs:.1} s)", job.name);
+            if first_sound {
+                self.status.push_str(
+                    " — audio scrub sounds each frame you step to (the transport's scrub latch)",
+                );
+            }
+        }
     }
 
     /// GM12: remove track `index` (1.. — the first track goes through
@@ -2917,39 +3105,62 @@ impl AppState {
         self.report(r, "sound track settings");
     }
 
-    /// Import a sound file as this cut's scratch audio track (one undo
-    /// step; replaces any existing clip — the inverse restores it).
-    pub fn import_audio(&mut self, path: &std::path::Path) {
-        let at = self.at();
-        let Some(clip) = self.read_audio(path) else {
-            return;
+    /// GM12: Lip flap's Generate (D14) — the form's column shows its
+    /// closed, half and open drawings over its frames as the dialogue
+    /// track's level reads at its thresholds: one sheet edit, one undo
+    /// step. False when it was refused (the reason is on the Aka lane).
+    pub fn generate_lip_flap(&mut self, form: &mut crate::playback::LipForm) -> bool {
+        let Some(drawings) = form.mouths_set() else {
+            self.refuse("refused — lip flap needs a closed, a half and an open drawing");
+            return false;
         };
-        let secs = clip.seconds();
-        let cname = clip.name.clone();
-        if let Err(e) = self.engine.apply(
-            "set audio",
-            vec![Command::SetCutAudio {
-                at,
-                audio: Some(clip),
-            }],
-        ) {
-            self.status = format!("error: {e}");
-        } else {
-            self.status = format!("audio: {cname} ({secs:.1}s)");
+        let fps = self.fps();
+        let Some(cut) = self.engine.project.cut(form.at.scene, form.at.cut) else {
+            self.refuse("refused — lip flap did not happen (its cut is gone)");
+            return false;
+        };
+        if anim_core::audio::track_clip(cut, form.track).is_none() {
+            self.refuse("refused — the dialogue track has no sound");
+            return false;
         }
+        let mouths = form.mouths_for(cut, fps);
+        let cmds = anim_core::audio::lip_flap_commands(
+            &self.engine.project,
+            form.at,
+            form.column,
+            drawings,
+            form.from,
+            &mouths,
+        );
+        let cmds = match cmds {
+            Ok(c) => c,
+            Err(e) => {
+                self.refuse(format!("refused — lip flap did not happen ({e})"));
+                return false;
+            }
+        };
+        let span = format!("frames {}–{}", form.from + 1, form.from + mouths.len() as u32);
+        if cmds.is_empty() {
+            self.status = format!("lip flap: the column already shows these mouths ({span})");
+            return true;
+        }
+        let r = self.engine.apply("lip flap", cmds);
+        let ok = r.is_ok();
+        self.report(r, "lip flap");
+        if ok {
+            self.status = format!("lip flap: {span} written (one undo step)");
+        }
+        ok
     }
 
-    /// Remove the cut's scratch audio (one undo step).
+    /// Remove the first track's clip (one undo step; its settings stay).
     pub fn remove_audio(&mut self) {
         let at = self.at();
-        if let Err(e) = self.engine.apply(
-            "remove audio",
+        let r = self.engine.apply(
+            "remove sound track",
             vec![Command::SetCutAudio { at, audio: None }],
-        ) {
-            self.status = format!("error: {e}");
-        } else {
-            self.status = "audio removed".into();
-        }
+        );
+        self.report(r, "remove sound track");
     }
 
     /// Export the current cut's timing as an .xdts exposure sheet.
@@ -3306,9 +3517,11 @@ impl AppState {
         // non-loop run stops) rewinds to the top first — otherwise the
         // first tick would hit the end condition and stop again instantly,
         // making the play press feel dead (and silently disarming the
-        // playback the user thought they started).
-        if self.view.playing && self.view.frame + 1 >= self.frame_count() {
-            self.view.frame = 0;
+        // playback the user thought they started). GM12: the end of the
+        // run's range — the loop range's last frame rewinds to its first.
+        let (lo, hi) = self.run_range(self.view.frame);
+        if self.view.playing && self.view.frame >= hi {
+            self.view.frame = lo;
         }
         self.view.play_acc = 0.0;
     }

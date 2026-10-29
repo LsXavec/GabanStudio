@@ -75,6 +75,13 @@ impl Rig {
         // GM6: the onion and light table settings, fed as the App feeds them.
         editor.canvas.onion = config.onion.sane();
         editor.canvas.light_table = config.light_table;
+        // GM12: audio scrub (a flip since the last frame stored first) and
+        // the RAM preview cap, as the App feeds them.
+        if let Some(on) = editor.scrub_request.take() {
+            config.perf.scrub_audio = on;
+        }
+        editor.scrub_audio = config.perf.scrub_audio;
+        editor.state.ram.set_cap_mb(config.perf.ram_preview_mb);
         editor.ui(
             ui,
             &config.pen,
@@ -88,6 +95,9 @@ impl Rig {
         );
         // GM2: the shell's outbox and autosave interval, as the App wires them.
         self.requests.append(&mut self.editor.requests);
+        if let Some(on) = self.editor.scrub_request.take() {
+            self.config.perf.scrub_audio = on;
+        }
         // GM4: the OPTIONS row's stabilizer level, saved as the App saves it.
         if let Some(level) = self.editor.canvas.stabilizer_request.take() {
             self.config.pen.stabilizer = level;
@@ -878,6 +888,9 @@ mod tests {
                 // GM3: the menus' and palette's shell verbs.
                 Action::Settings => Some(AppRequest::Settings),
                 Action::Quit => Some(AppRequest::Quit),
+                // GM12: the sound pickers are the shell's file dialogs.
+                Action::ImportSound => Some(AppRequest::ImportSound),
+                Action::AddSoundTrack => Some(AppRequest::AddSoundTrack),
                 _ => None,
             };
             match want {
@@ -1177,7 +1190,7 @@ mod tests {
 
     /// Colour literals outside plate.rs, measured at 56679ad. The count may
     /// only go down (D7): lower the pin when it does.
-    const COLOUR_LITERALS_PINNED: usize = 83;
+    const COLOUR_LITERALS_PINNED: usize = 82;
 
     fn colour_literals(text: &str) -> usize {
         let prefix = concat!("Color32", "::");

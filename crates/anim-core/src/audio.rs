@@ -70,6 +70,35 @@ impl TrackKind {
             TrackKind::Other => "other",
         }
     }
+
+    /// The kind a sound file's stem suggests, by the words studios name
+    /// them with (`bgm`, `music`, `m01` → music; `se`, `sfx` → effects;
+    /// `serifu`, `voice` → dialogue), a trailing take number aside. Any
+    /// other stem is effects: the first track is the dialogue, and the
+    /// track header changes a wrong guess.
+    pub fn guess(stem: &str) -> TrackKind {
+        TrackKind::named(stem).unwrap_or(TrackKind::Effects)
+    }
+
+    /// The kind a stem names outright, if any word of it does — the first
+    /// track keeps its dialogue kind unless the file says otherwise.
+    pub fn named(stem: &str) -> Option<TrackKind> {
+        let stem = stem.to_ascii_lowercase();
+        for token in stem.split(|c: char| !c.is_ascii_alphanumeric()) {
+            let word = token.trim_end_matches(|c: char| c.is_ascii_digit());
+            let numbered = word.len() < token.len();
+            match word {
+                "bgm" | "music" => return Some(TrackKind::Music),
+                "m" if numbered => return Some(TrackKind::Music),
+                "se" | "sfx" | "fx" => return Some(TrackKind::Effects),
+                "serifu" | "dialogue" | "dialog" | "voice" | "vo" => {
+                    return Some(TrackKind::Dialogue);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
 }
 
 /// A track's mix settings (its clip aside).
@@ -186,16 +215,17 @@ pub struct AudioTrack {
 /// clip). Number 0 is the first track (`Cut.audio`); it is absent when the
 /// cut has no first clip, and the rest keep their numbers.
 pub fn tracks(cut: &Cut) -> Vec<(usize, &TrackProps, &AudioClip)> {
-    cut.audio
-        .iter()
-        .map(|c| (0, &cut.audio_props, c))
-        .chain(
-            cut.tracks
-                .iter()
-                .enumerate()
-                .map(|(i, t)| (i + 1, &t.props, &t.clip)),
-        )
-        .collect()
+    tracks_iter(cut).collect()
+}
+
+/// [`tracks`] without the Vec — for the checks playback makes every frame.
+pub fn tracks_iter(cut: &Cut) -> impl Iterator<Item = (usize, &TrackProps, &AudioClip)> + '_ {
+    cut.audio.iter().map(|c| (0, &cut.audio_props, c)).chain(
+        cut.tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (i + 1, &t.props, &t.clip)),
+    )
 }
 
 /// Track `index`'s settings (0 = the first track, which has settings even
@@ -223,13 +253,13 @@ pub fn sounds(props: &TrackProps, any_solo: bool) -> bool {
 
 /// Whether any track of the cut is soloed.
 pub fn any_solo(cut: &Cut) -> bool {
-    tracks(cut).iter().any(|(_, p, _)| p.solo)
+    tracks_iter(cut).any(|(_, p, _)| p.solo)
 }
 
 /// Whether anything in the cut sounds at all.
 pub fn has_sound(cut: &Cut) -> bool {
     let solo = any_solo(cut);
-    tracks(cut).iter().any(|(_, p, _)| sounds(p, solo))
+    tracks_iter(cut).any(|(_, p, _)| sounds(p, solo))
 }
 
 // ---- Decoding ------------------------------------------------------------------
@@ -271,11 +301,78 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     }
 }
 
+/// An RF64 WAV (EBU Tech 3306, as broadcast recorders write) as the plain
+/// RIFF it is under the 200 MB cap: the marker and the sizes the 32-bit
+/// fields leave at 0xFFFFFFFF, taken from its `ds64` chunk (or the file's
+/// end). None for any other file. hound and symphonia read only RIFF.
+pub fn rf64_as_riff(bytes: &[u8]) -> Option<Vec<u8>> {
+    if bytes.get(0..4) != Some(b"RF64") || bytes.get(8..12) != Some(b"WAVE") || bytes.len() > MAX_AUDIO_BYTES {
+        return None;
+    }
+    let u32_at = |b: &[u8], at: usize| b.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+    let mut out = bytes.to_vec();
+    out[0..4].copy_from_slice(b"RIFF");
+    out[4..8].copy_from_slice(&((bytes.len() - 8) as u32).to_le_bytes());
+    let mut data_len: Option<u64> = None;
+    let mut at = 12;
+    while let (Some(id), Some(len)) = (bytes.get(at..at + 4), u32_at(bytes, at + 4)) {
+        let body = at + 8;
+        if id == b"ds64" {
+            // riffSize u64, dataSize u64, sampleCount u64, ...
+            data_len = bytes
+                .get(body + 8..body + 16)
+                .map(|s| u64::from_le_bytes(s.try_into().expect("8 bytes")));
+        } else if id == b"data" {
+            let len = if len == u32::MAX {
+                data_len.unwrap_or(u64::MAX).min((bytes.len() - body) as u64) as u32
+            } else {
+                len
+            };
+            out[at + 4..at + 8].copy_from_slice(&len.to_le_bytes());
+            return Some(out);
+        }
+        at = body.saturating_add(len as usize).saturating_add(len as usize & 1);
+    }
+    None
+}
+
 /// Decode a WAV, MP3, OGG Vorbis or FLAC file to interleaved f32 samples in
 /// [-1, 1]: (sample rate, channels, samples). The format comes from the
 /// magic bytes; `ext_hint` is used only when they say nothing. A damaged
 /// packet is skipped; every other failure is an `Err`, never a panic.
+/// Copies `bytes` once (the reader owns what it reads); [`decode_shared`]
+/// reads a clip's own buffer without the copy.
 pub fn decode(bytes: &[u8], ext_hint: &str) -> std::result::Result<(u32, u16, Vec<f32>), String> {
+    too_large(bytes.len())?;
+    decode_shared(std::sync::Arc::new(bytes.to_vec()), ext_hint)
+}
+
+fn too_large(len: usize) -> std::result::Result<(), String> {
+    if len > MAX_AUDIO_BYTES {
+        return Err(format!(
+            "audio: too large ({} MB; max {} MB)",
+            len / (1024 * 1024),
+            MAX_AUDIO_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
+/// A shared buffer as the byte slice symphonia's cursor reads.
+struct Shared(std::sync::Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for Shared {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// [`decode`] over a shared buffer: the reader holds another reference to
+/// `bytes`, never a copy of a 200 MB file.
+pub fn decode_shared(
+    bytes: std::sync::Arc<Vec<u8>>,
+    ext_hint: &str,
+) -> std::result::Result<(u32, u16, Vec<f32>), String> {
     use symphonia::core::audio::{SampleBuffer, SignalSpec};
     use symphonia::core::codecs::{CODEC_TYPE_NULL, DecoderOptions};
     use symphonia::core::errors::Error as DecodeError;
@@ -284,15 +381,9 @@ pub fn decode(bytes: &[u8], ext_hint: &str) -> std::result::Result<(u32, u16, Ve
     use symphonia::core::meta::MetadataOptions;
     use symphonia::core::probe::Hint;
 
-    if bytes.len() > MAX_AUDIO_BYTES {
-        return Err(format!(
-            "audio: too large ({} MB; max {} MB)",
-            bytes.len() / (1024 * 1024),
-            MAX_AUDIO_BYTES / (1024 * 1024)
-        ));
-    }
+    too_large(bytes.len())?;
     let mut hint = Hint::new();
-    match sniff(bytes) {
+    match sniff(&bytes) {
         Some(f) => {
             hint.with_extension(f.ext());
         }
@@ -301,7 +392,7 @@ pub fn decode(bytes: &[u8], ext_hint: &str) -> std::result::Result<(u32, u16, Ve
         }
         None => {}
     }
-    let source = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes.to_vec())), Default::default());
+    let source = MediaSourceStream::new(Box::new(std::io::Cursor::new(Shared(bytes))), Default::default());
     // Gapless: MP3 and Vorbis drop the encoder's delay and padding, so a
     // clip lasts what was recorded and lines up with the sheet.
     let opts = FormatOptions {
@@ -379,20 +470,33 @@ pub fn resample_linear(samples: &[f32], channels: u16, from: u32, to: u32) -> Ve
     if from == to || from == 0 || to == 0 || n == 0 {
         return samples.to_vec();
     }
-    let m = ((n as u64 * to as u64 + from as u64 / 2) / from as u64) as usize;
+    let m = resampled_len(n, from, to);
     let step = from as f64 / to as f64;
     let mut out = Vec::with_capacity(m * ch);
     for j in 0..m {
-        let pos = j as f64 * step;
-        let i0 = (pos.floor() as usize).min(n - 1);
-        let i1 = (i0 + 1).min(n - 1);
-        let t = (pos - i0 as f64) as f32;
         for c in 0..ch {
-            let (a, b) = (samples[i0 * ch + c], samples[i1 * ch + c]);
-            out.push(a + (b - a) * t);
+            out.push(lerp_at(samples, ch, n, step, j, c));
         }
     }
     out
+}
+
+/// How many sample frames `n` at `from` Hz last at `to` Hz (to the nearest).
+fn resampled_len(n: usize, from: u32, to: u32) -> usize {
+    ((n as u64 * to as u64 + from as u64 / 2) / from as u64) as usize
+}
+
+/// Output frame `j`'s channel `c` of the linear resampling that reads
+/// `step` input frames per output frame from `n`-frame `samples` — the one
+/// law [`resample_linear`] and [`mix`] share, so the mix of a span is the
+/// span of the whole clip's resampling, sample for sample.
+fn lerp_at(samples: &[f32], ch: usize, n: usize, step: f64, j: usize, c: usize) -> f32 {
+    let pos = j as f64 * step;
+    let i0 = (pos.floor() as usize).min(n - 1);
+    let i1 = (i0 + 1).min(n - 1);
+    let t = (pos - i0 as f64) as f32;
+    let (a, b) = (samples[i0 * ch + c], samples[i1 * ch + c]);
+    a + (b - a) * t
 }
 
 // ---- Mix -----------------------------------------------------------------------
@@ -401,38 +505,47 @@ pub fn resample_linear(samples: &[f32], channels: u16, from: u32, to: u32) -> Ve
 /// stereo, every sounding track (see [`sounds`]) resampled, scaled by its
 /// gain and placed at its offset (a mono clip feeds both sides), summed
 /// and clamped to [-1, 1]. `frames · out_rate / fps` sample frames long.
+/// Only the span of each clip that lands inside the mix is resampled — a
+/// 30-minute bed under a 6-second cut reads 6 seconds of it — and it is
+/// that span of the whole clip's [`resample_linear`], sample for sample.
 pub fn mix(cut: &Cut, fps: u32, frames: u32, out_rate: u32) -> Vec<f32> {
     let fps = fps.max(1) as i64;
     let rate = out_rate.max(1) as i64;
     let len = (frames as i64 * rate / fps) as usize;
     let mut out = vec![0.0f32; len * 2];
     let solo = any_solo(cut);
-    for (_, props, clip) in tracks(cut) {
+    for (_, props, clip) in tracks_iter(cut) {
         if !sounds(props, solo) {
             continue;
         }
         let g = props.gain();
         let start = (props.offset as i64 * rate).div_euclid(fps);
         let ch = clip.channels.max(1) as usize;
-        let resampled;
-        let src: &[f32] = if clip.sample_rate == out_rate {
-            &clip.samples
-        } else {
-            resampled = resample_linear(&clip.samples, clip.channels, clip.sample_rate, out_rate);
-            &resampled
-        };
+        let src: &[f32] = &clip.samples;
         let n = src.len() / ch;
+        let from = clip.sample_rate;
+        let same = from == out_rate || from == 0 || out_rate == 0 || n == 0;
+        let (m, step) = if same {
+            (n, 1.0)
+        } else {
+            (resampled_len(n, from, out_rate), from as f64 / out_rate as f64)
+        };
         let first = (-start).max(0) as usize;
-        for i in first..n {
-            let o = start + i as i64;
-            if o >= len as i64 {
-                break;
-            }
-            let o = o as usize;
-            let (l, r) = if ch == 1 {
-                (src[i], src[i])
+        let end = m.min((len as i64 - start).max(0) as usize);
+        let at = |i: usize, c: usize| {
+            if same {
+                src[i * ch + c]
             } else {
-                (src[i * ch], src[i * ch + 1])
+                lerp_at(src, ch, n, step, i, c)
+            }
+        };
+        for i in first..end {
+            let o = (start + i as i64) as usize;
+            let (l, r) = if ch == 1 {
+                let v = at(i, 0);
+                (v, v)
+            } else {
+                (at(i, 0), at(i, 1))
             };
             out[2 * o] += l * g;
             out[2 * o + 1] += r * g;

@@ -618,6 +618,18 @@ impl AudioClip {
     /// failure is an `Err`, never a panic — commands reject atomically and
     /// loads report Corrupt.
     pub fn from_wav(name: impl Into<String>, bytes: Vec<u8>) -> Result<Self, String> {
+        let (sample_rate, channels, samples) = Self::wav_samples(&bytes)?;
+        Ok(Self {
+            name: name.into(),
+            bytes: std::sync::Arc::new(bytes),
+            sample_rate,
+            channels,
+            samples: std::sync::Arc::new(samples),
+        })
+    }
+
+    /// hound's decode of a WAV: (rate, channels, samples).
+    fn wav_samples(bytes: &[u8]) -> Result<(u32, u16, Vec<f32>), String> {
         if bytes.len() > MAX_AUDIO_BYTES {
             return Err(format!(
                 "wav: too large ({} MB; max {} MB)",
@@ -626,7 +638,7 @@ impl AudioClip {
             ));
         }
         let mut reader =
-            hound::WavReader::new(std::io::Cursor::new(&bytes)).map_err(|e| format!("wav: {e}"))?;
+            hound::WavReader::new(std::io::Cursor::new(bytes)).map_err(|e| format!("wav: {e}"))?;
         let spec = reader.spec();
         if spec.channels == 0 || spec.channels > 2 {
             return Err(format!(
@@ -665,27 +677,41 @@ impl AudioClip {
             }
             (fmt, bits) => return Err(format!("wav: unsupported format {fmt:?}/{bits}-bit")),
         };
-        Ok(Self {
-            name: name.into(),
-            bytes: std::sync::Arc::new(bytes),
-            sample_rate: spec.sample_rate,
-            channels: spec.channels,
-            samples: std::sync::Arc::new(samples),
-        })
+        Ok((spec.sample_rate, spec.channels, samples))
     }
 
     /// GM12: decode any file the sound tracks take — WAV, MP3, OGG Vorbis or
     /// FLAC, told apart by its magic bytes. A WAV takes the `from_wav` path
-    /// above (so every v0.3 clip decodes exactly as it always did); the
-    /// rest go through symphonia ([`crate::audio::decode`]), under the same
-    /// mono-or-stereo and rate law.
+    /// above (so every v0.3 clip decodes exactly as it always did); an
+    /// RF64 reads as the RIFF it would be ([`crate::audio::rf64_as_riff`]);
+    /// a WAV hound refuses (A-law, µ-law, 64-bit float) gets symphonia's
+    /// reader, and hound's reason stands when both refuse. The rest go
+    /// through symphonia ([`crate::audio::decode_shared`], which reads the
+    /// clip's own buffer), under the same mono-or-stereo and rate law.
     pub fn from_bytes(name: impl Into<String>, bytes: Vec<u8>) -> Result<Self, String> {
         let name = name.into();
-        if matches!(crate::audio::sniff(&bytes), Some(crate::audio::Format::Wav)) {
-            return Self::from_wav(name, bytes);
-        }
-        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-        let (rate, channels, samples) = crate::audio::decode(&bytes, &ext)?;
+        let bytes = std::sync::Arc::new(bytes);
+        let (sample_rate, channels, samples) =
+            if matches!(crate::audio::sniff(&bytes), Some(crate::audio::Format::Wav)) {
+                let riff = crate::audio::rf64_as_riff(&bytes).map(std::sync::Arc::new);
+                let wav = riff.as_ref().unwrap_or(&bytes);
+                Self::wav_samples(wav).or_else(|e| Self::decoded(wav, "wav").map_err(|_| e))?
+            } else {
+                let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+                Self::decoded(&bytes, &ext)?
+            };
+        Ok(Self {
+            name,
+            bytes,
+            sample_rate,
+            channels,
+            samples: std::sync::Arc::new(samples),
+        })
+    }
+
+    /// symphonia's decode of `bytes`, under the clip law.
+    fn decoded(bytes: &std::sync::Arc<Vec<u8>>, ext: &str) -> Result<(u32, u16, Vec<f32>), String> {
+        let (rate, channels, samples) = crate::audio::decode_shared(std::sync::Arc::clone(bytes), ext)?;
         if channels == 0 || channels > 2 {
             return Err(format!(
                 "audio: {channels} channels unsupported (mono or stereo only)"
@@ -694,13 +720,7 @@ impl AudioClip {
         if !(8_000..=192_000).contains(&rate) {
             return Err(format!("audio: sample rate {rate} Hz out of range"));
         }
-        Ok(Self {
-            name,
-            bytes: std::sync::Arc::new(bytes),
-            sample_rate: rate,
-            channels,
-            samples: std::sync::Arc::new(samples),
-        })
+        Ok((rate, channels, samples))
     }
 
     /// Clip length in seconds.

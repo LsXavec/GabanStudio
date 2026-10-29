@@ -148,6 +148,17 @@ pub enum Action {
     ShowRenderQueue,
     /// GM11: View ▸ Final look — the composite as the master delivers it.
     ToggleFinalLook,
+    // GM12: sound — File ▸ Import sound… / Add sound track… (decoded on a
+    // worker), the transport's loop range and scrub latch, RAM preview and
+    // the kuchipaku (lip flap) window.
+    ImportSound,
+    AddSoundTrack,
+    LoopIn,
+    LoopOut,
+    ClearLoop,
+    ToggleScrub,
+    RamPreview,
+    LipFlap,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -374,6 +385,14 @@ impl Action {
         Action::PaperSize,
         Action::ShowRenderQueue,
         Action::ToggleFinalLook,
+        Action::ImportSound,
+        Action::AddSoundTrack,
+        Action::LoopIn,
+        Action::LoopOut,
+        Action::ClearLoop,
+        Action::ToggleScrub,
+        Action::RamPreview,
+        Action::LipFlap,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -494,6 +513,14 @@ impl Action {
             Action::PaperSize => "Paper size…",
             Action::ShowRenderQueue => "Render Queue (delivery)",
             Action::ToggleFinalLook => "Final look (delivery)",
+            Action::ImportSound => "Import sound…",
+            Action::AddSoundTrack => "Add sound track…",
+            Action::LoopIn => "Loop in (range start)",
+            Action::LoopOut => "Loop out (range end)",
+            Action::ClearLoop => "Clear loop range",
+            Action::ToggleScrub => "Audio scrub latch",
+            Action::RamPreview => "Render RAM preview",
+            Action::LipFlap => "kuchipaku (lip flap)…",
         }
     }
 
@@ -620,6 +647,14 @@ impl Action {
             PaperSize => "Set the cut's paper: the sheet the camera pans over, larger than the frame for BG pans and hiki slides.",
             ShowRenderQueue => "Open the render queue: delivery jobs (PNG16, TIFF16, EXR, ProRes, line test) rendered on a worker.",
             ToggleFinalLook => "Show the composite as the master delivers it: no rough, reference or correction layers, rendered on a worker.",
+            ImportSound => "Import a WAV, MP3, OGG or FLAC file as the cut's first (dialogue) track, else a further one.",
+            AddSoundTrack => "Add a sound file as a further track (SE, BGM…), its kind guessed from the file name.",
+            LoopIn => "Start the loop range (work area) at this frame: playback runs from here.",
+            LoopOut => "End the loop range (work area) at this frame: playback wraps or stops here.",
+            ClearLoop => "Clear this cut's loop range: playback runs the whole cut again.",
+            ToggleScrub => "Latch audio scrub: stepping or dragging the stopped playhead sounds that frame.",
+            RamPreview => "Render the play range's composites into RAM on a worker; playback shows them (Ao on the sheet).",
+            LipFlap => "Write 3-mouth kuchipaku on a column from a dialogue track's level, as one undo step.",
         }
     }
 
@@ -628,16 +663,19 @@ impl Action {
         use Action::*;
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings | WelcomeScreen => Group::File,
+            | BuildComposite | ProjectSettings | WelcomeScreen | ImportSound | AddSoundTrack => {
+                Group::File
+            }
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
             | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView | PinToLightTable
             | ShiftTrace | ResetShift | ToggleFinalLook => Group::View,
-            MakeInbetweens | KindKey | KindBreakdown | KindInbetween | KindUnset => Group::Sheet,
-            PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop => {
-                Group::Playback
+            MakeInbetweens | KindKey | KindBreakdown | KindInbetween | KindUnset | LipFlap => {
+                Group::Sheet
             }
+            PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop | LoopIn
+            | LoopOut | ClearLoop | ToggleScrub | RamPreview => Group::Playback,
             PrevKey | NextKey | NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames
             | DeleteFrames | HoldPlus | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees
             | Reverse | ColumnKindCel | ColumnKindBg | ColumnKindBook | ColumnKindRef
@@ -685,8 +723,19 @@ impl Action {
             ToggleOnion => "View/Onion skin",
             ToggleCompositeView => "View/Composite view",
             MissCheck => "View/Miss check",
-            PlayPause => "Sheet/Play / Pause",
-            ToggleLoop => "Sheet/Loop playback",
+            // GM12: the transport's verbs share one submenu (the play
+            // verb's path had a "/" in its name, which filed it in a
+            // submenu of its own).
+            PlayPause => "Sheet/Play/Play or pause",
+            ToggleLoop => "Sheet/Play/Loop playback",
+            LoopIn => "Sheet/Play/Loop in",
+            LoopOut => "Sheet/Play/Loop out",
+            ClearLoop => "Sheet/Play/Clear loop range",
+            ToggleScrub => "Sheet/Play/Audio scrub",
+            RamPreview => "Sheet/Play/Render RAM preview",
+            LipFlap => "Sheet/Lip flap…",
+            ImportSound => "File/Import sound…",
+            AddSoundTrack => "File/Add sound track…",
             FirstFrame => "Sheet/First frame",
             PrevFrame => "Sheet/Previous frame",
             NextFrame => "Sheet/Next frame",
@@ -903,6 +952,14 @@ impl Action {
                 "hide corrections",
                 "sakkan",
             ],
+            ImportSound => &["audio", "wav", "mp3", "dialogue", "serifu", "sound"],
+            AddSoundTrack => &["audio track", "SE", "BGM", "music", "effects"],
+            LoopIn => &["in point", "work area", "mark in"],
+            LoopOut => &["out point", "work area end", "mark out"],
+            ClearLoop => &["clear in and out", "whole cut"],
+            ToggleScrub => &["scrub", "audio scrub"],
+            RamPreview => &["ram preview", "cache frames", "preview render"],
+            LipFlap => &["lip sync", "kuchipaku", "mouth"],
             _ => &[],
         }
     }
@@ -920,7 +977,7 @@ impl Action {
             | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees | Reverse | ColumnKindCel
             | ColumnKindBg | ColumnKindBook | ColumnKindRef | ToggleColumnHidden
             | ToggleColumnLocked | CopyCells | CutCells | PasteCells | PasteCellsInsert
-            | TypeIntoCell => Ctx::Sheet,
+            | TypeIntoCell | LipFlap => Ctx::Sheet,
             FrameCurves | InterpHold | InterpLinear | InterpEase | InterpEaseIn | InterpEaseOut
             | InterpBezier | HandlesAuto | HandlesSmooth | HandlesFlat | HandlesBroken => {
                 Ctx::Curves
@@ -1172,11 +1229,35 @@ impl Action {
                 shift: true,
                 ..k("C")
             }),
+            // GM12: the same in both presets. The loop range on Shift+I /
+            // Shift+O (in / out — O alone is the onion), its clear on Alt+X;
+            // scrub on Shift+S (Premiere's scrub toggle); import on Ctrl+I,
+            // a further track with Shift; RAM preview on 0 (the keypad's 0
+            // of After Effects — never Shift+Space, the canvas's turn).
+            LoopIn => Some(Chord {
+                shift: true,
+                ..k("I")
+            }),
+            LoopOut => Some(Chord {
+                shift: true,
+                ..k("O")
+            }),
+            ClearLoop => Some(alt("X")),
+            ToggleScrub => Some(Chord {
+                shift: true,
+                ..k("S")
+            }),
+            ImportSound => Some(ctrl("I")),
+            AddSoundTrack => Some(Chord {
+                shift: true,
+                ..ctrl("I")
+            }),
+            RamPreview => Some(k("0")),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize => None,
+            | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize | LipFlap => None,
         }
     }
 }
@@ -1375,6 +1456,14 @@ pub struct PerfConfig {
     /// Undo steps kept (0 = unlimited).
     #[serde(default = "default_undo_limit")]
     pub undo_limit: usize,
+    /// GM12: the MB RAM preview's composites may hold (least recently
+    /// used go first past it).
+    #[serde(default = "default_ram_preview_mb")]
+    pub ram_preview_mb: u32,
+    /// GM12: the transport's scrub latch, remembered (on by default: a
+    /// stopped playhead's move sounds its frame).
+    #[serde(default = "default_true")]
+    pub scrub_audio: bool,
 }
 
 fn default_fps_cap() -> u32 {
@@ -1382,6 +1471,9 @@ fn default_fps_cap() -> u32 {
 }
 fn default_undo_limit() -> usize {
     200
+}
+fn default_ram_preview_mb() -> u32 {
+    crate::playback::DEFAULT_RAM_MB
 }
 
 impl Default for PerfConfig {
@@ -1393,6 +1485,8 @@ impl Default for PerfConfig {
             fps_cap: default_fps_cap(),
             show_fps: false,
             undo_limit: default_undo_limit(),
+            ram_preview_mb: default_ram_preview_mb(),
+            scrub_audio: true,
         }
     }
 }
@@ -3543,6 +3637,23 @@ fn performance_page(
                     changed |= ui
                     .add(egui::DragValue::new(&mut p.undo_limit).range(0..=100_000).speed(5))
                     .changed();
+                    ui.end_row();
+                    // GM12: playback's memory and its scrub latch.
+                    ui.label("RAM preview cap").on_hover_text(
+                        "Megabytes of composited frames RAM preview may hold; past it the least \
+                         recently used go first.",
+                    );
+                    changed |= ui
+                    .add(
+                        egui::Slider::new(&mut p.ram_preview_mb, 256..=32_768)
+                            .logarithmic(true)
+                            .suffix(" MB"),
+                    )
+                    .changed();
+                    ui.end_row();
+                    ui.label("Audio scrub")
+                    .on_hover_text("A stopped playhead's move sounds one frame of the cut's mix.");
+                    changed |= ui.checkbox(&mut p.scrub_audio, "").changed();
                     ui.end_row();
             });
     });

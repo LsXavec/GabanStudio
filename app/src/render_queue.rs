@@ -58,6 +58,8 @@ pub struct Job {
     pub burn_ins: BurnIns,
     /// A half-size proxy (50%) whatever the preset's scale.
     pub half: bool,
+    /// An image sequence also writes the range's mixdown WAV beside it.
+    pub mixdown: bool,
     pub out: PathBuf,
     pub pattern: String,
     pub state: JobState,
@@ -175,6 +177,9 @@ pub struct JobSpec {
     pub slate: Slate,
     pub out: PathBuf,
     pub pattern: String,
+    /// An image sequence also writes the range's mixdown WAV (on unless
+    /// the queue's form turns it off).
+    pub mixdown: bool,
 }
 
 impl JobSpec {
@@ -218,6 +223,7 @@ impl JobSpec {
             },
             out,
             pattern,
+            mixdown: true,
         })
     }
 
@@ -264,15 +270,18 @@ pub fn render_job(
         tick(f);
     }
     // GM12: the range's mixdown beside the frames, named as a video of the
-    // pattern would be (no file when no track sounds).
-    let wav = deliver::video_name(&spec.pattern, &spec.slate.names, "wav");
-    deliver::write_mixdown(
-        &spec.out.join(wav),
-        &spec.cut,
-        spec.fps.max(1),
-        spec.frames.0,
-        spec.frames.1,
-    )?;
+    // pattern would be (no file when no track sounds, or the form's
+    // "mixdown WAV" latch is off).
+    if spec.mixdown {
+        let wav = deliver::video_name(&spec.pattern, &spec.slate.names, "wav");
+        deliver::write_mixdown(
+            &spec.out.join(wav),
+            &spec.cut,
+            spec.fps.max(1),
+            spec.frames.0,
+            spec.frames.1,
+        )?;
+    }
     Ok(n)
 }
 
@@ -411,6 +420,8 @@ pub struct Draft {
     pub burn_ins: BurnIns,
     /// Render at half size (a 50% proxy) whatever the preset's scale.
     pub half: bool,
+    /// An image sequence also writes the range's mixdown WAV beside it.
+    pub mixdown: bool,
     /// The output folder; empty = the configured default, else a `render`
     /// folder beside the project file.
     pub out: String,
@@ -429,6 +440,7 @@ impl Default for Draft {
             preset: 0,
             burn_ins: PRESETS[0].burn_ins,
             half: false,
+            mixdown: true,
             out: String::new(),
             pattern: deliver::DEFAULT_PATTERN.into(),
             range: None,
@@ -552,7 +564,8 @@ pub fn add_job(state: &mut AppState, at: CutRef, frames: Option<(u32, u32)>) -> 
     push_job(state, at, frames, d.preset, d.burn_ins, d.half, out, d.pattern).is_some()
 }
 
-/// Queue one job; its index, or None when the cut is gone.
+/// Queue one job; its index, or None when the cut is gone. A sequence's
+/// mixdown WAV follows the form's latch.
 #[allow(clippy::too_many_arguments)]
 fn push_job(
     state: &mut AppState,
@@ -570,6 +583,7 @@ fn push_job(
         None => cut.name.clone(),
         Some(_) => format!("{} · {}–{}", cut.name, span.0 + 1, span.1 + 1),
     };
+    let mixdown = state.render_queue.draft.mixdown;
     let q = &mut state.render_queue.queue;
     q.push(Job {
         at,
@@ -579,6 +593,7 @@ fn push_job(
         preset,
         burn_ins,
         half,
+        mixdown,
         out,
         pattern,
         state: JobState::Queued,
@@ -716,6 +731,7 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
         if job.half {
             spec.preset.scale = 0.5;
         }
+        spec.mixdown = job.mixdown;
         state.render_queue.queue.jobs[i].span = spec.frames;
         let note = match anim_core::export::vector_stroke_cels(&spec.cut) {
             0 => String::new(),
@@ -885,6 +901,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 plate::latch(ui, &mut d.half, "half size (proxy)").on_hover_text(
                     "render at 50% (each pixel the mean of a 2×2 block): quick review \
                      copies of any preset",
+                );
+                ui.label("sound");
+                plate::latch(ui, &mut d.mixdown, "mixdown WAV").on_hover_text(
+                    "an image sequence also writes the range's sound mix as a WAV beside \
+                     its frames (a video carries its sound either way)",
                 );
             });
             ui.horizontal(|ui| {
@@ -1178,6 +1199,7 @@ mod tests {
             preset: 0,
             burn_ins: BurnIns::NONE,
             half: false,
+            mixdown: true,
             out: out.to_path_buf(),
             pattern: deliver::DEFAULT_PATTERN.into(),
             state: JobState::Queued,
@@ -1814,6 +1836,58 @@ mod tests {
         );
         let (size, _, _) = png16(&dir.path().join("half").join(&names[0]), 0, 0);
         assert_eq!(size, (32, 18), "half size");
+    }
+
+    #[test]
+    fn render_queue_mixdown_wav_latch_writes_the_sound_beside_a_sequence_or_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = small();
+        let at = s.at();
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../crates/anim-core/tests/fixtures/tone.wav"
+        ))
+        .unwrap();
+        let clip = anim_core::model::AudioClip::from_bytes("tone.wav", bytes).unwrap();
+        s.engine
+            .apply("sound", vec![Command::SetCutAudio { at, audio: Some(clip) }])
+            .expect("the sound");
+        assert!(s.render_queue.draft.mixdown, "the latch starts on");
+        s.render_queue.ffmpeg = Some((String::new(), None));
+        s.render_queue.draft.preset = PRESETS.iter().position(|p| p.name == "PNG 8-bit").unwrap();
+        s.render_queue.draft.burn_ins = BurnIns::NONE;
+        s.render_queue.draft.out = dir.path().join("on").display().to_string();
+        assert!(add_job(&mut s, at, None));
+        s.render_queue.draft.mixdown = false;
+        s.render_queue.draft.out = dir.path().join("off").display().to_string();
+        assert!(add_job(&mut s, at, None));
+        assert_eq!(
+            s.render_queue.queue.jobs.iter().map(|j| j.mixdown).collect::<Vec<_>>(),
+            vec![true, false],
+            "each job keeps the latch as it was added"
+        );
+        let ctx = egui::Context::default();
+        start(&mut s, &ctx);
+        wait(&mut s, &ctx);
+        let wavs = |d: &str| {
+            files(&dir.path().join(d))
+                .into_iter()
+                .filter(|n| n.ends_with(".wav"))
+                .count()
+        };
+        assert_eq!(files(&dir.path().join("on")).len(), 4, "three frames and the WAV");
+        assert_eq!(wavs("on"), 1);
+        assert_eq!(files(&dir.path().join("off")).len(), 3, "the frames alone");
+        assert_eq!(wavs("off"), 0);
+        // Named as the range's video would be: no separator left dangling
+        // where the frame token was. As long as the range: 3 frames at 24
+        // fps, 48 kHz stereo, the tone in it.
+        let wav = dir.path().join("on").join("show_SC01_CUT01.wav");
+        let bytes = std::fs::read(&wav).expect("the WAV under the pattern's name");
+        let mix = anim_core::model::AudioClip::from_bytes("mix.wav", bytes).unwrap();
+        assert_eq!((mix.sample_rate, mix.channels), (anim_core::audio::MIX_RATE, 2));
+        assert_eq!(mix.samples.len(), 3 * 48_000 / 24 * 2, "three frames of sound");
+        assert!(mix.samples.iter().any(|v| v.abs() > 0.1), "the tone, not silence");
     }
 
     #[test]

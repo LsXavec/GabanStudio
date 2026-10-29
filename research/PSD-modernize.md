@@ -2606,9 +2606,49 @@ what was not verified.
   Add sound track… (WAV, MP3, OGG, FLAC) / Remove track N. Render queue: video jobs mux the mixdown WAV
   (ffmpeg audio args unchanged, only the input), image sequences write the range's mixdown WAV beside the
   frames. Fixtures `tests/fixtures/tone.{wav,flac,mp3,ogg}` (0.5 s of 440 Hz at 16 kHz, made once with
-  ffmpeg 8.1.2 — 16 kHz keeps each under 20 KB). 15 `sound_tests`, 7 `playback_*`. Left: the sheet's
-  waveform strip and track headers (mute / solo / gain in the sheet), the lip-flap window (the engine
-  half is done and pinned), the RAM preview's worker, Ao bar and Settings ▸ Performance MB cap (the
-  `FrameCache` is built and pinned), Stretch (waveform zoom, cue markers). Not verified: sound through a
-  real device (latency: the clock follows the samples handed to the device), the real window and its
-  file dialogs, a real ffmpeg mux of the mixdown.
+  ffmpeg 8.1.2 — 16 kHz keeps each under 20 KB). 15 `sound_tests`, 7 `playback_*`. Listed as left here,
+  against D0 (they are core), and built by the review fixes below: the sheet's waveform strip and track
+  headers, the lip-flap window, the RAM preview's worker, Ao bar and Settings ▸ Performance MB cap.
+  Stretch, not built: waveform zoom, cue markers. Not verified: sound through a real device (latency: the
+  clock follows the samples handed to the device), the real window and its file dialogs, a real ffmpeg
+  mux of the mixdown.
+- 2026-10-29 — GM12 review fixes. Sheet (`xsheet_panel.rs`): a track header row over the sheet — the
+  track picker ("1 dialogue — serifu (dialogue)": number, name, `TrackKind::label`), the kind combo, M / S
+  latches (painted, spoken "mute track" / "solo track"), gain in dB (−60..+24) and offset in frames as
+  DragValues that show their value while dragged and land as one `SetTrackProps` on release (one undo step
+  per drag or click); REMOVE TRACK (DANGER) in the picker's context menu, the File menu's "Remove track N"
+  gone. The waveform column draws the picked track's per-frame RMS (`playback::track_envelope`), read once
+  per change under `envelope_key` (cut, track, its settings and clip, fps), in plate tokens. Lip flap:
+  `Action::LipFlap` ("kuchipaku (lip flap)…", Sheet ▸ Lip flap…, aliases lip sync / kuchipaku / mouth, no
+  chord) opens a non-modal window — track, mouth column, the closed / half / open drawings (the column's
+  first three to start), an in–out range (the loop range, else the whole cut), the two threshold sliders,
+  the envelope with the mouths it would write and their counts; "generate" is one `Engine::apply`
+  (`AppState::generate_lip_flap`). Workers (NEVER-DO 6, D9): Import sound… / Add sound track… read and
+  decode on a worker (`begin_sound_import` / `poll_sound_import`: "decoding NAME…", a second import refused
+  while one decodes, a file that does not decode refused saying why) and land as one step; the playback
+  mix is made on a worker (`playback::MixJob`, keyed by `mix_key`; the sound starts when it lands, a dead
+  worker plays silent with a refusal); `audio::mix` resamples only the span of each clip inside the mix;
+  `decode_shared` reads a clip's own buffer without a copy; an RF64 WAV is read as the RIFF it is
+  (`rf64_as_riff`). RAM preview: `Action::RamPreview` (Sheet ▸ Play ▸ Render RAM preview, chord 0) — a CPU
+  worker draws the play range into the `FrameCache` (now a `BTreeMap` by use order, eviction O(log n)),
+  each frame held under its own key (eval hash, what each column shows, the drawing's content hash, the
+  look), so an edit drops only the frames whose key moved and another cut, size, colour law or final look
+  starts afresh; the cap is `perf.ram_preview_mb` (default 2048, Settings ▸ Performance slider 256–32768);
+  a full cap or a frame larger than it is refused; Ao bars on the sheet mark held frames; the viewer shows
+  the held frame while playing. Verbs (D6), each with help, group, menu, aliases and context, chords the
+  same in both keymaps: ImportSound (File, Ctrl+I), AddSoundTrack (File, Ctrl+Shift+I), LoopIn (Shift+I),
+  LoopOut (Shift+O), ClearLoop (Alt+X), ToggleScrub (Shift+S) in Playback and Sheet ▸ Play; the transport
+  and the menus call `perform`. Transport (D7): fixed slots — the range readout says "—" when unset, × is
+  greyed then, "dropped N" keeps its width; the tooltips name the range and the chord ("the loop range
+  starts at this frame (Shift+I)"; loop off "stops at the end of the loop range (or the cut)"). Minors:
+  the loop range is per cut, rippled by Insert / Delete frame (view state:
+  undo and the range verbs leave it), a start past it plays on to the cut's end; stop never sounds a scrub
+  snippet; scrub defaults on, lives in `perf.scrub_audio`, and the first sound import says so in the status
+  line; a new track is named after its file and its kind guessed from the stem (`TrackKind::named`:
+  bgm / music / m01 → Music, se / sfx / fx → Effects, serifu / dialogue / voice / vo → Dialogue, else
+  Effects); the render queue's "mixdown WAV" latch (default on) per job — the WAV is named by
+  `deliver::video_name`, which already trimmed the separator the frame token leaves (the test pins its
+  name and length); `has_sound` / `any_solo` / `mix_key` walk `tracks_iter`, no Vec per frame. 18
+  `sound_tests`, 17 `playback_*`, `sheetui_waveform_*`,
+  `render_queue_mixdown_*`; the colour-literal pin 83 → 82. Not verified: the real window, its file dialogs
+  and a real device.

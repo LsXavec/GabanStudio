@@ -63,6 +63,15 @@ pub struct SheetUi {
     /// GM6: the cell (column, frame) whose context menu is open — its
     /// drawing's kind is marked from there.
     menu_cell: Option<(ColumnId, u32)>,
+    /// GM12: the sound track the header row shows (0 = the first track).
+    pub track: usize,
+    /// GM12: the shown track's level per frame, under its envelope key —
+    /// the waveform strip reads it, never the samples, each frame.
+    wave: Option<(u64, std::sync::Arc<Vec<f32>>)>,
+    /// GM12: a gain or offset drag in progress: (track, its live settings)
+    /// — the field shows them, and the drag commits once, on release (one
+    /// undo step).
+    track_edit: Option<(usize, anim_core::audio::TrackProps)>,
 }
 
 impl SheetUi {
@@ -669,10 +678,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
         });
     ui.separator();
 
+    // GM12: the shown sound track's header, and its level for the
+    // waveform column.
+    track_header(ui, state, gesture_safe);
+    let wave = sheet_wave(state);
+
     // ---- The sheet itself -------------------------------------------------
     let n_cols = state.cut().xsheet.columns.len();
     let n_params = state.cut().xsheet.params.len();
-    let has_audio = state.cut().audio.is_some();
+    let has_audio = wave.is_some();
     let memo_x = GUTTER_W
         + n_cols as f32 * COL_W
         + n_params as f32 * PARAM_COL_W
@@ -881,43 +895,40 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 // not per-row text islands.)
                 let cut = state.cut();
 
-                // Audio waveform cell: this frame's peak amplitude as a
-                // centred horizontal bar — the track reads as a vertical
-                // waveform down the sheet. Subsampled (≤32 taps per row) so
-                // a long clip never makes the sheet paint heavy.
-                if let Some(clip) = &cut.audio {
+                // GM12: RAM preview's Ao bar — this frame plays from memory.
+                if state.ram.held(cut.id, frame) {
+                    painter.rect_filled(
+                        Rect::from_min_size(row_rect.min, vec2(3.0, ROW_H)),
+                        0,
+                        plate::AO,
+                    );
+                }
+
+                // GM12: the waveform cell — the shown track's level on this
+                // frame (its RMS, the loudest frame full width) as a
+                // centred bar, so the track reads as a waveform down the
+                // sheet; dimmer when the track does not sound (muted, or
+                // another is soloed). The level is the envelope cached per
+                // track, never the samples, each frame.
+                if let Some((level, sounds)) = &wave {
                     let x0 = row_rect.left()
                         + GUTTER_W
                         + n_cols as f32 * COL_W
                         + cut.xsheet.params.len() as f32 * PARAM_COL_W;
                     let cell =
                         Rect::from_min_size(pos2(x0, row_rect.top()), vec2(AUDIO_COL_W, ROW_H));
-                    // Same integer math as playback's start offset (whole
-                    // sample-frames, then interleave) so the drawn row and
-                    // the sound never drift apart over a long clip.
-                    let ch = clip.channels as u64;
-                    let sr = clip.sample_rate as u64;
-                    let f = fps.max(1) as u64;
-                    let a =
-                        (((frame as u64 * sr) / f) * ch).min(clip.samples.len() as u64) as usize;
-                    let b = ((((frame as u64 + 1) * sr) / f) * ch).min(clip.samples.len() as u64)
-                        as usize;
-                    if a < b {
-                        let stride = ((b - a) / 32).max(1);
-                        let mut peak = 0.0f32;
-                        let mut i = a;
-                        while i < b {
-                            peak = peak.max(clip.samples[i].abs());
-                            i += stride;
-                        }
-                        let half = peak.min(1.0) * (AUDIO_COL_W - 8.0) * 0.5;
+                    let v = level.get(frame as usize).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                    if v > 0.0 {
+                        let half = v * (AUDIO_COL_W - 8.0) * 0.5;
                         let cy = cell.center();
+                        let ink = if *sounds {
+                            plate::legend_dim()
+                        } else {
+                            plate::rule_beat()
+                        };
                         painter.line_segment(
                             [pos2(cy.x - half, cy.y), pos2(cy.x + half, cy.y)],
-                            egui::Stroke::new(
-                                (ROW_H - 4.0).max(1.0),
-                                Color32::from_rgba_unmultiplied(139, 141, 131, 90),
-                            ),
+                            egui::Stroke::new((ROW_H - 4.0).max(1.0), ink),
                         );
                     }
                 }
@@ -1346,6 +1357,187 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 ui.ctx().request_repaint();
             }
         });
+}
+
+/// GM12: the shown sound track's header row (when the cut has sound): the
+/// track picker (its context menu removes the track — a DANGER), the
+/// track's kind, its M(ute) and S(olo) toggles, its gain in dB and its
+/// offset in frames. Each edit is one undo step through
+/// [`AppState::set_track_props`]; a gain or offset drag shows its live
+/// value and commits once, on release.
+fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+    use crate::playback::track_name;
+    use anim_core::audio::{self, MAX_GAIN_DB, MIN_GAIN_DB, TrackKind};
+    let tracks: Vec<usize> = audio::tracks_iter(state.cut()).map(|(i, _, _)| i).collect();
+    let Some(&first) = tracks.first() else {
+        state.sheet_ui.track_edit = None;
+        return;
+    };
+    if !tracks.contains(&state.sheet_ui.track) {
+        state.sheet_ui.track = first;
+    }
+    let t = state.sheet_ui.track;
+    let Some(now) = audio::track_props(state.cut(), t).cloned() else {
+        return;
+    };
+    let mut live = match &state.sheet_ui.track_edit {
+        Some((i, p)) if *i == t => p.clone(),
+        _ => now.clone(),
+    };
+    let mut pick = t;
+    let mut commit: Option<anim_core::audio::TrackProps> = None;
+    let mut dragging = false;
+    let mut remove = false;
+    let cut = state.cut();
+    ui.horizontal_wrapped(|ui| {
+        plate::legend(ui, "♪").on_hover_text("the sound track the waveform column shows");
+        let picker = egui::ComboBox::from_id_salt("sheet_track")
+            .selected_text(track_name(cut, t))
+            .show_ui(ui, |ui| {
+                for &i in &tracks {
+                    ui.selectable_value(&mut pick, i, track_name(cut, i));
+                }
+            });
+        picker
+            .response
+            .on_hover_text("the track this header shows — right-click to remove it")
+            .context_menu(|ui| {
+                plate::surface(ui);
+                if plate::danger_hint(ui, "REMOVE TRACK", "removes this track and its sound (undo restores it)")
+                    && gesture_safe
+                {
+                    remove = true;
+                    ui.close();
+                }
+            });
+        egui::ComboBox::from_id_salt("sheet_track_kind")
+            .selected_text(live.kind.label())
+            .show_ui(ui, |ui| {
+                for k in TrackKind::ALL {
+                    if ui.selectable_label(live.kind == k, k.label()).clicked() && gesture_safe {
+                        commit = Some(anim_core::audio::TrackProps {
+                            kind: k,
+                            ..now.clone()
+                        });
+                    }
+                }
+            });
+        // M and S: painted toggles, as the column heads' H and L.
+        for (what, on, name, hover) in [
+            (0u8, now.mute, "mute track", "mute: the track never sounds (mute wins over solo)"),
+            (1, now.solo, "solo track", "solo: while any track is soloed, only soloed tracks sound"),
+        ] {
+            let (r, resp) = ui.allocate_exact_size(vec2(22.0, ROW_H), Sense::click());
+            let ink = match (what, on) {
+                (0, true) => plate::AKA,
+                (1, true) => plate::TALLY,
+                _ if resp.hovered() => plate::STRUCK,
+                _ => plate::legend_dim(),
+            };
+            let p = ui.painter();
+            p.rect_stroke(
+                r.shrink(1.0),
+                0.0,
+                egui::Stroke::new(1.0, if on { ink } else { plate::legend_dim() }),
+                egui::StrokeKind::Inside,
+            );
+            p.text(
+                r.center(),
+                egui::Align2::CENTER_CENTER,
+                if what == 0 { "M" } else { "S" },
+                egui::FontId::monospace(10.0),
+                ink,
+            );
+            plate::speak(&resp, egui::WidgetType::Checkbox, Some(on), name);
+            if resp.on_hover_text(hover).clicked() && gesture_safe {
+                let mut next = now.clone();
+                if what == 0 {
+                    next.mute = !next.mute;
+                } else {
+                    next.solo = !next.solo;
+                }
+                commit = Some(next);
+            }
+        }
+        let fields = [
+            (
+                plate::field(
+                    ui,
+                    egui::DragValue::new(&mut live.gain_db)
+                        .range(MIN_GAIN_DB..=MAX_GAIN_DB)
+                        .speed(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" dB")
+                        .update_while_editing(false),
+                ),
+                "track gain (dB)",
+                "the track's level in dB (−60 to +24); drag or type",
+            ),
+            (
+                plate::field(
+                    ui,
+                    egui::DragValue::new(&mut live.offset)
+                        .range(-100_000..=100_000)
+                        .speed(0.1)
+                        .suffix(" f")
+                        .update_while_editing(false),
+                ),
+                "track offset (frames)",
+                "the frame the track's first sample sounds on (below 0 starts before the cut)",
+            ),
+        ];
+        for (r, name, hover) in fields {
+            plate::speak(&r, egui::WidgetType::DragValue, None, name);
+            let r = r.on_hover_text(hover);
+            if r.dragged() {
+                dragging = true;
+            }
+            if (r.drag_stopped() || (r.changed() && !r.dragged())) && gesture_safe {
+                commit = Some(live.clone());
+            }
+        }
+    });
+    if pick != t {
+        state.sheet_ui.track = pick;
+        state.sheet_ui.track_edit = None;
+        return;
+    }
+    if remove {
+        state.sheet_ui.track_edit = None;
+        if t == 0 {
+            state.remove_audio();
+        } else {
+            state.remove_audio_track(t);
+        }
+        return;
+    }
+    state.sheet_ui.track_edit = dragging.then(|| (t, live));
+    if let Some(next) = commit {
+        state.sheet_ui.track_edit = None;
+        state.set_track_props(t, next);
+    }
+}
+
+/// GM12: the shown track's level per frame for the waveform column, and
+/// whether it sounds — cached under its envelope key, so the samples are
+/// read once per change, not each frame. None without sound.
+fn sheet_wave(state: &mut AppState) -> Option<(std::sync::Arc<Vec<f32>>, bool)> {
+    use anim_core::audio;
+    let fps = state.fps();
+    let t = state.sheet_ui.track;
+    let cut = state.cut();
+    audio::track_clip(cut, t)?;
+    let props = audio::track_props(cut, t)?;
+    let sounds = audio::sounds(props, audio::any_solo(cut));
+    let key = crate::playback::envelope_key(cut, t, fps);
+    if let Some((k, w)) = &state.sheet_ui.wave
+        && *k == key
+    {
+        return Some((w.clone(), sounds));
+    }
+    let level = std::sync::Arc::new(crate::playback::track_envelope(cut, t, fps));
+    state.sheet_ui.wave = Some((key, level.clone()));
+    Some((level, sounds))
 }
 
 /// The parameter keying strip (C1 camera model): shown when a param-column
@@ -2513,6 +2705,66 @@ mod sheetui_tests {
         assert_eq!(parse_length("1+x", 24), None);
         assert_eq!(seconds_plus_frames(60, 24), "2+12");
         assert_eq!(seconds_plus_frames(48, 24), "2+0");
+    }
+
+    #[test]
+    fn sheetui_waveform_column_reads_the_picked_tracks_level_once_per_change() {
+        use anim_core::audio::{AudioTrack, TrackKind, TrackProps};
+        use anim_core::command::Command;
+        use crate::playback::{envelope_key, track_envelope};
+        let tone = |ext: &str| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../crates/anim-core/tests/fixtures")
+                .join(format!("tone.{ext}"));
+            let bytes = std::fs::read(path).unwrap();
+            anim_core::model::AudioClip::from_bytes(format!("tone.{ext}"), bytes).unwrap()
+        };
+        let mut s = crate::doc::AppState::new_project("t", 320, 240, 24, 300.0);
+        let at = s.at();
+        let track = AudioTrack {
+            props: TrackProps::new("bgm", TrackKind::Music),
+            clip: tone("flac"),
+        };
+        s.engine
+            .apply(
+                "sound",
+                vec![
+                    Command::SetCutAudio { at, audio: Some(tone("wav")) },
+                    Command::AddTrack { at, index: 1, track },
+                ],
+            )
+            .unwrap();
+        let mut h = EditorHarness::with_state(s);
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::XSheet]);
+        h.run();
+        // The first track shows: its level per frame, read under its key.
+        let wave = |h: &EditorHarness| h.state().sheet_ui.wave.clone().expect("the level");
+        let (k, w) = wave(&h);
+        assert_eq!(k, envelope_key(h.state().cut(), 0, 24));
+        assert_eq!(*w, track_envelope(h.state().cut(), 0, 24));
+        assert_eq!(w.len(), 48);
+        assert!(w.iter().any(|v| *v > 0.5), "the tone reads");
+        // Read once: the frames after reuse it.
+        h.run_frames(2);
+        assert!(std::sync::Arc::ptr_eq(&w, &wave(&h).1));
+        // The header's picker on the second track: its level, its key.
+        let picked = |n: &str| format!("ComboBox = \"{n}\"");
+        assert!(h.describe().contains(&picked("1 dialogue — serifu (dialogue)")), "{}", h.describe());
+        h.state_mut().sheet_ui.track = 1;
+        h.run();
+        assert!(h.describe().contains(&picked("2 bgm — BGM (music)")), "{}", h.describe());
+        let (k2, w2) = wave(&h);
+        assert_eq!(k2, envelope_key(h.state().cut(), 1, 24));
+        assert_eq!(*w2, track_envelope(h.state().cut(), 1, 24));
+        // An offset is a new key: the level is read again, moved.
+        let mut later = anim_core::audio::track_props(h.state().cut(), 1).unwrap().clone();
+        later.offset = 6;
+        h.state_mut().set_track_props(1, later);
+        h.run();
+        let (k3, w3) = wave(&h);
+        assert_ne!(k3, k2);
+        assert_eq!(&w3[6..], &w2[..42]);
+        assert!(w3[..6].iter().all(|v| *v == 0.0));
     }
 }
 

@@ -570,3 +570,122 @@ fn the_mixdown_wav_carries_the_mix_of_the_rendered_range() {
     assert!(!anim_core::deliver::write_mixdown(&none, &quiet, 24, 0, 3).unwrap());
     assert!(!none.exists());
 }
+
+#[test]
+fn the_mix_resamples_only_its_span_and_matches_the_whole_clip_resampled() {
+    // A 2-second 44.1 kHz stereo bed starting 30 frames before a 12-frame
+    // cut, under a 22.05 kHz mono line 5 frames in: the mix equals the
+    // whole clips resampled, sliced and summed, bit for bit.
+    let bed = wav(44_100, 2, 88_200, |i, c| ((i as f32 * 0.013).sin() * 0.4) * if c == 0 { 1.0 } else { 0.5 });
+    let line = wav(22_050, 1, 11_025, |i, _| (i as f32 * 0.07).cos() * 0.3);
+    let (mut engine, at) = engine_with_cut(12);
+    let (b, l) = (clip("bed.wav", bed), clip("line.wav", line));
+    let mut props = TrackProps::new("bed", TrackKind::Music);
+    props.offset = -30;
+    props.gain_db = -6.0;
+    engine
+        .apply(
+            "tracks",
+            vec![
+                Command::SetCutAudio { at, audio: Some(l.clone()) },
+                Command::AddTrack { at, index: 1, track: AudioTrack { props: props.clone(), clip: b.clone() } },
+                Command::SetTrackProps {
+                    at,
+                    index: 0,
+                    before: TrackProps::default(),
+                    after: TrackProps { offset: 5, ..TrackProps::default() },
+                },
+            ],
+        )
+        .unwrap();
+    let cut = engine.project.cut(at.scene, at.cut).unwrap();
+    let got = audio::mix(cut, 24, 12, 48_000);
+    let len = 12 * 48_000 / 24;
+    let mut want = vec![0.0f32; len * 2];
+    let place = |want: &mut Vec<f32>, src: Vec<f32>, ch: usize, offset: i64, g: f32| {
+        let start = (offset * 48_000).div_euclid(24);
+        for i in 0..src.len() / ch {
+            let o = start + i as i64;
+            if o < 0 || o >= len as i64 {
+                continue;
+            }
+            let (l, r) = if ch == 1 { (src[i], src[i]) } else { (src[i * ch], src[i * ch + 1]) };
+            want[2 * o as usize] += l * g;
+            want[2 * o as usize + 1] += r * g;
+        }
+    };
+    place(&mut want, audio::resample_linear(&l.samples, 1, 22_050, 48_000), 1, 5, 1.0);
+    place(&mut want, audio::resample_linear(&b.samples, 2, 44_100, 48_000), 2, -30, props.gain());
+    for s in &mut want {
+        *s = s.clamp(-1.0, 1.0);
+    }
+    assert_eq!(got.len(), want.len());
+    assert!(got == want, "the span mix drifts from the whole-clip resampling");
+}
+
+#[test]
+fn an_rf64_and_a_wav_hound_refuses_still_decode() {
+    // RF64 (EBU 3306): the RIFF's own bytes behind an RF64 marker, a ds64
+    // chunk and 0xFFFFFFFF sizes — decodes to the RIFF's samples.
+    let riff = wav(16_000, 1, 800, |i, _| (i as f32 * 0.2).sin() * 0.5);
+    let want = AudioClip::from_wav("a.wav", riff.clone()).unwrap();
+    let data_len = riff.len() as u64 - 44;
+    let mut rf64 = b"RF64".to_vec();
+    rf64.extend_from_slice(&u32::MAX.to_le_bytes());
+    rf64.extend_from_slice(b"WAVEds64");
+    rf64.extend_from_slice(&28u32.to_le_bytes());
+    rf64.extend_from_slice(&(riff.len() as u64 + 36 - 8).to_le_bytes());
+    rf64.extend_from_slice(&data_len.to_le_bytes());
+    rf64.extend_from_slice(&800u64.to_le_bytes());
+    rf64.extend_from_slice(&0u32.to_le_bytes());
+    rf64.extend_from_slice(&riff[12..40]); // "fmt " and its 16 bytes, "data"
+    rf64.extend_from_slice(&u32::MAX.to_le_bytes());
+    rf64.extend_from_slice(&riff[44..]);
+    assert_eq!(audio::sniff(&rf64), Some(Format::Wav));
+    let got = AudioClip::from_bytes("a.wav", rf64.clone()).unwrap();
+    assert_eq!((got.sample_rate, got.channels), (16_000, 1));
+    assert_eq!(got.samples, want.samples);
+    assert_eq!(*got.bytes, rf64, "the clip keeps the file's own bytes");
+    // A 64-bit float WAV: hound refuses it, symphonia's reader takes it.
+    let mut f64wav = b"RIFF".to_vec();
+    let body: Vec<u8> = (0..400).flat_map(|i| ((i as f64 * 0.1).sin() * 0.25).to_le_bytes()).collect();
+    f64wav.extend_from_slice(&(36 + body.len() as u32).to_le_bytes());
+    f64wav.extend_from_slice(b"WAVEfmt ");
+    f64wav.extend_from_slice(&16u32.to_le_bytes());
+    f64wav.extend_from_slice(&3u16.to_le_bytes());
+    f64wav.extend_from_slice(&1u16.to_le_bytes());
+    f64wav.extend_from_slice(&8_000u32.to_le_bytes());
+    f64wav.extend_from_slice(&64_000u32.to_le_bytes());
+    f64wav.extend_from_slice(&8u16.to_le_bytes());
+    f64wav.extend_from_slice(&64u16.to_le_bytes());
+    f64wav.extend_from_slice(b"data");
+    f64wav.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    f64wav.extend_from_slice(&body);
+    assert!(AudioClip::from_wav("f.wav", f64wav.clone()).is_err(), "hound reads no 64-bit float");
+    let got = AudioClip::from_bytes("f.wav", f64wav).unwrap();
+    assert_eq!((got.sample_rate, got.channels, got.samples.len()), (8_000, 1, 400));
+    assert!((got.samples[10] - (1.0f64.sin() * 0.25) as f32).abs() < 1e-6);
+    // Both refusing: hound's reason stands.
+    let mut broken = riff.clone();
+    broken[22] = 7; // seven channels
+    let err = AudioClip::from_bytes("b.wav", broken).unwrap_err();
+    assert!(err.starts_with("wav:"), "{err}");
+}
+
+#[test]
+fn a_track_kind_is_guessed_from_the_file_stem() {
+    for (stem, kind) in [
+        ("c012_bgm", TrackKind::Music),
+        ("BGM02", TrackKind::Music),
+        ("theme music", TrackKind::Music),
+        ("m01-a", TrackKind::Music),
+        ("se_door", TrackKind::Effects),
+        ("SFX-03", TrackKind::Effects),
+        ("serifu_take2", TrackKind::Dialogue),
+        ("voice", TrackKind::Dialogue),
+        ("room tone", TrackKind::Effects),
+        ("mom", TrackKind::Effects),
+    ] {
+        assert_eq!(TrackKind::guess(stem), kind, "{stem}");
+    }
+}

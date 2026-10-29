@@ -335,5 +335,7 @@ impl crate::Editor {
         self.project_settings_window(ctx);
         // GM10: the cut's paper window, while open.
         self.paper_size_window(ctx);
+        // GM12: the lip-flap window, while open.
+        self.lip_flap_window(ctx);
     }
 }

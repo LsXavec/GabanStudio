@@ -2920,6 +2920,16 @@ impl App {
                     _ => ed.leave(Leave::Open, ctx),
                 }
             }
+            AppRequest::ImportSound | AppRequest::AddSoundTrack => {
+                let Some(ed) = &mut self.editor else { return };
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Sound (WAV, MP3, OGG, FLAC)", &["wav", "mp3", "ogg", "flac"])
+                    .pick_file()
+                {
+                    let as_track = req == AppRequest::AddSoundTrack;
+                    ed.state.begin_sound_import(&path, as_track, Some(ctx.clone()));
+                }
+            }
         }
     }
 }
@@ -2946,6 +2956,10 @@ pub enum AppRequest {
     /// GM3: raised by the menus, the palette and their chords.
     Settings,
     Quit,
+    /// GM12: File ▸ Import sound… and Add sound track… — the file picker
+    /// is the shell's (it is a window); the decode then runs on a worker.
+    ImportSound,
+    AddSoundTrack,
 }
 
 impl Editor {
@@ -3240,6 +3254,44 @@ impl Editor {
             Action::PrevCut => s.step_cut(false),
             Action::NextCut => s.step_cut(true),
             Action::ToggleLoop => s.view.loop_playback = !s.view.loop_playback,
+            // GM12: the loop range, per cut, at the cursor.
+            Action::LoopIn => s.set_loop_in(),
+            Action::LoopOut => s.set_loop_out(),
+            Action::ClearLoop => {
+                if s.clear_loop() {
+                    s.status = "loop range cleared — playback runs the whole cut".into();
+                } else {
+                    s.refuse("refused — this cut has no loop range");
+                }
+            }
+            Action::ToggleScrub => {
+                ed.scrub_audio = !ed.scrub_audio;
+                ed.scrub_request = Some(ed.scrub_audio);
+                s.status = if ed.scrub_audio {
+                    "audio scrub on: a stopped playhead's move sounds its frame".into()
+                } else {
+                    "audio scrub off".into()
+                };
+            }
+            Action::RamPreview => s.status = s.ram.toggle().into(),
+            Action::LipFlap => match playback::LipForm::of(s) {
+                Some(form) => ed.lip_form = Some(form),
+                None => s.refuse("refused — import a dialogue track first (File ▸ Import sound…)"),
+            },
+            // GM12: the file picker is the shell's; one decode at a time.
+            Action::ImportSound | Action::AddSoundTrack => match &s.sound_import {
+                Some(job) => {
+                    let msg = format!("refused — {} is still decoding", job.name);
+                    s.refuse(msg);
+                }
+                None => {
+                    *out = Performed::App(if action == Action::ImportSound {
+                        AppRequest::ImportSound
+                    } else {
+                        AppRequest::AddSoundTrack
+                    });
+                }
+            },
             Action::NewDrawing => s.new_drawing_at_frame(),
             Action::ClearCel => match &selection {
                 Some(poly) => s.clear_current_region(poly),
@@ -3521,6 +3573,12 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::WelcomeScreen
             // GM9: nor the add-node menu (it brings a pane forward).
             | Action::AddNode
+            // GM12: no file picker, no lip-flap window, and no worker
+            // starts mid-stroke (NEVER-DO 6).
+            | Action::ImportSound
+            | Action::AddSoundTrack
+            | Action::RamPreview
+            | Action::LipFlap
     )
 }
 
@@ -3875,10 +3933,21 @@ struct Editor {
     play_dropped: u64,
     /// GM12: playback was running last frame (a new run counts from 0).
     play_running: bool,
-    /// GM12: a stopped playhead's move sounds one frame of the mix.
+    /// GM12: this run started past the loop range's end, so it plays on
+    /// to the cut's end (play from the cursor never jumps back).
+    play_whole: bool,
+    /// GM12: a stopped playhead's move sounds one frame of the mix — the
+    /// config's `perf.scrub_audio`, fed in each frame.
     scrub_audio: bool,
-    /// GM12: the loop range (first, last frame) — None plays the cut.
-    loop_range: Option<(u32, u32)>,
+    /// GM12: the scrub latch or verb flipped it; the shell stores it in
+    /// the config (remembered across sessions).
+    scrub_request: Option<bool>,
+    /// GM12: the last scrub snippet sounded (the tests read it).
+    last_snippet: Option<playback::Snippet>,
+    /// GM12: the mix being made on a worker.
+    mix_job: Option<playback::MixJob>,
+    /// GM12: Sheet ▸ Lip flap…'s window is open with this form.
+    lip_form: Option<playback::LipForm>,
     /// GM2: what the artist asked for that would drop unsaved work — the
     /// "Save changes?" modal shows while this is Some.
     leave: Option<Leave>,
@@ -4458,8 +4527,12 @@ impl Editor {
             audio_clock: None,
             play_dropped: 0,
             play_running: false,
-            scrub_audio: false,
-            loop_range: None,
+            play_whole: false,
+            scrub_audio: true,
+            scrub_request: None,
+            last_snippet: None,
+            mix_job: None,
+            lip_form: None,
             leave: None,
             leave_after_save: None,
             close_ok: false,
@@ -4531,8 +4604,12 @@ impl Editor {
             audio_clock: None,
             play_dropped: 0,
             play_running: false,
-            scrub_audio: false,
-            loop_range: None,
+            play_whole: false,
+            scrub_audio: true,
+            scrub_request: None,
+            last_snippet: None,
+            mix_job: None,
+            lip_form: None,
             leave: None,
             leave_after_save: None,
             close_ok: false,
@@ -4943,6 +5020,15 @@ impl Editor {
                 Err("give this key a spacing chart first")
             }
             Action::ResetShift if s.view.light.offsets.is_empty() => Err("no pin is shifted"),
+            // GM12: one sound decodes at a time; the loop range and the
+            // lip flap need something to act on.
+            Action::ImportSound | Action::AddSoundTrack if s.sound_import.is_some() => {
+                Err("a sound file is still decoding")
+            }
+            Action::ClearLoop if s.loop_range().is_none() => Err("this cut has no loop range"),
+            Action::LipFlap if anim_core::audio::tracks_iter(s.cut()).next().is_none() => {
+                Err("import a dialogue track first")
+            }
             _ => Ok(()),
         }
     }
@@ -4970,6 +5056,9 @@ impl Editor {
             ),
             // GM11: the composite viewers' delivery look.
             Action::ToggleFinalLook => Some(self.final_look.on),
+            // GM12: audio scrub, and a RAM preview pass running.
+            Action::ToggleScrub => Some(self.scrub_audio),
+            Action::RamPreview => Some(self.state.ram.busy()),
             _ => None,
         }
     }
@@ -5480,6 +5569,15 @@ impl eframe::App for App {
             // GM6: the onion and light table settings live in the config.
             editor.canvas.onion = self.config.onion.sane();
             editor.canvas.light_table = self.config.light_table;
+            // GM12: audio scrub is remembered (a flip since the last frame
+            // — the latch or the verb's chord — is saved first), and the
+            // RAM preview cap is Settings ▸ Performance's.
+            if let Some(on) = editor.scrub_request.take() {
+                self.config.perf.scrub_audio = on;
+                self.config.save();
+            }
+            editor.scrub_audio = self.config.perf.scrub_audio;
+            editor.state.ram.set_cap_mb(self.config.perf.ram_preview_mb);
             editor.ui(
                 ui,
                 &pen,
@@ -5491,6 +5589,10 @@ impl eframe::App for App {
                 room,
                 &self.config.keybinds,
             );
+            if let Some(on) = editor.scrub_request.take() {
+                self.config.perf.scrub_audio = on;
+                self.config.save();
+            }
             // Stage 4: the strip's stack requests (the App owns config).
             if let Some(req) = editor.state.stack_request.take() {
                 match req {
@@ -6293,10 +6395,12 @@ impl Editor {
                 }
             };
         let clip_changed = self.audio_playing && self.audio_key != key;
-        if playing && key.is_some() && (!self.audio_playing || jumped || clip_changed) {
-            self.start_audio(frame);
+        let start = playing && key.is_some() && (!self.audio_playing || jumped || clip_changed);
+        if start && self.start_audio(frame) {
             self.audio_key = key;
-        } else if self.audio_playing && (!playing || key.is_none()) {
+        } else if self.audio_playing && (start || !playing || key.is_none()) {
+            // Stopped — or the new mix is still being made: the UI clock
+            // steps the playhead until it is in.
             if let Some(out) = &self.audio_out {
                 out.sink.stop();
             }
@@ -6304,11 +6408,14 @@ impl Editor {
             self.audio_key = None;
             self.audio_clock = None;
         }
-        // GM12: scrub — a stopped playhead's move sounds one frame.
+        // GM12: scrub — a stopped playhead's move sounds one frame (not
+        // the frame a run ended on: it was running last frame).
         if key.is_some() && !self.audio_playing {
             let rate = anim_core::audio::MIX_RATE;
             let prev = self.audio_prev_frame;
-            for s in playback::scrub_requests(prev, frame, playing, self.scrub_audio, fps, rate) {
+            let moving = playing || self.play_running;
+            for s in playback::scrub_requests(prev, frame, moving, self.scrub_audio, fps, rate) {
+                self.last_snippet = Some(s);
                 self.start_snippet(s);
             }
         }
@@ -6333,7 +6440,8 @@ impl Editor {
     }
 
     /// GM12: the cut's mix for playback — mixed once per key, so a seek or
-    /// a scrub restarts from the samples already made.
+    /// a scrub restarts from the samples already made. The mixing runs on
+    /// a worker (D9): None until it is in (the sound starts then).
     fn playback_mix(&mut self) -> Option<std::sync::Arc<Vec<f32>>> {
         let fps = self.state.fps().max(1);
         let cut = self.state.cut();
@@ -6346,18 +6454,43 @@ impl Editor {
         {
             return Some(mix.clone());
         }
-        let rate = anim_core::audio::MIX_RATE;
-        let mix = std::sync::Arc::new(anim_core::audio::mix(cut, fps, cut.frame_count, rate));
-        self.audio_mix = Some((key, mix.clone()));
-        Some(mix)
+        let polled = match &self.mix_job {
+            Some(job) if job.key == key => job.poll(),
+            _ => {
+                // (Playback repaints every frame; the job needs no nudge.)
+                self.mix_job = Some(playback::MixJob::start(cut, fps, key));
+                return None;
+            }
+        };
+        match polled {
+            Ok(None) => None,
+            Ok(Some(mix)) => {
+                self.mix_job = None;
+                self.audio_mix = Some((key, mix.clone()));
+                Some(mix)
+            }
+            Err(()) => {
+                // The worker died without a mix: play silent rather than
+                // asking again every frame.
+                self.mix_job = None;
+                let len = (cut.frame_count as u64 * anim_core::audio::MIX_RATE as u64
+                    / fps as u64) as usize;
+                let silent = std::sync::Arc::new(vec![0.0f32; len * 2]);
+                self.audio_mix = Some((key, silent.clone()));
+                self.state.refuse("refused — the sound mix failed; playing silent");
+                Some(silent)
+            }
+        }
     }
 
-    fn start_audio(&mut self, frame: u32) {
+    /// Start the mix sounding from `frame` under the audio clock; false
+    /// when there is no device or the mix is not in yet.
+    fn start_audio(&mut self, frame: u32) -> bool {
         if !self.ensure_audio_out() {
-            return;
+            return false;
         }
         let Some(mix) = self.playback_mix() else {
-            return;
+            return false;
         };
         let fps = self.state.fps().max(1);
         let rate = anim_core::audio::MIX_RATE;
@@ -6365,7 +6498,9 @@ impl Editor {
         // a left-channel sample of the stereo mix.
         let start = ((frame as u64 * rate as u64 / fps as u64) as usize * 2).min(mix.len());
         let cursor = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(start));
-        let Some(out) = &self.audio_out else { return };
+        let Some(out) = &self.audio_out else {
+            return false;
+        };
         out.sink.stop();
         out.sink.append(ClipSource {
             end: mix.len(),
@@ -6378,6 +6513,7 @@ impl Editor {
         out.sink.play();
         self.audio_playing = true;
         self.audio_clock = Some((playback::PlayClock::new(frame, fps, rate), cursor, start));
+        true
     }
 
     /// GM12: sound one scrub snippet of the mix, cutting off the last.
@@ -6413,9 +6549,17 @@ impl Editor {
         let prev = self.state.view.frame;
         if playing && !self.play_running {
             self.play_dropped = 0;
+            // A run started past the loop range plays on to the cut's end
+            // (play from the cursor never jumps back).
+            self.play_whole = prev > self.state.play_range().1;
         }
         self.play_running = playing;
-        let range = playback::play_range(self.loop_range, self.state.frame_count());
+        let whole = (0, self.state.frame_count() - 1);
+        let range = if self.play_whole {
+            whole
+        } else {
+            self.state.play_range()
+        };
         let looping = self.state.view.loop_playback;
         let reached = match &mut self.audio_clock {
             Some((clock, cursor, start)) if playing && self.audio_playing => {
@@ -6441,11 +6585,17 @@ impl Editor {
                 // The UI clock knows only the cut's ends: past the loop
                 // range's end (or wrapped at the cut's) is the range's end.
                 let past = now > range.1 || (now < prev && prev <= range.1);
-                (playing && self.loop_range.is_some() && past)
+                (playing && (range != whole || self.play_whole) && past)
                     .then(|| playback::place(range.1 + 1, range, looping))
             }
         };
         match step {
+            // A run that played on past the loop range loops the range
+            // once it wraps at the cut's end.
+            Some(playback::Step::Wrap(_)) if self.play_whole => {
+                self.play_whole = false;
+                self.state.view.frame = self.state.play_range().0;
+            }
             Some(playback::Step::Show(f)) | Some(playback::Step::Wrap(f)) => {
                 self.state.view.frame = f;
             }
@@ -6634,6 +6784,24 @@ impl Editor {
                     "imported {ok} Krita brush(es) · {dup} skipped · {failed} unreadable · {purged} unreal removed"
                 );
             }
+        }
+        // GM12: a sound file decoded on its worker lands as one edit, and
+        // RAM preview keeps its frames true to the document (an edit drops
+        // just the frames it changed) before playback reads them.
+        self.state.poll_sound_import();
+        let p = &self.state.engine.project;
+        let look = playback::RamLook {
+            at: self.state.at(),
+            size: (p.width, p.height),
+            law: p.color_law,
+            final_look: self.final_look.on,
+        };
+        let range = self.state.play_range();
+        let s = &mut self.state;
+        match s.ram.sync(&mut s.engine, look, range, Some(ui.ctx())) {
+            Some(Ok(msg)) => s.status = msg,
+            Some(Err(msg)) => s.refuse(msg),
+            None => {}
         }
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.play_tick(dt);
@@ -6828,53 +6996,11 @@ impl Editor {
                         }
                     });
                     ui.separator();
-                    // Scratch audio (moved from the x-sheet header — the sheet
-                    // is for time, the slate detent is for the file's parts).
-                    // GM12: WAV, MP3, OGG Vorbis or FLAC; with a first track
-                    // in place, a further file becomes a further track.
-                    const SOUND: &[&str] = &["wav", "mp3", "ogg", "flac"];
-                    match self.state.cut().audio.as_ref().map(|a| a.name.clone()) {
-                        Some(name) => {
-                            if ui.button(format!("Remove audio ({name})")).clicked() {
-                                self.state.remove_audio();
-                                ui.close();
-                            }
-                            if ui.button("Add sound track…").clicked() {
-                                ui.close();
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("Sound (WAV, MP3, OGG, FLAC)", SOUND)
-                                    .pick_file()
-                                {
-                                    self.state.add_audio_track(&path);
-                                }
-                            }
-                        }
-                        None => {
-                            if ui.button("Import sound…").clicked() {
-                                ui.close();
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("Sound (WAV, MP3, OGG, FLAC)", SOUND)
-                                    .pick_file()
-                                {
-                                    self.state.import_audio(&path);
-                                }
-                            }
-                        }
-                    }
-                    let extra: Vec<(usize, String)> = self
-                        .state
-                        .cut()
-                        .tracks
-                        .iter()
-                        .enumerate()
-                        .map(|(i, t)| (i + 1, t.props.name.clone()))
-                        .collect();
-                    for (index, name) in extra {
-                        if ui.button(format!("Remove track {index} ({name})")).clicked() {
-                            self.state.remove_audio_track(index);
-                            ui.close();
-                        }
-                    }
+                    // GM12: the sound verbs (WAV, MP3, OGG Vorbis or FLAC,
+                    // decoded on a worker). A track's removal is a DANGER
+                    // in its sheet header's context menu.
+                    self.menu_item(ui, Action::ImportSound);
+                    self.menu_item(ui, Action::AddSoundTrack);
                     ui.separator();
                     self.menu_item(ui, Action::Settings);
                     self.menu_item(ui, Action::Quit);
@@ -7418,7 +7544,7 @@ impl Editor {
                             (Icon::Play, "play (Space)")
                         };
                         if plate::icon_button(ui, pi, "", ph).clicked() {
-                            self.state.toggle_play();
+                            self.invoke(Action::PlayPause, ui.ctx());
                         }
                         if plate::icon_button(ui, Icon::StepFwd, "", "next frame (F)").clicked()
                             && !gesture
@@ -7449,46 +7575,48 @@ impl Editor {
                                 .color(plate::LEGEND),
                         );
                         let mut lp = self.state.view.loop_playback;
-                        plate::latch(ui, &mut lp, "loop")
-                            .on_hover_text("off = playback stops on the last frame");
+                        plate::latch(ui, &mut lp, "loop").on_hover_text(
+                            "off = playback stops at the end of the loop range (or the cut)",
+                        );
                         self.state.view.loop_playback = lp;
                         // GM12: the loop range — "in" and "out" mark the
-                        // playhead; × plays the whole cut again.
-                        let here = self.state.view.frame;
-                        let (lo, hi) = playback::play_range(self.loop_range, count);
-                        if ui
-                            .small_button("in")
-                            .on_hover_text("the loop range starts at this frame")
+                        // playhead; × plays the whole cut again. Every
+                        // slot keeps its width whatever it reads (D7).
+                        if playback::transport_key(ui, "in", "loop in", 26.0)
+                            .on_hover_text("the loop range starts at this frame (Shift+I)")
                             .clicked()
                         {
-                            self.loop_range = Some((here, hi.max(here)));
+                            self.invoke(Action::LoopIn, ui.ctx());
                         }
-                        if ui
-                            .small_button("out")
-                            .on_hover_text("the loop range ends at this frame")
+                        if playback::transport_key(ui, "out", "loop out", 30.0)
+                            .on_hover_text("the loop range ends at this frame (Shift+O)")
                             .clicked()
                         {
-                            self.loop_range = Some((lo.min(here), here));
+                            self.invoke(Action::LoopOut, ui.ctx());
                         }
-                        if let Some((a, b)) = self.loop_range {
-                            ui.label(
-                                egui::RichText::new(format!("{}–{}", a + 1, b + 1))
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(plate::LEGEND),
-                            );
-                            if ui
-                                .small_button("×")
-                                .on_hover_text("clear the loop range")
-                                .clicked()
-                            {
-                                self.loop_range = None;
-                            }
+                        let range = self.state.loop_range();
+                        let text = match range {
+                            Some((a, b)) => format!("{}–{}", a + 1, b + 1),
+                            None => "—".to_string(),
+                        };
+                        playback::readout(ui, &text, 64.0, plate::LEGEND)
+                            .on_hover_text("this cut's loop range (— = none: the whole cut plays)");
+                        let clear = ui.add_enabled_ui(range.is_some(), |ui| {
+                            playback::transport_key(ui, "×", "clear loop range", 22.0)
+                                .on_hover_text("clear the loop range (Alt+X)")
+                                .on_disabled_hover_text("this cut has no loop range")
+                        });
+                        if clear.inner.clicked() {
+                            self.invoke(Action::ClearLoop, ui.ctx());
                         }
                         let mut scrub = self.scrub_audio;
-                        plate::latch(ui, &mut scrub, "scrub")
-                            .on_hover_text("on = a stopped playhead's move sounds one frame");
-                        self.scrub_audio = scrub;
+                        if plate::latch(ui, &mut scrub, "scrub")
+                            .on_hover_text("on = a stopped playhead's move sounds one frame (Shift+S)")
+                            .changed()
+                        {
+                            self.scrub_audio = scrub;
+                            self.scrub_request = Some(scrub);
+                        }
                         ui.label(
                             egui::RichText::new(format!("{:.3}", self.state.fps() as f32))
                                 .monospace()
@@ -7496,15 +7624,14 @@ impl Editor {
                                 .color(plate::LEGEND),
                         );
                         // GM12: frames passed over to keep up with the sound.
-                        if self.play_dropped > 0 {
-                            ui.label(
-                                egui::RichText::new(format!("dropped {}", self.play_dropped))
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(plate::LEGEND),
-                            )
+                        let dropped = format!("dropped {}", self.play_dropped);
+                        let ink = if self.play_dropped > 0 {
+                            plate::LEGEND
+                        } else {
+                            plate::legend_dim()
+                        };
+                        playback::readout(ui, &dropped, 96.0, ink)
                             .on_hover_text("frames passed over to keep up with the sound");
-                        }
                         ui.separator();
                         // REFUSAL lane (Aka): the machine overruled the hand.
                         // Dwells 4s; a repeat of the same refusal re-flashes.
@@ -7588,7 +7715,13 @@ impl Editor {
         let float_open = self.float_viewer.is_open();
         let mut graph = viewer::GraphView::Off;
         if viewers_open || composite_needed || float_open {
-            graph = if self.final_look.on {
+            let (cut_id, frame) = (self.state.view.cut, self.state.view.frame);
+            graph = if self.state.view.playing
+                && let Some(id) = self.state.ram.shown(cut_id, frame, ui.ctx())
+            {
+                // GM12: RAM preview — a held frame plays from memory.
+                viewer::GraphView::Ready(id)
+            } else if self.final_look.on {
                 // GM11: the master's look, rendered by the CPU on a worker
                 // (D9) — no GPU needed; the last frame stays up meanwhile.
                 self.final_look.view(&self.state, ui.ctx())
