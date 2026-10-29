@@ -159,6 +159,9 @@ pub enum Action {
     ToggleScrub,
     RamPreview,
     LipFlap,
+    /// GM13: the satsuei look graph, in one undo step (a graph shaped by
+    /// hand is asked about first, DANGER).
+    BuildSatsuei,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -393,6 +396,7 @@ impl Action {
         Action::ToggleScrub,
         Action::RamPreview,
         Action::LipFlap,
+        Action::BuildSatsuei,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -521,6 +525,7 @@ impl Action {
             Action::ToggleScrub => "Audio scrub latch",
             Action::RamPreview => "Render RAM preview",
             Action::LipFlap => "kuchipaku (lip flap)…",
+            Action::BuildSatsuei => "Build satsuei graph",
         }
     }
 
@@ -655,6 +660,7 @@ impl Action {
             ToggleScrub => "Latch audio scrub: stepping or dragging the stopped playhead sounds that frame.",
             RamPreview => "Render the play range's composites into RAM on a worker; playback shows them (Ao on the sheet).",
             LipFlap => "Write 3-mouth kuchipaku on a column from a dialogue track's level, as one undo step.",
+            BuildSatsuei => "Build the satsuei (composite) look graph: passes, diffusion, para, light wrap, grade, grain, vignette.",
         }
     }
 
@@ -685,7 +691,7 @@ impl Action {
             | HandlesFlat | HandlesBroken => Group::Sheet,
             FrameCurves => Group::View,
             PrevCut | NextCut | PaperSize => Group::Cut,
-            AddNode => Group::Composite,
+            AddNode | BuildSatsuei => Group::Composite,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
@@ -799,6 +805,8 @@ impl Action {
             BuildComposite => "Project/Build composite from sheet",
             // GM9: beside the auto-comp, where graphs are made.
             AddNode => "Project/Add node…",
+            // GM13: and the satsuei look's graph beside them.
+            BuildSatsuei => "Project/Build satsuei graph",
             ProjectSettings => "Project/Project settings…",
             WelcomeScreen => "File/Welcome screen…",
             PrevCut => "Cut/Previous cut",
@@ -960,6 +968,7 @@ impl Action {
             ToggleScrub => &["scrub", "audio scrub"],
             RamPreview => &["ram preview", "cache frames", "preview render"],
             LipFlap => &["lip sync", "kuchipaku", "mouth"],
+            BuildSatsuei => &["satsuei", "look", "satsuei template", "satsuei graph"],
             _ => &[],
         }
     }
@@ -982,7 +991,7 @@ impl Action {
             | InterpBezier | HandlesAuto | HandlesSmooth | HandlesFlat | HandlesBroken => {
                 Ctx::Curves
             }
-            AddNode => Ctx::NodeGraph,
+            AddNode | BuildSatsuei => Ctx::NodeGraph,
             _ => Ctx::Global,
         }
     }
@@ -1257,7 +1266,8 @@ impl Action {
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize | LipFlap => None,
+            | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize | LipFlap
+            | BuildSatsuei => None,
         }
     }
 }

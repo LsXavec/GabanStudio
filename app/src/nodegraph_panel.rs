@@ -38,6 +38,9 @@ pub struct GraphUi {
     pub node_rects: Vec<(NodeId, Rect)>,
     /// The Effect inspector's gesture in progress.
     pub fx: crate::fxui::FxEdit,
+    /// GM13: "load .cube…" was clicked for this node's file parameter —
+    /// the editor hands it to the shell, which opens the file picker.
+    pub lut_pick: Option<(NodeId, &'static str)>,
 }
 
 impl GraphUi {
@@ -712,24 +715,40 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-/// GM13: the pane's toolbar. "Build satsuei graph" replaces the graph with
-/// the satsuei chain in one undo step; without a drawing column it is
-/// disabled and its tooltip says why.
+/// GM13: the pane's toolbar. "Build satsuei graph" (the BuildSatsuei verb:
+/// its label, its help) replaces the graph with the satsuei chain in one
+/// undo step; over a graph shaped by hand it has the DANGER edge and asks
+/// first; without a drawing column it is disabled and its tooltip says why.
 fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
+    use crate::config::Action;
     ui.horizontal(|ui| {
         let why = state.satsuei_refusal();
-        let button = ui.add_enabled(why.is_none(), egui::Button::new("Build satsuei graph"));
-        let button = match why {
-            Some(why) => button.on_disabled_hover_text(why),
-            None => button.on_hover_text(
-                "replace this cut's graph with the satsuei chain: BG through a camera; per \
-                 character a paint pass, a shadow pass, a highlight glow and the lines; then \
-                 diffusion, para, light wrap, grade, grain and vignette — one undo step, every \
-                 node editable",
-            ),
+        let hand = state.satsuei_hand_built();
+        let button = ui.add_enabled(why.is_none(), egui::Button::new(Action::BuildSatsuei.label()));
+        if hand.is_some() && why.is_none() {
+            // DANGER's Aka edge, painted over the button: a stroke of its
+            // own would grow it, and the graph below would shift.
+            ui.painter().rect_stroke(
+                button.rect,
+                egui::CornerRadius::ZERO,
+                Stroke::new(1.0, crate::plate::AKA),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let help = Action::BuildSatsuei.help();
+        let button = match (why, hand) {
+            (Some(why), _) => button.on_disabled_hover_text(why),
+            (None, Some(n)) => button.on_hover_text(format!(
+                "{help} It replaces this hand-built graph ({n} nodes): it asks first, and \
+                 undo brings the graph back."
+            )),
+            (None, None) => button.on_hover_text(format!(
+                "{help} The BG goes through the camera (the characters are held to the \
+                 frame); one undo step, every node editable."
+            )),
         };
         if button.clicked() {
-            state.build_satsuei();
+            state.request_satsuei();
         }
     });
 }
@@ -939,9 +958,9 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 .response
                 .on_hover_text("only these layer roles render: the shadow pass, the highlight pass, paint only, lines only");
                 changed |= ui
-                    .checkbox(absorb_trace, "absorb trace lines")
+                    .checkbox(absorb_trace, "iro-tore (absorb trace lines)")
                     .on_hover_text(
-                        "iro-tore: the shadow and highlight trace lines take the paint colour under them \
+                        "the shadow and highlight trace lines take the paint colour under them \
                          (or the nearest within 3 px)",
                     )
                     .changed();
@@ -1209,9 +1228,36 @@ mod tests {
         h
     }
 
+    /// The sample in the satsuei (composite) room, its node graph brought
+    /// forward as a click on its tab would (egui_dock's tab titles are not
+    /// in the tree).
+    fn sample_in_the_composite_room() -> EditorHarness {
+        let mut h = EditorHarness::with_state(crate::sample::build_sample());
+        h.perform(Action::RoomComposite);
+        h.run_frames(3);
+        let tab = h
+            .editor()
+            .dock
+            .find_tab(&Pane::NodeGraph)
+            .expect("the room has a node graph");
+        let _ = h.editor_mut().dock.set_active_tab(tab);
+        h.run_frames(2);
+        h
+    }
+
+    /// A node of `kind` added to the current cut (setup, one step).
+    fn add_node(s: &mut AppState, kind: NodeKind) -> NodeId {
+        let at = s.at();
+        let id = NodeId(s.engine.project.alloc_id());
+        s.engine
+            .apply("add node", vec![anim_core::command::Command::AddNode { at, id, kind }])
+            .unwrap();
+        id
+    }
+
     #[test]
     fn comproom_build_satsuei_graph_is_one_undo_step_and_builds_the_template() {
-        let mut h = sample_graph_pane();
+        let mut h = sample_in_the_composite_room();
         let before = h.state().cut().graph.clone();
         let depth = h.state().engine.history_len();
         assert_eq!(h.node_enabled("Build satsuei graph"), Some(true), "{}", h.describe());
@@ -1251,6 +1297,8 @@ mod tests {
         h.run();
         h.run();
         assert_eq!(h.node_enabled("Build satsuei graph"), Some(false), "{}", h.describe());
+        // The registry greys the verb with the same reason (menus, palette).
+        assert_eq!(h.editor().can_perform(Action::BuildSatsuei), Err(h.state().satsuei_refusal().unwrap()));
         let depth = h.state().engine.history_len();
         let graph = h.state().cut().graph.clone();
         assert!(!h.state_mut().build_satsuei(), "the verb refuses too");
@@ -1312,5 +1360,338 @@ mod tests {
         assert_eq!(params.0.get("lut"), Some(&FxValue::Blob { blob: "lut.identity".into() }));
         s.engine.undo().unwrap();
         assert!(s.cut().blobs.is_empty(), "undo takes the file back out");
+    }
+
+    #[test]
+    fn comproom_build_satsuei_over_a_hand_built_graph_asks_first() {
+        let mut h = sample_graph_pane();
+        // A node placed by hand: the graph is no longer an auto-comp.
+        add_node(h.state_mut(), NodeKind::effect(FxKind::Blur));
+        h.run();
+        let n = h.state().cut().graph.nodes().count();
+        assert_eq!(h.state().satsuei_hand_built(), Some(n));
+        let graph = h.state().cut().graph.clone();
+        let depth = h.state().engine.history_len();
+        let ask = format!(
+            "Replace this hand-built graph ({n} nodes) with the satsuei chain? Undo brings it back."
+        );
+        h.click("Build satsuei graph");
+        assert!(h.has(&ask), "{}", h.describe());
+        assert_eq!(h.state().engine.history_len(), depth, "asked: nothing replaced yet");
+        h.click("Cancel");
+        assert!(!h.has(&ask));
+        assert_eq!(h.state().engine.history_len(), depth, "cancel leaves the history as it was");
+        assert_eq!(h.state().cut().graph, graph);
+        // The verb asks the same way; the held DANGER builds, in one step.
+        h.perform(Action::BuildSatsuei);
+        h.run();
+        assert!(h.has(&ask), "{}", h.describe());
+        h.hold("Replace");
+        assert!(!h.has(&ask));
+        assert_eq!(h.state().engine.history_len(), depth + 1, "{}", h.state().refusal);
+        assert!(
+            h.state()
+                .cut()
+                .graph
+                .nodes()
+                .any(|n| matches!(n.kind, NodeKind::Effect { fx: FxKind::Diffusion, .. })),
+            "the satsuei chain"
+        );
+        h.perform(Action::Undo);
+        assert_eq!(h.state().cut().graph, graph, "undo brings the hand-built graph back");
+    }
+
+    #[test]
+    fn comproom_the_build_satsuei_verb_is_one_step_and_names_the_button() {
+        let mut h = sample_graph_pane();
+        // The registry's words are the toolbar button's: its label, and its
+        // help on hover (with where the camera sits).
+        assert!(h.has(Action::BuildSatsuei.label()), "{}", h.describe());
+        h.hover(Action::BuildSatsuei.label());
+        h.wait(1.0);
+        assert!(h.has_text_containing(Action::BuildSatsuei.help()), "{}", h.describe());
+        assert!(h.has_text_containing("The BG goes through the camera"), "{}", h.describe());
+        assert_eq!(Action::BuildSatsuei.menu(), Some("Project/Build satsuei graph"));
+        // A hidden column still counts: the template wires it.
+        let s = h.state_mut();
+        let at = s.at();
+        let hide: Vec<anim_core::command::Command> = s
+            .cut()
+            .xsheet
+            .columns
+            .iter()
+            .map(|c| {
+                let def = s.cut().column_def(c.id);
+                anim_core::command::Command::SetColumnDef {
+                    at,
+                    column: c.id,
+                    def: anim_core::xsheet::ColumnDef {
+                        kind: def.kind,
+                        hidden: true,
+                        locked: def.locked,
+                    },
+                }
+            })
+            .collect();
+        s.engine.apply("hide", hide).unwrap();
+        h.run();
+        assert!(h.state().cut().render_order().is_empty(), "every column hidden");
+        assert_eq!(h.editor().can_perform(Action::BuildSatsuei), Ok(()));
+        // An auto-comp graph is replaced at once: one undo step.
+        let depth = h.state().engine.history_len();
+        assert_eq!(h.perform(Action::BuildSatsuei), crate::Performed::Done);
+        h.run();
+        let s = h.state();
+        assert_eq!(s.engine.history_len(), depth + 1, "one undo step: {}", s.refusal);
+        assert_eq!(s.engine.history().last().unwrap().label, "build satsuei graph");
+        assert!(s.cut().graph.nodes().any(|n| matches!(n.kind, NodeKind::Effect { fx: FxKind::Vignette, .. })));
+    }
+
+    /// A 2×2×2 .cube whose entry at corner (r, g, b) is `f` of it.
+    fn cube(f: impl Fn([u8; 3]) -> [u8; 3]) -> Vec<u8> {
+        let mut text = String::from("LUT_3D_SIZE 2\n");
+        for i in 0..8u8 {
+            let [r, g, b] = f([i & 1, (i >> 1) & 1, (i >> 2) & 1]);
+            text.push_str(&format!("{r} {g} {b}\n"));
+        }
+        text.into_bytes()
+    }
+
+    #[test]
+    fn comproom_two_luts_of_one_name_keep_their_own_files_and_a_replaced_file_leaves() {
+        use anim_core::fx::{FxCtx, FxValues, Image};
+        let mut s = crate::sample::build_sample();
+        let a = add_node(&mut s, NodeKind::effect(FxKind::Lut));
+        let b = add_node(&mut s, NodeKind::effect(FxKind::Lut));
+        let ident = cube(|c| c);
+        let invert = cube(|c| c.map(|v| 1 - v));
+        // The file a node holds, and what it makes of one colour.
+        let file = |s: &AppState, id: NodeId| match &s.cut().graph.node(id).unwrap().kind {
+            NodeKind::Effect { params, .. } => match params.get("lut") {
+                Some(FxValue::Blob { blob }) => blob.clone(),
+                v => panic!("not a file: {v:?}"),
+            },
+            k => panic!("not an effect: {k:?}"),
+        };
+        let look = |s: &AppState, id: NodeId| {
+            let NodeKind::Effect { fx, params, binds } = &s.cut().graph.node(id).unwrap().kind else {
+                panic!("not an effect");
+            };
+            let v = FxValues::resolve(*fx, params, binds, |_| None);
+            let src = Image::from_px(1, 1, vec![0.25, 0.5, 0.75, 1.0]);
+            let ctx = FxCtx {
+                frame: 0,
+                blobs: Some(&s.cut().blobs),
+            };
+            fx.apply_in(&v, anim_core::color::ColorLaw::Srgb, &[Some(&src)], 1, 1, ctx).px
+        };
+        let near = |got: Vec<f32>, want: [f32; 4]| {
+            got.len() == 4 && got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-4)
+        };
+        // Two files of one name: each node keeps its own.
+        assert!(s.set_lut(a, "lut", "film", ident.clone()));
+        assert!(s.set_lut(b, "lut", "film", invert.clone()));
+        assert_eq!(file(&s, a), "lut.film");
+        assert_eq!(file(&s, b), "lut.film~2");
+        assert_eq!(s.cut().blobs["lut.film"].as_slice(), ident.as_slice());
+        assert_eq!(s.cut().blobs["lut.film~2"].as_slice(), invert.as_slice());
+        assert!(near(look(&s, a), [0.25, 0.5, 0.75, 1.0]), "{:?}", look(&s, a));
+        assert!(near(look(&s, b), [0.75, 0.5, 0.25, 1.0]), "{:?}", look(&s, b));
+        // A new file on `a` takes its old one out of the cut in the same
+        // step; `b`'s stays.
+        let depth = s.engine.history_len();
+        assert!(s.set_lut(a, "lut", "warm", invert.clone()));
+        assert_eq!(s.engine.history_len(), depth + 1, "one step");
+        assert_eq!(file(&s, a), "lut.warm");
+        let keys: Vec<&str> = s.cut().blobs.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["lut.film~2", "lut.warm"]);
+        assert!(near(look(&s, b), [0.75, 0.5, 0.25, 1.0]));
+        s.engine.undo().unwrap();
+        assert_eq!(file(&s, a), "lut.film");
+        assert_eq!(s.cut().blobs["lut.film"].as_slice(), ident.as_slice(), "undo brings it back");
+    }
+
+    /// The sample with the palette panel and the node graph side by side,
+    /// a Palette map node selected.
+    fn palette_and_graph() -> (EditorHarness, NodeId) {
+        let mut s = crate::sample::build_sample();
+        let id = add_node(&mut s, NodeKind::effect(FxKind::PaletteMap));
+        s.selected_node = Some(id);
+        let mut h = EditorHarness::with_state(s);
+        let mut dock = egui_dock::DockState::new(vec![Pane::Palette]);
+        dock.main_surface_mut()
+            .split_right(egui_dock::NodeIndex::root(), 0.4, vec![Pane::NodeGraph]);
+        h.editor_mut().dock = dock;
+        h.run();
+        h.run();
+        (h, id)
+    }
+
+    /// Node `id`'s colour map and the variant it was taken from.
+    fn map_of(
+        s: &AppState,
+        at: anim_core::command::CutRef,
+        id: NodeId,
+    ) -> (Vec<([u8; 4], [u8; 4])>, String) {
+        let cut = s.engine.project.cut(at.scene, at.cut).unwrap();
+        match &cut.graph.node(id).unwrap().kind {
+            NodeKind::Effect { params, .. } => match params.get("map") {
+                Some(FxValue::Map { map, from }) => (map.clone(), from.clone()),
+                v => panic!("not a map: {v:?}"),
+            },
+            k => panic!("not an effect: {k:?}"),
+        }
+    }
+
+    #[test]
+    fn comproom_a_palette_variant_is_picked_in_the_graph_and_followed_in_one_step() {
+        let (mut h, id) = palette_and_graph();
+        let at = h.state().at();
+        // A variant named in the palette panel ...
+        assert!(!h.text_fields().is_empty(), "{}", h.describe());
+        h.focus_text_field(0);
+        h.type_text("night");
+        assert_eq!(h.text_fields()[0], "night", "{}", h.describe());
+        // (The panel's foot sits below the fold of the test window.)
+        h.scroll_to("+ variant");
+        h.click("+ variant");
+        assert_eq!(h.state().palette_variant_names(), ["Ball/night"], "{}", h.describe());
+        // ... is a choice of the Palette map picker, as palette/variant.
+        h.click_combo("none");
+        h.click("Ball/night");
+        assert!(h.describe().contains("ComboBox = \"Ball/night\""), "{}", h.describe());
+        assert_eq!(map_of(h.state(), at, id), (Vec::new(), "Ball/night".into()), "it starts as the model");
+        // A variant chip changes under the picker's drag: nothing lands
+        // mid-gesture ...
+        let depth = h.state().engine.history_len();
+        let ball = h.state().palettes.characters[0].roles[1].color;
+        let blue = [30, 60, 160, 255];
+        h.scroll_to("night");
+        let held = h.rect("night").center();
+        h.press_and_move(held, held + egui::vec2(1.0, 0.0), 2);
+        h.state_mut().palettes.characters[0].variants[0].colors[1] = blue;
+        h.run_frames(3);
+        assert_eq!(h.state().engine.history_len(), depth, "nothing lands mid-drag");
+        // ... and on release the node follows its variant, one undo step.
+        h.release(held);
+        let s = h.state();
+        assert_eq!(s.engine.history_len(), depth + 1, "one step: {}", s.refusal);
+        assert_eq!(s.engine.history().last().unwrap().label, "palette variant");
+        assert_eq!(Some(map_of(s, at, id).0), s.palette_variant_map("Ball/night"));
+        assert_eq!(map_of(s, at, id).0, vec![(ball, blue)]);
+        // The variant removed: the node keeps its last colours, and the
+        // picker says the variant is gone (in Aka).
+        let depth = h.state().engine.history_len();
+        h.scroll_to("×");
+        h.click("×");
+        assert!(h.state().palette_variant_names().is_empty());
+        assert!(h.describe().contains("ComboBox = \"Ball/night (gone)\""), "{}", h.describe());
+        assert_eq!(h.state().engine.history_len(), depth);
+        assert_eq!(map_of(h.state(), at, id).0, vec![(ball, blue)]);
+    }
+
+    #[test]
+    fn comproom_palette_edits_refresh_the_palette_maps_of_every_cut_in_one_step() {
+        use anim_core::command::{Command, CutRef};
+        let mut s = crate::sample::build_sample();
+        s.palettes.characters[0].add_variant("night");
+        let here = s.at();
+        let other = CutRef {
+            scene: here.scene,
+            cut: s.engine.add_cut(here.scene, "C002", 24).unwrap(),
+        };
+        let kind = anim_core::look::effect_with(
+            FxKind::PaletteMap,
+            &[("map", FxValue::Map { map: Vec::new(), from: "Ball/night".into() })],
+        );
+        let (a, b) = (NodeId(s.engine.project.alloc_id()), NodeId(s.engine.project.alloc_id()));
+        s.engine
+            .apply(
+                "add nodes",
+                vec![
+                    Command::AddNode { at: here, id: a, kind: kind.clone() },
+                    Command::AddNode { at: other, id: b, kind },
+                ],
+            )
+            .unwrap();
+        let mut h = EditorHarness::with_state(s);
+        h.run();
+        let fresh = |h: &EditorHarness| h.state().palette_variant_map("Ball/night").unwrap();
+        // The night's ball goes blue: both cuts' nodes follow, one step.
+        let depth = h.state().engine.history_len();
+        h.state_mut().palettes.characters[0].variants[0].colors[1] = [30, 60, 160, 255];
+        h.run();
+        assert_eq!(h.state().engine.history_len(), depth + 1, "every cut, one step");
+        assert!(!fresh(&h).is_empty());
+        for (at, id) in [(here, a), (other, b)] {
+            assert_eq!(map_of(h.state(), at, id), (fresh(&h), "Ball/night".into()));
+        }
+        // A model chip edit is followed too (the model's chip is the key).
+        let depth = h.state().engine.history_len();
+        h.state_mut().palettes.characters[0].roles[1].color = [200, 30, 40, 255];
+        h.run();
+        assert_eq!(h.state().engine.history_len(), depth + 1);
+        assert_eq!(fresh(&h)[0].0, [200, 30, 40, 255]);
+        for (at, id) in [(here, a), (other, b)] {
+            assert_eq!(map_of(h.state(), at, id).0, fresh(&h));
+        }
+        // An edit that leaves every map as it was adds no step.
+        let depth = h.state().engine.history_len();
+        h.state_mut().palettes.characters[0].roles[0].name = "ink".into();
+        h.run();
+        assert_eq!(h.state().engine.history_len(), depth);
+        // A rename re-points the nodes in one step: they keep following.
+        let map = fresh(&h);
+        assert!(h.state_mut().rename_palette_variant(0, 0, "dusk"));
+        h.run();
+        assert_eq!(h.state().engine.history_len(), depth + 1);
+        assert_eq!(h.state().palette_variant_names(), ["Ball/dusk"]);
+        for (at, id) in [(here, a), (other, b)] {
+            assert_eq!(map_of(h.state(), at, id), (map.clone(), "Ball/dusk".into()));
+        }
+        assert!(!h.state_mut().rename_palette_variant(0, 0, "  "), "an empty name is refused");
+    }
+
+    #[test]
+    fn comproom_the_cube_picker_is_the_shells_and_the_look_adds_no_shader() {
+        let mut s = crate::sample::build_sample();
+        let id = add_node(&mut s, NodeKind::effect(FxKind::Lut));
+        s.selected_node = Some(id);
+        let mut h = EditorHarness::with_state(s);
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::NodeGraph]);
+        h.run();
+        h.run();
+        // "load .cube…" asks the shell for its file picker (a window): the
+        // rig logs the request and never opens one.
+        let depth = h.state().engine.history_len();
+        h.click("load .cube…");
+        assert_eq!(h.rig().requests, vec![crate::AppRequest::LoadLut { node: id, key: "lut" }]);
+        assert_eq!(h.state().engine.history_len(), depth, "nothing changes until a file is picked");
+        assert!(!include_str!("fxui.rs").contains(concat!("rfd", "::")), "no picker in the inspector");
+        // D9: the look is CPU maths — no shader module, entry point or
+        // .wgsl file in the core, and the app's no more than before (the
+        // needles are split so this file never counts itself).
+        let count = |dir: &str| {
+            let (mut modules, mut stages, mut wgsl) = (0, 0, 0);
+            for entry in std::fs::read_dir(dir).expect("the sources") {
+                let path = entry.expect("a source entry").path();
+                match path.extension().and_then(|x| x.to_str()) {
+                    Some("rs") => {
+                        let text = std::fs::read_to_string(&path).expect("a source file");
+                        modules += text.matches(concat!("create_shader", "_module(")).count();
+                        for stage in ["vertex", "fragment", "compute"] {
+                            stages += text.matches(&format!("@{stage}")).count();
+                        }
+                    }
+                    Some("wgsl") => wgsl += 1,
+                    _ => {}
+                }
+            }
+            (modules, stages, wgsl)
+        };
+        let core = concat!(env!("CARGO_MANIFEST_DIR"), "/../crates/anim-core/src");
+        assert_eq!(count(core), (0, 0, 0), "the core holds no shader");
+        let (modules, stages, wgsl) = count(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        assert!(modules <= 4 && stages <= 8 && wgsl == 0, "{modules} modules, {stages} entry points, {wgsl} .wgsl");
     }
 }

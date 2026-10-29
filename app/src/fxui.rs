@@ -301,16 +301,16 @@ fn specs_ui(
                 r.rect
             }
             // GM13: a file parameter — the file it holds, and a button that
-            // embeds a .cube in the cut (one undo step with the node).
+            // embeds a .cube in the cut (one undo step with the node). The
+            // file picker is a window: the shell opens it
+            // (AppRequest::LoadLut), only on a real click.
             (ParamKind::Blob, FxValue::Blob { blob }) => {
                 let name = blob.strip_prefix("lut.").unwrap_or(&blob);
                 ui.horizontal(|ui| {
                     ui.label(if name.is_empty() { "no file" } else { name });
                     let load = ui.button("load .cube…").on_hover_text(spec.help);
-                    if load.clicked()
-                        && let Some(path) = rfd::FileDialog::new().add_filter("3D LUT", &["cube"]).pick_file()
-                    {
-                        state.set_lut_file(id, key, &path);
+                    if load.clicked() {
+                        state.graph_ui.lut_pick = Some((id, key));
                     }
                 })
                 .response
@@ -318,10 +318,17 @@ fn specs_ui(
             }
             // GM13: a colour map — the palette variant it was taken from;
             // picking one sets the map (one undo step), and the palette's
-            // variant edits refresh it.
+            // variant edits refresh it. A variant since removed is said in
+            // Aka (the node keeps its last colours).
             (ParamKind::ColorMap, FxValue::Map { from, .. }) => {
                 let choices = state.palette_variant_names();
-                let shown = if from.is_empty() { "none".to_string() } else { from.clone() };
+                let shown = if from.is_empty() {
+                    egui::RichText::new("none")
+                } else if !choices.contains(&from) {
+                    egui::RichText::new(format!("{from} (gone)")).color(crate::plate::AKA)
+                } else {
+                    egui::RichText::new(from.clone())
+                };
                 let mut pick: Option<String> = None;
                 let r = egui::ComboBox::from_id_salt(("fx map", id.0, key))
                     .selected_text(shown)

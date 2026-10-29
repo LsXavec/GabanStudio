@@ -173,6 +173,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         state.meta_dirty = true;
     }
     if let Some((ri, old, new)) = chip_changed {
+        // GM13: a variant chip left as the model's follows the model.
+        for v in &mut state.palettes.characters[ci].variants {
+            if v.colors.get(ri) == Some(&old) {
+                v.colors[ri] = new;
+            }
+        }
         state.offer_recolour(ci, ri, old, new);
     }
     if armed_pot.is_some() {
@@ -217,12 +223,13 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
 }
 
 /// GM13: the character's time-of-day variants (day, evening, night ...): a
-/// row of chips each, aligned to the model's roles. A Palette map node set
-/// to a variant follows it: once a chip edit ends (the pointer is up), the
-/// stale nodes refresh in one undo step.
+/// row of chips each, aligned to the model's roles; double-click a name to
+/// rename it. A Palette map node set to a variant follows it (and the
+/// model): once an edit ends (the pointer is up), the stale nodes refresh
+/// in one undo step ([`AppState::follow_palette_variants`]).
 fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
-    let stale_id = egui::Id::new("palette variants stale");
     let name_id = egui::Id::new("palette variant name");
+    let rename_id = egui::Id::new(("palette variant rename", ci));
     ui.separator();
     plate::legend(ui, "variants").on_hover_text(
         "time-of-day colours of this character, one per chip: a Palette map node in the \
@@ -230,14 +237,48 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
     );
     let mut stale = false;
     let mut remove: Option<usize> = None;
+    let mut renaming: Option<(usize, String)> =
+        ui.data_mut(|d| d.get_temp(rename_id).unwrap_or_default());
+    let mut renamed: Option<(usize, String)> = None;
     let ch = &mut state.palettes.characters[ci];
-    let roles: Vec<[u8; 4]> = ch.roles.iter().map(|r| r.color).collect();
+    let roles: Vec<(String, [u8; 4])> =
+        ch.roles.iter().map(|r| (r.name.clone(), r.color)).collect();
     for (vi, v) in ch.variants.iter_mut().enumerate() {
         ui.horizontal(|ui| {
-            ui.label(&v.name);
-            for (ri, model) in roles.iter().enumerate() {
+            let mut close = false;
+            match renaming.as_mut().filter(|(at, _)| *at == vi) {
+                Some((_, text)) => {
+                    let r = ui.add(egui::TextEdit::singleline(text).desired_width(72.0));
+                    if r.lost_focus() {
+                        // Enter or a click away renames; Esc keeps the name.
+                        if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            renamed = Some((vi, text.clone()));
+                        }
+                        close = true;
+                    } else if !r.has_focus() {
+                        r.request_focus();
+                    }
+                }
+                None => {
+                    if ui
+                        .add(egui::Label::new(&v.name).sense(egui::Sense::click()))
+                        .on_hover_text("double-click to rename")
+                        .double_clicked()
+                    {
+                        renaming = Some((vi, v.name.clone()));
+                    }
+                }
+            }
+            if close {
+                renaming = None;
+            }
+            for (ri, (role, model)) in roles.iter().enumerate() {
                 let mut c = v.colors.get(ri).copied().unwrap_or(*model);
-                if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
+                if ui
+                    .color_edit_button_srgba_unmultiplied(&mut c)
+                    .on_hover_text(format!("{role}: model → {}", v.name))
+                    .changed()
+                {
                     v.colors.resize(ri.max(v.colors.len()), *model);
                     if ri < v.colors.len() {
                         v.colors[ri] = c;
@@ -254,6 +295,7 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
     }
     if let Some(vi) = remove {
         ch.variants.remove(vi);
+        renaming = None;
     }
     let mut name: String = ui.data_mut(|d| d.get_temp(name_id).unwrap_or_default());
     ui.horizontal(|ui| {
@@ -270,14 +312,12 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
         }
     });
     ui.data_mut(|d| d.insert_temp(name_id, name));
+    ui.data_mut(|d| d.insert_temp(rename_id, renaming));
     if stale || remove.is_some() {
         state.meta_dirty = true;
-        ui.data_mut(|d| d.insert_temp(stale_id, true));
     }
-    let pending = ui.data(|d| d.get_temp::<bool>(stale_id).unwrap_or(false));
-    if pending && !ui.input(|i| i.pointer.any_down()) {
-        ui.data_mut(|d| d.insert_temp(stale_id, false));
-        state.refresh_palette_maps();
+    if let Some((vi, text)) = renamed {
+        state.rename_palette_variant(ci, vi, &text);
     }
 }
 

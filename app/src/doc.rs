@@ -566,6 +566,12 @@ pub struct AppState {
     /// GM8: the Build composite DANGER confirm is open — the graph shaped
     /// by hand it would replace has this many nodes.
     pub auto_comp_confirm: Option<usize>,
+    /// GM13: the Build satsuei graph DANGER confirm is open — the graph
+    /// shaped by hand it would replace has this many nodes.
+    pub satsuei_confirm: Option<usize>,
+    /// GM13: the palettes' fingerprint as the Palette map nodes last
+    /// followed it (None until the first frame records it).
+    pub palette_maps_seen: Option<u64>,
     /// GM12: each cut's loop range (in..=out, 0-based), set by Loop in and
     /// Loop out — session view state, rippled by frame inserts and deletes.
     pub loop_ranges: HashMap<(SceneId, CutId), (u32, u32)>,
@@ -688,6 +694,8 @@ impl AppState {
             render_queue: Default::default(),
             convert_confirm: false,
             auto_comp_confirm: None,
+            satsuei_confirm: None,
+            palette_maps_seen: None,
             loop_ranges: HashMap::new(),
             sound_import: None,
             ram: Default::default(),
@@ -782,6 +790,8 @@ impl AppState {
             render_queue: Default::default(),
             convert_confirm: false,
             auto_comp_confirm: None,
+            satsuei_confirm: None,
+            palette_maps_seen: None,
             loop_ranges: HashMap::new(),
             sound_import: None,
             ram: Default::default(),
@@ -4250,12 +4260,35 @@ impl AppState {
     }
 
     /// GM13: why "Build satsuei graph" cannot run on the current cut (None:
-    /// it can).
+    /// it can). A hidden column still counts — the template wires it.
     pub fn satsuei_refusal(&self) -> Option<&'static str> {
-        self.cut()
-            .render_order()
+        anim_core::look::template_columns(self.cut())
             .is_empty()
             .then_some("this cut has no drawing column to build from — add one on the X-sheet")
+    }
+
+    /// GM13 "Build satsuei graph" as the verb runs it: at once over an
+    /// empty graph or an earlier auto-comp; over a graph shaped by hand,
+    /// the DANGER confirm first (as [`Self::request_auto_comp`]).
+    pub fn request_satsuei(&mut self) {
+        if let Some(why) = self.satsuei_refusal() {
+            self.refuse(format!("refused — {why}"));
+            return;
+        }
+        match self.satsuei_hand_built() {
+            Some(n) => self.satsuei_confirm = Some(n),
+            None => {
+                self.build_satsuei();
+            }
+        }
+    }
+
+    /// GM13: the node count when the current cut's graph was shaped by hand
+    /// (not empty, not an auto-comp) — building over it asks first.
+    pub fn satsuei_hand_built(&self) -> Option<usize> {
+        let graph = &self.cut().graph;
+        let n = graph.nodes().count();
+        (n > 0 && auto_chain(graph).is_none()).then_some(n)
     }
 
     /// GM13 "Build satsuei graph": the current cut's graph becomes the
@@ -4314,47 +4347,127 @@ impl AppState {
         })
     }
 
-    /// GM13: bring every Palette map node of the current cut up to its
-    /// variant's colours (after a variant changed) — one undo step; false
-    /// when nothing was stale.
+    /// GM13: rename variant `vi` of character `ci`. The palettes live
+    /// outside undo; the Palette map nodes set to the old name are
+    /// re-pointed to the new one in one undo step, so they keep following
+    /// it. False when the name is empty, unchanged or taken.
+    pub fn rename_palette_variant(&mut self, ci: usize, vi: usize, name: &str) -> bool {
+        use anim_core::fx::{FxKind, FxValue};
+        use anim_core::graph::NodeKind;
+        let name = name.trim();
+        let Some(p) = self.palettes.characters.get(ci) else {
+            return false;
+        };
+        let Some(v) = p.variants.get(vi) else {
+            return false;
+        };
+        if name.is_empty() || p.variants.iter().any(|o| o.name == name) {
+            return false;
+        }
+        let old = format!("{}/{}", p.name, v.name);
+        let new = format!("{}/{}", p.name, name);
+        let mut cmds = Vec::new();
+        for scene in &self.engine.project.scenes {
+            for cut in &scene.cuts {
+                let at = CutRef {
+                    scene: scene.id,
+                    cut: cut.id,
+                };
+                for node in cut.graph.nodes() {
+                    let NodeKind::Effect {
+                        fx: FxKind::PaletteMap,
+                        params,
+                        binds,
+                    } = &node.kind
+                    else {
+                        continue;
+                    };
+                    let Some(FxValue::Map { map, from }) = params.get("map") else {
+                        continue;
+                    };
+                    if *from != old {
+                        continue;
+                    }
+                    let mut params = params.clone();
+                    params.set(
+                        "map",
+                        FxValue::Map {
+                            map: map.clone(),
+                            from: new.clone(),
+                        },
+                    );
+                    cmds.push(Command::SetNodeKind {
+                        at,
+                        id: node.id,
+                        kind: NodeKind::Effect {
+                            fx: FxKind::PaletteMap,
+                            params,
+                            binds: binds.clone(),
+                        },
+                    });
+                }
+            }
+        }
+        self.palettes.characters[ci].variants[vi].name = name.to_string();
+        self.meta_dirty = true;
+        if cmds.is_empty() {
+            self.status = format!("variant renamed to {name}");
+        } else {
+            let r = self.engine.apply("rename variant", cmds);
+            self.report(r, "variant renamed — its Palette map nodes follow");
+        }
+        true
+    }
+
+    /// GM13: bring every Palette map node of every cut up to its variant's
+    /// colours (after a palette or variant changed) — one undo step; false
+    /// when nothing was stale. A variant that is gone leaves its nodes as
+    /// they are (the picker says so, in Aka).
     pub fn refresh_palette_maps(&mut self) -> bool {
         use anim_core::fx::{FxKind, FxValue};
         use anim_core::graph::NodeKind;
-        let at = self.at();
         let mut cmds = Vec::new();
-        for node in self.cut().graph.nodes() {
-            let NodeKind::Effect {
-                fx: FxKind::PaletteMap,
-                params,
-                binds,
-            } = &node.kind
-            else {
-                continue;
-            };
-            let Some(FxValue::Map { map, from }) = params.get("map") else {
-                continue;
-            };
-            let Some(fresh) = self.palette_variant_map(from) else {
-                continue;
-            };
-            if fresh != *map {
-                let mut params = params.clone();
-                params.set(
-                    "map",
-                    FxValue::Map {
-                        map: fresh,
-                        from: from.clone(),
-                    },
-                );
-                cmds.push(Command::SetNodeKind {
-                    at,
-                    id: node.id,
-                    kind: NodeKind::Effect {
+        for scene in &self.engine.project.scenes {
+            for cut in &scene.cuts {
+                let at = CutRef {
+                    scene: scene.id,
+                    cut: cut.id,
+                };
+                for node in cut.graph.nodes() {
+                    let NodeKind::Effect {
                         fx: FxKind::PaletteMap,
                         params,
-                        binds: binds.clone(),
-                    },
-                });
+                        binds,
+                    } = &node.kind
+                    else {
+                        continue;
+                    };
+                    let Some(FxValue::Map { map, from }) = params.get("map") else {
+                        continue;
+                    };
+                    let Some(fresh) = self.palette_variant_map(from) else {
+                        continue;
+                    };
+                    if fresh != *map {
+                        let mut params = params.clone();
+                        params.set(
+                            "map",
+                            FxValue::Map {
+                                map: fresh,
+                                from: from.clone(),
+                            },
+                        );
+                        cmds.push(Command::SetNodeKind {
+                            at,
+                            id: node.id,
+                            kind: NodeKind::Effect {
+                                fx: FxKind::PaletteMap,
+                                params,
+                                binds: binds.clone(),
+                            },
+                        });
+                    }
+                }
             }
         }
         if cmds.is_empty() {
@@ -4363,6 +4476,38 @@ impl AppState {
         let r = self.engine.apply("palette variant", cmds);
         self.report(r, "palette maps follow the variant");
         true
+    }
+
+    /// GM13: the Palette map nodes follow the palettes. Called every frame
+    /// with the pointer up: when the palettes changed since the last call
+    /// (a model chip, a role, a variant chip), every stale node is
+    /// refreshed in one undo step — a drag on a chip is one gesture, its
+    /// one step lands on release. The first call only records.
+    pub fn follow_palette_variants(&mut self, pointer_down: bool) -> bool {
+        if pointer_down {
+            return false;
+        }
+        let seen = self.palettes_fingerprint();
+        let Some(last) = self.palette_maps_seen.replace(seen) else {
+            return false;
+        };
+        last != seen && self.refresh_palette_maps()
+    }
+
+    /// GM13: a hash of every palette's model and variant colours.
+    fn palettes_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for p in &self.palettes.characters {
+            p.name.hash(&mut h);
+            for r in &p.roles {
+                (&r.name, r.color).hash(&mut h);
+            }
+            for v in &p.variants {
+                (&v.name, &v.colors).hash(&mut h);
+            }
+        }
+        h.finish()
     }
 
     /// GM13: embed the .cube at `path` as the LUT of node `id`'s file
@@ -4381,10 +4526,13 @@ impl AppState {
         }
     }
 
-    /// GM13: a .cube's bytes stored in the cut (`Cut::blobs`, key
-    /// `lut.<name>`) and node `id`'s file parameter `key` pointed at it —
-    /// one undo step. A file that does not parse is refused with the
-    /// reason, and nothing changes.
+    /// GM13: a .cube's bytes stored in the cut (`Cut::blobs`) and node
+    /// `id`'s file parameter `key` pointed at it — one undo step. The key
+    /// is `lut.<name>`, or `lut.<name>~2`, `~3` ... while another node
+    /// holds that key with other bytes, so two LUTs of one name keep their
+    /// own looks. The file it replaces leaves the cut in the same step when
+    /// no other node uses it. A file that does not parse is refused with
+    /// the reason, and nothing changes.
     pub fn set_lut(&mut self, id: NodeId, key: &str, name: &str, bytes: Vec<u8>) -> bool {
         use anim_core::fx::FxValue;
         use anim_core::graph::NodeKind;
@@ -4396,12 +4544,40 @@ impl AppState {
             return false;
         }
         let at = self.at();
-        let blob = format!("lut.{name}");
-        let Ok(node) = self.cut().graph.node(id) else {
+        let cut = self.cut();
+        let Ok(node) = cut.graph.node(id) else {
             return false;
         };
         let NodeKind::Effect { fx, params, binds } = &node.kind else {
             return false;
+        };
+        // Does a file parameter other than this one point at `blob`?
+        let held = |blob: &str| {
+            cut.graph.nodes().any(|n| match &n.kind {
+                NodeKind::Effect { params, .. } => params.0.iter().any(|(k, v)| {
+                    matches!(v, FxValue::Blob { blob: b } if b == blob)
+                        && (n.id != id || k != key)
+                }),
+                _ => false,
+            })
+        };
+        let blob = (1..)
+            .map(|n| match n {
+                1 => format!("lut.{name}"),
+                n => format!("lut.{name}~{n}"),
+            })
+            .find(|k| match cut.blobs.get(k) {
+                None => true,
+                Some(b) => **b == bytes || !held(k),
+            })
+            .expect("a free key");
+        let replaced = match params.get(key) {
+            Some(FxValue::Blob { blob: old })
+                if *old != blob && cut.blobs.contains_key(old) && !held(old) =>
+            {
+                Some(old.clone())
+            }
+            _ => None,
         };
         let mut params = params.clone();
         params.set(key, FxValue::Blob { blob: blob.clone() });
@@ -4410,7 +4586,7 @@ impl AppState {
             params,
             binds: binds.clone(),
         };
-        let before = self.cut().blobs.get(&blob).cloned();
+        let before = cut.blobs.get(&blob).cloned();
         let mut cmds = Vec::new();
         if before.as_deref() != Some(&bytes) {
             cmds.push(Command::SetCutBlob {
@@ -4422,6 +4598,16 @@ impl AppState {
         }
         if node.kind != kind {
             cmds.push(Command::SetNodeKind { at, id, kind });
+        }
+        // The file it replaces goes too, when nothing else uses it.
+        if let Some(old) = replaced {
+            let before = cut.blobs.get(&old).cloned();
+            cmds.push(Command::SetCutBlob {
+                at,
+                key: old,
+                before,
+                after: None,
+            });
         }
         if cmds.is_empty() {
             return false;

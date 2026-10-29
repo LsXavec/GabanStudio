@@ -2930,6 +2930,12 @@ impl App {
                     ed.state.begin_sound_import(&path, as_track, Some(ctx.clone()));
                 }
             }
+            AppRequest::LoadLut { node, key } => {
+                let Some(ed) = &mut self.editor else { return };
+                if let Some(path) = rfd::FileDialog::new().add_filter("3D LUT", &["cube"]).pick_file() {
+                    ed.state.set_lut_file(node, key, &path);
+                }
+            }
         }
     }
 }
@@ -2960,6 +2966,12 @@ pub enum AppRequest {
     /// is the shell's (it is a window); the decode then runs on a worker.
     ImportSound,
     AddSoundTrack,
+    /// GM13: the inspector's "load .cube…" for this node's file parameter
+    /// — the .cube picker is the shell's too (a window, on a real click).
+    LoadLut {
+        node: anim_core::ids::NodeId,
+        key: &'static str,
+    },
 }
 
 impl Editor {
@@ -3343,6 +3355,8 @@ impl Editor {
             // GM8: the auto-comp — the whole graph in one undo step (a
             // graph shaped by hand asks first, DANGER).
             Action::BuildComposite => s.request_auto_comp(),
+            // GM13: and the satsuei look's chain, asked the same way.
+            Action::BuildSatsuei => s.request_satsuei(),
             Action::KindKey
             | Action::KindBreakdown
             | Action::KindInbetween
@@ -3579,6 +3593,8 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::AddSoundTrack
             | Action::RamPreview
             | Action::LipFlap
+            // GM13: the satsuei graph replaces nodes the stroke may feed.
+            | Action::BuildSatsuei
     )
 }
 
@@ -4936,6 +4952,10 @@ impl Editor {
             Action::BuildComposite if s.cut().render_order().is_empty() => {
                 Err("no column reaches the composite")
             }
+            // GM13: the toolbar button's own refusal, said the same way.
+            Action::BuildSatsuei if s.satsuei_refusal().is_some() => {
+                Err(s.satsuei_refusal().unwrap_or("no drawing column"))
+            }
             a if stroke_guarded(a) && self.canvas.stroke_active() => {
                 Err("finish the stroke first")
             }
@@ -5209,6 +5229,7 @@ impl Editor {
         self.leave_modal(ctx);
         self.convert_modal(ctx);
         self.auto_comp_modal(ctx);
+        self.satsuei_modal(ctx);
         // The title is rebuilt only when what it shows changes.
         let dirty = self.state.is_dirty();
         let stale = self.title_from.as_ref().is_none_or(|(d, f, n)| {
@@ -5262,6 +5283,49 @@ impl Editor {
                 self.state.auto_comp();
             }
             Some(false) => self.state.auto_comp_confirm = None,
+            None => {}
+        }
+    }
+
+    /// GM13: "Build satsuei graph" over a graph shaped by hand — the same
+    /// DANGER confirm (it replaces every node; undo brings them back).
+    fn satsuei_modal(&mut self, ctx: &egui::Context) {
+        let Some(n) = self.state.satsuei_confirm else {
+            return;
+        };
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("gm13_satsuei")).show(ctx, |ui| {
+            plate::legend(ui, "build satsuei graph");
+            ui.label(format!(
+                "Replace this hand-built graph ({n} nodes) with the satsuei chain? Undo brings it back."
+            ));
+            ui.label(
+                egui::RichText::new(
+                    "passes per character, diffusion, para, light wrap, grade, grain and vignette",
+                )
+                .color(plate::legend_dim()),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if plate::danger_hint(ui, "Replace", "replaces every node of this cut's graph") {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                    choice = Some(false);
+                }
+            });
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => {
+                self.state.satsuei_confirm = None;
+                self.state.build_satsuei();
+            }
+            Some(false) => self.state.satsuei_confirm = None,
             None => {}
         }
     }
@@ -6723,6 +6787,14 @@ impl Editor {
         // GM7 CHIP PICK: the active chip lasts while the brush holds its
         // colour (a wheel, preset or key that moves the brush clears it).
         self.state.sync_active_chip(self.canvas.brush_color);
+        // GM13: the Palette map nodes follow the palettes — one undo step
+        // once an edit ends (the pointer is up); and the inspector's .cube
+        // picker is the shell's (a window, only on a real click).
+        let down = ui.input(|i| i.pointer.any_down());
+        self.state.follow_palette_variants(down);
+        if let Some((node, key)) = self.state.graph_ui.lut_pick.take() {
+            self.requests.push(AppRequest::LoadLut { node, key });
+        }
         // GM3: the chords every tooltip names; the palette (its keys taken
         // before anything else reads them) and the help windows.
         menus::publish(ui.ctx(), binds);

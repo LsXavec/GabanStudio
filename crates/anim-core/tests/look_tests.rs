@@ -8,12 +8,13 @@
 use std::sync::Arc;
 
 use anim_core::Engine;
+use anim_core::camera::CameraState;
 use anim_core::color::ColorLaw;
 use anim_core::command::{Command, CutRef};
 use anim_core::export::graph_composite;
 use anim_core::export::graph_composite_pixel_law;
 use anim_core::fx::{FxBinds, FxCtx, FxKind, FxParams, FxValue, FxValues, Image, blur};
-use anim_core::graph::{self, NodeKind};
+use anim_core::graph::{self, NodeKind, PlaneSpec};
 use anim_core::ids::*;
 use anim_core::look::{
     self, ABSORB_RADIUS, PAINT_PASS, Tiles, absorb_trace_lines, apply_lut, directional_blur,
@@ -21,7 +22,7 @@ use anim_core::look::{
 };
 use anim_core::model::{CelLayer, Cut, Drawing, LayerRole};
 use anim_core::raster::{TILE, TILE_LEN, TileData, f16_bits_to_f32, f32_to_f16_bits};
-use anim_core::xsheet::{ColumnDef, ColumnKind, Exposure};
+use anim_core::xsheet::{ColumnDef, ColumnKind, Exposure, ParamInterp, ParamKey};
 
 const RED: [f32; 4] = [0.8, 0.1, 0.1, 1.0];
 const GREEN: [f32; 4] = [0.1, 0.7, 0.2, 1.0];
@@ -719,6 +720,19 @@ fn the_satsuei_template_builds_the_pinned_chain_in_one_step_and_renders_on_the_c
     assert!(matches!(c.graph.node(feed).unwrap().kind, NodeKind::Effect { fx: FxKind::Vignette, .. }));
     let passes = c.graph.nodes().filter(|n| n.kind.is_filtered_source()).count();
     assert_eq!(passes, 4, "paint, shadow, highlight and lines");
+    // The shadow's tone is a cool multiply (the paint already holds the
+    // kage colour), pinned; the closing Grade is neutral.
+    let grades: Vec<&NodeKind> = c
+        .graph
+        .nodes()
+        .map(|n| &n.kind)
+        .filter(|k| matches!(k, NodeKind::Effect { fx: FxKind::Grade, .. }))
+        .collect();
+    assert_eq!(grades, [&look::shadow_tone(), &NodeKind::effect(FxKind::Grade)]);
+    let NodeKind::Effect { params, .. } = look::shadow_tone() else {
+        unreachable!("an effect")
+    };
+    assert_eq!((params.get("gain"), params.get("temperature")), (Some(&f(0.9)), Some(&f(-0.4))));
     let px = graph_composite(c, ColorLaw::Srgb, 0, 64, 36).expect("the chain renders");
     assert!(px.iter().all(|v| v.is_finite()));
     // The character is in it: the lit paint differs from the bare BG.
@@ -728,4 +742,138 @@ fn the_satsuei_template_builds_the_pinned_chain_in_one_step_and_renders_on_the_c
     e.undo().unwrap();
     assert_eq!(cut(&e, at).graph, before, "undo restores the graph exactly");
     assert_eq!(cut(&e, at).meta, meta);
+}
+
+/// Build the satsuei graph on `at` in one step.
+fn build_template(e: &mut Engine, at: CutRef) {
+    let mut next = e.project.next_id;
+    let cmds = satsuei_template(cut(e, at), at, || {
+        next += 1;
+        NodeId(next - 1)
+    });
+    e.project.next_id = next;
+    e.apply("build satsuei graph", cmds).unwrap();
+}
+
+#[test]
+fn the_satsuei_template_keeps_the_layout_camera_and_a_hidden_column() {
+    let (mut e, at) = satsuei_rig();
+    let (bg, a) = {
+        let c = cut(&e, at);
+        (c.xsheet.columns[0].id, c.xsheet.columns[1].id)
+    };
+    // The layout room's camera: a keyed pan, a T.U., two planes with the
+    // BG on the far one (pin 1); and the cel column hidden for now.
+    let pan = e.add_param_column(at, "cam pan x").unwrap();
+    let key = |frame: u32, value: f32| Command::SetParamKey {
+        at,
+        column: pan,
+        frame,
+        key: Some(ParamKey { value, interp: ParamInterp::Linear, handles: None }),
+    };
+    let NodeKind::Camera { mut params, mut binds, .. } = NodeKind::camera() else {
+        unreachable!("a camera")
+    };
+    params.set("zoom", f(1.25));
+    binds.set("pan_x", Some(pan));
+    let layout = NodeKind::Camera { planes: vec![PlaneSpec { depth: 0.0 }, PlaneSpec { depth: 2.0 }], params, binds };
+    let (src, cam) = (e.alloc_node_id(), e.alloc_node_id());
+    e.apply(
+        "layout",
+        vec![
+            key(0, 0.0),
+            key(1, 120.0),
+            Command::AddNode { at, id: src, kind: NodeKind::source(bg) },
+            Command::AddNode { at, id: cam, kind: layout.clone() },
+            Command::Connect { at, from: src, from_pin: 0, to: cam, to_pin: 1 },
+            Command::SetColumnDef { at, column: a, def: ColumnDef { kind: ColumnKind::Cel, hidden: true, locked: false } },
+        ],
+    )
+    .unwrap();
+    assert!(!cut(&e, at).render_order().contains(&a), "hidden: out of the render order");
+    build_template(&mut e, at);
+    let c = cut(&e, at);
+    // One camera, its kind as the layout room left it, the BG on its plane.
+    let cams: Vec<(NodeId, &NodeKind)> = c
+        .graph
+        .nodes()
+        .filter(|n| matches!(n.kind, NodeKind::Camera { .. }))
+        .map(|n| (n.id, &n.kind))
+        .collect();
+    assert_eq!(cams.len(), 1);
+    assert_eq!(cams[0].1, &layout, "the keys, binds and planes are kept");
+    assert_eq!(CameraState::at(c, cams[0].0, 1).unwrap().pan_x, 120.0, "the pan still moves it");
+    // The hidden column is in the chain all the same (it draws nothing
+    // until it is shown).
+    let fg = "Normal(Screen(Multiply(A[color,shadow,highlight,shadow_line,highlight_line;absorb], \
+              Grade(Matte(A[shadow], -))), Glow(A[highlight], -)), A[line])";
+    let cam = "Camera(-, BG)";
+    let want = format!(
+        "Output(Vignette(Grain(Grade(Light wrap(Para(Diffusion(Normal({cam}, {fg})), -), {cam}, {fg})))))"
+    );
+    assert_eq!(spell(c, c.graph.output.unwrap()), want);
+    let hidden = graph_composite(c, ColorLaw::Srgb, 0, 64, 36).expect("renders");
+    e.apply(
+        "show",
+        vec![Command::SetColumnDef { at, column: a, def: ColumnDef { kind: ColumnKind::Cel, hidden: false, locked: false } }],
+    )
+    .unwrap();
+    let shown = graph_composite(cut(&e, at), ColorLaw::Srgb, 0, 64, 36).expect("renders");
+    let skin = (20 * 64 + 35) * 4;
+    assert_ne!(hidden[skin..skin + 3], shown[skin..skin + 3], "shown again, the character is in the look");
+}
+
+// ---- Criterion 3: steady off neutral, and the grain pinned ----------------------------
+
+#[test]
+fn every_look_fx_is_deterministic_off_neutral_and_grain_matches_its_pinned_bits() {
+    let law = ColorLaw::Srgb;
+    let chip = [222u8, 178, 140, 255];
+    let mut src = swatch(16, 12);
+    src.set_pixel(5, 5, law.texel(chip).map(f16_bits_to_f32));
+    let bg = solid(16, 12, [0.9, 0.8, 0.2, 1.0]);
+    let blobs = std::collections::BTreeMap::from([(
+        "lut.invert".to_string(),
+        Arc::new(inverting_cube().into_bytes()),
+    )]);
+    let (white, black) = (FxValue::Color([255, 255, 255, 255]), FxValue::Color([0, 0, 0, 255]));
+    let off: [(FxKind, Vec<(&str, FxValue)>); 9] = [
+        (FxKind::Para, vec![("color_a", white.clone()), ("color_b", black), ("angle", f(30.0)), ("amount", f(0.6))]),
+        (FxKind::LightWrap, vec![("radius", f(3.0)), ("intensity", f(1.0))]),
+        (FxKind::Rim, vec![("width", f(2.0)), ("intensity", f(0.8)), ("color", white)]),
+        (FxKind::Vignette, vec![("amount", f(1.0)), ("radius", f(0.2))]),
+        (FxKind::Grain, vec![("amount", f(0.1))]),
+        (FxKind::MotionBlur, vec![("length", f(5.0)), ("angle", f(30.0))]),
+        (FxKind::Lut, vec![("lut", FxValue::Blob { blob: "lut.invert".into() }), ("mix", f(1.0))]),
+        (FxKind::Matte, vec![("invert", FxValue::Bool(true))]),
+        (
+            FxKind::PaletteMap,
+            vec![("map", FxValue::Map { map: vec![(chip, [40, 50, 110, 255])], from: "Ball/night".into() })],
+        ),
+    ];
+    let kinds: Vec<FxKind> = off.iter().map(|(k, _)| *k).collect();
+    assert_eq!(kinds, FxKind::LOOK, "every look kind is checked");
+    for (kind, set) in &off {
+        let ins: Vec<Option<&Image>> = match kind {
+            FxKind::LightWrap => vec![Some(&src), Some(&bg), None],
+            _ => vec![Some(&src)],
+        };
+        let render = || {
+            let ctx = FxCtx { frame: 7, blobs: Some(&blobs) };
+            kind.apply_in(&values(*kind, set), law, &ins, src.w, src.h, ctx)
+        };
+        let once = render();
+        assert_ne!(once, src, "{} off neutral changes the image", kind.name());
+        assert_eq!(once, render(), "{}: the same inputs give the same pixels", kind.name());
+    }
+    // Grain at amount 0.1, seed 0, frame 7 on flat grey, to the bit: a
+    // changed hash or noise shape shows here.
+    let grey = solid(4, 4, [0.5, 0.5, 0.5, 1.0]);
+    let grain = run_at(FxKind::Grain, &[("amount", f(0.1))], &[Some(&grey)], 7);
+    let bits: Vec<u32> = [(0, 0), (3, 1), (1, 2), (2, 3)]
+        .iter()
+        .map(|&(x, y)| grain.pixel(x, y)[0].to_bits())
+        .collect();
+    // 0.49382, 0.40295, 0.43066, 0.59279: grey ± up to the amount.
+    assert_eq!(bits, [1056757384, 1053708078, 1054637936, 1058521389], "pinned grain");
 }

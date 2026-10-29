@@ -48,8 +48,8 @@ use rayon::prelude::*;
 use crate::color::{ColorLaw, is_paint_role};
 use crate::command::{Command, CutRef};
 use crate::fx::{self, FxKind, FxValue, FxValues, Image, LUMA, ParamKind};
-use crate::graph::{BlendMode, NodeKind, place_node};
-use crate::ids::NodeId;
+use crate::graph::{BlendMode, NodeKind, PlaneSpec, place_node};
+use crate::ids::{ColumnId, NodeId};
 use crate::model::{Cut, Drawing, LayerRole};
 use crate::raster::{TILE, TileCoord, TileData, f16_bits_to_f32, f32_to_f16_bits};
 use crate::xsheet::ColumnKind;
@@ -578,15 +578,69 @@ fn srgb_eotf(s: f32) -> f32 {
     }
 }
 
-pub(crate) fn lut_fx(v: &FxValues, law: ColorLaw, src: &Image, file: Option<&[u8]>) -> Image {
+/// A cut's file as worked out once: a file is an immutable shared handle
+/// (`Cut::blobs`), so while a memo holds one its address names those
+/// bytes. Its hash and its LUT are not redone on every frame's render.
+struct FileMemo {
+    file: Arc<Vec<u8>>,
+    hash: u64,
+    lut: Option<Option<Arc<Lut3D>>>,
+}
+
+/// How many files the memo keeps (a look rarely reads more than two).
+const FILE_MEMOS: usize = 4;
+
+fn with_memo<T>(file: &Arc<Vec<u8>>, f: impl FnOnce(&mut FileMemo) -> T) -> T {
+    use std::sync::{Mutex, OnceLock};
+    static MEMOS: OnceLock<Mutex<Vec<FileMemo>>> = OnceLock::new();
+    let mut memos = MEMOS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let i = match memos.iter().position(|m| Arc::ptr_eq(&m.file, file)) {
+        Some(i) => i,
+        None => {
+            if memos.len() >= FILE_MEMOS {
+                memos.remove(0);
+            }
+            memos.push(FileMemo {
+                file: file.clone(),
+                hash: crate::value::fnv1a(file),
+                lut: None,
+            });
+            memos.len() - 1
+        }
+    };
+    f(&mut memos[i])
+}
+
+/// The content hash of a cut's file (FNV-1a), once per file.
+pub fn file_hash(file: &Arc<Vec<u8>>) -> u64 {
+    with_memo(file, |m| m.hash)
+}
+
+/// A cut's file read as a .cube LUT (None: it does not read), once per
+/// file.
+pub fn file_lut(file: &Arc<Vec<u8>>) -> Option<Arc<Lut3D>> {
+    with_memo(file, |m| {
+        let bytes = m.file.clone();
+        m.lut
+            .get_or_insert_with(|| {
+                std::str::from_utf8(&bytes)
+                    .ok()
+                    .and_then(|t| parse_cube(t).ok())
+                    .map(Arc::new)
+            })
+            .clone()
+    })
+}
+
+pub(crate) fn lut_fx(v: &FxValues, law: ColorLaw, src: &Image, file: Option<&Arc<Vec<u8>>>) -> Image {
     let mix = v.float("mix");
     if mix <= 0.0 {
         return src.clone();
     }
-    let Some(lut) = file
-        .and_then(|b| std::str::from_utf8(b).ok())
-        .and_then(|t| parse_cube(t).ok())
-    else {
+    let Some(lut) = file.and_then(file_lut) else {
         return src.clone(); // no file, or not one that reads: as it is
     };
     // A .cube grades display-encoded colour: the Srgb law stores it; the
@@ -716,7 +770,7 @@ pub fn fx_recipe_extra(fx: FxKind, v: &FxValues, cut: &Cut, frame: u32) -> Strin
     }
     for s in fx.specs().iter().filter(|s| matches!(s.kind, ParamKind::Blob)) {
         match cut.blobs.get(v.blob(s.key)) {
-            Some(b) => extra.push_str(&format!(",{}#{:016x}", s.key, crate::value::fnv1a(b))),
+            Some(b) => extra.push_str(&format!(",{}#{:016x}", s.key, file_hash(b))),
             None => extra.push_str(&format!(",{}#-", s.key)),
         }
     }
@@ -782,16 +836,66 @@ impl<F: FnMut() -> NodeId> Build<'_, F> {
     }
 }
 
+/// The columns the satsuei template builds from: every column but a Ref,
+/// in band order (BG, Cel, Book; sheet order within a band). A hidden one
+/// is in too — its source draws nothing until the column is shown again.
+pub fn template_columns(cut: &Cut) -> Vec<ColumnId> {
+    let mut order: Vec<(u8, usize, ColumnId)> = cut
+        .xsheet
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (cut.column_def(c.id).kind, i, c.id))
+        .filter(|(kind, _, _)| *kind != ColumnKind::Ref)
+        .map(|(kind, i, id)| (kind.band(), i, id))
+        .collect();
+    order.sort();
+    order.into_iter().map(|(_, _, id)| id).collect()
+}
+
+/// Does node `id`, or anything feeding it, draw `column`?
+fn draws_column(cut: &Cut, id: NodeId, column: ColumnId) -> bool {
+    let mut todo = vec![id];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(id) = todo.pop() {
+        let Ok(n) = cut.graph.node(id) else {
+            continue;
+        };
+        if !seen.insert(id) {
+            continue;
+        }
+        if matches!(n.kind, NodeKind::DrawingSource { column: c, .. } if c == column) {
+            return true;
+        }
+        todo.extend(n.inputs.iter().flatten().map(|&(src, _)| src));
+    }
+    false
+}
+
+/// The template's shadow tone: a cool multiply over the painted kage (the
+/// paint pass already holds the shadow colour, so this only cools and
+/// deepens it a little — red 0.81, green 0.9, blue 0.99 of the paint).
+pub fn shadow_tone() -> NodeKind {
+    effect_with(
+        FxKind::Grade,
+        &[("gain", FxValue::Float(0.9)), ("temperature", FxValue::Float(-0.4))],
+    )
+}
+
 /// GM13 "Build satsuei graph": the cut's graph becomes the satsuei chain,
 /// one batch (the old nodes and their places go first, so the batch is the
 /// whole graph and one undo step); every node stays an ordinary, editable
-/// node. `alloc` hands out node ids, as for the auto-comp.
+/// node. `alloc` hands out node ids, as for the auto-comp. It builds from
+/// [`template_columns`] (a hidden column too).
 ///
-/// - The BG columns (bottom → top, Normal) through a Camera.
+/// - The BG columns (bottom → top, Normal) through a Camera. The graph's
+///   first Camera keeps its kind — the layout room's keys, binds and planes
+///   — and each BG column goes on the plane it fed there (else the first).
+///   The characters and Book stay held to the frame, off the camera.
 /// - Each cel column: its paint pass ([`PAINT_PASS`], trace lines absorbed),
-///   its Shadow pass → Matte (white) → Grade (gain 0.75) multiplied over the
-///   paint, its Highlight pass → Glow screened on, and its Line pass laid
-///   over (Normal); the characters stack in sheet order.
+///   its Shadow pass → Matte (white) → Grade ([`shadow_tone`]) multiplied
+///   over the paint, its Highlight pass → Glow screened on, and its Line
+///   pass laid over (Normal); the characters stack in sheet order.
 /// - Book columns over the characters (Normal).
 /// - The characters over the BG camera, then Diffusion, Para, Light wrap
 ///   (background: the BG camera; matte: the characters), Grade, Grain and
@@ -802,6 +906,26 @@ pub fn satsuei_template(cut: &Cut, at: CutRef, alloc: impl FnMut() -> NodeId) ->
         at,
         alloc,
         cmds: Vec::new(),
+    };
+    // The camera work carries over: the first Camera's kind (never fewer
+    // than one plane), and the plane each BG column fed.
+    let old_cam = cut.graph.nodes().find(|n| matches!(n.kind, NodeKind::Camera { .. }));
+    let mut cam_kind = old_cam.map_or_else(NodeKind::camera, |n| n.kind.clone());
+    if let NodeKind::Camera { planes, .. } = &mut cam_kind
+        && planes.is_empty()
+    {
+        planes.push(PlaneSpec::default());
+    }
+    let plane_count = cam_kind.input_count().max(1);
+    let plane_of = |column: ColumnId| -> usize {
+        old_cam
+            .and_then(|cam| {
+                cam.inputs
+                    .iter()
+                    .position(|i| i.is_some_and(|(src, _)| draws_column(cut, src, column)))
+            })
+            .filter(|&pin| pin < plane_count)
+            .unwrap_or(0)
     };
     for n in cut.graph.nodes() {
         b.cmds.push(Command::RemoveNode { at, id: n.id });
@@ -816,27 +940,30 @@ pub fn satsuei_template(cut: &Cut, at: CutRef, alloc: impl FnMut() -> NodeId) ->
         row += 1.0;
         (row - 1.0) * ROW
     };
-    let (mut bg, mut chars, mut book): (Option<NodeId>, Option<NodeId>, Option<NodeId>) = (None, None, None);
-    for column in cut.render_order() {
+    // The BG's stack on each camera plane, then the characters and Book.
+    let mut bg: Vec<Option<NodeId>> = vec![None; plane_count];
+    let (mut chars, mut book): (Option<NodeId>, Option<NodeId>) = (None, None);
+    for column in template_columns(cut) {
         match cut.column_def(column).kind {
             ColumnKind::Bg => {
                 let y = next_row();
                 let src = b.add(NodeKind::source(column), (0.0, y));
-                bg = Some(b.stack(bg, src, BlendMode::Normal, (COL, y)));
+                let plane = plane_of(column);
+                bg[plane] = Some(b.stack(bg[plane], src, BlendMode::Normal, (COL, y)));
             }
             ColumnKind::Book => {
                 let y = next_row();
                 let src = b.add(NodeKind::source(column), (0.0, y));
                 book = Some(b.stack(book, src, BlendMode::Normal, (4.0 * COL, y)));
             }
-            // A Ref column never renders (and is not in the order).
+            // A Ref column never renders (and is not in the columns).
             ColumnKind::Ref => {}
             ColumnKind::Cel => {
                 let (y0, y1, y2, y3) = (next_row(), next_row(), next_row(), next_row());
                 let paint = b.add(NodeKind::pass(column, PAINT_PASS, true), (0.0, y0));
                 let shadow = b.add(NodeKind::pass(column, &[LayerRole::Shadow], false), (0.0, y1));
                 let matte = b.then(shadow, effect_with(FxKind::Matte, &[("white", FxValue::Bool(true))]), (COL, y1));
-                let tone = b.then(matte, effect_with(FxKind::Grade, &[("gain", FxValue::Float(0.75))]), (2.0 * COL, y1));
+                let tone = b.then(matte, shadow_tone(), (2.0 * COL, y1));
                 let shaded = b.stack(Some(paint), tone, BlendMode::Multiply, (3.0 * COL, y1));
                 let high = b.add(NodeKind::pass(column, &[LayerRole::Highlight], false), (0.0, y2));
                 let glow = b.then(
@@ -859,7 +986,17 @@ pub fn satsuei_template(cut: &Cut, at: CutRef, alloc: impl FnMut() -> NodeId) ->
         }
     }
     let y = (row - 1.0).max(0.0) * ROW;
-    let cam = bg.map(|bg| b.then(bg, NodeKind::camera(), (2.0 * COL, 0.0)));
+    // The camera films the BG; a kept camera stays even with no BG to
+    // film, so its keys are never lost.
+    let cam = (old_cam.is_some() || bg.iter().any(Option::is_some)).then(|| {
+        let cam = b.add(cam_kind, (2.0 * COL, 0.0));
+        for (pin, stack) in bg.iter().enumerate() {
+            if let Some(stack) = *stack {
+                b.wire(stack, cam, pin as u16);
+            }
+        }
+        cam
+    });
     let fg = match (chars, book) {
         (Some(c), Some(k)) => Some(b.stack(Some(c), k, BlendMode::Normal, (5.0 * COL, y))),
         (c, k) => c.or(k),

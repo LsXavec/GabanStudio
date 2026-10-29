@@ -732,13 +732,14 @@ impl FxKind {
             Self::Blur => Some("bokashi"),
             Self::Glow => Some("tōkakō"),
             Self::Diffusion => Some("difyūjon"),
-            Self::Para => Some("para"),
+            // GM13: the satsuei desk's words; Para is its own trade word.
+            Self::LightWrap => Some("raito rappu"),
+            Self::Rim => Some("rimu raito"),
+            Self::Grain => Some("noizu"),
+            Self::MotionBlur => Some("nagashi (bure)"),
             Self::Grade
-            | Self::LightWrap
-            | Self::Rim
+            | Self::Para
             | Self::Vignette
-            | Self::Grain
-            | Self::MotionBlur
             | Self::Lut
             | Self::Matte
             | Self::PaletteMap => None,
@@ -772,11 +773,11 @@ impl FxKind {
             ],
             Self::Grade => &["colour", "color", "correction", "levels", "exposure"],
             Self::Para => &["gradient", "shade", "light", "satsuei"],
-            Self::LightWrap => &["wrap", "edge light", "background light", "satsuei"],
+            Self::LightWrap => &["wrap", "raito rappu", "edge light", "background light", "satsuei"],
             Self::Rim => &["rim", "rimu raito", "edge light", "backlight"],
             Self::Vignette => &["corners", "edge darkening", "lens"],
-            Self::Grain => &["noise", "film grain", "texture"],
-            Self::MotionBlur => &["directional blur", "speed", "smear", "camera shake", "nagashi"],
+            Self::Grain => &["noise", "noizu", "film grain", "texture"],
+            Self::MotionBlur => &["directional blur", "speed", "smear", "camera shake", "nagashi", "bure"],
             Self::Lut => &["cube", ".cube", "look", "grade", "colour", "color"],
             Self::Matte => &["mask", "key", "choke", "spread", "cut out"],
             Self::PaletteMap => &["variant", "time of day", "evening", "night", "recolour", "recolor"],
@@ -899,8 +900,8 @@ impl FxKind {
             Self::Grain => look::grain(v, src, ctx.frame),
             Self::MotionBlur => look::directional_blur(src, v.float("length"), v.float("angle")),
             Self::Lut => {
-                let text = ctx.blobs.and_then(|b| b.get(v.blob("lut")));
-                look::lut_fx(v, law, src, text.map(|t| t.as_slice()))
+                let file = ctx.blobs.and_then(|b| b.get(v.blob("lut")));
+                look::lut_fx(v, law, src, file)
             }
             Self::Matte => look::matte(v, src, pin(1)),
             Self::PaletteMap => look::palette_map(src, law, v.map("map")),

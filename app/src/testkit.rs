@@ -264,6 +264,22 @@ impl EditorHarness {
         self.run();
     }
 
+    /// GM13: click the ONE combo box showing `value` — a combo carries its
+    /// value, not a name (`ComboBox = "…"` in [`describe`](Self::describe)).
+    #[track_caller]
+    pub fn click_combo(&mut self, value: &str) {
+        let role = egui::accesskit::Role::ComboBox;
+        let shows = |n: &egui_kittest::Node<'_>| n.value().as_deref() == Some(value);
+        let count = self.h.query_all_by_role(role).filter(|n| shows(n)).count();
+        assert!(count == 1, "click_combo({value:?}): {count} combo box(es)\n{}", self.describe());
+        self.h
+            .query_all_by_role(role)
+            .find(|n| shows(n))
+            .expect("counted")
+            .click();
+        self.run();
+    }
+
     /// Does an egui text field hold keyboard focus right now?
     pub fn typing(&self) -> bool {
         self.h.ctx.text_edit_focused()
