@@ -220,8 +220,10 @@ mod tests {
     use anim_core::raster::{TILE, TILE_LEN, TileCoord, TileData};
     use eframe::egui;
 
-    /// The menus a well-formed path may name.
-    const MENUS: [&str; 8] = ["File", "Edit", "View", "Sheet", "Cut", "Room", "Window", "Help"];
+    /// The menus a well-formed path may name (GM7: and the project's own).
+    const MENUS: [&str; 9] = [
+        "File", "Edit", "View", "Sheet", "Project", "Cut", "Room", "Window", "Help",
+    ];
 
     #[test]
     fn cmdui_every_action_has_help_a_group_and_a_place() {

@@ -104,6 +104,29 @@ pub fn sheet_rows(binds: &[Binding], query: &str) -> Vec<(Action, String)> {
     rows
 }
 
+/// GM7: the canvas gestures no chord names — a modifier on a tool's click
+/// or drag — as (gesture, what it does). F1's sheet lists them under its
+/// keys, so a refill is found where every other key is.
+pub const GESTURES: [(&str, &str); 5] = [
+    ("Space+drag", "move the view (Shift+drag turns it)"),
+    ("Alt+click", "pick a colour (a chip's exact colour arms the chip)"),
+    ("Shift+click with the pen", "rule on from the last stroke"),
+    ("Shift+click with fill", "refill the clicked flat in the brush colour (nuri-naoshi)"),
+    ("Ctrl+Shift+click with fill", "replace that colour on the whole layer"),
+];
+
+/// The gesture rows for `query`, matched like [`sheet_rows`]. Pure.
+pub fn gesture_rows(query: &str) -> Vec<(&'static str, &'static str)> {
+    let q = query.trim().to_lowercase();
+    GESTURES
+        .iter()
+        .filter(|(gesture, what)| {
+            q.is_empty() || gesture.to_lowercase().contains(&q) || what.to_lowercase().contains(&q)
+        })
+        .copied()
+        .collect()
+}
+
 impl crate::Editor {
     /// One action as a menu item: the last segment of its menu path, its
     /// chord at the right, a one-line tooltip; greyed with the reason when
@@ -124,7 +147,11 @@ impl crate::Editor {
         let resp = ui.add_enabled(can.is_ok(), button);
         // The chord is drawn, not spoken: the item answers to its name.
         plate::speak(&resp, egui::WidgetType::Button, on, name);
-        let tip = tip_with(action, chord);
+        let mut tip = tip_with(action, chord);
+        if let Some(note) = self.menu_note(action) {
+            tip.push('\n');
+            tip.push_str(&note);
+        }
         let resp = match can {
             Ok(()) => resp.on_hover_text(tip),
             Err(why) => resp.on_disabled_hover_text(format!("{tip}\nnot now: {why}")),
@@ -164,11 +191,34 @@ impl crate::Editor {
         }
     }
 
+    /// GM7: a line of the document's own state under an item's tooltip —
+    /// the colour law beside the migration that changes it.
+    fn menu_note(&self, action: Action) -> Option<String> {
+        match action {
+            Action::ConvertColorsToSrgb => Some(format!(
+                "this project: {}",
+                self.state.engine.project.color_law.label()
+            )),
+            _ => None,
+        }
+    }
+
     /// The registry-only menus: edit, view, sheet.
     pub(crate) fn plain_menus(&mut self, ui: &mut egui::Ui) {
         for (label, menu) in [("edit", "Edit"), ("view", "View"), ("sheet", "Sheet")] {
             ui.menu_button(label, |ui| self.menu_items(ui, menu));
         }
+    }
+
+    /// GM7: the project's own menu — its colour law (D8), said where the
+    /// migration that changes it sits.
+    pub(crate) fn project_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("project", |ui| {
+            let law = self.state.engine.project.color_law.label();
+            ui.label(egui::RichText::new(format!("colour law: {law}")).color(plate::legend_dim()));
+            ui.separator();
+            self.menu_items(ui, "Project");
+        });
     }
 
     pub(crate) fn help_menu(&mut self, ui: &mut egui::Ui) {
@@ -201,6 +251,20 @@ impl crate::Editor {
                             ui.label(a.label()).on_hover_text(a.help());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 plate::value(ui, &chord);
+                            });
+                        });
+                    }
+                    // GM7: then the gestures, under the same find.
+                    let gestures = gesture_rows(&help.sheet_query);
+                    if !gestures.is_empty() {
+                        ui.add_space(4.0);
+                        plate::legend(ui, "canvas gestures");
+                    }
+                    for (gesture, what) in gestures {
+                        ui.horizontal(|ui| {
+                            ui.label(what);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                plate::value(ui, gesture);
                             });
                         });
                     }
@@ -238,6 +302,12 @@ impl crate::Editor {
                     "6. Hold Space and drag the canvas to move the view (Shift+drag turns it); \
                      Alt+click picks a colour; Shift+click rules on from the last stroke."
                         .into(),
+                    // GM7: the refill gestures, on the fill tool.
+                    format!(
+                        "7. With fill ({}), Shift+click refills a painted flat in the brush colour; \
+                         Ctrl+Shift+click replaces that colour on the whole layer.",
+                        k(FillTool)
+                    ),
                 ] {
                     ui.label(line);
                 }

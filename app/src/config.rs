@@ -457,7 +457,7 @@ impl Action {
             Action::ShiftTrace => "Shift & trace",
             Action::ResetShift => "Reset shift & trace",
             Action::ConvertColorsToSrgb => "Convert colours to sRGB…",
-            Action::ShowPaintCheck => "Paint check",
+            Action::ShowPaintCheck => "Nuri check (paint check)",
         }
     }
 
@@ -493,7 +493,7 @@ impl Action {
             ToggleCompositeView => "Show the node graph's composite instead of the edit view.",
             SelectTool => "Select, move, scale and rotate ink.",
             BrushTool => "Back to the brush.",
-            FillTool => "Flood-fill closed areas with the brush colour.",
+            FillTool => "Flood-fill closed areas with the brush colour. Shift+click: refill a flat; Ctrl+Shift+click: layer-wide.",
             LassoFillTool => "Draw a loop and it fills with the brush colour.",
             SelectAll => "Select everything on the active layer.",
             Undo => "Take back the last step.",
@@ -575,7 +575,7 @@ impl Action {
             ShiftTrace => "Shift & trace: drag moves the selected light-table ghost, Shift+drag turns it (view only).",
             ResetShift => "Put every shifted light-table ghost back where it belongs.",
             ConvertColorsToSrgb => "Store this saved project's colours as exact sRGB chips (a backup is written first).",
-            ShowPaintCheck => "Open the Paint check pane: unpainted holes and off-palette colours, click to jump.",
+            ShowPaintCheck => "Open the nuri check pane: unpainted holes and off-palette colours, click to jump.",
         }
     }
 
@@ -697,8 +697,9 @@ impl Action {
             ResetShift => "View/Light table/Reset shift",
             FrameCurves => "View/Frame curves",
             ShowCurves => "Window/Curves (graph editor)",
-            ShowPaintCheck => "Window/Paint check",
-            ConvertColorsToSrgb => "File/Convert colours to sRGB…",
+            ShowPaintCheck => "Window/Nuri check (paint check)",
+            // GM7: the project's own menu, beside its colour law.
+            ConvertColorsToSrgb => "Project/Convert colours to sRGB…",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             // Each item is its room detent's Stage::name (a test holds them
@@ -730,7 +731,7 @@ impl Action {
             ToggleEraser => &["rubber", "erase"],
             ToggleAlphaLock => &["preserve alpha", "lock transparency"],
             SelectTool => &["move", "transform", "lasso select"],
-            FillTool => &["bucket", "paint"],
+            FillTool => &["bucket", "paint", "refill", "nuri-naoshi", "replace colour"],
             LassoFillTool => &["lasso fill", "fill loop"],
             NewDrawing => &["new cel", "blank"],
             ClearFrameKey => &["hold", "extend"],
@@ -801,7 +802,15 @@ impl Action {
             ResetShift => &["shift and trace", "light table", "reset"],
             // GM7: the ink-and-paint words.
             ConvertColorsToSrgb => &["colour law", "color space", "srgb", "convert colours"],
-            ShowPaintCheck => &["paint check", "holes", "unpainted", "stray colours"],
+            ShowPaintCheck => &[
+                "paint check",
+                "nuri",
+                "shiage kensa",
+                "kensa",
+                "holes",
+                "unpainted",
+                "stray colours",
+            ],
             _ => &[],
         }
     }
@@ -1046,10 +1055,17 @@ impl Action {
             PinToLightTable => Some(alt("P")),
             ShiftTrace => Some(alt("T")),
             ResetShift => Some(alt("0")),
+            // GM7: the nuri check is run again after every paint pass, so
+            // it opens from the keys, beside the command palette's Ctrl+K. The
+            // colour-law migration stays chordless (a DANGER verb).
+            ShowPaintCheck => Some(Chord {
+                shift: true,
+                ..ctrl("K")
+            }),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomEdit | ShowCurves | InterpHold | InterpLinear | InterpEase
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
-            | HandlesFlat | HandlesBroken | ConvertColorsToSrgb | ShowPaintCheck => None,
+            | HandlesFlat | HandlesBroken | ConvertColorsToSrgb => None,
         }
     }
 }

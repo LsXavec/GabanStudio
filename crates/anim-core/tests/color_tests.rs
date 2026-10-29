@@ -18,7 +18,10 @@ use anim_core::fill::{FillOpts, fill_diff, flood_fill_mask};
 use anim_core::graph::{BlendMode, NodeKind};
 use anim_core::ids::*;
 use anim_core::model::{CelLayer, LayerRole};
-use anim_core::raster::{TILE, TILE_LEN, TileCoord, TileData, f16_bits_to_f32, f32_to_f16_bits};
+use anim_core::raster::{
+    TILE, TILE_LEN, TileCoord, TileData, TileDiff, f16_bits_to_f32, f32_to_f16_bits,
+};
+use anim_core::value::fnv1a;
 use anim_core::xsheet::{ColumnDef, Exposure};
 
 /// Two tiles wide, so floods and scans cross a tile seam.
@@ -276,6 +279,9 @@ fn color_law_persists_and_a_file_without_it_loads_legacy() {
         .unwrap();
     drop(conn);
     assert!(Engine::load(&path).is_err());
+    // Said as a newer file (D2's wording), not as a corrupt one.
+    let err = Engine::load(&path).err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(err.contains("newer Gaban Studio") && err.contains("cmyk"), "{err}");
     std::fs::remove_file(&path).unwrap();
 }
 
@@ -335,6 +341,13 @@ fn legacy_render_is_unchanged_by_the_law_seam() {
     let cut = r.cut();
     let old = render_graph_frame(cut, 0, W, H).unwrap();
     assert_eq!(old, render_graph_frame_law(cut, ColorLaw::Legacy, 0, W, H).unwrap());
+    // Pinned: this rig's export bytes as 27cbf36 (the last build before the
+    // law existed) rendered them, hashed — the graph path (the Solid under
+    // the art) and the column path.
+    const PRE_GM7_GRAPH: u64 = 0x34bc_5ae0_8cdf_e645;
+    const PRE_GM7_COLUMN: u64 = 0x9df0_3433_c410_5ed5;
+    assert_eq!(fnv1a(&old), PRE_GM7_GRAPH, "the Legacy export changed");
+    assert_eq!(fnv1a(&render_frame(cut, 0, W, H)), PRE_GM7_COLUMN, "the Legacy export changed");
     // A painted Legacy pixel exports as the linear value of its chip.
     let lin = |c: u8| (srgb_to_linear(c) * 255.0).round() as u8;
     assert_eq!(px(&old, 20, 20), [lin(C1[0]), lin(C1[1]), lin(C1[2]), 255]);
@@ -522,7 +535,7 @@ fn refill_changes_only_the_clicked_connected_region() {
     let r = refill_rig();
     let (before, line) = (r.tiles(r.color), r.tiles(r.line));
     let to = ColorLaw::Srgb.premultiplied(C2);
-    let diff = color::refill(&before, &line, (10, 10), W, H, 2, to).unwrap();
+    let diff = color::refill(&before, &line, (10, 10), W, H, 2, to, None).unwrap();
     let mut after = before.clone();
     for (coord, _, a) in diff {
         match a {
@@ -544,7 +557,7 @@ fn replace_all_changes_every_exact_match_in_the_layer_and_nothing_else() {
     let r = refill_rig();
     let before = r.tiles(r.color);
     let to = ColorLaw::Srgb.premultiplied(C2);
-    let (diff, n) = color::replace_all(&before, (80, 5), W, H, to).unwrap();
+    let (diff, n) = color::replace_all(&before, (80, 5), W, H, to, None).unwrap();
     assert_eq!(n, 100 * H as usize);
     let mut after = before.clone();
     for (coord, _, a) in diff {
@@ -562,15 +575,47 @@ fn refill_refuses_off_paper_bare_line_and_same_colour() {
     let (color, line) = (r.tiles(r.color), r.tiles(r.line));
     let to = ColorLaw::Srgb.premultiplied(C2);
     let same = ColorLaw::Srgb.premultiplied(C1);
-    let refill = |seed, c| color::refill(&color, &line, seed, W, H, 2, c).err();
+    let refill = |seed, c| color::refill(&color, &line, seed, W, H, 2, c, None).err();
     assert_eq!(refill((-1, 4), to), Some(RefillRefusal::OffPaper));
     assert_eq!(refill((4, H as i32), to), Some(RefillRefusal::OffPaper));
     assert_eq!(refill((125, 4), to), Some(RefillRefusal::Bare));
     assert_eq!(refill((70, 4), to), Some(RefillRefusal::OnLine));
     assert_eq!(refill((4, 4), same), Some(RefillRefusal::Unchanged));
-    let all = |seed| color::replace_all(&color, seed, W, H, to).err();
+    let all = |seed| color::replace_all(&color, seed, W, H, to, None).err();
     assert_eq!(all((125, 4)), Some(RefillRefusal::Bare));
     assert_eq!(all((200, 4)), Some(RefillRefusal::OffPaper));
+}
+
+/// A layer's tiles after a diff.
+fn applied(before: &Tiles, diff: TileDiff) -> Tiles {
+    let mut after = before.clone();
+    for (coord, _, a) in diff {
+        match a {
+            Some(t) => after.insert(coord, t),
+            None => after.remove(&coord),
+        };
+    }
+    after
+}
+
+#[test]
+fn refill_and_replace_all_keep_inside_the_selection() {
+    let r = refill_rig();
+    let (color, line) = (r.tiles(r.color), r.tiles(r.line));
+    let to = ColorLaw::Srgb.premultiplied(C2);
+    // The select tool's box over x 20..40, y 0..32 of the C1 flat.
+    let sel = [(20.0, 0.0), (40.0, 0.0), (40.0, 32.0), (20.0, 32.0)];
+    let mut want = rect(20, 0, 40, 32);
+    want.sort_by_key(|&(x, y)| (y, x));
+    let diff = color::refill(&color, &line, (25, 10), W, H, 2, to, Some(&sel)).unwrap();
+    assert_eq!(changed(&color, &applied(&color, diff)), want, "refill stays in the selection");
+    let (diff, n) = color::replace_all(&color, (25, 10), W, H, to, Some(&sel)).unwrap();
+    assert_eq!(n, 20 * 32);
+    assert_eq!(changed(&color, &applied(&color, diff)), want, "replace-all too");
+    // A click outside the selection is refused, as a plain fill's is.
+    let outside = Some(RefillRefusal::OutsideSelection);
+    assert_eq!(color::refill(&color, &line, (5, 10), W, H, 2, to, Some(&sel)).err(), outside);
+    assert_eq!(color::replace_all(&color, (25, 40), W, H, to, Some(&sel)).err(), outside);
 }
 
 // ---- The paint check --------------------------------------------------------------
@@ -651,4 +696,58 @@ fn paint_check_reads_each_drawing_once_at_its_first_frame_in_range() {
     assert!(found.iter().all(|f| f.frame == 6));
     // A range that never shows the drawing checks nothing.
     assert!(color::paint_check(r.cut(), r.law(), (W, H), 0..6, &[C1], 4).is_empty());
+}
+
+#[test]
+fn paint_check_walls_holes_with_the_cel_not_its_rough_or_reference() {
+    let mut r = check_rig(false);
+    let want = color::paint_check(r.cut(), r.law(), (W, H), 0..24, &[C1], 4);
+    assert_eq!(want.len(), 3);
+    // A visible rough, LO reference and correction layer over the whole
+    // paper: they are not the cel, so the holes under them still show.
+    let (at, d) = (r.at, r.d);
+    for (name, role) in [
+        ("rough", LayerRole::Rough),
+        ("lo", LayerRole::Reference),
+        ("fix", LayerRole::Correction),
+    ] {
+        let id = r.engine.alloc_layer_id();
+        let layer = CelLayer::with_role(id, name, role);
+        let add = Command::AddCelLayer { at, drawing: d, index: 0, layer };
+        r.engine.apply("layer", vec![add]).unwrap();
+        let plate = ColorLaw::Srgb.texel([90, 90, 200, 255]);
+        paint(&mut r.engine, at, d, id, &rect(0, 0, W as i32, H as i32), plate);
+    }
+    let found = color::paint_check(r.cut(), r.law(), (W, H), 0..24, &[C1], 4);
+    assert_eq!(found, want, "the same holes and stray as before");
+    // Paint does close a hole, on any paint layer.
+    r.paint(r.shadow, &rect(5, 5, 20, 20), C1);
+    let found = color::paint_check(r.cut(), r.law(), (W, H), 0..24, &[C1], 4);
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].bbox, [57, 5, 80, 20]);
+}
+
+#[test]
+fn paint_check_reports_soft_paint_as_one_soft_edge_per_layer() {
+    let mut r = check_rig(true);
+    // Half-covered chip paint — two feathered specks on the color layer,
+    // one on the shadow layer: an edge, not a wrong colour.
+    let soft = ColorLaw::Srgb.texel([C1[0], C1[1], C1[2], 128]);
+    let (at, d, color, shadow) = (r.at, r.d, r.color, r.shadow);
+    let mut specks = rect(100, 50, 104, 54);
+    specks.extend(rect(110, 10, 112, 12));
+    paint(&mut r.engine, at, d, color, &specks, soft);
+    paint(&mut r.engine, at, d, shadow, &rect(120, 50, 122, 52), soft);
+    let found = color::paint_check(r.cut(), r.law(), (W, H), 0..24, &[C1], 4);
+    assert_eq!(found.len(), 2, "one per layer: {found:?}");
+    assert!(found.iter().all(|f| f.kind == FindingKind::SoftEdge), "{found:?}");
+    let what = |f: &Finding| (f.layer, f.bbox, f.pixels);
+    assert_eq!(what(&found[0]), (Some(color), [100, 10, 112, 54], 16 + 4));
+    assert_eq!(what(&found[1]), (Some(shadow), [120, 50, 122, 52], 4));
+    assert_eq!(found[0].color.map(|c| c[3]), Some(128), "its coverage");
+    // Opaque paint of a non-chip colour is still a stray, not an edge.
+    r.paint(r.color, &rect(100, 30, 102, 32), STRAY);
+    let found = color::paint_check(r.cut(), r.law(), (W, H), 0..24, &[C1], 4);
+    let kinds: Vec<_> = found.iter().map(|f| f.kind).collect();
+    assert_eq!(kinds, [FindingKind::Stray, FindingKind::SoftEdge, FindingKind::SoftEdge]);
 }

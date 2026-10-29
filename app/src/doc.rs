@@ -380,7 +380,9 @@ pub struct AppState {
     /// pixels from text copied elsewhere since.
     pub pixel_clip_text: Option<String>,
     /// GM7 CHIP PICK: the active chip — a role of the active character an
-    /// exact eyedrop matched (None = the brush colour is no chip).
+    /// exact eyedrop, a pot click or the pot lens armed (None = none). The
+    /// swatch board rings it; `sync_active_chip` clears it once the brush
+    /// colour or the character moves off it.
     pub active_chip: Option<usize>,
     /// GM7: the swatch board's "Recolour paint" offer after a chip edit.
     pub recolour_offer: Option<crate::paintcheck::RecolourOffer>,
@@ -3517,13 +3519,44 @@ impl AppState {
         ch.roles.iter().position(|r| r.color[..3] == rgb)
     }
 
+    /// GM7 CHIP PICK: the active chip names a pot of the ACTIVE character
+    /// whose colour IS the brush colour, or nothing — a brush the wheel, a
+    /// preset or a key moved off it, or another character's board, clears
+    /// it (the shell runs this every frame).
+    pub fn sync_active_chip(&mut self, brush: [u8; 4]) {
+        let holds = self.active_chip.is_some_and(|ri| {
+            self.palettes
+                .characters
+                .get(self.active_character)
+                .and_then(|c| c.roles.get(ri))
+                .is_some_and(|r| r.color[..3] == brush[..3])
+        });
+        if !holds {
+            self.active_chip = None;
+        }
+    }
+
+    /// GM7: the pot the swatch board rings — the active chip, else the
+    /// first pot of the brush colour (one ring, never every pot sharing it).
+    pub fn ringed_chip(&self, brush: [u8; 4]) -> Option<usize> {
+        self.active_chip.or_else(|| self.chip_of([brush[0], brush[1], brush[2]]))
+    }
+
     /// GM7 RECOLOUR: a chip (`role` of `character`) went from `from` to
     /// `to` — offer to repaint the paint that used it. A drag through the
-    /// wheel keeps the ORIGINAL colour as the one to replace.
+    /// wheel keeps the ORIGINAL colour as the one to replace; an offer for
+    /// another chip that was never taken is dropped, and the status says so.
     pub fn offer_recolour(&mut self, character: usize, role: usize, from: [u8; 4], to: [u8; 4]) {
         let from = match &self.recolour_offer {
             Some(o) if o.character == character && o.role == role => o.from,
-            _ => from,
+            Some(o) => {
+                self.status = format!(
+                    "recolour offer for '{}' dropped — its paint keeps the old colour",
+                    o.name
+                );
+                from
+            }
+            None => from,
         };
         let name = self
             .palettes
@@ -3566,8 +3599,17 @@ impl AppState {
     /// GM7 REFILL (Shift+click with Fill): the clicked flat — bounded by
     /// the drawing's visible line art — becomes `chip`; with `all`
     /// (Ctrl+Shift+click), every texel of the clicked colour on the layer.
-    /// `under_px` takes the same colour tucked under the line along.
-    pub fn refill_at(&mut self, seed: (i32, i32), chip: [u8; 4], all: bool, under_px: u32) {
+    /// `under_px` takes the same colour tucked under the line along. `clip`
+    /// (the select tool's active selection) confines both, as it does a
+    /// plain fill.
+    pub fn refill_at(
+        &mut self,
+        seed: (i32, i32),
+        chip: [u8; 4],
+        all: bool,
+        under_px: u32,
+        clip: Option<&[(f32, f32)]>,
+    ) {
         if self.active_layer_props().is_some_and(|p| !p.visible) {
             self.status = format!(
                 "layer '{}' is hidden — press A to switch or click its eye",
@@ -3587,7 +3629,7 @@ impl AppState {
         let color = self.engine.project.color_law.premultiplied(chip);
         let target = self.active_layer_tiles().cloned().unwrap_or_default();
         let result = if all {
-            anim_core::color::replace_all(&target, seed, w, h, color).map(|(d, _)| d)
+            anim_core::color::replace_all(&target, seed, w, h, color, clip).map(|(d, _)| d)
         } else {
             let bound = self
                 .cut()
@@ -3598,7 +3640,7 @@ impl AppState {
                     lines.flatten()
                 })
                 .unwrap_or_default();
-            anim_core::color::refill(&target, &bound, seed, w, h, under_px, color)
+            anim_core::color::refill(&target, &bound, seed, w, h, under_px, color, clip)
         };
         use anim_core::color::RefillRefusal as RR;
         match result {
@@ -3610,6 +3652,9 @@ impl AppState {
             Err(RR::Bare) => self.refuse("nothing to refill — no paint there (a plain fill paints bare paper)"),
             Err(RR::OnLine) => self.refuse("clicked on the line art — refill the paint beside it"),
             Err(RR::Unchanged) => self.status = "that paint already is the brush colour".into(),
+            Err(RR::OutsideSelection) => {
+                self.status = "clicked outside the selection (Esc clears it)".into()
+            }
         }
     }
 

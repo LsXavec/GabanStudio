@@ -1224,7 +1224,9 @@ impl CanvasView {
             CanvasTool::LassoFill => "lasso fill: draw a loop — it fills with the brush             colour; softness feathers inward, grow shifts the edge"
                 .into(),
             CanvasTool::Fill => "fill: click a region — line art bounds it; gap closes line \
-            breaks, under tucks the flat beneath the lines; Alt+click picks a colour"
+            breaks, under tucks the flat beneath the lines; Alt+click picks a colour; \
+            Shift+click refills a painted flat with the brush colour, Ctrl+Shift+click \
+            replaces that colour on the whole layer"
                 .into(),
             CanvasTool::Paint => "paint: Alt+click picks a colour, Shift+click rules on from \
             the last stroke, Space+drag pans (Shift+drag turns)"
@@ -3162,7 +3164,9 @@ impl CanvasView {
                     Action::FillTool,
                     "click a region; line art bounds it. gap closes line \
                     breaks; under tucks the flat beneath the lines; cel/layer \
-                    picks the boundary reference",
+                    picks the boundary reference. Shift+click refills a painted \
+                    flat (nuri-naoshi); Ctrl+Shift+click replaces its colour on \
+                    the whole layer",
                 )
                 .clicked()
                     && !fill_on
@@ -6057,7 +6061,12 @@ impl CanvasView {
             }
             return;
         }
-        if !response.drag_started_by(egui::PointerButton::Primary) {
+        // The canvas senses clicks too, so a still press starts no drag: it
+        // lands as a click on release (as the eyedropper's does), a press
+        // that moves as a drag start — one fill either way.
+        if !(response.clicked_by(egui::PointerButton::Primary)
+            || response.drag_started_by(egui::PointerButton::Primary))
+        {
             return;
         }
         let Some(pos) = response.interact_pointer_pos() else {
@@ -6071,13 +6080,15 @@ impl CanvasView {
             return;
         }
         // GM7 REFILL: Shift+click recolours the clicked flat (bounded by the
-        // line), Ctrl+Shift+click every texel of its colour on the layer.
-        // Exact texel work on the CPU, so it needs no GPU.
+        // line), Ctrl+Shift+click every texel of its colour on the layer —
+        // inside the active selection, like every fill. Exact texel work on
+        // the CPU, so it needs no GPU.
         let m = ui.input(|i| i.modifiers);
         if m.shift {
             let p = to_paper(pos);
             let seed = (p.x.floor() as i32, p.y.floor() as i32);
-            state.refill_at(seed, self.brush_color, m.command, self.fill_grow);
+            let clip = self.selection_poly();
+            state.refill_at(seed, self.brush_color, m.command, self.fill_grow, clip.as_deref());
             return;
         }
         if !self.raster {

@@ -3033,6 +3033,8 @@ impl Editor {
                     let ci = ed.state.active_character.min(nchars - 1);
                     if let Some(role) = ed.state.palettes.characters[ci].roles.get(i).cloned() {
                         ed.canvas.brush_color = role.color;
+                        // GM7: the pot it armed is the active chip.
+                        ed.state.active_chip = Some(i);
                         ed.state.status = format!(
                             "pot: {} · {}",
                             ed.state.palettes.characters[ci].name, role.name
@@ -5754,6 +5756,9 @@ impl Editor {
     ) {
         // GM2: never lose work — close guard, save modal, title, autosave.
         self.worksafe_frame(ui.ctx());
+        // GM7 CHIP PICK: the active chip lasts while the brush holds its
+        // colour (a wheel, preset or key that moves the brush clears it).
+        self.state.sync_active_chip(self.canvas.brush_color);
         // GM3: the chords every tooltip names; the palette (its keys taken
         // before anything else reads them) and the help windows.
         menus::publish(ui.ctx(), binds);
@@ -6064,13 +6069,14 @@ impl Editor {
                         }
                     }
                     ui.separator();
-                    // GM7: the colour-law migration (a DANGER confirm).
-                    self.menu_item(ui, Action::ConvertColorsToSrgb);
                     self.menu_item(ui, Action::Settings);
                     self.menu_item(ui, Action::Quit);
                 });
                 // GM3: the registry's own menus.
                 self.plain_menus(ui);
+                // GM7: the project's colour law and its migration (a DANGER
+                // confirm), before the cuts it holds.
+                self.project_menu(ui);
                 // Scene/cut navigation (C2): the model always supported
                 // more than one, there was just no way to reach them.
                 // GM3: beside the sheet menu, in the spec's menu order.
@@ -6434,7 +6440,7 @@ impl Editor {
                         // its settings live on the canvas deck + right rail.
                         // GM14: the Curves pane is the registry's own item
                         // (Window ▸ Curves (graph editor), listed below);
-                        // GM7: so is Window ▸ Paint check.
+                        // GM7: so is Window ▸ Nuri check (paint check).
                         if matches!(*pane, Pane::Brush | Pane::Curves | Pane::PaintCheck) {
                             continue;
                         }

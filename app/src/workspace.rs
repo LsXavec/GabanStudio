@@ -82,7 +82,7 @@ impl Pane {
             Pane::NodeGraph => "Node Graph".into(),
             Pane::History => "History".into(),
             Pane::Curves => "Curves".into(),
-            Pane::PaintCheck => "Paint check".into(),
+            Pane::PaintCheck => "Nuri check (paint check)".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }
@@ -164,13 +164,14 @@ impl Stage {
             }
             Stage::Finishing => {
                 // Edit canvas + live composite viewer SIDE BY SIDE (the A2
-                // motivation), palette under the viewer.
+                // motivation), palette under the viewer — GM7: the nuri
+                // check tabbed behind it, the room's last pass.
                 let mut ds = DockState::new(vec![Pane::Canvas]);
                 let tree = ds.main_surface_mut();
                 let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.18, vec![Pane::XSheet]);
                 tree.split_below(rail, 0.55, vec![Pane::Layers]);
                 let [canvas, side] = tree.split_right(canvas, 0.58, vec![Pane::Viewer(0)]);
-                tree.split_below(side, 0.55, vec![Pane::Palette]);
+                tree.split_below(side, 0.55, vec![Pane::Palette, Pane::PaintCheck]);
                 tree.split_above(canvas, 0.11, vec![Pane::Brush]);
                 ds
             }

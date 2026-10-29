@@ -40,6 +40,10 @@ pub enum EngineError {
     /// rather than loaded with its newer data silently dropped on re-save.
     #[error("this project was made by a newer Gaban Studio (schema version {0}); update to open it")]
     NewerFile(i64),
+    /// GM7 (D8): a colour law this build does not know — a newer release
+    /// stored the colours. Refused rather than shown in the wrong colours.
+    #[error("this project was made by a newer Gaban Studio (colour law '{0}'); update to open it")]
+    NewerColorLaw(String),
     #[error("corrupt project file: {0}")]
     Corrupt(String),
     #[error("file error: {0}")]

@@ -345,6 +345,32 @@ pub enum RefillRefusal {
     OnLine,
     /// That paint already is the new colour.
     Unchanged,
+    /// The click is outside the active selection (refills respect it,
+    /// as fills do).
+    OutsideSelection,
+}
+
+/// The paper pixels inside `clip` (a paper-space polygon: the select tool's
+/// active selection), w×h row-major; None when there is no selection.
+fn clip_grid(clip: Option<&[(f32, f32)]>, w: usize, h: usize) -> Option<Vec<bool>> {
+    let poly = clip.filter(|p| p.len() >= 3)?;
+    let mut grid = vec![false; w * h];
+    // Only the polygon's bbox can hold inside pixels.
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for &(x, y) in poly {
+        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+    }
+    let span = |a: f32, b: f32, n: usize| {
+        let lo = (a.floor() as i64).clamp(0, n as i64) as usize;
+        let hi = (b.ceil() as i64).clamp(0, n as i64) as usize;
+        lo..hi
+    };
+    for y in span(y0, y1, h) {
+        for x in span(x0, x1, w) {
+            grid[y * w + x] = crate::edit::contains(poly, x as f32 + 0.5, y as f32 + 0.5);
+        }
+    }
+    Some(grid)
 }
 
 /// The texel under paper pixel (x, y) of a tile map (bare where no tile).
@@ -362,9 +388,22 @@ fn paper_grid(
     tiles: &BTreeMap<TileCoord, Arc<TileData>>,
     w: usize,
     h: usize,
-    mut pred: impl FnMut([u16; 4]) -> bool,
+    pred: impl FnMut([u16; 4]) -> bool,
 ) -> Vec<bool> {
     let mut grid = vec![false; w * h];
+    mark_grid(&mut grid, tiles, w, h, pred);
+    grid
+}
+
+/// Set (never clear) the cells of a w×h paper `grid` where `pred` holds
+/// for the texel of `tiles`.
+fn mark_grid(
+    grid: &mut [bool],
+    tiles: &BTreeMap<TileCoord, Arc<TileData>>,
+    w: usize,
+    h: usize,
+    mut pred: impl FnMut([u16; 4]) -> bool,
+) {
     for ((tx, ty), tile) in tiles {
         for row in 0..TILE {
             let y = *ty as i64 * TILE as i64 + row as i64;
@@ -382,7 +421,6 @@ fn paper_grid(
             }
         }
     }
-    grid
 }
 
 /// 4-connected flood from `seed` over the cells where `open` holds.
@@ -478,7 +516,10 @@ fn seed_texel(
 /// 0.1 alpha — the drawing's line art), becomes `color` (a premultiplied
 /// stored texel). The same value tucked under the line within `under_px`
 /// of the region goes too, so a recoloured flat leaves no old halo at the
-/// line's soft edge. Paper pixels only; one diff for one PaintTiles.
+/// line's soft edge. `clip` (the active selection) walls the region like
+/// the line does, and a click outside it is refused. Paper pixels only;
+/// one diff for one PaintTiles.
+#[allow(clippy::too_many_arguments)] // the fill tool's own knobs, as flood_fill_mask
 pub fn refill(
     target: &BTreeMap<TileCoord, Arc<TileData>>,
     line: &BTreeMap<TileCoord, Arc<TileData>>,
@@ -487,6 +528,7 @@ pub fn refill(
     height: u32,
     under_px: u32,
     color: [f32; 4],
+    clip: Option<&[(f32, f32)]>,
 ) -> Result<TileDiff, RefillRefusal> {
     let value = seed_texel(target, seed, width, height)?;
     let to = color.map(f32_to_f16_bits);
@@ -494,9 +536,16 @@ pub fn refill(
         return Err(RefillRefusal::Unchanged);
     }
     let (w, h) = (width as usize, height as usize);
-    let same = paper_grid(target, w, h, |t| t == value);
-    let ink = paper_grid(line, w, h, |t| f16_bits_to_f32(t[3]) >= 0.1);
+    let inside = clip_grid(clip, w, h);
     let si = seed.1 as usize * w + seed.0 as usize;
+    if inside.as_ref().is_some_and(|g| !g[si]) {
+        return Err(RefillRefusal::OutsideSelection);
+    }
+    let mut same = paper_grid(target, w, h, |t| t == value);
+    if let Some(g) = &inside {
+        same.iter_mut().zip(g).for_each(|(s, i)| *s &= *i);
+    }
+    let ink = paper_grid(line, w, h, |t| f16_bits_to_f32(t[3]) >= 0.1);
     if ink[si] {
         return Err(RefillRefusal::OnLine);
     }
@@ -513,20 +562,32 @@ pub fn refill(
 
 /// REPLACE-ALL (Ctrl+Shift+click with Fill): every texel of `target`
 /// exactly equal to the clicked one becomes `color`, on and off the
-/// paper. Returns the diff and the pixel count.
+/// paper — or, with `clip` (the active selection), on the paper inside it
+/// only. Returns the diff and the pixel count.
 pub fn replace_all(
     target: &BTreeMap<TileCoord, Arc<TileData>>,
     seed: (i32, i32),
     width: u32,
     height: u32,
     color: [f32; 4],
+    clip: Option<&[(f32, f32)]>,
 ) -> Result<(TileDiff, usize), RefillRefusal> {
     let value = seed_texel(target, seed, width, height)?;
     let to = color.map(f32_to_f16_bits);
     if to == value {
         return Err(RefillRefusal::Unchanged);
     }
-    Ok(swap_texels(target, value, to))
+    let (w, h) = (width as usize, height as usize);
+    let Some(inside) = clip_grid(clip, w, h) else {
+        return Ok(swap_texels(target, value, to));
+    };
+    if !inside[seed.1 as usize * w + seed.0 as usize] {
+        return Err(RefillRefusal::OutsideSelection);
+    }
+    let mut mask = paper_grid(target, w, h, |t| t == value);
+    mask.iter_mut().zip(&inside).for_each(|(m, i)| *m &= *i);
+    let n = mask.iter().filter(|m| **m).count();
+    Ok((paint_mask(target, &mask, w, h, to), n))
 }
 
 /// Square (Chebyshev) dilation by `r`, in place — the fill's grow law.
@@ -557,9 +618,13 @@ fn dilate(bits: &mut [bool], w: usize, h: usize, r: usize) {
 pub enum FindingKind {
     /// Bare paper enclosed by the drawing's art (an unpainted region).
     Hole,
-    /// Paint that is not a chip of the palette (or a soft, part-covered
-    /// texel on a paint layer).
+    /// Opaque paint that is not a chip of the palette.
     Stray,
+    /// Part-covered paint on a paint layer — a feathered, grown or
+    /// anti-aliased edge, whatever its colour: one finding per layer.
+    /// Refill, replace-all and recolour match opaque chips only, so it is
+    /// worth knowing, but it is an edge, not a wrong colour.
+    SoftEdge,
 }
 
 /// One finding: where it is and how big.
@@ -570,13 +635,14 @@ pub struct Finding {
     pub frame: u32,
     pub column: ColumnId,
     pub drawing: DrawingId,
-    /// A stray: its layer. A hole: the drawing's color layer (where its
-    /// paint belongs), if it has one.
+    /// A stray or soft edge: its layer. A hole: the drawing's color layer
+    /// (where its paint belongs), if it has one.
     pub layer: Option<LayerId>,
     /// Paper pixels `[x0, y0, x1, y1)`.
     pub bbox: [u32; 4],
     pub pixels: usize,
-    /// A stray: its colour, decoded as a chip (alpha is its coverage).
+    /// A stray: its colour, decoded as a chip. A soft edge: its first
+    /// texel's, alpha being that texel's coverage.
     pub color: Option<[u8; 4]>,
 }
 
@@ -642,15 +708,19 @@ fn components(grid: &[bool], w: usize, h: usize) -> Vec<Component> {
 /// THE PAINT CHECK over `frames` of a cut (paper `size`): every drawing a
 /// rendering Cel column shows in the range, once each, at the first frame
 /// that shows it.
-/// - **Holes**: 4-connected bare regions of the drawing's flatten that do
-///   not touch the paper's edge (so they are enclosed by its art), at
-///   least `min_px` pixels.
-/// - **Stray colours**: texels on Color / Shadow / Highlight layers that
-///   are not exactly a chip of `chips` stored opaque under `law`, grouped
-///   in 4-connected components per layer.
+/// - **Holes**: 4-connected bare regions of the drawing's art (its visible
+///   layers but reference, rough and correction — those are not the cel)
+///   that do not touch the paper's edge (so they are enclosed by its art),
+///   at least `min_px` pixels.
+/// - **Stray colours**: opaque texels on Color / Shadow / Highlight layers
+///   that are not exactly a chip of `chips` stored under `law`, grouped in
+///   4-connected components per layer.
+/// - **Soft edges**: part-covered texels on those layers, one finding per
+///   layer (their union box and count).
 ///
 /// Pure and deterministic (frame, then sheet order, holes before strays,
-/// scan order), so it runs on any thread.
+/// a layer's strays before its soft edge, scan order), so it runs on any
+/// thread.
 pub fn paint_check(
     cut: &Cut,
     law: ColorLaw,
@@ -707,8 +777,21 @@ fn check_drawing(
     min_px: usize,
     found: &mut Found<'_>,
 ) {
-    let flat = d.flatten();
-    let inked = paper_grid(&flat, w, h, |t| !bare(t));
+    // The cel's art walls the holes: the coverage of every layer its
+    // flatten shows (visible, opacity above 0) but the reference, rough and
+    // correction layers — a visible rough over a bare region must not hide
+    // the hole.
+    let mut inked = vec![false; w * h];
+    for layer in &d.layers {
+        let p = &layer.props;
+        if !p.visible
+            || p.opacity <= 0.0
+            || matches!(p.role, LayerRole::Reference | LayerRole::Rough | LayerRole::Correction)
+        {
+            continue;
+        }
+        mark_grid(&mut inked, &layer.raster.tiles, w, h, |t| !bare(t));
+    }
     let bare_grid: Vec<bool> = inked.iter().map(|b| !*b).collect();
     let home = d
         .layers
@@ -720,13 +803,40 @@ fn check_drawing(
             found(FindingKind::Hole, home, &c, None);
         }
     }
+    let opaque = f32_to_f16_bits(1.0);
     for layer in d.layers.iter().filter(|l| is_paint_role(l.props.role)) {
         let tiles = &layer.raster.tiles;
-        let stray = paper_grid(tiles, w, h, |t| !bare(t) && !chips.contains(&t));
+        let colour_at = |i: usize| {
+            let (x, y) = ((i % w) as i32, (i / w) as i32);
+            law.decode_pixel(texel_of(tiles, x, y).map(f16_bits_to_f32))
+        };
+        let stray = paper_grid(tiles, w, h, |t| t[3] == opaque && !chips.contains(&t));
         for c in components(&stray, w, h) {
-            let (x, y) = ((c.first % w) as i32, (c.first / w) as i32);
-            let px = texel_of(tiles, x, y).map(f16_bits_to_f32);
-            found(FindingKind::Stray, Some(layer.id), &c, law.decode_pixel(px));
+            found(FindingKind::Stray, Some(layer.id), &c, colour_at(c.first));
+        }
+        // Soft texels: one finding for the layer, however many edges.
+        let soft = paper_grid(tiles, w, h, |t| !bare(t) && t[3] != opaque);
+        let mut rim = Component {
+            bbox: [u32::MAX, u32::MAX, 0, 0],
+            pixels: 0,
+            first: 0,
+            edge: false,
+        };
+        for (i, _) in soft.iter().enumerate().filter(|(_, s)| **s) {
+            let (x, y) = ((i % w) as u32, (i / w) as u32);
+            if rim.pixels == 0 {
+                rim.first = i;
+            }
+            rim.pixels += 1;
+            rim.bbox = [
+                rim.bbox[0].min(x),
+                rim.bbox[1].min(y),
+                rim.bbox[2].max(x + 1),
+                rim.bbox[3].max(y + 1),
+            ];
+        }
+        if rim.pixels > 0 {
+            found(FindingKind::SoftEdge, Some(layer.id), &rim, colour_at(rim.first));
         }
     }
 }

@@ -31,6 +31,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         for ci in 0..n_chars {
             let name = state.palettes.characters[ci].name.clone();
             if plate::detent(ui, state.active_character == ci, &name).clicked() {
+                if state.active_character != ci {
+                    // GM7: the active chip is a pot of the board on show.
+                    state.active_chip = None;
+                }
                 state.active_character = ci;
             }
         }
@@ -50,6 +54,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     // and the pot a click armed (the active chip).
     let mut chip_changed: Option<(usize, [u8; 4], [u8; 4])> = None;
     let mut armed_pot: Option<usize> = None;
+    // GM7 CHIP PICK: one ringed pot — the active chip, else the first pot
+    // of the brush colour (two pots sharing a colour never both ring).
+    let ring = state.ringed_chip(canvas.brush_color);
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -61,7 +68,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                             // clicked non-canvas target (XL law).
                             let (pr, presp) =
                                 ui.allocate_exact_size(vec2(44.0, 30.0), Sense::click());
-                            let armed = canvas.brush_color[..3] == role.color[..3];
+                            let armed = ring == Some(ri);
                             plate::speak(
                                 &presp,
                                 egui::WidgetType::Button,
@@ -152,6 +159,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         });
     if let Some(ri) = remove_role {
         state.palettes.characters[ci].roles.remove(ri);
+        // GM7: the pots after it moved up one; the ring finds its colour.
+        state.active_chip = None;
         model_changed = true;
     }
     if model_changed {
@@ -184,6 +193,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             if ui.button("+ character").clicked() && !name.is_empty() {
                 state.palettes.characters.push(CharacterPalette::new(name));
                 state.active_character = state.palettes.characters.len() - 1;
+                state.active_chip = None;
                 state.palette_new_name.clear();
                 state.meta_dirty = true;
             }
@@ -191,6 +201,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         if !state.palettes.characters.is_empty() && plate::danger(ui, "REMOVE CHARACTER") {
             state.palettes.characters.remove(ci);
             state.active_character = 0;
+            state.active_chip = None;
             state.meta_dirty = true;
         }
     }
@@ -209,15 +220,33 @@ fn recolour_offer_ui(ui: &mut egui::Ui, state: &mut AppState) {
         egui::RichText::new(format!("'{}' {} → {}", o.name, hex(o.from), hex(o.to)))
             .color(plate::legend_dim()),
     );
+    // The repaint matches the old colour, not the chip: another character
+    // whose chip shares it (skin tones often do) is repainted too.
+    let shared: Vec<&str> = state
+        .palettes
+        .characters
+        .iter()
+        .enumerate()
+        .filter(|(ci, c)| *ci != o.character && c.roles.iter().any(|r| r.color[..3] == o.from[..3]))
+        .map(|(_, c)| c.name.as_str())
+        .collect();
+    if !shared.is_empty() {
+        ui.label(
+            egui::RichText::new(format!("…also used by {} — its paint changes too", shared.join(", ")))
+                .color(plate::legend_dim()),
+        );
+    }
+    const TOUCHES: &str =
+        "paint layers only (Color/Shadow/Highlight/Custom); line art is never touched; one undo step";
     let (at, scene) = (state.at(), state.view.scene);
     ui.horizontal_wrapped(|ui| {
-        if ui.button("Recolour this cut").clicked() {
+        if ui.button("Recolour this cut").on_hover_text(TOUCHES).clicked() {
             state.recolour(RecolourScope::Cut(at));
         }
-        if ui.button("Recolour this scene").clicked() {
+        if ui.button("Recolour this scene").on_hover_text(TOUCHES).clicked() {
             state.recolour(RecolourScope::Scene(scene));
         }
-        if ui.button("Recolour project").clicked() {
+        if ui.button("Recolour project").on_hover_text(TOUCHES).clicked() {
             state.recolour(RecolourScope::Project);
         }
         if ui.button("Keep paint").on_hover_text("leave the paint as it is").clicked() {

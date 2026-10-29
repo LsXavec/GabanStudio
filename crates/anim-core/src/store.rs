@@ -469,10 +469,11 @@ pub fn load(path: &Path) -> Result<Project> {
     }
     // D8 colour law: absent = Legacy (every file before GM7). An unknown
     // value is a newer law this build can't render faithfully — refuse it
-    // rather than show the wrong colours.
+    // (worded as a newer file, like a newer schema) rather than show the
+    // wrong colours.
     if let Some(key) = get_meta_opt("color_law") {
         project.color_law = crate::color::ColorLaw::from_key(&key)
-            .ok_or_else(|| EngineError::Corrupt(format!("unknown colour law '{key}'")))?;
+            .ok_or(EngineError::NewerColorLaw(key))?;
     }
     // Opaque app-owned data: every `app.`-prefixed meta row, prefix
     // stripped. Absent entirely in files saved before this existed — an

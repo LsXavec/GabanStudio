@@ -2428,3 +2428,21 @@ what was not verified.
   and box). 17 `color_tests`, 6 `inkpaint_*` app tests. Left: the "show unpainted" overlay and palette JSON
   import / export (stretch). Not verified: the real window, the GPU Solid on screen, and the Shift /
   Ctrl+Shift fill click through the harness (the engine side is tested).
+- 2026-10-29 — GM7 review fixes: Convert colours to sRGB… moves to a new Project menu that says the
+  colour law ("colour law: legacy (linear, v0.3)", also under the item's tooltip); an unknown colour law
+  is refused as a newer file (`EngineError::NewerColorLaw`), not as corrupt. A fill click lands on release:
+  the canvas senses clicks too, so a still press started no drag and filled nothing. Shift+click refill
+  and Ctrl+Shift+click replace keep inside the selection (a click outside it says so) and are named in
+  the fill status line, the deck tooltip, the help line, the palette words (refill, nuri-naoshi, replace
+  colour), F1's new canvas-gesture rows and quick start line 7. The paint check is the nuri check (paint
+  check): palette words nuri, kensa, shiage kensa; Ctrl+Shift+K in both keymaps; tabbed behind the palette
+  in the finishing room. Its hole wall is the visible art without Reference / Rough / Correction layers;
+  part-covered paint is one soft edge per layer, not strays; a fresh frame range starts at the playhead;
+  the list belongs to the cut it checked (another cut's list is hidden and its jump refused), turns stale
+  when the paint moves, builds only the rows in view, and a jump arms the finding's layer. The swatch
+  board rings one pot (the active chip, kept while the brush holds its colour; the pot lens arms it too);
+  the recolour buttons say what they touch and name another character that shares the old colour; a
+  dropped offer is said. The Legacy pins are the pre-GM7 build's hashes (built from 27cbf36). 20
+  `color_tests`, 13 `inkpaint_*` app tests (the Shift / Ctrl+Shift click now through the harness). Left:
+  a project-scope recolour and the colour-law convert still run on the UI thread (a worker needs
+  stale-diff protection). Not verified: the real window.
