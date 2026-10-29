@@ -2370,8 +2370,14 @@ impl CanvasView {
         if !raster_available {
             self.raster = false;
         }
+        // With NO GPU at all (the headless testkit and layout probe — the
+        // app always has one) the full deck still lays out so it can be
+        // measured and driven; strokes stay on the CPU path and the GPU
+        // tools refuse with their reason. A user's vector choice keeps the
+        // plain brush slider (GM1).
+        let full_deck = self.raster || !raster_available;
         ui.horizontal_wrapped(|ui| {
-            if self.raster {
+            if full_deck {
                 // ---- THE PENCIL BOX (genga room charter): the three named
                 // pencils + the eraser, one XL detent group with specimen
                 // strokes. Arming a pencil arms the brush; the Tally ring
@@ -2566,7 +2572,7 @@ impl CanvasView {
         // ---- OPTIONS row (spec defect 4): ALWAYS allocated at OPTIONS_H,
         // even when empty, so arming select or fill NEVER moves the strip
         // above — the armed tool's sub-elements land here and nowhere else.
-        if self.raster {
+        if full_deck {
             let full = vec2(ui.available_width(), plate::OPTIONS_H);
             ui.allocate_ui_with_layout(
                 full,

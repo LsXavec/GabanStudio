@@ -1,0 +1,775 @@
+//! THE HEADLESS UI TESTKIT (GM1, D10): drives the REAL editor through egui
+//! frames and finds widgets by their AccessKit names — no window, no wgpu
+//! device, no audio device, no network, no child process. Each harness
+//! owns a fresh temp data dir; nothing here reaches the user's
+//! `%APPDATA%/AnimStudio`. Every test carries `testkit` in its name (the
+//! part's gate counts them).
+
+// The D10 API is the contract later parts drive; not every verb has a
+// test caller yet.
+#![allow(dead_code)]
+
+use std::path::Path;
+
+use eframe::egui;
+use egui_kittest::Harness;
+use egui_kittest::kittest::{NodeT, Queryable};
+
+use crate::canvas::CanvasTool;
+use crate::config::{self, Action, Config};
+use crate::doc::AppState;
+use crate::workspace::{Stage, Workspace, Workspaces};
+use crate::{AppRequest, Editor, Performed, shortcuts};
+
+/// Ctrl as the platform reports it on Windows/Linux (the chord matcher
+/// reads `command`).
+pub const CTRL: egui::Modifiers = egui::Modifiers {
+    ctrl: true,
+    command: true,
+    ..egui::Modifiers::NONE
+};
+
+/// What the harness drives each frame: the editor, the shell's config, and
+/// the log of every shortcut dispatched with what perform returned.
+pub struct Rig {
+    pub editor: Editor,
+    pub config: Config,
+    pub performed: Vec<(Action, Performed)>,
+    dressed: bool,
+}
+
+impl Rig {
+    fn frame(&mut self, ui: &mut egui::Ui) {
+        if !self.dressed {
+            // The app's own dressing; fonts go live on the next pass, so
+            // this first frame draws nothing.
+            crate::dress(ui.ctx());
+            ui.ctx().all_styles_mut(|s| s.visuals.text_cursor.blink = false);
+            self.dressed = true;
+            ui.ctx().request_repaint();
+            return;
+        }
+        let Rig { editor, config, .. } = self;
+        let mut presets_dirty = false;
+        editor.ui(
+            ui,
+            &config.pen,
+            &config.layers,
+            &mut config.presets,
+            &mut presets_dirty,
+            &[],
+            config.ui.lock_positions,
+            None,
+        );
+        // The shell's shortcut dispatch, minus the dialogs: requests are
+        // logged, never carried out.
+        for a in shortcuts::collect(ui.ctx(), &self.config.keybinds) {
+            self.editor.presets.clone_from(&self.config.presets);
+            let r = self.editor.perform(a);
+            self.performed.push((a, r));
+        }
+    }
+}
+
+/// The whole editor on a 1280×800 screen.
+pub struct EditorHarness {
+    h: Harness<'static, Rig>,
+    dir: tempfile::TempDir,
+}
+
+impl EditorHarness {
+    /// A 1920×1080, 24 fps project with one drawing at frame 0, at 100 %.
+    pub fn new() -> Self {
+        let mut state = AppState::new_project("testkit", 1920, 1080, 24, 300.0);
+        state.new_drawing_at_frame();
+        Self::with_state(state)
+    }
+
+    pub fn with_state(state: AppState) -> Self {
+        let dir = tempfile::tempdir().expect("temp data dir");
+        let (config, _) = Config::load_from(dir.path());
+        let editor = Editor::from_state(state, None, Some(dir.path()));
+        let rig = Rig {
+            editor,
+            config,
+            performed: Vec::new(),
+            dressed: false,
+        };
+        let h = Harness::builder()
+            .with_size(egui::vec2(1280.0, 800.0))
+            .with_pixels_per_point(1.0)
+            .with_max_steps(12)
+            .with_wait_for_pending_images(false)
+            .build_ui_state(|ui, rig: &mut Rig| rig.frame(ui), rig);
+        let mut me = Self { h, dir };
+        me.run();
+        me
+    }
+
+    pub fn with_ppp(mut self, ppp: f32) -> Self {
+        self.h.set_pixels_per_point(ppp);
+        self.run();
+        self
+    }
+
+    /// Run until egui stops asking for an immediate repaint (bounded; a
+    /// live playhead keeps asking, which is not an error here).
+    pub fn run(&mut self) {
+        let _ = self.h.try_run();
+    }
+
+    pub fn run_frames(&mut self, n: usize) {
+        self.h.run_steps(n);
+    }
+
+    /// Click the ONE widget with this accessible name; none or several is
+    /// a panic that prints the whole tree.
+    #[track_caller]
+    pub fn click(&mut self, label: &str) {
+        self.click_at(label, 0, true);
+    }
+
+    /// Click the n-th of several widgets sharing a name.
+    #[track_caller]
+    pub fn click_nth(&mut self, label: &str, n: usize) {
+        self.click_at(label, n, false);
+    }
+
+    #[track_caller]
+    fn click_at(&mut self, label: &str, n: usize, only: bool) {
+        let count = self.h.query_all_by_label(label).count();
+        if count == 0 || (only && count > 1) || n >= count {
+            panic!(
+                "click({label:?}): {count} widget(s) carry that name\n{}",
+                self.describe()
+            );
+        }
+        self.h.query_all_by_label(label).nth(n).expect("counted").click();
+        self.run();
+    }
+
+    #[track_caller]
+    pub fn hover(&mut self, label: &str) {
+        let count = self.h.query_all_by_label(label).count();
+        assert!(count == 1, "hover({label:?}): {count} widget(s)\n{}", self.describe());
+        self.h.get_by_label(label).hover();
+        self.run();
+    }
+
+    /// Give the n-th text field keyboard focus the way Tab or a screen
+    /// reader does (an AccessKit Focus action; fields carry no name of
+    /// their own). A pointer click would also land, but inside a menu it
+    /// closes the menu first.
+    #[track_caller]
+    pub fn focus_text_field(&mut self, n: usize) {
+        let role = egui::accesskit::Role::TextInput;
+        let count = self.h.query_all_by_role(role).count();
+        assert!(n < count, "text field {n} of {count}\n{}", self.describe());
+        self.h.query_all_by_role(role).nth(n).expect("counted").focus();
+        self.run();
+    }
+
+    /// Does an egui text field hold keyboard focus right now?
+    pub fn typing(&self) -> bool {
+        self.h.ctx.text_edit_focused()
+    }
+
+    /// The text of every text field on screen.
+    pub fn text_fields(&self) -> Vec<String> {
+        self.h
+            .query_all_by_role(egui::accesskit::Role::TextInput)
+            .map(|n| n.value().unwrap_or_default())
+            .collect()
+    }
+
+    /// One key, as a keyboard sends it: press (+ the typed character when
+    /// no Ctrl/Alt is held) in one frame, release in the next.
+    pub fn key(&mut self, key: egui::Key) {
+        self.key_mods(egui::Modifiers::NONE, key);
+    }
+
+    pub fn key_mods(&mut self, mods: egui::Modifiers, key: egui::Key) {
+        let input = self.h.input_mut();
+        input.modifiers = mods;
+        input.events.push(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: mods,
+        });
+        let name = key.name();
+        if !mods.ctrl && !mods.alt && !mods.command && name.chars().count() == 1 {
+            let text = if mods.shift {
+                name.to_string()
+            } else {
+                name.to_lowercase()
+            };
+            input.events.push(egui::Event::Text(text));
+        }
+        self.h.step();
+        let input = self.h.input_mut();
+        input.events.push(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: false,
+            repeat: false,
+            modifiers: mods,
+        });
+        input.modifiers = egui::Modifiers::NONE;
+        self.h.step();
+        self.run();
+    }
+
+    pub fn type_text(&mut self, text: &str) {
+        self.h.input_mut().events.push(egui::Event::Text(text.to_string()));
+        self.h.step();
+        self.run();
+    }
+
+    /// Press at `from`, move in `steps` frames, release at `to`.
+    pub fn drag(&mut self, from: egui::Pos2, to: egui::Pos2, steps: usize) {
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let input = self.h.input_mut();
+        input.events.push(egui::Event::PointerMoved(from));
+        input.events.push(button(from, true));
+        self.h.step();
+        let steps = steps.max(1);
+        for i in 1..=steps {
+            let p = from + (to - from) * (i as f32 / steps as f32);
+            self.h.input_mut().events.push(egui::Event::PointerMoved(p));
+            self.h.step();
+        }
+        self.h.input_mut().events.push(button(to, false));
+        self.h.step();
+        self.run();
+    }
+
+    pub fn has(&self, label: &str) -> bool {
+        self.h.query_all_by_label(label).next().is_some()
+    }
+
+    #[track_caller]
+    pub fn rect(&self, label: &str) -> egui::Rect {
+        self.h.get_by_label(label).rect()
+    }
+
+    /// The AccessKit tree as text: one line per named node, indented.
+    pub fn describe(&self) -> String {
+        describe_tree(&self.h)
+    }
+
+    pub fn state(&self) -> &Rig {
+        self.h.state()
+    }
+
+    pub fn state_mut(&mut self) -> &mut Rig {
+        self.h.state_mut()
+    }
+
+    pub fn editor(&self) -> &Editor {
+        &self.h.state().editor
+    }
+
+    pub fn editor_mut(&mut self) -> &mut Editor {
+        &mut self.h.state_mut().editor
+    }
+
+    /// Every shortcut dispatched so far, with what perform returned.
+    pub fn performed(&self) -> &[(Action, Performed)] {
+        &self.h.state().performed
+    }
+
+    /// Perform an action the way the shell does (presets refreshed first),
+    /// then let a frame run.
+    pub fn perform(&mut self, a: Action) -> Performed {
+        let rig = self.h.state_mut();
+        rig.editor.presets.clone_from(&rig.config.presets);
+        let r = rig.editor.perform(a);
+        self.run_frames(1);
+        r
+    }
+
+    pub fn data_dir(&self) -> &Path {
+        self.dir.path()
+    }
+}
+
+/// One panel's ui fn in a fixed rect, with the same queries.
+pub struct PanelHarness<S: 'static> {
+    h: Harness<'static, (S, bool)>,
+}
+
+impl<S: 'static> PanelHarness<S> {
+    pub fn new(
+        size: egui::Vec2,
+        state: S,
+        mut panel: impl FnMut(&mut egui::Ui, &mut S) + 'static,
+    ) -> Self {
+        let h = Harness::builder()
+            .with_size(size)
+            .with_max_steps(12)
+            .with_wait_for_pending_images(false)
+            .build_ui_state(
+                move |ui, (s, dressed): &mut (S, bool)| {
+                    if !*dressed {
+                        crate::dress(ui.ctx());
+                        *dressed = true;
+                        ui.ctx().request_repaint();
+                        return;
+                    }
+                    panel(ui, s);
+                },
+                (state, false),
+            );
+        let mut me = Self { h };
+        let _ = me.h.try_run();
+        me
+    }
+
+    pub fn has(&self, label: &str) -> bool {
+        self.h.query_all_by_label(label).next().is_some()
+    }
+
+    #[track_caller]
+    pub fn click(&mut self, label: &str) {
+        let count = self.h.query_all_by_label(label).count();
+        assert!(count == 1, "click({label:?}): {count} widget(s)\n{}", self.describe());
+        self.h.get_by_label(label).click();
+        let _ = self.h.try_run();
+    }
+
+    pub fn describe(&self) -> String {
+        describe_tree(&self.h)
+    }
+
+    pub fn state(&self) -> &S {
+        &self.h.state().0
+    }
+}
+
+fn describe_tree<S>(h: &Harness<'_, S>) -> String {
+    fn walk<'t>(n: egui_kittest::Node<'t>, depth: usize, out: &mut String) {
+        let ak = n.accesskit_node();
+        let (label, value) = (ak.label(), ak.value());
+        let field = matches!(
+            ak.role(),
+            egui::accesskit::Role::TextInput | egui::accesskit::Role::MultilineTextInput
+        );
+        let named = label.is_some() || value.is_some() || field || ak.is_focused();
+        if named {
+            out.push_str(&"  ".repeat(depth));
+            out.push_str(&format!("{:?}", ak.role()));
+            if let Some(l) = label {
+                out.push_str(&format!(" {l:?}"));
+            }
+            if let Some(v) = value {
+                out.push_str(&format!(" = {v:?}"));
+            }
+            if ak.is_focused() {
+                out.push_str(" (focused)");
+            }
+            out.push('\n');
+        }
+        for c in n.children() {
+            walk(c, depth + usize::from(named), out);
+        }
+    }
+    let mut out = String::new();
+    walk(h.root(), 0, &mut out);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- the harness itself ----
+
+    #[test]
+    fn testkit_editor_runs_headless() {
+        let mut h = EditorHarness::new();
+        h.run_frames(10);
+        let ed = h.editor();
+        assert!(ed.paint.is_none() && ed.graph.is_none(), "a GPU resource was created");
+        assert!(ed.audio_out.is_none() && !ed.audio_tried, "an audio device was opened");
+        let tree = h.describe();
+        for room in ["room layout", "room genga", "room shiage", "room henshū"] {
+            assert!(h.has(room), "room switcher lacks {room:?}:\n{tree}");
+        }
+        for tool in ["select", "fill", "lasso fill"] {
+            assert!(h.has(tool), "tool deck lacks {tool:?}:\n{tree}");
+        }
+    }
+
+    #[test]
+    fn testkit_click_fill_tool_by_label() {
+        let mut h = EditorHarness::new();
+        assert!(h.editor().canvas.tool == CanvasTool::Paint);
+        h.click("fill");
+        assert!(h.editor().canvas.tool == CanvasTool::Fill);
+    }
+
+    #[test]
+    #[should_panic(expected = "room genga")]
+    fn testkit_click_missing_label_shows_the_tree() {
+        let mut h = EditorHarness::new();
+        h.click("no such widget");
+    }
+
+    #[test]
+    fn testkit_icon_only_controls_answer_to_names() {
+        let p = PanelHarness::new(egui::vec2(400.0, 80.0), (), |ui, _| {
+            ui.horizontal(|ui| {
+                crate::plate::icon_button(ui, crate::icons::Icon::SkipBack, "", "first frame");
+                crate::plate::tool_button(ui, false, crate::icons::Icon::Fill, "");
+            });
+        });
+        assert!(p.has("first frame"), "{}", p.describe());
+        assert!(p.has("fill"), "{}", p.describe());
+    }
+
+    // ---- shortcuts: the text-focus rule ----
+
+    #[test]
+    fn testkit_tool_chords_switch_without_focus() {
+        let mut h = EditorHarness::new();
+        h.key(egui::Key::G);
+        assert!(h.editor().canvas.tool == CanvasTool::Fill);
+        h.key(egui::Key::B);
+        assert!(h.editor().canvas.tool == CanvasTool::Paint);
+    }
+
+    /// Open the ws menu and focus its name field.
+    fn focus_field(h: &mut EditorHarness) {
+        h.click("ws");
+        h.focus_text_field(0);
+        assert!(h.typing(), "no text field took focus\n{}", h.describe());
+    }
+
+    #[test]
+    fn testkit_typing_in_a_field_keeps_the_tool() {
+        let mut h = EditorHarness::new();
+        focus_field(&mut h);
+        h.key(egui::Key::G);
+        assert!(
+            h.editor().canvas.tool == CanvasTool::Paint,
+            "G fired over a text field: {:?}\n{}",
+            h.text_fields(),
+            h.describe()
+        );
+        let ed = h.editor_mut();
+        ed.canvas.set_tool(CanvasTool::Fill, &mut ed.state);
+        h.key(egui::Key::B);
+        assert!(h.editor().canvas.tool == CanvasTool::Fill, "B fired over a text field");
+        assert_eq!(h.editor().ws_name, "gb");
+        assert!(h.performed().is_empty(), "{:?}", h.performed());
+    }
+
+    #[test]
+    fn testkit_ctrl_s_in_a_field_still_saves() {
+        let mut h = EditorHarness::new();
+        focus_field(&mut h);
+        h.key_mods(CTRL, egui::Key::S);
+        assert_eq!(h.performed(), &[(Action::Save, Performed::App(AppRequest::Save))]);
+        // Ctrl+Z is the field's own undo, never the document's.
+        let before = h.editor().state.doc_gen;
+        h.key_mods(CTRL, egui::Key::Z);
+        assert_eq!(h.performed().len(), 1, "{:?}", h.performed());
+        assert_eq!(h.editor().state.doc_gen, before);
+    }
+
+    // ---- Editor::perform, the one dispatch ----
+
+    #[test]
+    fn testkit_every_action_performs() {
+        let mut h = EditorHarness::new();
+        for &a in Action::ALL {
+            let r = h.perform(a);
+            let want = match a {
+                Action::Save => Some(AppRequest::Save),
+                Action::SaveAs => Some(AppRequest::SaveAs),
+                Action::Open => Some(AppRequest::Open),
+                Action::NewProject => Some(AppRequest::NewProject),
+                _ => None,
+            };
+            match want {
+                Some(req) => assert_eq!(r, Performed::App(req), "{a:?}"),
+                None => assert!(!matches!(r, Performed::App(_)), "{a:?} asked the shell: {r:?}"),
+            }
+        }
+        h.run_frames(3);
+    }
+
+    #[test]
+    fn testkit_perform_keeps_the_shell_semantics() {
+        let mut h = EditorHarness::new();
+        // Undo / redo walk the one history.
+        let g0 = h.editor().state.doc_gen;
+        assert_eq!(h.perform(Action::Undo), Performed::Done);
+        assert_eq!(h.editor().state.status, "undo");
+        assert_eq!(h.perform(Action::Redo), Performed::Done);
+        assert_eq!(h.editor().state.status, "redo");
+        assert_eq!(h.editor().state.doc_gen, g0 + 2);
+        // A guest's undo travels to the host instead.
+        h.editor_mut().canvas.is_guest = true;
+        h.perform(Action::Undo);
+        assert_eq!(h.editor().canvas.history_request, Some(false));
+        assert_eq!(h.editor().state.doc_gen, g0 + 2);
+        assert_eq!(h.perform(Action::Save), Performed::Ignored, "the host owns the file");
+        h.editor_mut().canvas.is_guest = false;
+        h.editor_mut().canvas.history_request = None;
+        // Tool switches toggle exactly as before.
+        let tool = |h: &EditorHarness| h.editor().canvas.tool;
+        h.perform(Action::SelectTool);
+        assert!(tool(&h) == CanvasTool::Select);
+        h.perform(Action::SelectTool);
+        assert!(tool(&h) == CanvasTool::Paint);
+        h.perform(Action::FillTool);
+        assert!(tool(&h) == CanvasTool::Fill);
+        h.perform(Action::FillTool);
+        assert!(tool(&h) == CanvasTool::Paint);
+        h.perform(Action::SelectTool);
+        h.perform(Action::BrushTool);
+        assert!(tool(&h) == CanvasTool::Paint);
+        // Onion flips the light box.
+        let onion = h.editor().state.view.onion;
+        h.perform(Action::ToggleOnion);
+        assert_eq!(h.editor().state.view.onion, !onion);
+    }
+
+    // ---- config + workspaces: tolerant load, atomic save ----
+
+    fn write(path: &Path, bytes: &[u8]) {
+        std::fs::write(path, bytes).expect("write into the temp dir");
+    }
+
+    #[test]
+    fn testkit_config_bad_section_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.update_repo = "someone/else".into();
+        cfg.perf.vsync = !cfg.perf.vsync;
+        let mut v = serde_json::to_value(&cfg).unwrap();
+        v["ui"] = serde_json::json!("not a section");
+        for b in v["keybinds"].as_array_mut().unwrap() {
+            if b["action"] == "BrushTool" {
+                b["chord"]["keys"] = serde_json::json!(["N"]);
+            }
+        }
+        v["keybinds"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "action": "Teleport", "chord": null }));
+        let bytes = serde_json::to_vec_pretty(&v).unwrap();
+        write(&config::config_path_in(dir.path()), &bytes);
+
+        let (got, notes) = Config::load_from(dir.path());
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(got.update_repo, "someone/else");
+        assert_eq!(got.perf.vsync, cfg.perf.vsync);
+        assert_eq!(got.keybinds.len(), Action::ALL.len());
+        let brush = got.chord_for(Action::BrushTool).map(|c| c.keys.clone());
+        assert_eq!(brush, Some(vec!["N".to_string()]));
+        let save = got.chord_for(Action::Save).cloned();
+        assert_eq!(save, Config::default().chord_for(Action::Save).cloned());
+        let kept = std::fs::read(dir.path().join("config.json.bad")).unwrap();
+        assert_eq!(kept, bytes, "config.json.bad holds the original bytes");
+    }
+
+    #[test]
+    fn testkit_config_save_is_atomic_and_byte_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config::config_path_in(dir.path());
+        let tmp = dir.path().join("config.json.tmp");
+        let (cfg, _) = Config::load_from(dir.path());
+        cfg.save_to(dir.path()).unwrap();
+        let first = std::fs::read(&path).unwrap();
+        assert!(!tmp.exists(), "the .tmp is renamed away");
+        // A save cut short leaves a .tmp: never read.
+        write(&tmp, b"{ torn");
+        let (back, notes) = Config::load_from(dir.path());
+        assert!(notes.is_empty(), "{notes:?}");
+        std::fs::remove_file(&tmp).unwrap();
+        back.save_to(dir.path()).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), first, "round trip is byte-stable");
+        // The write goes through <file>.tmp: with that path blocked the old
+        // file survives untouched.
+        std::fs::create_dir(&tmp).unwrap();
+        let mut changed = back.clone();
+        changed.update_repo = "x/y".into();
+        assert!(changed.save_to(dir.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), first);
+    }
+
+    #[test]
+    fn testkit_workspaces_drop_only_the_bad_one() {
+        let dir = tempfile::tempdir().unwrap();
+        // A dock as a room saves it: laid out (a never-shown DockState
+        // holds NaN rects, which JSON cannot carry).
+        let dock = EditorHarness::new().editor().dock.clone();
+        let ws = |name: &str| Workspace {
+            name: name.into(),
+            dock: dock.clone(),
+            preset: None,
+            view: None,
+        };
+        let list = Workspaces {
+            list: vec![ws("a"), ws("b")],
+        };
+        let mut v = serde_json::to_value(&list).unwrap();
+        v["list"]
+            .as_array_mut()
+            .unwrap()
+            .insert(1, serde_json::json!({ "name": "broken", "dock": 7 }));
+        let bytes = serde_json::to_vec(&v).unwrap();
+        write(&Workspaces::path_in(dir.path()), &bytes);
+
+        let (got, notes) = Workspaces::load_from(dir.path());
+        let names: Vec<&str> = got.list.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(std::fs::read(dir.path().join("workspaces.json.bad")).unwrap(), bytes);
+        got.save_to(dir.path()).unwrap();
+        assert!(!dir.path().join("workspaces.json.tmp").exists());
+        let (again, notes) = Workspaces::load_from(dir.path());
+        assert_eq!(again.list.len(), 2);
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    #[test]
+    fn testkit_paths_stay_in_the_temp_dir() {
+        let h = EditorHarness::new();
+        let dir = h.data_dir().to_path_buf();
+        assert!(dir.starts_with(std::env::temp_dir()), "{}", dir.display());
+        assert!(config::config_path_in(&dir).starts_with(&dir));
+        assert!(Workspaces::path_in(&dir).starts_with(&dir));
+        assert!(config::autosave_dir_in(&dir).starts_with(&dir));
+        assert_eq!(h.editor().data_dir.as_deref(), Some(dir.as_path()));
+        h.editor().save_workspaces();
+        assert!(Workspaces::path_in(&dir).exists(), "workspaces persist into the harness dir");
+        // The real data dir refuses outright under test.
+        assert!(std::panic::catch_unwind(config::data_dir).is_err());
+    }
+
+    // ---- the layout probe, every room at every scale ----
+
+    fn probe_room(stage: Stage) {
+        for ppp in crate::PROBE_SCALES {
+            let (lines, moved) = crate::probe_run(stage, ppp);
+            assert_eq!(
+                moved,
+                0,
+                "{} at {ppp}: the canvas moved\n{}",
+                stage.name(),
+                lines.join("\n")
+            );
+        }
+    }
+
+    #[test]
+    fn testkit_probe_layout_room() {
+        probe_room(Stage::Layout);
+    }
+
+    #[test]
+    fn testkit_probe_drawing_room() {
+        probe_room(Stage::Drawing);
+    }
+
+    #[test]
+    fn testkit_probe_finishing_room() {
+        probe_room(Stage::Finishing);
+    }
+
+    #[test]
+    fn testkit_probe_edit_room() {
+        probe_room(Stage::Edit);
+    }
+
+    // ---- source ratchets ----
+
+    fn sources() -> Vec<(String, String)> {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                out.push((name, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn testkit_spawns_go_through_proc_and_release_is_gui() {
+        let needle = concat!("Command", "::new(");
+        for (name, text) in sources() {
+            if name == "proc.rs" || name == "devloop.rs" {
+                continue;
+            }
+            assert!(!text.contains(needle), "{name} spawns outside proc::command");
+        }
+        let main = sources().into_iter().find(|(n, _)| n == "main.rs").unwrap().1;
+        assert!(main.contains(concat!("windows_subsystem", " = \"windows\"")));
+    }
+
+    /// Colour literals outside plate.rs, measured at 56679ad. The count may
+    /// only go down (D7): lower the pin when it does.
+    const COLOUR_LITERALS_PINNED: usize = 86;
+
+    fn colour_literals(text: &str) -> usize {
+        let prefix = concat!("Color32", "::");
+        let calls = [
+            "from_rgb(",
+            "from_rgba_unmultiplied(",
+            "from_rgba_premultiplied(",
+            "from_gray(",
+            "from_black_alpha(",
+            "from_white_alpha(",
+        ];
+        let mut n = 0;
+        for (at, _) in text.match_indices(prefix) {
+            let rest = &text[at + prefix.len()..];
+            if calls.iter().any(|c| rest.starts_with(c)) {
+                n += 1;
+            } else if rest.starts_with(|c: char| c.is_ascii_uppercase()) {
+                let ident: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_')
+                    .collect();
+                if ident != "TRANSPARENT" {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn testkit_colour_literal_ratchet() {
+        let mut total = 0;
+        for (name, text) in sources() {
+            if name == "plate.rs" {
+                continue;
+            }
+            let n = colour_literals(&text);
+            if n > 0 {
+                println!("{name:22} {n}");
+            }
+            total += n;
+        }
+        println!("total {total} (pinned {COLOUR_LITERALS_PINNED})");
+        assert!(
+            total <= COLOUR_LITERALS_PINNED,
+            "colour literals rose to {total} (pinned {COLOUR_LITERALS_PINNED}) — use plate tokens"
+        );
+    }
+}

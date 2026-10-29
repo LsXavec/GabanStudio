@@ -5,7 +5,7 @@
 //! `%APPDATA%/AnimStudio/config.json`. Defaults avoid keys a compact keyboard
 //! may lack (frame stepping is `,` / `.`, not the arrow keys).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
@@ -262,7 +262,7 @@ impl Chord {
 
     /// Fires when every key is held, at least one was pressed THIS frame, and
     /// the modifiers match exactly.
-    fn matches(&self, i: &egui::InputState) -> bool {
+    pub(crate) fn matches(&self, i: &egui::InputState) -> bool {
         if self.keys.is_empty() {
             return false;
         }
@@ -1014,6 +1014,10 @@ pub struct Config {
     /// Transient: last Krita-import result line (not persisted).
     #[serde(skip)]
     pub last_import_note: String,
+    /// Transient: what the tolerant load reset (shown once on the status
+    /// lane, then cleared; not persisted).
+    #[serde(skip)]
+    pub load_notes: Vec<String>,
 }
 
 impl Default for Config {
@@ -1034,23 +1038,192 @@ impl Default for Config {
             layers: LayersConfig::default(),
             presets: default_presets(),
             last_import_note: String::new(),
+            load_notes: Vec::new(),
         }
     }
 }
 
+/// The real data dir, `%APPDATA%/AnimStudio` (D11). It holds config.json,
+/// workspaces.json, autosave/, crash.log and running.json. Resolved by
+/// main() and the real-dir `load()`/`save()` wrappers only; everything else
+/// takes a dir. Under `cfg(test)` it refuses outright: tests pass their own
+/// temp dir and never reach the user's files (NEVER-DO 5).
+#[cfg(not(test))]
+pub fn data_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(base).join("AnimStudio"))
+}
+#[cfg(test)]
+pub fn data_dir() -> Option<PathBuf> {
+    panic!("tests never compute the real data dir — pass a temp dir (GM1)")
+}
+
+/// `config.json` inside a data dir.
+pub fn config_path_in(dir: &Path) -> PathBuf {
+    dir.join("config.json")
+}
+
+/// The autosave folder inside a data dir. Autosave itself lands in a later
+/// part; the testkit pins the path today.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn autosave_dir_in(dir: &Path) -> PathBuf {
+    dir.join("autosave")
+}
+
+/// Write `bytes` to `path` through `<file>.tmp` + rename (D11): a reader
+/// only ever sees the old file or the whole new one, never a torn write.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        std::io::Write::write_all(&mut f, bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
+/// Read one section of a config/workspaces object: absent keeps the
+/// default silently; present but of the wrong shape keeps the default and
+/// names the section in `dropped`.
+fn read_section<T: serde::de::DeserializeOwned>(
+    map: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    slot: &mut T,
+    dropped: &mut Vec<String>,
+) {
+    if let Some(v) = map.get(key) {
+        match serde_json::from_value::<T>(v.clone()) {
+            Ok(t) => *slot = t,
+            Err(_) => dropped.push(key.to_string()),
+        }
+    }
+}
+
+/// Read a list element by element: one bad entry is dropped (and counted
+/// in `dropped`), every readable entry survives. None = not a list.
+fn read_list<T: serde::de::DeserializeOwned>(
+    v: &serde_json::Value,
+    what: &str,
+    dropped: &mut Vec<String>,
+) -> Option<Vec<T>> {
+    let items = v.as_array()?;
+    let mut out = Vec::with_capacity(items.len());
+    let mut bad = 0usize;
+    for it in items {
+        match serde_json::from_value::<T>(it.clone()) {
+            Ok(t) => out.push(t),
+            Err(_) => bad += 1,
+        }
+    }
+    if bad > 0 {
+        dropped.push(format!("{bad} {what}"));
+    }
+    Some(out)
+}
+
+/// Keep the unreadable original beside the file (`<file>.bad`) and say,
+/// in ONE note, what was reset. Nothing dropped = no note, no copy.
+fn note_dropped(path: &Path, bytes: &[u8], dropped: &[String], notes: &mut Vec<String>) {
+    if dropped.is_empty() {
+        return;
+    }
+    let mut bad = path.as_os_str().to_owned();
+    bad.push(".bad");
+    let _ = std::fs::write(PathBuf::from(&bad), bytes);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    notes.push(format!(
+        "{name}: reset {} to defaults — the original is kept as {name}.bad",
+        dropped.join(", ")
+    ));
+}
+
 impl Config {
-    pub fn config_path() -> Option<PathBuf> {
-        let base = std::env::var_os("APPDATA")?;
-        Some(PathBuf::from(base).join("AnimStudio").join("config.json"))
+    /// Load config from the real data dir (see [`Config::load_from`]); the
+    /// notes ride along in `load_notes` for the status lane.
+    pub fn load() -> Self {
+        let Some(dir) = data_dir() else {
+            let mut cfg = Self::default();
+            cfg.fill_missing();
+            return cfg;
+        };
+        let (mut cfg, notes) = Self::load_from(&dir);
+        cfg.load_notes = notes;
+        cfg
     }
 
-    /// Load config, falling back to defaults on any error. Missing actions
-    /// (e.g. added in a newer build) are filled in with their defaults.
-    pub fn load() -> Self {
-        let mut cfg = Self::config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str::<Config>(&s).ok())
-            .unwrap_or_default();
+    /// Load `dir/config.json`, TOLERANT section by section (D11): a section
+    /// of the wrong shape falls back to its default, keybinds and presets
+    /// are read element by element, and every readable part survives. When
+    /// anything was reset the original bytes are kept as `config.json.bad`
+    /// and exactly one note says what. A leftover `config.json.tmp` (a save
+    /// cut short) is never read. Missing actions (e.g. added in a newer
+    /// build) are filled in with their defaults.
+    pub fn load_from(dir: &Path) -> (Self, Vec<String>) {
+        let path = config_path_in(dir);
+        let mut cfg = Self::default();
+        let mut notes = Vec::new();
+        if let Ok(bytes) = std::fs::read(&path) {
+            let mut dropped = Vec::new();
+            match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(serde_json::Value::Object(map)) => cfg.read_sections(&map, &mut dropped),
+                _ => dropped.push("the whole file".to_string()),
+            }
+            note_dropped(&path, &bytes, &dropped, &mut notes);
+        }
+        cfg.fill_missing();
+        (cfg, notes)
+    }
+
+    fn read_sections(
+        &mut self,
+        map: &serde_json::Map<String, serde_json::Value>,
+        dropped: &mut Vec<String>,
+    ) {
+        if let Some(v) = map.get("keybinds") {
+            match read_list::<Binding>(v, "keybind(s)", dropped) {
+                Some(list) => self.keybinds = list,
+                None => dropped.push("keybinds".to_string()),
+            }
+        }
+        read_section(map, "perf", &mut self.perf, dropped);
+        read_section(map, "ui", &mut self.ui, dropped);
+        read_section(map, "session", &mut self.session, dropped);
+        read_section(map, "update_repo", &mut self.update_repo, dropped);
+        read_section(map, "pen", &mut self.pen, dropped);
+        read_section(map, "layers", &mut self.layers, dropped);
+        if let Some(v) = map.get("presets") {
+            match read_list::<BrushPreset>(v, "preset(s)", dropped) {
+                Some(list) => self.presets = list,
+                None => dropped.push("presets".to_string()),
+            }
+        }
+    }
+
+    /// Save to the real data dir (see [`Config::save_to`]).
+    pub fn save(&self) {
+        if let Some(dir) = data_dir() {
+            let _ = self.save_to(&dir);
+        }
+    }
+
+    /// Save to `dir/config.json` atomically (`config.json.tmp` + rename).
+    pub fn save_to(&self, dir: &Path) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        write_atomic(&config_path_in(dir), json.as_bytes())
+    }
+
+    /// Every action bound (missing ones get their default chord) and the
+    /// pencil box present.
+    fn fill_missing(&mut self) {
+        let cfg = self;
         for a in Action::ALL {
             if !cfg.keybinds.iter().any(|b| b.action == *a) {
                 cfg.keybinds.push(Binding {
@@ -1065,18 +1238,6 @@ impl Config {
             if !cfg.presets.iter().any(|q| q.name == p.name) {
                 cfg.presets.insert(0, p);
             }
-        }
-        cfg
-    }
-    pub fn save(&self) {
-        let Some(path) = Self::config_path() else {
-            return;
-        };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, json);
         }
     }
 
@@ -1107,11 +1268,6 @@ impl Config {
             .iter()
             .find(|b| b.action == action)
             .and_then(|b| b.chord.as_ref())
-    }
-
-    /// Did this action's bound chord fire this frame?
-    pub fn triggered(&self, action: Action, i: &egui::InputState) -> bool {
-        self.chord_for(action).is_some_and(|c| c.matches(i))
     }
 
     /// True if some OTHER action already uses this chord (conflict warning).

@@ -3,6 +3,10 @@
 //! Two screens: a startup New Project dialog (sets resolution/fps), then the
 //! editor (top bar, left X-sheet, central canvas, status bar).
 
+// Release builds are GUI-subsystem: no console window behind the app (GM1).
+// CLI paths (the layout probe) re-attach to the launching terminal.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod canvas;
 mod config;
 mod devloop;
@@ -23,7 +27,11 @@ mod paint;
 mod palette;
 mod palette_panel;
 mod plate;
+mod proc;
 mod runs;
+mod shortcuts;
+#[cfg(test)]
+mod testkit;
 mod uidump;
 mod update;
 mod viewer;
@@ -73,6 +81,7 @@ fn main() -> eframe::Result<()> {
     // prints the canvas rect per scripted step, so any drawing-area movement
     // is a measurable number instead of an on-rig observation.
     if std::env::var_os("ANIMSTUDIO_PROBE").is_some() {
+        attach_console();
         probe();
         return Ok(());
     }
@@ -89,7 +98,10 @@ fn main() -> eframe::Result<()> {
             Some(why)
         }
     };
-    // Load config up front so the surface (V-Sync / frame latency) reflects it.
+    // THE real data dir (D11) is resolved here and handed down; everything
+    // below takes a dir. Config up front so the surface (V-Sync / frame
+    // latency) reflects it.
+    let data_dir = config::data_dir();
     let config = Config::load();
     let surface = eframe::egui_wgpu::SurfaceConfig {
         present_mode: if config.perf.vsync {
@@ -116,17 +128,50 @@ fn main() -> eframe::Result<()> {
         "Gaban Studio",
         native_options,
         Box::new(move |cc| {
-            cc.egui_ctx.set_visuals(plate::visuals());
-            plate::install_fonts(&cc.egui_ctx);
-            Ok(Box::new(App::new(cc, config, staging_failed.clone())))
+            dress(&cc.egui_ctx);
+            Ok(Box::new(App::new(
+                cc,
+                config,
+                staging_failed.clone(),
+                data_dir.clone(),
+            )))
         }),
     )
 }
+
+/// The plate visuals and the Plex type stack — the app, the layout probe
+/// and the testkit all draw with the same dressing.
+fn dress(ctx: &egui::Context) {
+    ctx.set_visuals(plate::visuals());
+    plate::install_fonts(ctx);
+}
+
+/// A GUI-subsystem build has no console: re-attach to the launching
+/// terminal so CLI output (the probe) is seen. No terminal = no-op.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    // SAFETY: AttachConsole takes a process id and touches no Rust state.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
+#[cfg(not(windows))]
+fn attach_console() {}
 
 /// A slate room tab (spec §4.2): kanji over romaji caps, framed, all four
 /// identical in structure; the active room is lit by the Tally lamp.
 fn slate_tab(ui: &mut egui::Ui, active: bool, kanji: &str, romaji: &str) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(84.0, 34.0), egui::Sense::click());
+    // The painted tab still answers to a name (AccessKit, D7).
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            ui.is_enabled(),
+            active,
+            format!("room {romaji}"),
+        )
+    });
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         p.rect_filled(rect, 0.0, plate::WELL);
@@ -176,6 +221,8 @@ fn slate_tab(ui: &mut egui::Ui, active: bool, kanji: &str, romaji: &str) -> egui
 struct App {
     /// Shared wgpu context from eframe (for the GPU raster paint layer).
     render_state: Option<RenderState>,
+    /// The data dir main() resolved (D11); editors persist into it.
+    data_dir: Option<std::path::PathBuf>,
     /// The open project (None until one is created/opened).
     editor: Option<Editor>,
     /// When Some, the New Project dialog is showing (startup, or "New…").
@@ -522,7 +569,7 @@ impl App {
     fn relaunch_into(&mut self, new_exe: std::path::PathBuf, ctx: &egui::Context) {
         let Some(editor) = &mut self.editor else {
             // No document open — nothing to carry; just hand over.
-            let _ = std::process::Command::new(&new_exe)
+            let _ = proc::command(&new_exe)
                 .env("ANIMSTUDIO_RESUME", "1")
                 .spawn();
             std::process::exit(0);
@@ -551,7 +598,7 @@ impl App {
             return;
         }
         ctx.request_repaint();
-        match std::process::Command::new(&new_exe)
+        match proc::command(&new_exe)
             .env("ANIMSTUDIO_RESUME", "1")
             .spawn()
         {
@@ -2173,7 +2220,7 @@ impl App {
                                 ed.state.status = "live from the host".into();
                             } else {
                                 let rs = self.render_state.as_ref();
-                                let mut ed = Editor::from_state(st, rs);
+                                let mut ed = Editor::from_state(st, rs, self.data_dir.as_deref());
                                 ed.stage = self.editor.as_ref().and_then(|o| o.stage);
                                 ed.canvas.engine_changed();
                                 ed.state.status = "live from the host".into();
@@ -2263,6 +2310,7 @@ impl App {
         cc: &eframe::CreationContext<'_>,
         config: Config,
         staging_failed: Option<String>,
+        data_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let backend = cc
             .wgpu_render_state
@@ -2297,7 +2345,11 @@ impl App {
                     state.goto(s.frame.min(last));
                     state.status = "restored after rebuild".into();
                     devloop::Session::clear_pending();
-                    Some(Editor::from_state(state, cc.wgpu_render_state.as_ref()))
+                    Some(Editor::from_state(
+                        state,
+                        cc.wgpu_render_state.as_ref(),
+                        data_dir.as_deref(),
+                    ))
                 }
                 Err(e) => {
                     // Leave `pending` set: the autosave is still on disk and
@@ -2313,6 +2365,7 @@ impl App {
         });
         Self {
             render_state: cc.wgpu_render_state.clone(),
+            data_dir,
             editor: restored,
             new_form: None,
             update_rx: {
@@ -2554,13 +2607,83 @@ impl App {
         out
     }
 
-    /// Run an action bound to a keyboard shortcut.
-    fn perform(&mut self, action: Action) {
+    /// Run an action bound to a keyboard shortcut: the editor performs it
+    /// (the one dispatch, D6); what only the shell can do comes back as a
+    /// request and is carried out here.
+    fn perform(&mut self, ctx: &egui::Context, action: Action) {
+        let performed = match &mut self.editor {
+            Some(ed) => {
+                ed.presets.clone_from(&self.config.presets);
+                ed.perform(action)
+            }
+            None if action == Action::NewProject => Performed::App(AppRequest::NewProject),
+            None => Performed::Ignored,
+        };
+        if let Performed::App(req) = performed {
+            self.handle_request(ctx, req);
+        }
+    }
+
+    /// The shell-level verbs: dialogs, the file pickers, the window.
+    fn handle_request(&mut self, ctx: &egui::Context, req: AppRequest) {
+        match req {
+            AppRequest::NewProject => self.new_form = Some(NewProjectForm::default()),
+            AppRequest::Settings => self.settings_open = true,
+            AppRequest::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            AppRequest::Save | AppRequest::SaveAs | AppRequest::Open => {
+                let Some(ed) = &mut self.editor else { return };
+                match req {
+                    AppRequest::Save => ed.state.save(false),
+                    AppRequest::SaveAs => ed.state.save(true),
+                    _ => ed.state.open(),
+                }
+            }
+        }
+    }
+}
+
+/// What [`Editor::perform`] did with an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Performed {
+    /// The editor carried it out (a refusal it says aloud counts as done).
+    Done,
+    /// Nothing happened: refused mid-stroke, the host owns it, an empty slot.
+    Ignored,
+    /// Only the shell can do this (dialogs, the window).
+    App(AppRequest),
+}
+
+/// The shell-level verbs an action can ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppRequest {
+    NewProject,
+    Open,
+    Save,
+    SaveAs,
+    // Raised by the menus and the command palette (GM3); handled already.
+    #[allow(dead_code)]
+    Settings,
+    #[allow(dead_code)]
+    Quit,
+}
+
+impl Editor {
+    /// THE one dispatch for every [`Action`] (D6): shortcuts now, menus and
+    /// the command palette later all land here. Editor state only — the
+    /// file dialogs and the window belong to the shell, so those come back
+    /// as [`Performed::App`].
+    pub fn perform(&mut self, action: Action) -> Performed {
+        let mut out = Performed::Done;
+        self.perform_into(action, &mut out);
+        out
+    }
+
+    fn perform_into(&mut self, action: Action, out: &mut Performed) {
         if action == Action::NewProject {
-            self.new_form = Some(NewProjectForm::default());
+            *out = Performed::App(AppRequest::NewProject);
             return;
         }
-        let Some(ed) = &mut self.editor else { return };
+        let ed = self;
         // Handled on the canvas (owns the tool state), before borrowing ed.state.
         if action == Action::ToggleEraser {
             ed.canvas.toggle_eraser();
@@ -2653,10 +2776,12 @@ impl App {
                 return;
             }
             if !ed.canvas.stroke_active()
-                && let Some(p) = self.config.presets.get(i)
+                && let Some(p) = ed.presets.get(i)
             {
                 ed.canvas.apply_preset(p);
                 ed.state.status = format!("brush: {}", p.name);
+            } else {
+                *out = Performed::Ignored;
             }
             return;
         }
@@ -2692,6 +2817,7 @@ impl App {
             )
         {
             ed.state.refuse("refused — finish the stroke first");
+            *out = Performed::Ignored;
             return;
         }
         let s = &mut ed.state;
@@ -2767,13 +2893,16 @@ impl App {
             // the HOST owns the file; guest strokes already live there.
             Action::Save | Action::SaveAs if ed.canvas.is_guest => {
                 s.refuse("refused — the host owns the file; your strokes already live there");
+                *out = Performed::Ignored;
             }
             Action::Open if ed.canvas.is_guest => {
                 s.refuse("refused — leave the room first (Settings › Session) to open your own file");
+                *out = Performed::Ignored;
             }
-            Action::Save => s.save(false),
-            Action::SaveAs => s.save(true),
-            Action::Open => s.open(),
+            // The file dialogs block the window: the shell runs them.
+            Action::Save => *out = Performed::App(AppRequest::Save),
+            Action::SaveAs => *out = Performed::App(AppRequest::SaveAs),
+            Action::Open => *out = Performed::App(AppRequest::Open),
             Action::NewProject => {}
         }
     }
@@ -2959,6 +3088,12 @@ fn drain_tablet(
 }
 
 struct Editor {
+    /// The data dir workspaces persist into (D11; None = not persisted —
+    /// the layout probe).
+    data_dir: Option<std::path::PathBuf>,
+    /// The brush presets the 1–8 keys arm: the shell's config copy,
+    /// refreshed before every [`Editor::perform`].
+    presets: Vec<BrushPreset>,
     state: AppState,
     canvas: canvas::CanvasView,
     /// GPU raster paint layer (None if wgpu is unavailable).
@@ -3252,7 +3387,31 @@ impl EditorTabs<'_> {
 }
 
 impl Editor {
-    fn from_form(form: &NewProjectForm, rs: Option<&RenderState>) -> Self {
+    /// The user's saved workspaces from the data dir (none without one);
+    /// a dropped entry is said on the status lane.
+    fn load_workspaces(state: &mut AppState, data_dir: Option<&std::path::Path>) -> Workspaces {
+        let Some(dir) = data_dir else {
+            return Workspaces { list: Vec::new() };
+        };
+        let (ws, notes) = Workspaces::load_from(dir);
+        if !notes.is_empty() {
+            state.status = notes.join(" · ");
+        }
+        ws
+    }
+
+    /// Persist the workspace list into the data dir (none = not persisted).
+    fn save_workspaces(&self) {
+        if let Some(dir) = &self.data_dir {
+            let _ = self.workspaces.save_to(dir);
+        }
+    }
+
+    fn from_form(
+        form: &NewProjectForm,
+        rs: Option<&RenderState>,
+        data_dir: Option<&std::path::Path>,
+    ) -> Self {
         // AUDIT [31] follow-on: the name field now starts EMPTY so its
         // hint is reachable, so an untyped name must still produce a
         // named cut rather than a blank one.
@@ -3260,7 +3419,7 @@ impl Editor {
             "" => "Untitled".to_string(),
             n => n.to_string(),
         };
-        let state = AppState::new_project(
+        let mut state = AppState::new_project(
             name,
             form.width,
             form.height,
@@ -3269,7 +3428,10 @@ impl Editor {
         );
         let paint = rs.map(|rs| PaintLayer::new(rs, form.width, form.height));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, form.width, form.height));
+        let workspaces = Self::load_workspaces(&mut state, data_dir);
         Self {
+            data_dir: data_dir.map(|d| d.to_path_buf()),
+            presets: Vec::new(),
             state,
             canvas: canvas::CanvasView::new(),
             paint,
@@ -3287,7 +3449,7 @@ impl Editor {
             status_since: 0.0,
             refusal_seen_seq: 0,
             refusal_since: -10.0,
-            workspaces: Workspaces::load(),
+            workspaces,
             ws_name: String::new(),
             rename_buf: String::new(),
             preset_name: String::new(),
@@ -3304,11 +3466,18 @@ impl Editor {
             audio_key: None,
         }
     }
-    fn from_state(state: AppState, rs: Option<&RenderState>) -> Self {
+    fn from_state(
+        mut state: AppState,
+        rs: Option<&RenderState>,
+        data_dir: Option<&std::path::Path>,
+    ) -> Self {
         let (w, h) = (state.engine.project.width, state.engine.project.height);
         let paint = rs.map(|rs| PaintLayer::new(rs, w, h));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, w, h));
+        let workspaces = Self::load_workspaces(&mut state, data_dir);
         Self {
+            data_dir: data_dir.map(|d| d.to_path_buf()),
+            presets: Vec::new(),
             state,
             canvas: canvas::CanvasView::new(),
             paint,
@@ -3324,7 +3493,7 @@ impl Editor {
             status_since: 0.0,
             refusal_seen_seq: 0,
             refusal_since: -10.0,
-            workspaces: Workspaces::load(),
+            workspaces,
             ws_name: String::new(),
             rename_buf: String::new(),
             preset_name: String::new(),
@@ -3507,14 +3676,7 @@ impl eframe::App for App {
         // Keyboard-shortcut dispatch — skipped while a dialog is up or while
         // capturing a rebind (so the captured key doesn't also fire an action).
         if self.editor.is_some() && self.new_form.is_none() && self.capturing.is_none() {
-            let collect = |i: &egui::InputState| -> Vec<Action> {
-                Action::ALL
-                    .iter()
-                    .copied()
-                    .filter(|a| self.config.triggered(*a, i))
-                    .collect()
-            };
-            let mut fired: Vec<Action> = ui.ctx().input(collect);
+            let mut fired: Vec<Action> = shortcuts::collect(ui.ctx(), &self.config.keybinds);
             // Keyboard events land in whichever VIEWPORT has focus. The
             // popout canvas (Phase 5 step 2) is its own OS window, so a
             // shortcut pressed there arrives in ITS input state, not the
@@ -3523,17 +3685,28 @@ impl eframe::App for App {
             // twice from one Ctrl+Z).
             let float_open = self.editor.as_ref().is_some_and(|e| e.float_canvas.open);
             if float_open {
-                let more = ui
-                    .ctx()
-                    .input_for(floatcanvas::FloatCanvas::viewport_id(), collect);
+                let more = shortcuts::collect_for(
+                    ui.ctx(),
+                    floatcanvas::FloatCanvas::viewport_id(),
+                    &self.config.keybinds,
+                );
                 for a in more {
                     if !fired.contains(&a) {
                         fired.push(a);
                     }
                 }
             }
+            let ctx = ui.ctx().clone();
             for action in fired {
-                self.perform(action);
+                self.perform(&ctx, action);
+            }
+            // What the tolerant config load reset is said once, on the
+            // status lane of the first editor.
+            if !self.config.load_notes.is_empty()
+                && let Some(ed) = &mut self.editor
+            {
+                ed.state.status = self.config.load_notes.join(" · ");
+                self.config.load_notes.clear();
             }
         }
 
@@ -3616,7 +3789,7 @@ impl eframe::App for App {
                             view,
                         });
                     }
-                    ed.workspaces.save();
+                    ed.save_workspaces();
                 }
                 config::LayoutAct::Load(name) => {
                     if let Some(w) = ed
@@ -3636,7 +3809,7 @@ impl eframe::App for App {
                 }
                 config::LayoutAct::Delete(name) => {
                     ed.workspaces.list.retain(|w| w.name != name);
-                    ed.workspaces.save();
+                    ed.save_workspaces();
                 }
                 config::LayoutAct::LoadHost => {
                     if let Some(json) = &self.session_host_layout
@@ -3832,11 +4005,19 @@ impl App {
         }
         match action {
             Some(FormAction::Create) => {
-                self.editor = Some(Editor::from_form(&form, self.render_state.as_ref()));
+                self.editor = Some(Editor::from_form(
+                    &form,
+                    self.render_state.as_ref(),
+                    self.data_dir.as_deref(),
+                ));
             }
             Some(FormAction::Open) => match AppState::pick_and_open() {
                 Some(Ok(state)) => {
-                    self.editor = Some(Editor::from_state(state, self.render_state.as_ref()));
+                    self.editor = Some(Editor::from_state(
+                        state,
+                        self.render_state.as_ref(),
+                        self.data_dir.as_deref(),
+                    ));
                 }
                 // AUDIT [16]: a failed load used to vanish — the same
                 // dialog reappeared with no reason. Carry the reason back
@@ -3866,23 +4047,50 @@ impl App {
 /// a cel frame and an empty frame, undo/redo — and prints the canvas rect
 /// after every step. Any `MOVED` line is a layout-stability bug.
 fn probe() {
-    // Two passes: 100% and 125% display scale (fractional scales can add
+    // Every room, at each display scale (fractional scales can add
     // pixel-rounding jitter that 1.0 never shows).
-    for ppp in [1.0f32, 1.25] {
-        println!("---- pixels_per_point {ppp} ----");
-        probe_at(ppp);
+    let mut moved = 0usize;
+    for &stage in Stage::ALL {
+        for ppp in PROBE_SCALES {
+            println!("---- {} · pixels_per_point {ppp} ----", stage.name());
+            let (lines, m) = probe_run(stage, ppp);
+            for line in lines {
+                println!("{line}");
+            }
+            moved += m;
+        }
+    }
+    println!();
+    if moved == 0 {
+        println!("PROBE PASS: canvas rect never moved");
+    } else {
+        println!("PROBE FAIL: canvas rect moved {moved} time(s)");
     }
 }
 
-fn probe_at(ppp: f32) {
+/// The display scales the probe walks (the testkit runs the same set).
+const PROBE_SCALES: [f32; 3] = [1.0, 1.25, 1.5];
+
+/// One probe pass in one room at one scale — THE scenario, shared by the
+/// CLI probe and the testkit test. Returns the printed lines and the
+/// number of MOVED steps after settle.
+fn probe_run(stage: Stage, ppp: f32) -> (Vec<String>, usize) {
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(ppp);
+    dress(&ctx);
     let config = Config::default();
     let pen = config.pen.clone();
     let layers_cfg = config.layers.clone();
     let mut state = AppState::new_project("probe", 1920, 1080, 24, 300.0);
     state.new_drawing_at_frame(); // cel at frame 0; frame 1 stays empty
-    let mut editor = Editor::from_state(state, None);
+    let mut editor = Editor::from_state(state, None, None);
+    // Enter the room the way the room switcher does.
+    editor.dock = stage.dock();
+    if editor.canvas.apply_view(&stage.view(), &mut editor.state) {
+        editor.stage = Some(stage);
+        editor.state.view.line_guard = matches!(stage, Stage::Finishing);
+    }
+    let mut lines: Vec<String> = Vec::new();
     let raw = || egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::pos2(0.0, 0.0),
@@ -3892,7 +4100,7 @@ fn probe_at(ppp: f32) {
     };
     let mut last: Option<egui::Rect> = None;
     let mut moved = 0usize;
-    let run =
+    let mut run =
         |editor: &mut Editor, label: &str, last: &mut Option<egui::Rect>, moved: &mut usize| {
             ctx.begin_pass(raw());
             let mut root = egui::Ui::new(
@@ -3940,13 +4148,13 @@ fn probe_at(ppp: f32) {
                 }
                 _ => String::new(),
             };
-            println!(
+            lines.push(format!(
                 "{label:26} L{:8.2} T{:7.2} W{:8.2} H{:7.2}{note}",
                 r.left(),
                 r.top(),
                 r.width(),
                 r.height()
-            );
+            ));
             *last = Some(r);
         };
     for _ in 0..4 {
@@ -3983,12 +4191,7 @@ fn probe_at(ppp: f32) {
         editor.state.redo();
         run(&mut editor, "after redo", &mut last, &mut moved);
     }
-    println!();
-    if moved == 0 {
-        println!("PROBE PASS: canvas rect never moved");
-    } else {
-        println!("PROBE FAIL: canvas rect moved {moved} time(s)");
-    }
+    (lines, moved)
 }
 
 impl Editor {
@@ -4658,7 +4861,7 @@ impl Editor {
                                     view,
                                 });
                             }
-                            self.workspaces.save();
+                            self.save_workspaces();
                             self.ws_name.clear();
                             ui.close();
                         }
@@ -4747,11 +4950,11 @@ impl Editor {
                     }
                     if let Some((i, pname)) = assign {
                         self.workspaces.list[i].preset = pname;
-                        self.workspaces.save();
+                        self.save_workspaces();
                     }
                     if let Some(i) = remove {
                         self.workspaces.list.remove(i);
-                        self.workspaces.save();
+                        self.save_workspaces();
                     }
                 });
                 // Re-open closed panes (a pane lives only while it's in the

@@ -1,8 +1,8 @@
 //! Workspaces: named, persisted arrangements of dockable panes over the ONE
 //! shared document (the production model — isolated rooms, shared parameters).
-//! Saved to %APPDATA%/AnimStudio/workspaces.json.
+//! Saved to workspaces.json in the data dir (%APPDATA%/AnimStudio).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use egui_dock::{DockState, NodeIndex};
 
@@ -242,44 +242,56 @@ pub struct Workspaces {
 }
 
 impl Workspaces {
-    fn path() -> Option<PathBuf> {
-        let base = std::env::var_os("APPDATA")?;
-        Some(
-            PathBuf::from(base)
-                .join("AnimStudio")
-                .join("workspaces.json"),
-        )
+    /// `workspaces.json` inside a data dir (D11).
+    pub fn path_in(dir: &Path) -> PathBuf {
+        dir.join("workspaces.json")
     }
 
-    /// Load saved workspaces; a missing/unreadable file seeds the defaults.
+    /// Load saved workspaces from `dir`; a missing file is an empty list.
     /// TOLERANT per-workspace parse: one unreadable workspace (e.g. saved by
     /// a newer build with pane kinds this build doesn't know) must not reset
-    /// every workspace — the readable ones survive.
-    pub fn load() -> Self {
-        if let Some(path) = Self::path()
-            && let Ok(text) = std::fs::read_to_string(&path)
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
-            && let Some(items) = v.get("list").and_then(|l| l.as_array())
-        {
-            let list: Vec<Workspace> = items
-                .iter()
-                .filter_map(|it| serde_json::from_value(it.clone()).ok())
-                .collect();
-            if !list.is_empty() {
-                return Self { list };
-            }
-        }
+    /// every workspace — the readable ones survive, the original bytes are
+    /// kept as `workspaces.json.bad` and one note says how many were
+    /// dropped. A leftover `workspaces.json.tmp` is never read.
+    pub fn load_from(dir: &Path) -> (Self, Vec<String>) {
+        let path = Self::path_in(dir);
         // No seeded defaults anymore: the stage spine provides the built-in
         // rooms; this list is purely the user's own saved arrangements.
-        Self { list: Vec::new() }
+        let mut list = Vec::new();
+        let mut notes = Vec::new();
+        if let Ok(bytes) = std::fs::read(&path) {
+            let mut dropped = 0usize;
+            match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(v) => match v.get("list").and_then(|l| l.as_array()) {
+                    Some(items) => {
+                        for it in items {
+                            match serde_json::from_value::<Workspace>(it.clone()) {
+                                Ok(w) => list.push(w),
+                                Err(_) => dropped += 1,
+                            }
+                        }
+                    }
+                    None => dropped += 1,
+                },
+                Err(_) => dropped += 1,
+            }
+            if dropped > 0 {
+                let mut bad = path.as_os_str().to_owned();
+                bad.push(".bad");
+                let _ = std::fs::write(PathBuf::from(bad), &bytes);
+                notes.push(format!(
+                    "workspaces.json: dropped {dropped} unreadable entr{} — the original is \
+                     kept as workspaces.json.bad",
+                    if dropped == 1 { "y" } else { "ies" }
+                ));
+            }
+        }
+        (Self { list }, notes)
     }
-    pub fn save(&self) {
-        let Some(path) = Self::path() else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
-        }
+
+    /// Save to `dir/workspaces.json` atomically (`.tmp` + rename).
+    pub fn save_to(&self, dir: &Path) -> std::io::Result<()> {
+        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        crate::config::write_atomic(&Self::path_in(dir), text.as_bytes())
     }
 }

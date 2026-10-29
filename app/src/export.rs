@@ -205,7 +205,7 @@ pub fn spawn_mp4(
                 ]
                 .map(String::from),
             );
-            let status = std::process::Command::new(&ffmpeg)
+            let status = crate::proc::command(&ffmpeg)
                 .args(&args)
                 .status()
                 .map_err(|e| format!("running ffmpeg: {e}"))?;
@@ -302,7 +302,7 @@ fn find_ffmpeg() -> Option<PathBuf> {
 }
 
 fn works(program: &Path) -> bool {
-    std::process::Command::new(program)
+    crate::proc::command(program)
         .arg("-version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

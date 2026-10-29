@@ -69,6 +69,22 @@ pub fn exact() -> bool {
     EXACT.load(Ordering::Relaxed)
 }
 
+/// The accessible name and state of a painted control (AccessKit, D7):
+/// icon-only controls answer to their hover text or icon name instead of
+/// an empty label, so screen readers and the testkit can find them.
+fn speak(resp: &Response, typ: egui::WidgetType, selected: Option<bool>, name: &str) {
+    let enabled = resp.enabled();
+    resp.widget_info(|| match selected {
+        Some(on) => egui::WidgetInfo::selected(typ, enabled, on, name),
+        None => egui::WidgetInfo::labeled(typ, enabled, name),
+    });
+}
+
+/// An icon's spoken name, for controls drawn without a label.
+fn icon_name(icon: crate::icons::Icon) -> String {
+    format!("{icon:?}").to_lowercase()
+}
+
 /// Append the exact identity line to a response's hover, when enabled.
 fn describe(resp: Response, kind: &str, label: &str) -> Response {
     if exact() {
@@ -321,6 +337,7 @@ pub fn detent(ui: &mut Ui, armed: bool, label: &str) -> Response {
             ink,
         );
     }
+    speak(&resp, egui::WidgetType::SelectableLabel, Some(armed), label);
     describe(resp, "DETENT detent", label)
 }
 
@@ -359,6 +376,7 @@ pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         };
         label_at(ui, rect.left() + 12.0, rect.center().y, label, 11.5, ink);
     }
+    speak(&resp, egui::WidgetType::Checkbox, Some(*on), label);
     describe(resp, "LATCH latch", label)
 }
 
@@ -423,6 +441,8 @@ pub fn tool_button(ui: &mut Ui, armed: bool, icon: crate::icons::Icon, label: &s
             p.rect_filled(bar, CornerRadius::ZERO, TALLY);
         }
     }
+    let name = if label.is_empty() { icon_name(icon) } else { label.to_string() };
+    speak(&resp, egui::WidgetType::SelectableLabel, Some(armed), &name);
     describe(resp, "DETENT tool_button", label)
 }
 
@@ -488,6 +508,8 @@ pub fn tool_latch(ui: &mut Ui, on: &mut bool, icon: crate::icons::Icon, label: &
             );
         }
     }
+    let name = if label.is_empty() { icon_name(icon) } else { label.to_string() };
+    speak(&resp, egui::WidgetType::Checkbox, Some(*on), &name);
     describe(resp, "LATCH tool_latch", label)
 }
 
@@ -527,6 +549,12 @@ pub fn icon_button(ui: &mut Ui, icon: crate::icons::Icon, label: &str, hover: &s
             );
         }
     }
+    let name = match (label.is_empty(), hover.is_empty()) {
+        (false, _) => label.to_string(),
+        (true, false) => hover.to_string(),
+        (true, true) => icon_name(icon),
+    };
+    speak(&resp, egui::WidgetType::Button, None, &name);
     let resp = if hover.is_empty() {
         resp
     } else {
@@ -567,6 +595,7 @@ pub fn swatch(ui: &mut Ui, color: Color32, armed: bool) -> Response {
             );
         }
     }
+    speak(&resp, egui::WidgetType::Button, Some(armed), "colour well");
     describe(resp, "SWATCH swatch", "colour well")
 }
 

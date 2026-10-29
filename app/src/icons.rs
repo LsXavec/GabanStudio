@@ -141,7 +141,8 @@ fn mask_texture(ctx: &egui::Context, icon: Icon, target: f32) -> Option<egui::Te
     Some(tex)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+// Debug names the icon for icon-only controls' accessible names (plate.rs).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Icon {
     /// Pen nib on a diagonal — draw ink.
     Brush,
