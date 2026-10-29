@@ -43,6 +43,94 @@ pub fn solo_template() -> Vec<LayerProps> {
         .collect()
 }
 
+/// GM6: the spacing-chart presets (タイミング指示) — marks between the keys,
+/// 0..1: even halves / thirds / quarters, or bunched toward one key.
+pub const CHART_PRESETS: &[(&str, &[f32])] = &[
+    ("halves", &[0.5]),
+    ("thirds", &[1.0 / 3.0, 2.0 / 3.0]),
+    ("quarters", &[0.25, 0.5, 0.75]),
+    ("favour start", &[0.125, 0.25, 0.5]),
+    ("favour end", &[0.5, 0.75, 0.875]),
+];
+
+/// GM6: where `n` inbetweens land between keys exposed at `fa` and `fb`:
+/// the span split into n+1 equal steps, rounded, each at least one frame
+/// after the last. None when the span is too short (or n is 0).
+pub fn inbetween_frames(fa: u32, fb: u32, n: usize) -> Option<Vec<u32>> {
+    let span = fb.checked_sub(fa)? as usize;
+    if n == 0 || span < n + 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut prev = fa;
+    for i in 1..=n {
+        let step = ((i * span) as f64 / (n + 1) as f64).round() as u32;
+        let f = (fa + step).max(prev + 1);
+        out.push(f);
+        prev = f;
+    }
+    Some(out)
+}
+
+/// A name's number: (text before its first digit run, the number, the
+/// text after) — "D12A" is ("D", 12, "A").
+fn split_number(name: &str) -> Option<(&str, u64, &str)> {
+    let start = name.find(|c: char| c.is_ascii_digit())?;
+    let len = name[start..]
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(name.len() - start);
+    let n = name[start..start + len].parse().ok()?;
+    Some((&name[..start], n, &name[start + len..]))
+}
+
+/// GM6: the names of `n` inbetweens from key `from` to key `to`: the free
+/// numbers strictly between the keys' numbers when there are enough
+/// (spread evenly when there are more), otherwise the from-key's name
+/// plus a letter (`1a`, `1b`, …), never a name already `taken`.
+pub fn inbetween_names(
+    from: &str,
+    to: &str,
+    n: usize,
+    taken: &HashSet<String>,
+) -> Vec<String> {
+    if let (Some((p, a, s)), Some((p2, b, s2))) = (split_number(from), split_number(to))
+        && (p, s) == (p2, s2)
+    {
+        let (lo, hi) = (a.min(b), a.max(b));
+        let free: Vec<String> = (lo + 1..hi)
+            .map(|k| format!("{p}{k}{s}"))
+            .filter(|name| !taken.contains(name))
+            .collect();
+        let m = free.len();
+        if m >= n {
+            // The j-th of n picks sits nearest (j+1)/(n+1) of the way along.
+            let at = |j: usize| (2 * (j + 1) * (m + 1) + n + 1) / (2 * (n + 1)) - 1;
+            let mut picked: Vec<String> = (0..n).map(|j| free[at(j)].clone()).collect();
+            if a > b {
+                picked.reverse();
+            }
+            return picked;
+        }
+    }
+    let mut out = Vec::with_capacity(n);
+    let mut k = 0usize;
+    while out.len() < n {
+        // a … z, then a1 … z1, and so on — never a taken name.
+        let letter = (b'a' + (k % 26) as u8) as char;
+        let round = k / 26;
+        let name = if round == 0 {
+            format!("{from}{letter}")
+        } else {
+            format!("{from}{letter}{round}")
+        };
+        if !taken.contains(&name) && !out.contains(&name) {
+            out.push(name);
+        }
+        k += 1;
+    }
+    out
+}
+
 /// The user's CURSOR into the document: which scene/cut/frame/column/layer
 /// is being looked at, and how (onion, playback). This is LENS-DOCK Phase
 /// 2's ViewContext, split from the document so panels can eventually hold or
@@ -81,11 +169,12 @@ pub struct ViewContext {
     /// row refuses. Arming-only: the pen path is untouched. Defaults ON
     /// when entering the Finishing room, OFF elsewhere.
     pub line_guard: bool,
-    /// THE GHOST PIN (room ratified 2026-08-17): a library drawing pinned
-    /// to the light box — rendered in Ao at the onion strength on EVERY
-    /// frame, with no sheet entry, no export, no document change. Pure
-    /// display; dies with the session (NEVER-DO 1 of its room).
-    pub ghost_pin: Option<DrawingId>,
+    /// THE LIGHT TABLE (GM6; generalises the ghost pin, room ratified
+    /// 2026-08-17): drawings pinned to the light box — rendered in Ao on
+    /// EVERY frame, with no sheet entry, no export, no document change.
+    /// The first pin is the old ghost pin. Pure display; the pins and the
+    /// shift & trace offsets die with the session (NEVER-DO 1 of its room).
+    pub light: crate::canvas::LightTable,
 }
 
 /// The document (engine + where it lives on disk) plus the single "Main"
@@ -182,6 +271,9 @@ pub struct AppState {
     pub sheet_ui: crate::xsheet_panel::SheetUi,
     /// GM14: the curves pane's shown columns, key selection and view.
     pub curves: crate::curves_panel::CurvesState,
+    /// GM6: the pixel clipboard — the last copied selection of a layer, at
+    /// its paper position (session-only; the cell clipboard is sheet_ui's).
+    pub pixel_clip: Option<anim_core::edit::ClipImage>,
 }
 
 impl AppState {
@@ -219,7 +311,7 @@ impl AppState {
                 active_layer: "line".into(),
                 active_role: anim_core::model::LayerRole::Line,
                 loop_playback: true,
-                ghost_pin: None,
+                light: Default::default(),
                 line_guard: false,
             },
             file_path: None,
@@ -256,6 +348,7 @@ impl AppState {
             param_interp: anim_core::xsheet::ParamInterp::Ease,
             sheet_ui: Default::default(),
             curves: Default::default(),
+            pixel_clip: None,
         }
     }
 
@@ -300,7 +393,7 @@ impl AppState {
                 active_layer: "line".into(),
                 active_role: anim_core::model::LayerRole::Line,
                 loop_playback: true,
-                ghost_pin: None,
+                light: Default::default(),
                 line_guard: false,
             },
             file_path: Some(path),
@@ -338,6 +431,7 @@ impl AppState {
             param_interp: anim_core::xsheet::ParamInterp::Ease,
             sheet_ui: Default::default(),
             curves: Default::default(),
+            pixel_clip: None,
         })
     }
 
@@ -1378,6 +1472,293 @@ impl AppState {
         [prev, next]
     }
 
+    // ---- GM6: genga to douga --------------------------------------------
+
+    /// Mark a drawing's kind (Unset clears its chart too) — one undo step;
+    /// a kind never changes pixels.
+    pub fn set_drawing_kind(&mut self, id: DrawingId, kind: anim_core::model::DrawingKind) {
+        let before = self.cut().drawing_def(id);
+        let after = anim_core::model::DrawingDef {
+            kind,
+            chart: if kind == anim_core::model::DrawingKind::Unset {
+                None
+            } else {
+                before.chart.clone()
+            },
+        };
+        self.apply_drawing_def(id, before, after, &format!("mark {}", kind.label()));
+    }
+
+    /// Give a key a spacing chart toward the next key in its column (no
+    /// marks = remove the chart). Marking the chart makes the drawing a key.
+    pub fn set_chart(&mut self, id: DrawingId, marks: &[f32]) {
+        use anim_core::model::{DrawingDef, DrawingKind, SpacingChart};
+        let before = self.cut().drawing_def(id);
+        let chart = if marks.is_empty() {
+            None
+        } else {
+            let col = self.cut().xsheet.column(self.view.active_column);
+            let start = col.and_then(|c| c.keys_referencing(id).first().copied());
+            match col.zip(start).and_then(|(c, f)| c.next_key(f, |d| d != id)) {
+                Some((_, to)) => Some(SpacingChart {
+                    to,
+                    marks: marks.to_vec(),
+                }),
+                None => {
+                    self.refuse("refused — a chart points at the NEXT key; expose one after this one");
+                    return;
+                }
+            }
+        };
+        let after = DrawingDef {
+            kind: DrawingKind::Key,
+            chart,
+        };
+        self.apply_drawing_def(id, before, after, "spacing chart");
+    }
+
+    fn apply_drawing_def(
+        &mut self,
+        id: DrawingId,
+        before: anim_core::model::DrawingDef,
+        after: anim_core::model::DrawingDef,
+        label: &str,
+    ) {
+        if before == after {
+            return;
+        }
+        let at = self.at();
+        let r = self.engine.apply(
+            label,
+            vec![Command::SetDrawingDef {
+                at,
+                drawing: id,
+                before,
+                after,
+            }],
+        );
+        self.report(r, label);
+    }
+
+    /// Make inbetweens: the chart on this frame's key becomes blank
+    /// Inbetween drawings (named between the keys, the from-key's layer
+    /// stack, structure only) exposed between the two keys' exposure
+    /// starts — keys, defs and cells in ONE undo step. False = refused.
+    pub fn make_inbetweens(&mut self) -> bool {
+        match self.inbetween_commands() {
+            Ok(cmds) => {
+                let n = cmds
+                    .iter()
+                    .filter(|c| matches!(c, Command::AddDrawing { .. }))
+                    .count();
+                let r = self.engine.apply("make inbetweens", cmds);
+                let ok = r.is_ok();
+                self.report(r, &format!("{n} inbetween(s) made"));
+                ok
+            }
+            Err(why) => {
+                self.refuse(format!("refused — {why}"));
+                false
+            }
+        }
+    }
+
+    /// The commands `make_inbetweens` applies (D1: one batch).
+    fn inbetween_commands(&mut self) -> Result<Vec<Command>, String> {
+        use anim_core::model::{DrawingDef, DrawingKind};
+        let at = self.at();
+        let column = self.view.active_column;
+        let from = self.current_drawing().ok_or("no drawing on this frame")?;
+        let chart = self
+            .cut()
+            .drawing_def(from)
+            .chart
+            .ok_or("this drawing has no spacing chart")?;
+        let col = self.cut().xsheet.column(column).ok_or("no active column")?;
+        let (fa, _) = col.exposure_at(self.view.frame).ok_or("nothing exposed here")?;
+        let (fb, _) = col
+            .next_key(fa, |d| d == chart.to)
+            .ok_or("the chart's next key is not exposed after this one in this column")?;
+        let n = chart.marks.len();
+        let frames = inbetween_frames(fa, fb, n)
+            .ok_or_else(|| format!("{n} inbetweens need at least {} frames between the keys", n + 1))?;
+        let between: Vec<u32> = col
+            .keys()
+            .map(|(f, _)| f)
+            .filter(|f| *f > fa && *f < fb)
+            .collect();
+        let name_of = |d: DrawingId| self.cut().drawing(d).map(|x| x.name.clone()).unwrap_or_default();
+        let taken: HashSet<String> = self.cut().drawings.iter().map(|d| d.name.clone()).collect();
+        let names = inbetween_names(&name_of(from), &name_of(chart.to), n, &taken);
+        let specs: Vec<LayerProps> = match self.cut().drawing(from) {
+            Some(d) if !d.layers.is_empty() => d.layers.iter().map(|l| l.props.clone()).collect(),
+            _ => self.new_cel_specs(),
+        };
+        let mut cmds: Vec<Command> = between
+            .into_iter()
+            .map(|frame| Command::SetCell {
+                at,
+                column,
+                frame,
+                key: None,
+            })
+            .collect();
+        let mut index = self.cut().drawings.len();
+        for (name, frame) in names.into_iter().zip(frames) {
+            let id = self.engine.alloc_drawing_id();
+            let layers = specs
+                .iter()
+                .map(|props| CelLayer {
+                    id: self.engine.alloc_layer_id(),
+                    props: props.clone(),
+                    raster: Default::default(),
+                })
+                .collect();
+            cmds.push(Command::AddDrawing {
+                at,
+                id,
+                index,
+                name,
+                strokes: vec![],
+                layers,
+            });
+            cmds.push(Command::SetDrawingDef {
+                at,
+                drawing: id,
+                before: DrawingDef::default(),
+                after: DrawingDef {
+                    kind: DrawingKind::Inbetween,
+                    chart: None,
+                },
+            });
+            cmds.push(Command::SetCell {
+                at,
+                column,
+                frame,
+                key: Some(Exposure::Drawing(id)),
+            });
+            index += 1;
+        }
+        Ok(cmds)
+    }
+
+    /// Duplicate cel: this frame's drawing — strokes and its whole layer
+    /// stack, pixels shared — under the next free number, exposed here in
+    /// place of the original. One undo step.
+    pub fn duplicate_cel(&mut self) {
+        let at = self.at();
+        let Some(src) = self.current_drawing().and_then(|id| self.cut().drawing(id)).cloned() else {
+            self.refuse("refused — no drawing on this frame to duplicate");
+            return;
+        };
+        let name = self.next_drawing_name();
+        let id = self.engine.alloc_drawing_id();
+        let layers = src
+            .layers
+            .iter()
+            .map(|l| CelLayer {
+                id: self.engine.alloc_layer_id(),
+                props: l.props.clone(),
+                raster: l.raster.clone(),
+            })
+            .collect();
+        let index = self.cut().drawings.len();
+        let r = self.engine.apply(
+            "duplicate cel",
+            vec![
+                Command::AddDrawing {
+                    at,
+                    id,
+                    index,
+                    name: name.clone(),
+                    strokes: src.strokes.clone(),
+                    layers,
+                },
+                Command::SetCell {
+                    at,
+                    column: self.view.active_column,
+                    frame: self.view.frame,
+                    key: Some(Exposure::Drawing(id)),
+                },
+            ],
+        );
+        if r.is_ok() {
+            self.view.selected_drawing = Some(id);
+        }
+        self.report(r, &format!("{} duplicated as {name}", src.name));
+    }
+
+    /// The pixel clipboard: copy the selected pixels of the armed layer of
+    /// the drawing shown here. False = nothing copied (refused).
+    pub fn copy_pixels(&mut self, poly: &[(f32, f32)]) -> bool {
+        let clip = self.current_drawing().and_then(|id| {
+            let d = self.cut().drawing(id)?;
+            let layer = self.active_layer_of(d)?;
+            anim_core::edit::copy_region(d, layer.id, poly)
+        });
+        match clip {
+            Some(c) => {
+                self.pixel_clip = Some(c);
+                self.status = "pixels copied".into();
+                true
+            }
+            None => {
+                self.refuse("refused — no ink in the selection on the armed layer");
+                false
+            }
+        }
+    }
+
+    /// Paste the copied pixels in place (the same paper position) on the
+    /// armed layer of this frame's own cel — a held or blank frame gets a
+    /// new cel first. One undo step.
+    pub fn paste_pixels(&mut self) {
+        let Some(clip) = self.pixel_clip.clone() else {
+            self.refuse("refused — copy pixels first");
+            return;
+        };
+        if self.refuse_if_locked() {
+            return;
+        }
+        let at = self.at();
+        let target = self
+            .own_key_drawing()
+            .and_then(|id| self.cut().drawing(id))
+            .filter(|d| !d.layers.is_empty())
+            .and_then(|d| Some((d.id, self.active_layer_of(d)?.id)));
+        if let Some((id, layer)) = target {
+            let cmds = {
+                let d = self.cut().drawing(id).expect("checked above");
+                anim_core::edit::paste_region(at, d, layer, &clip)
+            };
+            // Through the region edit's own commit (one PaintTiles).
+            for c in cmds {
+                if let Command::PaintTiles { id, layer, diff, .. } = c {
+                    self.commit_region_edit("paste pixels", id, layer, diff);
+                }
+            }
+            return;
+        }
+        if self.own_key_drawing().is_some_and(|id| {
+            self.cut().drawing(id).is_some_and(|d| !d.layers.is_empty())
+        }) {
+            self.refuse("refused — no armed layer on this cel to paste into");
+            return;
+        }
+        // A held / blank frame (or a vector-only cel): the paste becomes
+        // the new cel's paint, as a stroke would.
+        let Some(slot) = self.active_slot_resolved() else {
+            self.refuse("refused — no armed layer to paste into");
+            return;
+        };
+        let tiles: Vec<(TileCoord, Arc<TileData>)> =
+            anim_core::edit::merge_patch(&BTreeMap::new(), &[], &clip.patch)
+                .into_iter()
+                .filter_map(|(c, _, after)| after.map(|t| (c, t)))
+                .collect();
+        self.commit_raster(tiles, slot);
+    }
+
     /// WHOLE-CEL composite of a drawing's visible layers (bottom→top slices +
     /// composite hash) — the onion ghost is the cel as it looks, all layers.
     /// Composite of `id`'s visible layers, optionally restricted to the
@@ -1657,9 +2038,7 @@ impl AppState {
         if self.view.selected_drawing == Some(id) {
             self.view.selected_drawing = None;
         }
-        if self.view.ghost_pin == Some(id) {
-            self.view.ghost_pin = None;
-        }
+        self.view.light.unpin(id);
         self.report(r, "drawing removed from library");
     }
     pub fn clear_key_at_frame(&mut self) {
@@ -3824,5 +4203,408 @@ mod sheetedit_tests {
         h.type_text("threes");
         h.key(egui::Key::Enter);
         assert_eq!(keys(&h), drawn(&[0, 3, 6], &[d0, d1, d2]));
+    }
+}
+
+#[cfg(test)]
+mod lighttable_tests {
+    use std::collections::{BTreeMap, HashSet};
+    use std::sync::Arc;
+
+    use anim_core::ids::DrawingId;
+    use anim_core::model::DrawingKind;
+    use anim_core::raster::{TILE, TILE_LEN, TileData, f32_to_f16_bits};
+    use eframe::egui;
+
+    use super::{AppState, inbetween_frames, inbetween_names};
+    use crate::canvas::{
+        ONION_AHEAD_TINT, ONION_BEHIND_TINT, OnionCfg, OnionMode, PinShift, onion_set, shift_tiles,
+    };
+    use crate::config::{Action, Config};
+    use crate::plate;
+    use crate::testkit::EditorHarness;
+    use crate::workspace::Pane;
+    use crate::xsheet_panel::{CellMark, cell_mark};
+
+    /// Column A keyed at `frames` (frame 0 is the harness's own drawing),
+    /// the cursor on frame 0; the drawings in frame order.
+    fn keyed(frames: &[u32]) -> (EditorHarness, Vec<DrawingId>) {
+        let mut h = EditorHarness::new();
+        let s = h.state_mut();
+        for &f in frames.iter().filter(|f| **f > 0) {
+            s.goto(f);
+            s.new_drawing_at_frame();
+        }
+        s.goto(0);
+        let ids = frames
+            .iter()
+            .map(|&f| s.resolve_at(s.view.active_column, f).expect("keyed"))
+            .collect();
+        h.run();
+        (h, ids)
+    }
+
+    fn set_at(s: &AppState, frame: u32, cfg: &OnionCfg) -> Vec<(DrawingId, i32)> {
+        onion_set(s.cut(), s.view.active_column, frame, cfg)
+            .into_iter()
+            .map(|(d, o, _)| (d, o))
+            .collect()
+    }
+
+    fn depth(before: u8, after: u8, mode: OnionMode) -> OnionCfg {
+        OnionCfg {
+            before,
+            after,
+            mode,
+            ..OnionCfg::default()
+        }
+    }
+
+    /// One solid tile of premultiplied `v` at `coord` on the armed layer.
+    fn ink_tile(h: &mut EditorHarness, coord: (i32, i32), v: f32) {
+        let slot = h.state().active_slot_resolved().expect("an armed layer");
+        let mut px = vec![0u16; TILE_LEN];
+        for x in px.iter_mut() {
+            *x = f32_to_f16_bits(v);
+        }
+        h.state_mut()
+            .commit_raster(vec![(coord, Arc::new(TileData::from_vec(px)))], slot)
+            .expect("the tile committed");
+    }
+
+    fn hashes(s: &AppState) -> Vec<u64> {
+        s.cut().drawings.iter().map(|d| d.content_hash()).collect()
+    }
+
+    #[test]
+    fn lighttable_onion_depth_one_is_the_old_neighbours_on_every_frame() {
+        let (mut h, _) = keyed(&[0, 4, 8]);
+        let cfg = OnionCfg::default();
+        for f in 0..h.state().frame_count() {
+            h.state_mut().goto(f);
+            let s = h.state();
+            let set = set_at(s, f, &cfg);
+            let behind = set.iter().find(|(_, o)| *o < 0).map(|(d, _)| *d);
+            let ahead = set.iter().find(|(_, o)| *o > 0).map(|(d, _)| *d);
+            assert_eq!([behind, ahead], s.onion_neighbors(), "frame {f}");
+        }
+    }
+
+    #[test]
+    fn lighttable_onion_depth_zero_is_empty_and_five_reaches_every_drawing() {
+        let (h, d) = keyed(&[0, 2, 4, 6, 8, 10, 12]);
+        let s = h.state();
+        assert!(set_at(s, 6, &depth(0, 0, OnionMode::Drawings)).is_empty());
+        assert_eq!(
+            set_at(s, 6, &depth(5, 5, OnionMode::Drawings)),
+            vec![(d[2], -1), (d[1], -2), (d[0], -3), (d[4], 1), (d[5], 2), (d[6], 3)]
+        );
+        // Each step farther fades by the falloff.
+        let w: Vec<f32> = onion_set(s.cut(), s.view.active_column, 6, &depth(3, 0, OnionMode::Drawings))
+            .into_iter()
+            .map(|(_, _, w)| w)
+            .collect();
+        let cfg = OnionCfg::default();
+        let want = [cfg.opacity, cfg.opacity * cfg.falloff, cfg.opacity * cfg.falloff * cfg.falloff];
+        assert_eq!(w.len(), want.len());
+        assert!(w.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-6), "{w:?}");
+    }
+
+    #[test]
+    fn lighttable_onion_frames_mode_counts_frames_not_drawings() {
+        let (h, d) = keyed(&[0, 4, 8]);
+        // Mid-hold of the second drawing: one frame back is itself, two
+        // back the first; ahead, the hold is skipped and the third is 3 on.
+        let set = set_at(h.state(), 5, &depth(2, 4, OnionMode::Frames));
+        assert_eq!(set, vec![(d[1], -1), (d[0], -2), (d[2], 3)]);
+    }
+
+    #[test]
+    fn lighttable_onion_keys_mode_skips_drawings_that_are_not_keys() {
+        let (mut h, d) = keyed(&[0, 4, 8, 12]);
+        let s = h.state_mut();
+        for k in [d[0], d[2]] {
+            s.set_drawing_kind(k, DrawingKind::Key);
+        }
+        let set = set_at(s, 4, &depth(1, 1, OnionMode::Keys));
+        assert_eq!(set, vec![(d[0], -1), (d[2], 1)]);
+        // Unmarked drawings never ghost in key mode.
+        let all = set_at(s, 12, &depth(5, 5, OnionMode::Keys));
+        assert_eq!(all, vec![(d[2], -1), (d[0], -2)]);
+    }
+
+    #[test]
+    fn lighttable_onion_other_columns_join_only_when_asked() {
+        let (mut h, d) = keyed(&[0, 4]);
+        let s = h.state_mut();
+        let a = s.view.active_column;
+        s.add_column();
+        s.goto(0);
+        s.new_drawing_at_frame();
+        let b = s.current_drawing().expect("column B's drawing");
+        let mine = onion_set(s.cut(), a, 4, &OnionCfg::default());
+        assert_eq!(mine.iter().map(|x| x.0).collect::<Vec<_>>(), vec![d[0]]);
+        let cfg = OnionCfg {
+            other_columns: true,
+            ..OnionCfg::default()
+        };
+        let all: Vec<DrawingId> = onion_set(s.cut(), a, 4, &cfg).into_iter().map(|x| x.0).collect();
+        assert_eq!(all, vec![d[0], b]);
+    }
+
+    #[test]
+    fn lighttable_onion_config_comes_back_in_range() {
+        let wild = OnionCfg {
+            before: 9,
+            after: 200,
+            opacity: f32::NAN,
+            falloff: 3.0,
+            ..OnionCfg::default()
+        }
+        .sane();
+        assert_eq!((wild.before, wild.after), (OnionCfg::MAX_DEPTH, OnionCfg::MAX_DEPTH));
+        assert_eq!(wild.opacity, OnionCfg::default().opacity);
+        assert_eq!(wild.falloff, 1.0);
+        assert_eq!(OnionCfg::default().weight(1), OnionCfg::default().opacity);
+    }
+
+    #[test]
+    fn lighttable_onion_tints_are_unchanged() {
+        assert_eq!(ONION_BEHIND_TINT, [160, 195, 232]);
+        assert_eq!(ONION_AHEAD_TINT, [205, 206, 199]);
+        assert_eq!(plate::AO.to_array(), [83, 137, 196, 255]);
+        assert_eq!(plate::LEGEND.to_array(), [139, 141, 131, 255]);
+    }
+
+    #[test]
+    fn lighttable_cell_marks_follow_the_drawing_kind() {
+        assert_eq!(cell_mark(DrawingKind::Key), CellMark::Circle);
+        assert_eq!(cell_mark(DrawingKind::Breakdown), CellMark::Underline);
+        assert_eq!(cell_mark(DrawingKind::Inbetween), CellMark::None);
+        assert_eq!(cell_mark(DrawingKind::Unset), CellMark::None);
+    }
+
+    #[test]
+    fn lighttable_marking_a_key_names_the_sheet_cell_and_never_touches_pixels() {
+        let mut h = EditorHarness::new();
+        h.run();
+        assert!(!h.has_text_containing("at frame 1: genga (key)"));
+        let before = hashes(h.state());
+        let steps = h.state().engine.position();
+        h.perform(Action::KindKey);
+        h.run();
+        assert!(h.has_text_containing("at frame 1: genga (key)"), "{}", h.describe());
+        let d = h.state().current_drawing().expect("a drawing");
+        assert_eq!(h.state().cut().drawing_kind(d), DrawingKind::Key);
+        assert_eq!(h.state().engine.position(), steps + 1, "one undo step");
+        assert_eq!(hashes(h.state()), before, "a kind never changes pixels");
+        h.perform(Action::KindBreakdown);
+        h.run();
+        assert!(h.has_text_containing("at frame 1: breakdown"));
+        h.state_mut().undo();
+        h.state_mut().undo();
+        assert_eq!(h.state().cut().drawing_kind(d), DrawingKind::Unset);
+    }
+
+    #[test]
+    fn lighttable_pins_show_on_every_frame_and_never_touch_the_document() {
+        let (mut h, d) = keyed(&[0, 4, 8]);
+        let before = hashes(h.state());
+        let steps = h.state().engine.position();
+        h.perform(Action::PinToLightTable);
+        assert!(h.state().view.light.is_pinned(d[0]));
+        for f in [0, 4, 8, 30] {
+            h.state_mut().goto(f);
+            h.run();
+            let shown: Vec<DrawingId> = h.state().view.light.shown(h.state().cut()).iter().map(|x| x.0).collect();
+            assert_eq!(shown, vec![d[0]], "frame {f}");
+        }
+        h.state_mut().view.light.nudge(12.0, -4.0, 0.1);
+        h.run();
+        let moved = PinShift {
+            dx: 12.0,
+            dy: -4.0,
+            rot: 0.1,
+        };
+        assert_eq!(h.state().view.light.shift(d[0]), moved);
+        // A second pin, selected, moves alone; pinning again unpins.
+        h.state_mut().goto(4);
+        h.perform(Action::PinToLightTable);
+        h.state_mut().view.light.selected = Some(d[1]);
+        h.state_mut().view.light.nudge(1.0, 0.0, 0.0);
+        assert_eq!(h.state().view.light.shift(d[1]).dx, 1.0);
+        assert_eq!(h.state().view.light.shift(d[0]), moved);
+        h.perform(Action::ResetShift);
+        assert!(h.state().view.light.offsets.is_empty());
+        h.perform(Action::PinToLightTable);
+        assert!(!h.state().view.light.is_pinned(d[1]));
+        assert_eq!(hashes(h.state()), before, "pins are view state");
+        assert_eq!(h.state().engine.position(), steps, "no undo step");
+    }
+
+    #[test]
+    fn lighttable_shift_and_trace_drag_moves_the_pin_not_the_pen() {
+        let (mut h, d) = keyed(&[0, 4]);
+        h.perform(Action::PinToLightTable);
+        h.state_mut().goto(4);
+        h.state_mut().view.light.shift_trace = true;
+        h.run();
+        let strokes = |h: &EditorHarness| h.state().cut().drawings.iter().map(|d| d.strokes.len()).sum::<usize>();
+        let (before, steps) = (strokes(&h), h.state().engine.position());
+        let c = h.editor().pane_rects.iter().find(|(p, _)| *p == Pane::Canvas).map(|(_, r)| r.center());
+        let c = c.expect("the drawing room docks the canvas");
+        h.drag(c, c + egui::vec2(60.0, 0.0), 6);
+        h.run();
+        let s = h.state().view.light.shift(d[0]);
+        assert!(s.dx > 1.0 && s.dy.abs() < 1e-3 && s.rot == 0.0, "{s:?}");
+        assert_eq!((strokes(&h), h.state().engine.position()), (before, steps), "the pen rested");
+        h.perform(Action::ResetShift);
+        assert!(h.state().view.light.shift(d[0]).is_identity());
+    }
+
+    #[test]
+    fn lighttable_shift_tiles_moves_ink_and_the_identity_shares_tiles() {
+        let mut px = vec![0u16; TILE_LEN];
+        for x in px.iter_mut() {
+            *x = f32_to_f16_bits(0.5);
+        }
+        let mut tiles = BTreeMap::new();
+        tiles.insert((0, 0), Arc::new(TileData::from_vec(px)));
+        let center = egui::pos2(960.0, 540.0);
+        let same = shift_tiles(&tiles, PinShift::default(), center);
+        assert!(Arc::ptr_eq(&same[&(0, 0)], &tiles[&(0, 0)]));
+        let shift = PinShift {
+            dx: TILE as f32,
+            dy: 0.0,
+            rot: 0.0,
+        };
+        let moved = shift_tiles(&tiles, shift, center);
+        assert!(moved.get(&(1, 0)).is_some_and(|t| !t.is_empty()));
+        assert!(moved.get(&(0, 0)).is_none_or(|t| t.is_empty()));
+        // A turned pin maps back exactly.
+        let turn = PinShift {
+            dx: 3.0,
+            dy: -7.0,
+            rot: 0.4,
+        };
+        let p = egui::pos2(100.0, 40.0);
+        let q = turn.invert(turn.apply(p, center), center);
+        assert!((q - p).length() < 1e-3, "{q:?}");
+    }
+
+    #[test]
+    fn lighttable_inbetween_frames_split_the_span_evenly() {
+        assert_eq!(inbetween_frames(0, 8, 3), Some(vec![2, 4, 6]));
+        assert_eq!(inbetween_frames(0, 4, 3), Some(vec![1, 2, 3]));
+        assert_eq!(inbetween_frames(10, 16, 1), Some(vec![13]));
+        assert_eq!(inbetween_frames(0, 3, 3), None, "too short");
+        assert_eq!(inbetween_frames(8, 0, 1), None, "backwards");
+        assert_eq!(inbetween_frames(0, 8, 0), None);
+    }
+
+    #[test]
+    fn lighttable_inbetween_names_number_between_the_keys_or_letter_the_first() {
+        let none = HashSet::new();
+        assert_eq!(inbetween_names("1", "5", 3, &none), ["2", "3", "4"]);
+        assert_eq!(inbetween_names("1", "9", 1, &none), ["5"]);
+        assert_eq!(inbetween_names("5", "1", 3, &none), ["4", "3", "2"]);
+        assert_eq!(inbetween_names("1", "2", 3, &none), ["1a", "1b", "1c"]);
+        let taken: HashSet<String> = ["3".to_string(), "1a".to_string()].into();
+        assert_eq!(inbetween_names("1", "5", 3, &taken), ["1b", "1c", "1d"]);
+        assert_eq!(inbetween_names("A1", "A5", 2, &none), ["A2", "A4"]);
+    }
+
+    #[test]
+    fn lighttable_make_inbetweens_fills_the_chart_in_one_undo_step() {
+        let (mut h, d) = keyed(&[0, 8]);
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        s.set_chart(d[0], &[0.25, 0.5, 0.75]);
+        let def = s.cut().drawing_def(d[0]);
+        assert_eq!(def.kind, DrawingKind::Key);
+        assert_eq!(def.chart.as_ref().map(|c| c.to), Some(d[1]));
+        let name = |s: &AppState, id: DrawingId| s.cut().drawing(id).map(|x| x.name.clone()).unwrap_or_default();
+        let taken: HashSet<String> = s.cut().drawings.iter().map(|x| x.name.clone()).collect();
+        let want = inbetween_names(&name(s, d[0]), &name(s, d[1]), 3, &taken);
+        let (count, steps) = (s.cut().drawings.len(), s.engine.position());
+        assert!(s.make_inbetweens(), "{}", s.status);
+        assert_eq!(s.engine.position(), steps + 1, "one undo step");
+        let frames: Vec<u32> = s.cut().xsheet.column(col).unwrap().keys().map(|(f, _)| f).collect();
+        assert_eq!(frames, vec![0, 2, 4, 6, 8]);
+        for (f, want) in [2, 4, 6].into_iter().zip(&want) {
+            let ib = s.resolve_at(col, f).expect("an inbetween");
+            assert_eq!(s.cut().drawing_kind(ib), DrawingKind::Inbetween);
+            assert_eq!(&name(s, ib), want);
+        }
+        s.undo();
+        let frames: Vec<u32> = s.cut().xsheet.column(col).unwrap().keys().map(|(f, _)| f).collect();
+        assert_eq!(frames, vec![0, 8]);
+        assert_eq!(s.cut().drawings.len(), count);
+        // Without a chart there is nothing to fill.
+        s.goto(8);
+        assert!(!s.make_inbetweens());
+    }
+
+    #[test]
+    fn lighttable_duplicate_cel_copies_the_layers_under_a_new_name() {
+        let mut h = EditorHarness::new();
+        ink_tile(&mut h, (0, 0), 0.5);
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        let src = s.resolve_at(col, 0).expect("a drawing");
+        let steps = s.engine.position();
+        s.duplicate_cel();
+        assert_eq!(s.engine.position(), steps + 1, "one undo step");
+        let dup = s.resolve_at(col, 0).expect("the copy");
+        assert_ne!(dup, src);
+        let (a, b) = (s.cut().drawing(src).unwrap(), s.cut().drawing(dup).unwrap());
+        assert_ne!(a.name, b.name);
+        assert_eq!(a.layers.len(), b.layers.len());
+        for (la, lb) in a.layers.iter().zip(&b.layers) {
+            assert_ne!(la.id, lb.id);
+            assert_eq!(la.content_hash(), lb.content_hash());
+        }
+        s.undo();
+        assert_eq!(s.resolve_at(col, 0), Some(src));
+        assert!(s.cut().drawing(dup).is_none());
+    }
+
+    #[test]
+    fn lighttable_copied_pixels_paste_in_place_into_another_drawing() {
+        let (mut h, _) = keyed(&[0, 8]);
+        ink_tile(&mut h, (1, 1), 0.5);
+        let src = h.state().active_layer_tiles().and_then(|m| m.get(&(1, 1)).cloned());
+        let src = src.expect("the inked tile");
+        let s = h.state_mut();
+        assert!(!s.copy_pixels(&[(300.0, 300.0), (310.0, 300.0), (310.0, 310.0)]), "no ink there");
+        let square = [(56.0, 56.0), (136.0, 56.0), (136.0, 136.0), (56.0, 136.0)];
+        assert!(s.copy_pixels(&square));
+        s.goto(8);
+        let steps = s.engine.position();
+        s.paste_pixels();
+        assert_eq!(s.engine.position(), steps + 1, "one undo step");
+        let got = s.active_layer_tiles().and_then(|m| m.get(&(1, 1)).cloned());
+        assert_eq!(got.expect("pasted in place").rgba, src.rgba);
+        s.undo();
+        assert!(s.active_layer_tiles().is_none_or(|m| m.get(&(1, 1)).is_none_or(|t| t.is_empty())));
+    }
+
+    #[test]
+    fn lighttable_config_keeps_the_onion_and_the_light_table() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let mut cfg = Config::default();
+        cfg.onion = OnionCfg {
+            before: 3,
+            after: 2,
+            mode: OnionMode::Keys,
+            other_columns: true,
+            opacity: 0.6,
+            falloff: 0.5,
+        };
+        cfg.light_table.opacity = 0.7;
+        cfg.save_to(dir.path()).expect("saved");
+        let (back, _) = Config::load_from(dir.path());
+        assert_eq!(back.onion, cfg.onion);
+        assert_eq!(back.light_table, cfg.light_table);
     }
 }

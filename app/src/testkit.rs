@@ -72,6 +72,9 @@ impl Rig {
         let pen = std::mem::take(&mut self.pen);
         let Rig { editor, config, .. } = self;
         let mut presets_dirty = false;
+        // GM6: the onion and light table settings, fed as the App feeds them.
+        editor.canvas.onion = config.onion.sane();
+        editor.canvas.light_table = config.light_table;
         editor.ui(
             ui,
             &config.pen,
@@ -88,6 +91,13 @@ impl Rig {
         // GM4: the OPTIONS row's stabilizer level, saved as the App saves it.
         if let Some(level) = self.editor.canvas.stabilizer_request.take() {
             self.config.pen.stabilizer = level;
+        }
+        // GM6: and the light box's onion / light table edits.
+        if let Some(cfg) = self.editor.canvas.onion_request.take() {
+            self.config.onion = cfg;
+        }
+        if let Some(cfg) = self.editor.canvas.light_table_request.take() {
+            self.config.light_table = cfg;
         }
         self.editor.autosave.minutes = self.config.session.autosave_minutes;
         // The shell's shortcut dispatch, minus the dialogs: requests are
@@ -1143,7 +1153,7 @@ mod tests {
 
     /// Colour literals outside plate.rs, measured at 56679ad. The count may
     /// only go down (D7): lower the pin when it does.
-    const COLOUR_LITERALS_PINNED: usize = 86;
+    const COLOUR_LITERALS_PINNED: usize = 83;
 
     fn colour_literals(text: &str) -> usize {
         let prefix = concat!("Color32", "::");

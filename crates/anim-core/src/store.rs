@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension};
 use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
-use crate::model::{CelLayer, Cut, Drawing, LayerProps, LayerRole, Project, Scene};
+use crate::model::{CelLayer, Cut, Drawing, DrawingDef, LayerProps, LayerRole, Project, Scene};
 use crate::raster::{RasterLayer, TileData};
 use crate::xsheet::{Column, ColumnDef, Exposure, ParamColumn, ParamKey};
 
@@ -76,7 +76,11 @@ CREATE TABLE IF NOT EXISTS column_defs(
 CREATE TABLE IF NOT EXISTS cut_memos(
     cut_id INTEGER NOT NULL, frame INTEGER NOT NULL, text TEXT NOT NULL,
     PRIMARY KEY(cut_id, frame));
+CREATE TABLE IF NOT EXISTS drawing_defs(
+    drawing_id INTEGER PRIMARY KEY, json TEXT NOT NULL);
 ";
+// GM6 (D2): drawing kinds and spacing charts are a v11 side table too, added
+// with no version bump: a v11 file saved before it reads it as empty.
 // v11 (GM5, D2): cut meta, column kinds and the memo row are side tables
 // too, created on save only; a file without them reads them as empty. v10
 // was never written by this branch: it loads as v9 plus tables we do not
@@ -154,7 +158,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
          DELETE FROM cut_images;
          DELETE FROM param_columns; DELETE FROM param_keys;
          DELETE FROM cut_audio; DELETE FROM cel_layer_defs;
-         DELETE FROM cut_meta; DELETE FROM column_defs; DELETE FROM cut_memos;",
+         DELETE FROM cut_meta; DELETE FROM column_defs; DELETE FROM cut_memos;
+         DELETE FROM drawing_defs;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -226,6 +231,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
             tx.prepare("INSERT INTO column_defs(column_id, json) VALUES (?1, ?2)")?;
         let mut ins_memo =
             tx.prepare("INSERT INTO cut_memos(cut_id, frame, text) VALUES (?1, ?2, ?3)")?;
+        let mut ins_drawing_def =
+            tx.prepare("INSERT INTO drawing_defs(drawing_id, json) VALUES (?1, ?2)")?;
 
         for (s_ord, scene) in project.scenes.iter().enumerate() {
             ins_scene.execute((scene.id.0 as i64, &scene.name, s_ord as i64))?;
@@ -248,6 +255,13 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                 // map canonical); a column without a row is a plain Cel.
                 for (column, def) in &cut.column_defs {
                     ins_column_def.execute((column.0 as i64, def.to_json()))?;
+                }
+                // GM6: likewise only non-default drawing defs, and only for
+                // drawings that are still in the cut.
+                for (drawing, def) in &cut.drawing_defs {
+                    if cut.drawing(*drawing).is_some() {
+                        ins_drawing_def.execute((drawing.0 as i64, def.to_json()))?;
+                    }
                 }
                 for (d_ord, d) in cut.drawings.iter().enumerate() {
                     let payload = serde_json::to_string(&d.strokes)?;
@@ -431,6 +445,8 @@ pub fn load(path: &Path) -> Result<Project> {
         && has_table("cut_meta")
         && has_table("column_defs")
         && has_table("cut_memos");
+    // GM6: added inside v11, so probed on its own.
+    let drawing_defs = version >= 11 && has_table("drawing_defs");
 
     let mut project = Project::new(get_meta("name")?);
     project.fps = get_meta("fps")?
@@ -665,6 +681,21 @@ pub fn load(path: &Path) -> Result<Project> {
                     strokes: serde_json::from_str(&payload)?,
                     layers,
                 });
+                if drawing_defs {
+                    let json: Option<String> = conn
+                        .query_row(
+                            "SELECT json FROM drawing_defs WHERE drawing_id = ?1",
+                            (id,),
+                            |r| r.get(0),
+                        )
+                        .optional()?;
+                    if let Some(json) = json {
+                        let def = DrawingDef::from_json(&json).ok_or_else(|| {
+                            EngineError::Corrupt(format!("bad drawing def for drawing {id}"))
+                        })?;
+                        cut.set_drawing_def(DrawingId(id as u64), def);
+                    }
+                }
             }
 
             let mut stmt =

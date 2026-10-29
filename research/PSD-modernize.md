@@ -2395,3 +2395,19 @@ what was not verified.
   Not verified: the real window (the system clipboard round trip, Tab in the entry, wheel zoom), and on
   Windows Shift+Delete arrives as a Cut event, so GM5's Shift+Delete chord does not reach the sheet there
   (found here, not changed).
+- 2026-10-29 — The light table and inbetweening part (GM6). Engine: `DrawingKind` (unmarked / genga key /
+  breakdown / douga inbetween) and `SpacingChart` in a `DrawingDef` kept per cut beside the drawings (never
+  in `content_hash`), `SetDrawingDef` with an exact inverse (RemoveDrawing drops and restores the def), the
+  v11 side table `drawing_defs` (no version bump; a file without it loads empty), `prev_key` / `next_key`,
+  and the pixel clipboard `copy_region` / `paste_region` (src-over, one PaintTiles). App: the onion's depth
+  0–5 each side, drawings / frames / keys mode, other columns, opacity and falloff in the config's `onion`
+  section (depth 1 drawings equals the old pair on every frame); onion slots grow to three (behind, ahead,
+  light-table pins), tints unchanged; the light table replaces the single ghost pin with pins shown on every
+  frame at the `light_table` opacity, shift & trace (a drag moves the selected pin, Shift+drag turns it, the
+  pen rests; reset), view state only; kinds circled / underlined on the sheet with a chart glyph and a
+  spoken cell name; spacing-chart presets; make inbetweens (one undo step: blank inbetweens named between
+  the keys or lettered, keys between cleared); duplicate cel; Copy / Paste pixels (Ctrl+C / Ctrl+V on the
+  canvas). 11 verbs. 4 `layer_tests` and 18 `lighttable_*` app tests; the colour-literal pin drops 86 → 83.
+  Left: a sheet-cell context menu for the kind, the chart glyph on the canvas itself, Copy / Paste through
+  the system clipboard events. Not verified: the real window, the GPU light-table slot and its shifted tiles
+  on screen.

@@ -451,3 +451,48 @@ pub fn merge_patch(
     }
     diff
 }
+
+// ---- GM6: the pixel clipboard ----------------------------------------------
+// Copy takes the selected pixels of one cel layer (the source is untouched);
+// paste lands them in place, src-over, in any drawing and layer as ONE
+// `PaintTiles` — the same exact-inverse diff a transform gesture commits.
+
+/// Copied pixels: premultiplied f32 at their paper position.
+#[derive(Clone, Debug)]
+pub struct ClipImage {
+    pub patch: FloatingPatch,
+}
+
+/// Copy the pixels inside `polygon` (paper space, ≥3 points) from `layer` of
+/// `drawing`. `None` = no such layer, or the region holds no ink.
+pub fn copy_region(
+    drawing: &crate::model::Drawing,
+    layer: crate::ids::LayerId,
+    polygon: &[(f32, f32)],
+) -> Option<ClipImage> {
+    let lift = lift_region(&drawing.layer(layer)?.raster.tiles, polygon)?;
+    lift.patch.has_ink().then_some(ClipImage { patch: lift.patch })
+}
+
+/// Paste `clip` in place over `layer` of `drawing`: one `PaintTiles`, or
+/// nothing when the layer is missing or the paste changes no pixel.
+pub fn paste_region(
+    at: crate::command::CutRef,
+    drawing: &crate::model::Drawing,
+    layer: crate::ids::LayerId,
+    clip: &ClipImage,
+) -> Vec<crate::command::Command> {
+    let Some(cel) = drawing.layer(layer) else {
+        return Vec::new();
+    };
+    let diff = merge_patch(&cel.raster.tiles, &[], &clip.patch);
+    if diff.is_empty() {
+        return Vec::new();
+    }
+    vec![crate::command::Command::PaintTiles {
+        at,
+        id: drawing.id,
+        layer,
+        diff,
+    }]
+}

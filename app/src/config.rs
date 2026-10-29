@@ -115,6 +115,20 @@ pub enum Action {
     HandlesSmooth,
     HandlesFlat,
     HandlesBroken,
+    // GM6: the genga-to-douga verbs — the pixel clipboard (over the canvas
+    // with a selection), drawing kinds, inbetweens, duplicate cel and the
+    // light table.
+    CopyPixels,
+    PastePixels,
+    DuplicateCel,
+    MakeInbetweens,
+    KindKey,
+    KindBreakdown,
+    KindInbetween,
+    KindUnset,
+    PinToLightTable,
+    ShiftTrace,
+    ResetShift,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -316,6 +330,17 @@ impl Action {
         Action::HandlesSmooth,
         Action::HandlesFlat,
         Action::HandlesBroken,
+        Action::CopyPixels,
+        Action::PastePixels,
+        Action::DuplicateCel,
+        Action::MakeInbetweens,
+        Action::KindKey,
+        Action::KindBreakdown,
+        Action::KindInbetween,
+        Action::KindUnset,
+        Action::PinToLightTable,
+        Action::ShiftTrace,
+        Action::ResetShift,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -415,6 +440,17 @@ impl Action {
             Action::HandlesSmooth => "Key handles: smooth",
             Action::HandlesFlat => "Key handles: flat",
             Action::HandlesBroken => "Key handles: broken",
+            Action::CopyPixels => "Copy pixels",
+            Action::PastePixels => "Paste pixels",
+            Action::DuplicateCel => "Duplicate cel",
+            Action::MakeInbetweens => "Make inbetweens (douga)",
+            Action::KindKey => "Mark drawing: key (genga)",
+            Action::KindBreakdown => "Mark drawing: breakdown",
+            Action::KindInbetween => "Mark drawing: inbetween (douga)",
+            Action::KindUnset => "Mark drawing: unmarked",
+            Action::PinToLightTable => "Pin to light table",
+            Action::ShiftTrace => "Shift & trace",
+            Action::ResetShift => "Reset shift & trace",
         }
     }
 
@@ -520,6 +556,17 @@ impl Action {
             HandlesSmooth => "Bezier handles that stay in line: dragging one turns the other, so the curve stays smooth.",
             HandlesFlat => "Bezier handles laid flat: the motion comes to rest on the key (no overshoot).",
             HandlesBroken => "Bezier handles that move apart: each side of the key bends on its own (a sharp turn).",
+            CopyPixels => "Copy the selected pixels of the active layer (over the canvas, with a selection).",
+            PastePixels => "Paste the copied pixels in place on this frame's cel — one undo step.",
+            DuplicateCel => "Copy this frame's drawing and its layer stack under the next free number, exposed here.",
+            MakeInbetweens => "Turn this key's spacing chart into blank inbetween drawings, exposed between the keys.",
+            KindKey => "Mark this frame's drawing as a key (genga): its number is circled on the sheet.",
+            KindBreakdown => "Mark this frame's drawing as a breakdown: its number is underlined on the sheet.",
+            KindInbetween => "Mark this frame's drawing as an inbetween (douga).",
+            KindUnset => "Clear this frame's drawing kind (and its spacing chart).",
+            PinToLightTable => "Pin or unpin this frame's drawing on the light table: it shows on every frame.",
+            ShiftTrace => "Shift & trace: drag moves the selected light-table ghost, Shift+drag turns it (view only).",
+            ResetShift => "Put every shifted light-table ghost back where it belongs.",
         }
     }
 
@@ -528,9 +575,12 @@ impl Action {
         use Action::*;
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit => Group::File,
-            Undo | Redo | History | SelectAll | ClearCel | ClearCelAll => Group::Edit,
+            Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
+            | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
-            | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView => Group::View,
+            | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView | PinToLightTable
+            | ShiftTrace | ResetShift => Group::View,
+            MakeInbetweens | KindKey | KindBreakdown | KindInbetween | KindUnset => Group::Sheet,
             PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop => {
                 Group::Playback
             }
@@ -622,6 +672,18 @@ impl Action {
             HandlesSmooth => "Sheet/Key handles/smooth",
             HandlesFlat => "Sheet/Key handles/flat",
             HandlesBroken => "Sheet/Key handles/broken",
+            // GM6: the genga-to-douga verbs.
+            CopyPixels => "Edit/Copy pixels",
+            PastePixels => "Edit/Paste pixels",
+            DuplicateCel => "Edit/Duplicate cel",
+            MakeInbetweens => "Sheet/Make inbetweens (douga)",
+            KindKey => "Sheet/Drawing kind/key (genga)",
+            KindBreakdown => "Sheet/Drawing kind/breakdown",
+            KindInbetween => "Sheet/Drawing kind/inbetween (douga)",
+            KindUnset => "Sheet/Drawing kind/unmarked",
+            PinToLightTable => "View/Light table/Pin this drawing",
+            ShiftTrace => "View/Light table/Shift & trace",
+            ResetShift => "View/Light table/Reset shift",
             FrameCurves => "View/Frame curves",
             ShowCurves => "Window/Curves (graph editor)",
             PrevCut => "Cut/Previous cut",
@@ -712,6 +774,18 @@ impl Action {
             HandlesAuto | HandlesSmooth | HandlesFlat | HandlesBroken => {
                 &["handles", "bezier", "tangents"]
             }
+            // GM6: the genga-to-douga words.
+            CopyPixels => &["copy", "pixels", "clipboard", "copy selection"],
+            PastePixels => &["paste", "pixels", "clipboard", "paste in place"],
+            DuplicateCel => &["duplicate", "copy drawing", "clone cel"],
+            MakeInbetweens => &["inbetween", "douga", "spacing chart", "tween"],
+            KindKey => &["key", "genga", "drawing kind"],
+            KindBreakdown => &["breakdown", "drawing kind"],
+            KindInbetween => &["inbetween", "douga", "drawing kind"],
+            KindUnset => &["unmark", "drawing kind"],
+            PinToLightTable => &["light table", "pin", "ghost pin", "tracing"],
+            ShiftTrace => &["shift and trace", "light table", "tracing"],
+            ResetShift => &["shift and trace", "light table", "reset"],
             _ => &[],
         }
     }
@@ -723,7 +797,7 @@ impl Action {
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll
-            | BrushSmaller | BrushBigger => Ctx::Canvas,
+            | BrushSmaller | BrushBigger | CopyPixels | PastePixels => Ctx::Canvas,
             NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames | DeleteFrames | HoldPlus
             | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees | Reverse | ColumnKindCel
             | ColumnKindBg | ColumnKindBook | ColumnKindRef | ToggleColumnHidden
@@ -758,6 +832,9 @@ impl Action {
                 | Action::PasteCellsInsert
                 | Action::TypeIntoCell
                 | Action::FrameCurves
+                // GM6: and the pixel clipboard, over the canvas only.
+                | Action::CopyPixels
+                | Action::PastePixels
         )
     }
 
@@ -934,10 +1011,17 @@ impl Action {
                 shift: true,
                 ..k("F")
             }),
+            // GM6: the same clipboard keys over the canvas act on pixels
+            // (D6: one chord, two panes); the rest live in the menus, the
+            // palette and the light box.
+            CopyPixels => Some(ctrl("C")),
+            PastePixels => Some(ctrl("V")),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomEdit | ShowCurves | InterpHold | InterpLinear | InterpEase
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
-            | HandlesFlat | HandlesBroken => None,
+            | HandlesFlat | HandlesBroken | DuplicateCel | MakeInbetweens | KindKey
+            | KindBreakdown | KindInbetween | KindUnset | PinToLightTable | ShiftTrace
+            | ResetShift => None,
         }
     }
 }
@@ -1865,6 +1949,13 @@ pub struct Config {
     pub layers: LayersConfig,
     #[serde(default = "default_presets")]
     pub presets: Vec<BrushPreset>,
+    /// GM6: the onion's depth, mode, other columns, opacity and falloff.
+    #[serde(default)]
+    pub onion: crate::canvas::OnionCfg,
+    /// GM6: the light table's settings (its pins and shift & trace
+    /// offsets are session view state, never saved).
+    #[serde(default)]
+    pub light_table: crate::canvas::LightTableCfg,
     /// Transient: last Krita-import result line (not persisted).
     #[serde(skip)]
     pub last_import_note: String,
@@ -1886,6 +1977,8 @@ impl Default for Config {
             pen: PenConfig::default(),
             layers: LayersConfig::default(),
             presets: default_presets(),
+            onion: Default::default(),
+            light_table: Default::default(),
             last_import_note: String::new(),
             load_notes: Vec::new(),
         }
@@ -1956,6 +2049,8 @@ fn section_name(key: &str) -> &'static str {
         "pen" => "pen",
         "layers" => "layer settings",
         "presets" => "brush presets",
+        "onion" => "onion skin",
+        "light_table" => "light table",
         _ => "settings",
     }
 }
@@ -2088,6 +2183,8 @@ impl Config {
         read_section(map, "update_repo", &mut self.update_repo, dropped);
         read_section(map, "pen", &mut self.pen, dropped);
         read_section(map, "layers", &mut self.layers, dropped);
+        read_section(map, "onion", &mut self.onion, dropped);
+        read_section(map, "light_table", &mut self.light_table, dropped);
         if let Some(v) = map.get("presets") {
             match read_list::<BrushPreset>(v, ("brush preset", "brush presets"), dropped) {
                 Some(list) => self.presets = list,

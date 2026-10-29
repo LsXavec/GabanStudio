@@ -2972,6 +2972,21 @@ impl Editor {
             ed.canvas.miss_check = !ed.canvas.miss_check;
             return;
         }
+        // GM6: the pixel clipboard reads the canvas's selection.
+        if action == Action::CopyPixels {
+            match ed.canvas.selection_poly() {
+                Some(poly) => {
+                    if !ed.state.copy_pixels(&poly) {
+                        *out = Performed::Ignored;
+                    }
+                }
+                None => {
+                    ed.state.refuse("refused — select pixels first, then copy");
+                    *out = Performed::Ignored;
+                }
+            }
+            return;
+        }
         // Composite view swaps what the canvas renders — blocked mid-stroke
         // (the live stroke's sandwich would vanish under it).
         if action == Action::ToggleCompositeView {
@@ -3105,6 +3120,38 @@ impl Editor {
             | Action::HandlesFlat
             | Action::HandlesBroken => curves_panel::key_verb(s, action),
             Action::ToggleOnion => s.view.onion = !s.view.onion,
+            // GM6: the genga-to-douga verbs, on this frame's drawing.
+            Action::PastePixels => s.paste_pixels(),
+            Action::DuplicateCel => s.duplicate_cel(),
+            Action::MakeInbetweens => {
+                s.make_inbetweens();
+            }
+            Action::KindKey
+            | Action::KindBreakdown
+            | Action::KindInbetween
+            | Action::KindUnset => match s.current_drawing() {
+                Some(d) => {
+                    let kind = match action {
+                        Action::KindKey => anim_core::model::DrawingKind::Key,
+                        Action::KindBreakdown => anim_core::model::DrawingKind::Breakdown,
+                        Action::KindInbetween => anim_core::model::DrawingKind::Inbetween,
+                        _ => anim_core::model::DrawingKind::Unset,
+                    };
+                    s.set_drawing_kind(d, kind);
+                }
+                None => s.refuse("refused — no drawing on this frame to mark"),
+            },
+            Action::PinToLightTable => match s.current_drawing() {
+                Some(d) => {
+                    let col = s.view.active_column;
+                    let on = s.view.light.toggle(col, d);
+                    s.status = if on { "pinned to the light table" } else { "unpinned" }.into();
+                }
+                None => s.refuse("refused — no drawing on this frame to pin"),
+            },
+            Action::ShiftTrace => s.view.light.shift_trace = !s.view.light.shift_trace,
+            Action::ResetShift => s.view.light.reset(),
+            Action::CopyPixels => {}
             Action::ToggleEraser
             | Action::ToggleAlphaLock
             | Action::ToggleCompositeView
@@ -3278,6 +3325,15 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::HandlesSmooth
             | Action::HandlesFlat
             | Action::HandlesBroken
+            // GM6: the genga-to-douga verbs edit the document too.
+            | Action::CopyPixels
+            | Action::PastePixels
+            | Action::DuplicateCel
+            | Action::MakeInbetweens
+            | Action::KindKey
+            | Action::KindBreakdown
+            | Action::KindInbetween
+            | Action::KindUnset
     )
 }
 
@@ -4252,6 +4308,27 @@ impl Editor {
                 Err("select keys in the curves pane first")
             }
             Action::FrameCurves if s.curves.plot.is_none() => Err("open the curves pane first"),
+            // GM6: the genga-to-douga verbs that would refuse.
+            Action::CopyPixels if self.canvas.selection_poly().is_none() => {
+                Err("select pixels first")
+            }
+            Action::PastePixels if s.pixel_clip.is_none() => Err("copy pixels first"),
+            Action::DuplicateCel
+            | Action::KindKey
+            | Action::KindBreakdown
+            | Action::KindInbetween
+            | Action::KindUnset
+            | Action::PinToLightTable
+                if s.current_drawing().is_none() =>
+            {
+                Err("no drawing on this frame")
+            }
+            Action::MakeInbetweens
+                if s.current_drawing().is_none_or(|d| s.cut().drawing_def(d).chart.is_none()) =>
+            {
+                Err("give this key a spacing chart first")
+            }
+            Action::ResetShift if s.view.light.offsets.is_empty() => Err("no pin is shifted"),
             _ => Ok(()),
         }
     }
@@ -4272,6 +4349,11 @@ impl Editor {
             Action::ColumnKindBg => Some(self.state.active_column_def().kind == ColumnKind::Bg),
             Action::ColumnKindBook => Some(self.state.active_column_def().kind == ColumnKind::Book),
             Action::ColumnKindRef => Some(self.state.active_column_def().kind == ColumnKind::Ref),
+            // GM6: the light table's latch and this frame's pin.
+            Action::ShiftTrace => Some(self.state.view.light.shift_trace),
+            Action::PinToLightTable => Some(
+                self.state.current_drawing().is_some_and(|d| self.state.view.light.is_pinned(d)),
+            ),
             _ => None,
         }
     }
@@ -4666,6 +4748,9 @@ impl eframe::App for App {
             editor.state.new_cel_template = stack.layers.clone();
             editor.state.stack_current = stack.name.clone();
             editor.state.stacks = layers_cfg.all_stacks();
+            // GM6: the onion and light table settings live in the config.
+            editor.canvas.onion = self.config.onion.sane();
+            editor.canvas.light_table = self.config.light_table;
             editor.ui(
                 ui,
                 &pen,
@@ -4709,6 +4794,16 @@ impl eframe::App for App {
             // GM4: the OPTIONS row's stabilizer level persists with the pen.
             if let Some(level) = editor.canvas.stabilizer_request.take() {
                 self.config.pen.stabilizer = level;
+                self.config.save();
+            }
+            // GM6: a light box edit of the onion or the light table persists
+            // (the pins and shift offsets are view state and never do).
+            if let Some(cfg) = editor.canvas.onion_request.take() {
+                self.config.onion = cfg;
+                self.config.save();
+            }
+            if let Some(cfg) = editor.canvas.light_table_request.take() {
+                self.config.light_table = cfg;
                 self.config.save();
             }
             if presets_dirty {

@@ -196,8 +196,11 @@ pub struct PaintLayer {
     height: u32,
     /// Sampler filter used to display the layers (Canvas scaling filter setting).
     filter: wgpu::FilterMode,
-    /// Onion ghosts: [0]=previous cel, [1]=next cel (whole-cel composites).
-    onion: [Option<OnionSlot>; 2],
+    /// Onion ghosts: [0]=the ghosts behind, [1]=the ghosts ahead (each side's
+    /// whole-cel composites, weighted, in ONE texture — GM6: depth 5 adds
+    /// no textures), [2]=the light table's pins. Three paper-size textures
+    /// at most, never one per ghost.
+    onion: [Option<OnionSlot>; 3],
     /// Raster projections of OTHER columns' cels at the current frame —
     /// edit-view multi-column display (B4). Same shape/lifecycle as an
     /// onion slot (content-hash gated, size-checked), keyed by column so
@@ -654,7 +657,7 @@ impl PaintLayer {
             width,
             height,
             filter,
-            onion: [None, None],
+            onion: [None, None, None],
             other_cols: std::collections::HashMap::new(),
             active,
             below,
@@ -1033,7 +1036,7 @@ impl PaintLayer {
         self.scratch = mk(self);
         self.width = width;
         self.height = height;
-        self.onion = [None, None]; // stale size
+        self.onion = [None, None, None]; // stale size
         self.other_cols.clear(); // stale size
         self.composite_bind_wet = Self::make_composite_bind(
             &self.device,
@@ -1448,8 +1451,9 @@ impl PaintLayer {
         }
     }
 
-    /// Build an onion-skin ghost into slot 0 (previous) or 1 (next) as the
-    /// WHOLE-CEL composite of the neighbour's visible layers. `hash` is the
+    /// Build an onion-skin ghost into slot 0 (behind), 1 (ahead) or 2 (the
+    /// light table's pins) as the WHOLE-CEL composite of the ghosts' visible
+    /// layers (bottom→top; a ghost's weight rides in its opacities). `hash` is the
     /// composite's content hash (skip rebuild if unchanged); `None` clears the
     /// slot.
     pub fn set_onion(&mut self, slot: usize, layers: Option<&[LayerSlice<'_>]>, hash: u64) {
@@ -1497,6 +1501,12 @@ impl PaintLayer {
     }
     pub fn onion_id(&self, slot: usize) -> Option<egui::TextureId> {
         self.onion[slot].as_ref().map(|s| s.tex_id)
+    }
+
+    /// GM6: the content hash a slot holds (a caller with costly slices —
+    /// the light table's shifted pins — checks it before building them).
+    pub fn onion_hash(&self, slot: usize) -> Option<u64> {
+        self.onion[slot].as_ref().map(|s| s.hash)
     }
 
     /// Sync ONE non-active column's raster projection (its own resolved

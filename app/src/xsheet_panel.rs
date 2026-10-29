@@ -623,17 +623,19 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     // THE GHOST PIN (room ratified 2026-08-17): display
                     // only — Ao on the light box, every frame, no sheet
                     // entry, no export, dies with the session.
-                    let pinned = state.view.ghost_pin == Some(id);
+                    // GM6: the light table's pins (the ghost pin is the first).
+                    let pinned = state.view.light.is_pinned(id);
                     if ui
                         .button(if pinned { "unpin ghost" } else { "pin as ghost" })
                         .on_hover_text(
-                        "ghost this drawing on the light box on every frame \
-                         (Ao, onion strength) — display only, never exported, \
-                         never on the sheet",
+                        "ghost this drawing on the light table on every frame \
+                         (Ao, the light table's opacity) — display only, never \
+                         exported, never on the sheet",
                         )
                         .clicked()
                     {
-                    state.view.ghost_pin = if pinned { None } else { Some(id) };
+                    let col = state.view.active_column;
+                    state.view.light.toggle(col, id);
                     ui.close();
                     }
                     // Held DANGER: removal lifts the drawing's keys and
@@ -1178,13 +1180,60 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                             .drawing(r.drawing)
                             .map(|d| d.name.clone())
                             .unwrap_or_else(|| format!("{}", r.drawing));
-                        sheet_painter.text(
+                        let text_rect = sheet_painter.text(
                             pos2(cx + 10.0, ctop + r.start as f32 * ROW_H + ROW_H * 0.5),
                             egui::Align2::LEFT_CENTER,
-                            name,
+                            &name,
                             egui::FontId::monospace(11.0),
                             plate::STRUCK,
                         );
+                        // GM6: a key's number circled, a breakdown's
+                        // underlined, and a chart's glyph beside it; the
+                        // cell answers to its kind by name.
+                        let def = cut.drawing_def(r.drawing);
+                        let ink = egui::Stroke::new(plate::device_px(1.0, ppp), plate::STRUCK);
+                        match cell_mark(def.kind) {
+                            CellMark::Circle => {
+                                let rad = (text_rect.width().max(text_rect.height()) * 0.5 + 2.0)
+                                    .min(ROW_H * 0.5 + 3.0);
+                                sheet_painter.circle_stroke(text_rect.center(), rad, ink);
+                            }
+                            CellMark::Underline => {
+                                sheet_painter.line_segment(
+                                    [text_rect.left_bottom(), text_rect.right_bottom()],
+                                    ink,
+                                );
+                            }
+                            CellMark::None => {}
+                        }
+                        if let Some(chart) = &def.chart {
+                            crate::canvas::chart_glyph(
+                                &sheet_painter,
+                                Rect::from_min_size(
+                                    pos2(text_rect.right() + 6.0, text_rect.top()),
+                                    vec2(6.0, text_rect.height()),
+                                ),
+                                &chart.marks,
+                                plate::AO,
+                            );
+                        }
+                        if def.kind != anim_core::model::DrawingKind::Unset {
+                            let resp = ui.interact(
+                                text_rect,
+                                ui.id().with(("cell_kind", col.id, r.start)),
+                                Sense::hover(),
+                            );
+                            plate::speak(
+                                &resp,
+                                egui::WidgetType::Label,
+                                None,
+                                &format!(
+                                    "drawing {name} at frame {}: {}",
+                                    r.start + 1,
+                                    def.kind.label()
+                                ),
+                            );
+                        }
                     }
                     for f in &marks.empties {
                         let y = plate::snap(ctop + *f as f32 * ROW_H + 9.0, ppp);
@@ -1522,6 +1571,26 @@ fn continuation_handles(
     }
     for (column, old, new) in pending {
         state.set_hold_terminator(column, old, new);
+    }
+}
+
+/// GM6: how the sheet marks a drawing's number by its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellMark {
+    /// A key (genga): the number circled.
+    Circle,
+    /// A breakdown: the number underlined.
+    Underline,
+    None,
+}
+
+/// GM6: the sheet's mark for a drawing kind.
+pub fn cell_mark(kind: anim_core::model::DrawingKind) -> CellMark {
+    use anim_core::model::DrawingKind;
+    match kind {
+        DrawingKind::Key => CellMark::Circle,
+        DrawingKind::Breakdown => CellMark::Underline,
+        DrawingKind::Inbetween | DrawingKind::Unset => CellMark::None,
     }
 }
 

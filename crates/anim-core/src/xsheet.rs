@@ -99,6 +99,37 @@ impl Column {
         Some((k, self.keys.range(after).next().map(|(f, _)| *f)))
     }
 
+    // ---- GM6: key-to-key lookups for inbetweening and the onion ----------
+    // The drawing kind lives on the cut, so the caller says what counts as
+    // a key (`is_key`); a drawing that is not one is skipped over.
+
+    /// The nearest key strictly before `frame` exposing a drawing that
+    /// passes `is_key`: its frame and drawing.
+    pub fn prev_key(
+        &self,
+        frame: u32,
+        is_key: impl Fn(DrawingId) -> bool,
+    ) -> Option<(u32, DrawingId)> {
+        self.keys.range(..frame).rev().find_map(|(f, e)| match e {
+            Exposure::Drawing(d) if is_key(*d) => Some((*f, *d)),
+            _ => None,
+        })
+    }
+
+    /// The nearest key strictly after `frame` exposing a drawing that
+    /// passes `is_key`: its frame and drawing.
+    pub fn next_key(
+        &self,
+        frame: u32,
+        is_key: impl Fn(DrawingId) -> bool,
+    ) -> Option<(u32, DrawingId)> {
+        let after = (std::ops::Bound::Excluded(frame), std::ops::Bound::Unbounded);
+        self.keys.range(after).find_map(|(f, e)| match e {
+            Exposure::Drawing(d) if is_key(*d) => Some((*f, *d)),
+            _ => None,
+        })
+    }
+
     /// Open `n` frames at `frame`: every key at or after it moves `n` later.
     /// False (and nothing moves) when a key would pass `u32::MAX`.
     pub fn insert_frames(&mut self, frame: u32, n: u32) -> bool {

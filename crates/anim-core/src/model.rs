@@ -402,6 +402,115 @@ impl Drawing {
     }
 }
 
+/// GM6: what a drawing is in the genga → douga hand-off — a Key (原画), a
+/// Breakdown or an Inbetween (動画); Unset is a plain drawing. A
+/// DEFINITION, never pixels: it lives in `Cut::drawing_defs`, outside
+/// `content_hash`.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize,
+)]
+pub enum DrawingKind {
+    #[default]
+    Unset,
+    Key,
+    Breakdown,
+    Inbetween,
+}
+
+impl DrawingKind {
+    pub const ALL: [DrawingKind; 4] = [
+        DrawingKind::Unset,
+        DrawingKind::Key,
+        DrawingKind::Breakdown,
+        DrawingKind::Inbetween,
+    ];
+
+    /// Stable persisted key (the drawing_defs JSON). Never rename these.
+    pub fn key(self) -> &'static str {
+        match self {
+            DrawingKind::Unset => "unset",
+            DrawingKind::Key => "key",
+            DrawingKind::Breakdown => "breakdown",
+            DrawingKind::Inbetween => "inbetween",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<DrawingKind> {
+        DrawingKind::ALL.into_iter().find(|k| k.key() == key)
+    }
+
+    /// The studio term, romaji plus English (D7).
+    pub fn label(self) -> &'static str {
+        match self {
+            DrawingKind::Unset => "unmarked",
+            DrawingKind::Key => "genga (key)",
+            DrawingKind::Breakdown => "breakdown",
+            DrawingKind::Inbetween => "douga (inbetween)",
+        }
+    }
+}
+
+/// GM6: a spacing chart (タイミング指示) on a key, toward the key `to`: the
+/// inbetweens' positions between the two keys, each mark in (0, 1) —
+/// halves, thirds, or favouring one key.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SpacingChart {
+    pub to: DrawingId,
+    pub marks: Vec<f32>,
+}
+
+impl SpacingChart {
+    /// Can the chart be drawn and inbetweened? Every mark finite and
+    /// strictly between the keys.
+    pub fn is_valid(&self) -> bool {
+        self.marks.iter().all(|m| m.is_finite() && *m > 0.0 && *m < 1.0)
+    }
+}
+
+/// GM6: a drawing's definition — its kind and, on a key, a spacing chart.
+/// Lives beside the drawing in `Cut::drawing_defs` (the `drawing_defs`
+/// side table, D2), never in `content_hash`; the default is never stored.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct DrawingDef {
+    pub kind: DrawingKind,
+    pub chart: Option<SpacingChart>,
+}
+
+impl DrawingDef {
+    /// The store's JSON row.
+    pub fn to_json(&self) -> String {
+        let chart = self.chart.as_ref().map(|c| {
+            serde_json::json!({ "to": c.to.0, "marks": c.marks })
+        });
+        serde_json::json!({ "kind": self.kind.key(), "chart": chart }).to_string()
+    }
+
+    /// Read a store row. None = not a JSON object (the caller reports the
+    /// file corrupt); an unknown kind (a newer build's) reads as Unset and
+    /// a chart that cannot be read is dropped rather than refusing the file.
+    pub fn from_json(text: &str) -> Option<DrawingDef> {
+        let v: serde_json::Value = serde_json::from_str(text).ok()?;
+        let o = v.as_object()?;
+        let kind = o
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .and_then(DrawingKind::from_key)
+            .unwrap_or_default();
+        let chart = o.get("chart").and_then(|c| {
+            let to = DrawingId(c.get("to")?.as_u64()?);
+            let marks = c
+                .get("marks")?
+                .as_array()?
+                .iter()
+                .map(|m| m.as_f64().map(|m| m as f32))
+                .collect::<Option<Vec<f32>>>()?;
+            let chart = SpacingChart { to, marks };
+            chart.is_valid().then_some(chart)
+        });
+        Some(DrawingDef { kind, chart })
+    }
+}
+
 /// An image asset owned by a CUT (background plate, reference/storyboard
 /// underlay, scanned pencil art — the satsuei "cels over BG" model keeps
 /// BGs per cut). The ORIGINAL encoded bytes are the persisted truth (saved
@@ -689,6 +798,11 @@ pub struct Cut {
     /// non-default definitions are stored: a missing entry is a plain cel
     /// column, so legacy cuts are all Cel.
     pub column_defs: std::collections::BTreeMap<ColumnId, crate::xsheet::ColumnDef>,
+    /// GM6: each drawing's definition (kind, spacing chart). Only
+    /// non-default definitions are stored, so an unmarked drawing has no
+    /// entry; never in `content_hash` (D1).
+    #[serde(default)]
+    pub drawing_defs: std::collections::BTreeMap<DrawingId, DrawingDef>,
 }
 
 impl Cut {
@@ -706,6 +820,27 @@ impl Cut {
             meta: Default::default(),
             memos: Default::default(),
             column_defs: Default::default(),
+            drawing_defs: Default::default(),
+        }
+    }
+
+    /// GM6: a drawing's definition (the default for an unmarked one).
+    pub fn drawing_def(&self, id: DrawingId) -> DrawingDef {
+        self.drawing_defs.get(&id).cloned().unwrap_or_default()
+    }
+
+    /// GM6: a drawing's kind (Unset when unmarked).
+    pub fn drawing_kind(&self, id: DrawingId) -> DrawingKind {
+        self.drawing_defs.get(&id).map_or(DrawingKind::Unset, |d| d.kind)
+    }
+
+    /// GM6: set a drawing's definition, keeping the map canonical (the
+    /// default is never stored), so undo restores structural equality.
+    pub fn set_drawing_def(&mut self, id: DrawingId, def: DrawingDef) {
+        if def == DrawingDef::default() {
+            self.drawing_defs.remove(&id);
+        } else {
+            self.drawing_defs.insert(id, def);
         }
     }
 

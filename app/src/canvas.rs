@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anim_core::edit::{self, FloatingPatch};
 use anim_core::ids::{ColumnId, CutId, DrawingId, LayerId, SceneId};
-use anim_core::model::{Stroke, StrokePoint};
+use anim_core::model::{DrawingKind, Stroke, StrokePoint};
 use anim_core::raster::{TileCoord, TileData};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
@@ -665,8 +665,16 @@ pub struct CanvasView {
     /// Refusal edge-flash bookkeeping (seq last seen + when).
     flash_seq: u32,
     flash_since: f64,
-    /// Lightbox rail (Phase 4): ghost strength scales the onion alphas.
-    onion_strength: f32,
+    /// GM6: the onion's depth, mode and opacity (the old lightbox strength
+    /// is its `opacity`) and the light table's settings — the shell feeds
+    /// them from the config every frame; a light box edit lands in the
+    /// requests below for the shell to save.
+    pub onion: OnionCfg,
+    pub light_table: LightTableCfg,
+    pub(crate) onion_request: Option<OnionCfg>,
+    pub(crate) light_table_request: Option<LightTableCfg>,
+    /// GM6: a shift & trace drag in flight (its last paper point).
+    shift_drag: Option<Pos2>,
     /// Paper furniture: field / safe-area / peg-bar guides, in Ao.
     show_field: bool,
     show_safe: bool,
@@ -887,7 +895,11 @@ impl CanvasView {
             flip_held: false,
             flash_seq: 0,
             flash_since: -10.0,
-            onion_strength: 0.45,
+            onion: OnionCfg::default(),
+            light_table: LightTableCfg::default(),
+            onion_request: None,
+            light_table_request: None,
+            shift_drag: None,
             show_field: false,
             show_safe: false,
             show_peg: false,
@@ -2463,28 +2475,163 @@ impl CanvasView {
             .on_hover_text("ghost only the layer matching the active layer's name");
         state.view.onion_layer_only = lo;
         ui.add_space(2.0);
-        vline(
-            ui,
-            "strength",
-            format!("{:.0}%", self.onion_strength * 100.0),
-        );
+        // GM6: depth, mode, other columns, opacity with falloff — kept in
+        // the config (an edit lands in onion_request for the shell).
+        let mut cfg = self.onion;
+        vline(ui, "strength", format!("{:.0}%", cfg.opacity * 100.0));
         ui.spacing_mut().slider_width = 96.0;
-        ui.add(egui::Slider::new(&mut self.onion_strength, 0.1..=1.0).show_value(false));
-        if let Some(pid) = state.view.ghost_pin {
-            ui.add_space(6.0);
-            let name = state
-                .cut()
-                .drawing(pid)
-                .map(|d| d.name.clone())
-                .unwrap_or_default();
-            vline(ui, "ghost", name);
-            if ui
-                .button("unpin")
-                .on_hover_text("stop ghosting the pinned drawing")
-                .clicked()
-            {
-                state.view.ghost_pin = None;
+        ui.add(egui::Slider::new(&mut cfg.opacity, 0.1..=1.0).show_value(false))
+            .on_hover_text("the nearest ghost's opacity");
+        // Folded by default: the fold-out keeps its old height (the view
+        // block stays on screen).
+        egui::CollapsingHeader::new("onion depth").show(ui, |ui| {
+            vline(ui, "falloff", format!("{:.0}%", cfg.falloff * 100.0));
+            ui.add(egui::Slider::new(&mut cfg.falloff, 0.0..=1.0).show_value(false))
+                .on_hover_text("each ghost farther away keeps this much of the one before");
+            vline(ui, "behind · ahead", format!("{} · {}", cfg.before, cfg.after));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut cfg.before).range(0..=OnionCfg::MAX_DEPTH))
+                    .on_hover_text("ghosts behind (0–5)");
+                ui.add(egui::DragValue::new(&mut cfg.after).range(0..=OnionCfg::MAX_DEPTH))
+                    .on_hover_text("ghosts ahead (0–5)");
+            });
+            ui.horizontal_wrapped(|ui| {
+                for m in OnionMode::ALL {
+                    if ui
+                        .selectable_label(cfg.mode == m, m.label())
+                        .on_hover_text(match m {
+                            OnionMode::Drawings => "ghost the previous and next distinct drawings",
+                            OnionMode::Frames => "ghost what the column shows 1, 2, … frames away",
+                            OnionMode::Keys => "ghost the previous and next key (genga) drawings",
+                        })
+                        .clicked()
+                    {
+                        cfg.mode = m;
+                    }
+                }
+            });
+            plate::latch(ui, &mut cfg.other_columns, "other columns")
+                .on_hover_text("ghost every other column that renders too");
+        });
+        if cfg != self.onion {
+            self.onion = cfg.sane();
+            self.onion_request = Some(self.onion);
+        }
+
+        // GM6: THE LIGHT TABLE — pins on every frame, shift & trace.
+        egui::CollapsingHeader::new("light table").show(ui, |ui| {
+            if let Some(here) = state.current_drawing() {
+                let pinned = state.view.light.is_pinned(here);
+                if ui
+                    .button(if pinned { "unpin this drawing" } else { "pin this drawing" })
+                    .on_hover_text(Action::PinToLightTable.help())
+                    .clicked()
+                {
+                    state.view.light.toggle(state.view.active_column, here);
+                }
             }
+            let shown = state.view.light.shown(state.cut());
+            let target = state.view.light.target();
+            for (pid, _) in &shown {
+                let name = state.cut().drawing(*pid).map(|d| d.name.clone()).unwrap_or_default();
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(target == Some(*pid), format!("pin {name}"))
+                        .on_hover_text("shift & trace moves this pin")
+                        .clicked()
+                    {
+                        state.view.light.selected = Some(*pid);
+                    }
+                    if ui.small_button("unpin").on_hover_text("stop ghosting this drawing").clicked() {
+                        state.view.light.unpin(*pid);
+                    }
+                });
+            }
+            let mut lt = self.light_table;
+            vline(ui, "pin opacity", format!("{:.0}%", lt.opacity * 100.0));
+            ui.add(egui::Slider::new(&mut lt.opacity, 0.1..=1.0).show_value(false))
+                .on_hover_text("every pin shows at this opacity");
+            if lt != self.light_table {
+                self.light_table = lt;
+                self.light_table_request = Some(lt);
+            }
+            let mut st = state.view.light.shift_trace;
+            crate::menus::hover_tip(
+                plate::latch(ui, &mut st, "shift & trace"),
+                Action::ShiftTrace,
+                "while on, a drag on the canvas moves the selected pin (Shift+drag turns it); the pen rests",
+            );
+            state.view.light.shift_trace = st;
+            if !state.view.light.offsets.is_empty()
+                && ui.button("reset shift").on_hover_text(Action::ResetShift.help()).clicked()
+            {
+                state.view.light.reset();
+            }
+        });
+
+        // GM6: genga to douga — this frame's drawing's kind, its spacing
+        // chart toward the next key, and the inbetweens it makes.
+        if let Some(here) = state.current_drawing() {
+            let busy = self.stroke_active();
+            egui::CollapsingHeader::new("genga · douga").show(ui, |ui| {
+                let kind = state.cut().drawing_kind(here);
+                vline(ui, "kind", kind.label().to_string());
+                ui.horizontal_wrapped(|ui| {
+                    for (k, label) in [
+                        (DrawingKind::Key, "key"),
+                        (DrawingKind::Breakdown, "breakdown"),
+                        (DrawingKind::Inbetween, "inbetween"),
+                        (DrawingKind::Unset, "unmarked"),
+                    ] {
+                        if ui.selectable_label(kind == k, label).on_hover_text(k.label()).clicked() && !busy {
+                            state.set_drawing_kind(here, k);
+                        }
+                    }
+                });
+                if kind == DrawingKind::Key {
+                    let chart = state.cut().drawing_def(here).chart;
+                    vline(
+                        ui,
+                        "chart",
+                        chart.as_ref().map_or("none".to_string(), |c| format!("{} marks", c.marks.len())),
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        for (name, marks) in crate::doc::CHART_PRESETS {
+                            if ui
+                                .small_button(*name)
+                                .on_hover_text("a spacing chart toward the next key")
+                                .clicked()
+                                && !busy
+                            {
+                                state.set_chart(here, marks);
+                            }
+                        }
+                        if chart.is_some()
+                            && ui.small_button("clear").on_hover_text("remove the chart").clicked()
+                            && !busy
+                        {
+                            state.set_chart(here, &[]);
+                        }
+                    });
+                    if chart.is_some()
+                        && ui
+                            .button("make inbetweens")
+                            .on_hover_text(Action::MakeInbetweens.help())
+                            .clicked()
+                        && !busy
+                    {
+                        state.make_inbetweens();
+                    }
+                }
+                if ui
+                    .button("duplicate cel")
+                    .on_hover_text(Action::DuplicateCel.help())
+                    .clicked()
+                    && !busy
+                {
+                    state.duplicate_cel();
+                }
+            });
         }
         ui.add_space(10.0);
         plate::legend(ui, "paper");
@@ -3492,6 +3639,13 @@ impl CanvasView {
         self.retire_line_anchor(state);
         if hand && !state.view.playing {
             // GM4: the Space hand has the pointer — no tool input, no tap.
+        } else if !state.view.playing
+            && state.view.light.shift_trace
+            && state.view.light.target().is_some()
+            && !self.pen_busy()
+        {
+            // GM6: shift & trace has the pointer — the pen rests.
+            self.shift_trace_input(ui, &response, &to_paper, pos2(paper_w * 0.5, paper_h * 0.5), state);
         } else if !state.view.playing {
             match self.tool {
                 CanvasTool::Paint => {
@@ -3807,37 +3961,96 @@ impl CanvasView {
             // unchanged, so this is cheap) — decoupled from stroke state entirely,
             // so no current-cel/stroke predicate can ever tear a slot down. Only
             // onion-off clears the slots.
-            let pin = state.view.ghost_pin;
-            if state.view.onion || pin.is_some() || self.flip_held {
-                let neighbors = state.onion_neighbors();
-                // Computed once per frame, not per neighbour: the active
+            let pins = state.view.light.shown(state.cut());
+            if state.view.onion || !pins.is_empty() || self.flip_held {
+                // Computed once per frame, not per ghost: the active
                 // layer's role name is what "line-only ghost" locks onto.
                 // The FLIP shows the whole previous cel — no filter.
                 let filter = (!self.flip_held && state.view.onion_layer_only)
                     .then(|| (state.active_layer_name(), state.view.active_role));
-                // Slot 0 = the behind-neighbour (onion; the FLIP borrows it
-                // at full identity). Slot 1 = THE GHOST PIN when set (the
-                // pinned scaffold outranks the forward neighbour); else
-                // onion's next drawing.
-                let s0 = if self.flip_held || state.view.onion {
-                    neighbors[0]
-                } else {
-                    None
-                };
-                let s1 = pin.or(if state.view.onion { neighbors[1] } else { None });
-                // PSD-cel-layers: ghosts honour each layer's onion flag;
-                // the FLIP shows the whole previous cel (not a ghost).
-                let ghost = !self.flip_held;
-                for (slot, nid) in [s0, s1].into_iter().enumerate() {
-                    let f = filter.as_ref().map(|(n, r)| (n.as_str(), *r));
-                    match nid.and_then(|id| state.drawing_composite(id, f, ghost)) {
-                        Some((slices, hash)) => p.set_onion(slot, Some(&slices), hash),
-                        None => p.set_onion(slot, None, 0),
+                let f = filter.as_ref().map(|(n, r)| (n.as_str(), *r));
+                if self.flip_held {
+                    // The FLIP borrows slot 0 at full identity: the whole
+                    // previous cel, not a ghost (unchanged by GM6).
+                    let prev = state.onion_neighbors()[0];
+                    match prev.and_then(|id| state.drawing_composite(id, None, false)) {
+                        Some((slices, hash)) => p.set_onion(0, Some(&slices), hash),
+                        None => p.set_onion(0, None, 0),
                     }
+                } else if state.view.onion {
+                    // GM6: slot 0 = every ghost behind, slot 1 = every ghost
+                    // ahead, each side composited with its weights into its
+                    // one texture (farthest first, the nearest on top at
+                    // full; the slot's tint carries the nearest's opacity).
+                    let set = onion_set(
+                        state.cut(),
+                        state.view.active_column,
+                        state.view.frame,
+                        &self.onion,
+                    );
+                    for (slot, behind) in [(0, true), (1, false)] {
+                        let mut side: Vec<&(DrawingId, i32, f32)> =
+                            set.iter().filter(|g| (g.1 < 0) == behind).collect();
+                        side.sort_by_key(|g| std::cmp::Reverse(g.1.unsigned_abs()));
+                        let near = side.iter().map(|g| g.2).fold(0.0f32, f32::max);
+                        let mut slices = Vec::new();
+                        let mut bytes = Vec::new();
+                        for &&(id, _, w) in &side {
+                            // PSD-cel-layers: ghosts honour each layer's onion flag.
+                            if let Some((s, h)) = state.drawing_composite(id, f, true) {
+                                let k = if near > 0.0 { w / near } else { 1.0 };
+                                slices.extend(s.into_iter().map(|(t, o)| (t, o * k)));
+                                bytes.extend_from_slice(&h.to_le_bytes());
+                                bytes.extend_from_slice(&k.to_bits().to_le_bytes());
+                            }
+                        }
+                        if slices.is_empty() {
+                            p.set_onion(slot, None, 0);
+                        } else {
+                            p.set_onion(slot, Some(&slices), anim_core::value::fnv1a(&bytes));
+                        }
+                    }
+                } else {
+                    p.set_onion(0, None, 0);
+                    p.set_onion(1, None, 0);
+                }
+                // GM6: THE LIGHT TABLE's own slot (it no longer borrows
+                // slot 1): every pin, shift & trace offsets baked in.
+                // The hash first: the shift resample runs only when a pin's
+                // pixels or offset changed, never per frame.
+                let mut bytes = Vec::new();
+                for &(id, shift) in &pins {
+                    if let Some((_, h)) = state.drawing_composite(id, f, true) {
+                        bytes.extend_from_slice(&h.to_le_bytes());
+                        for v in [shift.dx, shift.dy, shift.rot] {
+                            bytes.extend_from_slice(&v.to_bits().to_le_bytes());
+                        }
+                    }
+                }
+                let hash = anim_core::value::fnv1a(&bytes);
+                if bytes.is_empty() {
+                    p.set_onion(2, None, 0);
+                } else if p.onion_hash(2) != Some(hash) {
+                    let center = pos2(
+                        state.engine.project.width as f32 * 0.5,
+                        state.engine.project.height as f32 * 0.5,
+                    );
+                    let mut shifted: Vec<(BTreeMap<TileCoord, Arc<TileData>>, f32)> = Vec::new();
+                    for &(id, shift) in &pins {
+                        if let Some((s, _)) = state.drawing_composite(id, f, true) {
+                            shifted.extend(
+                                s.into_iter().map(|(t, o)| (shift_tiles(t, shift, center), o)),
+                            );
+                        }
+                    }
+                    let slices: Vec<crate::paint::LayerSlice<'_>> =
+                        shifted.iter().map(|(t, o)| (t, *o)).collect();
+                    p.set_onion(2, Some(&slices), hash);
                 }
             } else {
                 p.set_onion(0, None, 0);
                 p.set_onion(1, None, 0);
+                p.set_onion(2, None, 0);
             }
 
             // ---- Multi-column raster display (B4): every OTHER column's
@@ -3932,28 +4145,33 @@ impl CanvasView {
             }
         }
 
-        // 2a. THE GHOST PIN (vector path): the pinned drawing haunts every
-        // frame in Ao at the onion strength — display only, per its room.
-        if edit_view
-            && !self.flip_held
-            && let Some(pid) = state.view.ghost_pin
-            && state.resolve_at(active_col, frame) != Some(pid)
-            && let Some(d) = cut.drawing(pid)
-        {
-            let a = (255.0 * self.onion_strength.clamp(0.0, 1.0)) as u8;
-            draw_strokes(
-                &painter,
-                &d.strokes,
-                &to_screen,
-                scale,
-                Some(Color32::from_rgba_unmultiplied(83, 137, 196, a)),
-                &self.pen_curve,
-            );
+        // 2a. THE LIGHT TABLE (vector path; GM6 generalises the ghost pin):
+        // every pinned drawing haunts every frame in Ao at the light table's
+        // opacity, moved by its shift & trace offset — display only.
+        if edit_view && !self.flip_held {
+            let a = (255.0 * self.light_table.opacity.clamp(0.0, 1.0)) as u8;
+            let center = pos2(paper_w * 0.5, paper_h * 0.5);
+            for (pid, shift) in state.view.light.shown(cut) {
+                if state.resolve_at(active_col, frame) == Some(pid) && shift.is_identity() {
+                    continue;
+                }
+                if let Some(d) = cut.drawing(pid) {
+                    let moved = |p: Pos2| to_screen(shift.apply(p, center));
+                    draw_strokes(
+                        &painter,
+                        &d.strokes,
+                        &moved,
+                        scale,
+                        Some(ghost_tint([plate::AO.r(), plate::AO.g(), plate::AO.b()], a)),
+                        &self.pen_curve,
+                    );
+                }
+            }
         }
 
         // 2. Onion ghosts of the active column, under its current drawing.
         if edit_view && state.view.onion && !self.flip_held {
-            let ghosts = onion_ghosts(state, active_col, frame, self.onion_strength);
+            let ghosts = onion_ghosts(state, active_col, frame, &self.onion);
             for (id, tint) in ghosts {
                 if let Some(d) = cut.drawing(id) {
                     draw_strokes(
@@ -4003,7 +4221,7 @@ impl CanvasView {
             // Legend (spec defect 14) — as multiply tints for now; the
             // true re-ink lands on the VECTOR path in Phase 4, and the
             // raster blit shader stays untouched (Do-NOT-build).
-            let ga = (255.0 * self.onion_strength.clamp(0.0, 1.0)) as u8;
+            let ga = (255.0 * self.onion.opacity.clamp(0.0, 1.0)) as u8;
             if self.flip_held {
                 // THE FLIP: the previous drawing full-strength, alone —
                 // the current cel steps aside until R lifts.
@@ -4011,28 +4229,20 @@ impl CanvasView {
                     paint_paper_image(&painter, &xf, id, Color32::WHITE);
                 }
             } else {
-                if let Some(id) = p.onion_id(0) {
-                    paint_paper_image(
-                        &painter,
-                        &xf,
-                        id,
-                        Color32::from_rgba_unmultiplied(160, 195, 232, ga),
-                    );
+                // GM6: the light table's pins first (SCAFFOLD, in Ao at the
+                // light table's opacity), then the ghosts behind (Ao) and
+                // ahead (the quiet Legend lean).
+                if let Some(id) = p.onion_id(2) {
+                    let la = (255.0 * self.light_table.opacity.clamp(0.0, 1.0)) as u8;
+                    paint_paper_image(&painter, &xf, id, ghost_tint(ONION_BEHIND_TINT, la));
                 }
-                if let Some(id) = p.onion_id(1) {
-                    // The pin is SCAFFOLD — it ghosts in Ao; the forward
-                    // neighbour keeps its quiet Legend lean.
-                    let t = if state.view.ghost_pin.is_some() {
-                        (160u8, 195u8, 232u8)
-                    } else {
-                        (205u8, 206u8, 199u8)
-                    };
-                    paint_paper_image(
-                        &painter,
-                        &xf,
-                        id,
-                        Color32::from_rgba_unmultiplied(t.0, t.1, t.2, ga),
-                    );
+                if state.view.onion {
+                    if let Some(id) = p.onion_id(0) {
+                        paint_paper_image(&painter, &xf, id, ghost_tint(ONION_BEHIND_TINT, ga));
+                    }
+                    if let Some(id) = p.onion_id(1) {
+                        paint_paper_image(&painter, &xf, id, ghost_tint(ONION_AHEAD_TINT, ga));
+                    }
                 }
                 // Layers under the active one (per-layer opacities baked in).
                 paint_paper_image(&painter, &xf, p.below_id(), Color32::WHITE);
@@ -5280,6 +5490,38 @@ impl CanvasView {
     /// LASSO FILL input (PSD-lasso-fill): drag draws the loop; release
     /// commits ONE region edit. The fill tool's guard set, verbatim
     /// (NEVER-DO 2), minus the GPU requirement — this path is pure CPU.
+    /// GM6: shift & trace — a drag moves the selected pin by the paper
+    /// distance travelled; Shift+drag turns it about the paper centre.
+    /// View state only: no command, no undo step, no pixel touched.
+    fn shift_trace_input(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        center: Pos2,
+        state: &mut AppState,
+    ) {
+        let Some(p) = response.interact_pointer_pos().map(to_paper) else {
+            self.shift_drag = None;
+            return;
+        };
+        if response.dragged_by(egui::PointerButton::Primary) {
+            if let Some(last) = self.shift_drag {
+                if ui.input(|i| i.modifiers.shift) {
+                    let a0 = (last.y - center.y).atan2(last.x - center.x);
+                    let a1 = (p.y - center.y).atan2(p.x - center.x);
+                    state.view.light.nudge(0.0, 0.0, a1 - a0);
+                } else {
+                    state.view.light.nudge(p.x - last.x, p.y - last.y, 0.0);
+                }
+            }
+            self.shift_drag = Some(p);
+        }
+        if response.drag_stopped() {
+            self.shift_drag = None;
+        }
+    }
+
     fn lasso_fill_input(
         &mut self,
         ui: &egui::Ui,
@@ -6673,45 +6915,437 @@ fn linear_rgba(c: [u8; 4]) -> [f32; 4] {
     [lin(c[0]), lin(c[1]), lin(c[2]), c[3] as f32 / 255.0]
 }
 
-/// Previous/next distinct drawings on a column, with their ghost tints.
-/// Classic onion convention: red = before, green = after, fading with depth.
+// ---- GM6: the onion's depth and modes, and the light table ---------------
+
+/// Which drawings the onion ghosts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum OnionMode {
+    /// The previous / next distinct drawings in the column (today's onion).
+    #[default]
+    Drawings,
+    /// Fixed frame offsets: what the column shows 1, 2, … frames away.
+    Frames,
+    /// The previous / next Key (genga) drawings.
+    Keys,
+}
+
+impl OnionMode {
+    pub const ALL: [OnionMode; 3] = [OnionMode::Drawings, OnionMode::Frames, OnionMode::Keys];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            OnionMode::Drawings => "drawings",
+            OnionMode::Frames => "frames",
+            OnionMode::Keys => "keys (genga)",
+        }
+    }
+}
+
+/// GM6: the onion's settings — kept in the config's `onion` section.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct OnionCfg {
+    /// Ghosts behind and ahead, 0–5 each (0 = none on that side).
+    pub before: u8,
+    pub after: u8,
+    pub mode: OnionMode,
+    /// Also ghost every other column that renders.
+    pub other_columns: bool,
+    /// The nearest ghost's opacity (the old onion strength).
+    pub opacity: f32,
+    /// Each step farther multiplies the opacity by this.
+    pub falloff: f32,
+}
+
+impl Default for OnionCfg {
+    fn default() -> Self {
+        Self {
+            before: 1,
+            after: 1,
+            mode: OnionMode::Drawings,
+            other_columns: false,
+            opacity: 0.45,
+            falloff: 0.6,
+        }
+    }
+}
+
+impl OnionCfg {
+    pub const MAX_DEPTH: u8 = 5;
+
+    /// The weight of a ghost `rank` steps away (1 = the nearest).
+    pub fn weight(&self, rank: u32) -> f32 {
+        let falloff = self.falloff.clamp(0.0, 1.0);
+        self.opacity.clamp(0.0, 1.0) * falloff.powi(rank.saturating_sub(1) as i32)
+    }
+
+    /// Back in range after a hand-edited config.
+    pub fn sane(self) -> Self {
+        Self {
+            before: self.before.min(Self::MAX_DEPTH),
+            after: self.after.min(Self::MAX_DEPTH),
+            opacity: if self.opacity.is_finite() { self.opacity.clamp(0.05, 1.0) } else { 0.45 },
+            falloff: if self.falloff.is_finite() { self.falloff.clamp(0.0, 1.0) } else { 0.6 },
+            ..self
+        }
+    }
+}
+
+/// GM6: the light table's settings — kept in the config's `light_table`
+/// section (the pins and offsets themselves are session view state).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct LightTableCfg {
+    /// The fixed opacity every pin shows at.
+    pub opacity: f32,
+}
+
+impl Default for LightTableCfg {
+    fn default() -> Self {
+        Self { opacity: 0.45 }
+    }
+}
+
+/// GM6: the drawings the onion ghosts on `column` at `frame`, each with its
+/// signed offset (−k behind, +k ahead: the rank in drawings and keys
+/// mode, the frame distance in frames mode) and its weight. A side of
+/// depth 0 ghosts nothing; the frame's own key never ghosts; a drawing
+/// ghosts once (the nearest wins), and the drawing held over the frame
+/// never ghosts ahead. At depth 1 in drawings mode this is exactly
+/// `AppState::onion_neighbors`. With `other_columns`, every other column
+/// that renders adds its own set after the active column's.
+pub fn onion_set(
+    cut: &anim_core::model::Cut,
+    column: ColumnId,
+    frame: u32,
+    cfg: &OnionCfg,
+) -> Vec<(DrawingId, i32, f32)> {
+    let mut out = Vec::new();
+    let mut cols = vec![column];
+    if cfg.other_columns {
+        let (below, above) = cut.render_split(column);
+        cols.extend(below.into_iter().chain(above).filter(|c| *c != column));
+    }
+    for c in cols {
+        if let Some(col) = cut.xsheet.column(c) {
+            column_onion(cut, col, frame, cfg, &mut out);
+        }
+    }
+    out
+}
+
+fn column_onion(
+    cut: &anim_core::model::Cut,
+    col: &anim_core::xsheet::Column,
+    frame: u32,
+    cfg: &OnionCfg,
+    out: &mut Vec<(DrawingId, i32, f32)>,
+) {
+    use anim_core::model::DrawingKind;
+    use anim_core::xsheet::Exposure;
+    let count = cut.frame_count.max(1);
+    let own = match col.key_at(frame) {
+        Some(Exposure::Drawing(d)) => Some(d),
+        _ => None,
+    };
+    let held = col.resolve(frame);
+    let before = cfg.before.min(OnionCfg::MAX_DEPTH) as u32;
+    let after = cfg.after.min(OnionCfg::MAX_DEPTH) as u32;
+    // True when `d` joined the set at this offset.
+    let push = |out: &mut Vec<(DrawingId, i32, f32)>, d: DrawingId, offset: i32, rank: u32| {
+        if Some(d) == own || out.iter().any(|(o, _, _)| *o == d) {
+            return false;
+        }
+        out.push((d, offset, cfg.weight(rank)));
+        true
+    };
+    match cfg.mode {
+        OnionMode::Drawings => {
+            let mut rank = 0;
+            for f in (0..frame).rev() {
+                if rank == before {
+                    break;
+                }
+                if let Some(d) = col.resolve(f)
+                    && push(out, d, -(rank as i32 + 1), rank + 1)
+                {
+                    rank += 1;
+                }
+            }
+            let mut rank = 0;
+            for f in frame.saturating_add(1)..count {
+                if rank == after {
+                    break;
+                }
+                if let Some(d) = col.resolve(f)
+                    && Some(d) != held
+                    && push(out, d, rank as i32 + 1, rank + 1)
+                {
+                    rank += 1;
+                }
+            }
+        }
+        OnionMode::Frames => {
+            for k in 1..=before.min(frame) {
+                if let Some(d) = col.resolve(frame - k) {
+                    push(out, d, -(k as i32), k);
+                }
+            }
+            for k in 1..=after {
+                let f = frame.saturating_add(k);
+                if f >= count {
+                    break;
+                }
+                if let Some(d) = col.resolve(f)
+                    && Some(d) != held
+                {
+                    push(out, d, k as i32, k);
+                }
+            }
+        }
+        OnionMode::Keys => {
+            let is_key = |d: DrawingId| cut.drawing_kind(d) == DrawingKind::Key;
+            let (mut rank, mut f) = (0, frame);
+            while rank < before
+                && let Some((kf, d)) = col.prev_key(f, is_key)
+            {
+                if push(out, d, -(rank as i32 + 1), rank + 1) {
+                    rank += 1;
+                }
+                f = kf;
+            }
+            let (mut rank, mut f) = (0, frame);
+            while rank < after
+                && let Some((kf, d)) = col.next_key(f, is_key)
+            {
+                if kf >= count {
+                    break;
+                }
+                if Some(d) != held && push(out, d, rank as i32 + 1, rank + 1) {
+                    rank += 1;
+                }
+                f = kf;
+            }
+        }
+    }
+}
+
+/// GM6: one pinned ghost's shift & trace offset — view only, never in the
+/// document or the config.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PinShift {
+    /// Paper-pixel translation.
+    pub dx: f32,
+    pub dy: f32,
+    /// Turn about the paper centre, radians (clockwise on y-down paper).
+    pub rot: f32,
+}
+
+impl PinShift {
+    pub fn is_identity(&self) -> bool {
+        self.dx == 0.0 && self.dy == 0.0 && self.rot == 0.0
+    }
+
+    /// Where the paper point `p` of the pinned drawing shows.
+    pub fn apply(&self, p: Pos2, center: Pos2) -> Pos2 {
+        let v = rotate_vec(p - center, self.rot.to_degrees());
+        center + v + vec2(self.dx, self.dy)
+    }
+
+    /// The paper point of the pinned drawing that shows at `q`.
+    pub fn invert(&self, q: Pos2, center: Pos2) -> Pos2 {
+        center + rotate_vec(q - center - vec2(self.dx, self.dy), -self.rot.to_degrees())
+    }
+}
+
+/// GM6: THE LIGHT TABLE — pinned (column, drawing) pairs shown on every
+/// frame at the light table's opacity, plus the shift & trace offsets.
+/// View state, per cut in effect (a pin of another cut's drawing does not
+/// resolve here and waits); never document data.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LightTable {
+    /// The first pin is the old single ghost pin.
+    pub pins: Vec<(ColumnId, DrawingId)>,
+    pub offsets: std::collections::HashMap<DrawingId, PinShift>,
+    /// The pin a shift & trace drag moves (None or unpinned = the first).
+    pub selected: Option<DrawingId>,
+    /// The "shift & trace" latch: while on, a canvas drag moves the
+    /// selected pin and the pen rests.
+    pub shift_trace: bool,
+}
+
+impl LightTable {
+    pub fn is_pinned(&self, d: DrawingId) -> bool {
+        self.pins.iter().any(|(_, p)| *p == d)
+    }
+
+    /// Pin or unpin `d`; true = it is pinned now.
+    pub fn toggle(&mut self, column: ColumnId, d: DrawingId) -> bool {
+        if self.is_pinned(d) {
+            self.unpin(d);
+            false
+        } else {
+            self.pins.push((column, d));
+            true
+        }
+    }
+
+    pub fn unpin(&mut self, d: DrawingId) {
+        self.pins.retain(|(_, p)| *p != d);
+        self.offsets.remove(&d);
+        if self.selected == Some(d) {
+            self.selected = None;
+        }
+    }
+
+    /// The first pin (the old ghost pin).
+    pub fn first(&self) -> Option<DrawingId> {
+        self.pins.first().map(|(_, d)| *d)
+    }
+
+    /// The pin shift & trace moves.
+    pub fn target(&self) -> Option<DrawingId> {
+        self.selected.filter(|d| self.is_pinned(*d)).or_else(|| self.first())
+    }
+
+    pub fn shift(&self, d: DrawingId) -> PinShift {
+        self.offsets.get(&d).copied().unwrap_or_default()
+    }
+
+    /// Move (and turn) the target pin, view only.
+    pub fn nudge(&mut self, dx: f32, dy: f32, rot: f32) {
+        if let Some(d) = self.target() {
+            let s = self.offsets.entry(d).or_default();
+            s.dx += dx;
+            s.dy += dy;
+            s.rot += rot;
+        }
+    }
+
+    /// Reset puts every pin back where it belongs.
+    pub fn reset(&mut self) {
+        self.offsets.clear();
+    }
+
+    /// The pins of drawings in `cut`, with their offsets, in pin order.
+    pub fn shown(&self, cut: &anim_core::model::Cut) -> Vec<(DrawingId, PinShift)> {
+        self.pins
+            .iter()
+            .filter(|(_, d)| cut.drawing(*d).is_some())
+            .map(|(_, d)| (*d, self.shift(*d)))
+            .collect()
+    }
+}
+
+/// GM6: a pinned cel's tiles as shift & trace shows them — every texel
+/// pulled from where `shift` says it came from (nearest texel), display
+/// only. The identity shares the tiles untouched.
+pub fn shift_tiles(
+    tiles: &BTreeMap<TileCoord, Arc<TileData>>,
+    shift: PinShift,
+    center: Pos2,
+) -> BTreeMap<TileCoord, Arc<TileData>> {
+    use anim_core::raster::{TILE, TILE_LEN};
+    if shift.is_identity() || tiles.is_empty() {
+        return tiles.clone();
+    }
+    let t = TILE as i32;
+    // The shifted bounds of every source tile.
+    let mut lo = pos2(f32::MAX, f32::MAX);
+    let mut hi = pos2(f32::MIN, f32::MIN);
+    for &(tx, ty) in tiles.keys() {
+        for (cx, cy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            let p = pos2(((tx + cx) * t) as f32, ((ty + cy) * t) as f32);
+            let q = shift.apply(p, center);
+            lo = lo.min(q);
+            hi = hi.max(q);
+        }
+    }
+    let (t0x, t0y) = ((lo.x.floor() as i32).div_euclid(t), (lo.y.floor() as i32).div_euclid(t));
+    let (t1x, t1y) = ((hi.x.ceil() as i32).div_euclid(t), (hi.y.ceil() as i32).div_euclid(t));
+    let mut out = BTreeMap::new();
+    for ty in t0y..=t1y {
+        for tx in t0x..=t1x {
+            let mut px = vec![0u16; TILE_LEN];
+            let mut any = false;
+            for row in 0..TILE {
+                for col in 0..TILE {
+                    let q = pos2(
+                        (tx * t + col as i32) as f32 + 0.5,
+                        (ty * t + row as i32) as f32 + 0.5,
+                    );
+                    let s = shift.invert(q, center);
+                    let (sx, sy) = (s.x.floor() as i32, s.y.floor() as i32);
+                    let Some(src) = tiles.get(&(sx.div_euclid(t), sy.div_euclid(t))) else {
+                        continue;
+                    };
+                    let si = (sy.rem_euclid(t) * t + sx.rem_euclid(t)) as usize * 4;
+                    let di = (row * TILE + col) * 4;
+                    px[di..di + 4].copy_from_slice(&src.rgba[si..si + 4]);
+                    any |= src.rgba[si + 3] != 0;
+                }
+            }
+            if any {
+                out.insert((tx, ty), Arc::new(TileData::from_vec(px)));
+            }
+        }
+    }
+    out
+}
+
+/// The onion's ghosts of `column` at `frame` for the vector path, each
+/// with its tint, farthest first so the nearest lies on top. Ghost BEHIND
+/// = Ao (continuity — where the motion came from); ghost AHEAD = Legend
+/// (the plate stating what is next). Spec defect 14: the old red/green
+/// pair is dead — Aka never sits on the paper for hours, and there is no
+/// green in this application. The drawing shown here never ghosts.
 fn onion_ghosts(
     state: &AppState,
     column: ColumnId,
     frame: u32,
-    strength: f32,
+    cfg: &OnionCfg,
 ) -> Vec<(anim_core::ids::DrawingId, Color32)> {
     let current = state.resolve_at(column, frame);
-    let mut out = Vec::new();
-    let mut collect = |range: Box<dyn Iterator<Item = u32>>, base: (u8, u8, u8)| {
-        let mut found: Vec<anim_core::ids::DrawingId> = Vec::new();
-        for f in range {
-            if let Some(id) = state.resolve_at(column, f)
-                && Some(id) != current
-                && !found.contains(&id)
-            {
-                found.push(id);
-                if found.len() == 2 {
-                    break;
-                }
-            }
-        }
-        for (depth, id) in found.into_iter().enumerate() {
-            let alpha = ((if depth == 0 { 255.0 } else { 140.0 }) * strength.clamp(0.0, 1.0)) as u8;
-            out.push((
-                id,
-                Color32::from_rgba_unmultiplied(base.0, base.1, base.2, alpha),
-            ));
-        }
-    };
+    let mut set: Vec<(DrawingId, i32, f32)> = onion_set(state.cut(), column, frame, cfg)
+        .into_iter()
+        .filter(|(id, _, _)| Some(*id) != current)
+        .collect();
+    set.sort_by_key(|(_, offset, _)| std::cmp::Reverse(offset.unsigned_abs()));
+    set.into_iter()
+        .map(|(id, offset, weight)| {
+            let base = if offset < 0 { plate::AO } else { plate::LEGEND };
+            let alpha = (255.0 * weight.clamp(0.0, 1.0)) as u8;
+            (id, ghost_tint([base.r(), base.g(), base.b()], alpha))
+        })
+        .collect()
+}
 
-    // Ghost BEHIND = Ao (continuity — where the motion came from); ghost
-    // AHEAD = Legend (the plate stating what is next). Spec defect 14: the
-    // old red/green pair is dead — Aka never sits on the paper for hours,
-    // and there is no green in this application.
-    collect(Box::new((0..frame).rev()), (83, 137, 196));
-    collect(Box::new(frame + 1..state.frame_count()), (139, 141, 131));
-    out
+/// GM6: the classic spacing-chart glyph (タイミング指示) in `rect`: a rule
+/// from the key (top) to the next key (bottom), long ticks at both keys and
+/// a short tick at each mark.
+pub fn chart_glyph(painter: &egui::Painter, rect: Rect, marks: &[f32], ink: Color32) {
+    let stroke = egui::Stroke::new(1.0, ink);
+    let x = rect.center().x;
+    painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], stroke);
+    let w = rect.width() * 0.5;
+    for (t, half) in [(0.0, w), (1.0, w)]
+        .into_iter()
+        .chain(marks.iter().map(|m| (m.clamp(0.0, 1.0), w * 0.6)))
+    {
+        let y = rect.top() + rect.height() * t;
+        painter.line_segment([pos2(x - half, y), pos2(x + half, y)], stroke);
+    }
+}
+
+/// The onion's raster tints, unchanged since spec defect 14: Ao's paper
+/// wash behind (the light table's pins wear it too), Legend's ahead. Aka
+/// is never an onion tint (D7 keeps it for refusals).
+pub const ONION_BEHIND_TINT: [u8; 3] = [160, 195, 232];
+pub const ONION_AHEAD_TINT: [u8; 3] = [205, 206, 199];
+
+/// A ghost's colour: `rgb` at `alpha`, unmultiplied.
+fn ghost_tint(rgb: [u8; 3], alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], alpha)
 }
 
 fn draw_strokes(

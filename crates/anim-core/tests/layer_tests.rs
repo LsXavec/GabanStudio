@@ -1064,3 +1064,271 @@ fn definitions_survive_save_and_old_files_infer_roles() {
 
     std::fs::remove_file(&path).unwrap();
 }
+
+// ---- GM6: drawing kinds and spacing charts (the drawing_defs side table) ---
+
+/// The fixture plus a second, blank drawing "5" exposed at frame 8 — the
+/// chart's target key.
+fn two_key_fixture() -> (LayerFixture, DrawingId) {
+    let mut f = layer_fixture();
+    let col = f.engine.project.cut(f.at.scene, f.at.cut).unwrap().xsheet.columns[0].id;
+    let five = f.engine.alloc_drawing_id();
+    f.engine
+        .apply(
+            "second key",
+            vec![
+                Command::AddDrawing {
+                    at: f.at,
+                    id: five,
+                    index: 1,
+                    name: "5".into(),
+                    strokes: vec![],
+                    layers: vec![],
+                },
+                Command::SetCell {
+                    at: f.at,
+                    column: col,
+                    frame: 8,
+                    key: Some(Exposure::Drawing(five)),
+                },
+            ],
+        )
+        .unwrap();
+    f.engine.clear_history();
+    (f, five)
+}
+
+fn key_with_chart(to: DrawingId) -> anim_core::model::DrawingDef {
+    use anim_core::model::{DrawingDef, DrawingKind, SpacingChart};
+    DrawingDef {
+        kind: DrawingKind::Key,
+        chart: Some(SpacingChart {
+            to,
+            marks: vec![0.25, 0.5, 0.75],
+        }),
+    }
+}
+
+#[test]
+fn drawing_defs_never_change_the_content_hash_and_undo_exactly() {
+    use anim_core::model::{DrawingDef, DrawingKind};
+    let (mut f, five) = two_key_fixture();
+    let h0 = drawing(&f).content_hash();
+    let def = key_with_chart(five);
+    f.engine
+        .apply(
+            "mark key",
+            vec![Command::SetDrawingDef {
+                at: f.at,
+                drawing: f.d,
+                before: DrawingDef::default(),
+                after: def.clone(),
+            }],
+        )
+        .unwrap();
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    assert_eq!(cut.drawing_def(f.d), def);
+    assert_eq!(cut.drawing_kind(f.d), DrawingKind::Key);
+    assert_eq!(drawing(&f).content_hash(), h0, "a kind is not pixels");
+
+    // A stale `before` is refused, and so is a mark outside (0, 1).
+    let stale = f.engine.apply(
+        "stale",
+        vec![Command::SetDrawingDef {
+            at: f.at,
+            drawing: f.d,
+            before: DrawingDef::default(),
+            after: DrawingDef::default(),
+        }],
+    );
+    assert!(stale.is_err(), "before must match the document");
+    let mut bad = def.clone();
+    bad.chart.as_mut().unwrap().marks.push(1.0);
+    let refused = f.engine.apply(
+        "bad chart",
+        vec![Command::SetDrawingDef {
+            at: f.at,
+            drawing: f.d,
+            before: def.clone(),
+            after: bad,
+        }],
+    );
+    assert!(refused.is_err(), "marks lie strictly between the keys");
+
+    f.engine.undo().unwrap();
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    assert_eq!(cut.drawing_def(f.d), DrawingDef::default());
+    assert!(cut.drawing_defs.is_empty(), "the default is never stored");
+    f.engine.redo().unwrap();
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    assert_eq!(cut.drawing_def(f.d), def);
+
+    // Removing the drawing drops its definition; undo brings both back.
+    let removed = f.engine.project.cut(f.at.scene, f.at.cut).unwrap().drawing(f.d).unwrap().clone();
+    f.engine
+        .apply(
+            "remove",
+            vec![Command::RemoveDrawing {
+                at: f.at,
+                id: f.d,
+            }],
+        )
+        .unwrap();
+    assert!(f.engine.project.cut(f.at.scene, f.at.cut).unwrap().drawing_defs.is_empty());
+    f.engine.undo().unwrap();
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    assert_eq!(cut.drawing(f.d).unwrap(), &removed);
+    assert_eq!(cut.drawing_def(f.d), def);
+}
+
+#[test]
+fn drawing_defs_survive_save_and_files_without_the_table_load_empty() {
+    use anim_core::model::{DrawingDef, DrawingKind};
+    let (mut f, five) = two_key_fixture();
+    let def = key_with_chart(five);
+    f.engine
+        .apply(
+            "kinds",
+            vec![
+                Command::SetDrawingDef {
+                    at: f.at,
+                    drawing: f.d,
+                    before: DrawingDef::default(),
+                    after: def.clone(),
+                },
+                Command::SetDrawingDef {
+                    at: f.at,
+                    drawing: five,
+                    before: DrawingDef::default(),
+                    after: DrawingDef {
+                        kind: DrawingKind::Breakdown,
+                        chart: None,
+                    },
+                },
+            ],
+        )
+        .unwrap();
+
+    let dir = std::env::temp_dir().join("anim_core_tests");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("drawing_defs_{}.animproj", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    f.engine.save(&path).unwrap();
+    let loaded = Engine::load(&path).unwrap();
+    assert_eq!(f.engine.project, loaded.project, "drawing defs round-trip exactly");
+    let cut = loaded.project.cut(f.at.scene, f.at.cut).unwrap();
+    assert_eq!(cut.drawing_def(f.d), def);
+    assert_eq!(cut.drawing_kind(five), DrawingKind::Breakdown);
+    let hashes = |e: &Engine| -> Vec<u64> {
+        let cut = e.project.cut(f.at.scene, f.at.cut).unwrap();
+        cut.drawings.iter().map(|d| d.content_hash()).collect()
+    };
+    assert_eq!(hashes(&loaded), hashes(&f.engine));
+
+    // A v11 file saved before the table existed: every drawing reads Unset.
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TABLE drawing_defs;").unwrap();
+    }
+    let old = Engine::load(&path).unwrap();
+    let cut = old.project.cut(f.at.scene, f.at.cut).unwrap();
+    assert!(cut.drawing_defs.is_empty());
+    assert_eq!(cut.drawing_kind(f.d), DrawingKind::Unset);
+    assert_eq!(hashes(&old), hashes(&f.engine), "pixels never depended on it");
+    // Re-saving creates the table again (IF NOT EXISTS, on save only).
+    old.save(&path).unwrap();
+    let again = Engine::load(&path).unwrap();
+    assert_eq!(old.project, again.project);
+
+    // An unreadable row is a corrupt file, not a silent default.
+    f.engine.save(&path).unwrap();
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("UPDATE drawing_defs SET json = 'not json';").unwrap();
+    }
+    assert!(Engine::load(&path).is_err());
+
+    std::fs::remove_file(&path).unwrap();
+}
+
+#[test]
+fn prev_and_next_key_skip_drawings_that_are_not_keys() {
+    let (f, five) = two_key_fixture();
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    let col = &cut.xsheet.columns[0];
+    let any = |_: DrawingId| true;
+    assert_eq!(col.prev_key(8, any), Some((0, f.d)));
+    assert_eq!(col.prev_key(0, any), None, "strictly before");
+    assert_eq!(col.next_key(0, any), Some((8, five)));
+    assert_eq!(col.next_key(8, any), None, "strictly after");
+    assert_eq!(col.next_key(3, any), Some((8, five)), "from inside a hold");
+    // Only `five` counts as a key: the search from 10 back skips past `cel`.
+    let only_five = |d: DrawingId| d == five;
+    assert_eq!(col.prev_key(10, only_five), Some((8, five)));
+    assert_eq!(col.prev_key(8, only_five), None);
+    assert_eq!(col.next_key(0, |d| d == f.d), None);
+}
+
+#[test]
+fn copied_pixels_paste_in_place_into_another_drawing() {
+    use anim_core::edit::{copy_region, paste_region};
+    let (mut f, five) = two_key_fixture();
+    // Ink the source's line layer: one solid tile at (0, 0).
+    let ink = solid_tile(0x3C00); // 1.0 in every channel
+    f.engine
+        .apply(
+            "ink",
+            vec![Command::PaintTiles {
+                at: f.at,
+                id: f.d,
+                layer: f.line,
+                diff: vec![((0, 0), None, Some(ink.clone()))],
+            }],
+        )
+        .unwrap();
+    // The target needs a layer to paste into.
+    let target = f.engine.alloc_layer_id();
+    f.engine
+        .apply(
+            "layer",
+            vec![Command::AddCelLayer {
+                at: f.at,
+                drawing: five,
+                index: 0,
+                layer: CelLayer::new(target, "line"),
+            }],
+        )
+        .unwrap();
+    let before_paste = f.engine.position();
+
+    let square = [(8.0, 8.0), (40.0, 8.0), (40.0, 40.0), (8.0, 40.0)];
+    let clip = copy_region(drawing(&f), f.line, &square).expect("inked region copies");
+    assert!(copy_region(drawing(&f), f.color, &square).is_none(), "blank layer copies nothing");
+    let src_hash = drawing(&f).content_hash();
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    let cmds = paste_region(f.at, cut.drawing(five).unwrap(), target, &clip);
+    assert_eq!(cmds.len(), 1, "one PaintTiles");
+    f.engine.apply("paste", cmds).unwrap();
+    assert_eq!(f.engine.position(), before_paste + 1, "one undo step");
+    assert_eq!(drawing(&f).content_hash(), src_hash, "copy never touches the source");
+
+    // Inside the square the target equals the source; outside it is blank.
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    let pasted = cut.drawing(five).unwrap().layer(target).unwrap().raster.tiles[&(0, 0)].clone();
+    let texel = |x: usize, y: usize| pasted.rgba[(y * 64 + x) * 4 + 3];
+    assert_eq!(texel(20, 20), ink.rgba[(20 * 64 + 20) * 4 + 3]);
+    assert_eq!(texel(8, 8), 0x3C00);
+    assert_eq!(texel(2, 2), 0, "outside the selection stays blank");
+    assert_eq!(texel(50, 50), 0);
+
+    // Opaque ink pasted over itself changes no pixel: no command at all.
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    let again = paste_region(f.at, cut.drawing(five).unwrap(), target, &clip);
+    assert!(again.is_empty(), "a no-op paste emits nothing");
+
+    // One undo removes the whole paste.
+    f.engine.undo().unwrap();
+    let cut = f.engine.project.cut(f.at.scene, f.at.cut).unwrap();
+    assert!(cut.drawing(five).unwrap().layer(target).unwrap().raster.tiles.is_empty());
+}

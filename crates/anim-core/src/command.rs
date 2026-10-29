@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
-use crate::model::{AudioClip, CelLayer, Cut, Drawing, LayerProps, Project, Stroke};
+use crate::model::{AudioClip, CelLayer, Cut, Drawing, DrawingDef, LayerProps, Project, Stroke};
 use crate::raster::TileDiff;
 use crate::xsheet::{Column, ColumnDef, Exposure, ParamColumn, ParamKey};
 
@@ -300,6 +300,15 @@ pub enum Command {
         frame: u32,
         text: Option<String>,
     },
+    /// GM6: a drawing's definition (kind, spacing chart). `before` must be
+    /// what the drawing holds now, so a stale edit refuses instead of
+    /// drifting; the inverse swaps the two. Never reaches pixels.
+    SetDrawingDef {
+        at: CutRef,
+        drawing: DrawingId,
+        before: DrawingDef,
+        after: DrawingDef,
+    },
 }
 
 impl Command {
@@ -341,7 +350,8 @@ impl Command {
             | Command::SetCells { at, .. }
             | Command::SetCutMeta { at, .. }
             | Command::SetColumnDef { at, .. }
-            | Command::SetMemo { at, .. } => *at,
+            | Command::SetMemo { at, .. }
+            | Command::SetDrawingDef { at, .. } => *at,
             Command::AddCut { scene, cut, .. } => CutRef {
                 scene: *scene,
                 cut: cut.id,
@@ -796,6 +806,17 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 strokes: drawing.strokes.clone(),
                 layers: drawing.layers.clone(), // full stack: ids+props+tiles
             }];
+            // GM6: the definition goes with the drawing and comes back
+            // with it (a chart elsewhere that runs TO it is left as is: it
+            // reads as no chart while its key is gone).
+            if let Some(def) = cut.drawing_defs.remove(id) {
+                inverse.push(Command::SetDrawingDef {
+                    at: *at,
+                    drawing: *id,
+                    before: DrawingDef::default(),
+                    after: def,
+                });
+            }
             inverse.extend(restore_cells);
 
             let mut roots = Vec::new();
@@ -1625,6 +1646,39 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     text: prev,
                 }],
                 // Memos never reach pixels.
+                invalidation_roots: vec![],
+            })
+        }
+
+        Command::SetDrawingDef {
+            at,
+            drawing,
+            before,
+            after,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            if cut.drawing(*drawing).is_none() {
+                return Err(EngineError::UnknownDrawing(*drawing));
+            }
+            if cut.drawing_def(*drawing) != *before {
+                return Err(EngineError::InvalidCommand(format!(
+                    "drawing {drawing}'s definition changed since this edit was made"
+                )));
+            }
+            if after.chart.as_ref().is_some_and(|c| !c.is_valid()) {
+                return Err(EngineError::InvalidCommand(
+                    "spacing chart marks must lie strictly between the keys (0..1)".into(),
+                ));
+            }
+            cut.set_drawing_def(*drawing, after.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetDrawingDef {
+                    at: *at,
+                    drawing: *drawing,
+                    before: after.clone(),
+                    after: before.clone(),
+                }],
+                // Kind and chart never reach pixels (D1).
                 invalidation_roots: vec![],
             })
         }
