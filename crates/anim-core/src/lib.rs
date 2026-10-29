@@ -18,6 +18,7 @@ pub mod error;
 pub mod eval;
 pub mod export;
 pub mod fill;
+pub mod fx;
 pub mod graph;
 pub mod ids;
 pub mod model;
@@ -571,6 +572,22 @@ impl Engine {
             .cut(scene, cut)
             .ok_or(EngineError::UnknownCut(cut))?;
         self.evaluator.eval(cut_ref, frame)
+    }
+
+    /// GM9: one node's value at `frame`, memoised like [`Self::eval`] — the
+    /// GPU compositor keys an uploaded FX subtree by its hash (D9).
+    pub fn eval_node(
+        &mut self,
+        scene: SceneId,
+        cut: CutId,
+        node: NodeId,
+        frame: u32,
+    ) -> Result<Value> {
+        let cut_ref = self
+            .project
+            .cut(scene, cut)
+            .ok_or(EngineError::UnknownCut(cut))?;
+        self.evaluator.eval_at(cut_ref, node, frame)
     }
 
     // ---- Persistence ------------------------------------------------------

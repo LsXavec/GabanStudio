@@ -26,6 +26,9 @@ pub enum GraphView {
     /// The evaluator returned an error (corrupt graph state).
     EvalFailed,
     Ready(egui::TextureId),
+    /// GM9: shown, while a CPU subtree (an Effect) renders on the worker —
+    /// the texture holds its last result; the views light a TALLY dot.
+    Rendering(egui::TextureId),
 }
 
 /// Per-instance view state (keyed by the pane's viewer id; session-only).
@@ -95,16 +98,20 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
         );
     };
     match graph {
-        GraphView::Ready(id) => {
+        GraphView::Ready(id) | GraphView::Rendering(id) => {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             painter.image(id, paper_rect, uv, Color32::WHITE);
-            painter.text(
+            let tag = painter.text(
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
                 egui::Align2::LEFT_TOP,
                 "🎬 composite",
                 egui::FontId::proportional(12.0),
                 Color32::from_rgba_unmultiplied(83, 137, 196, 200),
             );
+            if matches!(graph, GraphView::Rendering(_)) {
+                // GM9: the lamp — an FX render is pending.
+                painter.circle_filled(pos2(tag.right() + 8.0, tag.center().y), 4.0, crate::plate::TALLY);
+            }
         }
         GraphView::NoOutput | GraphView::Off => hint(
             &painter,

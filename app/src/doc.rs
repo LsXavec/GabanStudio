@@ -515,6 +515,9 @@ pub struct AppState {
     pub selected_node: Option<NodeId>,
     /// Node-graph pane: view pan.
     pub graph_pan: (f32, f32),
+    /// GM9: the node graph's add-node menu, node drag and inspector edit —
+    /// session-only view state.
+    pub graph_ui: crate::nodegraph_panel::GraphUi,
     /// X-sheet pane: the selected PARAMETER column (its keying strip shows
     /// under the toolbar) — session-only view state.
     pub param_sel: Option<anim_core::ids::ParamId>,
@@ -618,6 +621,7 @@ impl AppState {
             pending_wire: None,
             selected_node: None,
             graph_pan: (0.0, 0.0),
+            graph_ui: Default::default(),
             param_sel: None,
             param_buf: 0.0,
             param_buf_at: None,
@@ -707,6 +711,7 @@ impl AppState {
             pending_wire: None,
             selected_node: None,
             graph_pan: (0.0, 0.0),
+            graph_ui: Default::default(),
             param_sel: None,
             param_buf: 0.0,
             param_buf_at: None,
@@ -3373,46 +3378,111 @@ impl AppState {
         let index = self.cut().images.len();
         let image = self.engine.alloc_image_id();
         let node = self.engine.alloc_node_id();
-        let r = self.engine.apply(
-            "import image",
-            vec![
-                Command::AddImage {
-                    at,
-                    id: image,
-                    index,
-                    name,
-                    bytes,
-                },
-                Command::AddNode {
-                    at,
-                    id: node,
-                    kind: anim_core::graph::NodeKind::ImageSource { image },
-                },
-            ],
-        );
+        let mut cmds = vec![
+            Command::AddImage {
+                at,
+                id: image,
+                index,
+                name,
+                bytes,
+            },
+            Command::AddNode {
+                at,
+                id: node,
+                kind: anim_core::graph::NodeKind::ImageSource { image },
+            },
+        ];
+        cmds.extend(self.layout_edit(|l| {
+            l.insert(node, pos);
+        }));
+        let r = self.engine.apply("import image", cmds);
         if r.is_ok() {
             self.node_positions.insert(node.0, pos);
             self.selected_node = Some(node);
         }
         self.report(r, "image imported");
     }
+    /// Add a node at `pos` (graph space) — the node and its place in the
+    /// saved layout are one undo step (GM9).
     pub fn graph_add_node(&mut self, kind: anim_core::graph::NodeKind, pos: (f32, f32)) {
         let at = self.at();
         let id = self.engine.alloc_node_id();
-        let r = self
-            .engine
-            .apply("add node", vec![Command::AddNode { at, id, kind }]);
+        let mut cmds = vec![Command::AddNode { at, id, kind }];
+        cmds.extend(self.layout_edit(|l| {
+            l.insert(id, pos);
+        }));
+        let r = self.engine.apply("add node", cmds);
         if r.is_ok() {
             self.node_positions.insert(id.0, pos);
             self.selected_node = Some(id);
         }
         self.report(r, "node added");
     }
+
+    /// GM9: the cut's saved node layout (`cut_meta["graph.layout"]`).
+    pub fn graph_layout(&self) -> std::collections::BTreeMap<NodeId, (f32, f32)> {
+        self.cut()
+            .meta
+            .get(anim_core::graph::LAYOUT_KEY)
+            .map(|j| anim_core::graph::layout_from_json(j))
+            .unwrap_or_default()
+    }
+
+    /// GM9: where a node sits in graph space — a live drag, else the saved
+    /// layout, else its session spot (`ensure_node_layout`'s first layout).
+    pub fn node_pos(&self, id: NodeId) -> (f32, f32) {
+        if let Some((n, p)) = self.graph_ui.drag.as_ref().map(|d| (d.node, d.pos))
+            && n == id
+        {
+            return p;
+        }
+        self.graph_layout()
+            .get(&id)
+            .copied()
+            .or_else(|| self.node_positions.get(&id.0).copied())
+            .unwrap_or((40.0, 40.0))
+    }
+
+    /// GM9: the SetCutMeta that writes the layout of every live node with
+    /// `edit` applied (so the first save freezes the shown layout too);
+    /// None when nothing changes.
+    fn layout_edit(
+        &self,
+        edit: impl FnOnce(&mut std::collections::BTreeMap<NodeId, (f32, f32)>),
+    ) -> Option<Command> {
+        let ids: Vec<NodeId> = self.cut().graph.nodes().map(|n| n.id).collect();
+        let mut layout: std::collections::BTreeMap<NodeId, (f32, f32)> =
+            ids.iter().map(|&id| (id, self.node_pos(id))).collect();
+        edit(&mut layout);
+        let before = self.cut().meta.get(anim_core::graph::LAYOUT_KEY).cloned();
+        let after = Some(anim_core::graph::layout_to_json(&layout));
+        (after != before).then(|| Command::SetCutMeta {
+            at: self.at(),
+            key: anim_core::graph::LAYOUT_KEY.into(),
+            before,
+            after,
+        })
+    }
+
+    /// GM9: a node drag lands as ONE undo step — its new place in the saved
+    /// layout (the drag itself only moved the view).
+    pub fn graph_move_node(&mut self, id: NodeId, pos: (f32, f32)) {
+        let Some(cmd) = self.layout_edit(|l| {
+            l.insert(id, pos);
+        }) else {
+            return;
+        };
+        let r = self.engine.apply("move node", vec![cmd]);
+        self.report(r, "node moved");
+    }
+
     pub fn graph_remove_node(&mut self, id: NodeId) {
         let at = self.at();
-        let r = self
-            .engine
-            .apply("remove node", vec![Command::RemoveNode { at, id }]);
+        let mut cmds = vec![Command::RemoveNode { at, id }];
+        cmds.extend(self.layout_edit(|l| {
+            l.remove(&id);
+        }));
+        let r = self.engine.apply("remove node", cmds);
         if r.is_ok() {
             self.node_positions.remove(&id.0);
             if self.selected_node == Some(id) {
@@ -3468,9 +3538,11 @@ impl AppState {
         let mut new_positions: Vec<(u64, (f32, f32))> = Vec::new();
         {
             let cut = self.cut();
+            // GM9: a node with a saved place keeps it.
+            let saved = self.graph_layout();
             let (mut n_src, mut n_mid, mut n_out) = (0, 0, 0);
             for node in cut.graph.nodes() {
-                if self.node_positions.contains_key(&node.id.0) {
+                if self.node_positions.contains_key(&node.id.0) || saved.contains_key(&node.id) {
                     continue;
                 }
                 use anim_core::graph::NodeKind::*;
@@ -3479,7 +3551,7 @@ impl AppState {
                         n_src += 1;
                         (40.0, n_src - 1)
                     }
-                    Transform { .. } | Blend { .. } => {
+                    Transform { .. } | Blend { .. } | Effect { .. } => {
                         n_mid += 1;
                         (260.0, n_mid - 1)
                     }

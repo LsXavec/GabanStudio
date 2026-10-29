@@ -1627,8 +1627,13 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     before: after.clone(),
                     after: before.clone(),
                 }],
-                // A key's owner part invalidates what it renders (D3).
-                invalidation_roots: all_nodes(cut),
+                // A key's owner part invalidates what it renders (D3); the
+                // graph layout (GM9) renders nothing.
+                invalidation_roots: if key == crate::graph::LAYOUT_KEY {
+                    Vec::new()
+                } else {
+                    all_nodes(cut)
+                },
             })
         }
 

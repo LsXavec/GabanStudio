@@ -36,6 +36,12 @@ impl Evaluator {
         self.eval_node(cut, output, frame, &mut visiting)
     }
 
+    /// GM9: evaluate any node of the cut at `frame` (the same memo).
+    pub fn eval_at(&mut self, cut: &Cut, node: NodeId, frame: u32) -> Result<Value> {
+        let mut visiting = HashSet::new();
+        self.eval_node(cut, node, frame, &mut visiting)
+    }
+
     fn eval_node(
         &mut self,
         cut: &Cut,
@@ -144,6 +150,27 @@ impl Evaluator {
             NodeKind::Output => {
                 let child = input_value(0, self, visiting)?;
                 Value::image(format!("out({})", child.recipe()))
+            }
+            NodeKind::Effect { fx, params, binds } => {
+                // An unwired optional pin (the glow's matte) renders
+                // differently from a wired, empty one, so it spells "-".
+                let mut ins = Vec::with_capacity(fx.inputs());
+                for slot in 0..fx.inputs() {
+                    ins.push(match inputs.get(slot).copied().flatten() {
+                        Some(_) => input_value(slot, self, visiting)?.recipe().to_string(),
+                        None => "-".to_string(),
+                    });
+                }
+                // The RESOLVED parameters (bound columns sampled at this
+                // frame), like Transform: a keyed parameter changes the
+                // value per frame; equal resolved values still cache-hit.
+                let v = cut.fx_at(*fx, params, binds, frame);
+                Value::image(format!(
+                    "fx({}, {}, [{}])",
+                    fx.name(),
+                    v.recipe(),
+                    ins.join(", ")
+                ))
             }
         };
 

@@ -14,6 +14,9 @@ hound = "3"
 rusqlite = { version = "0.37", features = ["bundled"] }
 thiserror = "2"
 bytemuck = "1"
+# GM9 (D9, D16): the compositing FX run once, here, on the CPU — parallel
+# over rows.
+rayon = "1.12"
 
 [dev-dependencies]
 # Tests forge legacy (schema v4/v5) project files directly to prove migration.

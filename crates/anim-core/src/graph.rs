@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
 use crate::error::{EngineError, Result};
+use crate::fx::{FxBinds, FxKind, FxParams};
 use crate::ids::{ColumnId, ImageId, NodeId, ParamId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -95,14 +96,35 @@ pub enum NodeKind {
     Blend { mode: BlendMode },
     /// The cut's final image. One input.
     Output,
+    /// GM9: a compositing effect (blur, glow, diffusion, grade), rendered by
+    /// [`crate::fx`] on the CPU in every view (D9). Each parameter takes its
+    /// bound X-sheet param column's value when bound and resolvable, else
+    /// its stored value, else its spec default.
+    Effect {
+        fx: FxKind,
+        #[serde(default)]
+        params: FxParams,
+        #[serde(default)]
+        binds: FxBinds,
+    },
 }
 
 impl NodeKind {
+    /// GM9: a new Effect node of `fx` with every parameter at its default.
+    pub fn effect(fx: FxKind) -> Self {
+        Self::Effect {
+            fx,
+            params: FxParams::defaults(fx),
+            binds: FxBinds::default(),
+        }
+    }
+
     pub fn input_count(&self) -> usize {
         match self {
             Self::DrawingSource { .. } | Self::Solid { .. } | Self::ImageSource { .. } => 0,
             Self::Transform { .. } | Self::Output => 1,
             Self::Blend { .. } => 2,
+            Self::Effect { fx, .. } => fx.inputs(),
         }
     }
 
@@ -114,8 +136,38 @@ impl NodeKind {
             Self::Transform { .. } => "Transform",
             Self::Blend { .. } => "Blend",
             Self::Output => "Output",
+            Self::Effect { fx, .. } => fx.name(),
         }
     }
+
+    /// Does any parameter of this node read the given param column? (The
+    /// invalidation roots of a param key edit.)
+    pub fn references(&self, param: ParamId) -> bool {
+        match self {
+            Self::Transform { binds, .. } => binds.references(param),
+            Self::Effect { binds, .. } => binds.references(param),
+            _ => false,
+        }
+    }
+}
+
+/// GM9 (D3): the cut meta key holding the node graph's layout — JSON
+/// `{"<node id>": [x, y], ...}` in graph-space points. Positions are not
+/// rendered, so setting it invalidates nothing.
+pub const LAYOUT_KEY: &str = "graph.layout";
+
+/// Read a `graph.layout` value (an unreadable one is an empty layout: the
+/// pane places nodes afresh rather than refusing the cut).
+pub fn layout_from_json(json: &str) -> BTreeMap<NodeId, (f32, f32)> {
+    serde_json::from_str::<BTreeMap<u64, (f32, f32)>>(json)
+        .map(|m| m.into_iter().map(|(id, p)| (NodeId(id), p)).collect())
+        .unwrap_or_default()
+}
+
+/// Write a `graph.layout` value.
+pub fn layout_to_json(layout: &BTreeMap<NodeId, (f32, f32)>) -> String {
+    let plain: BTreeMap<u64, (f32, f32)> = layout.iter().map(|(id, p)| (id.0, *p)).collect();
+    serde_json::to_string(&plain).unwrap_or_else(|_| "{}".into())
 }
 
 /// A connection source: the output pin of another node.
@@ -280,14 +332,12 @@ impl Graph {
             .collect()
     }
 
-    /// All Transform nodes with any param bound to the given parameter
-    /// column (invalidation roots when a param key changes).
+    /// All Transform and Effect nodes with any param bound to the given
+    /// parameter column (invalidation roots when a param key changes).
     pub fn sources_of_param(&self, param: ParamId) -> Vec<NodeId> {
         self.nodes
             .values()
-            .filter(
-                |n| matches!(&n.kind, NodeKind::Transform { binds, .. } if binds.references(param)),
-            )
+            .filter(|n| n.kind.references(param))
             .map(|n| n.id)
             .collect()
     }

@@ -18,6 +18,12 @@
 //! LAW is preserved). Transform/Blend run here with their own pipelines, one
 //! encoder+submit per node pass — the same uniform-aliasing law as opacity_buf,
 //! and graphs are tiny so submits only happen when the hash changes.
+//!
+//! GM9 (D9): an Effect node has no GPU twin — its maths lives once, in
+//! `anim_core::fx`. Its whole subtree renders on the CPU, on a worker
+//! thread, from a `Cut` snapshot; the result uploads into a texture filed
+//! under (node, frame, eval hash). Until it lands the last upload shows
+//! and `rendering()` is true (the views' TALLY dot) — the pen never waits.
 
 use anim_core::color::ColorLaw;
 use anim_core::graph::{BlendMode, NodeKind};
@@ -26,8 +32,8 @@ use anim_core::model::{Cut, Drawing};
 use eframe::egui;
 use eframe::egui_wgpu::{RenderState, Renderer};
 use egui::mutex::RwLock;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, mpsc};
 use wgpu::util::DeviceExt;
 
 use crate::paint::{LayerSlice, PaintLayer};
@@ -167,6 +173,14 @@ pub struct GraphCompositor {
     /// The colour law the cached output was rendered under (D8: a Solid
     /// node's chip goes through it).
     law: ColorLaw,
+
+    /// GM9: the CPU renders' uploads, their worker (started on first use)
+    /// and this execution's eval hash of each CPU root.
+    fx: FxCache<FxTex>,
+    fx_worker: Option<FxWorker>,
+    fx_hashes: HashMap<NodeId, u64>,
+    /// An upload landed since `out_texture` was composed.
+    fx_fresh: bool,
 }
 
 impl Drop for GraphCompositor {
@@ -346,6 +360,10 @@ impl GraphCompositor {
             sampler,
             cached_hash: None,
             law: ColorLaw::Legacy,
+            fx: FxCache::default(),
+            fx_worker: None,
+            fx_hashes: HashMap::new(),
+            fx_fresh: false,
         };
         this.clear_view_now(&this.out_view.clone());
         this
@@ -391,6 +409,7 @@ impl GraphCompositor {
         self.width = width;
         self.height = height;
         self.cached_hash = None;
+        self.fx.clear();
         self.clear_view_now(&self.out_view.clone());
     }
 
@@ -411,18 +430,27 @@ impl GraphCompositor {
     // ---- Execution ----------------------------------------------------------
 
     /// Execute the graph at `frame` if `output_hash` differs from what the
-    /// output texture holds. Returns the egui texture to display.
+    /// output texture holds (or a CPU render landed). `fx_hashes` is the
+    /// eval hash of each of `cpu_roots(cut)`. Returns the egui texture to
+    /// display.
     pub fn execute(
         &mut self,
         output_hash: u64,
+        fx_hashes: HashMap<NodeId, u64>,
         cut: &Cut,
         law: ColorLaw,
         frame: u32,
         paint: &mut PaintLayer,
     ) -> egui::TextureId {
-        if self.cached_hash == Some(output_hash) && self.law == law {
+        if self.law != law {
+            self.fx.clear(); // D8: the renders were made under the old law
+        }
+        self.land_fx();
+        if self.cached_hash == Some(output_hash) && self.law == law && !self.fx_fresh {
             return self.out_id;
         }
+        self.fx_fresh = false;
+        self.fx_hashes = fx_hashes;
         self.law = law;
         for p in &mut self.pool {
             p.free = true;
@@ -445,6 +473,68 @@ impl GraphCompositor {
         }
         self.cached_hash = Some(output_hash);
         self.out_id
+    }
+
+    /// GM9: is a CPU render in flight? (The views show a TALLY dot and the
+    /// caller keeps repainting until it lands.)
+    pub fn rendering(&self) -> bool {
+        self.fx.rendering()
+    }
+
+    /// Upload every CPU render the worker has finished (no CPU work here).
+    fn land_fx(&mut self) {
+        let Some(worker) = &self.fx_worker else {
+            return;
+        };
+        let done: Vec<FxDone> = worker.done.try_iter().collect();
+        for d in done {
+            self.land_one(d);
+        }
+    }
+
+    /// Upload one finished render (a size or law change since its job
+    /// drops it).
+    fn land_one(&mut self, d: FxDone) {
+        if d.generation != self.fx.generation()
+            || d.texels.len() != (self.width * self.height * 4) as usize
+        {
+            return;
+        }
+        let size = wgpu::Extent3d {
+            width: self.width,
+            height: self.height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("graph_fx"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        // write_texture needs no 256-byte row alignment (unlike a buffer copy).
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&d.texels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8 * self.width),
+                rows_per_image: Some(self.height),
+            },
+            size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        if self.fx.accept(d.key, d.generation, FxTex { view }) {
+            self.fx_fresh = true;
+        }
     }
 
     /// Render one node into a pool slot (post-order over the real graph).
@@ -538,6 +628,44 @@ impl GraphCompositor {
                 slot
             }
             NodeKind::Output => self.render_input(cut, &inputs, 0, frame, paint, visiting),
+            NodeKind::Effect { .. } => {
+                // GM9 (D9): the subtree renders on the CPU worker; this shows
+                // its upload — the last one while a newer render is pending.
+                let slot = self.acquire_cleared();
+                if let Some(&hash) = self.fx_hashes.get(&id) {
+                    let key = FxKey { node: id, frame, hash };
+                    if self.fx.want(key) {
+                        if self.fx_worker.is_none() {
+                            self.fx_worker = FxWorker::spawn();
+                        }
+                        let job = FxJob {
+                            key,
+                            generation: self.fx.generation(),
+                            cut: cut.clone(),
+                            law: self.law,
+                            width: self.width,
+                            height: self.height,
+                        };
+                        let unsent = match &self.fx_worker {
+                            Some(w) => w.jobs.send(job).err().map(|e| e.0),
+                            None => Some(job),
+                        };
+                        if let Some(job) = unsent {
+                            // No worker (no thread, or a render panicked):
+                            // render here this once rather than wait forever.
+                            self.fx_worker = None;
+                            let d = render_job(&job);
+                            self.land_one(d);
+                        }
+                    }
+                }
+                if let Some((tex, _)) = self.fx.shown(id) {
+                    let src = tex.view.clone();
+                    let dst = self.pool[slot].view.clone();
+                    self.draw_quad(&src, &dst, (0.0, 0.0), 1.0, 0.0);
+                }
+                slot
+            }
         };
         visiting.remove(&id);
         slot
@@ -764,6 +892,206 @@ impl GraphCompositor {
     }
 }
 
+// ---- GM9: the CPU subtrees ----------------------------------------------------
+
+/// Does this node's maths live only on the CPU? (D9: no forked FX maths.)
+pub fn needs_cpu(kind: &NodeKind) -> bool {
+    matches!(kind, NodeKind::Effect { .. })
+}
+
+/// Does `node`, or anything feeding it, need the CPU?
+pub fn subtree_needs_cpu(cut: &Cut, node: NodeId) -> bool {
+    let mut seen = HashSet::new();
+    let mut stack = vec![node];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Ok(n) = cut.graph.node(id) else {
+            continue;
+        };
+        if needs_cpu(&n.kind) {
+            return true;
+        }
+        stack.extend(n.inputs.iter().flatten().map(|(src, _)| *src));
+    }
+    false
+}
+
+/// The CPU nodes the GPU walk from the output reaches — each renders its
+/// whole subtree on the worker, so nothing under one is listed.
+pub fn cpu_roots(cut: &Cut) -> Vec<NodeId> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+    let mut stack: Vec<NodeId> = cut.graph.output.into_iter().collect();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Ok(n) = cut.graph.node(id) else {
+            continue;
+        };
+        if needs_cpu(&n.kind) {
+            roots.push(id);
+        } else {
+            stack.extend(n.inputs.iter().flatten().map(|(src, _)| *src));
+        }
+    }
+    roots
+}
+
+/// What a CPU render is filed under: the node, the frame, and the
+/// evaluator's hash of the node's value (its parameters, their bound
+/// values and everything upstream) — anything that changes the pixels
+/// changes the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FxKey {
+    pub node: NodeId,
+    pub frame: u32,
+    pub hash: u64,
+}
+
+/// The upload cache's bookkeeping, apart from the device (tests drive it
+/// with plain values): what each node shows, and what is in flight. One
+/// result per node is kept — the last one, shown while a newer renders.
+pub struct FxCache<T> {
+    shown: HashMap<NodeId, (FxKey, T)>,
+    pending: HashMap<NodeId, FxKey>,
+    /// Bumped by `clear` (a colour law or size change): results of older
+    /// jobs are dropped on arrival.
+    generation: u64,
+}
+
+impl<T> Default for FxCache<T> {
+    fn default() -> Self {
+        Self {
+            shown: HashMap::new(),
+            pending: HashMap::new(),
+            generation: 0,
+        }
+    }
+}
+
+impl<T> FxCache<T> {
+    /// Should a job for `key` be sent? False when it is shown or already in
+    /// flight; true marks it in flight (a newer key replaces an older one).
+    pub fn want(&mut self, key: FxKey) -> bool {
+        if self.shown.get(&key.node).is_some_and(|(k, _)| *k == key)
+            || self.pending.get(&key.node) == Some(&key)
+        {
+            return false;
+        }
+        self.pending.insert(key.node, key);
+        true
+    }
+
+    /// A result arrived: shown (true) unless a `clear` came after its job.
+    /// A superseded result still shows — it is newer than what showed, the
+    /// worker answers in order — while the node keeps waiting for its key.
+    pub fn accept(&mut self, key: FxKey, generation: u64, item: T) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        if self.pending.get(&key.node) == Some(&key) {
+            self.pending.remove(&key.node);
+        }
+        self.shown.insert(key.node, (key, item));
+        true
+    }
+
+    /// What `node` shows now, and whether it is exactly `key`.
+    pub fn shown(&self, node: NodeId) -> Option<(&T, FxKey)> {
+        self.shown.get(&node).map(|(k, t)| (t, *k))
+    }
+
+    /// Is any render still in flight?
+    pub fn rendering(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn clear(&mut self) {
+        self.shown.clear();
+        self.pending.clear();
+        self.generation += 1;
+    }
+}
+
+/// One CPU render for the worker: a snapshot, so the document stays free.
+pub struct FxJob {
+    pub key: FxKey,
+    pub generation: u64,
+    pub cut: Cut,
+    pub law: ColorLaw,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// A finished render: Rgba16Float texels (premultiplied), ready to upload.
+pub struct FxDone {
+    pub key: FxKey,
+    pub generation: u64,
+    pub texels: Vec<u16>,
+}
+
+/// The worker's whole job — the export's own `render_node`, as f16 bits.
+pub fn render_job(job: &FxJob) -> FxDone {
+    let px = anim_core::export::render_node_px(
+        &job.cut,
+        job.law,
+        job.key.node,
+        job.key.frame,
+        job.width,
+        job.height,
+    );
+    FxDone {
+        key: job.key,
+        generation: job.generation,
+        texels: px.into_iter().map(anim_core::raster::f32_to_f16_bits).collect(),
+    }
+}
+
+/// The FX worker thread. Jobs queued for one node collapse to the newest
+/// (scrubbing never builds a backlog).
+struct FxWorker {
+    jobs: mpsc::Sender<FxJob>,
+    done: mpsc::Receiver<FxDone>,
+}
+
+impl FxWorker {
+    fn spawn() -> Option<Self> {
+        let (jobs, job_rx) = mpsc::channel::<FxJob>();
+        let (done_tx, done) = mpsc::channel::<FxDone>();
+        std::thread::Builder::new()
+            .name("gaban-fx".into())
+            .spawn(move || {
+                while let Ok(first) = job_rx.recv() {
+                    let mut batch: Vec<FxJob> = vec![first];
+                    batch.extend(job_rx.try_iter());
+                    let mut newest: HashMap<NodeId, FxJob> = HashMap::new();
+                    for j in batch {
+                        newest.insert(j.key.node, j);
+                    }
+                    for j in newest.into_values() {
+                        if done_tx.send(render_job(&j)).is_err() {
+                            return; // the compositor is gone
+                        }
+                    }
+                }
+            })
+            .ok()?;
+        Some(Self { jobs, done })
+    }
+}
+
+/// An uploaded CPU render.
+struct FxTex {
+    view: wgpu::TextureView,
+}
+
 /// The drawing a DrawingSource on `column` shows at `frame`. A hidden or
 /// Ref column yields none, so its slot stays transparent (GM5) — the same
 /// rule as the CPU reference's `render_graph_frame`.
@@ -810,5 +1138,99 @@ mod source_tests {
             h.perform(verb);
             assert_eq!(shown(&h), renders, "{verb:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fx_tests {
+    use super::*;
+    use crate::doc::AppState;
+    use crate::testkit::EditorHarness;
+    use anim_core::fx::{FxKind, FxParams, FxValue};
+
+    /// Solid → `fx` → Output, the output set: (solid, fx node, output).
+    fn rig(s: &mut AppState, fx: FxKind) -> (NodeId, NodeId, NodeId) {
+        let mut add = |kind: NodeKind, x: f32| {
+            s.graph_add_node(kind, (x, 0.0));
+            s.selected_node.unwrap()
+        };
+        let solid = add(NodeKind::Solid { rgba: [64, 128, 192, 255] }, 0.0);
+        let node = add(NodeKind::effect(fx), 200.0);
+        let out = add(NodeKind::Output, 400.0);
+        s.graph_connect(solid, node, 0);
+        s.graph_connect(node, out, 0);
+        s.graph_set_output(out);
+        (solid, node, out)
+    }
+
+    #[test]
+    fn fxnode_subtree_needs_cpu_above_an_effect_only() {
+        let mut h = EditorHarness::new();
+        let s = h.state_mut();
+        let (solid, glow, out) = rig(s, FxKind::Glow);
+        assert!(needs_cpu(&s.cut().graph.node(glow).unwrap().kind));
+        assert!(subtree_needs_cpu(s.cut(), out), "above an Effect");
+        assert!(subtree_needs_cpu(s.cut(), glow), "the Effect itself");
+        assert!(!subtree_needs_cpu(s.cut(), solid), "below it, the GPU");
+        assert_eq!(cpu_roots(s.cut()), vec![glow]);
+        // A plain graph: Solid → Output.
+        s.graph_connect(solid, out, 0);
+        assert!(!subtree_needs_cpu(s.cut(), out), "a plain graph stays on the GPU");
+        assert!(cpu_roots(s.cut()).is_empty());
+    }
+
+    #[test]
+    fn fxnode_cache_key_follows_the_eval_hash() {
+        let mut h = EditorHarness::new();
+        let s = h.state_mut();
+        let (solid, grade, _) = rig(s, FxKind::Grade);
+        let (scene, cut) = (s.view.scene, s.view.cut);
+        let hash = |s: &mut AppState| s.engine.eval_node(scene, cut, grade, 0).unwrap().hash();
+        let h0 = hash(s);
+        assert_eq!(hash(s), h0, "stable while nothing changes");
+        let k0 = FxKey { node: grade, frame: 0, hash: h0 };
+        let mut cache: FxCache<Vec<u16>> = FxCache::default();
+        assert!(cache.want(k0), "a miss sends a job");
+        assert!(!cache.want(k0), "in flight: not sent twice");
+        assert!(cache.rendering());
+        // The worker's job, run here: no thread, no device.
+        let law = s.engine.project.color_law;
+        let job = FxJob {
+            key: k0,
+            generation: cache.generation(),
+            cut: s.cut().clone(),
+            law,
+            width: 8,
+            height: 8,
+        };
+        let done = render_job(&job);
+        // A neutral grade is the export's own pixels of its input.
+        let plain: Vec<u16> = anim_core::export::render_node_px(s.cut(), law, solid, 0, 8, 8)
+            .into_iter()
+            .map(anim_core::raster::f32_to_f16_bits)
+            .collect();
+        assert_eq!(done.texels, plain);
+        assert!(cache.accept(done.key, done.generation, done.texels));
+        assert!(!cache.rendering(), "landed");
+        assert!(!cache.want(k0), "a hit sends nothing");
+        // A parameter edit changes the hash, so the key; the last result
+        // shows while the new one renders.
+        let mut params = FxParams::defaults(FxKind::Grade);
+        params.set("exposure", FxValue::Float(1.0));
+        let binds = Default::default();
+        s.graph_set_kind(grade, NodeKind::Effect { fx: FxKind::Grade, params, binds });
+        let h1 = hash(s);
+        assert_ne!(h1, h0, "the eval hash follows the parameter");
+        let k1 = FxKey { hash: h1, ..k0 };
+        assert!(cache.want(k1), "a new key is a miss");
+        assert_eq!(cache.shown(grade).map(|(_, k)| k), Some(k0));
+        assert!(cache.rendering());
+        // Another frame is another key.
+        assert_ne!(FxKey { frame: 1, ..k1 }, k1);
+        // A law or size change clears it: older jobs' results are dropped.
+        let old = cache.generation();
+        cache.clear();
+        assert!(!cache.accept(k1, old, Vec::new()), "a result from before the clear");
+        assert!(cache.shown(grade).is_none() && !cache.rendering());
     }
 }

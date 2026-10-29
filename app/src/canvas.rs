@@ -3836,10 +3836,16 @@ impl CanvasView {
         // mismatch on return to edit view).
         let mut composite_tex: Option<egui::TextureId> = None;
         let mut composite_note: Option<&'static str> = None;
+        // GM9: an FX subtree is still rendering on the worker.
+        let mut composite_pending = false;
         if self.composite_view {
             use crate::viewer::GraphView as GV;
             match graph {
                 GV::Ready(id) => composite_tex = Some(id),
+                GV::Rendering(id) => {
+                    composite_tex = Some(id);
+                    composite_pending = true;
+                }
                 GV::NoOutput => {
                     composite_note = Some("composite view — no graph output wired (C to edit)");
                 }
@@ -4227,13 +4233,17 @@ impl CanvasView {
             paint_paper_image(&painter, &xf, id, Color32::WHITE);
             // Painted overlay tag (zero layout impact) so the mode is never
             // ambiguous — this view looks like art, not like a mode.
-            painter.text(
+            let tag = painter.text(
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
                 egui::Align2::LEFT_TOP,
                 "composite view",
                 egui::FontId::proportional(12.0),
                 Color32::from_rgb(139, 141, 131), // Legend: the app speaking
             );
+            if composite_pending {
+                // GM9: the lamp — an FX render is pending (the last result shows).
+                painter.circle_filled(pos2(tag.right() + 8.0, tag.center().y), 4.0, crate::plate::TALLY);
+            }
         }
         if let Some(note) = composite_note {
             painter.text(

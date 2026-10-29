@@ -16,6 +16,7 @@ mod export;
 mod floatcanvas;
 mod forge;
 mod floatwin;
+mod fxui;
 mod graphcomp;
 mod curves_panel;
 mod history_panel;
@@ -7211,9 +7212,26 @@ impl Editor {
                 match self.state.engine.eval(scene, cutid, frame) {
                     Ok(v) => {
                         let hash = v.hash();
+                        // GM9: each CPU subtree's own eval hash keys its
+                        // worker render (memo hits after the eval above).
+                        let roots = graphcomp::cpu_roots(self.state.cut());
+                        let fx: std::collections::HashMap<_, _> = roots
+                            .into_iter()
+                            .filter_map(|n| {
+                                let v = self.state.engine.eval_node(scene, cutid, n, frame).ok()?;
+                                Some((n, v.hash()))
+                            })
+                            .collect();
                         let cut = self.state.cut();
                         let law = self.state.engine.project.color_law;
-                        viewer::GraphView::Ready(g.execute(hash, cut, law, frame, p))
+                        let id = g.execute(hash, fx, cut, law, frame, p);
+                        if g.rendering() {
+                            // Poll for the worker's result; the pen never waits.
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+                            viewer::GraphView::Rendering(id)
+                        } else {
+                            viewer::GraphView::Ready(id)
+                        }
                     }
                     Err(_) => viewer::GraphView::EvalFailed,
                 }
@@ -7234,7 +7252,9 @@ impl Editor {
                     self.state.engine.project.height as f32,
                 );
                 match graph {
-                    viewer::GraphView::Ready(id) => sh.tex = Some(id),
+                    viewer::GraphView::Ready(id) | viewer::GraphView::Rendering(id) => {
+                        sh.tex = Some(id)
+                    }
                     viewer::GraphView::NoOutput | viewer::GraphView::Off => {
                         sh.tex = None;
                         sh.hint =

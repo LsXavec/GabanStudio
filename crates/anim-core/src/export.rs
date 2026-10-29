@@ -20,6 +20,7 @@
 use std::collections::HashSet;
 
 use crate::color::ColorLaw;
+use crate::fx::Image;
 use crate::graph::{BlendMode, NodeKind};
 use crate::ids::NodeId;
 use crate::model::Cut;
@@ -244,7 +245,8 @@ pub fn linear_to_srgb_f(v: f32) -> f32 {
 // then recomposites — the standard Porter-Duff separable-blend shape.
 // The GPU shader (graphcomp BLEND_SHADER) mirrors these formulas EXACTLY;
 // change both together or the composite view lies about the export.
-fn blend_into(bottom: &mut [f32], top: &[f32], mode: BlendMode) {
+// GM9: the diffusion FX screens / soft-lights through these same formulas.
+pub(crate) fn blend_into(bottom: &mut [f32], top: &[f32], mode: BlendMode) {
     for (d, s) in bottom.chunks_exact_mut(4).zip(top.chunks_exact(4)) {
         let (sa, da) = (s[3], d[3]);
         let out_a = sa + da * (1.0 - sa);
@@ -417,9 +419,40 @@ fn render_node(
             bottom
         }
         NodeKind::Output => input(0, visiting),
+        NodeKind::Effect { fx, params, binds } => {
+            // GM9 (D9): the one implementation of every FX. An unwired pin
+            // is None (the glow's matte then restricts nothing).
+            let ins: Vec<Option<Image>> = (0..fx.inputs())
+                .map(|slot| {
+                    node.inputs
+                        .get(slot)
+                        .copied()
+                        .flatten()
+                        .map(|_| Image::from_px(width, height, input(slot, visiting)))
+                })
+                .collect();
+            let refs: Vec<Option<&Image>> = ins.iter().map(Option::as_ref).collect();
+            let v = cut.fx_at(*fx, params, binds, frame);
+            fx.apply(&v, law, &refs, width, height).px
+        }
     };
     visiting.remove(&id);
     out
+}
+
+/// GM9 (D9): one node's subtree rendered at `frame` (premultiplied f32,
+/// `width × height × 4`) — what the GPU compositor's worker renders for an
+/// FX subtree and uploads, so the composite view shows the export's pixels.
+pub fn render_node_px(
+    cut: &Cut,
+    law: ColorLaw,
+    node: NodeId,
+    frame: u32,
+    width: u32,
+    height: u32,
+) -> Vec<f32> {
+    let mut visiting = HashSet::new();
+    render_node(cut, law, node, frame, width, height, &mut visiting)
 }
 
 /// Execute `cut.graph` at `frame` into a premultiplied f32 frame.

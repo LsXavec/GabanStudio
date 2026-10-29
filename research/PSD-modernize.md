@@ -2462,3 +2462,24 @@ what was not verified.
   `ui.quick_start`; Help ▸ Quick start gains the checklist with Show me. 13 `welcome_*` tests and a
   composite-room probe. Left: newproject.rs still keeps its own resolution presets; the role chooser
   (stretch). Not verified: the real window.
+- 2026-10-29 — GM9 Compositing FX core. Engine: `fx.rs` (premultiplied f32 `Image`; `ParamSpec` with
+  Float, Color, Bool and Choice kinds; `FxParams` whose missing keys take the spec default, `FxBinds`;
+  `FxKind` Blur, Glow, Diffusion, Grade with `specs`, `inputs`, `apply`; rows in parallel with rayon
+  1.12). Formulas pinned in code and tests: blur σ = r/2 as three box passes (boxes-for-Gauss),
+  transparent outside; glow `bright = max(luma − t, 0)/(1 − t)` × colour × tint (the tint through the
+  colour law), `out = in + blur(bright)·intensity`, an optional matte input gates it; diffusion
+  `mix(in, screen | soft light(in, blur(in)), mix)`; grade on unpremultiplied colour, saturation about
+  Rec.709 luma, temperature and tint as ±25 % channel gains. `NodeKind::Effect { fx, params, binds }`
+  (serde defaults: old files load unchanged), `references(param)`; the eval hash spells every resolved
+  value; the export's `render_node` Effect arm and `render_node_px`; the `graph.layout` cut meta (its
+  SetCutMeta invalidates nothing). App: graphcomp `needs_cpu`, `subtree_needs_cpu`, `cpu_roots`, a
+  worker thread rendering from a `Cut` snapshot, an upload cache keyed (node, frame, eval hash) whose
+  bookkeeping (`FxCache`) is apart from the device, the last result plus a TALLY dot
+  (`GraphView::Rendering`) while a render is pending; the node graph's searchable add-node menu (Tab or
+  a right-click on empty space; Source, Transform, Blend, FX, Output; by name, category or alias; placed
+  at the pointer in one undo step; Build composite from sheet in its foot); node positions saved in
+  `graph.layout` (add, remove and import carry it in the same step; a drag is one step); `fxui.rs`, the
+  inspector from specs (drag value with its range, colour button, latch, combo, a bind picker per
+  bindable parameter; one gesture, one step). 17 `fx_tests`, 6 `fxnode_*` app tests. Left: the stretch
+  (a glow driven only by its matte); colour parameters cannot be bound. Not verified: the GPU path on a
+  real GPU (upload, blit, the dot) and the real window.

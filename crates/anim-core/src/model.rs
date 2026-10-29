@@ -934,6 +934,18 @@ impl Cut {
             get(binds.rotate, rotate_deg),
         )
     }
+
+    /// GM9: an Effect node's EFFECTIVE parameters at `frame` — the
+    /// transform_at of FX, read by all three render paths alike.
+    pub fn fx_at(
+        &self,
+        fx: crate::fx::FxKind,
+        params: &crate::fx::FxParams,
+        binds: &crate::fx::FxBinds,
+        frame: u32,
+    ) -> crate::fx::FxValues {
+        crate::fx::FxValues::resolve(fx, params, binds, |id| self.param_value(id, frame))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

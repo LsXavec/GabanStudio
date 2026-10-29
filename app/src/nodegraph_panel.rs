@@ -5,6 +5,7 @@
 //! compositor — the graph drives evaluation/caching today and becomes the
 //! render path when the GPU graph compositor lands.
 
+use anim_core::fx::FxKind;
 use anim_core::graph::{BlendMode, NodeKind};
 use anim_core::ids::NodeId;
 use eframe::egui;
@@ -21,6 +22,274 @@ fn node_height(inputs: usize) -> f32 {
     TITLE_H + (inputs.max(1) as f32) * PIN_STEP + 6.0
 }
 
+/// GM9: the pane's session-only view state (positions themselves live in
+/// the cut's `graph.layout`).
+#[derive(Default)]
+pub struct GraphUi {
+    /// The searchable add-node menu, while open.
+    pub add_menu: Option<AddMenu>,
+    /// A node drag in progress: shown live, committed once on release.
+    pub drag: Option<NodeDrag>,
+    /// Each node's screen rect this frame.
+    pub node_rects: Vec<(NodeId, Rect)>,
+    /// The Effect inspector's gesture in progress.
+    pub fx: crate::fxui::FxEdit,
+}
+
+pub struct AddMenu {
+    /// Where it opened: the screen point, and the graph point a new node
+    /// takes (its top-left corner at the pointer).
+    pub screen: Pos2,
+    pub world: (f32, f32),
+    pub query: String,
+    pub sel: usize,
+    /// The field has not taken focus yet.
+    fresh: bool,
+    /// The menu's rect last frame: a press outside it closes the menu.
+    rect: Option<Rect>,
+}
+
+pub struct NodeDrag {
+    pub node: NodeId,
+    /// Where the node is shown now (graph space).
+    pub pos: (f32, f32),
+    start: (f32, f32),
+    press: Pos2,
+}
+
+/// What an add-menu entry makes.
+enum Make {
+    Node(NodeKind),
+    /// "Image (PNG)…" asks for the file first.
+    Image,
+}
+
+/// One entry of the add-node menu.
+struct Entry {
+    category: &'static str,
+    name: String,
+    aliases: &'static [&'static str],
+    help: &'static str,
+    make: Make,
+}
+
+/// Every node the add menu offers, in category order: Source, Transform,
+/// Blend, FX, Output (later parts add Generators and 3D).
+fn entries(state: &AppState) -> Vec<Entry> {
+    let mut v: Vec<Entry> = state
+        .cut()
+        .xsheet
+        .columns
+        .iter()
+        .map(|c| Entry {
+            category: "Source",
+            name: format!("Drawing: column {}", c.name),
+            aliases: &["drawingsource", "cel", "column"],
+            help: "the column's drawing at each frame",
+            make: Make::Node(NodeKind::DrawingSource { column: c.id }),
+        })
+        .collect();
+    v.push(Entry {
+        category: "Source",
+        name: "Solid".into(),
+        aliases: &["colour", "color", "fill", "constant"],
+        help: "a constant colour layer",
+        make: Make::Node(NodeKind::Solid {
+            rgba: [255, 255, 255, 255],
+        }),
+    });
+    v.push(Entry {
+        category: "Source",
+        name: "Image (PNG)…".into(),
+        aliases: &["imagesource", "png", "background", "plate", "reference"],
+        help: "import a background plate / reference image into this cut — \
+            stored inside the project file, wired as an ImageSource node",
+        make: Make::Image,
+    });
+    v.push(Entry {
+        category: "Transform",
+        name: "Transform".into(),
+        aliases: &["move", "scale", "rotate", "camera"],
+        help: "moves, scales and rotates its input",
+        make: Make::Node(NodeKind::Transform {
+            translate: (0.0, 0.0),
+            scale: 1.0,
+            rotate_deg: 0.0,
+            binds: Default::default(),
+        }),
+    });
+    v.push(Entry {
+        category: "Blend",
+        name: "Blend".into(),
+        aliases: &["composite", "over", "merge"],
+        help: "composites input 1 over input 0",
+        make: Make::Node(NodeKind::Blend {
+            mode: BlendMode::Normal,
+        }),
+    });
+    for &fx in FxKind::ALL {
+        v.push(Entry {
+            category: "FX",
+            name: fx.name().into(),
+            aliases: fx.aliases(),
+            help: fx.help(),
+            make: Make::Node(NodeKind::effect(fx)),
+        });
+    }
+    v.push(Entry {
+        category: "Output",
+        name: "Output".into(),
+        aliases: &["result", "final"],
+        help: "the cut's final image",
+        make: Make::Node(NodeKind::Output),
+    });
+    v
+}
+
+/// The entries matching `query`, best first: every word must appear in
+/// the name, the category or an alias; a name starting with the query
+/// ranks above a name containing it, above an alias or category match.
+fn ranked(entries: Vec<Entry>, query: &str) -> Vec<Entry> {
+    let q = query.trim().to_lowercase();
+    let mut rows: Vec<(u8, usize, Entry)> = entries
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, e)| {
+            let name = e.name.to_lowercase();
+            let hay = format!("{name} {} {}", e.category.to_lowercase(), e.aliases.join(" "));
+            if !q.split_whitespace().all(|w| hay.contains(w)) {
+                return None;
+            }
+            let rank = if name.starts_with(&q) {
+                0
+            } else if name.contains(&q) {
+                1
+            } else {
+                2
+            };
+            Some((rank, i, e))
+        })
+        .collect();
+    rows.sort_by_key(|r| (r.0, r.1));
+    rows.into_iter().map(|r| r.2).collect()
+}
+
+/// GM9: the add-node menu at the pointer. Typing filters; the arrows move;
+/// Enter or a click adds the node where the menu opened, in one undo step;
+/// Esc or a press outside closes it.
+fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(mut menu) = state.graph_ui.add_menu.take() else {
+        return;
+    };
+    let ctx = ui.ctx().clone();
+    // The list's own keys, taken before the field can see them.
+    let none = egui::Modifiers::NONE;
+    let (up, down, enter, esc) = ctx.input_mut(|i| {
+        (
+            i.consume_key(none, egui::Key::ArrowUp),
+            i.consume_key(none, egui::Key::ArrowDown),
+            i.consume_key(none, egui::Key::Enter),
+            i.consume_key(none, egui::Key::Escape),
+        )
+    });
+    let outside = ctx.input(|i| {
+        i.pointer.any_pressed()
+            && i
+                .pointer
+                .interact_pos()
+                .is_some_and(|p| menu.rect.is_some_and(|r| !r.contains(p)))
+    });
+    if esc || outside {
+        return;
+    }
+    let rows = ranked(entries(state), &menu.query);
+    let last = rows.len().saturating_sub(1);
+    if up {
+        menu.sel = menu.sel.saturating_sub(1);
+    }
+    if down {
+        menu.sel += 1;
+    }
+    menu.sel = menu.sel.min(last);
+    let mut pick = if enter && !rows.is_empty() {
+        Some(menu.sel)
+    } else {
+        None
+    };
+    let mut build = false;
+    let area = egui::Area::new(ui.id().with("add node menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(menu.screen)
+        .show(&ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(260.0);
+                crate::plate::legend(ui, "add node");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut menu.query)
+                        .hint_text("type a node — name, category or alias")
+                        .desired_width(f32::INFINITY),
+                );
+                if menu.fresh || !field.has_focus() {
+                    field.request_focus();
+                    menu.fresh = false;
+                }
+                if field.changed() {
+                    menu.sel = 0;
+                }
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    if rows.is_empty() {
+                        ui.label(egui::RichText::new("no node matches").color(crate::plate::legend_dim()));
+                    }
+                    for (i, e) in rows.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let row = crate::plate::detent(ui, i == menu.sel, &e.name).on_hover_text(e.help);
+                            if i == menu.sel && (up || down) {
+                                row.scroll_to_me(None);
+                            }
+                            if row.clicked() {
+                                pick = Some(i);
+                            }
+                            ui.label(egui::RichText::new(e.category).color(crate::plate::legend_dim()));
+                        });
+                    }
+                });
+                // GM8: the whole graph from the sheet, where graphs are made
+                // (a graph shaped by hand is asked about first, DANGER).
+                ui.separator();
+                let action = crate::config::Action::BuildComposite;
+                let can = !state.cut().render_order().is_empty();
+                let resp = ui.add_enabled(can, egui::Button::new(action.label()));
+                let resp = if can {
+                    resp.on_hover_text(action.help())
+                } else {
+                    resp.on_disabled_hover_text("no column reaches the composite")
+                };
+                build = resp.clicked();
+            });
+        });
+    menu.rect = Some(area.response.rect);
+    if let Some(e) = pick.and_then(|i| rows.into_iter().nth(i)) {
+        match e.make {
+            Make::Node(kind) => state.graph_add_node(kind, menu.world),
+            Make::Image => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("PNG image", &["png"])
+                    .pick_file()
+                {
+                    state.graph_import_image(&path, menu.world);
+                }
+            }
+        }
+        return;
+    }
+    if build {
+        state.request_auto_comp();
+        return;
+    }
+    state.graph_ui.add_menu = Some(menu);
+}
+
 fn kind_color(kind: &NodeKind) -> Color32 {
     match kind {
         NodeKind::DrawingSource { .. } => Color32::from_rgb(83, 137, 196),
@@ -29,7 +298,7 @@ fn kind_color(kind: &NodeKind) -> Color32 {
         // AUDIT [28]: these two hues are in no ratified palette. Node
         // identity comes from tokens now — Legend for an operation, Ao
         // for the one that composites (continuity), as elsewhere.
-        NodeKind::Transform { .. } => crate::plate::LEGEND,
+        NodeKind::Transform { .. } | NodeKind::Effect { .. } => crate::plate::LEGEND,
         NodeKind::Blend { .. } => crate::plate::AO,
         // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
         // means refusal or destruction, and the graph's result is
@@ -55,6 +324,38 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let origin = rect.left_top() + vec2(state.graph_pan.0, state.graph_pan.1);
     let to_screen = |p: (f32, f32)| pos2(origin.x + p.0, origin.y + p.1);
 
+    // GM9: Tab with the pointer over the graph, or a right-click on empty
+    // graph space, opens the add-node menu there (never while typing).
+    let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+    let tab = state.graph_ui.add_menu.is_none()
+        && hover.is_some()
+        && !ui.ctx().text_edit_focused()
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+    let open_at = if response.secondary_clicked() {
+        response.interact_pointer_pos()
+    } else if tab {
+        hover
+    } else {
+        None
+    };
+    // A node drag the pane never saw end (it closed mid-drag) is dropped.
+    if state.graph_ui.drag.is_some()
+        && !ui.input(|i| i.pointer.any_down() || i.pointer.any_released())
+    {
+        state.graph_ui.drag = None;
+    }
+    if let Some(p) = open_at {
+        state.graph_ui.add_menu = Some(AddMenu {
+            screen: p,
+            world: (p.x - origin.x, p.y - origin.y),
+            query: String::new(),
+            sel: 0,
+            fresh: true,
+            rect: None,
+        });
+    }
+    state.graph_ui.node_rects.clear();
+
     // Snapshot the graph (owned) so state can be mutated by interactions.
     struct NodeView {
         id: NodeId,
@@ -68,11 +369,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         .graph
         .nodes()
         .map(|n| {
-            let pos = state
-                .node_positions
-                .get(&n.id.0)
-                .copied()
-                .unwrap_or((40.0, 40.0));
+            let pos = state.node_pos(n.id);
             NodeView {
                 id: n.id,
                 kind: n.kind.clone(),
@@ -176,16 +473,39 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             Color32::from_rgb(228, 225, 214),
         );
 
-        // Body drag = move; click = select; right-click = node menu.
+        // Body drag = move (GM9: shown live, saved once on release — one
+        // undo step); click = select; right-click = node menu.
+        state.graph_ui.node_rects.push((nv.id, nv.rect));
         let body_resp = ui.interact(
             nv.rect,
             ui.id().with(("node", nv.id.0)),
             Sense::click_and_drag(),
         );
-        if body_resp.dragged() {
-            let e = state.node_positions.entry(nv.id.0).or_insert((40.0, 40.0));
-            e.0 += body_resp.drag_delta().x;
-            e.1 += body_resp.drag_delta().y;
+        if body_resp.drag_started() {
+            let start = state.node_pos(nv.id);
+            let press = ui
+                .input(|i| i.pointer.press_origin())
+                .unwrap_or(nv.rect.left_top());
+            state.graph_ui.drag = Some(NodeDrag {
+                node: nv.id,
+                pos: start,
+                start,
+                press,
+            });
+        }
+        if body_resp.dragged()
+            && let Some(d) = state.graph_ui.drag.as_mut()
+            && d.node == nv.id
+            && let Some(p) = ui.input(|i| i.pointer.interact_pos())
+        {
+            d.pos = (d.start.0 + p.x - d.press.x, d.start.1 + p.y - d.press.y);
+        }
+        if body_resp.drag_stopped()
+            && let Some(d) = state.graph_ui.drag.take()
+            && d.node == nv.id
+            && d.pos != d.start
+        {
+            state.graph_move_node(d.node, d.pos);
         }
         if body_resp.clicked() {
             state.selected_node = Some(nv.id);
@@ -263,102 +583,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         state.pending_wire = None;
     }
 
-    // Background context menu: add nodes at the click position.
-    response.context_menu(|ui| {
-        let Some(ptr) = ui.ctx().pointer_interact_pos() else {
-            return;
-        };
-        let world = (ptr.x - origin.x - 160.0, ptr.y - origin.y - 60.0);
-        ui.label(egui::RichText::new("add node").color(crate::plate::legend_dim()).small());
-        let columns: Vec<(anim_core::ids::ColumnId, String)> = state
-            .cut()
-            .xsheet
-            .columns
-            .iter()
-            .map(|c| (c.id, c.name.clone()))
-            .collect();
-        for (cid, cname) in columns {
-            if ui
-                .button(format!("DrawingSource: column {cname}"))
-                .clicked()
-            {
-                state.graph_add_node(NodeKind::DrawingSource { column: cid }, world);
-                ui.close();
-            }
-        }
-        if ui.button("Solid").clicked() {
-            state.graph_add_node(
-                NodeKind::Solid {
-                    rgba: [255, 255, 255, 255],
-                },
-                world,
-            );
-            ui.close();
-        }
-        if ui
-            .button("Image (PNG)…")
-            .on_hover_text(
-                "import a background plate / reference image into this cut — \
-            stored inside the project file, wired as an ImageSource node",
-            )
-            .clicked()
-        {
-            ui.close();
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("PNG image", &["png"])
-                .pick_file()
-            {
-                state.graph_import_image(&path, world);
-            }
-        }
-        if ui.button("Transform").clicked() {
-            state.graph_add_node(
-                NodeKind::Transform {
-                    translate: (0.0, 0.0),
-                    scale: 1.0,
-                    rotate_deg: 0.0,
-                    binds: Default::default(),
-                },
-                world,
-            );
-            ui.close();
-        }
-        if ui.button("Blend").clicked() {
-            state.graph_add_node(
-                NodeKind::Blend {
-                    mode: BlendMode::Normal,
-                },
-                world,
-            );
-            ui.close();
-        }
-        if ui.button("Output").clicked() {
-            state.graph_add_node(NodeKind::Output, world);
-            ui.close();
-        }
-        // GM8: the whole graph from the sheet, where graphs are made (a
-        // graph shaped by hand is asked about first, DANGER).
-        ui.separator();
-        let build = crate::config::Action::BuildComposite;
-        let can = !state.cut().render_order().is_empty();
-        let resp = ui.add_enabled(can, egui::Button::new(build.label()));
-        let resp = if can {
-            resp.on_hover_text(build.help())
-        } else {
-            resp.on_disabled_hover_text("no column reaches the composite")
-        };
-        if resp.clicked() {
-            state.request_auto_comp();
-            ui.close();
-        }
-    });
+    // GM9: the searchable add-node menu (opened above).
+    add_menu_ui(ui, state);
 
     // Hint when empty.
     if nodes.is_empty() {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "right-click to add nodes — the cut's compositing graph lives here",
+            "Tab or right-click to add nodes — the cut's compositing graph lives here",
             egui::FontId::proportional(13.0),
             Color32::from_rgb(139, 141, 131),
         );
@@ -531,9 +764,156 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
             NodeKind::Output => {
                 ui.label(egui::RichText::new("the cut's final image").color(crate::plate::legend_dim()));
             }
+            // GM9: generated from the kind's specs; it commits its own
+            // gestures, one undo step each.
+            NodeKind::Effect { fx, params, binds } => {
+                crate::fxui::inspector(ui, state, id, *fx, params, binds);
+            }
         }
         if changed {
             state.graph_set_kind(id, kind);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Action;
+    use crate::testkit::EditorHarness;
+    use crate::workspace::Pane;
+    use anim_core::fx::FxValue;
+
+    /// A harness showing only the Node Graph pane.
+    fn graph_pane() -> EditorHarness {
+        let mut h = EditorHarness::new();
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::NodeGraph]);
+        h.run();
+        h.run();
+        h
+    }
+
+    fn node_rect(h: &EditorHarness, id: NodeId) -> Rect {
+        let rects = &h.state().graph_ui.node_rects;
+        rects
+            .iter()
+            .find(|(n, _)| *n == id)
+            .map(|(_, r)| *r)
+            .unwrap_or_else(|| panic!("node {id:?} not drawn\n{}", h.describe()))
+    }
+
+    #[test]
+    fn fxnode_add_menu_search_ranks_names_then_aliases() {
+        let h = graph_pane();
+        let names = |q: &str| -> Vec<String> {
+            ranked(entries(h.state()), q)
+                .into_iter()
+                .map(|e| e.name)
+                .collect()
+        };
+        assert_eq!(names("glo").first().map(String::as_str), Some("Glow"));
+        assert_eq!(names("bokashi"), ["Blur"], "a trade word finds its kind");
+        assert_eq!(names("fx"), ["Blur", "Glow", "Diffusion", "Grade"]);
+        assert!(names("no such node").is_empty());
+        // Empty: everything, in category order.
+        let cats: Vec<&str> = ranked(entries(h.state()), "")
+            .iter()
+            .map(|e| e.category)
+            .collect();
+        let mut order = cats.clone();
+        order.dedup();
+        assert_eq!(order, ["Source", "Transform", "Blend", "FX", "Output"]);
+    }
+
+    #[test]
+    fn fxnode_typing_glo_and_enter_adds_a_glow_in_one_undo_step() {
+        let mut h = graph_pane();
+        let at = pos2(700.0, 520.0);
+        h.point_at(at);
+        h.key(egui::Key::Tab);
+        assert!(h.state().graph_ui.add_menu.is_some(), "Tab opens the menu\n{}", h.describe());
+        assert!(h.typing(), "its field has the keys");
+        h.type_text("glo");
+        let depth = h.state().engine.history_len();
+        let count = h.state().cut().graph.nodes().count();
+        h.key(egui::Key::Enter);
+        let s = h.state();
+        assert!(s.graph_ui.add_menu.is_none(), "Enter adds and closes");
+        assert_eq!(s.engine.history_len(), depth + 1, "one undo step");
+        assert_eq!(s.cut().graph.nodes().count(), count + 1);
+        let id = s.selected_node.expect("the new node is selected");
+        assert!(matches!(
+            s.cut().graph.node(id).unwrap().kind,
+            NodeKind::Effect { fx: FxKind::Glow, .. }
+        ));
+        let r = node_rect(&h, id);
+        assert!((r.left_top() - at).length() < 0.01, "placed at the pointer: {r:?}");
+        // Undo takes the node and its place together.
+        h.perform(Action::Undo);
+        assert_eq!(h.state().cut().graph.nodes().count(), count);
+        assert!(!h.state().graph_layout().contains_key(&id));
+    }
+
+    #[test]
+    fn fxnode_one_drag_on_a_float_parameter_is_one_history_entry() {
+        let mut h = graph_pane();
+        h.state_mut()
+            .graph_add_node(NodeKind::effect(FxKind::Glow), (300.0, 300.0));
+        let id = h.state().selected_node.unwrap();
+        h.run();
+        let field = |h: &EditorHarness, key: &str| {
+            let fields = &h.state().graph_ui.fx.fields;
+            fields
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("no '{key}' field\n{}", h.describe()))
+        };
+        let r = field(&h, "radius");
+        let depth = h.state().engine.history_len();
+        h.drag(r.center(), r.center() + vec2(60.0, 0.0), 6);
+        let s = h.state();
+        assert_eq!(s.engine.history_len(), depth + 1, "one drag, one entry");
+        let NodeKind::Effect { params, .. } = &s.cut().graph.node(id).unwrap().kind else {
+            panic!("still an Effect");
+        };
+        let spec = FxKind::Glow.spec("radius").unwrap();
+        let FxValue::Float(v) = spec.read(params.get("radius")) else {
+            panic!("radius is a number");
+        };
+        assert!(v > 16.0, "the drag raised it from its default: {v}");
+        // Undo puts it back in one step.
+        h.perform(Action::Undo);
+        let NodeKind::Effect { params, .. } = &h.state().cut().graph.node(id).unwrap().kind else {
+            panic!("still an Effect");
+        };
+        assert_eq!(spec.read(params.get("radius")), FxValue::Float(16.0));
+    }
+
+    #[test]
+    fn fxnode_node_drag_is_one_entry_and_positions_survive_save_and_load() {
+        let mut h = graph_pane();
+        h.state_mut()
+            .graph_add_node(NodeKind::effect(FxKind::Blur), (300.0, 300.0));
+        let id = h.state().selected_node.unwrap();
+        h.run();
+        let r0 = node_rect(&h, id);
+        let depth = h.state().engine.history_len();
+        let grab = r0.left_top() + vec2(40.0, TITLE_H * 0.5);
+        h.drag(grab, grab + vec2(120.0, 40.0), 8);
+        assert_eq!(h.state().engine.history_len(), depth + 1, "one drag, one entry");
+        assert_eq!(h.state().graph_layout().get(&id), Some(&(420.0, 340.0)));
+        let r1 = node_rect(&h, id);
+        assert!((r1.left_top() - (r0.left_top() + vec2(120.0, 40.0))).length() < 0.01);
+        // Saved with the cut, every node's place; back after a load.
+        let file = h.data_dir().join("layout.gaban");
+        let s = h.state_mut();
+        s.begin_save(file.clone());
+        assert!(s.wait_save(), "the save landed");
+        let saved = h.state().graph_layout();
+        assert_eq!(saved.len(), h.state().cut().graph.nodes().count());
+        let back = AppState::load_from(file).expect("the file opens");
+        assert_eq!(back.graph_layout(), saved);
+        assert_eq!(back.node_pos(id), (420.0, 340.0));
+    }
 }
