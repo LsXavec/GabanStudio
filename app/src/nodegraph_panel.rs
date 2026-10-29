@@ -86,6 +86,11 @@ struct Entry {
     make: Make,
 }
 
+/// GM10: the Camera node's help (add menu and title tooltip).
+const CAMERA_HELP: &str = "the shooting camera over the paper: pans, zooms (T.U./T.B.), \
+    rotates and shakes; each plane input is a multiplane level whose depth sets how far \
+    a pan moves it and how far out of focus it sits";
+
 /// Every node the add menu offers, in category order: Source, Transform,
 /// Blend, FX, Output (later parts add Generators and 3D).
 fn entries(state: &AppState) -> Vec<Entry> {
@@ -134,6 +139,28 @@ fn entries(state: &AppState) -> Vec<Entry> {
             rotate_deg: 0.0,
             binds: Default::default(),
         }),
+    });
+    v.push(Entry {
+        category: "Transform",
+        name: "Camera".into(),
+        term: Some("satsuei kamera"),
+        aliases: &[
+            "kamera",
+            "satsuei",
+            "multiplane",
+            "pan",
+            "zoom",
+            "t.u.",
+            "t.b.",
+            "truck",
+            "shake",
+            "parallax",
+            "depth of field",
+            "dof",
+            "paper",
+        ],
+        help: CAMERA_HELP,
+        make: Make::Node(NodeKind::camera()),
     });
     v.push(Entry {
         category: "Blend",
@@ -324,6 +351,11 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
             &["the layer underneath", "the layer composited on top of it"],
         ),
         NodeKind::Effect { fx, .. } => (fx.input_names(), fx.input_help()),
+        // GM10: one pin per plane, named for its place in the stack.
+        NodeKind::Camera { .. } => {
+            let name = anim_core::camera::PLANE_NAMES.get(pin).copied().unwrap_or("plane");
+            return (name, anim_core::camera::PLANE_HELP);
+        }
         NodeKind::Transform { .. } => (&["image"], &["the picture it moves, scales and rotates"]),
         NodeKind::Output => (&["image"], &["the cut's final picture"]),
         NodeKind::DrawingSource { .. } | NodeKind::Solid { .. } | NodeKind::ImageSource { .. } => {
@@ -344,7 +376,9 @@ fn kind_color(kind: &NodeKind) -> Color32 {
         // AUDIT [28]: these two hues are in no ratified palette. Node
         // identity comes from tokens now — Legend for an operation, Ao
         // for the one that composites (continuity), as elsewhere.
-        NodeKind::Transform { .. } | NodeKind::Effect { .. } => crate::plate::LEGEND,
+        NodeKind::Transform { .. } | NodeKind::Effect { .. } | NodeKind::Camera { .. } => {
+            crate::plate::LEGEND
+        }
         NodeKind::Blend { .. } => crate::plate::AO,
         // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
         // means refusal or destruction, and the graph's result is
@@ -686,6 +720,8 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
         );
         if let NodeKind::Effect { fx, .. } = &kind {
             title.on_hover_text(fx.help());
+        } else if let NodeKind::Camera { .. } = &kind {
+            title.on_hover_text(CAMERA_HELP);
         }
         match &mut kind {
             NodeKind::Solid { rgba } => {
@@ -836,6 +872,14 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
             // gestures, one undo step each.
             NodeKind::Effect { fx, params, binds } => {
                 crate::fxui::inspector(ui, state, id, *fx, params, binds);
+            }
+            // GM10: the specs' controls, then the planes' depths.
+            NodeKind::Camera {
+                planes,
+                params,
+                binds,
+            } => {
+                crate::fxui::camera_inspector(ui, state, id, planes, params, binds);
             }
         }
         if changed {

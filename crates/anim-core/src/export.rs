@@ -19,25 +19,59 @@
 
 use std::collections::HashSet;
 
+use rayon::prelude::*;
+
+use crate::camera::{self, CameraState, IRect};
 use crate::color::ColorLaw;
 use crate::fx::Image;
-use crate::graph::{BlendMode, NodeKind};
+use crate::graph::{BlendMode, Node, NodeKind, PlaneSpec};
 use crate::ids::NodeId;
 use crate::model::Cut;
 use crate::raster::{TILE, f16_bits_to_f32};
 
-/// Splat one drawing's flattened tiles over a premultiplied f32 accumulator.
+/// GM10: where a node renders, in frame coordinates. Everything renders
+/// into the frame itself, except a Camera's planes, which render into the
+/// cut's paper rect; `fw × fh` is the frame either way (a Transform turns
+/// about the frame's centre wherever the area sits). At the frame's own
+/// rect every arm is exactly the pre-camera renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Area {
+    rect: IRect,
+    fw: u32,
+    fh: u32,
+}
+
+impl Area {
+    fn frame(width: u32, height: u32) -> Self {
+        Self {
+            rect: IRect::frame(width, height),
+            fw: width,
+            fh: height,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.rect.w as usize * self.rect.h as usize * 4
+    }
+
+    fn is_frame(&self) -> bool {
+        self.rect == IRect::frame(self.fw, self.fh)
+    }
+}
+
+/// Splat one drawing's flattened tiles over a premultiplied f32 accumulator
+/// covering `rect` (frame coordinates; GM10: a paper may start left of or
+/// above the frame, where tiles have negative coordinates).
 fn splat_flat(
     acc: &mut [f32],
     flat: &std::collections::BTreeMap<crate::raster::TileCoord, std::sync::Arc<crate::raster::TileData>>,
-    width: u32,
-    height: u32,
+    rect: IRect,
 ) {
-    let w = width as usize;
-    let h = height as usize;
+    let w = rect.w as usize;
+    let h = rect.h as usize;
     for ((tx, ty), tile) in flat {
-        let px0 = *tx as i64 * TILE as i64;
-        let py0 = *ty as i64 * TILE as i64;
+        let px0 = *tx as i64 * TILE as i64 - rect.x as i64;
+        let py0 = *ty as i64 * TILE as i64 - rect.y as i64;
         for row in 0..TILE {
             let py = py0 + row as i64;
             if py < 0 || py >= h as i64 {
@@ -80,7 +114,7 @@ fn composite(cut: &Cut, frame: u32, width: u32, height: u32) -> Vec<f32> {
         let Some(d) = cut.drawing(id) else {
             continue;
         };
-        splat_flat(&mut acc, &d.flatten(), width, height);
+        splat_flat(&mut acc, &d.flatten(), IRect::frame(width, height));
     }
     acc
 }
@@ -286,19 +320,23 @@ pub(crate) fn blend_into(bottom: &mut [f32], top: &[f32], mode: BlendMode) {
 /// scale has no meaningful inverse).
 fn transform_image(
     src: &[f32],
-    width: u32,
-    height: u32,
+    area: Area,
     translate: (f32, f32),
     scale: f32,
     rotate_deg: f32,
 ) -> Vec<f32> {
-    let w = width as usize;
-    let h = height as usize;
+    let w = area.rect.w as usize;
+    let h = area.rect.h as usize;
     let mut out = vec![0.0f32; w * h * 4];
     if scale.abs() < 1e-6 {
         return out;
     }
-    let (cx, cy) = (width as f32 / 2.0, height as f32 / 2.0);
+    // GM10: C is the frame's centre, in the area's pixels (the area is the
+    // frame everywhere but a camera's paper, where x = y = 0 changes nothing).
+    let (cx, cy) = (
+        area.fw as f32 / 2.0 - area.rect.x as f32,
+        area.fh as f32 / 2.0 - area.rect.y as f32,
+    );
     let rad = rotate_deg.to_radians();
     // Inverse rotation (transpose of forward R in y-down coords).
     let (sin, cos) = rad.sin_cos();
@@ -310,38 +348,120 @@ fn transform_image(
             let oy = py as f32 + 0.5 - cy - translate.1;
             let sx = (cos * ox + sin * oy) * inv_s + cx;
             let sy = (-sin * ox + cos * oy) * inv_s + cy;
-            // Bilinear in texel-index space; out-of-bounds taps contribute
-            // transparency (the outer half-texel of a fractionally-placed
-            // image fades out). KNOWN DEVIATION: the GPU compositor's
-            // ClampToEdge sampler instead repeats the border texel inside
-            // that half-texel band, so display and export can differ by a
-            // sub-pixel edge fringe on FRACTIONAL transforms (integer
-            // transforms are exact on both). This CPU law is the export
-            // truth; revisit with a bounds-checked shader if it ever shows.
-            let ix = sx - 0.5;
-            let iy = sy - 0.5;
-            let x0 = ix.floor();
-            let y0 = iy.floor();
-            let (fx, fy) = (ix - x0, iy - y0);
-            let mut px_acc = [0.0f32; 4];
-            for (dy, wy) in [(0i64, 1.0 - fy), (1, fy)] {
-                let ty = y0 as i64 + dy;
-                if wy <= 0.0 || ty < 0 || ty >= h as i64 {
-                    continue;
-                }
-                for (dx, wx) in [(0i64, 1.0 - fx), (1, fx)] {
-                    let tx = x0 as i64 + dx;
-                    if wx <= 0.0 || tx < 0 || tx >= w as i64 {
-                        continue;
-                    }
-                    let sp = &src[((ty as usize) * w + tx as usize) * 4..][..4];
-                    let wgt = wx * wy;
-                    for c in 0..4 {
-                        px_acc[c] += sp[c] * wgt;
-                    }
-                }
+            out[(py * w + px) * 4..][..4].copy_from_slice(&bilinear(src, w, h, sx, sy));
+        }
+    }
+    out
+}
+
+/// The one bilinear sampler — the Transform node's, and (GM10) the
+/// camera's: `src` (`w × h`, premultiplied) at (sx, sy) in pixel units,
+/// pixel centres at +0.5.
+#[inline]
+fn bilinear(src: &[f32], w: usize, h: usize, sx: f32, sy: f32) -> [f32; 4] {
+    // Bilinear in texel-index space; out-of-bounds taps contribute
+    // transparency (the outer half-texel of a fractionally-placed
+    // image fades out). KNOWN DEVIATION: the GPU compositor's
+    // ClampToEdge sampler instead repeats the border texel inside
+    // that half-texel band, so display and export can differ by a
+    // sub-pixel edge fringe on FRACTIONAL transforms (integer
+    // transforms are exact on both). This CPU law is the export
+    // truth; revisit with a bounds-checked shader if it ever shows.
+    let ix = sx - 0.5;
+    let iy = sy - 0.5;
+    let x0 = ix.floor();
+    let y0 = iy.floor();
+    let (fx, fy) = (ix - x0, iy - y0);
+    let mut px_acc = [0.0f32; 4];
+    for (dy, wy) in [(0i64, 1.0 - fy), (1, fy)] {
+        let ty = y0 as i64 + dy;
+        if wy <= 0.0 || ty < 0 || ty >= h as i64 {
+            continue;
+        }
+        for (dx, wx) in [(0i64, 1.0 - fx), (1, fx)] {
+            let tx = x0 as i64 + dx;
+            if wx <= 0.0 || tx < 0 || tx >= w as i64 {
+                continue;
             }
-            out[(py * w + px) * 4..][..4].copy_from_slice(&px_acc);
+            let sp = &src[((ty as usize) * w + tx as usize) * 4..][..4];
+            let wgt = wx * wy;
+            for c in 0..4 {
+                px_acc[c] += sp[c] * wgt;
+            }
+        }
+    }
+    px_acc
+}
+
+/// GM10: a Camera's frame (`st` resolved at `frame`, output `fw × fh`):
+/// each wired plane rendered at the cut's paper rect, blurred by its depth
+/// of field (the FX core blur), then sampled through its plane map with the
+/// one bilinear sampler and laid far to near, premultiplied src-over.
+#[allow(clippy::too_many_arguments)]
+fn camera_frame(
+    cut: &Cut,
+    law: ColorLaw,
+    node: &Node,
+    planes: &[PlaneSpec],
+    st: &CameraState,
+    frame: u32,
+    (fw, fh): (u32, u32),
+    visiting: &mut HashSet<NodeId>,
+) -> Vec<f32> {
+    let paper = camera::paper(cut, fw, fh);
+    let plane_area = Area {
+        rect: paper,
+        fw,
+        fh,
+    };
+    let (pw, ph) = (paper.w as usize, paper.h as usize);
+    let (ox, oy) = (paper.x as f32, paper.y as f32);
+    let mut out = vec![0.0f32; fw as usize * fh as usize * 4];
+    let depths: Vec<f32> = planes.iter().map(|p| p.depth).collect();
+    for i in camera::plane_order(&depths) {
+        let Some((src, _)) = node.inputs.get(i).copied().flatten() else {
+            continue;
+        };
+        let z = depths[i];
+        let mut plane = render_node(cut, law, src, frame, plane_area, visiting);
+        let r = st.dof_radius(z);
+        if r > 0.0 {
+            plane = crate::fx::blur(&Image::from_px(paper.w, paper.h, plane), r, r).px;
+        }
+        let map = st.plane_map(z, fw, fh);
+        out.par_chunks_mut(fw as usize * 4)
+            .enumerate()
+            .for_each(|(py, row)| {
+                for (px, d) in row.chunks_exact_mut(4).enumerate() {
+                    let (sx, sy) = map.map(px as f32 + 0.5, py as f32 + 0.5);
+                    let s = bilinear(&plane, pw, ph, sx - ox, sy - oy);
+                    let keep = 1.0 - s[3];
+                    for c in 0..4 {
+                        d[c] = s[c] + d[c] * keep;
+                    }
+                }
+            });
+    }
+    out
+}
+
+/// GM10: a frame-size render placed into `area` at the frame's own place
+/// (a camera feeding another camera's plane).
+fn place_frame(frame_px: &[f32], area: Area) -> Vec<f32> {
+    let mut out = vec![0.0f32; area.len()];
+    let (fw, aw, ah) = (area.fw as i64, area.rect.w as i64, area.rect.h as i64);
+    for y in 0..area.fh as i64 {
+        let ay = y - area.rect.y as i64;
+        if !(0..ah).contains(&ay) {
+            continue;
+        }
+        for x in 0..fw {
+            let ax = x - area.rect.x as i64;
+            if !(0..aw).contains(&ax) {
+                continue;
+            }
+            let (s, d) = (((y * fw + x) * 4) as usize, ((ay * aw + ax) * 4) as usize);
+            out[d..d + 4].copy_from_slice(&frame_px[s..s + 4]);
         }
     }
     out
@@ -355,11 +475,11 @@ fn render_node(
     law: ColorLaw,
     id: NodeId,
     frame: u32,
-    width: u32,
-    height: u32,
+    area: Area,
     visiting: &mut HashSet<NodeId>,
 ) -> Vec<f32> {
-    let empty = || vec![0.0f32; width as usize * height as usize * 4];
+    let (width, height) = (area.rect.w, area.rect.h);
+    let empty = || vec![0.0f32; area.len()];
     if !visiting.insert(id) {
         return empty();
     }
@@ -369,7 +489,7 @@ fn render_node(
     };
     let input = |slot: usize, visiting: &mut HashSet<NodeId>| -> Vec<f32> {
         match node.inputs.get(slot).copied().flatten() {
-            Some((src, _pin)) => render_node(cut, law, src, frame, width, height, visiting),
+            Some((src, _pin)) => render_node(cut, law, src, frame, area, visiting),
             None => empty(),
         }
     };
@@ -382,14 +502,14 @@ fn render_node(
                 && let Some(did) = col.resolve(frame)
                 && let Some(d) = cut.drawing(did)
             {
-                splat_flat(&mut acc, &d.flatten(), width, height);
+                splat_flat(&mut acc, &d.flatten(), area.rect);
             }
             acc
         }
         NodeKind::ImageSource { image } => {
             let mut acc = empty();
             if let Some(img) = cut.image(*image) {
-                splat_flat(&mut acc, &img.tiles, width, height);
+                splat_flat(&mut acc, &img.tiles, area.rect);
             }
             acc
         }
@@ -410,7 +530,7 @@ fn render_node(
         } => {
             let child = input(0, visiting);
             let (t, s, r) = cut.transform_at(*translate, *scale, *rotate_deg, binds, frame);
-            transform_image(&child, width, height, t, s, r)
+            transform_image(&child, area, t, s, r)
         }
         NodeKind::Blend { mode } => {
             let mut bottom = input(0, visiting);
@@ -435,6 +555,21 @@ fn render_node(
             let v = cut.fx_at(*fx, params, binds, frame);
             fx.apply(&v, law, &refs, width, height).px
         }
+        NodeKind::Camera {
+            planes,
+            params,
+            binds,
+        } => {
+            // GM10 (D9): the camera sees the frame; under another camera's
+            // plane its frame lands at the frame's place on that paper.
+            let st = CameraState::resolve(cut, params, binds, frame);
+            let px = camera_frame(cut, law, node, planes, &st, frame, (area.fw, area.fh), visiting);
+            if area.is_frame() {
+                px
+            } else {
+                place_frame(&px, area)
+            }
+        }
     };
     visiting.remove(&id);
     out
@@ -452,7 +587,30 @@ pub fn render_node_px(
     height: u32,
 ) -> Vec<f32> {
     let mut visiting = HashSet::new();
-    render_node(cut, law, node, frame, width, height, &mut visiting)
+    render_node(cut, law, node, frame, Area::frame(width, height), &mut visiting)
+}
+
+/// GM10: one node's subtree rendered into `rect` (frame coordinates) of a
+/// `width × height` frame (premultiplied f32, `rect.w × rect.h × 4`):
+/// sources land at their own place on it, so a rect larger than the frame
+/// shows the paper beyond it. At the frame's own rect it is exactly
+/// [`render_node_px`]; a Camera's planes render this way at the paper.
+pub fn render_node_rect(
+    cut: &Cut,
+    law: ColorLaw,
+    node: NodeId,
+    frame: u32,
+    rect: IRect,
+    width: u32,
+    height: u32,
+) -> Vec<f32> {
+    let mut visiting = HashSet::new();
+    let area = Area {
+        rect,
+        fw: width,
+        fh: height,
+    };
+    render_node(cut, law, node, frame, area, &mut visiting)
 }
 
 /// Execute `cut.graph` at `frame` into a premultiplied f32 frame.
@@ -467,7 +625,7 @@ fn graph_composite(
 ) -> Option<Vec<f32>> {
     let output = cut.graph.output?;
     let mut visiting = HashSet::new();
-    Some(render_node(cut, law, output, frame, width, height, &mut visiting))
+    Some(render_node(cut, law, output, frame, Area::frame(width, height), &mut visiting))
 }
 
 /// Graph-path render to straight RGBA8 over transparent (PNG-with-alpha).

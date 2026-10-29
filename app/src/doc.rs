@@ -3508,6 +3508,27 @@ impl AppState {
         self.report(r, "node updated");
     }
 
+    /// GM10: Cut ▸ Paper size — the cut's paper in frame pixels (the frame
+    /// itself clears the key), one undo step. A rect past the texture cap
+    /// or without area is refused, and says so.
+    pub fn set_cut_paper(&mut self, rect: anim_core::camera::IRect) {
+        if !rect.is_valid_paper() {
+            self.refuse(format!(
+                "paper {}×{} refused: each side must be 1 to {} px",
+                rect.w,
+                rect.h,
+                anim_core::camera::MAX_PAPER
+            ));
+            return;
+        }
+        let (w, h) = (self.engine.project.width as u32, self.engine.project.height as u32);
+        let Some(cmd) = anim_core::camera::set_paper(self.cut(), self.at(), rect, w, h) else {
+            return;
+        };
+        let r = self.engine.apply("paper size", vec![cmd]);
+        self.report(r, "paper size set");
+    }
+
     /// Give every unplaced node a default spot: sources in a left column,
     /// processors centre, output right — a readable first layout.
     pub fn ensure_node_layout(&mut self) {
@@ -3526,7 +3547,7 @@ impl AppState {
                         n_src += 1;
                         (40.0, n_src - 1)
                     }
-                    Transform { .. } | Blend { .. } | Effect { .. } => {
+                    Transform { .. } | Blend { .. } | Effect { .. } | Camera { .. } => {
                         n_mid += 1;
                         (260.0, n_mid - 1)
                     }

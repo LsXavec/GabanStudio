@@ -634,9 +634,10 @@ impl GraphCompositor {
                 slot
             }
             NodeKind::Output => self.render_input(cut, &inputs, 0, frame, paint, visiting),
-            NodeKind::Effect { .. } => {
+            NodeKind::Effect { .. } | NodeKind::Camera { .. } => {
                 // GM9 (D9): the subtree renders on the CPU worker; this shows
                 // its upload — the last one while a newer render is pending.
+                // GM10: a Camera too (its paper and sampling are CPU maths).
                 let slot = self.acquire_cleared();
                 if let Some(&hash) = self.fx_hashes.get(&id) {
                     let key = FxKey { node: id, frame, hash };
@@ -900,9 +901,10 @@ impl GraphCompositor {
 
 // ---- GM9: the CPU subtrees ----------------------------------------------------
 
-/// Does this node's maths live only on the CPU? (D9: no forked FX maths.)
+/// Does this node's maths live only on the CPU? (D9: no forked FX maths;
+/// GM10: nor camera maths — a Camera's planes render at the paper.)
 pub fn needs_cpu(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Effect { .. })
+    matches!(kind, NodeKind::Effect { .. } | NodeKind::Camera { .. })
 }
 
 /// Does `node`, or anything feeding it, need the CPU?
@@ -994,7 +996,13 @@ pub fn job_cut(cut: &Cut, node: NodeId, frame: u32) -> Cut {
             .cloned()
             .collect(),
         audio: None,
-        meta: Default::default(),
+        // GM10: the paper decides what a camera sees beyond the frame.
+        meta: cut
+            .meta
+            .iter()
+            .filter(|(k, _)| k.as_str() == anim_core::camera::PAPER_KEY)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
         memos: Default::default(),
         column_defs: cut.column_defs.clone(),
         drawing_defs: Default::default(),
@@ -1333,6 +1341,21 @@ mod fx_tests {
         let ink = Arc::new(TileData::from_vec(vec![0x3C00; TILE_LEN]));
         let slot = s.active_slot_resolved().expect("an armed layer");
         s.commit_raster(vec![((0, 0), ink.clone()), ((1, 0), ink)], slot);
+    }
+
+    #[test]
+    fn camview_a_camera_takes_the_cpu_path_and_its_job_keeps_the_paper() {
+        assert!(needs_cpu(&NodeKind::camera()), "the camera's maths are CPU maths");
+        let mut h = EditorHarness::new();
+        let s = h.state_mut();
+        let (w, fh) = (s.engine.project.width, s.engine.project.height);
+        let wide = anim_core::camera::IRect { x: -100, y: 0, w: w + 200, h: fh };
+        s.set_cut_paper(wide);
+        s.graph_add_node(NodeKind::camera(), (200.0, 0.0));
+        let cam = s.selected_node.unwrap();
+        let slim = job_cut(s.cut(), cam, 0);
+        assert_eq!(anim_core::camera::paper(&slim, w, fh), wide, "the job sees the paper");
+        assert_eq!(slim.meta.len(), 1, "and no other meta");
     }
 
     #[test]

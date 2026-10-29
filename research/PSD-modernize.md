@@ -2502,3 +2502,21 @@ what was not verified.
   21 `fx_tests`, 11 `fxnode_*` app tests. Left: the stretch; a per-FX "Add effect ▸" submenu; a removed
   unplaced node lets the unplaced nodes after it close ranks at the next load. Not verified: the real
   window and the GPU path on a real GPU.
+- 2026-10-29 — GM10 Camera, paper and multiplane. Engine: `camera.rs` (paper in `cut_meta["camera.paper"]`,
+  the frame stored as no key; `CAMERA_SPECS` through the GM9 spec system, every one bindable, resolved by
+  the shared `fx::resolve_specs`; the sample map, parallax `1/(1+k·z)` floored at 0.05, seeded bounded
+  shake, DOF radius, `field_guide`, `safe_frames`, `frame_rect_on_paper`, `output_camera`).
+  `NodeKind::Camera { planes, params, binds }` (one pin per plane, `PlaneSpec { depth }`); export renders
+  each plane at the paper rect, blurs it by DOF with the FX core's blur, samples it bilinear through the
+  map and lays the planes far→near (stable pin order); `render_node_rect` renders any rect of the frame
+  (negative tiles too); the default path is byte-identical (pinned FNV of the cam.x/cam.y/cam.scale
+  Transform graph taken before the change). The eval recipe names the camera, its paper and its planes.
+  App: the Camera node in the add menu (Transform, aliases satsuei/multiplane/T.U./T.B.…), pins named per
+  plane, an inspector from the specs (the FX inspector's spec core, shared) with depth per plane and
+  + plane / − plane; graphcomp `needs_cpu(Camera)` and a job's cut keeps the paper key; the canvas's field
+  and safe toggles draw the camera module's rects (field numbers, centre cross) through the view, the
+  extended paper's outline and the output camera's frame (AKA), recorded as drawn; the viewer gets a safe
+  latch and overlay; cut ▾ paper x/y/w/h with "set paper" (one undo step) and "frame". 14 `camera_tests`,
+  5 `camview_*` app tests. Shake frequency is in cycles per frame (the camera knows no fps). Left: paint
+  layers at paper size (GPU cap shown), fill/lasso clipped to the paper, painting beyond the frame, the
+  stretch (camera path overlay, motion blur). Not verified: the real window and a real GPU.

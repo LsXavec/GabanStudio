@@ -8,8 +8,9 @@
 //! One gesture is one undo step: a drag edits a live copy held here, and
 //! only the release commits it through SetNodeKind (the curves pane's law).
 
-use anim_core::fx::{FxBinds, FxKind, FxParams, FxValue, ParamKind, ParamSpec};
-use anim_core::graph::NodeKind;
+use anim_core::camera::{CAMERA_SPECS, MAX_PLANES, PLANE_HELP, PLANE_NAMES};
+use anim_core::fx::{self, FxBinds, FxKind, FxParams, FxValue, ParamKind, ParamSpec};
+use anim_core::graph::{NodeKind, PlaneSpec};
 use anim_core::ids::{NodeId, ParamId};
 use eframe::egui;
 
@@ -56,9 +57,15 @@ fn chip(
 
 /// A new column's name for `spec`: "Glow radius", or "Glow radius 2"… when
 /// a column already has it.
+#[cfg(test)]
 fn fresh_column_name(fx: FxKind, spec: &ParamSpec, columns: &[(ParamId, String)]) -> String {
+    column_name(fx.name(), spec, columns)
+}
+
+/// `fresh_column_name` for any node named `node` (GM10: "Camera pan x").
+fn column_name(node: &str, spec: &ParamSpec, columns: &[(ParamId, String)]) -> String {
     let label = spec.label.split(" (").next().unwrap_or(spec.label);
-    let base = format!("{} {label}", fx.name());
+    let base = format!("{node} {label}");
     let taken = |n: &str| columns.iter().any(|(_, c)| c == n);
     if !taken(&base) {
         return base;
@@ -81,6 +88,112 @@ pub fn inspector(
     params: &FxParams,
     binds: &FxBinds,
 ) {
+    let resolved = state.cut().fx_at(fx, params, binds, state.view.frame).values;
+    if let Some((params, binds)) = specs_ui(ui, state, id, fx.name(), fx.specs(), &resolved, params, binds) {
+        commit_kind(state, id, NodeKind::Effect { fx, params, binds });
+    }
+}
+
+/// GM10: the selected Camera node's parameters (the specs' controls, as
+/// an Effect's), then its planes: a depth each, "+ plane" and "− plane".
+/// One gesture is one undo step here too.
+pub fn camera_inspector(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    id: NodeId,
+    planes: &[PlaneSpec],
+    params: &FxParams,
+    binds: &FxBinds,
+) {
+    let frame = state.view.frame;
+    let resolved = fx::resolve_specs(CAMERA_SPECS, params, binds, |p| {
+        state.cut().param_value(p, frame)
+    });
+    let specs = specs_ui(ui, state, id, "Camera", CAMERA_SPECS, &resolved, params, binds);
+    let mut next = planes.to_vec();
+    let mut changed = false;
+    ui.separator();
+    for (i, plane) in planes.iter().enumerate() {
+        let name = PLANE_NAMES.get(i).copied().unwrap_or("plane");
+        let key = format!("{name} depth");
+        let mut z = match &state.graph_ui.fx.live {
+            Some((n, k, FxValue::Float(v))) if *n == id && *k == key => *v,
+            _ => plane.depth,
+        };
+        crate::plate::legend(ui, name).on_hover_text(PLANE_HELP);
+        let r = crate::plate::field(
+            ui,
+            egui::DragValue::new(&mut z)
+                .range(-100.0..=100.0)
+                .speed(0.05)
+                .prefix("z ")
+                .update_while_editing(false),
+        )
+        .on_hover_text(PLANE_HELP);
+        if r.dragged() {
+            state.graph_ui.fx.live = Some((id, key, FxValue::Float(z)));
+        }
+        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            state.graph_ui.fx.live = None;
+            next[i].depth = z;
+            changed = true;
+        }
+        state.graph_ui.fx.fields.push((name, r.rect));
+    }
+    ui.horizontal(|ui| {
+        let add = ui
+            .add_enabled(planes.len() < MAX_PLANES, egui::Button::new("+ plane"))
+            .on_hover_text("add a multiplane level behind the last one (one more input pin)");
+        if add.clicked() {
+            let z = planes.last().map_or(0.0, |p| p.depth + 1.0);
+            next.push(PlaneSpec { depth: z });
+            changed = true;
+        }
+        let remove = ui
+            .add_enabled(planes.len() > 1, egui::Button::new("− plane"))
+            .on_hover_text("remove the last plane and its input pin (undo restores its wire)");
+        if remove.clicked() {
+            next.pop();
+            changed = true;
+        }
+    });
+    if specs.is_none() && !changed {
+        return;
+    }
+    let (params, binds) = specs.unwrap_or_else(|| (params.clone(), binds.clone()));
+    commit_kind(
+        state,
+        id,
+        NodeKind::Camera {
+            planes: next,
+            params,
+            binds,
+        },
+    );
+}
+
+/// Writes `kind` to node `id` as one undo step, unless it is what the node
+/// already holds (a gesture that ends where it began writes nothing).
+fn commit_kind(state: &mut AppState, id: NodeId, kind: NodeKind) {
+    if state.cut().graph.node(id).is_ok_and(|n| n.kind != kind) {
+        state.graph_set_kind(id, kind);
+    }
+}
+
+/// The controls for `specs` of the node `id` called `node_name` (`resolved` is
+/// this frame's value of each spec, `params`/`binds` the stored ones), and
+/// the node's new params and binds when a gesture ended or a bind changed.
+#[allow(clippy::too_many_arguments)]
+fn specs_ui(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    id: NodeId,
+    node_name: &str,
+    specs: &'static [ParamSpec],
+    resolved: &[FxValue],
+    params: &FxParams,
+    binds: &FxBinds,
+) -> Option<(FxParams, FxBinds)> {
     let columns: Vec<(ParamId, String)> = state
         .cut()
         .xsheet
@@ -88,7 +201,6 @@ pub fn inspector(
         .iter()
         .map(|p| (p.id, p.name.clone()))
         .collect();
-    let resolved = state.cut().fx_at(fx, params, binds, state.view.frame);
     state.graph_ui.fx.fields.clear();
     // A drag's live value outlives no drag: one this inspector never saw
     // end (it was hidden mid-drag) is dropped.
@@ -98,7 +210,7 @@ pub fn inspector(
     }
     let mut commit: Option<(String, FxValue)> = None;
     let mut rebind: Option<(&'static str, Option<ParamId>)> = None;
-    for (spec, now) in fx.specs().iter().zip(&resolved.values) {
+    for (spec, now) in specs.iter().zip(resolved) {
         let key = spec.key;
         let bound = binds.get(key).filter(|_| spec.bindable());
         let live = match &state.graph_ui.fx.live {
@@ -217,7 +329,7 @@ pub fn inspector(
                         ui.close();
                     }
                 }
-                let fresh = fresh_column_name(fx, spec, &columns);
+                let fresh = column_name(node_name, spec, &columns);
                 if ui
                     .button(format!("+ new column '{fresh}'"))
                     .on_hover_text("add a parameter column to the X-sheet and bind it")
@@ -234,7 +346,7 @@ pub fn inspector(
         }
     }
     if commit.is_none() && rebind.is_none() {
-        return;
+        return None;
     }
     let mut params = params.clone();
     let mut binds = binds.clone();
@@ -244,11 +356,7 @@ pub fn inspector(
     if let Some((key, b)) = rebind {
         binds.set(key, b);
     }
-    let kind = NodeKind::Effect { fx, params, binds };
-    // A gesture that ends where it began writes nothing.
-    if state.cut().graph.node(id).is_ok_and(|n| n.kind != kind) {
-        state.graph_set_kind(id, kind);
-    }
+    Some((params, binds))
 }
 
 #[cfg(test)]

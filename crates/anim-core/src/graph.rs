@@ -109,9 +109,38 @@ pub enum NodeKind {
         #[serde(default)]
         binds: FxBinds,
     },
+    /// GM10: the camera over the cut's paper — one input pin per plane, each
+    /// at its depth; its output is the frame as the camera sees it, rendered
+    /// by [`crate::camera`]'s law on the CPU in every view (D9). Parameters
+    /// ([`crate::camera::CAMERA_SPECS`]) resolve and bind as an Effect's do.
+    Camera {
+        planes: Vec<PlaneSpec>,
+        #[serde(default)]
+        params: FxParams,
+        #[serde(default)]
+        binds: FxBinds,
+    },
+}
+
+/// GM10: one plane of a Camera node. `depth` is its z: 0 is the field,
+/// z > 0 farther (a pan moves it less), z < 0 nearer (more).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PlaneSpec {
+    #[serde(default)]
+    pub depth: f32,
 }
 
 impl NodeKind {
+    /// GM10: a new Camera node with one plane at depth 0 and every
+    /// parameter at its default.
+    pub fn camera() -> Self {
+        Self::Camera {
+            planes: vec![PlaneSpec::default()],
+            params: crate::camera::default_params(),
+            binds: FxBinds::default(),
+        }
+    }
+
     /// GM9: a new Effect node of `fx` with every parameter at its default.
     pub fn effect(fx: FxKind) -> Self {
         Self::Effect {
@@ -127,6 +156,7 @@ impl NodeKind {
             Self::Transform { .. } | Self::Output => 1,
             Self::Blend { .. } => 2,
             Self::Effect { fx, .. } => fx.inputs(),
+            Self::Camera { planes, .. } => planes.len(),
         }
     }
 
@@ -139,6 +169,7 @@ impl NodeKind {
             Self::Blend { .. } => "Blend",
             Self::Output => "Output",
             Self::Effect { fx, .. } => fx.name(),
+            Self::Camera { .. } => "Camera",
         }
     }
 
@@ -147,7 +178,7 @@ impl NodeKind {
     pub fn references(&self, param: ParamId) -> bool {
         match self {
             Self::Transform { binds, .. } => binds.references(param),
-            Self::Effect { binds, .. } => binds.references(param),
+            Self::Effect { binds, .. } | Self::Camera { binds, .. } => binds.references(param),
             _ => false,
         }
     }

@@ -3696,6 +3696,9 @@ struct Editor {
     ws_name: String,
     /// Buffer for the cut ▾ menu's rename field.
     rename_buf: String,
+    /// GM10: the cut ▾ menu's paper size while it is being typed (None
+    /// shows the cut's own paper).
+    paper_buf: Option<anim_core::camera::IRect>,
     /// Buffer for the Presets pane's "save current as" name field.
     preset_name: String,
     /// THE BRUSH FORGE (PSD-brush-forge): the draft under the hammer.
@@ -4270,6 +4273,7 @@ impl Editor {
             workspaces,
             ws_name: String::new(),
             rename_buf: String::new(),
+            paper_buf: None,
             preset_name: String::new(),
             forge: forge::ForgeState::default(),
             viewers: Default::default(),
@@ -4336,6 +4340,7 @@ impl Editor {
             workspaces,
             ws_name: String::new(),
             rename_buf: String::new(),
+            paper_buf: None,
             preset_name: String::new(),
             forge: forge::ForgeState::default(),
             viewers: Default::default(),
@@ -6587,6 +6592,48 @@ impl Editor {
                         {
                             self.state.rename_current_scene(&name);
                             self.rename_buf.clear();
+                        }
+                    });
+                    // GM10: Cut ▸ Paper size — the sheet the camera pans
+                    // over, in frame pixels (x/y may go negative); "set"
+                    // is one undo step, "frame" puts the paper back.
+                    let (fw, fh) = (self.state.engine.project.width, self.state.engine.project.height);
+                    let mut p = self
+                        .paper_buf
+                        .unwrap_or_else(|| anim_core::camera::paper(self.state.cut(), fw, fh));
+                    let cap = anim_core::camera::MAX_PAPER;
+                    let typed = ui
+                        .horizontal(|ui| {
+                            plate::legend(ui, "paper");
+                            let max = cap as i32;
+                            let a = ui.add(egui::DragValue::new(&mut p.x).range(-max..=max).prefix("x "));
+                            let b = ui.add(egui::DragValue::new(&mut p.y).range(-max..=max).prefix("y "));
+                            let c = ui.add(egui::DragValue::new(&mut p.w).range(1..=cap).prefix("w "));
+                            let d = ui.add(egui::DragValue::new(&mut p.h).range(1..=cap).prefix("h "));
+                            a.changed() || b.changed() || c.changed() || d.changed()
+                        })
+                        .inner;
+                    if typed {
+                        self.paper_buf = Some(p);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(self.paper_buf.is_some(), egui::Button::new("set paper"))
+                            .on_hover_text(format!(
+                                "the cut's paper becomes this rect (sides up to {cap} px, the GPU layer cap)"
+                            ))
+                            .clicked()
+                        {
+                            self.state.set_cut_paper(p);
+                            self.paper_buf = None;
+                        }
+                        if ui
+                            .button("frame")
+                            .on_hover_text("the paper is the frame again (the default)")
+                            .clicked()
+                        {
+                            self.state.set_cut_paper(anim_core::camera::IRect::frame(fw, fh));
+                            self.paper_buf = None;
                         }
                     });
                     // XDTS interop: the industry exposure-sheet exchange

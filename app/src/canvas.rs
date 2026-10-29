@@ -449,6 +449,45 @@ pub struct ReplayDone {
     pub why: String,
 }
 
+/// GM10: the camera furniture the canvas puts on the sheet, in paper
+/// (frame) pixels: the guides come from `anim_core::camera` (one law with
+/// the viewer's safe frames), the paper and the camera's frame from the
+/// cut. Recorded each frame as drawn.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Furniture {
+    /// The cut's paper when it is not the frame (`camera.paper`).
+    pub paper: Option<anim_core::camera::IRect>,
+    /// The output camera's frame on the paper, corners clockwise from its
+    /// top left.
+    pub camera: Option<[(f32, f32); 4]>,
+    /// Fields 1 to 12, while the field toggle is on.
+    pub fields: Vec<anim_core::camera::Rect>,
+    /// Action and title safe, while the safe toggle is on.
+    pub safe: Option<anim_core::camera::SafeFrames>,
+}
+
+impl Furniture {
+    /// What goes on a `width`×`height` sheet for `cut` at `frame`.
+    pub(crate) fn of(
+        cut: &anim_core::model::Cut,
+        frame: u32,
+        (width, height): (u32, u32),
+        field: bool,
+        safe: bool,
+    ) -> Self {
+        use anim_core::camera::{self, CameraState, IRect};
+        let paper = camera::paper(cut, width, height);
+        Self {
+            paper: (paper != IRect::frame(width, height)).then_some(paper),
+            camera: camera::output_camera(cut)
+                .and_then(|n| CameraState::at(cut, n, frame))
+                .map(|st| camera::frame_rect_on_paper(&st, width, height)),
+            fields: if field { camera::field_guide(width, height) } else { Vec::new() },
+            safe: safe.then(|| camera::safe_frames(width, height)),
+        }
+    }
+}
+
 pub struct CanvasView {
     zoom: f32,
     pan: egui::Vec2,
@@ -692,6 +731,8 @@ pub struct CanvasView {
     show_field: bool,
     show_safe: bool,
     show_peg: bool,
+    /// GM10: the camera furniture as drawn this frame.
+    pub(crate) furniture: Furniture,
     /// The INPUT plate field was clicked — open Settings at the pen page.
     pub(crate) request_pen_settings: bool,
     /// THE BRUSH LIBRARY (PSD-brush-library): the rail arms and imports;
@@ -920,6 +961,7 @@ impl CanvasView {
             show_field: false,
             show_safe: false,
             show_peg: false,
+            furniture: Furniture::default(),
             request_pen_settings: false,
             request_brush_import: false,
             brush_engine: None,
@@ -2771,10 +2813,12 @@ impl CanvasView {
         plate::legend(ui, "paper");
         ui.add_space(2.0);
         let mut f = self.show_field;
-        plate::latch(ui, &mut f, "field").on_hover_text("the 90% action field");
+        plate::latch(ui, &mut f, "field")
+            .on_hover_text("the 12-field chart (field n is n/12 of the frame) + centre cross");
         self.show_field = f;
         let mut sa = self.show_safe;
-        plate::latch(ui, &mut sa, "safe").on_hover_text("the 80% safe area + centre cross");
+        plate::latch(ui, &mut sa, "safe")
+            .on_hover_text("action safe (93%) and title safe (90%) + centre cross");
         self.show_safe = sa;
         let mut pg = self.show_peg;
         plate::latch(ui, &mut pg, "peg").on_hover_text("the registration peg bar");
@@ -3703,6 +3747,54 @@ impl CanvasView {
         // Paper furniture (Phase 4): field / safe / peg guides in Ao — the
         // scaffold ink, printed under the drawing like a real layout sheet.
         let ao = Color32::from_rgba_unmultiplied(83, 137, 196, 110);
+        // GM10: the camera furniture is paper-space geometry mapped through
+        // the view, upright or turned alike: the extended paper's outline,
+        // the field chart with its numbers, the safe frames, the centre
+        // cross, and the output camera's frame over them.
+        let furniture = Furniture::of(
+            state.cut(),
+            state.view.frame,
+            (paper_w as u32, paper_h as u32),
+            self.show_field,
+            self.show_safe,
+        );
+        {
+            let g = egui::Stroke::new(1.0, ao);
+            let outline = |pts: [(f32, f32); 4], stroke: egui::Stroke| -> egui::Shape {
+                let pts = pts.iter().map(|&(x, y)| to_screen(pos2(x, y))).collect();
+                egui::Shape::closed_line(pts, stroke)
+            };
+            if let Some(p) = furniture.paper {
+                let (x, y) = (p.x as f32, p.y as f32);
+                let (w, h) = (p.w as f32, p.h as f32);
+                let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
+                painter.add(outline(corners, egui::Stroke::new(1.0, crate::plate::legend_dim())));
+            }
+            for (n, r) in furniture.fields.iter().enumerate() {
+                painter.add(outline(r.corners(), g));
+                painter.text(
+                    to_screen(pos2(r.x, r.y)) + vec2(2.0, 1.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{}", n + 1),
+                    egui::FontId::monospace(9.0),
+                    ao,
+                );
+            }
+            if let Some(s) = furniture.safe {
+                painter.add(outline(s.action.corners(), g));
+                painter.add(outline(s.title.corners(), g));
+            }
+            if self.show_field || self.show_safe {
+                let pc = pos2(paper_w * 0.5, paper_h * 0.5);
+                let arm = 10.0 / scale.max(1e-6);
+                painter.line_segment([to_screen(pc - vec2(arm, 0.0)), to_screen(pc + vec2(arm, 0.0))], g);
+                painter.line_segment([to_screen(pc - vec2(0.0, arm)), to_screen(pc + vec2(0.0, arm))], g);
+            }
+            if let Some(c) = furniture.camera {
+                painter.add(outline(c, egui::Stroke::new(1.5, crate::plate::AKA)));
+            }
+        }
+        self.furniture = furniture;
         if !upright {
             // GM4: turned, the guides are paper-space shapes mapped through
             // the view (the peg bar's screen sizes become paper sizes).
@@ -3716,16 +3808,6 @@ impl CanvasView {
                 ];
                 egui::Shape::closed_line(pts.iter().map(|p| to_screen(*p)).collect(), g)
             };
-            let pc = pos2(paper_w * 0.5, paper_h * 0.5);
-            if self.show_field {
-                painter.add(paper_box(pc, vec2(paper_w, paper_h) * 0.45));
-            }
-            if self.show_safe {
-                painter.add(paper_box(pc, vec2(paper_w, paper_h) * 0.4));
-                let arm = 10.0 / scale.max(1e-6);
-                painter.line_segment([to_screen(pc - vec2(arm, 0.0)), to_screen(pc + vec2(arm, 0.0))], g);
-                painter.line_segment([to_screen(pc - vec2(0.0, arm)), to_screen(pc + vec2(0.0, arm))], g);
-            }
             if self.show_peg {
                 let u = 1.0 / scale.max(1e-6);
                 let pc = pos2(paper_w * 0.5, paper_h * 0.95);
@@ -3737,25 +3819,6 @@ impl CanvasView {
         }
         if upright {
             let g = egui::Stroke::new(1.0, ao);
-            if self.show_field {
-                painter.rect_stroke(
-                    egui::Rect::from_center_size(paper_rect.center(), paper_rect.size() * 0.9),
-                    0.0,
-                    g,
-                    egui::StrokeKind::Inside,
-                );
-            }
-            if self.show_safe {
-                painter.rect_stroke(
-                    egui::Rect::from_center_size(paper_rect.center(), paper_rect.size() * 0.8),
-                    0.0,
-                    g,
-                    egui::StrokeKind::Inside,
-                );
-                let c = paper_rect.center();
-                painter.line_segment([pos2(c.x - 10.0, c.y), pos2(c.x + 10.0, c.y)], g);
-                painter.line_segment([pos2(c.x, c.y - 10.0), pos2(c.x, c.y + 10.0)], g);
-            }
             if self.show_peg {
                 // The peg bar: round hole centre, slot holes either side —
                 // the registration a real sheet hangs on.
@@ -8887,5 +8950,99 @@ mod viewnav_tests {
         for (s, p) in tap.iter().zip(&path) {
             assert!((pos2(s.x, s.y) - *p).length() < 0.5, "{s:?} vs {p:?}");
         }
+    }
+}
+
+/// GM10: the camera furniture the canvas draws, headless (the harness runs
+/// the editor without a window or GPU and the canvas records what it drew).
+#[cfg(test)]
+mod camview_tests {
+    use crate::config::Action;
+    use crate::testkit::EditorHarness;
+    use anim_core::camera::{self, CameraState, IRect};
+    use anim_core::fx::FxValue;
+    use anim_core::graph::NodeKind;
+
+    fn harness() -> EditorHarness {
+        let mut h = EditorHarness::new();
+        h.run();
+        h
+    }
+
+    fn frame_size(h: &EditorHarness) -> (u32, u32) {
+        let p = &h.state().engine.project;
+        (p.width, p.height)
+    }
+
+    #[test]
+    fn camview_the_paper_outline_is_the_cuts_paper_and_undoes_to_none() {
+        let mut h = harness();
+        let (w, fh) = frame_size(&h);
+        assert_eq!(h.editor().canvas.furniture.paper, None, "the frame is the paper: no outline");
+        let wide = IRect { x: -540, y: 0, w: w + 1080, h: fh };
+        h.state_mut().set_cut_paper(wide);
+        h.run();
+        assert_eq!(h.editor().canvas.furniture.paper, Some(wide), "the outline is the cut's paper");
+        // A paper no renderer can take is refused and changes nothing.
+        h.state_mut().set_cut_paper(IRect { x: 0, y: 0, w: 0, h: fh });
+        h.run();
+        assert_eq!(h.editor().canvas.furniture.paper, Some(wide));
+        // Setting it was one undo step.
+        h.perform(Action::Undo);
+        h.run();
+        assert_eq!(h.editor().canvas.furniture.paper, None);
+        assert_eq!(camera::paper(h.state().cut(), w, fh), IRect::frame(w, fh));
+    }
+
+    #[test]
+    fn camview_the_camera_rect_sits_on_the_paper_where_the_output_camera_looks() {
+        let mut h = harness();
+        let (w, fh) = frame_size(&h);
+        assert_eq!(h.editor().canvas.furniture.camera, None, "no camera, no frame rect");
+        let s = h.state_mut();
+        s.graph_add_node(NodeKind::camera(), (200.0, 0.0));
+        let cam = s.selected_node.expect("the new camera is selected");
+        s.graph_set_output(cam);
+        let Ok(NodeKind::Camera { planes, params, binds }) =
+            s.cut().graph.node(cam).map(|n| n.kind.clone())
+        else {
+            panic!("a Camera node");
+        };
+        let mut params = params;
+        params.set("pan_x", FxValue::Float(300.0));
+        params.set("zoom", FxValue::Float(2.0));
+        s.graph_set_kind(cam, NodeKind::Camera { planes, params, binds });
+        h.run();
+        let frame = h.state().view.frame;
+        let st = CameraState::at(h.state().cut(), cam, frame).expect("the camera resolves");
+        let drawn = h.editor().canvas.furniture.camera.expect("the camera's frame is drawn");
+        assert_eq!(drawn, camera::frame_rect_on_paper(&st, w, fh));
+        // Zoom 2 shows half the frame, centred 300 px right of the frame's centre.
+        let (cx, cy) = (w as f32 / 2.0 + 300.0, fh as f32 / 2.0);
+        let (hw, hh) = (w as f32 / 4.0, fh as f32 / 4.0);
+        let want = [(cx - hw, cy - hh), (cx + hw, cy - hh), (cx + hw, cy + hh), (cx - hw, cy + hh)];
+        for (d, e) in drawn.iter().zip(want) {
+            assert!((d.0 - e.0).abs() < 1e-3 && (d.1 - e.1).abs() < 1e-3, "{drawn:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn camview_the_guide_toggles_draw_exactly_the_camera_module_rects() {
+        let mut h = harness();
+        let (w, fh) = frame_size(&h);
+        let f = &h.editor().canvas.furniture;
+        assert!(f.fields.is_empty() && f.safe.is_none(), "both toggles start off");
+        h.editor_mut().canvas.show_field = true;
+        h.run();
+        let f = &h.editor().canvas.furniture;
+        assert_eq!(f.fields, camera::field_guide(w, fh));
+        assert_eq!(f.fields.len(), camera::FIELDS as usize);
+        assert_eq!(f.safe, None, "the safe frames wait for their own toggle");
+        h.editor_mut().canvas.show_field = false;
+        h.editor_mut().canvas.show_safe = true;
+        h.run();
+        let f = &h.editor().canvas.furniture;
+        assert!(f.fields.is_empty());
+        assert_eq!(f.safe, Some(camera::safe_frames(w, fh)));
     }
 }

@@ -172,6 +172,33 @@ impl Evaluator {
                     ins.join(", ")
                 ))
             }
+            NodeKind::Camera {
+                planes,
+                params,
+                binds,
+            } => {
+                // GM10: every plane with its depth ("-" unwired), the
+                // RESOLVED camera with this frame's shake (a still camera
+                // still cache-hits across frames), and the paper, which
+                // decides what lies beyond the frame ("frame" = the default).
+                let mut ins = Vec::with_capacity(planes.len());
+                for (slot, plane) in planes.iter().enumerate() {
+                    let src = match inputs.get(slot).copied().flatten() {
+                        Some(_) => input_value(slot, self, visiting)?.recipe().to_string(),
+                        None => "-".to_string(),
+                    };
+                    ins.push(format!("z={}:{src}", plane.depth));
+                }
+                let st = crate::camera::CameraState::resolve(cut, params, binds, frame);
+                let paper = crate::camera::paper_meta(cut)
+                    .map(|p| format!("{},{},{},{}", p.x, p.y, p.w, p.h))
+                    .unwrap_or_else(|| "frame".into());
+                Value::image(format!(
+                    "camera({}, paper={paper}, [{}])",
+                    st.recipe(),
+                    ins.join(", ")
+                ))
+            }
         };
 
         visiting.remove(&id);

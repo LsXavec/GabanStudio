@@ -285,6 +285,28 @@ impl FxBinds {
     }
 }
 
+/// Every spec's value at one frame, in spec order: a bound column with a
+/// value at the frame wins, else the stored value, else the spec default.
+/// The one resolve law of Effect and (GM10) Camera parameters.
+pub fn resolve_specs(
+    specs: &[ParamSpec],
+    params: &FxParams,
+    binds: &FxBinds,
+    column: impl Fn(ParamId) -> Option<f32>,
+) -> Vec<FxValue> {
+    specs
+        .iter()
+        .map(|s| {
+            binds
+                .get(s.key)
+                .filter(|_| s.bindable())
+                .and_then(&column)
+                .and_then(|x| s.from_column(x, params))
+                .unwrap_or_else(|| s.read(params.get(s.key)))
+        })
+        .collect()
+}
+
 /// Every parameter of a kind resolved at one frame, in spec order — what
 /// [`FxKind::apply`] reads and what the eval hash spells.
 #[derive(Debug, Clone, PartialEq)]
@@ -303,18 +325,7 @@ impl FxValues {
         binds: &FxBinds,
         column: impl Fn(ParamId) -> Option<f32>,
     ) -> Self {
-        let values = kind
-            .specs()
-            .iter()
-            .map(|s| {
-                binds
-                    .get(s.key)
-                    .filter(|_| s.bindable())
-                    .and_then(&column)
-                    .and_then(|x| s.from_column(x, params))
-                    .unwrap_or_else(|| s.read(params.get(s.key)))
-            })
-            .collect();
+        let values = resolve_specs(kind.specs(), params, binds, column);
         Self { kind, values }
     }
 
@@ -390,7 +401,8 @@ pub enum FxKind {
     Grade,
 }
 
-const fn float(
+/// A Float spec (GM10: the Camera node's specs use it too).
+pub(crate) const fn float(
     key: &'static str,
     label: &'static str,
     help: &'static str,

@@ -35,6 +35,10 @@ pub enum GraphView {
 pub struct ViewerView {
     zoom: f32,
     pan: egui::Vec2,
+    /// GM10: the safe-frame overlay (action 93 %, title 90 %) is on.
+    pub safe: bool,
+    /// GM10: the safe frames drawn this frame, in frame pixels.
+    pub(crate) drawn_safe: Option<anim_core::camera::SafeFrames>,
 }
 
 impl Default for ViewerView {
@@ -42,6 +46,8 @@ impl Default for ViewerView {
         Self {
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
+            safe: false,
+            drawn_safe: None,
         }
     }
 }
@@ -129,5 +135,43 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
             "the graph failed to evaluate — check the Node Graph pane",
         ),
         GraphView::NoGpu => hint(&painter, "GPU unavailable — the viewer needs wgpu"),
+    }
+    // GM10: the safe frames over the composite, from the camera module (the
+    // canvas's safe toggle draws the same rects); the pane's latch turns
+    // them on.
+    vs.drawn_safe = vs
+        .safe
+        .then(|| anim_core::camera::safe_frames(paper_w as u32, paper_h as u32));
+    if let Some(s) = vs.drawn_safe {
+        let g = egui::Stroke::new(1.0, crate::plate::AO);
+        for r in [s.action, s.title] {
+            let pts = r.corners().iter().map(|&(x, y)| to_screen(pos2(x, y))).collect();
+            painter.add(egui::Shape::closed_line(pts, g));
+        }
+    }
+    let at = Rect::from_min_size(rect.left_bottom() + vec2(8.0, -28.0), vec2(80.0, 22.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+        crate::plate::latch(ui, &mut vs.safe, "safe")
+            .on_hover_text("action safe (93%) and title safe (90%) over the composite")
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testkit::EditorHarness;
+
+    #[test]
+    fn camview_the_viewer_safe_overlay_draws_the_camera_module_frames() {
+        let h = EditorHarness::new();
+        let state = h.state();
+        let (w, fh) = (state.engine.project.width, state.engine.project.height);
+        let ctx = egui::Context::default();
+        let mut vs = ViewerView::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| super::ui(ui, state, GraphView::Off, &mut vs));
+        assert_eq!(vs.drawn_safe, None, "off by default");
+        vs.safe = true;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| super::ui(ui, state, GraphView::Off, &mut vs));
+        assert_eq!(vs.drawn_safe, Some(anim_core::camera::safe_frames(w, fh)));
     }
 }
