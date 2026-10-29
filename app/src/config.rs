@@ -52,6 +52,106 @@ pub enum Action {
     SaveAs,
     Open,
     NewProject,
+    // GM3: the chrome's own verbs — menus, palette, help, rooms.
+    CommandPalette,
+    ShortcutSheet,
+    QuickStart,
+    About,
+    History,
+    Settings,
+    Quit,
+    ResetLayout,
+    ZoomFit,
+    RoomLayout,
+    RoomDrawing,
+    RoomFinishing,
+    RoomEdit,
+}
+
+/// GM3: what an action is about — the shortcut sheet's sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    File,
+    Edit,
+    View,
+    Sheet,
+    Cut,
+    Room,
+    Window,
+    Help,
+    Tool,
+    Playback,
+}
+
+impl Group {
+    pub const ALL: &'static [Group] = &[
+        Group::File,
+        Group::Edit,
+        Group::View,
+        Group::Playback,
+        Group::Sheet,
+        Group::Cut,
+        Group::Tool,
+        Group::Room,
+        Group::Window,
+        Group::Help,
+    ];
+    pub fn name(self) -> &'static str {
+        match self {
+            Group::File => "file",
+            Group::Edit => "edit",
+            Group::View => "view",
+            Group::Sheet => "sheet",
+            Group::Cut => "cut",
+            Group::Room => "room",
+            Group::Window => "window",
+            Group::Help => "help",
+            Group::Tool => "tools",
+            Group::Playback => "playback",
+        }
+    }
+}
+
+/// GM3: where a shortcut applies. Shortcuts dispatch by the pane under
+/// the pointer, else the focused pane; a chord may repeat only across
+/// different non-Global contexts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ctx {
+    Global,
+    Canvas,
+    Sheet,
+    NodeGraph,
+}
+
+impl Ctx {
+    /// May two actions in these contexts share a chord? Never when either
+    /// is Global or both are the same pane.
+    pub fn overlaps(self, other: Ctx) -> bool {
+        self == Ctx::Global || other == Ctx::Global || self == other
+    }
+}
+
+/// GM3: the shortcut preset the bindings start from. User overrides sit on
+/// top: switching presets moves only the bindings still at the old
+/// preset's default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum Keymap {
+    /// Gaban's own: one key per verb, frame steps on F / S.
+    #[default]
+    Gaban,
+    /// The letters Clip Studio Paint, Toon Boom and Krita share: B brush,
+    /// E eraser, G fill, `,` / `.` frame steps, Delete clears.
+    Industry,
+}
+
+impl Keymap {
+    pub const ALL: &'static [Keymap] = &[Keymap::Gaban, Keymap::Industry];
+    pub fn name(self) -> &'static str {
+        match self {
+            Keymap::Gaban => "gaban",
+            Keymap::Industry => "industry",
+        }
+    }
 }
 
 impl Action {
@@ -97,6 +197,19 @@ impl Action {
         Action::SaveAs,
         Action::Open,
         Action::NewProject,
+        Action::CommandPalette,
+        Action::ShortcutSheet,
+        Action::QuickStart,
+        Action::About,
+        Action::History,
+        Action::Settings,
+        Action::Quit,
+        Action::ResetLayout,
+        Action::ZoomFit,
+        Action::RoomLayout,
+        Action::RoomDrawing,
+        Action::RoomFinishing,
+        Action::RoomEdit,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -140,17 +253,237 @@ impl Action {
             Action::SaveAs => "Save As…",
             Action::Open => "Open…",
             Action::NewProject => "New project…",
+            Action::CommandPalette => "Command palette…",
+            Action::ShortcutSheet => "Keyboard shortcuts",
+            Action::QuickStart => "Quick start",
+            Action::About => "About Gaban Studio",
+            Action::History => "History",
+            Action::Settings => "Settings…",
+            Action::Quit => "Quit",
+            Action::ResetLayout => "Reset layout",
+            Action::ZoomFit => "Fit view (reset zoom & pan)",
+            Action::RoomLayout => "Layout room",
+            Action::RoomDrawing => "Drawing room (genga)",
+            Action::RoomFinishing => "Paint room (shiage)",
+            Action::RoomEdit => "Edit room (henshū)",
         }
     }
-    fn default_chord(self) -> Option<Chord> {
+
+    /// GM3: one line of help — the tooltip under every menu item, deck
+    /// button and palette row.
+    pub fn help(self) -> &'static str {
+        use Action::*;
+        match self {
+            PlayPause => "Start or stop playback of the cut.",
+            NextFrame => "Step one frame forward.",
+            PrevFrame => "Step one frame back.",
+            FirstFrame => "Jump to the cut's first frame.",
+            LastFrame => "Jump to the cut's last frame.",
+            PrevKey => "Jump to the previous key on the active column.",
+            NextKey => "Jump to the next key on the active column.",
+            MissCheck => "Flip to a dark ground to hunt unpainted holes.",
+            PrevCut => "Open the previous cut in the scene list.",
+            NextCut => "Open the next cut in the scene list.",
+            ToggleLoop => "Latch looping playback on or off.",
+            NewDrawing => "Put a new blank drawing on this frame.",
+            ClearCel => "Erase the active layer of this drawing (undoable).",
+            ClearCelAll => "Erase every layer of this drawing (undoable).",
+            ToggleEraser => "Switch the pen between brush and eraser.",
+            ToggleAlphaLock => "Paint only where ink already is (recolour).",
+            Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8 => {
+                "Arm this brush preset slot (with fill: a palette pot)."
+            }
+            CycleCelLayer => "Make the next cel layer active.",
+            CycleCelLayerBack => "Make the previous cel layer active.",
+            ClearFrameKey => "Lift the key on this frame; the hold before it extends.",
+            RemoveColumn => "Remove the selected x-sheet column.",
+            ToggleOnion => "Show neighbouring drawings faintly under this one.",
+            ToggleCompositeView => "Show the node graph's composite instead of the edit view.",
+            SelectTool => "Select, move, scale and rotate ink.",
+            BrushTool => "Back to the brush.",
+            FillTool => "Flood-fill closed areas with the brush colour.",
+            SelectAll => "Select everything on the active layer.",
+            Undo => "Take back the last step.",
+            Redo => "Re-apply the step you took back last.",
+            Save => "Write the project to its file.",
+            SaveAs => "Write the project to a new file.",
+            Open => "Open a project file (asks first about unsaved work).",
+            NewProject => "Start a new project (asks first about unsaved work).",
+            CommandPalette => "Search every command by name and run it.",
+            ShortcutSheet => "List every shortcut, grouped and searchable.",
+            QuickStart => "The first five minutes: draw, time, play, save.",
+            About => "Version and credits.",
+            History => "Every step so far; click one to go back or forward to it.",
+            Settings => "Shortcuts, pen, performance and the rest.",
+            Quit => "Close the app (asks first about unsaved work).",
+            ResetLayout => "Put this room's panes back where they started.",
+            ZoomFit => "Fit the canvas back in its pane at 100%.",
+            RoomLayout => "Open the layout room: the cut's preview and timing.",
+            RoomDrawing => "Open the drawing room (genga): canvas and sheet.",
+            RoomFinishing => "Open the paint room (shiage): palettes and fill.",
+            RoomEdit => "Open the edit room (henshū): cuts and the sheet head.",
+        }
+    }
+
+    /// GM3: the shortcut sheet's section.
+    pub fn group(self) -> Group {
+        use Action::*;
+        match self {
+            NewProject | Open | Save | SaveAs | Settings | Quit => Group::File,
+            Undo | Redo | History | SelectAll | ClearCel | ClearCelAll => Group::Edit,
+            ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck => Group::View,
+            PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop => {
+                Group::Playback
+            }
+            PrevKey | NextKey | NewDrawing | ClearFrameKey | RemoveColumn => Group::Sheet,
+            PrevCut | NextCut => Group::Cut,
+            SelectTool | BrushTool | FillTool | ToggleEraser | ToggleAlphaLock | Preset1
+            | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
+            | CycleCelLayer | CycleCelLayerBack => Group::Tool,
+            RoomLayout | RoomDrawing | RoomFinishing | RoomEdit => Group::Room,
+            ResetLayout => Group::Window,
+            CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
+        }
+    }
+
+    /// GM3: "Menu/Item" in the menu bar. None = PALETTE-ONLY: the tools
+    /// live on the canvas deck, so the menus do not repeat them.
+    pub fn menu(self) -> Option<&'static str> {
+        use Action::*;
+        Some(match self {
+            NewProject => "File/New…",
+            Open => "File/Open…",
+            Save => "File/Save",
+            SaveAs => "File/Save As…",
+            Settings => "File/Settings…",
+            Quit => "File/Quit",
+            Undo => "Edit/Undo",
+            Redo => "Edit/Redo",
+            History => "Edit/History",
+            SelectAll => "Edit/Select All",
+            ClearCel => "Edit/Clear active layer",
+            ClearCelAll => "Edit/Clear whole cel",
+            ZoomFit => "View/Fit view",
+            ToggleOnion => "View/Onion skin",
+            ToggleCompositeView => "View/Composite view",
+            MissCheck => "View/Miss check",
+            PlayPause => "Sheet/Play / Pause",
+            ToggleLoop => "Sheet/Loop playback",
+            FirstFrame => "Sheet/First frame",
+            PrevFrame => "Sheet/Previous frame",
+            NextFrame => "Sheet/Next frame",
+            LastFrame => "Sheet/Last frame",
+            PrevKey => "Sheet/Previous key",
+            NextKey => "Sheet/Next key",
+            NewDrawing => "Sheet/New drawing",
+            ClearFrameKey => "Sheet/Lift key",
+            RemoveColumn => "Sheet/Remove column",
+            PrevCut => "Cut/Previous cut",
+            NextCut => "Cut/Next cut",
+            RoomLayout => "Room/Layout",
+            RoomDrawing => "Room/Drawing (genga)",
+            RoomFinishing => "Room/Paint (shiage)",
+            RoomEdit => "Room/Edit (henshū)",
+            ResetLayout => "Window/Reset layout",
+            QuickStart => "Help/Quick start",
+            ShortcutSheet => "Help/Keyboard shortcuts",
+            CommandPalette => "Help/Command palette…",
+            About => "Help/About",
+            SelectTool | BrushTool | FillTool | ToggleEraser | ToggleAlphaLock | Preset1
+            | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
+            | CycleCelLayer | CycleCelLayerBack => return None,
+        })
+    }
+
+    /// GM3: other words the palette finds this action by.
+    pub fn aliases(self) -> &'static [&'static str] {
+        use Action::*;
+        match self {
+            PlayPause => &["preview", "run"],
+            MissCheck => &["holes", "gaps"],
+            ToggleOnion => &["ghost", "light table", "kasane"],
+            ToggleCompositeView => &["render", "output", "comp"],
+            ToggleEraser => &["rubber", "erase"],
+            ToggleAlphaLock => &["preserve alpha", "lock transparency"],
+            SelectTool => &["move", "transform", "lasso"],
+            FillTool => &["bucket", "paint"],
+            NewDrawing => &["new cel", "blank"],
+            ClearFrameKey => &["hold", "extend"],
+            RemoveColumn => &["delete column"],
+            ClearCel => &["wipe", "erase layer"],
+            ClearCelAll => &["wipe all", "erase cel"],
+            CycleCelLayer | CycleCelLayerBack => &["line", "colour", "shadow"],
+            Undo => &["back", "revert"],
+            Redo => &["again"],
+            History => &["undo list", "steps"],
+            Save => &["write", "store"],
+            Open => &["load"],
+            NewProject => &["create"],
+            Settings => &["preferences", "options", "config"],
+            Quit => &["exit", "close"],
+            CommandPalette => &["search", "commands"],
+            ShortcutSheet => &["keys", "hotkeys", "cheat sheet"],
+            ZoomFit => &["zoom", "reset view"],
+            RoomLayout => &["layout"],
+            RoomDrawing => &["genga"],
+            RoomFinishing => &["shiage", "colour"],
+            RoomEdit => &["henshu", "editing"],
+            _ => &[],
+        }
+    }
+
+    /// GM3: where this action's shortcut applies (see [`Ctx`]).
+    pub fn context(self) -> Ctx {
+        use Action::*;
+        match self {
+            SelectTool | BrushTool | FillTool | ToggleEraser | ToggleAlphaLock | Preset1
+            | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
+            | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll => Ctx::Canvas,
+            NewDrawing | ClearFrameKey | RemoveColumn => Ctx::Sheet,
+            _ => Ctx::Global,
+        }
+    }
+
+    /// GM3: the preset's chord for this action.
+    fn default_chord(self, keymap: Keymap) -> Option<Chord> {
+        use Action::*;
+        if keymap == Keymap::Industry {
+            let shift = |name: &str| Chord {
+                shift: true,
+                ..Chord::plain(name)
+            };
+            match self {
+                NextFrame => return Some(Chord::plain("Period")),
+                PrevFrame => return Some(Chord::plain("Comma")),
+                NewDrawing => return Some(Chord::plain("N")),
+                ToggleEraser => return Some(Chord::plain("E")),
+                // Delete clears on the canvas and removes in the sheet:
+                // one chord, two panes.
+                ClearCel => return Some(Chord::plain("Delete")),
+                ClearCelAll => return Some(shift("Delete")),
+                _ => {}
+            }
+        }
+        self.gaban_chord()
+    }
+
+    /// GM3: extra chords that fire the action in every preset.
+    fn default_also(self) -> Vec<Chord> {
+        match self {
+            // Ctrl+Shift+Z redoes beside Ctrl+Y (the other studios' habit).
+            Action::Redo => vec![Chord {
+                shift: true,
+                ..Chord::ctrl("Z")
+            }],
+            Action::CommandPalette => vec![Chord::plain("F3")],
+            _ => Vec::new(),
+        }
+    }
+
+    fn gaban_chord(self) -> Option<Chord> {
         use Action::*;
         let k = |name: &str| Chord::plain(name);
-        let ctrl = |name: &str| Chord {
-            keys: vec![name.to_string()],
-            ctrl: true,
-            shift: false,
-            alt: false,
-        };
+        let ctrl = |name: &str| Chord::ctrl(name);
         match self {
             PlayPause => Some(k("Space")),
             NextFrame => Some(k("F")),
@@ -208,8 +541,44 @@ impl Action {
             }),
             Open => Some(ctrl("O")),
             NewProject => Some(ctrl("N")),
+            CommandPalette => Some(ctrl("K")),
+            ShortcutSheet => Some(k("F1")),
+            Settings => Some(ctrl("Comma")),
+            Quit => Some(ctrl("Q")),
+            ZoomFit => Some(ctrl("0")),
+            QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
+            | RoomFinishing | RoomEdit => None,
         }
     }
+}
+
+/// GM3: every action bound as the preset binds it.
+pub fn default_binds(keymap: Keymap) -> Vec<Binding> {
+    Action::ALL
+        .iter()
+        .map(|a| Binding {
+            action: *a,
+            chord: a.default_chord(keymap),
+            also: a.default_also(),
+        })
+        .collect()
+}
+
+/// GM3: every pair of actions that share a chord where both could fire
+/// (see [`Ctx::overlaps`]) — the conflicts the Shortcuts page marks.
+pub fn clashes(binds: &[Binding]) -> Vec<(Action, Action, Chord)> {
+    let mut out = Vec::new();
+    for (i, a) in binds.iter().enumerate() {
+        for b in &binds[i + 1..] {
+            if a.action == b.action || !a.action.context().overlaps(b.action.context()) {
+                continue;
+            }
+            if let Some(c) = a.chords().find(|c| b.chords().any(|d| d == *c)) {
+                out.push((a.action, b.action, c.clone()));
+            }
+        }
+    }
+    out
 }
 
 /// A key combination: a set of (non-modifier) keys plus modifier flags. Held
@@ -230,6 +599,13 @@ impl Chord {
             ctrl: false,
             shift: false,
             alt: false,
+        }
+    }
+
+    fn ctrl(key: &str) -> Self {
+        Self {
+            ctrl: true,
+            ..Self::plain(key)
         }
     }
 
@@ -295,10 +671,27 @@ fn pretty_key(name: &str) -> &str {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Binding {
     pub action: Action,
     pub chord: Option<Chord>,
+    /// GM3: more chords that fire the same action (Redo's Ctrl+Shift+Z
+    /// beside Ctrl+Y). Rebinding or unbinding clears them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<Chord>,
+}
+
+impl Binding {
+    /// The chord, then the extra ones.
+    pub fn chords(&self) -> impl Iterator<Item = &Chord> {
+        self.chord.iter().chain(self.also.iter())
+    }
+
+    /// "Ctrl+Y / Ctrl+Shift+Z", or None when unbound.
+    pub fn label(&self) -> Option<String> {
+        let all: Vec<String> = self.chords().map(|c| c.label()).collect();
+        (!all.is_empty()).then(|| all.join(" / "))
+    }
 }
 
 // ---- Performance settings (Krita-derived; see research/performance-settings.md) ----
@@ -1028,6 +1421,9 @@ pub struct UiConfig {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub keybinds: Vec<Binding>,
+    /// GM3: the preset under the keybinds (Settings › Shortcuts).
+    #[serde(default)]
+    pub keymap: Keymap,
     #[serde(default)]
     pub perf: PerfConfig,
     #[serde(default)]
@@ -1057,13 +1453,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            keybinds: Action::ALL
-                .iter()
-                .map(|a| Binding {
-                    action: *a,
-                    chord: a.default_chord(),
-                })
-                .collect(),
+            keybinds: default_binds(Keymap::Gaban),
+            keymap: Keymap::Gaban,
             perf: PerfConfig::default(),
             ui: UiConfig::default(),
             session: SessionConfig::default(),
@@ -1133,7 +1524,7 @@ struct Dropped {
 /// A config section's name as the artist knows it (the Settings pages).
 fn section_name(key: &str) -> &'static str {
     match key {
-        "keybinds" => "shortcuts",
+        "keybinds" | "keymap" => "shortcuts",
         "perf" => "performance",
         "ui" => "interface",
         "session" => "session",
@@ -1260,6 +1651,7 @@ impl Config {
                 None => dropped.reset.push(section_name("keybinds")),
             }
         }
+        read_section(map, "keymap", &mut self.keymap, dropped);
         read_section(map, "perf", &mut self.perf, dropped);
         read_section(map, "ui", &mut self.ui, dropped);
         read_section(map, "session", &mut self.session, dropped);
@@ -1295,8 +1687,16 @@ impl Config {
             if !cfg.keybinds.iter().any(|b| b.action == *a) {
                 cfg.keybinds.push(Binding {
                     action: *a,
-                    chord: a.default_chord(),
+                    chord: a.default_chord(cfg.keymap),
+                    also: a.default_also(),
                 });
+            }
+        }
+        // GM3: a binding still at its preset chord gains the preset's
+        // extra chords (configs saved before Ctrl+Shift+Z redid).
+        for b in &mut cfg.keybinds {
+            if b.also.is_empty() && b.chord == b.action.default_chord(cfg.keymap) {
+                b.also = b.action.default_also();
             }
         }
         // The pencil box must exist even in configs saved before it
@@ -1313,13 +1713,24 @@ impl Config {
     /// AUDIT [1]: the old whole-config reset lived behind a plain button
     /// on the Shortcuts page and destroyed everything but shortcuts.
     pub fn reset_keybinds(&mut self) {
-        self.keybinds = Action::ALL
-            .iter()
-            .map(|a| Binding {
-                action: *a,
-                chord: a.default_chord(),
-            })
-            .collect();
+        self.keybinds = default_binds(self.keymap);
+    }
+
+    /// GM3: switch the preset. A binding still at the old preset's chord
+    /// takes the new preset's; one the user changed is theirs and stays.
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        let old = self.keymap;
+        for b in &mut self.keybinds {
+            if b.chord == b.action.default_chord(old) {
+                b.chord = b.action.default_chord(keymap);
+            }
+        }
+        self.keymap = keymap;
+    }
+
+    /// The whole binding of an action (chord and extra chords).
+    pub fn binding(&self, action: Action) -> Option<&Binding> {
+        self.keybinds.iter().find(|b| b.action == action)
     }
     pub fn binding_mut(&mut self, action: Action) -> &mut Binding {
         // Guaranteed present after `load()`.
@@ -1337,11 +1748,16 @@ impl Config {
             .and_then(|b| b.chord.as_ref())
     }
 
-    /// True if some OTHER action already uses this chord (conflict warning).
+    /// True if some OTHER action already uses this chord where both could
+    /// fire (conflict warning; GM3: a chord may repeat across panes).
     pub fn conflict(&self, action: Action, chord: &Chord) -> Option<Action> {
         self.keybinds
             .iter()
-            .find(|b| b.action != action && b.chord.as_ref() == Some(chord))
+            .find(|b| {
+                b.action != action
+                    && b.action.context().overlaps(action.context())
+                    && b.chords().any(|c| c == chord)
+            })
             .map(|b| b.action)
     }
 }
@@ -1411,8 +1827,9 @@ pub fn settings_window(
         if cancel {
             *capturing = None;
         } else if released && !cap.keys.is_empty() {
-            config.binding_mut(cap.action).chord =
-                Some(Chord::from_capture(cap.keys.clone(), cap.modifiers));
+            let b = config.binding_mut(cap.action);
+            b.chord = Some(Chord::from_capture(cap.keys.clone(), cap.modifiers));
+            b.also.clear();
             config.save();
             *capturing = None;
         }
@@ -1508,29 +1925,42 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
         )
         .color(crate::plate::legend_dim()),
     );
+    // GM3: the preset under the bindings; your own changes stay on top.
+    ui.horizontal(|ui| {
+        crate::plate::legend(ui, "preset");
+        for km in Keymap::ALL {
+            if crate::plate::detent(ui, config.keymap == *km, km.name()).clicked()
+                && config.keymap != *km
+            {
+                config.set_keymap(*km);
+                config.save();
+                *capturing = None;
+            }
+        }
+    });
     ui.separator();
     let capturing_action = capturing.as_ref().map(|c| c.action);
     egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("keybind_grid")
-            .num_columns(3)
+            .num_columns(4)
             .striped(true)
             .spacing([12.0, 6.0])
             .show(ui, |ui| {
                 for action in Action::ALL {
                     let action = *action;
-                    ui.label(action.label());
+                    ui.label(action.label()).on_hover_text(action.help());
                     let is_capturing = capturing_action == Some(action);
                     let text = if is_capturing {
                         "hold keys, release to set…".to_string()
                     } else {
                         config
-                            .chord_for(action)
-                            .map(|c| c.label())
+                            .binding(action)
+                            .and_then(|b| b.label())
                             .unwrap_or_else(|| "—".to_string())
                     };
                     let clash = config
-                        .chord_for(action)
-                        .and_then(|c| config.conflict(action, c));
+                        .binding(action)
+                        .and_then(|b| b.chords().find_map(|c| config.conflict(action, c)));
                     let btn = egui::Button::new(text).min_size(egui::vec2(160.0, 0.0));
                     let btn = if is_capturing {
                         btn.fill(crate::plate::tally_well())
@@ -1552,10 +1982,24 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                         };
                     }
                     if ui.button("unbind").clicked() {
-                        config.binding_mut(action).chord = None;
+                        let b = config.binding_mut(action);
+                        b.chord = None;
+                        b.also.clear();
                         config.save();
                         if capturing_action == Some(action) {
                             *capturing = None;
+                        }
+                    }
+                    // GM3: conflicts said inline, not only on hover.
+                    match clash {
+                        Some(other) => {
+                            ui.label(
+                                egui::RichText::new(format!("⚠ also {}", other.label()))
+                                    .color(crate::plate::AKA),
+                            );
+                        }
+                        None => {
+                            ui.label("");
                         }
                     }
                     ui.end_row();

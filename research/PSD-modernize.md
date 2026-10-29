@@ -2309,3 +2309,18 @@ what was not verified.
   autosave group; the per-frame clones are gone. 31 `worksafe_*` tests; colour literals unchanged at 86.
   Not verified: two real copies side by side, the relaunch hand-off, the opened folder window, the failed
   autosave line (needs a real worker), and the App's own shortcut gate (the testkit mirrors it).
+- 2026-10-29 — Menus, command palette, history and help: the registry gives every action a help line,
+  a group, a menu path (the deck's tools are palette-only) and aliases; the slate's row carries file, edit,
+  view, sheet, room (was ws), window (was panes), cut and help, every item showing its chord, a one-line
+  tooltip, and greyed with the reason when `Editor::can_perform` says no; clicks go through
+  `Editor::invoke` (the one dispatch). Ctrl+K / F3 opens the palette (name > alias > help scoring, recent
+  first, Enter runs, Esc closes, the field keeps the keys); F1 lists every bound action, grouped and
+  searchable; Help has Quick start and About. History pane (`Pane::History`, Edit ▸ History): label and
+  author per step, current armed, saved point marked, a click jumps by single steps
+  (`Engine::history/position/undo_to`). Ctrl+Shift+Z redoes beside Ctrl+Y (`Binding.also`). Keymaps
+  Gaban and Industry on Settings ▸ Shortcuts (overrides kept on top; conflicts said inline); shortcuts
+  resolve a shared chord by the pane under the pointer, else the focused one. Deck tooltips read the live
+  chords. 14 `cmdui_*` tests + 2 engine tests; colour literals unchanged at 86. Left: the palette does
+  not search pane names or settings (stretch); cut sits after window on the slate (its old place).
+  Not verified: the real window's menus and F3, the Settings ▸ Shortcuts preset detents (config tested,
+  not the page), and the App's own palette gate (the testkit mirrors it).

@@ -1922,6 +1922,23 @@ impl AppState {
         self.sanitize();
     }
 
+    /// GM3: the history pane's jump — single undo/redo steps until
+    /// `position` steps are applied.
+    pub fn undo_to(&mut self, position: usize) {
+        let from = self.engine.position();
+        let ok = self.engine.undo_to(position).is_ok();
+        let now = self.engine.position();
+        if now != from {
+            self.status = format!("history: step {now}");
+            self.doc_gen = self.doc_gen.wrapping_add(1);
+            self.history_moved();
+        }
+        if !ok {
+            self.refuse("refused — that step could not be replayed");
+        }
+        self.sanitize();
+    }
+
     /// Selection can dangle after undo of a creation command — never let a
     /// dead id escape into the UI.
     fn sanitize(&mut self) {

@@ -1,0 +1,204 @@
+//! GM3: THE MENU BAR, built from the one verb registry (D6): every action
+//! with a menu path ("Edit/Undo") is an item there, showing its chord, a
+//! one-line tooltip, and — when it cannot run now — greyed with the reason
+//! (`Editor::can_perform`). A click goes through `Editor::invoke`, the same
+//! dispatch a shortcut takes. Also the help windows: F1's shortcut sheet,
+//! quick start, about.
+
+use std::sync::Arc;
+
+use eframe::egui;
+
+use crate::config::{Action, Binding, Group};
+use crate::plate;
+
+/// The help windows the Help menu and F1 open.
+#[derive(Default)]
+pub struct HelpWindows {
+    /// F1: every bound action, grouped and searchable.
+    pub sheet: bool,
+    pub sheet_query: String,
+    pub quick_start: bool,
+    pub about: bool,
+}
+
+fn chords_id() -> egui::Id {
+    egui::Id::new("gaban_chords")
+}
+
+/// Publish this frame's bindings, so controls drawn deep inside panes (the
+/// canvas deck) can name their chords in their tooltips.
+pub fn publish(ctx: &egui::Context, binds: &[Binding]) {
+    let same = ctx.data(|d| {
+        d.get_temp::<Arc<Vec<Binding>>>(chords_id())
+            .is_some_and(|b| b.as_slice() == binds)
+    });
+    if !same {
+        ctx.data_mut(|d| d.insert_temp(chords_id(), Arc::new(binds.to_vec())));
+    }
+}
+
+/// The published chord label of an action ("Ctrl+Y / Ctrl+Shift+Z").
+pub fn chord_label(ctx: &egui::Context, action: Action) -> Option<String> {
+    let binds = ctx.data(|d| d.get_temp::<Arc<Vec<Binding>>>(chords_id()))?;
+    crate::cmdpal::chord_of(&binds, action)
+}
+
+/// "Name (chord) — help": the one tooltip shape for menu items, deck
+/// buttons and palette rows.
+pub fn tip(ctx: &egui::Context, action: Action) -> String {
+    tip_with(action, chord_label(ctx, action))
+}
+
+pub fn tip_with(action: Action, chord: Option<String>) -> String {
+    match chord {
+        Some(c) => format!("{} ({c}) — {}", action.label(), action.help()),
+        None => format!("{} — {}", action.label(), action.help()),
+    }
+}
+
+/// The shortcut sheet's rows for `query`: every action with a chord, in
+/// group order, as (action, chord label). Pure.
+pub fn sheet_rows(binds: &[Binding], query: &str) -> Vec<(Action, String)> {
+    let q = query.trim().to_lowercase();
+    let mut rows = Vec::new();
+    for g in Group::ALL {
+        for a in Action::ALL.iter().filter(|a| a.group() == *g) {
+            let Some(chord) = crate::cmdpal::chord_of(binds, *a) else {
+                continue;
+            };
+            let hit = q.is_empty()
+                || a.label().to_lowercase().contains(&q)
+                || chord.to_lowercase().contains(&q)
+                || a.help().to_lowercase().contains(&q);
+            if hit {
+                rows.push((*a, chord));
+            }
+        }
+    }
+    rows
+}
+
+impl crate::Editor {
+    /// One action as a menu item: the last segment of its menu path, its
+    /// chord at the right, a one-line tooltip; greyed with the reason when
+    /// it cannot run now.
+    pub(crate) fn menu_item(&mut self, ui: &mut egui::Ui, action: Action) {
+        let Some(path) = action.menu() else {
+            return;
+        };
+        let name = path.rsplit('/').next().unwrap_or(path);
+        let chord = chord_label(ui.ctx(), action);
+        let can = self.can_perform(action);
+        let mut button = egui::Button::new(name);
+        if let Some(c) = &chord {
+            button = button.shortcut_text(c.as_str());
+        }
+        let resp = ui.add_enabled(can.is_ok(), button);
+        // The chord is drawn, not spoken: the item answers to its name.
+        plate::speak(&resp, egui::WidgetType::Button, None, name);
+        let tip = tip_with(action, chord);
+        let resp = match can {
+            Ok(()) => resp.on_hover_text(tip),
+            Err(why) => resp.on_disabled_hover_text(format!("{tip}\nnot now: {why}")),
+        };
+        if resp.clicked() {
+            ui.close();
+            self.invoke(action, ui.ctx());
+        }
+    }
+
+    /// Every action filed under `menu`, in registry order.
+    pub(crate) fn menu_items(&mut self, ui: &mut egui::Ui, menu: &str) {
+        for a in Action::ALL {
+            if a.menu().and_then(|p| p.split('/').next()) == Some(menu) {
+                self.menu_item(ui, *a);
+            }
+        }
+    }
+
+    /// The registry-only menus: edit, view, sheet.
+    pub(crate) fn plain_menus(&mut self, ui: &mut egui::Ui) {
+        for (label, menu) in [("edit", "Edit"), ("view", "View"), ("sheet", "Sheet")] {
+            ui.menu_button(label, |ui| self.menu_items(ui, menu));
+        }
+    }
+
+    pub(crate) fn help_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("help", |ui| self.menu_items(ui, "Help"));
+    }
+
+    /// The help windows, each when open.
+    pub(crate) fn help_windows(&mut self, ctx: &egui::Context, binds: &[Binding]) {
+        let help = &mut self.help;
+        egui::Window::new("Keyboard shortcuts")
+            .open(&mut help.sheet)
+            .default_size([460.0, 560.0])
+            .show(ctx, |ui| {
+                plate::surface(ui);
+                ui.horizontal(|ui| {
+                    plate::legend(ui, "find");
+                    ui.text_edit_singleline(&mut help.sheet_query);
+                });
+                ui.separator();
+                let rows = sheet_rows(binds, &help.sheet_query);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let mut group = None;
+                    for (a, chord) in rows {
+                        if group != Some(a.group()) {
+                            group = Some(a.group());
+                            ui.add_space(4.0);
+                            plate::legend(ui, a.group().name());
+                        }
+                        ui.horizontal(|ui| {
+                            ui.label(a.label()).on_hover_text(a.help());
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                plate::value(ui, &chord);
+                            });
+                        });
+                    }
+                });
+            });
+        egui::Window::new("Quick start")
+            .open(&mut help.quick_start)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                plate::surface(ui);
+                // Said in THIS keymap's chords, so it never lies.
+                let k = |a| crate::cmdpal::chord_of(binds, a).unwrap_or_else(|| "—".into());
+                use Action::*;
+                for line in [
+                    format!(
+                        "1. Draw on the canvas with the pen ({} brush, {} eraser).",
+                        k(BrushTool),
+                        k(ToggleEraser)
+                    ),
+                    format!(
+                        "2. {} puts a new drawing on this frame; {} / {} step frames.",
+                        k(NewDrawing),
+                        k(NextFrame),
+                        k(PrevFrame)
+                    ),
+                    "3. The x-sheet times the drawings: a key holds until the next one.".into(),
+                    format!("4. {} plays the cut; {} latches looping.", k(PlayPause), k(ToggleLoop)),
+                    format!(
+                        "5. {} saves. {} finds any command; {} lists every key.",
+                        k(Save),
+                        k(CommandPalette),
+                        k(ShortcutSheet)
+                    ),
+                ] {
+                    ui.label(line);
+                }
+            });
+        egui::Window::new("About Gaban Studio")
+            .open(&mut help.about)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                plate::surface(ui);
+                plate::legend(ui, "画版 gaban studio");
+                plate::value(ui, &format!("version {}", env!("CARGO_PKG_VERSION")));
+                ui.label("A node-graph 2D animation studio: draw, time, paint, edit.");
+            });
+    }
+}

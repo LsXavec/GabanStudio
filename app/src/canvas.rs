@@ -15,7 +15,7 @@ use anim_core::raster::{TileCoord, TileData};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
-use crate::config::{BrushPreset, LayersConfig, PenConfig, PressureCurve};
+use crate::config::{Action, BrushPreset, LayersConfig, PenConfig, PressureCurve};
 use crate::doc::AppState;
 use crate::icons::Icon;
 use crate::paint::{Dab, PaintLayer, PaintMode};
@@ -777,6 +777,13 @@ impl CanvasView {
             tilt_shape: self.tilt_shape,
             tilt_strength: self.tilt_strength,
         }
+    }
+
+    /// GM3: fit the canvas back in its pane — zoom 100 %, no pan (the
+    /// rail's fit button and View › Fit view).
+    pub fn fit_view(&mut self) {
+        self.zoom = 1.0;
+        self.pan = egui::Vec2::ZERO;
     }
 
     /// An edit gesture is live: a stroke (pen down or its pen-up commit
@@ -1556,6 +1563,8 @@ impl CanvasView {
                 egui::StrokeKind::Inside,
             );
         }
+        // GM3: name, chord, one line of help — from the registry.
+        let resp = resp.on_hover_text(crate::menus::tip(ui.ctx(), Action::ToggleEraser));
         if plate::exact() {
             resp.on_hover_text("[PENCIL SLOT 'eraser' · canvas.rs eraser_slot]");
         }
@@ -2065,8 +2074,7 @@ impl CanvasView {
         plate::legend(ui, "view");
         ui.add_space(2.0);
         if plate::icon_button(ui, Icon::Fit, "fit", "reset zoom & pan").clicked() {
-            self.zoom = 1.0;
-            self.pan = egui::Vec2::ZERO;
+            self.fit_view();
         }
         vline(ui, "zoom", format!("{:3.0}%", self.zoom * 100.0));
         ui.add_space(10.0);
@@ -2406,13 +2414,19 @@ impl CanvasView {
                 // Select / transform tool (V; B returns to paint). Leaving
                 // Select commits any floating transform. A detent: clicking
                 // the armed position does nothing.
+                // GM3: every deck tooltip leads with the registry's line —
+                // name, the chord as bound now, one line of help.
+                let tip = |ui: &egui::Ui, a: Action, more: &str| {
+                    format!("{}\n{more}", crate::menus::tip(ui.ctx(), a))
+                };
                 let sel_on = self.tool == CanvasTool::Select;
                 if plate::tool_button(ui, sel_on, Icon::Select, lbl("select"), "select")
-                    .on_hover_text(
-                        "select / move / scale / rotate (V) — drag = select, drag \
-                    inside = move, corners = scale, just outside = rotate; \
-                    Enter applies, Esc cancels; Ctrl+A selects all",
-                    )
+                    .on_hover_text(tip(
+                        ui,
+                        Action::SelectTool,
+                        "drag = select, drag inside = move, corners = scale, just \
+                    outside = rotate; Enter applies, Esc cancels",
+                    ))
                     .clicked()
                     && !sel_on
                 {
@@ -2423,11 +2437,13 @@ impl CanvasView {
                 // Fill / bucket tool (G): the shiage verb.
                 let fill_on = self.tool == CanvasTool::Fill;
                 if plate::tool_button(ui, fill_on, Icon::Fill, lbl("fill"), "fill")
-                    .on_hover_text(
-                        "flood fill (G) — click a region; line art bounds it. \
-                    gap closes line breaks; under tucks the flat beneath \
-                    the lines; cel/layer picks the boundary reference",
-                    )
+                    .on_hover_text(tip(
+                        ui,
+                        Action::FillTool,
+                        "click a region; line art bounds it. gap closes line \
+                    breaks; under tucks the flat beneath the lines; cel/layer \
+                    picks the boundary reference",
+                    ))
                     .clicked()
                     && !fill_on
                 {
@@ -2454,20 +2470,24 @@ impl CanvasView {
                 // silhouette. Combines with brush or eraser.
                 let mut lock = self.alpha_lock;
                 plate::tool_latch(ui, &mut lock, Icon::Lock, lbl("lock"), "alpha lock")
-                    .on_hover_text(
-                        "alpha lock (L) — ink only recolors pixels this layer \
-                already has coverage on; the silhouette can't grow",
-                    );
+                    .on_hover_text(tip(
+                        ui,
+                        Action::ToggleAlphaLock,
+                        "ink only recolors pixels this layer already has \
+                    coverage on; the silhouette can't grow",
+                    ));
                 self.alpha_lock = lock;
                 // Composite view: the node graph's rendered output (review
                 // mode — painting pauses). Blocked mid-stroke: swapping the
                 // view under a live stroke would orphan its display.
                 let mut comp = self.composite_view;
                 plate::tool_latch(ui, &mut comp, Icon::Comp, lbl("comp"), "composite view")
-                    .on_hover_text(
-                        "composite view — what the node graph renders \
-                    (playback/export truth). C toggles; painting pauses here.",
-                    );
+                    .on_hover_text(tip(
+                        ui,
+                        Action::ToggleCompositeView,
+                        "what the node graph renders (playback/export truth); \
+                    painting pauses here",
+                    ));
                 if comp != self.composite_view && !self.stroke_active() {
                     self.composite_view = comp;
                 }

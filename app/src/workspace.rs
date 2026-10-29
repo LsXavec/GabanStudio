@@ -31,6 +31,8 @@ pub enum Pane {
     /// canvas, watch the graph result live next to it. The id keeps several
     /// viewers distinct in the dock tree (and keys their view state).
     Viewer(u8),
+    /// GM3: every undo step, current one marked; click one to go there.
+    History,
 }
 
 impl Pane {
@@ -45,6 +47,7 @@ impl Pane {
         Pane::Forge,
         Pane::Palette,
         Pane::NodeGraph,
+        Pane::History,
     ];
 
     /// THE FORGE ROOM (PSD-brush-forge, owner amendment 2026-08-19:
@@ -71,6 +74,7 @@ impl Pane {
             Pane::Forge => "Brush Forge".into(),
             Pane::Palette => "Palette".into(),
             Pane::NodeGraph => "Node Graph".into(),
+            Pane::History => "History".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }

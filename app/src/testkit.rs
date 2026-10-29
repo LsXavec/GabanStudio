@@ -67,17 +67,20 @@ impl Rig {
             &[],
             config.ui.lock_positions,
             None,
+            &config.keybinds,
         );
         // GM2: the shell's outbox and autosave interval, as the App wires them.
         self.requests.append(&mut self.editor.requests);
         self.editor.autosave.minutes = self.config.session.autosave_minutes;
         // The shell's shortcut dispatch, minus the dialogs: requests are
         // logged, never carried out. GM2: it stands down while the "Save
-        // changes?" modal is up, as the App's does.
-        if self.editor.leave_pending() {
+        // changes?" modal is up, as the App's does; GM3: and while the
+        // command palette has the keys.
+        if self.editor.leave_pending() || self.editor.palette.open {
             return;
         }
-        for a in shortcuts::collect(ui.ctx(), &self.config.keybinds) {
+        let here = self.editor.shortcut_ctx(ui.ctx());
+        for a in shortcuts::collect(ui.ctx(), &self.config.keybinds, here) {
             self.editor.presets.clone_from(&self.config.presets);
             let r = self.editor.perform(a);
             self.performed.push((a, r));
@@ -344,6 +347,18 @@ impl EditorHarness {
 
     pub fn has(&self, label: &str) -> bool {
         self.h.query_all_by_label(label).next().is_some()
+    }
+
+    /// GM3: is some text on screen (a tooltip, a row) containing `part`?
+    pub fn has_text_containing(&self, part: &str) -> bool {
+        self.h.query_all_by_label_contains(part).next().is_some()
+    }
+
+    /// GM3: the ONE widget with this name — enabled or greyed (None when
+    /// it is not on screen).
+    pub fn node_enabled(&self, label: &str) -> Option<bool> {
+        let node = self.h.query_by_label(label)?;
+        Some(!node.accesskit_node().is_disabled())
     }
 
     #[track_caller]
@@ -632,9 +647,9 @@ mod tests {
         assert!(h.editor().canvas.tool == CanvasTool::Paint);
     }
 
-    /// Open the ws menu and focus its name field.
+    /// Open the room menu (GM3: was "ws") and focus its name field.
     fn focus_field(h: &mut EditorHarness) {
-        h.click("ws");
+        h.click("room");
         h.focus_text_field(0);
         assert!(h.typing(), "no text field took focus\n{}", h.describe());
     }
@@ -683,6 +698,9 @@ mod tests {
                 Action::SaveAs => Some(AppRequest::SaveAs),
                 Action::Open => Some(AppRequest::Open),
                 Action::NewProject => Some(AppRequest::NewProject),
+                // GM3: the menus' and palette's shell verbs.
+                Action::Settings => Some(AppRequest::Settings),
+                Action::Quit => Some(AppRequest::Quit),
                 _ => None,
             };
             match want {

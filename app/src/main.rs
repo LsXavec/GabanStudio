@@ -8,6 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod canvas;
+mod cmdpal;
 mod config;
 mod devloop;
 mod doc;
@@ -16,10 +17,12 @@ mod floatcanvas;
 mod forge;
 mod floatwin;
 mod graphcomp;
+mod history_panel;
 mod icons;
 mod kpp;
 mod brushbank;
 mod kritares;
+mod menus;
 mod net;
 mod newproject;
 mod nodegraph_panel;
@@ -2757,8 +2760,12 @@ impl App {
                 ed.presets.clone_from(&self.config.presets);
                 ed.perform(action)
             }
-            None if action == Action::NewProject => Performed::App(AppRequest::NewProject),
-            None => Performed::Ignored,
+            None => match action {
+                Action::NewProject => Performed::App(AppRequest::NewProject),
+                Action::Settings => Performed::App(AppRequest::Settings),
+                Action::Quit => Performed::App(AppRequest::Quit),
+                _ => Performed::Ignored,
+            },
         };
         if let Performed::App(req) = performed {
             self.handle_request(ctx, req);
@@ -2807,10 +2814,8 @@ pub enum AppRequest {
     Open,
     Save,
     SaveAs,
-    // Raised by the menus and the command palette (GM3); handled already.
-    #[allow(dead_code)]
+    /// GM3: raised by the menus, the palette and their chords.
     Settings,
-    #[allow(dead_code)]
     Quit,
 }
 
@@ -2834,6 +2839,31 @@ impl Editor {
     fn perform_into(&mut self, action: Action, out: &mut Performed) {
         if action == Action::NewProject {
             *out = Performed::App(AppRequest::NewProject);
+            return;
+        }
+        // GM3: the chrome's own verbs — windows, panes and rooms; the
+        // document is untouched.
+        match action {
+            Action::Settings => *out = Performed::App(AppRequest::Settings),
+            Action::Quit => *out = Performed::App(AppRequest::Quit),
+            Action::CommandPalette => self.palette.toggle(),
+            Action::ShortcutSheet => self.help.sheet = !self.help.sheet,
+            Action::QuickStart => self.help.quick_start = !self.help.quick_start,
+            Action::About => self.help.about = !self.help.about,
+            Action::History => self.open_pane(Pane::History),
+            Action::ResetLayout => {
+                let st = self.stage.unwrap_or(Stage::Drawing);
+                self.dock = st.dock();
+                self.state.status = format!("layout reset: {}", st.name());
+            }
+            Action::ZoomFit => self.canvas.fit_view(),
+            Action::RoomLayout => self.enter_room(Stage::Layout),
+            Action::RoomDrawing => self.enter_room(Stage::Drawing),
+            Action::RoomFinishing => self.enter_room(Stage::Finishing),
+            Action::RoomEdit => self.enter_room(Stage::Edit),
+            _ => {}
+        }
+        if is_chrome(action) {
             return;
         }
         let ed = self;
@@ -2952,27 +2982,7 @@ impl Editor {
         // orphan its pen-up commit are dropped — frame nav would commit onto
         // the wrong frame, an A-cycle onto the wrong layer, undo/clear against
         // a vanished target. (Tool toggles are safe: the stroke latches them.)
-        if ed.canvas.stroke_active()
-            && matches!(
-                action,
-                Action::PlayPause
-                    | Action::NextFrame
-                    | Action::PrevFrame
-                    | Action::FirstFrame
-                    | Action::LastFrame
-                    | Action::NewDrawing
-                    | Action::ClearCel
-                    | Action::ClearCelAll
-                    | Action::CycleCelLayer
-                    | Action::CycleCelLayerBack
-                    | Action::ClearFrameKey
-                    | Action::RemoveColumn
-                    | Action::Undo
-                    | Action::Redo
-                    | Action::PrevCut
-                    | Action::NextCut
-            )
-        {
+        if ed.canvas.stroke_active() && stroke_guarded(action) {
             ed.state.refuse("refused — finish the stroke first");
             *out = Performed::Ignored;
             return;
@@ -3061,8 +3071,68 @@ impl Editor {
             Action::SaveAs => *out = Performed::App(AppRequest::SaveAs),
             Action::Open => *out = Performed::App(AppRequest::Open),
             Action::NewProject => {}
+            Action::CommandPalette
+            | Action::ShortcutSheet
+            | Action::QuickStart
+            | Action::About
+            | Action::History
+            | Action::Settings
+            | Action::Quit
+            | Action::ResetLayout
+            | Action::ZoomFit
+            | Action::RoomLayout
+            | Action::RoomDrawing
+            | Action::RoomFinishing
+            | Action::RoomEdit => {} // the chrome's, handled above
         }
     }
+}
+
+/// GM3: the chrome's own verbs (windows, panes, rooms) — never the
+/// document's.
+fn is_chrome(action: Action) -> bool {
+    matches!(
+        action,
+        Action::CommandPalette
+            | Action::ShortcutSheet
+            | Action::QuickStart
+            | Action::About
+            | Action::History
+            | Action::Settings
+            | Action::Quit
+            | Action::ResetLayout
+            | Action::ZoomFit
+            | Action::RoomLayout
+            | Action::RoomDrawing
+            | Action::RoomFinishing
+            | Action::RoomEdit
+    )
+}
+
+/// STROKE GUARD: while a stroke is live, actions that would retarget or
+/// orphan its pen-up commit are dropped — frame nav would commit onto the
+/// wrong frame, an A-cycle onto the wrong layer, undo/clear against a
+/// vanished target. (Tool toggles are safe: the stroke latches them.)
+fn stroke_guarded(action: Action) -> bool {
+    matches!(
+        action,
+        Action::PlayPause
+            | Action::NextFrame
+            | Action::PrevFrame
+            | Action::FirstFrame
+            | Action::LastFrame
+            | Action::NewDrawing
+            | Action::ClearCel
+            | Action::ClearCelAll
+            | Action::CycleCelLayer
+            | Action::CycleCelLayerBack
+            | Action::ClearFrameKey
+            | Action::RemoveColumn
+            | Action::Undo
+            | Action::Redo
+            | Action::PrevCut
+            | Action::NextCut
+    )
 }
 
 /// The pen line the artist hears when the native tablet backend drops out.
@@ -3431,6 +3501,13 @@ struct Editor {
     /// GM2: what the window title was last made from (dirty, file, name);
     /// it is rebuilt and sent only when one of them changes.
     title_from: Option<(bool, Option<std::path::PathBuf>, String)>,
+    /// GM3: the command palette (Ctrl+K).
+    pub palette: cmdpal::Palette,
+    /// GM3: the help windows (F1's shortcut sheet, quick start, about).
+    pub help: menus::HelpWindows,
+    /// GM3: where each pane was drawn this frame — the pane under the
+    /// pointer picks which shortcuts apply.
+    pane_rects: Vec<(Pane, egui::Rect)>,
 }
 
 /// GM2: an action that drops the open document — asked about first when
@@ -3574,6 +3651,8 @@ struct EditorTabs<'a> {
     /// the dock's Canvas tab shows a placeholder instead of double-driving
     /// the one CanvasView from two places.
     float_canvas_open: bool,
+    /// GM3: where each pane is drawn (the shortcut context reads it).
+    pane_rects: &'a mut Vec<(Pane, egui::Rect)>,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -3585,7 +3664,13 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
         // Every pane sits on the plate's grain (owner's amendment): laid
         // down first, so all content paints over the material.
         plate::surface(ui);
+        self.pane_rects.push((*tab, ui.max_rect()));
         match tab {
+            Pane::History => {
+                let gesture_safe = !self.canvas.stroke_active();
+                let shared = self.canvas.is_guest || self.canvas.session_live;
+                history_panel::ui(ui, self.state, gesture_safe, shared)
+            }
             Pane::XSheet => {
                 // The henshu lens (charter delta 4): the sheet grows its
                 // edit-room HEAD only in the Edit stage; content lensing,
@@ -3604,7 +3689,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 plate::legend(ui, "brush");
                 ui.label(
                     "the brush deck rides on the canvas now — close this pane \
-                     (panes menu can reopen it)",
+                     (the window menu can reopen it)",
                 );
             }
             Pane::Presets => self.presets_ui(ui),
@@ -3622,7 +3707,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 ui.centered_and_justified(|ui| {
                     ui.label(
                         egui::RichText::new(
-                            "canvas is open in its own window — panes ▾ to bring it back",
+                            "canvas is open in its own window — window ▾ to bring it back",
                         )
                         .color(plate::legend_dim()),
                     );
@@ -3837,6 +3922,9 @@ impl Editor {
             last_autosave_at: None,
             autosave_failing: false,
             title_from: None,
+            palette: cmdpal::Palette::default(),
+            help: menus::HelpWindows::default(),
+            pane_rects: Vec::new(),
         }
     }
     fn from_state(
@@ -3897,7 +3985,83 @@ impl Editor {
             last_autosave_at: None,
             autosave_failing: false,
             title_from: None,
+            palette: cmdpal::Palette::default(),
+            help: menus::HelpWindows::default(),
+            pane_rects: Vec::new(),
         }
+    }
+
+    /// GM3: which pane the keys are aimed at — the pane under the
+    /// pointer, else the focused pane (shortcuts.rs resolves shared chords
+    /// by it).
+    pub fn shortcut_ctx(&mut self, ctx: &egui::Context) -> config::Ctx {
+        let pane = ctx
+            .pointer_latest_pos()
+            .and_then(|p| self.pane_rects.iter().find(|(_, r)| r.contains(p)))
+            .map(|(pane, _)| *pane)
+            .or_else(|| self.dock.find_active_focused().map(|(_, t)| *t));
+        match pane {
+            Some(Pane::Canvas) => config::Ctx::Canvas,
+            Some(Pane::XSheet) => config::Ctx::Sheet,
+            Some(Pane::NodeGraph) => config::Ctx::NodeGraph,
+            _ => config::Ctx::Global,
+        }
+    }
+
+    /// GM3: open a pane, or bring it to the front when it is already
+    /// docked. A new one tabs in beside the layer strip (or the sheet).
+    pub fn open_pane(&mut self, pane: Pane) {
+        if let Some(path) = self.dock.find_tab(&pane) {
+            let _ = self.dock.set_active_tab(path);
+            self.dock.set_focused_node_and_surface(path.node_path());
+            return;
+        }
+        let beside = [Pane::Layers, Pane::XSheet]
+            .iter()
+            .find_map(|p| self.dock.find_tab(p));
+        match beside {
+            Some(path) => self.dock[path.node_path()].append_tab(pane),
+            None => self.dock.main_surface_mut().push_to_focused_leaf(pane),
+        }
+    }
+
+    /// GM3: may this action run now? Err says why not, in the artist's
+    /// words — a menu item that cannot run is greyed and says so.
+    pub fn can_perform(&self, action: Action) -> Result<(), &'static str> {
+        let guest = self.canvas.is_guest;
+        let shared = guest || self.canvas.session_live;
+        match action {
+            Action::Undo if !shared && !self.state.engine.can_undo() => Err("nothing to undo"),
+            Action::Redo if !shared && !self.state.engine.can_redo() => {
+                Err("nothing to redo — undo something first")
+            }
+            Action::Save | Action::SaveAs if guest => Err("the host owns the file"),
+            Action::Open if guest => Err("leave the room first to open your own file"),
+            a if stroke_guarded(a) && self.canvas.stroke_active() => {
+                Err("finish the stroke first")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// GM3: run an action from the menus or the command palette — the
+    /// same one dispatch as a shortcut (D6). What only the shell can do
+    /// goes the way the slate always sent it: New/Open through the unsaved
+    /// guard, the rest to the shell's outbox.
+    pub fn invoke(&mut self, action: Action, ctx: &egui::Context) -> Performed {
+        if let Err(why) = self.can_perform(action) {
+            self.state.refuse(format!("refused — {why}"));
+            return Performed::Ignored;
+        }
+        self.palette.note_run(action);
+        let r = self.perform(action);
+        match r {
+            Performed::App(AppRequest::NewProject) => self.leave(Leave::New, ctx),
+            Performed::App(AppRequest::Open) => self.leave(Leave::Open, ctx),
+            Performed::App(req) => self.requests.push(req),
+            Performed::Done | Performed::Ignored => {}
+        }
+        r
     }
 
     /// GM2: carry out `what` now when nothing would be lost (or this
@@ -4280,6 +4444,7 @@ impl eframe::App for App {
                 &native_pen,
                 self.config.ui.lock_positions,
                 room,
+                &self.config.keybinds,
             );
             // Stage 4: the strip's stack requests (the App owns config).
             if let Some(req) = editor.state.stack_request.take() {
@@ -4341,12 +4506,20 @@ impl eframe::App for App {
         // "Save changes?" and recovery modals included: nothing acts behind
         // a question about the document) or while capturing a rebind (so the
         // captured key doesn't also fire an action).
-        if self.editor.as_ref().is_some_and(|e| !e.leave_pending())
+        // GM3: the command palette has the keys while it is open.
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|e| !e.leave_pending() && !e.palette.open)
             && self.recovery.is_empty()
             && self.new_form.is_none()
             && self.capturing.is_none()
         {
-            let mut fired: Vec<Action> = shortcuts::collect(ui.ctx(), &self.config.keybinds);
+            let here = match &mut self.editor {
+                Some(ed) => ed.shortcut_ctx(ui.ctx()),
+                None => config::Ctx::Global,
+            };
+            let mut fired: Vec<Action> = shortcuts::collect(ui.ctx(), &self.config.keybinds, here);
             // Keyboard events land in whichever VIEWPORT has focus. The
             // popout canvas (Phase 5 step 2) is its own OS window, so a
             // shortcut pressed there arrives in ITS input state, not the
@@ -4359,6 +4532,7 @@ impl eframe::App for App {
                     ui.ctx(),
                     floatcanvas::FloatCanvas::viewport_id(),
                     &self.config.keybinds,
+                    config::Ctx::Canvas,
                 );
                 for a in more {
                     if !fired.contains(&a) {
@@ -4820,6 +4994,7 @@ fn probe_run(stage: Stage, ppp: f32) -> ProbeRun {
                 &[],
                 config.ui.lock_positions,
                 None,
+                &config.keybinds,
             );
             let _ = ctx.end_pass();
             let r = editor.canvas.dbg_rect;
@@ -5186,9 +5361,15 @@ impl Editor {
         native_pen: &[PenSample],
         ui_lock: bool,
         room: Option<(String, Vec<String>)>,
+        binds: &[config::Binding],
     ) {
         // GM2: never lose work — close guard, save modal, title, autosave.
         self.worksafe_frame(ui.ctx());
+        // GM3: the chords every tooltip names; the palette (its keys taken
+        // before anything else reads them) and the help windows.
+        menus::publish(ui.ctx(), binds);
+        self.palette_ui(ui.ctx(), binds);
+        self.help_windows(ui.ctx(), binds);
         // THE BRUSH LIBRARY (PSD-brush-library): the rail raised the
         // flag; the import runs HERE, where presets are mutable, and
         // never mid-stroke (NEVER-DO 3).
@@ -5288,15 +5469,10 @@ impl Editor {
                     if !file_menu_was_open {
                         self.recent_shown = worksafe::on_disk(&self.recent);
                     }
-                    // GM2: New/Open/Recent go through the unsaved guard.
-                    if ui.button("New…").clicked() {
-                        self.leave(Leave::New, ui.ctx());
-                        ui.close();
-                    }
-                    if ui.button("Open…").clicked() {
-                        self.leave(Leave::Open, ui.ctx());
-                        ui.close();
-                    }
+                    // GM2: New/Open/Recent go through the unsaved guard
+                    // (GM3: the registry's items, Editor::invoke).
+                    self.menu_item(ui, Action::NewProject);
+                    self.menu_item(ui, Action::Open);
                     ui.menu_button("Open Recent", |ui| {
                         if self.recent_shown.is_empty() {
                             ui.label(
@@ -5344,12 +5520,10 @@ impl Editor {
                             }
                         }
                     });
-                    if ui.button("Save").clicked() {
-                        // The saved file must contain what the screen shows.
-                        self.canvas.finish_gesture(&mut self.state);
-                        self.state.save(false);
-                        ui.close();
-                    }
+                    // Save lands the gesture first (Editor::perform): the
+                    // saved file must contain what the screen shows.
+                    self.menu_item(ui, Action::Save);
+                    self.menu_item(ui, Action::SaveAs);
                     ui.menu_button("Export…", |ui| {
                         // Frame range (C3): 1-based in the UI (matches the
                         // "N / total" frame readout elsewhere), 0-based
@@ -5498,15 +5672,12 @@ impl Editor {
                             }
                         }
                     }
-                    if ui
-                        .button("Settings…")
-                        .on_hover_text("keyboard shortcuts & config")
-                        .clicked()
-                    {
-                        self.request_settings = true;
-                        ui.close();
-                    }
+                    ui.separator();
+                    self.menu_item(ui, Action::Settings);
+                    self.menu_item(ui, Action::Quit);
                 });
+                // GM3: the registry's own menus.
+                self.plain_menus(ui);
 
                 // Slate identity: filename + dirty mark, then the cut's
                 // vitals as engraved fields (transport lives in the FOOT;
@@ -5619,7 +5790,10 @@ impl Editor {
                         self.enter_room(*st);
                     }
                 }
-                ui.menu_button("ws", |ui| {
+                // GM3: was "ws" — the rooms, then the saved arrangements.
+                ui.menu_button("room", |ui| {
+                    self.menu_items(ui, "Room");
+                    ui.separator();
                     ui.label(egui::RichText::new("save current arrangement as:").color(plate::legend_dim()));
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut self.ws_name);
@@ -5737,9 +5911,9 @@ impl Editor {
                         self.save_workspaces();
                     }
                 });
-                // Re-open closed panes (a pane lives only while it's in the
-                // dock tree).
-                ui.menu_button("panes", |ui| {
+                // Open or bring forward each pane (a pane lives only while
+                // it's in the dock tree). GM3: was "panes".
+                ui.menu_button("window", |ui| {
                     for pane in Pane::ALL {
                         // The Brush window is RETIRED (owner 2026-08-17):
                         // its settings live on the canvas deck + right rail.
@@ -5747,11 +5921,9 @@ impl Editor {
                             continue;
                         }
                         let present = self.dock.iter_all_tabs().any(|(_, t)| t == pane);
-                        if ui
-                            .add_enabled(!present, egui::Button::new(pane.title()))
-                            .clicked()
-                        {
-                            self.dock.main_surface_mut().push_to_focused_leaf(*pane);
+                        let hover = if present { "bring it forward" } else { "open it" };
+                        if ui.button(pane.title()).on_hover_text(hover).clicked() {
+                            self.open_pane(*pane);
                             ui.close();
                         }
                     }
@@ -5823,10 +5995,14 @@ impl Editor {
                         // (still true) — the checkbox reflects it again next
                         // frame; the status line already explains why.
                     }
+                    ui.separator();
+                    self.menu_items(ui, "Window");
                 });
                 // Scene/cut navigation (C2): the model always supported
                 // more than one, there was just no way to reach them.
                 ui.menu_button("cut", |ui| {
+                    self.menu_items(ui, "Cut");
+                    ui.separator();
                     ui.label(
                         egui::RichText::new(format!("now editing: {}", self.state.cut().name))
                             .color(plate::legend_dim()),
@@ -5943,6 +6119,7 @@ impl Editor {
                         ui.close();
                     }
                 });
+                self.help_menu(ui);
             });
             // Row 2 — THE ARMING LINE (spec §4.2): what the pen will do
             // RIGHT NOW: drawing · column · layer · pencil.
@@ -6216,7 +6393,9 @@ impl Editor {
             forge: &mut self.forge,
             native_pen,
             float_canvas_open: self.float_canvas.open,
+            pane_rects: &mut self.pane_rects,
         };
+        tabs.pane_rects.clear();
         let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
         // egui_dock clamps every divider so each side keeps `separator.extra`
         // pixels — the DEFAULT IS 175px, which silently blocked collapsing

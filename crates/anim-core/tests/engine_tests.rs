@@ -1107,3 +1107,58 @@ fn revision_out_of_order_session_undo_is_fresh() {
     let back = f.engine.revision();
     assert!(back != r0 && back != ra && back != mid);
 }
+
+// ---- GM3: the history pane's rows and jumps --------------------------------
+
+#[test]
+fn history_lists_undo_then_redo_steps_in_order() {
+    let mut f = fixture();
+    f.engine.clear_history();
+    let base = f.engine.revision();
+    assert_eq!(f.engine.base_revision(), base);
+    assert!(f.engine.history().is_empty() && f.engine.position() == 0);
+    f.engine.set_author(Some("mika".into()));
+    edit_cell(&mut f, 1);
+    f.engine.set_author(None);
+    edit_cell(&mut f, 2);
+    edit_cell(&mut f, 3);
+    let r3 = f.engine.revision();
+    f.engine.undo().unwrap();
+    let h = f.engine.history();
+    assert_eq!(h.len(), 3, "undo stack then redo stack");
+    assert_eq!(f.engine.position(), 2);
+    assert!(h[0].applied && h[1].applied && !h[2].applied);
+    assert_eq!(h[0].author.as_deref(), Some("mika"));
+    assert_eq!(h[1].author, None);
+    assert!(h.iter().all(|e| e.label == "edit"));
+    assert_eq!(h[2].revision, r3, "a redo row names the revision it returns to");
+    assert_eq!(h[1].revision, f.engine.revision(), "the current row is the revision");
+}
+
+#[test]
+fn undo_to_jumps_by_single_steps_and_back() {
+    let mut f = fixture();
+    f.engine.clear_history();
+    let mut states = vec![f.engine.project.clone()];
+    let mut revs = vec![f.engine.revision()];
+    for frame in 1..=5u32 {
+        edit_cell(&mut f, frame);
+        states.push(f.engine.project.clone());
+        revs.push(f.engine.revision());
+    }
+    f.engine.undo_to(2).unwrap();
+    assert_eq!(f.engine.position(), 2);
+    assert_eq!(f.engine.project, states[2], "exactly the state after step 2");
+    assert_eq!(f.engine.revision(), revs[2]);
+    assert_eq!(f.engine.history().len(), 5, "the undone steps wait as redo rows");
+    f.engine.undo_to(0).unwrap();
+    assert_eq!(f.engine.project, states[0]);
+    assert_eq!(f.engine.revision(), revs[0]);
+    f.engine.undo_to(5).unwrap();
+    assert_eq!(f.engine.project, states[5], "all five restored");
+    assert_eq!(f.engine.revision(), revs[5]);
+    // Past the end clamps to the last step; nothing is invented.
+    f.engine.undo_to(99).unwrap();
+    assert_eq!(f.engine.position(), 5);
+    assert_eq!(f.engine.project, states[5]);
+}

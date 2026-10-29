@@ -39,7 +39,6 @@ use xsheet::Column;
 
 /// One undoable step: a labeled batch of commands and its exact inverse.
 struct Applied {
-    #[allow(dead_code)] // surfaced in the UI's edit menu later
     label: String,
     redo: Vec<Command>,
     undo: Vec<Command>,
@@ -50,6 +49,19 @@ struct Applied {
     /// GM2: this step's revision serial — unique per applied state, never
     /// reused, so "undo back to the saved state" reads clean again.
     serial: u64,
+}
+
+/// GM3: one row of the history pane — a step's label, who made it, and
+/// whether it is applied (undo stack) or waiting to be redone (redo stack).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub label: String,
+    /// None = this machine's own hand.
+    pub author: Option<String>,
+    pub applied: bool,
+    /// The document's revision once this step is applied — compare it with
+    /// the saved revision to mark the saved point.
+    pub revision: u64,
 }
 
 #[derive(Default)]
@@ -466,6 +478,48 @@ impl Engine {
 
     pub fn can_redo(&self) -> bool {
         !self.history.redo_stack.is_empty()
+    }
+
+    /// GM3: every kept step, oldest first — the undo stack (applied), then
+    /// the redo stack in the order redo would re-apply it (not applied).
+    pub fn history(&self) -> Vec<HistoryEntry> {
+        let row = |a: &Applied, applied: bool| HistoryEntry {
+            label: a.label.clone(),
+            author: a.author.clone(),
+            applied,
+            revision: a.serial,
+        };
+        let h = &self.history;
+        h.undo_stack
+            .iter()
+            .map(|a| row(a, true))
+            .chain(h.redo_stack.iter().rev().map(|a| row(a, false)))
+            .collect()
+    }
+
+    /// GM3: how many rows of `history()` are applied.
+    pub fn position(&self) -> usize {
+        self.history.undo_stack.len()
+    }
+
+    /// GM3: the revision under the oldest kept step (position 0).
+    pub fn base_revision(&self) -> u64 {
+        self.history.base
+    }
+
+    /// GM3: undo or redo single steps until `position` steps are applied
+    /// (clamped to the history's length). Each step is the ordinary
+    /// undo/redo, so revisions and the redo stack stay exact.
+    pub fn undo_to(&mut self, position: usize) -> Result<()> {
+        let total = self.history.undo_stack.len() + self.history.redo_stack.len();
+        let target = position.min(total);
+        while self.history.undo_stack.len() > target {
+            self.undo()?;
+        }
+        while self.history.undo_stack.len() < target {
+            self.redo()?;
+        }
+        Ok(())
     }
 
     /// Forget all undo/redo history (e.g. after setup scripts, or to mark a
