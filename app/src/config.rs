@@ -100,6 +100,21 @@ pub enum Action {
     CutCells,
     PasteCells,
     PasteCellsInsert,
+    // GM14: typing on the sheet cursor's cell, and the curves pane's verbs
+    // (the pane, its framing, the selected keys' interpolation and handles).
+    TypeIntoCell,
+    ShowCurves,
+    FrameCurves,
+    InterpHold,
+    InterpLinear,
+    InterpEase,
+    InterpEaseIn,
+    InterpEaseOut,
+    InterpBezier,
+    HandlesAuto,
+    HandlesSmooth,
+    HandlesFlat,
+    HandlesBroken,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -155,6 +170,8 @@ pub enum Ctx {
     Canvas,
     Sheet,
     NodeGraph,
+    /// GM14: the curves pane (graph editor).
+    Curves,
 }
 
 impl Ctx {
@@ -286,6 +303,19 @@ impl Action {
         Action::CutCells,
         Action::PasteCells,
         Action::PasteCellsInsert,
+        Action::TypeIntoCell,
+        Action::ShowCurves,
+        Action::FrameCurves,
+        Action::InterpHold,
+        Action::InterpLinear,
+        Action::InterpEase,
+        Action::InterpEaseIn,
+        Action::InterpEaseOut,
+        Action::InterpBezier,
+        Action::HandlesAuto,
+        Action::HandlesSmooth,
+        Action::HandlesFlat,
+        Action::HandlesBroken,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -372,6 +402,19 @@ impl Action {
             Action::CutCells => "Cut cells",
             Action::PasteCells => "Paste cells",
             Action::PasteCellsInsert => "Paste cells (insert)",
+            Action::TypeIntoCell => "Type into cell",
+            Action::ShowCurves => "Curves (graph editor)",
+            Action::FrameCurves => "Frame curves",
+            Action::InterpHold => "Key interpolation: hold",
+            Action::InterpLinear => "Key interpolation: linear",
+            Action::InterpEase => "Key interpolation: ease",
+            Action::InterpEaseIn => "Key interpolation: ease in (slow start)",
+            Action::InterpEaseOut => "Key interpolation: ease out (slow stop)",
+            Action::InterpBezier => "Key interpolation: bezier",
+            Action::HandlesAuto => "Key handles: auto",
+            Action::HandlesSmooth => "Key handles: smooth",
+            Action::HandlesFlat => "Key handles: flat",
+            Action::HandlesBroken => "Key handles: broken",
         }
     }
 
@@ -458,6 +501,25 @@ impl Action {
             CutCells => "Copy the selected sheet cells, then empty them.",
             PasteCells => "Paste the copied cells at the cursor, over the cells there.",
             PasteCellsInsert => "Paste the copied cells at the cursor, pushing the cells there later.",
+            TypeIntoCell => {
+                "Type a drawing name into the sheet cursor's cell (a digit over the sheet starts it too)."
+            }
+            ShowCurves => "Open the Curves pane: param columns (camera moves) as curves over frames, keys to drag.",
+            FrameCurves => "Fit the curves view to the selected keys, or every curve when none is selected.",
+            InterpHold => "The selected keys hold their value until the next key: a jump, no motion between.",
+            InterpLinear => "The selected keys move at an even speed to the next key.",
+            InterpEase => "The selected keys start slowly, speed up, and slow again into the next key.",
+            InterpEaseIn => {
+                "Slow start: leaves the key slowly and speeds up toward the next (like After Effects' Easy Ease Out on this key)."
+            }
+            InterpEaseOut => {
+                "Slow stop: leaves the key at speed and slows into the next key (like After Effects' Easy Ease In on that key)."
+            }
+            InterpBezier => "The selected keys curve to the next key along their handles (drag them in the Curves pane).",
+            HandlesAuto => "Bezier keys with automatic handles: the curve passes smoothly through each key.",
+            HandlesSmooth => "Bezier handles that stay in line: dragging one turns the other, so the curve stays smooth.",
+            HandlesFlat => "Bezier handles laid flat: the motion comes to rest on the key (no overshoot).",
+            HandlesBroken => "Bezier handles that move apart: each side of the key bends on its own (a sharp turn).",
         }
     }
 
@@ -476,13 +538,16 @@ impl Action {
             | DeleteFrames | HoldPlus | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees
             | Reverse | ColumnKindCel | ColumnKindBg | ColumnKindBook | ColumnKindRef
             | ToggleColumnHidden | ToggleColumnLocked | CopyCells | CutCells | PasteCells
-            | PasteCellsInsert => Group::Sheet,
+            | PasteCellsInsert | TypeIntoCell | InterpHold | InterpLinear | InterpEase
+            | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
+            | HandlesFlat | HandlesBroken => Group::Sheet,
+            FrameCurves => Group::View,
             PrevCut | NextCut => Group::Cut,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
             RoomLayout | RoomDrawing | RoomFinishing | RoomEdit => Group::Room,
-            ResetLayout => Group::Window,
+            ResetLayout | ShowCurves => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
         }
     }
@@ -544,6 +609,21 @@ impl Action {
             CutCells => "Sheet/Cut cells",
             PasteCells => "Sheet/Paste cells",
             PasteCellsInsert => "Sheet/Paste cells (insert)",
+            TypeIntoCell => "Sheet/Type into cell",
+            // GM14: the curves pane's key verbs, a submenu each (the pane's
+            // right-click menu runs the same verbs).
+            InterpHold => "Sheet/Key interpolation/hold",
+            InterpLinear => "Sheet/Key interpolation/linear",
+            InterpEase => "Sheet/Key interpolation/ease",
+            InterpEaseIn => "Sheet/Key interpolation/ease in (slow start)",
+            InterpEaseOut => "Sheet/Key interpolation/ease out (slow stop)",
+            InterpBezier => "Sheet/Key interpolation/bezier",
+            HandlesAuto => "Sheet/Key handles/auto",
+            HandlesSmooth => "Sheet/Key handles/smooth",
+            HandlesFlat => "Sheet/Key handles/flat",
+            HandlesBroken => "Sheet/Key handles/broken",
+            FrameCurves => "View/Frame curves",
+            ShowCurves => "Window/Curves (graph editor)",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             // Each item is its room detent's Stage::name (a test holds them
@@ -623,6 +703,15 @@ impl Action {
             CutCells => &["cut", "cells", "clipboard"],
             PasteCells => &["paste", "cells", "clipboard"],
             PasteCellsInsert => &["paste insert", "cells", "clipboard"],
+            // GM14: the graph editor by the names other studios give it.
+            TypeIntoCell => &["enter cell", "type drawing", "cell entry"],
+            ShowCurves => &["graph editor", "f-curve", "curves", "camera move"],
+            FrameCurves => &["fit curves", "graph editor", "frame all"],
+            InterpHold | InterpLinear | InterpEase | InterpEaseIn | InterpEaseOut
+            | InterpBezier => &["interpolation", "curves", "easing"],
+            HandlesAuto | HandlesSmooth | HandlesFlat | HandlesBroken => {
+                &["handles", "bezier", "tangents"]
+            }
             _ => &[],
         }
     }
@@ -638,8 +727,11 @@ impl Action {
             NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames | DeleteFrames | HoldPlus
             | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees | Reverse | ColumnKindCel
             | ColumnKindBg | ColumnKindBook | ColumnKindRef | ToggleColumnHidden
-            | ToggleColumnLocked | CopyCells | CutCells | PasteCells | PasteCellsInsert => {
-                Ctx::Sheet
+            | ToggleColumnLocked | CopyCells | CutCells | PasteCells | PasteCellsInsert
+            | TypeIntoCell => Ctx::Sheet,
+            FrameCurves | InterpHold | InterpLinear | InterpEase | InterpEaseIn | InterpEaseOut
+            | InterpBezier | HandlesAuto | HandlesSmooth | HandlesFlat | HandlesBroken => {
+                Ctx::Curves
             }
             _ => Ctx::Global,
         }
@@ -654,7 +746,8 @@ impl Action {
     /// the whole cel with it over the canvas).
     pub fn pane_only(self) -> bool {
         // GM14: the cell clipboard too — Ctrl+V over the canvas must not
-        // paste cells into the sheet.
+        // paste cells into the sheet. Enter types into a cell only over the
+        // sheet, and the curves framing key frames only over its pane.
         matches!(
             self,
             Action::RemoveColumn
@@ -663,6 +756,8 @@ impl Action {
                 | Action::CutCells
                 | Action::PasteCells
                 | Action::PasteCellsInsert
+                | Action::TypeIntoCell
+                | Action::FrameCurves
         )
     }
 
@@ -691,6 +786,9 @@ impl Action {
                 // one chord, two panes.
                 ClearCel => return Some(Chord::plain("Delete")),
                 ClearCelAll => return Some(shift("Delete")),
+                // GM14: F frames the graph, as in every graph editor (the
+                // frame steps sit on , and . here).
+                FrameCurves => return Some(Chord::plain("F")),
                 _ => {}
             }
         }
@@ -828,8 +926,18 @@ impl Action {
                 shift: true,
                 ..ctrl("V")
             }),
+            // GM14: Enter over the sheet types into the cursor's cell. F is
+            // the next frame here, so the curves framing key is Shift+F (the
+            // pane itself also frames on a bare F under the pointer).
+            TypeIntoCell => Some(k("Enter")),
+            FrameCurves => Some(Chord {
+                shift: true,
+                ..k("F")
+            }),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
-            | RoomFinishing | RoomEdit => None,
+            | RoomFinishing | RoomEdit | ShowCurves | InterpHold | InterpLinear | InterpEase
+            | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
+            | HandlesFlat | HandlesBroken => None,
         }
     }
 }

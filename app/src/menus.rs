@@ -135,11 +135,31 @@ impl crate::Editor {
         }
     }
 
-    /// Every action filed under `menu`, in registry order.
+    /// Every action filed under `menu`, in registry order. GM14: a
+    /// three-part path ("Sheet/Key handles/flat") files the item in a
+    /// submenu, opened where its first item sits.
     pub(crate) fn menu_items(&mut self, ui: &mut egui::Ui, menu: &str) {
+        let mut subs: Vec<&str> = Vec::new();
         for a in Action::ALL {
-            if a.menu().and_then(|p| p.split('/').next()) == Some(menu) {
-                self.menu_item(ui, *a);
+            let Some(path) = a.menu() else { continue };
+            let mut parts = path.split('/');
+            if parts.next() != Some(menu) {
+                continue;
+            }
+            match (parts.next(), parts.next()) {
+                (Some(sub), Some(_)) if !subs.contains(&sub) => {
+                    subs.push(sub);
+                    ui.menu_button(sub, |ui| {
+                        for b in Action::ALL {
+                            let mut p = b.menu().unwrap_or("").split('/');
+                            if p.next() == Some(menu) && p.next() == Some(sub) && p.next().is_some() {
+                                self.menu_item(ui, *b);
+                            }
+                        }
+                    });
+                }
+                (Some(_), Some(_)) => {}
+                _ => self.menu_item(ui, *a),
             }
         }
     }

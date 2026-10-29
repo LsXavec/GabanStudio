@@ -1207,7 +1207,9 @@ satsuei part, the checklist moved up from Stretch, and the role chooser moved do
 - **Rooms (D12).** `Stage::Finishing` becomes `InkPaint` ("shiage (ink & paint)", key still `"finishing"`),
   and `Stage::Composite` ("satsuei (composite)", key `"composite"`) is added after it.
   - Its dock (`Stage::dock`, workspace.rs 130) puts the node graph large, with the viewer and the palette
-    beside it. Its verb (`Stage::view`, line 179) turns composite view on.
+    beside it, and the Curves pane (GM14's graph editor) as a tab beside the node graph: no room docked it
+    in GM14 (Window ▸ Curves opens it anywhere), and camera moves are timed here. Its verb (`Stage::view`,
+    line 179) turns composite view on.
   - `name` and `describes` split the old "shiage + satsuei" text between the two rooms.
   - `default_room_stacks` (config.rs 837, which maps a room key to a layer-stack preset) binds `"composite"`
     to `"Shiage (full)"`, and the Layers page's room list (config.rs 2130-2136) gains a row.

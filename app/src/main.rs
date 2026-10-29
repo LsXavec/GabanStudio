@@ -2875,6 +2875,15 @@ impl Editor {
             Action::QuickStart => self.help.quick_start = !self.help.quick_start,
             Action::About => self.help.about = !self.help.about,
             Action::History => self.open_pane(Pane::History),
+            // GM14: the graph editor, its framing, and typing on the sheet
+            // cursor's cell (the sheet comes forward and its entry takes
+            // the keys on its next frame).
+            Action::ShowCurves => self.open_pane(Pane::Curves),
+            Action::FrameCurves => curves_panel::frame_stored(&mut self.state),
+            Action::TypeIntoCell => {
+                self.open_pane(Pane::XSheet);
+                self.state.sheet_ui.ask_entry();
+            }
             Action::ResetLayout => {
                 let st = self.stage.unwrap_or(Stage::Drawing);
                 self.dock = st.dock();
@@ -3078,10 +3087,23 @@ impl Editor {
             Action::ColumnKindRef => s.set_column_kind(ColumnKind::Ref),
             Action::ToggleColumnHidden => s.toggle_column_hidden(),
             Action::ToggleColumnLocked => s.toggle_column_locked(),
-            Action::CopyCells => s.copy_cells(),
+            Action::CopyCells => {
+                s.copy_cells();
+            }
             Action::CutCells => s.cut_cells(),
             Action::PasteCells => s.paste_cells(false),
             Action::PasteCellsInsert => s.paste_cells(true),
+            // GM14: the curves pane's key verbs, on its selected keys.
+            Action::InterpHold
+            | Action::InterpLinear
+            | Action::InterpEase
+            | Action::InterpEaseIn
+            | Action::InterpEaseOut
+            | Action::InterpBezier
+            | Action::HandlesAuto
+            | Action::HandlesSmooth
+            | Action::HandlesFlat
+            | Action::HandlesBroken => curves_panel::key_verb(s, action),
             Action::ToggleOnion => s.view.onion = !s.view.onion,
             Action::ToggleEraser
             | Action::ToggleAlphaLock
@@ -3160,7 +3182,10 @@ impl Editor {
             | Action::RoomLayout
             | Action::RoomDrawing
             | Action::RoomFinishing
-            | Action::RoomEdit => {} // the chrome's, handled above
+            | Action::RoomEdit
+            | Action::ShowCurves
+            | Action::FrameCurves
+            | Action::TypeIntoCell => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
     }
@@ -3191,6 +3216,9 @@ fn is_chrome(action: Action) -> bool {
             | Action::RoomDrawing
             | Action::RoomFinishing
             | Action::RoomEdit
+            | Action::ShowCurves
+            | Action::FrameCurves
+            | Action::TypeIntoCell
     )
 }
 
@@ -3235,10 +3263,21 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::ColumnKindRef
             | Action::ToggleColumnHidden
             | Action::ToggleColumnLocked
-            // GM14: the cell clipboard edits the sheet too.
+            // GM14: the cell clipboard edits the sheet too, and so do the
+            // curves pane's key verbs.
             | Action::CutCells
             | Action::PasteCells
             | Action::PasteCellsInsert
+            | Action::InterpHold
+            | Action::InterpLinear
+            | Action::InterpEase
+            | Action::InterpEaseIn
+            | Action::InterpEaseOut
+            | Action::InterpBezier
+            | Action::HandlesAuto
+            | Action::HandlesSmooth
+            | Action::HandlesFlat
+            | Action::HandlesBroken
     )
 }
 
@@ -4115,6 +4154,7 @@ impl Editor {
             Some(Pane::Canvas) => config::Ctx::Canvas,
             Some(Pane::XSheet) => config::Ctx::Sheet,
             Some(Pane::NodeGraph) => config::Ctx::NodeGraph,
+            Some(Pane::Curves) => config::Ctx::Curves,
             _ => config::Ctx::Global,
         }
     }
@@ -4196,6 +4236,22 @@ impl Editor {
             Action::PasteCells | Action::PasteCellsInsert if s.sheet_ui.clipboard.is_none() => {
                 Err("copy cells first")
             }
+            // GM14: the key verbs act on the curves pane's selected keys.
+            Action::InterpHold
+            | Action::InterpLinear
+            | Action::InterpEase
+            | Action::InterpEaseIn
+            | Action::InterpEaseOut
+            | Action::InterpBezier
+            | Action::HandlesAuto
+            | Action::HandlesSmooth
+            | Action::HandlesFlat
+            | Action::HandlesBroken
+                if s.curves.selected.is_empty() =>
+            {
+                Err("select keys in the curves pane first")
+            }
+            Action::FrameCurves if s.curves.plot.is_none() => Err("open the curves pane first"),
             _ => Ok(()),
         }
     }
@@ -6219,7 +6275,9 @@ impl Editor {
                     for pane in Pane::ALL {
                         // The Brush window is RETIRED (owner 2026-08-17):
                         // its settings live on the canvas deck + right rail.
-                        if *pane == Pane::Brush {
+                        // GM14: the Curves pane is the registry's own item
+                        // (Window ▸ Curves (graph editor), listed below).
+                        if matches!(*pane, Pane::Brush | Pane::Curves) {
                             continue;
                         }
                         let present = self.dock.iter_all_tabs().any(|(_, t)| t == pane);
@@ -6595,6 +6653,11 @@ impl Editor {
                 egui_dock::AllowedSplits::All
             })
             .show_inside(ui, &mut tabs);
+        // GM14: the verbs a pane asked for (the curves pane's F and its
+        // key menu) run through the one dispatch, as a menu item does (D6).
+        for action in std::mem::take(&mut self.state.curves.asked) {
+            self.invoke(action, ui.ctx());
+        }
 
         // Phase 5 step 2: the canvas in its own OS window. Tabs' borrows of
         // state/canvas/paint end above, so this can borrow them fresh.

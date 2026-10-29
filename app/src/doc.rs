@@ -1901,8 +1901,9 @@ impl AppState {
         })
     }
 
-    /// Copy the selected cells to the sheet clipboard (no undo step).
-    pub fn copy_cells(&mut self) {
+    /// Copy the selected cells to the sheet clipboard (no undo step); false
+    /// when nothing was copied (the clipboard keeps what it held).
+    pub fn copy_cells(&mut self) -> bool {
         let (columns, from, to) = self.sheet_cells();
         match sheet_ops::copy_block(&self.engine.project, self.at(), &columns, from, to) {
             Ok(block) => {
@@ -1912,14 +1913,23 @@ impl AppState {
                     block.len
                 );
                 self.sheet_ui.clipboard = Some(block);
+                // The sheet hands the new block's text to the system.
+                self.sheet_ui.clip_text = None;
+                true
             }
-            Err(e) => self.report(Err(e), "copy"),
+            Err(e) => {
+                self.report(Err(e), "copy");
+                false
+            }
         }
     }
 
-    /// Copy the selected cells, then empty them — one undo step.
+    /// Copy the selected cells, then empty them — one undo step. A failed
+    /// copy cuts nothing (the clipboard still holds an older block).
     pub fn cut_cells(&mut self) {
-        self.copy_cells();
+        if !self.copy_cells() {
+            return;
+        }
         let Some(block) = &self.sheet_ui.clipboard else {
             return;
         };

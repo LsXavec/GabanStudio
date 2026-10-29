@@ -2,8 +2,12 @@
 //! curves. Keys select (click, Shift+click, a box) and drag (time snaps to
 //! whole frames; one drag is one undo step); a selected Bezier key's
 //! handles drag too; the context menu sets interpolation. F frames the
-//! selection, or everything. Edits go through SetParamKeys only.
+//! selection, or everything. Frame numbers ride the time rules, values the
+//! left edge, and the header types the selected key's value. Edits go
+//! through SetParamKeys only; the verbs (framing, interpolation, handles)
+//! are registry actions, run through the one dispatch.
 
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use anim_core::ids::ParamId;
@@ -11,6 +15,7 @@ use anim_core::xsheet::{HandleMode, Handles, ParamColumn, ParamInterp, ParamKey}
 use eframe::egui;
 use egui::{Pos2, Rect, Sense, pos2, vec2};
 
+use crate::config::Action;
 use crate::doc::AppState;
 use crate::plate;
 
@@ -18,6 +23,23 @@ use crate::plate;
 const HIT: f32 = 7.0;
 /// The column list's width.
 const LIST_W: f32 = 112.0;
+/// The header row over the plot (the selected key's frame and value).
+const HEAD_H: f32 = 24.0;
+
+/// The key verbs: the context menu's label, the registry action, and what
+/// it sets (a handle mode makes the key Bezier with that mode).
+const KEY_VERBS: [(&str, Action, ParamInterp, Option<HandleMode>); 10] = [
+    ("hold", Action::InterpHold, ParamInterp::Hold, None),
+    ("linear", Action::InterpLinear, ParamInterp::Linear, None),
+    ("ease", Action::InterpEase, ParamInterp::Ease, None),
+    ("ease in", Action::InterpEaseIn, ParamInterp::EaseIn, None),
+    ("ease out", Action::InterpEaseOut, ParamInterp::EaseOut, None),
+    ("bezier", Action::InterpBezier, ParamInterp::Bezier, None),
+    ("auto handles", Action::HandlesAuto, ParamInterp::Bezier, Some(HandleMode::Auto)),
+    ("smooth handles", Action::HandlesSmooth, ParamInterp::Bezier, Some(HandleMode::Smooth)),
+    ("flat handles", Action::HandlesFlat, ParamInterp::Bezier, Some(HandleMode::Flat)),
+    ("broken handles", Action::HandlesBroken, ParamInterp::Bezier, Some(HandleMode::Broken)),
+];
 
 /// Frame/value ↔ screen. Frame `f0` sits on the plot's left edge and value
 /// `v0` on its bottom edge; values grow upward.
@@ -116,11 +138,28 @@ pub struct CurvesState {
     moved: Option<(i64, f32)>,
     /// A handle drag's live key, shown until release.
     bent: Option<ParamKey>,
+    /// The verbs the pane asked for (its F, its key menu), run by the
+    /// editor through the one dispatch after the dock draws.
+    pub asked: Vec<Action>,
+    /// The header's value field last frame (tests aim with it).
+    pub value_field: Option<Rect>,
+    /// The header's value buffer for one key, and whether the field is
+    /// mid-edit (typed or dragged): a resting field follows the key.
+    value: Option<((ParamId, u32), f32)>,
+    value_editing: bool,
 }
 
-/// One colour per shown column, from the plate's tokens.
+/// One ink per shown column, from the plate's inks that carry no other
+/// meaning here — Tally is the current frame, Aka a refusal, and a selected
+/// key wears a ring, not a colour.
 fn ink(i: usize) -> egui::Color32 {
-    [plate::AO, plate::TALLY, plate::AKA, plate::PAPER, plate::STRUCK][i % 5]
+    [
+        plate::STRUCK,
+        plate::AO,
+        plate::LEGEND,
+        plate::AO.gamma_multiply(0.6),
+        plate::STRUCK.gamma_multiply(0.6),
+    ][i % 5]
 }
 
 /// The columns drawn: the chosen ones, else all of them.
@@ -185,8 +224,23 @@ pub fn frame_view(state: &mut AppState, plot: Rect) {
     }
 }
 
+/// The Frame curves verb: frame in the plot as last drawn.
+pub fn frame_stored(state: &mut AppState) {
+    if let Some(plot) = state.curves.plot {
+        frame_view(state, plot);
+    }
+}
+
+/// A key drag's frame offset as it will land: the whole selection stops
+/// together at frame 0 (`sheet_ops::move_param_keys` clamps the same way).
+fn clamp_frames(sel: &BTreeSet<(ParamId, u32)>, frames: i64) -> i64 {
+    let lowest = sel.iter().map(|&(_, f)| f as i64).min().unwrap_or(0);
+    frames.max(-lowest)
+}
+
 /// `col` with the selected keys moved by (frames, dv) — the drag's
-/// preview, by the same law as `sheet_ops::move_param_keys`.
+/// preview, by the same law as `sheet_ops::move_param_keys` (`frames`
+/// already clamped over the whole selection).
 fn moved_column(col: &ParamColumn, sel: &BTreeSet<(ParamId, u32)>, frames: i64, dv: f32) -> ParamColumn {
     let mut out = col.clone();
     let moving: Vec<(u32, ParamKey)> = col
@@ -223,6 +277,15 @@ fn key_at(cols: &[ParamColumn], view: &CurveView, plot: Rect, p: Pos2) -> Option
     best.map(|(k, _)| k)
 }
 
+/// Which of a Bezier key's handles shape a curve, (in, out): the out
+/// handle when a key follows; the in handle when the key before is Bezier
+/// too (its segment is the one that reads it).
+fn live_handles(col: &ParamColumn, frame: u32) -> (bool, bool) {
+    let before = col.keys().filter(|(f, _)| *f < frame).last();
+    let after = col.keys().any(|(f, _)| f > frame);
+    (before.is_some_and(|(_, k)| k.interp == ParamInterp::Bezier), after)
+}
+
 /// The handle of a selected Bezier key under `p`.
 fn handle_at(
     cols: &[ParamColumn],
@@ -237,8 +300,12 @@ fn handle_at(
                 continue;
             }
             let Some((hin, hout)) = handle_points(col, f) else { continue };
+            let (live_in, live_out) = live_handles(col, f);
             let at = view.to_screen(plot, f as f64, k.value as f64);
             for (pt, out) in [(hout, true), (hin, false)] {
+                if !(if out { live_out } else { live_in }) {
+                    continue;
+                }
                 let hs = view.to_screen(plot, pt.0, pt.1);
                 // A handle sitting on its key (an end key's empty side)
                 // never steals the key's drag.
@@ -305,14 +372,128 @@ fn set_interp(state: &mut AppState, interp: ParamInterp, mode: Option<HandleMode
     state.set_param_keys(label, edits);
 }
 
+/// A key verb (the context menu, Sheet ▸ Key interpolation / Key handles,
+/// the palette) on the selected keys — one undo step.
+pub fn key_verb(state: &mut AppState, action: Action) {
+    let Some(&(label, _, interp, mode)) = KEY_VERBS.iter().find(|v| v.1 == action) else {
+        return;
+    };
+    let label = match mode {
+        Some(_) => label.to_string(),
+        None => format!("interpolation: {label}"),
+    };
+    set_interp(state, interp, mode, &label);
+}
+
+/// The step between time rules, in frames: the first rung with room for
+/// its label; from a second up the rules fall on whole seconds.
+fn time_step(px_per_frame: f64, fps: u32) -> u32 {
+    let fps = fps.max(1);
+    let rungs = [1, 2, 4, 6, 12]
+        .into_iter()
+        .filter(|s| *s < fps)
+        .chain([1, 2, 5, 10, 30, 60].into_iter().map(|s| s * fps));
+    let mut last = fps;
+    for s in rungs {
+        last = s;
+        if s as f64 * px_per_frame >= 44.0 {
+            break;
+        }
+    }
+    last
+}
+
+/// A rule's frame number as the sheet says it: 1-based, or seconds+frames
+/// once the rules fall on seconds.
+fn time_label(frame: u32, step: u32, fps: u32) -> String {
+    if step >= fps.max(1) {
+        crate::xsheet_panel::seconds_plus_frames(frame, fps)
+    } else {
+        (frame + 1).to_string()
+    }
+}
+
+/// The step between value ticks: 1, 2 or 5 × a power of ten, about 40
+/// points apart.
+fn value_step(px_per_value: f64) -> f64 {
+    let raw = 40.0 / px_per_value.max(1e-9);
+    let mag = 10f64.powf(raw.log10().floor());
+    [1.0, 2.0, 5.0, 10.0]
+        .into_iter()
+        .map(|m| m * mag)
+        .find(|s| *s >= raw)
+        .unwrap_or(10.0 * mag)
+}
+
+/// A value tick's label, with the decimals its step needs.
+fn value_label(v: f64, step: f64) -> String {
+    let decimals = (-step.log10().floor()).max(0.0) as usize;
+    let v = if v.abs() < step * 1e-6 { 0.0 } else { v };
+    format!("{v:.decimals$}")
+}
+
+/// GM14: the header over the plot — the selected key's column and frame
+/// (1-based, as the sheet counts), its value typed or dragged (one undo
+/// step when the field lets go) and its interpolation.
+fn key_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+    let one = match state.curves.selected.len() {
+        1 => state.curves.selected.iter().next().copied(),
+        _ => None,
+    };
+    let picked = one.and_then(|(pid, frame)| {
+        let col = state.cut().xsheet.param(pid)?;
+        Some((pid, frame, col.name.clone(), col.key_at(frame)?))
+    });
+    let Some((pid, frame, name, key)) = picked else {
+        state.curves.value_field = None;
+        state.curves.value = None;
+        let n = state.curves.selected.len();
+        let text = if n == 0 {
+            "click a key to read and type its value".to_string()
+        } else {
+            format!("{n} keys selected — the right-click menu sets their interpolation")
+        };
+        ui.label(egui::RichText::new(text).color(plate::legend_dim()));
+        return;
+    };
+    ui.label(egui::RichText::new(format!("{name} @ {}", frame + 1)).color(plate::LEGEND));
+    // A resting field follows the key (an undo, a drag in the plot).
+    if !state.curves.value_editing || state.curves.value.map(|(k, _)| k) != Some((pid, frame)) {
+        state.curves.value = Some(((pid, frame), key.value));
+    }
+    let mut v = state.curves.value.map_or(key.value, |(_, v)| v);
+    let resp = ui
+        .add_enabled(
+            gesture_safe,
+            egui::DragValue::new(&mut v).speed(0.05).update_while_editing(false),
+        )
+        .on_hover_text("this key's value: drag it, or click and type — one undo step when you let go");
+    state.curves.value_field = Some(resp.rect);
+    state.curves.value = Some(((pid, frame), v));
+    state.curves.value_editing = resp.has_focus() || resp.dragged();
+    if (resp.drag_stopped() || (resp.changed() && !resp.dragged())) && v != key.value {
+        state.set_param_keys("key value", vec![(pid, frame, ParamKey { value: v, ..key })]);
+    }
+    let word = KEY_VERBS
+        .iter()
+        .find(|(_, _, i, m)| *i == key.interp && m.is_none())
+        .map_or("", |v| v.0);
+    ui.label(egui::RichText::new(word).color(plate::legend_dim()));
+}
+
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
-    // Selections of keys that no longer exist (undo, the sheet) drop out.
+    // Selections of keys that no longer exist (undo, the sheet) or whose
+    // curve is no longer shown drop out: a verb acts on what is seen.
+    let shown = &state.curves.shown;
     let live: BTreeSet<(ParamId, u32)> = state
         .curves
         .selected
         .iter()
         .copied()
-        .filter(|(p, f)| state.cut().xsheet.param(*p).is_some_and(|c| c.key_at(*f).is_some()))
+        .filter(|(p, f)| {
+            (shown.is_empty() || shown.contains(p))
+                && state.cut().xsheet.param(*p).is_some_and(|c| c.key_at(*f).is_some())
+        })
         .collect();
     state.curves.selected = live;
     let params: Vec<(ParamId, String)> = state
@@ -325,14 +506,21 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     if params.is_empty() {
         plate::legend(ui, "curves");
         ui.label(
-            egui::RichText::new("no param columns yet — add one in the sheet (camera moves etc.)")
-                .color(plate::legend_dim()),
+            egui::RichText::new(
+                "no param columns yet — bind one from a Transform node's parameter in the node \
+                 graph (+ new column)",
+            )
+            .color(plate::legend_dim()),
         );
         return;
     }
     let full = ui.available_rect_before_wrap();
     let list = Rect::from_min_size(full.min, vec2(LIST_W, full.height()));
-    let plot = Rect::from_min_max(pos2(full.left() + LIST_W + 4.0, full.top()), full.max);
+    let head = Rect::from_min_max(
+        pos2(full.left() + LIST_W + 4.0, full.top()),
+        pos2(full.right(), full.top() + HEAD_H),
+    );
+    let plot = Rect::from_min_max(pos2(head.left(), head.bottom()), full.max);
 
     // The column list: pick which curves show (none picked = all).
     ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
@@ -354,19 +542,28 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         }
     });
 
+    // The header: the selected key's frame and value.
+    ui.scope_builder(
+        egui::UiBuilder::new()
+            .max_rect(head)
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        |ui| key_header(ui, state, gesture_safe),
+    );
+
     state.curves.plot = Some(plot);
     let cols = shown_columns(state);
     if state.curves.view.is_none() {
         frame_view(state, plot);
     }
     // F frames the selection (or everything) while the pointer is over
-    // the pane — taken here, so the sheet's F (next frame) stays put.
+    // the pane, as in every graph editor — taken here, so the sheet's F
+    // (next frame) stays put, and run as the Frame curves verb.
     let pointer_here = ui.rect_contains_pointer(full);
     if pointer_here
         && !ui.ctx().text_edit_focused()
         && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F))
     {
-        frame_view(state, plot);
+        state.curves.asked.push(Action::FrameCurves);
     }
     let mut view = state.curves.view.unwrap_or_default();
 
@@ -414,7 +611,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             Drag::Keys { from } => {
                 let frames = ((p.x - from.x) as f64 / view.px_per_frame).round() as i64;
                 let dv = ((from.y - p.y) as f64 / view.px_per_value) as f32;
-                state.curves.moved = Some((frames, dv));
+                state.curves.moved = Some((clamp_frames(&state.curves.selected, frames), dv));
             }
             Drag::Handle { column, frame, out } => {
                 state.curves.bent = cols
@@ -428,26 +625,30 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     if resp.drag_stopped() {
         match state.curves.drag.take() {
             Some(Drag::Keys { .. }) => {
-                if let Some((frames, dv)) = state.curves.moved.take()
-                    && gesture_safe
-                {
-                    let keys: Vec<(ParamId, u32)> = state.curves.selected.iter().copied().collect();
-                    let lowest = keys.iter().map(|&(_, f)| f as i64).min().unwrap_or(0);
-                    let frames = frames.max(-lowest);
-                    if state.move_param_keys(&keys, frames, dv) {
-                        // The selection follows the keys it moved.
-                        state.curves.selected = keys
-                            .iter()
-                            .map(|&(p, f)| (p, (f as i64 + frames) as u32))
-                            .collect();
+                if let Some((frames, dv)) = state.curves.moved.take() {
+                    if !gesture_safe {
+                        state.refuse("refused — finish the stroke first");
+                    } else {
+                        let keys: Vec<(ParamId, u32)> =
+                            state.curves.selected.iter().copied().collect();
+                        let frames = clamp_frames(&state.curves.selected, frames);
+                        if state.move_param_keys(&keys, frames, dv) {
+                            // The selection follows the keys it moved.
+                            state.curves.selected = keys
+                                .iter()
+                                .map(|&(p, f)| (p, (f as i64 + frames) as u32))
+                                .collect();
+                        }
                     }
                 }
             }
             Some(Drag::Handle { column, frame, .. }) => {
-                if let Some(key) = state.curves.bent.take()
-                    && gesture_safe
-                {
-                    state.set_param_keys("bend handle", vec![(column, frame, key)]);
+                if let Some(key) = state.curves.bent.take() {
+                    if gesture_safe {
+                        state.set_param_keys("bend handle", vec![(column, frame, key)]);
+                    } else {
+                        state.refuse("refused — finish the stroke first");
+                    }
                 }
             }
             Some(Drag::Box { from }) => {
@@ -493,19 +694,48 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     // ---- paint ----
     let painter = ui.painter_at(plot);
     painter.rect_filled(plot, 0.0, plate::WELL);
-    // Frame rules every second, value zero line.
-    let fps = state.fps().max(1) as f64;
-    let (fa, _) = view.from_screen(plot, plot.left_bottom());
-    let (fb, _) = view.from_screen(plot, plot.right_top());
-    let step = if view.px_per_frame * fps < 24.0 { fps * 4.0 } else { fps };
-    let mut s = (fa / step).floor() * step;
-    while s <= fb {
-        let x = view.to_screen(plot, s, 0.0).x;
+    // Time rules with their frame numbers along the top (1-based, as the
+    // sheet counts; seconds+frames once they fall on seconds), value ticks
+    // with their numbers down the left edge, the value zero line.
+    let fps = state.fps().max(1);
+    let (fa, va) = view.from_screen(plot, plot.left_bottom());
+    let (fb, vb) = view.from_screen(plot, plot.right_top());
+    let numbers = egui::FontId::monospace(10.0);
+    let tstep = time_step(view.px_per_frame, fps);
+    let mut s = ((fa.max(0.0) / tstep as f64).ceil() as u32).saturating_mul(tstep);
+    while (s as f64) <= fb {
+        let x = view.to_screen(plot, s as f64, 0.0).x;
         painter.line_segment(
             [pos2(x, plot.top()), pos2(x, plot.bottom())],
             egui::Stroke::new(1.0, plate::rule_beat()),
         );
-        s += step;
+        painter.text(
+            pos2(x + 3.0, plot.top() + 2.0),
+            egui::Align2::LEFT_TOP,
+            time_label(s, tstep, fps),
+            numbers.clone(),
+            plate::LEGEND,
+        );
+        let Some(next) = s.checked_add(tstep) else { break };
+        s = next;
+    }
+    let vstep = value_step(view.px_per_value);
+    let mut t = (va / vstep).ceil();
+    while t * vstep <= vb {
+        let v = t * vstep;
+        let y = view.to_screen(plot, 0.0, v).y;
+        painter.line_segment(
+            [pos2(plot.left(), y), pos2(plot.left() + 6.0, y)],
+            egui::Stroke::new(1.0, plate::LEGEND),
+        );
+        painter.text(
+            pos2(plot.left() + 8.0, y),
+            egui::Align2::LEFT_CENTER,
+            value_label(v, vstep),
+            numbers.clone(),
+            plate::LEGEND,
+        );
+        t += 1.0;
     }
     let y0 = view.to_screen(plot, 0.0, 0.0).y;
     painter.line_segment(
@@ -521,15 +751,18 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     let sel = &state.curves.selected;
     for col in &cols {
         let i = params.iter().position(|(id, _)| *id == col.id).unwrap_or(0);
-        // The live drag shows on the curve itself.
-        let shown = match (state.curves.moved, state.curves.drag, state.curves.bent) {
-            (Some((frames, dv)), _, _) => moved_column(col, sel, frames, dv),
+        // The live drag shows on the curve itself; only a curve the drag
+        // changes is copied.
+        let shown: Cow<ParamColumn> = match (state.curves.moved, state.curves.drag, state.curves.bent) {
+            (Some((frames, dv)), _, _) if sel.iter().any(|(p, _)| *p == col.id) => {
+                Cow::Owned(moved_column(col, sel, frames, dv))
+            }
             (_, Some(Drag::Handle { column, frame, .. }), Some(k)) if column == col.id => {
                 let mut c = col.clone();
                 c.set_key(frame, k);
-                c
+                Cow::Owned(c)
             }
-            _ => col.clone(),
+            _ => Cow::Borrowed(col),
         };
         let step = (2.0 / view.px_per_frame).max(1e-3);
         let mut pts = Vec::new();
@@ -549,57 +782,50 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             if picked && k.interp == ParamInterp::Bezier
                 && let Some((hin, hout)) = handle_points(&shown, f)
             {
-                for hp in [hin, hout] {
+                // Only the handles a segment reads (see `live_handles`).
+                let (live_in, live_out) = live_handles(&shown, f);
+                for (hp, live) in [(hin, live_in), (hout, live_out)] {
+                    if !live {
+                        continue;
+                    }
                     let hs = view.to_screen(plot, hp.0, hp.1);
                     painter.line_segment([at, hs], egui::Stroke::new(1.0, plate::LEGEND));
                     painter.rect_filled(Rect::from_center_size(hs, vec2(5.0, 5.0)), 0.0, plate::LEGEND);
                 }
             }
-            painter.circle_filled(at, if picked { 4.5 } else { 3.5 }, if picked { plate::STRUCK } else { ink(i) });
+            painter.circle_filled(at, 3.5, ink(i));
+            if picked {
+                painter.circle_stroke(at, 6.5, egui::Stroke::new(1.5, plate::STRUCK));
+            }
         }
     }
     if let (Some(Drag::Box { from }), Some(p)) = (state.curves.drag, pointer) {
         let r = Rect::from_two_pos(from, p);
-        painter.rect_filled(r, 0.0, plate::AO.gamma_multiply(0.15));
-        painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, plate::AO), egui::StrokeKind::Inside);
+        painter.rect_filled(r, 0.0, plate::LEGEND.gamma_multiply(0.12));
+        painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, plate::LEGEND), egui::StrokeKind::Inside);
     }
     painter.text(
-        plot.left_top() + vec2(6.0, 4.0),
-        egui::Align2::LEFT_TOP,
+        plot.right_bottom() + vec2(-6.0, -4.0),
+        egui::Align2::RIGHT_BOTTOM,
         "drag keys · box select · F frames · right-click: interpolation · Alt+drag pans · scroll zooms",
         egui::FontId::proportional(10.5),
         plate::legend_dim(),
     );
     state.curves.view = Some(view);
 
-    // Interpolation and handle modes for the selected keys.
+    // Interpolation and handle modes for the selected keys: the registry's
+    // key verbs, run through the one dispatch once the dock has drawn.
     resp.context_menu(|ui| {
         if state.curves.selected.is_empty() {
             ui.label("select keys first");
             return;
         }
-        for (label, interp) in [
-            ("hold", ParamInterp::Hold),
-            ("linear", ParamInterp::Linear),
-            ("ease", ParamInterp::Ease),
-            ("ease in", ParamInterp::EaseIn),
-            ("ease out", ParamInterp::EaseOut),
-            ("bezier", ParamInterp::Bezier),
-        ] {
-            if ui.button(label).clicked() {
-                if gesture_safe {
-                    set_interp(state, interp, None, &format!("interpolation: {label}"));
-                }
-                ui.close();
+        for (n, (label, action, ..)) in KEY_VERBS.iter().enumerate() {
+            if n == 6 {
+                ui.separator();
             }
-        }
-        ui.separator();
-        for mode in HandleMode::ALL {
-            let label = format!("{} handles", mode.key());
-            if ui.button(&label).clicked() {
-                if gesture_safe {
-                    set_interp(state, ParamInterp::Bezier, Some(mode), &label);
-                }
+            if ui.button(*label).on_hover_text(action.help()).clicked() {
+                state.curves.asked.push(*action);
                 ui.close();
             }
         }
@@ -793,5 +1019,96 @@ mod tests {
         assert_eq!(hd.mode, HandleMode::Smooth, "an auto key turns smooth");
         assert!((hd.out_dv - (out.1 as f32 + 2.0)).abs() < 0.05, "{hd:?} vs {out:?}");
         assert_eq!(h.state().engine.position(), steps + 1);
+    }
+
+    #[test]
+    fn curves_header_types_a_keys_value_in_one_step() {
+        let (mut h, p) = curves();
+        assert!(h.has_text_containing("click a key"), "{}", h.describe());
+        h.click_pos(screen_of(&h, p, 10));
+        assert!(h.has("cam.x @ 11"), "the header names the key, 1-based\n{}", h.describe());
+        let field = h.state().curves.value_field.expect("the value field drew");
+        let steps = h.state().engine.position();
+        h.click_pos(field.center());
+        assert!(h.typing(), "a click types into the value\n{}", h.describe());
+        h.type_text("7.5");
+        h.key(egui::Key::Enter);
+        let k = h.state().cut().xsheet.param(p).unwrap().key_at(10).unwrap();
+        assert_eq!(k.value, 7.5);
+        assert_eq!(k.interp, ParamInterp::Linear, "only the value changed");
+        assert_eq!(h.state().engine.position(), steps + 1, "one typed value, one undo step");
+        assert!(!h.typing());
+        assert_eq!(keys(&h, p).len(), 3);
+    }
+
+    #[test]
+    fn curves_rules_and_ticks_carry_numbers() {
+        // Time: the first rung with room for its label; from a second up
+        // the rules fall on whole seconds, labelled seconds+frames.
+        assert_eq!(time_step(10.0, 24), 6);
+        assert_eq!(time_step(1.0, 24), 48);
+        assert_eq!(time_step(100.0, 24), 1);
+        assert_eq!(time_label(0, 6, 24), "1", "frames count from 1, as the sheet does");
+        assert_eq!(time_label(11, 6, 24), "12");
+        assert_eq!(time_label(48, 48, 24), "2+0");
+        // Value: 1, 2 or 5 × a power of ten, about 40 points apart, with
+        // the decimals the step needs.
+        assert_eq!(value_step(10.0), 5.0);
+        assert!((value_step(100.0) - 0.5).abs() < 1e-12);
+        assert!((value_step(0.4) - 100.0).abs() < 1e-9);
+        assert_eq!(value_label(2.5, 0.5), "2.5");
+        assert_eq!(value_label(10.0, 5.0), "10");
+        assert_eq!(value_label(-1e-12, 0.5), "0.0", "no minus zero");
+    }
+
+    #[test]
+    fn curves_handles_show_only_where_they_shape_the_curve() {
+        let mut col = ParamColumn::new(ParamId(1), "cam.x");
+        let k = |interp| ParamKey {
+            value: 0.0,
+            interp,
+            handles: None,
+        };
+        col.set_key(0, k(ParamInterp::Bezier));
+        col.set_key(10, k(ParamInterp::Linear));
+        col.set_key(20, k(ParamInterp::Bezier));
+        // (in, out): out when a key follows; in when the key before is
+        // Bezier (its segment reads it).
+        assert_eq!(live_handles(&col, 0), (false, true));
+        assert_eq!(live_handles(&col, 10), (true, true));
+        assert_eq!(live_handles(&col, 20), (false, false));
+        // A drag left stops the whole selection together at frame 0.
+        let sel: BTreeSet<(ParamId, u32)> = [(ParamId(1), 4), (ParamId(2), 8)].into_iter().collect();
+        assert_eq!(clamp_frames(&sel, -9), -4);
+        assert_eq!(clamp_frames(&sel, 3), 3);
+        let moved = moved_column(&col, &[(ParamId(1), 10)].into_iter().collect(), -12, 1.0);
+        assert_eq!(moved.keys().map(|(f, _)| f).collect::<Vec<_>>(), vec![0, 20], "10 - 12 lands on 0");
+    }
+
+    #[test]
+    fn curves_verbs_live_in_the_registry_and_open_the_pane() {
+        use crate::config::{Ctx, Keymap, default_binds};
+        // The palette finds the pane by the words animators use for it.
+        for q in ["graph editor", "f-curve", "curves"] {
+            assert_eq!(crate::cmdpal::ranked(q, &[]).first(), Some(&Action::ShowCurves), "{q}");
+        }
+        assert_eq!(Action::ShowCurves.menu(), Some("Window/Curves (graph editor)"));
+        // Frame curves has a chord in both keymaps, over the curves pane;
+        // the key verbs are filed in the Sheet menu.
+        for km in Keymap::ALL {
+            let binds = default_binds(*km);
+            assert!(crate::cmdpal::chord_of(&binds, Action::FrameCurves).is_some(), "{km:?}");
+        }
+        assert_eq!(Action::FrameCurves.context(), Ctx::Curves);
+        for (_, action, _, _) in KEY_VERBS {
+            assert_eq!(action.context(), Ctx::Curves, "{action:?}");
+            assert!(action.menu().is_some_and(|m| m.starts_with("Sheet/")), "{action:?}");
+        }
+        // Window › Curves docks the pane where it is not.
+        let mut h = EditorHarness::new();
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::XSheet]);
+        h.run();
+        h.perform(Action::ShowCurves);
+        assert!(h.editor().dock.find_tab(&Pane::Curves).is_some());
     }
 }

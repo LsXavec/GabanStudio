@@ -52,9 +52,24 @@ pub struct SheetUi {
     /// The top-left of frame 0's row on screen last frame (tests aim at
     /// cells with it).
     pub origin: Option<egui::Pos2>,
+    /// The clipboard block's text as handed to the system clipboard (None
+    /// = not handed over yet): a paste carrying other text is not cells.
+    pub clip_text: Option<String>,
+    /// The Type-into-cell verb asked for the entry (taken next frame).
+    type_asked: bool,
+    /// The cursor (cut, frame) the sheet last scrolled to: a new one is
+    /// scrolled into view, so the entry stays laid out under the keys.
+    followed: Option<(anim_core::ids::CutId, u32)>,
 }
 
 impl SheetUi {
+    /// GM14: the Type-into-cell verb — the entry on the cursor's cell
+    /// takes the keys on the sheet's next frame, its row brought into view.
+    pub fn ask_entry(&mut self) {
+        self.type_asked = true;
+        self.followed = None;
+    }
+
     /// The centre of drawing column `ci`'s cell on `frame`, as last drawn.
     pub fn cell_center(&self, ci: usize, frame: u32) -> Option<egui::Pos2> {
         self.origin.map(|o| {
@@ -115,24 +130,40 @@ fn block_text(state: &AppState, block: &anim_core::sheet_ops::Block) -> String {
     rows.iter().map(|r| r.join("\t")).collect::<Vec<_>>().join("\n")
 }
 
+/// GM14: hand a freshly filled sheet clipboard's text to the system
+/// clipboard — however it was filled (these keys, the menu, the palette) —
+/// so the paste key sends that text back and a paste can tell the block
+/// from text copied elsewhere since.
+fn publish_clipboard(ui: &egui::Ui, state: &mut AppState) {
+    if let Some(block) = &state.sheet_ui.clipboard
+        && state.sheet_ui.clip_text.is_none()
+    {
+        let text = block_text(state, block);
+        ui.ctx().copy_text(text.clone());
+        state.sheet_ui.clip_text = Some(text);
+    }
+}
+
 /// GM14: the system clipboard keys over the sheet. egui-winit turns
 /// Ctrl+C / Ctrl+X / Ctrl+V into Copy / Cut / Paste events (no key
 /// event), so the sheet answers them here, when the pointer is over it
 /// and no field is typing; the same verbs as the Copy/Cut/Paste cells
 /// actions. A frame that also carries the chord's key leaves it to the
-/// action, so one press never acts twice.
+/// action, so one press never acts twice. A paste lands the cells only
+/// when it carries the block's own text; other text is refused.
 fn clipboard_events(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+    publish_clipboard(ui, state);
     if !ui.rect_contains_pointer(ui.max_rect()) || ui.ctx().text_edit_focused() {
         return;
     }
     let (copy, cut, paste, shift, keyed) = ui.input(|i| {
-        let mut out = (false, false, false, i.modifiers.shift, false);
+        let mut out = (false, false, None, i.modifiers.shift, false);
         for e in &i.events {
             match e {
                 egui::Event::Copy => out.0 = true,
                 // Shift+Delete is Cut on Windows too: only Ctrl+X cuts cells.
                 egui::Event::Cut if i.modifiers.command => out.1 = true,
-                egui::Event::Paste(_) => out.2 = true,
+                egui::Event::Paste(text) => out.2 = Some(text.clone()),
                 _ => {}
             }
         }
@@ -151,12 +182,17 @@ fn clipboard_events(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool)
         } else {
             state.copy_cells();
         }
-        if let Some(block) = &state.sheet_ui.clipboard {
-            let text = block_text(state, block);
-            ui.ctx().copy_text(text);
+        publish_clipboard(ui, state);
+    } else if let Some(text) = paste
+        && gesture_safe
+    {
+        // The system hands text back with its own line ends.
+        let plain = |t: &str| t.replace("\r\n", "\n").trim_end().to_string();
+        if state.sheet_ui.clip_text.as_deref().map(plain) == Some(plain(&text)) {
+            state.paste_cells(shift);
+        } else {
+            state.refuse("refused — the clipboard holds text, not cells (copy cells first)");
         }
-    } else if paste && gesture_safe {
-        state.paste_cells(shift);
     }
 }
 
@@ -170,7 +206,7 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         state.sheet_ui.length = frames.to_string();
         state.sheet_ui.length_at = Some(frames);
     }
-    plate::legend(ui, "length");
+    plate::legend(ui, "shaku (length)");
     let resp = ui
         .add(
             egui::TextEdit::singleline(&mut state.sheet_ui.length)
@@ -188,7 +224,10 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             .color(plate::LEGEND),
     );
     if resp.lost_focus() {
-        if ui.input(|i| i.key_pressed(egui::Key::Enter)) && gesture_safe {
+        // The Enter that sets the length is the field's, not the sheet's
+        // Type-into-cell key.
+        let enter = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        if enter && gesture_safe {
             match parse_length(&state.sheet_ui.length, fps) {
                 Some(n) => state.set_cut_length(n),
                 None => state.refuse("cut length: type frames (60) or seconds+frames (2+12)"),
@@ -209,7 +248,7 @@ fn memo_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         state.sheet_ui.memo = state.cut().memos.get(&here.1).cloned().unwrap_or_default();
         state.sheet_ui.memo_at = Some(here);
     }
-    plate::legend(ui, "memo");
+    plate::legend(ui, "memo (serifu)");
     let resp = ui
         .add(
             egui::TextEdit::singleline(&mut state.sheet_ui.memo)
@@ -220,6 +259,8 @@ fn memo_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         .on_hover_text("this frame's memo: dialogue (serifu) and action notes — one undo step");
     if resp.lost_focus() {
         let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        // The field's own Enter, not the sheet's Type-into-cell key.
+        ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         // The frame the field was seeded for, even if the playhead moved.
         if let Some((cut, frame)) = state.sheet_ui.memo_at
             && !escaped
@@ -233,14 +274,73 @@ fn memo_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     }
 }
 
+/// GM14: typing starts on the cursor's cell before the entry draws — when
+/// the Type-into-cell verb asked (Enter over the sheet, the menu), or on a
+/// bare digit typed with the pointer over the cells: a drawing number, the
+/// entry's first character (3 then Enter exposes drawing 3). Over the
+/// sheet the digit is the entry's, not a brush preset's.
+fn start_typing(ui: &mut egui::Ui, state: &mut AppState, cells: Rect) {
+    let id = egui::Id::new(ENTRY_ID);
+    let asked = std::mem::take(&mut state.sheet_ui.type_asked);
+    let mut first = String::new();
+    if !asked {
+        if ui.ctx().text_edit_focused() || !ui.rect_contains_pointer(cells) {
+            return;
+        }
+        let digit = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Key {
+                    key,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if modifiers.is_none() && i.modifiers.is_none() => {
+                    let name = key.name();
+                    (name.len() == 1 && name.chars().all(|c| c.is_ascii_digit()))
+                        .then(|| (*key, name.to_string()))
+                }
+                _ => None,
+            })
+        });
+        let Some((key, text)) = digit else { return };
+        // The key never reaches the presets; its character is the entry's.
+        ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::NONE, key);
+            i.events
+                .retain(|e| !matches!(e, egui::Event::Text(t) if *t == text));
+        });
+        first = text;
+    }
+    let caret = first.chars().count();
+    state.sheet_ui.entry = first;
+    ui.memory_mut(|m| m.request_focus(id));
+    let mut edit = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+    edit.cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(caret))));
+    edit.store(ui.ctx(), id);
+}
+
 /// GM14: the typed entry on the cursor's cell — a text field, so a
 /// single-key shortcut never fires while it types. A drawing name and
 /// Enter exposes it ("x" = empty) and moves down; Tab enters and moves to
-/// the next column; Escape or a click away drops the text.
+/// the next column; Escape or a click away drops the text. Resting, a
+/// dim caret marks the cell that takes typing; typing, a frame rings it.
 fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe: bool) {
     let id = egui::Id::new(ENTRY_ID);
     if ui.memory(|m| m.has_focus(id)) {
         ui.painter().rect_filled(cell, 0.0, plate::WELL);
+        ui.painter().rect_stroke(
+            cell,
+            0.0,
+            egui::Stroke::new(1.0, plate::LEGEND),
+            egui::StrokeKind::Inside,
+        );
+    } else if state.sheet_ui.entry.is_empty() {
+        let x = cell.left() + 2.0;
+        ui.painter().line_segment(
+            [pos2(x, cell.top() + 4.0), pos2(x, cell.bottom() - 4.0)],
+            egui::Stroke::new(1.0, plate::legend_dim()),
+        );
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell));
     let resp = child
@@ -253,7 +353,10 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
                 .font(egui::FontId::monospace(11.0))
                 .text_color(plate::STRUCK),
         )
-        .on_hover_text("type a drawing name (x = empty): Enter enters it and moves down, Tab moves right");
+        .on_hover_text(
+            "type a drawing name (x = empty; a digit over the sheet starts it): Enter enters it \
+             and moves down, Tab moves right",
+        );
     let (enter, tab) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Tab)));
     let tabbed = tab && resp.has_focus();
     if !(resp.lost_focus() || tabbed) {
@@ -705,6 +808,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        // GM14: following the cursor jumps at once — the next frame lays
+        // out the cursor's row, so the typed entry never drops out.
+        .animated(false)
         // GM14: only the visible rows are laid out (a 600-frame cut).
         .show_rows(ui, ROW_H, frame_count as usize, |ui, rows| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -716,6 +822,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             let ppp = ui.ctx().pixels_per_point();
             let fps = state.fps();
             let mut clicked_frame: Option<u32> = None;
+            let mut type_here = false;
             // Content origin (top-left of frame 0's row) for handle geometry.
             let mut geom: Option<(f32, f32)> = None;
             let row_w = sheet_w.max(ui.available_width());
@@ -914,6 +1021,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                         (Some(col), f, _) => {
                             let shift = ui.input(|i| i.modifiers.shift);
                             let cursor = (state.view.active_column, state.view.frame);
+                            // A click on the cursor's own cell — anywhere
+                            // on it — types into it (focused once the entry
+                            // has drawn: it gives up focus to a click off it).
+                            type_here |= !shift && (col, f) == cursor;
                             let live = state.sheet_ui.head == Some(cursor);
                             let anchor = match state.sheet_ui.anchor {
                                 Some(a) if shift && live => a,
@@ -972,7 +1083,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             if let Some((ctop, cleft)) = geom {
                 let cut = state.cut();
                 let right = cleft + sheet_w;
-                for f in 0..=frame_count {
+                // The rules of the rows laid out (and the last one's foot).
+                for f in rows.start as u32..=(rows.end as u32).min(frame_count) {
                     if let Some(tier) = crate::runs::rule_tier(f, fps) {
                         let y = plate::snap(ctop + f as f32 * ROW_H, ppp);
                         let (w, ink) = match tier {
@@ -1093,29 +1205,62 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 continuation_handles(ui, state, ctop, cleft, frame_count);
             }
             // GM14: the typed entry rides on the cursor's cell (right of
-            // the key dot), on top of everything else in the sheet.
+            // the key dot), on top of everything else in the sheet. While it
+            // types it is laid out even off the shown rows (the follow below
+            // scrolls them to it), so Enter past the last row keeps the keys.
             if let Some((ctop, cleft)) = geom
                 && let Some(ci) = col_ids.iter().position(|c| *c == state.view.active_column)
-                && rows.contains(&(state.view.frame as usize))
             {
-                let cell = Rect::from_min_size(
+                let cells = Rect::from_min_max(
+                    pos2(cleft + GUTTER_W, ctop + rows.start as f32 * ROW_H),
                     pos2(
-                        cleft + GUTTER_W + ci as f32 * COL_W + 30.0,
-                        ctop + state.view.frame as f32 * ROW_H,
+                        cleft + GUTTER_W + col_ids.len() as f32 * COL_W,
+                        ctop + rows.end as f32 * ROW_H,
                     ),
-                    vec2(COL_W - 32.0, ROW_H),
                 );
-                entry_field(ui, state, cell, gesture_safe);
+                start_typing(ui, state, cells);
+                let id = egui::Id::new(ENTRY_ID);
+                if ui.memory(|m| m.has_focus(id)) || rows.contains(&(state.view.frame as usize)) {
+                    let cell = Rect::from_min_size(
+                        pos2(
+                            cleft + GUTTER_W + ci as f32 * COL_W + 30.0,
+                            ctop + state.view.frame as f32 * ROW_H,
+                        ),
+                        vec2(COL_W - 32.0, ROW_H),
+                    );
+                    entry_field(ui, state, cell, gesture_safe);
+                    if type_here {
+                        ui.memory_mut(|m| m.request_focus(id));
+                    }
+                }
+            } else {
+                // No drawing column under the cursor: nothing takes typing.
+                state.sheet_ui.type_asked = false;
             }
             if let Some(f) = clicked_frame {
                 state.goto(f);
+            }
+            // GM14: the sheet follows the cursor — a cursor moved by a key,
+            // by Enter in the entry or by a jump is scrolled into view (the
+            // next frame lays out its row); a scroll by hand stays put.
+            let at = (state.view.cut, state.view.frame);
+            if state.sheet_ui.followed != Some(at)
+                && let Some((ctop, cleft)) = geom
+            {
+                state.sheet_ui.followed = Some(at);
+                ui.scroll_to_rect(
+                    Rect::from_min_size(pos2(cleft, ctop + at.1 as f32 * ROW_H), vec2(1.0, ROW_H)),
+                    None,
+                );
+                ui.ctx().request_repaint();
             }
         });
 }
 
 /// The parameter keying strip (C1 camera model): shown when a param-column
 /// header is selected. Workflow: click a frame row, type the value, "key" —
-/// interpolation (hold/linear/ease) applies from that key to the next.
+/// interpolation (hold/linear/ease, GM14: ease in/out, bezier) applies from
+/// that key to the next.
 fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
     use anim_core::xsheet::{ParamInterp, ParamKey};
     let Some(pid) = state.param_sel else { return };
@@ -1159,6 +1304,21 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
                 "E",
                 ParamInterp::Ease,
                 "ease: gentle start and stop (camera slide)",
+            ),
+            (
+                "In",
+                ParamInterp::EaseIn,
+                "ease in: slow start — leaves this key slowly, speeds up to the next",
+            ),
+            (
+                "Out",
+                ParamInterp::EaseOut,
+                "ease out: slow stop — leaves at speed, slows into the next key",
+            ),
+            (
+                "B",
+                ParamInterp::Bezier,
+                "bezier: shape the curve to the next key with handles in the Curves pane",
             ),
         ] {
             if ui
@@ -2025,12 +2185,135 @@ mod sheetui_tests {
         assert_eq!(shown(&h, 1, 14), Exposure::Empty, "the block's length only");
         assert_eq!(h.state().engine.position(), steps + 1, "one paste, one undo step");
         // The system clipboard's Paste event (what Ctrl+V sends in the
-        // real window) lands the same block.
+        // real window) lands the same block: it carries the text the copy
+        // handed to the system clipboard.
         h.click_pos(cell(&h, 1, 20));
-        h.event(egui::Event::Paste("1".into()));
+        let text = h.state().sheet_ui.clip_text.clone().expect("the copy handed its text over");
+        h.event(egui::Event::Paste(text));
         for i in 0..4 {
             assert_eq!(shown(&h, 1, 20 + i), shown(&h, 0, 2 + i), "frame {}", 20 + i);
         }
+        // Text copied from elsewhere since is not cells: refused, untouched.
+        h.click_pos(cell(&h, 1, 0));
+        let steps = h.state().engine.position();
+        h.event(egui::Event::Paste("1".into()));
+        assert_eq!(h.state().engine.position(), steps, "foreign text pastes nothing");
+        assert_eq!(shown(&h, 1, 0), Exposure::Empty);
+        assert!(h.state().refusal.contains("clipboard holds text"), "{}", h.state().refusal);
+    }
+
+    #[test]
+    fn sheetui_a_digit_types_into_the_selected_cell_without_a_second_click() {
+        let mut h = sheet();
+        h.click_pos(cell(&h, 0, 2));
+        assert!(!h.typing(), "one click selects the cell");
+        let steps = h.state().engine.position();
+        // Over the sheet a bare digit is a drawing number, not a preset.
+        h.key(egui::Key::Num3);
+        assert!(h.typing(), "the digit started the entry\n{}", h.describe());
+        assert_eq!(h.state().sheet_ui.entry, "3");
+        h.key(egui::Key::Enter);
+        let s = h.state();
+        let three = s.cut().drawings.iter().find(|d| d.name == "3").expect("drawing 3 made");
+        assert_eq!(s.cut().xsheet.columns[0].key_at(2), Some(Exposure::Drawing(three.id)));
+        assert_eq!(s.engine.position(), steps + 1, "one entry, one undo step");
+        let fired: Vec<Action> = h.performed().iter().map(|(a, _)| *a).collect();
+        assert!(!fired.contains(&Action::Preset3), "{fired:?}");
+        // Escape drops the entry; Enter over the sheet (Type into cell,
+        // Enter in both keymaps) takes it up again.
+        h.key(egui::Key::Escape);
+        assert!(!h.typing());
+        h.key(egui::Key::Enter);
+        assert!(h.typing(), "Enter over the sheet types\n{}", h.describe());
+        assert!(h.performed().iter().any(|(a, _)| *a == Action::TypeIntoCell));
+        for km in crate::config::Keymap::ALL {
+            let binds = crate::config::default_binds(*km);
+            let chord = crate::cmdpal::chord_of(&binds, Action::TypeIntoCell);
+            assert_eq!(chord.as_deref(), Some("Enter"), "{km:?}");
+        }
+        // Anywhere on the cursor's cell — the key dot's side too — types.
+        h.key(egui::Key::Escape);
+        h.click_pos(cell(&h, 0, 5));
+        let left = cell(&h, 0, 5) - egui::vec2(super::COL_W * 0.4, 0.0);
+        h.click_pos(left);
+        assert!(h.typing(), "a click on the cell's left side types\n{}", h.describe());
+    }
+
+    #[test]
+    fn sheetui_typing_down_past_the_shown_rows_keeps_the_keys() {
+        let mut h = sheet();
+        h.state_mut().set_cut_length(600);
+        h.run();
+        let rows = h.state().sheet_ui.rows_shown.clone();
+        let low = rows.end as u32 - 3;
+        h.click_pos(cell(&h, 0, low));
+        for i in 0..6 {
+            h.key(egui::Key::Num1);
+            assert!(h.typing(), "entry {i} has the keys\n{}", h.describe());
+            h.key(egui::Key::Enter);
+        }
+        let frame = h.state().view.frame;
+        assert_eq!(frame, low + 6);
+        assert!(frame as usize >= rows.end, "the cursor left the first screen: {rows:?}");
+        assert!(h.typing(), "the entry kept the keys past the first screen");
+        let now = h.state().sheet_ui.rows_shown.clone();
+        assert!(now.contains(&(frame as usize)), "the sheet followed: {now:?}");
+        // A digit there is the entry's text, never a brush preset.
+        h.key(egui::Key::Num2);
+        assert_eq!(h.state().sheet_ui.entry, "2");
+        let fired: Vec<Action> = h.performed().iter().map(|(a, _)| *a).collect();
+        assert!(
+            !fired.iter().any(|a| matches!(a, Action::Preset1 | Action::Preset2)),
+            "{fired:?}"
+        );
+    }
+
+    #[test]
+    fn sheetui_range_verbs_retime_and_reverse_both_columns_of_a_shift_click_range() {
+        let mut h = sheet();
+        h.state_mut().add_column();
+        h.state_mut().add_column();
+        h.run();
+        let (a, b) = (column(&h, 0), column(&h, 1));
+        // Column A's first 12 frames into B and C.
+        h.click_pos(cell(&h, 0, 11));
+        h.set_mods(egui::Modifiers::SHIFT);
+        h.click_pos(cell(&h, 0, 0));
+        h.set_mods(egui::Modifiers::NONE);
+        h.key_mods(CTRL, egui::Key::C);
+        for ci in [1, 2] {
+            h.click_pos(cell(&h, ci, 0));
+            h.key_mods(CTRL, egui::Key::V);
+        }
+        let (d0, d4, d8) = (shown(&h, 0, 0), shown(&h, 0, 4), shown(&h, 0, 8));
+        assert!(d0 != d4 && d4 != d8, "three drawings: {d0:?} {d4:?} {d8:?}");
+        for ci in [1, 2] {
+            assert_eq!((shown(&h, ci, 0), shown(&h, ci, 4), shown(&h, ci, 8)), (d0, d4, d8));
+        }
+        // Shift+click: columns A and B, frames 1 to 8.
+        h.click_pos(cell(&h, 0, 0));
+        h.set_mods(egui::Modifiers::SHIFT);
+        h.click_pos(cell(&h, 1, 7));
+        h.set_mods(egui::Modifiers::NONE);
+        assert_eq!(h.state().sheet_range(), Some((vec![a, b], 0, 8)));
+        let steps = h.state().engine.position();
+        h.perform(Action::Reverse);
+        for ci in [0, 1] {
+            assert_eq!((shown(&h, ci, 0), shown(&h, ci, 3)), (d4, d4), "column {ci} reversed");
+            assert_eq!((shown(&h, ci, 4), shown(&h, ci, 7)), (d0, d0), "column {ci} reversed");
+            assert_eq!(shown(&h, ci, 8), d8, "column {ci}: past the range untouched");
+        }
+        assert_eq!((shown(&h, 2, 0), shown(&h, 2, 4)), (d0, d4), "column C is outside the range");
+        assert_eq!(h.state().engine.position(), steps + 1, "one verb, one undo step");
+        // On twos: each drawing in the range holds 2, what follows ripples
+        // up by the same amount in both columns.
+        h.perform(Action::RetimeTwos);
+        for ci in [0, 1] {
+            let got: Vec<_> = (0..5).map(|f| shown(&h, ci, f)).collect();
+            assert_eq!(got, vec![d4, d4, d0, d0, d8], "column {ci} on twos");
+        }
+        assert_eq!((shown(&h, 2, 0), shown(&h, 2, 4)), (d0, d4), "column C untouched");
+        assert_eq!(h.state().engine.position(), steps + 2);
     }
 
     #[test]
@@ -2084,6 +2367,7 @@ mod sheetui_tests {
         h.run();
         let rows = h.state().sheet_ui.rows_shown.clone();
         assert!(rows.len() < 80, "{rows:?}");
+        assert!(rows.contains(&599), "the sheet scrolled to the cursor: {rows:?}");
         assert_eq!(h.state().frame_count(), 600);
     }
 
@@ -2098,5 +2382,31 @@ mod sheetui_tests {
         assert_eq!(parse_length("1+x", 24), None);
         assert_eq!(seconds_plus_frames(60, 24), "2+12");
         assert_eq!(seconds_plus_frames(48, 24), "2+0");
+    }
+}
+
+/// GM14's test minimums, counted from the source (a name filter also
+/// counts any test whose module path merely holds the word): 10 tests in
+/// anim-core's curve_tests.rs, 5 curves_* and 5 sheetui_* app tests.
+#[cfg(test)]
+mod gm14_minimums {
+    /// The test fns named `prefix…` (each right under its #[test] line).
+    fn tests_named(src: &str, prefix: &str) -> usize {
+        let head = format!("fn {prefix}");
+        let lines: Vec<&str> = src.lines().map(str::trim).collect();
+        lines
+            .windows(2)
+            .filter(|w| w[0] == "#[test]" && w[1].starts_with(&head))
+            .count()
+    }
+
+    #[test]
+    fn test_counts_hold_in_source() {
+        let core = tests_named(include_str!("../../crates/anim-core/tests/curve_tests.rs"), "");
+        assert!(core >= 10, "curve_tests.rs holds {core} tests");
+        let curves = tests_named(include_str!("curves_panel.rs"), "curves_");
+        assert!(curves >= 5, "{curves} curves_* tests");
+        let sheet = tests_named(include_str!("xsheet_panel.rs"), "sheetui_");
+        assert!(sheet >= 5, "{sheet} sheetui_* tests");
     }
 }

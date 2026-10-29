@@ -4,6 +4,7 @@
 
 use anim_core::Engine;
 use anim_core::command::{Command, CutRef, ParamKeyEdit};
+use anim_core::graph::{NodeKind, TransformBinds};
 use anim_core::ids::*;
 use anim_core::sheet_ops;
 use anim_core::xsheet::{BezierSeg, HandleMode, Handles, ParamColumn, ParamInterp, ParamKey};
@@ -346,4 +347,87 @@ fn moving_keys_onto_a_keyed_frame_replaces_never_duplicates() {
     assert_eq!(got, vec![(0, 1.0), (4, 2.0), (12, 3.0)]);
     // No move, no command.
     assert!(sheet_ops::move_param_keys(&engine.project, at, &[(param, 0)], 0, 0.0).unwrap().is_empty());
+}
+
+/// The session mirror sends commands as JSON: a SetParamKeys batch — new
+/// interps and stored handles included — crosses the wire unchanged, and a
+/// key written before handles existed (no "handles" field) still reads.
+#[test]
+fn set_param_keys_crosses_the_json_wire_with_its_handles() {
+    let (_, at, param) = engine_with_param();
+    let cmd = Command::SetParamKeys {
+        at,
+        keys: vec![
+            ParamKeyEdit {
+                column: param,
+                frame: 3,
+                before: None,
+                after: Some(bez(2.5, handles(1.0, -0.5, 4.0, 8.25, HandleMode::Broken))),
+            },
+            ParamKeyEdit {
+                column: param,
+                frame: 9,
+                before: Some(key(1.0, ParamInterp::EaseIn)),
+                after: Some(key(1.5, ParamInterp::EaseOut)),
+            },
+            ParamKeyEdit { column: param, frame: 12, before: Some(key(0.0, ParamInterp::Hold)), after: None },
+        ],
+    };
+    let text = serde_json::to_string(&cmd).unwrap();
+    assert!(text.contains("SetParamKeys") && text.contains("Broken"), "{text}");
+    let back: Command = serde_json::from_str(&text).unwrap();
+    assert_eq!(back, cmd);
+
+    let new = Command::SetParamKey { at, column: param, frame: 4, key: Some(key(1.0, ParamInterp::Linear)) };
+    let wire = serde_json::to_string(&new).unwrap();
+    let old = wire.replace(",\"handles\":null", "");
+    assert_ne!(old, wire, "the key carries a handles field: {wire}");
+    let read: Command = serde_json::from_str(&old).unwrap();
+    assert_eq!(read, new);
+}
+
+/// The picture follows the handles: a bound Transform's eval hash (what the
+/// compositor caches frames on) moves between the keys when a handle bends,
+/// stays put on the keys themselves, and undo brings the old hash back.
+#[test]
+fn bending_a_handle_changes_the_eval_hash_between_the_keys() {
+    let (mut engine, at, param) = engine_with_param();
+    let (n_xform, n_out) = (engine.alloc_node_id(), engine.alloc_node_id());
+    let binds = TransformBinds { tx: Some(param), ..Default::default() };
+    engine
+        .apply(
+            "build graph",
+            vec![
+                Command::AddNode {
+                    at,
+                    id: n_xform,
+                    kind: NodeKind::Transform { translate: (1.0, 2.0), scale: 1.0, rotate_deg: 0.0, binds },
+                },
+                Command::AddNode { at, id: n_out, kind: NodeKind::Output },
+                Command::Connect { at, from: n_xform, from_pin: 0, to: n_out, to_pin: 0 },
+                Command::SetOutput { at, node: Some(n_out) },
+            ],
+        )
+        .unwrap();
+    let flat = bez(0.0, handles(0.0, 0.0, 4.0, 0.0, HandleMode::Flat));
+    engine
+        .apply(
+            "keys",
+            vec![
+                Command::SetParamKey { at, column: param, frame: 0, key: Some(flat) },
+                Command::SetParamKey { at, column: param, frame: 12, key: Some(key(10.0, ParamInterp::Linear)) },
+            ],
+        )
+        .unwrap();
+    let hash = |e: &mut Engine, frame| e.eval(at.scene, at.cut, frame).unwrap().hash();
+    let (k0, mid, k12) = (hash(&mut engine, 0), hash(&mut engine, 6), hash(&mut engine, 12));
+
+    let bent = bez(0.0, handles(0.0, 0.0, 4.0, 9.0, HandleMode::Broken));
+    let edit = ParamKeyEdit { column: param, frame: 0, before: Some(flat), after: Some(bent) };
+    engine.apply("bend handle", vec![Command::SetParamKeys { at, keys: vec![edit] }]).unwrap();
+    assert_ne!(hash(&mut engine, 6), mid, "the curve between the keys moved");
+    assert_eq!(hash(&mut engine, 0), k0, "a key's own frame keeps its value");
+    assert_eq!(hash(&mut engine, 12), k12);
+    engine.undo().unwrap();
+    assert_eq!(hash(&mut engine, 6), mid, "undo restores the old picture");
 }
