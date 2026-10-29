@@ -2585,3 +2585,30 @@ what was not verified.
   controls. CLI: `--scene` / `--cut` (`pick_cut`; names ignore case, an unknown name lists what is there),
   the cut it renders said when there are several, the usage said once. 18 `delivery_tests`, 14
   `render_queue_*`. Not verified: a real ffmpeg encode, the real window and its file dialogs.
+- 2026-10-29 — GM12 Sound tracks and real-time playback (core). Engine: `audio.rs` — `TrackKind`,
+  `TrackProps` (name, kind, offset, gain dB, mute, solo), `AudioTrack`; `decode` through symphonia 0.5.5
+  (fetched: symphonia, -core, -bundle-flac, -bundle-mp3, -codec-pcm, -codec-vorbis, -format-ogg,
+  -format-riff, -metadata, -utils-xiph 0.5.5, encoding_rs 0.8.42; gapless on), routed by magic bytes
+  (`sniff`); `resample_linear`, `mix` (stereo at 48 kHz, mute wins over solo, clamped), `write_wav`
+  (hound, 24-bit), `envelope` (per-frame RMS), `lip_flap` (hysteresis 0.8, minimum hold) and
+  `lip_flap_commands` (one SetCells). `Cut.audio` stays the first (dialogue) track, its settings in
+  `Cut.audio_props`; more tracks in `Cut.tracks`; `AudioClip::from_bytes` (a WAV keeps hound's exact
+  path). Commands `AddTrack` / `RemoveTrack` / `SetTrackProps` with exact inverses (track 0 is the first
+  track); InsertFrames / DeleteFrames ripple track offsets (a delete that swallows an offset restores it
+  exactly on undo). Store: side table `audio_tracks(cut_id, ord, json, bytes)` (D2: made on save, probed on
+  load; ord 0 holds the first track's settings when they differ from the default); `cut_audio` unchanged.
+  `deliver::mixdown` / `write_mixdown` over a frame range. App: `playback.rs` — `PlayClock` (frame =
+  start + floor(played · fps / rate), passed-over frames counted, never back), `place` / `play_range`
+  (loop range, play from the cursor), `scrub_requests`, `mix_key`, `FrameCache` (LRU by bytes, MB cap,
+  a changed eval hash drops the frame). The Editor plays the mix of every track (cached by `mix_key`),
+  audio-clocked from the playing source's sample position; transport: "in" / "out" / × loop range,
+  "scrub" latch, "dropped N". `AudioOut::open` refuses in a test build. File menu: Import sound… /
+  Add sound track… (WAV, MP3, OGG, FLAC) / Remove track N. Render queue: video jobs mux the mixdown WAV
+  (ffmpeg audio args unchanged, only the input), image sequences write the range's mixdown WAV beside the
+  frames. Fixtures `tests/fixtures/tone.{wav,flac,mp3,ogg}` (0.5 s of 440 Hz at 16 kHz, made once with
+  ffmpeg 8.1.2 — 16 kHz keeps each under 20 KB). 15 `sound_tests`, 7 `playback_*`. Left: the sheet's
+  waveform strip and track headers (mute / solo / gain in the sheet), the lip-flap window (the engine
+  half is done and pinned), the RAM preview's worker, Ao bar and Settings ▸ Performance MB cap (the
+  `FrameCache` is built and pinned), Stretch (waveform zoom, cue markers). Not verified: sound through a
+  real device (latency: the clock follows the samples handed to the device), the real window and its
+  file dialogs, a real ffmpeg mux of the mixdown.

@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 
+use crate::audio::{AudioTrack, TrackProps};
 use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
@@ -318,6 +319,28 @@ pub enum Command {
         before: ProjectProps,
         after: ProjectProps,
     },
+
+    // ---- GM12: sound tracks ------------------------------------------------
+    // Tracks are numbered from 0 = the first track (`Cut.audio`, set by
+    // SetCutAudio); AddTrack and RemoveTrack work on the ones after it.
+    /// Insert a track at number `index` (1..=the track count): a fresh one,
+    /// or the snapshot a RemoveTrack took.
+    AddTrack {
+        at: CutRef,
+        index: usize,
+        track: AudioTrack,
+    },
+    /// Remove track `index` (1 or later) with its clip.
+    RemoveTrack { at: CutRef, index: usize },
+    /// A track's settings (name, kind, offset, gain, mute, solo); track 0
+    /// is the first track's. `before` must be what it holds now; the
+    /// inverse swaps the two.
+    SetTrackProps {
+        at: CutRef,
+        index: usize,
+        before: TrackProps,
+        after: TrackProps,
+    },
 }
 
 /// No cut has id 0 (ids start at 1), so a project-level command's
@@ -368,7 +391,10 @@ impl Command {
             | Command::SetCutMeta { at, .. }
             | Command::SetColumnDef { at, .. }
             | Command::SetMemo { at, .. }
-            | Command::SetDrawingDef { at, .. } => *at,
+            | Command::SetDrawingDef { at, .. }
+            | Command::AddTrack { at, .. }
+            | Command::RemoveTrack { at, .. }
+            | Command::SetTrackProps { at, .. } => *at,
             Command::AddCut { scene, cut, .. } => CutRef {
                 scene: *scene,
                 cut: cut.id,
@@ -403,6 +429,30 @@ fn refuse_locked_ripple(cut: &Cut, frame: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// GM12: the frame offsets the ripple moves, as (track number, offset): the
+/// first track's only while it has a clip (an empty first track has
+/// nothing to keep in sync), then every track after it.
+fn track_offsets(cut: &Cut) -> Vec<(usize, i64)> {
+    let first = cut.audio.as_ref().map(|_| (0, cut.audio_props.offset as i64));
+    first
+        .into_iter()
+        .chain(
+            cut.tracks
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (i + 1, t.props.offset as i64)),
+        )
+        .collect()
+}
+
+/// GM12: track `index`'s settings, mutable (0 = the first track's).
+fn track_props_mut(cut: &mut Cut, index: usize) -> Option<&mut TrackProps> {
+    match index {
+        0 => Some(&mut cut.audio_props),
+        i => cut.tracks.get_mut(i - 1).map(|t| &mut t.props),
+    }
 }
 
 /// GM5: every node of a cut — the invalidation roots of an edit that moves
@@ -1435,10 +1485,20 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             }
             let grown = cut.frame_count.checked_add(*count);
             let fits = |last: Option<u32>| last.is_none_or(|l| l < *frame || l.checked_add(*count).is_some());
+            // GM12: a track offset at or after the frame moves too (D4).
+            let moved: Vec<usize> = track_offsets(cut)
+                .into_iter()
+                .filter(|(_, o)| *o >= *frame as i64)
+                .map(|(i, _)| i)
+                .collect();
+            let offsets_fit = track_offsets(cut)
+                .iter()
+                .all(|(_, o)| *o < *frame as i64 || o + (*count as i64) <= i32::MAX as i64);
             if grown.is_none()
                 || !cut.xsheet.columns.iter().all(|c| fits(c.last_key()))
                 || !cut.xsheet.params.iter().all(|p| fits(p.keys().last().map(|k| k.0)))
                 || !fits(cut.memos.keys().next_back().copied())
+                || !offsets_fit
             {
                 return Err(EngineError::InvalidCommand(
                     "insert would push a key past the last frame number".into(),
@@ -1452,6 +1512,10 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 p.insert_frames(*frame, *count);
             }
             crate::xsheet::insert_frames_in(&mut cut.memos, *frame, *count);
+            for i in moved {
+                let props = track_props_mut(cut, i).expect("listed above");
+                props.offset += *count as i32;
+            }
             cut.frame_count = grown.expect("checked above");
             Ok(AppliedEffect {
                 inverse: vec![Command::DeleteFrames {
@@ -1531,6 +1595,32 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     frame: f,
                     text: Some(text),
                 });
+            }
+            // GM12: a track after the range moves earlier; one starting
+            // inside it now starts where the range was, and the inverse
+            // (once its InsertFrames has moved it past the range) puts its
+            // own offset back.
+            let (start, end) = (*frame as i64, *frame as i64 + *count as i64);
+            for (i, o) in track_offsets(cut) {
+                if o < start {
+                    continue;
+                }
+                let props = track_props_mut(cut, i).expect("listed above");
+                if o >= end {
+                    props.offset -= *count as i32;
+                } else {
+                    let original = props.clone();
+                    props.offset = *frame as i32;
+                    inverse.push(Command::SetTrackProps {
+                        at: *at,
+                        index: i,
+                        before: TrackProps {
+                            offset: end as i32,
+                            ..original.clone()
+                        },
+                        after: original,
+                    });
+                }
             }
             cut.frame_count -= *count;
             Ok(AppliedEffect {
@@ -1739,6 +1829,74 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     .flat_map(|s| s.cuts.iter())
                     .flat_map(|c| c.graph.nodes().map(|n| n.id))
                     .collect(),
+            })
+        }
+
+        Command::AddTrack { at, index, track } => {
+            track.props.check()?;
+            let cut = cut_mut(project, *at)?;
+            if *index == 0 || *index > cut.tracks.len() + 1 {
+                return Err(EngineError::InvalidCommand(format!(
+                    "track {} out of range (the first track is the cut's audio; {} after it)",
+                    index,
+                    cut.tracks.len()
+                )));
+            }
+            cut.tracks.insert(index - 1, track.clone());
+            Ok(AppliedEffect {
+                inverse: vec![Command::RemoveTrack {
+                    at: *at,
+                    index: *index,
+                }],
+                // Audio never enters the render graph.
+                invalidation_roots: Vec::new(),
+            })
+        }
+
+        Command::RemoveTrack { at, index } => {
+            let cut = cut_mut(project, *at)?;
+            if *index == 0 || *index > cut.tracks.len() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "no track {index} to remove"
+                )));
+            }
+            let track = cut.tracks.remove(index - 1);
+            Ok(AppliedEffect {
+                inverse: vec![Command::AddTrack {
+                    at: *at,
+                    index: *index,
+                    track,
+                }],
+                invalidation_roots: Vec::new(),
+            })
+        }
+
+        Command::SetTrackProps {
+            at,
+            index,
+            before,
+            after,
+        } => {
+            after.check()?;
+            let cut = cut_mut(project, *at)?;
+            let props = track_props_mut(cut, *index).ok_or_else(|| {
+                EngineError::InvalidCommand(format!("no track {index}"))
+            })?;
+            if props != before {
+                return Err(EngineError::InvalidCommand(format!(
+                    "track {}'s settings changed since this edit was made",
+                    props.name
+                )));
+            }
+            *props = after.clone();
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetTrackProps {
+                    at: *at,
+                    index: *index,
+                    before: after.clone(),
+                    after: before.clone(),
+                }],
+                invalidation_roots: Vec::new(),
             })
         }
     }

@@ -24,6 +24,9 @@ image = { version = "0.25", default-features = false, features = ["png", "tiff",
 exr = { version = "1.74", default-features = false }
 # GM11: burn-in text — the app's Plex outlines rasterised on the CPU.
 ab_glyph = "0.2"
+# GM12 (D16): sound tracks — WAV, MP3, OGG Vorbis and FLAC decoded in pure
+# Rust (fetched). The engine only decodes and mixes; playback is the app's.
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "mp3", "ogg", "vorbis", "flac"] }
 
 [dev-dependencies]
 # Tests forge legacy (schema v4/v5) project files directly to prove migration.

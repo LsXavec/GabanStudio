@@ -78,7 +78,15 @@ CREATE TABLE IF NOT EXISTS cut_memos(
     PRIMARY KEY(cut_id, frame));
 CREATE TABLE IF NOT EXISTS drawing_defs(
     drawing_id INTEGER PRIMARY KEY, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS audio_tracks(
+    cut_id INTEGER NOT NULL, ord INTEGER NOT NULL, json TEXT NOT NULL,
+    bytes BLOB NOT NULL, PRIMARY KEY(cut_id, ord));
 ";
+// GM12 (D2): sound tracks are a v11 side table, added with no version bump.
+// Row ord 0 holds the first track's settings only (its clip stays in
+// cut_audio, unchanged; written only when they differ from the default);
+// rows 1.. are the tracks after it, settings JSON plus the clip's bytes
+// verbatim. A file without the table reads as no further tracks.
 // GM6 (D2): drawing kinds and spacing charts are a v11 side table too, added
 // with no version bump: a v11 file saved before it reads it as empty.
 // v11 (GM5, D2): cut meta, column kinds and the memo row are side tables
@@ -159,7 +167,7 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
          DELETE FROM param_columns; DELETE FROM param_keys;
          DELETE FROM cut_audio; DELETE FROM cel_layer_defs;
          DELETE FROM cut_meta; DELETE FROM column_defs; DELETE FROM cut_memos;
-         DELETE FROM drawing_defs;",
+         DELETE FROM drawing_defs; DELETE FROM audio_tracks;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -239,6 +247,9 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
             tx.prepare("INSERT INTO cut_memos(cut_id, frame, text) VALUES (?1, ?2, ?3)")?;
         let mut ins_drawing_def =
             tx.prepare("INSERT INTO drawing_defs(drawing_id, json) VALUES (?1, ?2)")?;
+        let mut ins_track = tx.prepare(
+            "INSERT INTO audio_tracks(cut_id, ord, json, bytes) VALUES (?1, ?2, ?3, ?4)",
+        )?;
 
         for (s_ord, scene) in project.scenes.iter().enumerate() {
             ins_scene.execute((scene.id.0 as i64, &scene.name, s_ord as i64))?;
@@ -317,6 +328,25 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                 if let Some(clip) = &cut.audio {
                     // Same asset law as images: original WAV bytes verbatim.
                     ins_audio.execute((cut.id.0 as i64, &clip.name, clip.bytes.as_slice()))?;
+                }
+                // GM12: the first track's settings (only when not v0.3's
+                // default), then every track after it with its bytes.
+                if cut.audio_props != crate::audio::TrackProps::default() {
+                    let file = cut.audio.as_ref().map_or("", |c| c.name.as_str());
+                    ins_track.execute((
+                        cut.id.0 as i64,
+                        0i64,
+                        cut.audio_props.to_json(file),
+                        &[] as &[u8],
+                    ))?;
+                }
+                for (t_ord, track) in cut.tracks.iter().enumerate() {
+                    ins_track.execute((
+                        cut.id.0 as i64,
+                        t_ord as i64 + 1,
+                        track.props.to_json(&track.clip.name),
+                        track.clip.bytes.as_slice(),
+                    ))?;
                 }
                 for (col_ord, col) in cut.xsheet.columns.iter().enumerate() {
                     ins_column.execute((col.id.0 as i64, cut.id.0 as i64, &col.name, col_ord as i64))?;
@@ -500,6 +530,8 @@ pub fn load(path: &Path) -> Result<Project> {
         && has_table("cut_memos");
     // GM6: added inside v11, so probed on its own.
     let drawing_defs = version >= 11 && has_table("drawing_defs");
+    // GM12: likewise.
+    let audio_tracks = version >= 11 && has_table("audio_tracks");
 
     let mut project = Project::new(get_meta("name")?);
     project.fps = get_meta("fps")?
@@ -613,9 +645,32 @@ pub fn load(path: &Path) -> Result<Project> {
                     Err(e) => return Err(EngineError::Corrupt(format!("audio row: {e}"))),
                 };
                 if let Some((a_name, a_bytes)) = row {
-                    let clip = crate::model::AudioClip::from_wav(a_name, a_bytes)
+                    // GM12: a WAV decodes exactly as before; the first track
+                    // may now also be MP3, OGG or FLAC (told by its bytes).
+                    let clip = crate::model::AudioClip::from_bytes(a_name, a_bytes)
                         .map_err(|e| EngineError::Corrupt(format!("audio: {e}")))?;
                     cut.audio = Some(clip);
+                }
+            }
+            if audio_tracks {
+                let mut stmt = conn.prepare(
+                    "SELECT ord, json, bytes FROM audio_tracks WHERE cut_id = ?1 ORDER BY ord",
+                )?;
+                let rows: Vec<(i64, String, Vec<u8>)> = stmt
+                    .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<std::result::Result<_, _>>()?;
+                for (ord, json, bytes) in rows {
+                    let (props, file) = crate::audio::TrackProps::from_json(&json).ok_or_else(
+                        || EngineError::Corrupt(format!("bad audio track {ord} of cut {cut_id}")),
+                    )?;
+                    if ord == 0 {
+                        cut.audio_props = props;
+                        continue;
+                    }
+                    let clip = crate::model::AudioClip::from_bytes(file, bytes).map_err(|e| {
+                        EngineError::Corrupt(format!("audio track {ord} of cut {cut_id}: {e}"))
+                    })?;
+                    cut.tracks.push(crate::audio::AudioTrack { props, clip });
                 }
             }
 

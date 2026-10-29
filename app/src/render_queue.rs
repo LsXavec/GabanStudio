@@ -263,6 +263,16 @@ pub fn render_job(
         n += 1;
         tick(f);
     }
+    // GM12: the range's mixdown beside the frames, named as a video of the
+    // pattern would be (no file when no track sounds).
+    let wav = deliver::video_name(&spec.pattern, &spec.slate.names, "wav");
+    deliver::write_mixdown(
+        &spec.out.join(wav),
+        &spec.cut,
+        spec.fps.max(1),
+        spec.frames.0,
+        spec.frames.1,
+    )?;
     Ok(n)
 }
 
@@ -286,18 +296,20 @@ fn render_video(
         spec.cut.id.0
     ));
     let audio_path = tmp.join("audio.wav");
-    let audio = match &spec.cut.audio {
-        Some(clip) => {
-            std::fs::create_dir_all(&tmp).map_err(|e| format!("temp dir: {e}"))?;
-            std::fs::write(&audio_path, clip.bytes.as_ref())
-                .map_err(|e| format!("audio temp: {e}"))?;
-            Some(AudioIn {
-                path: &audio_path,
-                offset: spec.frames.0 as f64 / fps as f64,
-                secs: total as f64 / fps as f64,
-            })
-        }
-        None => None,
+    // GM12: every sounding track mixed down over the whole cut — the same
+    // seek and length pick the range out of it as out of the clip before.
+    let audio = if anim_core::audio::has_sound(&spec.cut) {
+        std::fs::create_dir_all(&tmp).map_err(|e| format!("temp dir: {e}"))?;
+        let last = spec.cut.frame_count.max(1) - 1;
+        deliver::write_mixdown(&audio_path, &spec.cut, fps, 0, last)
+            .map_err(|e| format!("audio temp: {e}"))?;
+        Some(AudioIn {
+            path: &audio_path,
+            offset: spec.frames.0 as f64 / fps as f64,
+            secs: total as f64 / fps as f64,
+        })
+    } else {
+        None
     };
     let out = spec.out.join(deliver::video_name(
         &spec.pattern,

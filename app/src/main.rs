@@ -33,6 +33,7 @@ mod paintcheck;
 mod palette;
 mod palette_panel;
 mod plate;
+mod playback;
 mod proc;
 mod render_queue;
 mod runs;
@@ -470,11 +471,31 @@ struct AudioOut {
     sink: rodio::Sink,
 }
 
+impl AudioOut {
+    /// The default output device. GM12 (NEVER-DO 7): a test build refuses
+    /// before rodio is touched — tests never open an audio device.
+    fn open() -> Result<AudioOut, String> {
+        if cfg!(test) {
+            return Err("tests never open an audio device".into());
+        }
+        let stream = rodio::OutputStreamBuilder::open_default_stream().map_err(|e| e.to_string())?;
+        let sink = rodio::Sink::connect_new(stream.mixer());
+        Ok(AudioOut {
+            _stream: stream,
+            sink,
+        })
+    }
+}
+
 /// Zero-copy rodio source over the engine's Arc'd decoded samples — a
-/// restart must never clone a multi-hundred-MB sample buffer.
+/// restart must never clone a multi-hundred-MB sample buffer. GM12: it
+/// ends at `end` (a scrub snippet) and publishes its position in `cursor`
+/// — the audio clock reads how far the sound has got from it.
 struct ClipSource {
     data: std::sync::Arc<Vec<f32>>,
     pos: usize,
+    end: usize,
+    cursor: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     channels: u16,
     rate: u32,
 }
@@ -482,8 +503,13 @@ struct ClipSource {
 impl Iterator for ClipSource {
     type Item = f32;
     fn next(&mut self) -> Option<f32> {
+        if self.pos >= self.end {
+            return None;
+        }
         let v = self.data.get(self.pos).copied();
         self.pos += 1;
+        self.cursor
+            .store(self.pos, std::sync::atomic::Ordering::Relaxed);
         v
     }
 }
@@ -3829,11 +3855,30 @@ struct Editor {
     audio_playing: bool,
     /// Last frame seen by sync_audio — detects loop wraps and mid-play seeks.
     audio_prev_frame: u32,
-    /// WHAT is sounding: (scene, cut, clip identity via the bytes Arc's
-    /// address). A cut switch or an undo/redo that swaps the clip mid-play
-    /// changes this key → the sound restarts on the right clip instead of
-    /// the stale one playing on.
-    audio_key: Option<(u64, u64, usize)>,
+    /// WHAT is sounding: (scene, cut, the mix's key — GM12: every track's
+    /// settings and clip identity). A cut switch, a mute, or an undo/redo
+    /// that swaps a clip mid-play changes this key → the sound restarts on
+    /// the right mix instead of the stale one playing on.
+    audio_key: Option<(u64, u64, u64)>,
+    /// GM12: the cut's mix (stereo at `audio::MIX_RATE`) under its key —
+    /// a seek restarts from it without mixing again.
+    audio_mix: Option<(u64, std::sync::Arc<Vec<f32>>)>,
+    /// GM12: the audio clock while the mix sounds, with the playing
+    /// source's sample position and the sample it started from.
+    audio_clock: Option<(
+        playback::PlayClock,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        usize,
+    )>,
+    /// GM12: frames passed over to keep up since playback started (the
+    /// transport's "dropped N").
+    play_dropped: u64,
+    /// GM12: playback was running last frame (a new run counts from 0).
+    play_running: bool,
+    /// GM12: a stopped playhead's move sounds one frame of the mix.
+    scrub_audio: bool,
+    /// GM12: the loop range (first, last frame) — None plays the cut.
+    loop_range: Option<(u32, u32)>,
     /// GM2: what the artist asked for that would drop unsaved work — the
     /// "Save changes?" modal shows while this is Some.
     leave: Option<Leave>,
@@ -4409,6 +4454,12 @@ impl Editor {
             audio_playing: false,
             audio_prev_frame: 0,
             audio_key: None,
+            audio_mix: None,
+            audio_clock: None,
+            play_dropped: 0,
+            play_running: false,
+            scrub_audio: false,
+            loop_range: None,
             leave: None,
             leave_after_save: None,
             close_ok: false,
@@ -4476,6 +4527,12 @@ impl Editor {
             audio_playing: false,
             audio_prev_frame: 0,
             audio_key: None,
+            audio_mix: None,
+            audio_clock: None,
+            play_dropped: 0,
+            play_running: false,
+            scrub_audio: false,
+            loop_range: None,
             leave: None,
             leave_after_save: None,
             close_ok: false,
@@ -6212,20 +6269,29 @@ impl Editor {
     fn sync_audio(&mut self, dt: f32) {
         let playing = self.state.view.playing;
         let frame = self.state.view.frame;
-        let key = self.state.cut().audio.as_ref().map(|c| {
+        let fps = self.state.fps().max(1);
+        // GM12: what sounds is the mix of every track, keyed by all of it.
+        let key = anim_core::audio::has_sound(self.state.cut()).then(|| {
             (
                 self.state.view.scene.0,
                 self.state.view.cut.0,
-                std::sync::Arc::as_ptr(&c.bytes) as *const u8 as usize,
+                playback::mix_key(self.state.cut(), fps),
             )
         });
         // Max frames one tick can legitimately advance, with 3x headroom.
-        let max_step = ((self.state.fps().max(1) as f32 * dt).ceil() as u32)
+        let max_step = ((fps as f32 * dt).ceil() as u32)
             .saturating_mul(3)
             .max(4);
+        // GM12: under the audio clock the playhead moves only with the
+        // sound — any other frame is a seek or a loop wrap.
         let jumped = self.audio_playing
-            && (frame < self.audio_prev_frame
-                || frame > self.audio_prev_frame.saturating_add(max_step));
+            && match &self.audio_clock {
+                Some((clock, _, _)) => frame != clock.shown,
+                None => {
+                    frame < self.audio_prev_frame
+                        || frame > self.audio_prev_frame.saturating_add(max_step)
+                }
+            };
         let clip_changed = self.audio_playing && self.audio_key != key;
         if playing && key.is_some() && (!self.audio_playing || jumped || clip_changed) {
             self.start_audio(frame);
@@ -6236,20 +6302,26 @@ impl Editor {
             }
             self.audio_playing = false;
             self.audio_key = None;
+            self.audio_clock = None;
+        }
+        // GM12: scrub — a stopped playhead's move sounds one frame.
+        if key.is_some() && !self.audio_playing {
+            let rate = anim_core::audio::MIX_RATE;
+            let prev = self.audio_prev_frame;
+            for s in playback::scrub_requests(prev, frame, playing, self.scrub_audio, fps, rate) {
+                self.start_snippet(s);
+            }
         }
         self.audio_prev_frame = frame;
     }
-    fn start_audio(&mut self, frame: u32) {
+
+    /// The output device, opened on first need (once: a missing device is
+    /// never retried every frame). False = playback stays silent.
+    fn ensure_audio_out(&mut self) -> bool {
         if self.audio_out.is_none() && !self.audio_tried {
             self.audio_tried = true;
-            match rodio::OutputStreamBuilder::open_default_stream() {
-                Ok(stream) => {
-                    let sink = rodio::Sink::connect_new(stream.mixer());
-                    self.audio_out = Some(AudioOut {
-                        _stream: stream,
-                        sink,
-                    });
-                }
+            match AudioOut::open() {
+                Ok(out) => self.audio_out = Some(out),
                 Err(e) => {
                     // Once, not per frame; playback stays silent but works.
                     eprintln!("audio device unavailable: {e}");
@@ -6257,24 +6329,133 @@ impl Editor {
                 }
             }
         }
-        let Some(out) = &self.audio_out else { return };
-        let Some(clip) = &self.state.cut().audio else {
+        self.audio_out.is_some()
+    }
+
+    /// GM12: the cut's mix for playback — mixed once per key, so a seek or
+    /// a scrub restarts from the samples already made.
+    fn playback_mix(&mut self) -> Option<std::sync::Arc<Vec<f32>>> {
+        let fps = self.state.fps().max(1);
+        let cut = self.state.cut();
+        if !anim_core::audio::has_sound(cut) {
+            return None;
+        }
+        let key = playback::mix_key(cut, fps);
+        if let Some((k, mix)) = &self.audio_mix
+            && *k == key
+        {
+            return Some(mix.clone());
+        }
+        let rate = anim_core::audio::MIX_RATE;
+        let mix = std::sync::Arc::new(anim_core::audio::mix(cut, fps, cut.frame_count, rate));
+        self.audio_mix = Some((key, mix.clone()));
+        Some(mix)
+    }
+
+    fn start_audio(&mut self, frame: u32) {
+        if !self.ensure_audio_out() {
+            return;
+        }
+        let Some(mix) = self.playback_mix() else {
             return;
         };
-        let fps = self.state.fps().max(1) as u64;
+        let fps = self.state.fps().max(1);
+        let rate = anim_core::audio::MIX_RATE;
         // Whole sample-frames, THEN interleave — start is always aligned to
-        // a channel-0 sample.
-        let start = ((frame as u64 * clip.sample_rate as u64) / fps) * clip.channels as u64;
-        let start = (start as usize).min(clip.samples.len());
+        // a left-channel sample of the stereo mix.
+        let start = ((frame as u64 * rate as u64 / fps as u64) as usize * 2).min(mix.len());
+        let cursor = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(start));
+        let Some(out) = &self.audio_out else { return };
         out.sink.stop();
         out.sink.append(ClipSource {
-            data: clip.samples.clone(),
+            end: mix.len(),
+            data: mix,
             pos: start,
-            channels: clip.channels,
-            rate: clip.sample_rate,
+            cursor: cursor.clone(),
+            channels: 2,
+            rate,
         });
         out.sink.play();
         self.audio_playing = true;
+        self.audio_clock = Some((playback::PlayClock::new(frame, fps, rate), cursor, start));
+    }
+
+    /// GM12: sound one scrub snippet of the mix, cutting off the last.
+    fn start_snippet(&mut self, s: playback::Snippet) {
+        if !self.ensure_audio_out() {
+            return;
+        }
+        let Some(mix) = self.playback_mix() else {
+            return;
+        };
+        let start = (s.start as usize * 2).min(mix.len());
+        let end = ((s.start + s.len) as usize * 2).min(mix.len());
+        let Some(out) = &self.audio_out else { return };
+        out.sink.stop();
+        out.sink.append(ClipSource {
+            data: mix,
+            pos: start,
+            end,
+            cursor: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(start)),
+            channels: 2,
+            rate: anim_core::audio::MIX_RATE,
+        });
+        out.sink.play();
+    }
+
+    /// GM12: one UI frame of playback. While the mix sounds, the audio
+    /// clock leads: the frame shown is the frame the sound is on, and the
+    /// frames the UI was too slow for are passed over and counted. Without
+    /// sound the UI clock steps the playhead (`AppState::tick`). Either way
+    /// the loop range wraps (or ends) playback, then the sound follows.
+    fn play_tick(&mut self, dt: f32) {
+        let playing = self.state.view.playing;
+        let prev = self.state.view.frame;
+        if playing && !self.play_running {
+            self.play_dropped = 0;
+        }
+        self.play_running = playing;
+        let range = playback::play_range(self.loop_range, self.state.frame_count());
+        let looping = self.state.view.loop_playback;
+        let reached = match &mut self.audio_clock {
+            Some((clock, cursor, start)) if playing && self.audio_playing => {
+                let pos = cursor.load(std::sync::atomic::Ordering::Relaxed);
+                let before = clock.dropped;
+                let f = clock.advance((pos.saturating_sub(*start) / 2) as u64);
+                self.play_dropped += clock.dropped - before;
+                // The mix ends with the cut: a sound that has run out is
+                // past the end even where fps does not divide the rate.
+                let ran_out = self.audio_out.as_ref().is_some_and(|o| o.sink.empty());
+                Some(if ran_out { f.max(range.1 + 1) } else { f })
+            }
+            _ => None,
+        };
+        let step = match reached {
+            Some(f) => Some(playback::place(f, range, looping)),
+            None => {
+                self.state.tick(dt);
+                let now = self.state.view.frame;
+                if playing && now > prev + 1 {
+                    self.play_dropped += (now - prev - 1) as u64;
+                }
+                // The UI clock knows only the cut's ends: past the loop
+                // range's end (or wrapped at the cut's) is the range's end.
+                let past = now > range.1 || (now < prev && prev <= range.1);
+                (playing && self.loop_range.is_some() && past)
+                    .then(|| playback::place(range.1 + 1, range, looping))
+            }
+        };
+        match step {
+            Some(playback::Step::Show(f)) | Some(playback::Step::Wrap(f)) => {
+                self.state.view.frame = f;
+            }
+            Some(playback::Step::End(f)) => {
+                self.state.view.frame = f;
+                self.state.view.playing = false;
+            }
+            None => {}
+        }
+        self.sync_audio(dt);
     }
 
     /// THE FOOT's right lane: the room lamp, the tape counter, and the pen
@@ -6455,8 +6636,7 @@ impl Editor {
             }
         }
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
-        self.state.tick(dt);
-        self.sync_audio(dt);
+        self.play_tick(dt);
         egui::Panel::top("top_bar").show(ui, |ui| {
             plate::surface(ui);
             // Owner's directive (2026-08-17): the bar read small. One size
@@ -6650,23 +6830,49 @@ impl Editor {
                     ui.separator();
                     // Scratch audio (moved from the x-sheet header — the sheet
                     // is for time, the slate detent is for the file's parts).
+                    // GM12: WAV, MP3, OGG Vorbis or FLAC; with a first track
+                    // in place, a further file becomes a further track.
+                    const SOUND: &[&str] = &["wav", "mp3", "ogg", "flac"];
                     match self.state.cut().audio.as_ref().map(|a| a.name.clone()) {
                         Some(name) => {
                             if ui.button(format!("Remove audio ({name})")).clicked() {
                                 self.state.remove_audio();
                                 ui.close();
                             }
-                        }
-                        None => {
-                            if ui.button("Import WAV…").clicked() {
+                            if ui.button("Add sound track…").clicked() {
                                 ui.close();
                                 if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("WAV audio", &["wav"])
+                                    .add_filter("Sound (WAV, MP3, OGG, FLAC)", SOUND)
+                                    .pick_file()
+                                {
+                                    self.state.add_audio_track(&path);
+                                }
+                            }
+                        }
+                        None => {
+                            if ui.button("Import sound…").clicked() {
+                                ui.close();
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("Sound (WAV, MP3, OGG, FLAC)", SOUND)
                                     .pick_file()
                                 {
                                     self.state.import_audio(&path);
                                 }
                             }
+                        }
+                    }
+                    let extra: Vec<(usize, String)> = self
+                        .state
+                        .cut()
+                        .tracks
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| (i + 1, t.props.name.clone()))
+                        .collect();
+                    for (index, name) in extra {
+                        if ui.button(format!("Remove track {index} ({name})")).clicked() {
+                            self.state.remove_audio_track(index);
+                            ui.close();
                         }
                     }
                     ui.separator();
@@ -7246,12 +7452,59 @@ impl Editor {
                         plate::latch(ui, &mut lp, "loop")
                             .on_hover_text("off = playback stops on the last frame");
                         self.state.view.loop_playback = lp;
+                        // GM12: the loop range — "in" and "out" mark the
+                        // playhead; × plays the whole cut again.
+                        let here = self.state.view.frame;
+                        let (lo, hi) = playback::play_range(self.loop_range, count);
+                        if ui
+                            .small_button("in")
+                            .on_hover_text("the loop range starts at this frame")
+                            .clicked()
+                        {
+                            self.loop_range = Some((here, hi.max(here)));
+                        }
+                        if ui
+                            .small_button("out")
+                            .on_hover_text("the loop range ends at this frame")
+                            .clicked()
+                        {
+                            self.loop_range = Some((lo.min(here), here));
+                        }
+                        if let Some((a, b)) = self.loop_range {
+                            ui.label(
+                                egui::RichText::new(format!("{}–{}", a + 1, b + 1))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(plate::LEGEND),
+                            );
+                            if ui
+                                .small_button("×")
+                                .on_hover_text("clear the loop range")
+                                .clicked()
+                            {
+                                self.loop_range = None;
+                            }
+                        }
+                        let mut scrub = self.scrub_audio;
+                        plate::latch(ui, &mut scrub, "scrub")
+                            .on_hover_text("on = a stopped playhead's move sounds one frame");
+                        self.scrub_audio = scrub;
                         ui.label(
                             egui::RichText::new(format!("{:.3}", self.state.fps() as f32))
                                 .monospace()
                                 .size(11.0)
                                 .color(plate::LEGEND),
                         );
+                        // GM12: frames passed over to keep up with the sound.
+                        if self.play_dropped > 0 {
+                            ui.label(
+                                egui::RichText::new(format!("dropped {}", self.play_dropped))
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(plate::LEGEND),
+                            )
+                            .on_hover_text("frames passed over to keep up with the sound");
+                        }
                         ui.separator();
                         // REFUSAL lane (Aka): the machine overruled the hand.
                         // Dwells 4s; a repeat of the same refusal re-flashes.

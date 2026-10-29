@@ -321,6 +321,33 @@ pub struct AudioIn<'a> {
     pub secs: f64,
 }
 
+/// GM12: the cut's mix (every sounding track, [`crate::audio::mix`]) over
+/// frames `from..=to`, interleaved stereo at [`crate::audio::MIX_RATE`];
+/// None when nothing sounds.
+pub fn mixdown(cut: &Cut, fps: u32, from: u32, to: u32) -> Option<Vec<f32>> {
+    if !crate::audio::has_sound(cut) {
+        return None;
+    }
+    let rate = crate::audio::MIX_RATE as u64;
+    let fps = fps.max(1) as u64;
+    let mut all = crate::audio::mix(cut, fps as u32, to.saturating_add(1), rate as u32);
+    let skip = ((from as u64 * rate / fps) as usize * 2).min(all.len());
+    all.drain(..skip);
+    Some(all)
+}
+
+/// GM12: write the mixdown of frames `from..=to` to `path` as a 24-bit
+/// stereo WAV (hound). Ok(false), and no file, when nothing sounds. A
+/// video job writes the whole cut's (frames 0 to the end) and muxes it
+/// through [`ffmpeg_args`] exactly as v0.3 muxed its one clip; an image
+/// sequence gets its range's beside the frames.
+pub fn write_mixdown(path: &Path, cut: &Cut, fps: u32, from: u32, to: u32) -> Result<bool, String> {
+    match mixdown(cut, fps, from, to) {
+        Some(mix) => crate::audio::write_wav(path, &mix, crate::audio::MIX_RATE).map(|_| true),
+        None => Ok(false),
+    }
+}
+
 /// Crop odd sizes by a pixel: 4:2:0 and 4:2:2 need even dimensions.
 const EVEN: &str = "crop=trunc(iw/2)*2:trunc(ih/2)*2";
 

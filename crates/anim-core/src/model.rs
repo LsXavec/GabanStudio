@@ -674,6 +674,35 @@ impl AudioClip {
         })
     }
 
+    /// GM12: decode any file the sound tracks take — WAV, MP3, OGG Vorbis or
+    /// FLAC, told apart by its magic bytes. A WAV takes the `from_wav` path
+    /// above (so every v0.3 clip decodes exactly as it always did); the
+    /// rest go through symphonia ([`crate::audio::decode`]), under the same
+    /// mono-or-stereo and rate law.
+    pub fn from_bytes(name: impl Into<String>, bytes: Vec<u8>) -> Result<Self, String> {
+        let name = name.into();
+        if matches!(crate::audio::sniff(&bytes), Some(crate::audio::Format::Wav)) {
+            return Self::from_wav(name, bytes);
+        }
+        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        let (rate, channels, samples) = crate::audio::decode(&bytes, &ext)?;
+        if channels == 0 || channels > 2 {
+            return Err(format!(
+                "audio: {channels} channels unsupported (mono or stereo only)"
+            ));
+        }
+        if !(8_000..=192_000).contains(&rate) {
+            return Err(format!("audio: sample rate {rate} Hz out of range"));
+        }
+        Ok(Self {
+            name,
+            bytes: std::sync::Arc::new(bytes),
+            sample_rate: rate,
+            channels,
+            samples: std::sync::Arc::new(samples),
+        })
+    }
+
     /// Clip length in seconds.
     pub fn seconds(&self) -> f32 {
         self.samples.len() as f32 / (self.sample_rate as f32 * self.channels as f32)
@@ -812,7 +841,17 @@ pub struct Cut {
     pub images: Vec<ImageAsset>,
     /// The scratch audio track (C4): at most ONE clip per cut, aligned to
     /// frame 0. Timing reference only — audio never enters the render graph.
+    /// GM12: this is the FIRST sound track (dialogue); its settings live in
+    /// `audio_props`, the tracks after it in `tracks`.
     pub audio: Option<AudioClip>,
+    /// GM12: the first track's settings (name, kind, offset, gain, mute,
+    /// solo). The default is v0.3's: dialogue from frame 0, as recorded.
+    #[serde(default)]
+    pub audio_props: crate::audio::TrackProps,
+    /// GM12: the sound tracks after the first (SE, music, ...), in order.
+    /// Their offsets are frame-indexed, so frame ripples move them (D4).
+    #[serde(default)]
+    pub tracks: Vec<crate::audio::AudioTrack>,
     /// GM5 (D3): namespaced keys (`camera.paper`, `prod.status`, ...) whose
     /// values are JSON owned by the part that defines the key. Edited only
     /// through SetCutMeta; unknown keys round-trip untouched.
@@ -843,6 +882,8 @@ impl Cut {
             graph: Graph::default(),
             images: Vec::new(),
             audio: None,
+            audio_props: Default::default(),
+            tracks: Vec::new(),
             meta: Default::default(),
             memos: Default::default(),
             column_defs: Default::default(),

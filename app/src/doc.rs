@@ -2821,10 +2821,10 @@ impl AppState {
         self.report(r, label);
     }
 
-    /// Import a WAV as this cut's scratch audio track (one undo step;
-    /// replaces any existing clip — the inverse restores it).
-    pub fn import_audio(&mut self, path: &std::path::Path) {
-        let at = self.at();
+    /// Read a sound file as a clip, or say why not in the status line.
+    /// GM12: WAV, MP3, OGG Vorbis or FLAC, routed by the file's magic bytes
+    /// (`AudioClip::from_bytes`); the bytes are kept verbatim.
+    fn read_audio(&mut self, path: &std::path::Path) -> Option<anim_core::model::AudioClip> {
         // Size gate BEFORE reading: the picker filters by extension only,
         // so a mislabeled multi-GB file must fail here, not after a full
         // read into memory.
@@ -2835,11 +2835,11 @@ impl AppState {
                     m.len() / (1024 * 1024),
                     anim_core::model::MAX_AUDIO_BYTES / (1024 * 1024)
                 );
-                return;
+                return None;
             }
             Err(e) => {
                 self.status = format!("audio read failed: {e}");
-                return;
+                return None;
             }
             Ok(_) => {}
         }
@@ -2847,19 +2847,82 @@ impl AppState {
             Ok(b) => b,
             Err(e) => {
                 self.status = format!("audio read failed: {e}");
-                return;
+                return None;
             }
         };
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "audio.wav".into());
-        let clip = match anim_core::model::AudioClip::from_wav(name, bytes) {
-            Ok(c) => c,
+        match anim_core::model::AudioClip::from_bytes(name, bytes) {
+            Ok(c) => Some(c),
             Err(e) => {
                 self.status = format!("audio import failed: {e}");
-                return;
+                None
             }
+        }
+    }
+
+    /// GM12: add a sound file as a further track of this cut (one undo
+    /// step), named after the file, of the effects kind.
+    pub fn add_audio_track(&mut self, path: &std::path::Path) {
+        let Some(clip) = self.read_audio(path) else {
+            return;
+        };
+        let at = self.at();
+        let index = self.cut().tracks.len() + 1;
+        let stem = path
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "track".into());
+        let track = anim_core::audio::AudioTrack {
+            props: anim_core::audio::TrackProps::new(&stem, anim_core::audio::TrackKind::Effects),
+            clip,
+        };
+        let r = self
+            .engine
+            .apply("add sound track", vec![Command::AddTrack { at, index, track }]);
+        self.report(r, "add sound track");
+    }
+
+    /// GM12: remove track `index` (1.. — the first track goes through
+    /// `remove_audio`), one undo step.
+    pub fn remove_audio_track(&mut self, index: usize) {
+        let at = self.at();
+        let r = self
+            .engine
+            .apply("remove sound track", vec![Command::RemoveTrack { at, index }]);
+        self.report(r, "remove sound track");
+    }
+
+    /// GM12: a track header's edit (mute, solo, gain, name, kind or offset)
+    /// as one undo step; track 0 is the first track.
+    pub fn set_track_props(&mut self, index: usize, after: anim_core::audio::TrackProps) {
+        let at = self.at();
+        let Some(before) = anim_core::audio::track_props(self.cut(), index).cloned() else {
+            return;
+        };
+        if before == after {
+            return;
+        }
+        let r = self.engine.apply(
+            "sound track settings",
+            vec![Command::SetTrackProps {
+                at,
+                index,
+                before,
+                after,
+            }],
+        );
+        self.report(r, "sound track settings");
+    }
+
+    /// Import a sound file as this cut's scratch audio track (one undo
+    /// step; replaces any existing clip — the inverse restores it).
+    pub fn import_audio(&mut self, path: &std::path::Path) {
+        let at = self.at();
+        let Some(clip) = self.read_audio(path) else {
+            return;
         };
         let secs = clip.seconds();
         let cname = clip.name.clone();

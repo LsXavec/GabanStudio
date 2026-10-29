@@ -996,6 +996,8 @@ pub fn job_cut(cut: &Cut, node: NodeId, frame: u32) -> Cut {
             .cloned()
             .collect(),
         audio: None,
+        audio_props: Default::default(),
+        tracks: Vec::new(),
         // GM10: the paper decides what a camera sees beyond the frame.
         meta: cut
             .meta
