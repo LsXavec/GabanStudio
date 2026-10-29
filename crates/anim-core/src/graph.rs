@@ -10,7 +10,7 @@ use crate::command::{Command, CutRef};
 use crate::error::{EngineError, Result};
 use crate::fx::{FxBinds, FxKind, FxParams};
 use crate::ids::{ColumnId, ImageId, NodeId, ParamId};
-use crate::model::Cut;
+use crate::model::{Cut, LayerRole};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
@@ -78,7 +78,18 @@ impl TransformBinds {
 pub enum NodeKind {
     /// Reads the cut's X-sheet: resolves `column` at the evaluated frame.
     /// This node is the bridge between timing and imagery.
-    DrawingSource { column: ColumnId },
+    /// GM13: `roles` passes only those cel layers (the Shadow pass, the
+    /// Highlight pass, paint only, lines only); `absorb_trace` recolours the
+    /// trace lines into the paint first ([`crate::look`]). Both default off,
+    /// are left out of the JSON when off (old files and peers read the same
+    /// node), and a filtered source renders on the CPU in every view (D9).
+    DrawingSource {
+        column: ColumnId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        roles: Option<Vec<LayerRole>>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        absorb_trace: bool,
+    },
     /// Constant color layer.
     Solid { rgba: [u8; 4] },
     /// One of the cut's imported image assets (BG plate, reference).
@@ -130,7 +141,36 @@ pub struct PlaneSpec {
     pub depth: f32,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 impl NodeKind {
+    /// A plain DrawingSource: every visible layer of the column's drawing.
+    pub fn source(column: ColumnId) -> Self {
+        Self::DrawingSource {
+            column,
+            roles: None,
+            absorb_trace: false,
+        }
+    }
+
+    /// GM13: a role pass of `column` — only `roles`' layers, with the trace
+    /// lines absorbed into the paint first when `absorb_trace`.
+    pub fn pass(column: ColumnId, roles: &[LayerRole], absorb_trace: bool) -> Self {
+        Self::DrawingSource {
+            column,
+            roles: Some(roles.to_vec()),
+            absorb_trace,
+        }
+    }
+
+    /// GM13: a DrawingSource that filters roles or absorbs trace lines (a
+    /// CPU node in every view).
+    pub fn is_filtered_source(&self) -> bool {
+        matches!(self, Self::DrawingSource { roles, absorb_trace, .. } if roles.is_some() || *absorb_trace)
+    }
+
     /// GM10: a new Camera node with one plane at depth 0 and every
     /// parameter at its default.
     pub fn camera() -> Self {
@@ -404,7 +444,7 @@ impl Graph {
     pub fn sources_of_column(&self, column: ColumnId) -> Vec<NodeId> {
         self.nodes
             .values()
-            .filter(|n| matches!(n.kind, NodeKind::DrawingSource { column: c } if c == column))
+            .filter(|n| matches!(n.kind, NodeKind::DrawingSource { column: c, .. } if c == column))
             .map(|n| n.id)
             .collect()
     }

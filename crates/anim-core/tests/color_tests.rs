@@ -207,7 +207,7 @@ impl Rig {
     /// Solid(chip) under the column's drawing, wired to the output.
     fn solid_under_art(&mut self, chip: [u8; 4]) {
         let s = self.node(NodeKind::Solid { rgba: chip });
-        let src = self.node(NodeKind::DrawingSource { column: self.col });
+        let src = self.node(NodeKind::source(self.col));
         let blend = self.node(NodeKind::Blend { mode: BlendMode::Normal });
         let out = self.node(NodeKind::Output);
         self.connect(s, blend, 0);

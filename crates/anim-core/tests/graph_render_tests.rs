@@ -255,7 +255,7 @@ fn trivial_graph_matches_column_export_exactly() {
     let mut r = rig();
     r.paint_texel(10, 20, [0.5, 0.25, 0.125, 0.5]);
     r.paint_texel(40, 8, [0.0, 0.0, 0.0, 1.0]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let out = r.node(NodeKind::Output);
     r.connect(src, out, 0);
     r.set_output(out);
@@ -268,7 +268,7 @@ fn trivial_graph_matches_column_export_exactly() {
 fn transform_integer_translate_is_exact() {
     let mut r = rig();
     r.paint_texel(10, 20, [1.0, 1.0, 1.0, 1.0]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let xf = r.node(NodeKind::Transform {
         translate: (5.0, 3.0),
         scale: 1.0,
@@ -289,7 +289,7 @@ fn transform_integer_translate_is_exact() {
 fn transform_identity_is_exact() {
     let mut r = rig();
     r.paint_texel(31, 7, [0.5, 0.5, 0.0, 0.5]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let xf = r.node(NodeKind::Transform {
         translate: (0.0, 0.0),
         scale: 1.0,
@@ -304,7 +304,7 @@ fn transform_identity_is_exact() {
 
     let mut r2 = rig();
     r2.paint_texel(31, 7, [0.5, 0.5, 0.0, 0.5]);
-    let src2 = r2.node(NodeKind::DrawingSource { column: r2.col });
+    let src2 = r2.node(NodeKind::source(r2.col));
     let out2 = r2.node(NodeKind::Output);
     r2.connect(src2, out2, 0);
     r2.set_output(out2);
@@ -319,7 +319,7 @@ fn transform_rotate90_pins_centre_origin_clockwise() {
     // (31.5, 40.5) = exactly pixel (31, 40) — a single-pixel landing.
     let mut r = rig();
     r.paint_texel(40, 32, [1.0, 0.0, 0.0, 1.0]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let xf = r.node(NodeKind::Transform {
         translate: (0.0, 0.0),
         scale: 1.0,
@@ -345,7 +345,7 @@ fn transform_scale_about_centre_and_degenerate_zero() {
     // skirt — bounded, and absent far away.
     let mut r = rig();
     r.paint_texel(32, 32, [1.0, 0.0, 0.0, 1.0]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let xf = r.node(NodeKind::Transform {
         translate: (0.0, 0.0),
         scale: 3.0,
@@ -365,7 +365,7 @@ fn transform_scale_about_centre_and_degenerate_zero() {
     // Degenerate law: |s| < 1e-6 renders fully transparent.
     let mut r2 = rig();
     r2.paint_texel(32, 32, [1.0, 0.0, 0.0, 1.0]);
-    let src2 = r2.node(NodeKind::DrawingSource { column: r2.col });
+    let src2 = r2.node(NodeKind::source(r2.col));
     let xf2 = r2.node(NodeKind::Transform {
         translate: (0.0, 0.0),
         scale: 0.0,
@@ -388,7 +388,7 @@ fn transform_fractional_translate_pins_bilinear_edge_law() {
     // truth; the GPU's ClampToEdge fringe is the documented deviation).
     let mut r = rig();
     r.paint_texel(10, 20, [1.0, 1.0, 1.0, 1.0]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let xf = r.node(NodeKind::Transform {
         translate: (0.5, 0.0),
         scale: 1.0,
@@ -426,7 +426,7 @@ fn missing_column_renders_transparent_and_still_evaluates() {
     // export must agree), and the renderer draws transparent.
     let mut r = rig();
     r.paint_texel(5, 5, [1.0, 0.0, 0.0, 1.0]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let out = r.node(NodeKind::Output);
     r.connect(src, out, 0);
     r.set_output(out);
@@ -443,7 +443,7 @@ fn missing_column_renders_transparent_and_still_evaluates() {
 fn holds_resolve_through_the_graph() {
     let mut r = rig();
     r.paint_texel(3, 3, [0.0, 0.5, 0.0, 0.5]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let out = r.node(NodeKind::Output);
     r.connect(src, out, 0);
     r.set_output(out);

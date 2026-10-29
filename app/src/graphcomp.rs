@@ -562,7 +562,7 @@ impl GraphCompositor {
         let kind = node.kind.clone();
         let inputs = node.inputs.clone();
         let slot = match &kind {
-            NodeKind::DrawingSource { column } => {
+            NodeKind::DrawingSource { column, .. } if !kind.is_filtered_source() => {
                 let slot = self.acquire_cleared();
                 // A hidden or Ref column yields transparent (GM5).
                 if let Some(d) = source_drawing(cut, *column, frame) {
@@ -634,10 +634,12 @@ impl GraphCompositor {
                 slot
             }
             NodeKind::Output => self.render_input(cut, &inputs, 0, frame, paint, visiting),
-            NodeKind::Effect { .. } | NodeKind::Camera { .. } => {
+            NodeKind::Effect { .. } | NodeKind::Camera { .. } | NodeKind::DrawingSource { .. } => {
                 // GM9 (D9): the subtree renders on the CPU worker; this shows
                 // its upload — the last one while a newer render is pending.
-                // GM10: a Camera too (its paper and sampling are CPU maths).
+                // GM10: a Camera too (its paper and sampling are CPU maths);
+                // GM13: a role pass or trace-line absorb (the plain source
+                // took the arm above).
                 let slot = self.acquire_cleared();
                 if let Some(&hash) = self.fx_hashes.get(&id) {
                     let key = FxKey { node: id, frame, hash };
@@ -902,9 +904,10 @@ impl GraphCompositor {
 // ---- GM9: the CPU subtrees ----------------------------------------------------
 
 /// Does this node's maths live only on the CPU? (D9: no forked FX maths;
-/// GM10: nor camera maths — a Camera's planes render at the paper.)
+/// GM10: nor camera maths — a Camera's planes render at the paper; GM13:
+/// nor a role pass or a trace-line absorb.)
 pub fn needs_cpu(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Effect { .. } | NodeKind::Camera { .. })
+    matches!(kind, NodeKind::Effect { .. } | NodeKind::Camera { .. }) || kind.is_filtered_source()
 }
 
 /// Does `node`, or anything feeding it, need the CPU?
@@ -967,7 +970,7 @@ pub fn job_cut(cut: &Cut, node: NodeId, frame: u32) -> Cut {
             continue;
         };
         match &n.kind {
-            NodeKind::DrawingSource { column } => {
+            NodeKind::DrawingSource { column, .. } => {
                 drawings.extend(source_drawing(cut, *column, frame).map(|d| d.id));
             }
             NodeKind::ImageSource { image } => {
@@ -1008,6 +1011,8 @@ pub fn job_cut(cut: &Cut, node: NodeId, frame: u32) -> Cut {
         memos: Default::default(),
         column_defs: cut.column_defs.clone(),
         drawing_defs: Default::default(),
+        // GM13: a LUT reads its embedded file (shared handles).
+        blobs: cut.blobs.clone(),
     }
 }
 
@@ -1370,7 +1375,7 @@ mod fx_tests {
         ink(h.state_mut());
         let s = h.state_mut();
         let col = s.view.active_column;
-        s.graph_add_node(NodeKind::DrawingSource { column: col }, (0.0, 0.0));
+        s.graph_add_node(NodeKind::source(col), (0.0, 0.0));
         let src = s.selected_node.unwrap();
         s.graph_add_node(NodeKind::effect(FxKind::Blur), (200.0, 0.0));
         let blur = s.selected_node.unwrap();

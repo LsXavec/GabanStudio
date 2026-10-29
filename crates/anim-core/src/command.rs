@@ -6,6 +6,7 @@
 //! are no longer valid. The Engine owns history stacks built from these.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use crate::audio::{AudioTrack, TrackProps};
 use crate::error::{EngineError, Result};
@@ -291,6 +292,14 @@ pub enum Command {
         before: Option<String>,
         after: Option<String>,
     },
+    /// GM13: set (Some) or remove (None) one of the cut's embedded files
+    /// (`Cut::blobs`, a LUT's .cube text). `before` must match.
+    SetCutBlob {
+        at: CutRef,
+        key: String,
+        before: Option<Arc<Vec<u8>>>,
+        after: Option<Arc<Vec<u8>>>,
+    },
     SetColumnDef {
         at: CutRef,
         column: ColumnId,
@@ -389,6 +398,7 @@ impl Command {
             | Command::DeleteFrames { at, .. }
             | Command::SetCells { at, .. }
             | Command::SetCutMeta { at, .. }
+            | Command::SetCutBlob { at, .. }
             | Command::SetColumnDef { at, .. }
             | Command::SetMemo { at, .. }
             | Command::SetDrawingDef { at, .. }
@@ -1724,6 +1734,38 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 } else {
                     all_nodes(cut)
                 },
+            })
+        }
+
+        Command::SetCutBlob {
+            at,
+            key,
+            before,
+            after,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            if key.is_empty() {
+                return Err(EngineError::InvalidCommand("empty cut file key".into()));
+            }
+            if cut.blobs.get(key) != before.as_ref() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "cut file '{key}' changed since this edit was made"
+                )));
+            }
+            match after {
+                Some(v) => cut.blobs.insert(key.clone(), v.clone()),
+                None => cut.blobs.remove(key),
+            };
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetCutBlob {
+                    at: *at,
+                    key: key.clone(),
+                    before: after.clone(),
+                    after: before.clone(),
+                }],
+                // An Effect reads its file through its key: everything that
+                // could show it re-renders.
+                invalidation_roots: all_nodes(cut),
             })
         }
 

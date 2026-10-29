@@ -24,6 +24,7 @@ pub mod fill;
 pub mod fx;
 pub mod graph;
 pub mod ids;
+pub mod look;
 pub mod model;
 pub mod raster;
 pub mod sheet_ops;

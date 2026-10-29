@@ -300,6 +300,50 @@ fn specs_ui(
                 }
                 r.rect
             }
+            // GM13: a file parameter — the file it holds, and a button that
+            // embeds a .cube in the cut (one undo step with the node).
+            (ParamKind::Blob, FxValue::Blob { blob }) => {
+                let name = blob.strip_prefix("lut.").unwrap_or(&blob);
+                ui.horizontal(|ui| {
+                    ui.label(if name.is_empty() { "no file" } else { name });
+                    let load = ui.button("load .cube…").on_hover_text(spec.help);
+                    if load.clicked()
+                        && let Some(path) = rfd::FileDialog::new().add_filter("3D LUT", &["cube"]).pick_file()
+                    {
+                        state.set_lut_file(id, key, &path);
+                    }
+                })
+                .response
+                .rect
+            }
+            // GM13: a colour map — the palette variant it was taken from;
+            // picking one sets the map (one undo step), and the palette's
+            // variant edits refresh it.
+            (ParamKind::ColorMap, FxValue::Map { from, .. }) => {
+                let choices = state.palette_variant_names();
+                let shown = if from.is_empty() { "none".to_string() } else { from.clone() };
+                let mut pick: Option<String> = None;
+                let r = egui::ComboBox::from_id_salt(("fx map", id.0, key))
+                    .selected_text(shown)
+                    .show_ui(ui, |ui| {
+                        if choices.is_empty() {
+                            ui.label("no palette has variants yet — add one in the palette panel");
+                        }
+                        for name in &choices {
+                            if ui.selectable_label(*name == from, name).clicked() {
+                                pick = Some(name.clone());
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text(spec.help);
+                if let Some(name) = pick {
+                    commit = state
+                        .palette_variant_map(&name)
+                        .map(|map| (key.to_string(), FxValue::Map { map, from: name }));
+                }
+                r.rect
+            }
             // A value that does not fit its spec cannot come out of
             // `resolve` (it reads through the spec); draw nothing.
             _ => continue,

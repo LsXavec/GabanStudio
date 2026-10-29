@@ -51,7 +51,7 @@ pub fn build_auto_comp(
         cmds.push(Command::AddNode {
             at,
             id: src,
-            kind: NodeKind::DrawingSource { column },
+            kind: NodeKind::source(column),
         });
         below = Some(match below {
             None => src,
@@ -119,8 +119,14 @@ pub fn auto_chain(graph: &anim_core::graph::Graph) -> Option<Vec<ColumnId>> {
         }
         let node = graph.node(id).ok()?;
         seen += 1;
+        // GM13: a role pass is a graph a hand (or the satsuei template) has
+        // shaped, never the chain.
         next = match node.kind {
-            NodeKind::DrawingSource { column } => {
+            NodeKind::DrawingSource {
+                column,
+                roles: None,
+                absorb_trace: false,
+            } => {
                 cols.push(column);
                 None
             }
@@ -130,7 +136,12 @@ pub fn auto_chain(graph: &anim_core::graph::Graph) -> Option<Vec<ColumnId>> {
                 let (src, 0) = node.inputs.get(1).copied().flatten()? else {
                     return None;
                 };
-                let NodeKind::DrawingSource { column } = graph.node(src).ok()?.kind else {
+                let NodeKind::DrawingSource {
+                    column,
+                    roles: None,
+                    absorb_trace: false,
+                } = graph.node(src).ok()?.kind
+                else {
                     return None;
                 };
                 seen += 1;
@@ -4236,6 +4247,188 @@ impl AppState {
                 false
             }
         }
+    }
+
+    /// GM13: why "Build satsuei graph" cannot run on the current cut (None:
+    /// it can).
+    pub fn satsuei_refusal(&self) -> Option<&'static str> {
+        self.cut()
+            .render_order()
+            .is_empty()
+            .then_some("this cut has no drawing column to build from — add one on the X-sheet")
+    }
+
+    /// GM13 "Build satsuei graph": the current cut's graph becomes the
+    /// satsuei chain ([`anim_core::look::satsuei_template`]) — one undo
+    /// step, every node an ordinary editable node.
+    pub fn build_satsuei(&mut self) -> bool {
+        if let Some(why) = self.satsuei_refusal() {
+            self.refuse(format!("refused — {why}"));
+            return false;
+        }
+        let at = self.at();
+        let mut next = self.engine.project.next_id;
+        let Some(cmds) = self
+            .engine
+            .project
+            .cut(at.scene, at.cut)
+            .map(|cut| {
+                anim_core::look::satsuei_template(cut, at, || {
+                    next += 1;
+                    NodeId(next - 1)
+                })
+            })
+        else {
+            return false;
+        };
+        self.engine.project.next_id = next;
+        match self.engine.apply("build satsuei graph", cmds) {
+            Ok(()) => {
+                self.status = "satsuei graph built — every node stays editable".into();
+                true
+            }
+            Err(e) => {
+                self.refuse(format!("refused — the satsuei graph could not be built ({e})"));
+                false
+            }
+        }
+    }
+
+    /// GM13: every palette variant a Palette map node can take, spelled
+    /// `palette/variant`.
+    pub fn palette_variant_names(&self) -> Vec<String> {
+        self.palettes
+            .characters
+            .iter()
+            .flat_map(|p| p.variants.iter().map(move |v| format!("{}/{}", p.name, v.name)))
+            .collect()
+    }
+
+    /// GM13: the chip map of the variant spelled `palette/variant`.
+    pub fn palette_variant_map(&self, name: &str) -> Option<Vec<([u8; 4], [u8; 4])>> {
+        self.palettes.characters.iter().find_map(|p| {
+            p.variants
+                .iter()
+                .find(|v| format!("{}/{}", p.name, v.name) == name)
+                .and_then(|v| p.variant_map(&v.name))
+        })
+    }
+
+    /// GM13: bring every Palette map node of the current cut up to its
+    /// variant's colours (after a variant changed) — one undo step; false
+    /// when nothing was stale.
+    pub fn refresh_palette_maps(&mut self) -> bool {
+        use anim_core::fx::{FxKind, FxValue};
+        use anim_core::graph::NodeKind;
+        let at = self.at();
+        let mut cmds = Vec::new();
+        for node in self.cut().graph.nodes() {
+            let NodeKind::Effect {
+                fx: FxKind::PaletteMap,
+                params,
+                binds,
+            } = &node.kind
+            else {
+                continue;
+            };
+            let Some(FxValue::Map { map, from }) = params.get("map") else {
+                continue;
+            };
+            let Some(fresh) = self.palette_variant_map(from) else {
+                continue;
+            };
+            if fresh != *map {
+                let mut params = params.clone();
+                params.set(
+                    "map",
+                    FxValue::Map {
+                        map: fresh,
+                        from: from.clone(),
+                    },
+                );
+                cmds.push(Command::SetNodeKind {
+                    at,
+                    id: node.id,
+                    kind: NodeKind::Effect {
+                        fx: FxKind::PaletteMap,
+                        params,
+                        binds: binds.clone(),
+                    },
+                });
+            }
+        }
+        if cmds.is_empty() {
+            return false;
+        }
+        let r = self.engine.apply("palette variant", cmds);
+        self.report(r, "palette maps follow the variant");
+        true
+    }
+
+    /// GM13: embed the .cube at `path` as the LUT of node `id`'s file
+    /// parameter `key` ([`Self::set_lut`]).
+    pub fn set_lut_file(&mut self, id: NodeId, key: &str, path: &std::path::Path) -> bool {
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "lut".into());
+        match std::fs::read(path) {
+            Ok(bytes) => self.set_lut(id, key, &name, bytes),
+            Err(e) => {
+                self.refuse(format!("refused — {} could not be read ({e})", path.display()));
+                false
+            }
+        }
+    }
+
+    /// GM13: a .cube's bytes stored in the cut (`Cut::blobs`, key
+    /// `lut.<name>`) and node `id`'s file parameter `key` pointed at it —
+    /// one undo step. A file that does not parse is refused with the
+    /// reason, and nothing changes.
+    pub fn set_lut(&mut self, id: NodeId, key: &str, name: &str, bytes: Vec<u8>) -> bool {
+        use anim_core::fx::FxValue;
+        use anim_core::graph::NodeKind;
+        let parsed = std::str::from_utf8(&bytes)
+            .map_err(|_| "not a text file".to_string())
+            .and_then(anim_core::look::parse_cube);
+        if let Err(why) = parsed {
+            self.refuse(format!("refused — {name} is not a 3D .cube LUT ({why})"));
+            return false;
+        }
+        let at = self.at();
+        let blob = format!("lut.{name}");
+        let Ok(node) = self.cut().graph.node(id) else {
+            return false;
+        };
+        let NodeKind::Effect { fx, params, binds } = &node.kind else {
+            return false;
+        };
+        let mut params = params.clone();
+        params.set(key, FxValue::Blob { blob: blob.clone() });
+        let kind = NodeKind::Effect {
+            fx: *fx,
+            params,
+            binds: binds.clone(),
+        };
+        let before = self.cut().blobs.get(&blob).cloned();
+        let mut cmds = Vec::new();
+        if before.as_deref() != Some(&bytes) {
+            cmds.push(Command::SetCutBlob {
+                at,
+                key: blob,
+                before,
+                after: Some(std::sync::Arc::new(bytes)),
+            });
+        }
+        if node.kind != kind {
+            cmds.push(Command::SetNodeKind { at, id, kind });
+        }
+        if cmds.is_empty() {
+            return false;
+        }
+        let r = self.engine.apply("load LUT", cmds);
+        self.report(r, "LUT stored in the cut");
+        true
     }
 
     /// GM8 Project Settings: one undoable `SetProjectProps`. The tiles

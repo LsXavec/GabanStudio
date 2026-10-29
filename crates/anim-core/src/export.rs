@@ -365,11 +365,11 @@ fn transform_image(
     out
 }
 
-/// The one bilinear sampler — the Transform node's, and (GM10) the
-/// camera's: `src` (`w × h`, premultiplied) at (sx, sy) in pixel units,
-/// pixel centres at +0.5.
+/// The one bilinear sampler — the Transform node's, (GM10) the camera's
+/// and (GM13) the motion blur's: `src` (`w × h`, premultiplied) at (sx, sy)
+/// in pixel units, pixel centres at +0.5.
 #[inline]
-fn bilinear(src: &[f32], w: usize, h: usize, sx: f32, sy: f32) -> [f32; 4] {
+pub(crate) fn bilinear(src: &[f32], w: usize, h: usize, sx: f32, sy: f32) -> [f32; 4] {
     // Bilinear in texel-index space; out-of-bounds taps contribute
     // transparency (the outer half-texel of a fractionally-placed
     // image fades out). KNOWN DEVIATION: the GPU compositor's
@@ -505,7 +505,11 @@ fn render_node(
         }
     };
     let out = match &node.kind {
-        NodeKind::DrawingSource { column } => {
+        NodeKind::DrawingSource {
+            column,
+            roles,
+            absorb_trace,
+        } => {
             let mut acc = empty();
             // A hidden or Ref column yields transparent (GM5).
             if let Some(col) = cut.xsheet.column(*column)
@@ -513,7 +517,10 @@ fn render_node(
                 && let Some(did) = col.resolve(frame)
                 && let Some(d) = cut.drawing(did)
             {
-                splat_flat(&mut acc, &d.flatten(), area.rect);
+                // GM13: a role pass and the trace-line absorb (plain: the
+                // flatten, exactly).
+                let tiles = crate::look::source_tiles(d, roles.as_deref(), *absorb_trace);
+                splat_flat(&mut acc, &tiles, area.rect);
             }
             acc
         }
@@ -564,7 +571,12 @@ fn render_node(
                 .collect();
             let refs: Vec<Option<&Image>> = ins.iter().map(Option::as_ref).collect();
             let v = cut.fx_at(*fx, params, binds, frame);
-            fx.apply(&v, law, &refs, width, height).px
+            // GM13: Grain reads the frame, a LUT the cut's embedded file.
+            let ctx = crate::fx::FxCtx {
+                frame,
+                blobs: Some(&cut.blobs),
+            };
+            fx.apply_in(&v, law, &refs, width, height, ctx).px
         }
         NodeKind::Camera {
             planes,

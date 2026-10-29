@@ -734,7 +734,7 @@ fn ref_and_hidden_columns_are_absent_from_every_render_path() {
     let at = fx.at;
     let (src, out) = (fx.engine.alloc_node_id(), fx.engine.alloc_node_id());
     fx.apply(vec![
-        Command::AddNode { at, id: src, kind: NodeKind::DrawingSource { column: fx.cols[0] } },
+        Command::AddNode { at, id: src, kind: NodeKind::source(fx.cols[0]) },
         Command::AddNode { at, id: out, kind: NodeKind::Output },
         Command::Connect { at, from: src, from_pin: 0, to: out, to_pin: 0 },
         Command::SetOutput { at, node: Some(out) },

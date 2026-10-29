@@ -74,7 +74,11 @@ impl Evaluator {
         };
 
         let value = match &kind {
-            NodeKind::DrawingSource { column } => {
+            NodeKind::DrawingSource {
+                column,
+                roles,
+                absorb_trace,
+            } => {
                 // A missing column (deleted while a DrawingSource still reads
                 // it) is TOLERATED as transparent, not an error — both frame
                 // renderers (CPU export + GPU compositor) already draw it that
@@ -92,12 +96,20 @@ impl Evaluator {
                             // Content hash in the recipe: editing artwork
                             // changes the value (and its hash) without any
                             // extra plumbing.
-                            Some(dr) => Value::image(format!(
-                                "drawing({}:'{}'#{:016x})",
-                                d,
-                                dr.name,
-                                dr.content_hash()
-                            )),
+                            Some(dr) => {
+                                let plain =
+                                    format!("drawing({}:'{}'#{:016x})", d, dr.name, dr.content_hash());
+                                // GM13: a role pass also spells its roles,
+                                // the absorb and the cel's layer roles (the
+                                // content hash leaves roles out, but a
+                                // pass's pixels follow them).
+                                Value::image(
+                                    match crate::look::pass_recipe(roles.as_deref(), *absorb_trace, dr) {
+                                        Some(pass) => format!("{plain}{pass}"),
+                                        None => plain,
+                                    },
+                                )
+                            }
                             None => Value::image(format!("drawing({d}:?)")),
                         },
                         None => Value::image("empty".to_string()),
@@ -165,8 +177,12 @@ impl Evaluator {
                 // frame), like Transform: a keyed parameter changes the
                 // value per frame; equal resolved values still cache-hit.
                 let v = cut.fx_at(*fx, params, binds, frame);
+                // GM13: Grain changes with the frame, and a LUT with its
+                // file's bytes (the key alone would keep a replaced file's
+                // cache). Empty for every other kind.
+                let extra = crate::look::fx_recipe_extra(*fx, &v, cut, frame);
                 Value::image(format!(
-                    "fx({}, {}, [{}])",
+                    "fx({}, {}{extra}, [{}])",
                     fx.name(),
                     v.recipe(),
                     ins.join(", ")

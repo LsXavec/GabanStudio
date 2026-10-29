@@ -19,19 +19,54 @@ pub struct ColorRole {
     pub color: [u8; 4],
 }
 
+/// GM13: a named variant of a character's palette (day, evening, night):
+/// one colour per chip of the model, in the model's order. A chip the
+/// variant has no colour for keeps the model's.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PaletteVariant {
+    pub name: String,
+    pub colors: Vec<[u8; 4]>,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct CharacterPalette {
     pub name: String,
     pub roles: Vec<ColorRole>,
+    /// GM13: time-of-day variants, aligned to `roles` (older files: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<PaletteVariant>,
 }
 
 impl CharacterPalette {
+    /// GM13: the variant's map — each model chip to the variant's colour
+    /// at its place (a chip it lacks, or one it leaves as is, maps nowhere).
+    pub fn variant_map(&self, variant: &str) -> Option<Vec<([u8; 4], [u8; 4])>> {
+        let v = self.variants.iter().find(|v| v.name == variant)?;
+        Some(
+            self.roles
+                .iter()
+                .zip(&v.colors)
+                .filter(|(role, to)| role.color != **to)
+                .map(|(role, to)| (role.color, *to))
+                .collect(),
+        )
+    }
+
+    /// GM13: a new variant named `name`, starting as the model's colours.
+    pub fn add_variant(&mut self, name: impl Into<String>) {
+        self.variants.push(PaletteVariant {
+            name: name.into(),
+            colors: self.roles.iter().map(|r| r.color).collect(),
+        });
+    }
+
     /// A fresh character with the standard anime color-model triple —
     /// same values as the per-layer defaults (Settings → Layers), so a
     /// character's "normal" tone matches what "color" paints by default.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            variants: Vec::new(),
             roles: vec![
                 ColorRole {
                     name: "normal".into(),

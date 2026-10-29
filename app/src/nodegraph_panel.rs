@@ -8,6 +8,7 @@
 use anim_core::fx::FxKind;
 use anim_core::graph::{BlendMode, NodeKind};
 use anim_core::ids::NodeId;
+use anim_core::model::LayerRole;
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, pos2, vec2};
 
@@ -105,7 +106,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
             term: None,
             aliases: &["drawingsource", "cel", "column"],
             help: "the column's drawing at each frame",
-            make: Make::Node(NodeKind::DrawingSource { column: c.id }),
+            make: Make::Node(NodeKind::source(c.id)),
         })
         .collect();
     v.push(Entry {
@@ -172,7 +173,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
             mode: BlendMode::Normal,
         }),
     });
-    for &fx in FxKind::ALL {
+    for &fx in FxKind::CORE {
         v.push(Entry {
             category: "FX",
             name: fx.name().into(),
@@ -190,6 +191,25 @@ fn entries(state: &AppState) -> Vec<Entry> {
         help: "the cut's final image",
         make: Make::Node(NodeKind::Output),
     });
+    v
+}
+
+/// GM13: what the add menu lists — [`entries`] with the satsuei look's
+/// kinds as their own Look category before the Output.
+fn menu_entries(state: &AppState) -> Vec<Entry> {
+    let mut v = entries(state);
+    let out = v.pop();
+    for &fx in FxKind::LOOK {
+        v.push(Entry {
+            category: "Look",
+            name: fx.name().into(),
+            term: fx.term(),
+            aliases: fx.aliases(),
+            help: fx.help(),
+            make: Make::Node(NodeKind::effect(fx)),
+        });
+    }
+    v.extend(out);
     v
 }
 
@@ -249,7 +269,7 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
     if esc || outside {
         return;
     }
-    let rows = ranked(entries(state), &menu.query);
+    let rows = ranked(menu_entries(state), &menu.query);
     let last = rows.len().saturating_sub(1);
     if up {
         menu.sel = menu.sel.saturating_sub(1);
@@ -389,6 +409,7 @@ fn kind_color(kind: &NodeKind) -> Color32 {
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     state.ensure_node_layout();
+    toolbar(ui, state);
     inspector_row(ui, state);
     ui.separator();
     let rect = ui.available_rect_before_wrap();
@@ -691,6 +712,28 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
+/// GM13: the pane's toolbar. "Build satsuei graph" replaces the graph with
+/// the satsuei chain in one undo step; without a drawing column it is
+/// disabled and its tooltip says why.
+fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
+    ui.horizontal(|ui| {
+        let why = state.satsuei_refusal();
+        let button = ui.add_enabled(why.is_none(), egui::Button::new("Build satsuei graph"));
+        let button = match why {
+            Some(why) => button.on_disabled_hover_text(why),
+            None => button.on_hover_text(
+                "replace this cut's graph with the satsuei chain: BG through a camera; per \
+                 character a paint pass, a shadow pass, a highlight glow and the lines; then \
+                 diffusion, para, light wrap, grade, grain and vignette — one undo step, every \
+                 node editable",
+            ),
+        };
+        if button.clicked() {
+            state.build_satsuei();
+        }
+    });
+}
+
 /// Selected node's parameters, edited through SetNodeKind (undoable).
 fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal_wrapped(|ui| {
@@ -847,7 +890,11 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 }
             }
-            NodeKind::DrawingSource { column } => {
+            NodeKind::DrawingSource {
+                column,
+                roles,
+                absorb_trace,
+            } => {
                 let columns: Vec<(anim_core::ids::ColumnId, String)> = state
                     .cut()
                     .xsheet
@@ -864,6 +911,40 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                         changed = true;
                     }
                 }
+                // GM13: the role pass (every layer, or the ticked roles')
+                // and the trace-line absorb — each click one undo step.
+                let shown = match roles {
+                    None => "every layer".to_string(),
+                    Some(r) => r.iter().map(|x| x.label()).collect::<Vec<_>>().join(" + "),
+                };
+                ui.menu_button(format!("pass: {shown} ▾"), |ui| {
+                    if ui.selectable_label(roles.is_none(), "every layer").clicked() {
+                        *roles = None;
+                        changed = true;
+                    }
+                    for role in LayerRole::ALL {
+                        let on = roles.as_ref().is_some_and(|r| r.contains(&role));
+                        if ui.selectable_label(on, role.label()).clicked() {
+                            let mut r = roles.take().unwrap_or_default();
+                            if on {
+                                r.retain(|x| *x != role);
+                            } else {
+                                r.push(role);
+                            }
+                            *roles = (!r.is_empty()).then_some(r);
+                            changed = true;
+                        }
+                    }
+                })
+                .response
+                .on_hover_text("only these layer roles render: the shadow pass, the highlight pass, paint only, lines only");
+                changed |= ui
+                    .checkbox(absorb_trace, "absorb trace lines")
+                    .on_hover_text(
+                        "iro-tore: the shadow and highlight trace lines take the paint colour under them \
+                         (or the nearest within 3 px)",
+                    )
+                    .changed();
             }
             NodeKind::Output => {
                 ui.label(egui::RichText::new("the cut's final image").color(crate::plate::legend_dim()));
@@ -1084,5 +1165,152 @@ mod tests {
             assert_eq!(fx.input_names().len(), fx.inputs(), "{fx:?}");
             assert_eq!(fx.input_help().len(), fx.inputs(), "{fx:?}");
         }
+    }
+
+    // ---- GM13: the satsuei (composite) room's look --------------------------
+
+    /// The graph under `id`, spelled: kinds, passes and pins (`-` unwired).
+    fn spell(c: &anim_core::model::Cut, id: NodeId) -> String {
+        let n = c.graph.node(id).unwrap();
+        let name = match &n.kind {
+            NodeKind::DrawingSource {
+                column,
+                roles,
+                absorb_trace,
+            } => {
+                let col = c.xsheet.column(*column).unwrap().name.clone();
+                match roles {
+                    None => col,
+                    Some(r) => format!(
+                        "{col}[{}{}]",
+                        r.iter().map(|r| r.key()).collect::<Vec<_>>().join(","),
+                        if *absorb_trace { ";absorb" } else { "" }
+                    ),
+                }
+            }
+            NodeKind::Blend { mode } => format!("{mode}"),
+            k => k.name().to_string(),
+        };
+        let ins: Vec<String> = n
+            .inputs
+            .iter()
+            .map(|i| i.map_or_else(|| "-".to_string(), |(src, _)| spell(c, src)))
+            .collect();
+        if ins.is_empty() { name } else { format!("{name}({})", ins.join(", ")) }
+    }
+
+    /// The sample cut (BG, the ball column A, the empty column B) in the
+    /// graph pane alone.
+    fn sample_graph_pane() -> EditorHarness {
+        let mut h = EditorHarness::with_state(crate::sample::build_sample());
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::NodeGraph]);
+        h.run();
+        h.run();
+        h
+    }
+
+    #[test]
+    fn comproom_build_satsuei_graph_is_one_undo_step_and_builds_the_template() {
+        let mut h = sample_graph_pane();
+        let before = h.state().cut().graph.clone();
+        let depth = h.state().engine.history_len();
+        assert_eq!(h.node_enabled("Build satsuei graph"), Some(true), "{}", h.describe());
+        h.click("Build satsuei graph");
+        let s = h.state();
+        assert_eq!(s.engine.history_len(), depth + 1, "one undo step");
+        let c = s.cut();
+        let character = |col: &str| {
+            format!(
+                "Normal(Screen(Multiply({col}[color,shadow,highlight,shadow_line,highlight_line;absorb], \
+                 Grade(Matte({col}[shadow], -))), Glow({col}[highlight], -)), {col}[line])"
+            )
+        };
+        let fg = format!("Normal({}, {})", character("A"), character("B"));
+        let want = format!(
+            "Output(Vignette(Grain(Grade(Light wrap(Para(Diffusion(Normal(Camera(BG), {fg})), -), Camera(BG), {fg})))))"
+        );
+        assert_eq!(spell(c, c.graph.output.unwrap()), want);
+        let layout = s.graph_layout();
+        assert!(c.graph.nodes().all(|n| layout.contains_key(&n.id)), "every node has its place");
+        assert!(s.status.contains("satsuei graph built"), "{}", s.status);
+        // Undo takes the whole graph back, nodes and places.
+        h.perform(Action::Undo);
+        assert_eq!(h.state().cut().graph, before, "undo restores the graph exactly");
+    }
+
+    #[test]
+    fn comproom_build_satsuei_is_disabled_and_says_why_without_a_drawing_column() {
+        let mut s = AppState::new_project("bare cut", 64, 36, 24, 300.0);
+        let at = s.at();
+        let column = s.cut().xsheet.columns[0].id;
+        s.engine
+            .apply("bare", vec![anim_core::command::Command::RemoveColumn { at, id: column }])
+            .unwrap();
+        let mut h = EditorHarness::with_state(s);
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::NodeGraph]);
+        h.run();
+        h.run();
+        assert_eq!(h.node_enabled("Build satsuei graph"), Some(false), "{}", h.describe());
+        let depth = h.state().engine.history_len();
+        let graph = h.state().cut().graph.clone();
+        assert!(!h.state_mut().build_satsuei(), "the verb refuses too");
+        let s = h.state();
+        assert_eq!(s.engine.history_len(), depth);
+        assert_eq!(s.cut().graph, graph);
+        assert!(s.refusal.contains("no drawing column"), "the reason is said: {}", s.refusal);
+    }
+
+    #[test]
+    fn comproom_the_satsuei_look_renders_on_the_cpu_worker_and_a_lut_is_one_step() {
+        let mut s = crate::sample::build_sample();
+        assert!(s.build_satsuei());
+        let c = s.cut();
+        let out = c.graph.output.unwrap();
+        let vignette = c.graph.node(out).unwrap().inputs[0].unwrap().0;
+        // D9: the look's maths live once, on the CPU — its whole subtree
+        // goes to the worker; the passes are CPU nodes, a plain source not.
+        assert_eq!(crate::graphcomp::cpu_roots(c), vec![vignette]);
+        let passes: Vec<&NodeKind> = c
+            .graph
+            .nodes()
+            .map(|n| &n.kind)
+            .filter(|k| k.is_filtered_source())
+            .collect();
+        assert_eq!(passes.len(), 8, "four passes for each cel column");
+        assert!(passes.iter().all(|k| crate::graphcomp::needs_cpu(k)));
+        let column = c.xsheet.columns[0].id;
+        assert!(!crate::graphcomp::needs_cpu(&NodeKind::source(column)));
+        // A LUT node: loading a file is one step that brings the file into
+        // the cut; a file that is not a .cube is refused with the reason.
+        let at = s.at();
+        let lut = s.engine.project.next_id;
+        s.engine.project.next_id += 1;
+        s.engine
+            .apply(
+                "add node",
+                vec![anim_core::command::Command::AddNode {
+                    at,
+                    id: NodeId(lut),
+                    kind: NodeKind::effect(FxKind::Lut),
+                }],
+            )
+            .unwrap();
+        let depth = s.engine.history_len();
+        assert!(!s.set_lut(NodeId(lut), "lut", "junk", b"LUT_3D_SIZE 2\n0 0 0\n".to_vec()));
+        assert_eq!(s.engine.history_len(), depth, "refused: nothing changes");
+        assert!(s.refusal.contains("not a 3D .cube"), "{}", s.refusal);
+        let mut cube = String::from("LUT_3D_SIZE 2\n");
+        for i in 0..8 {
+            cube.push_str(&format!("{} {} {}\n", i & 1, (i >> 1) & 1, (i >> 2) & 1));
+        }
+        assert!(s.set_lut(NodeId(lut), "lut", "identity", cube.clone().into_bytes()));
+        assert_eq!(s.engine.history_len(), depth + 1, "one step: the file and the node");
+        assert_eq!(s.cut().blobs.get("lut.identity").map(|b| b.as_slice()), Some(cube.as_bytes()));
+        let NodeKind::Effect { params, .. } = &s.cut().graph.node(NodeId(lut)).unwrap().kind else {
+            panic!("still an effect");
+        };
+        assert_eq!(params.0.get("lut"), Some(&FxValue::Blob { blob: "lut.identity".into() }));
+        s.engine.undo().unwrap();
+        assert!(s.cut().blobs.is_empty(), "undo takes the file back out");
     }
 }

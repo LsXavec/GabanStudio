@@ -10,7 +10,9 @@
 //! inspector is generated from them, a stored value that is missing takes the
 //! spec default, and every parameter can be bound to an X-sheet param column
 //! (the Transform binds' law; a colour's column mixes its chip toward a second
-//! chip). Later parts add FX by declaring specs.
+//! chip). Later parts add FX by declaring specs: GM13's satsuei look (para,
+//! light wrap, rim light, vignette, grain, motion blur, LUT, matte, palette
+//! map) is declared here and computed once in [`crate::look`].
 //!
 //! Formulas (pinned by tests/fx_tests.rs — change them together):
 //! - **Blur** radius r: a Gaussian with σ = r/2, done as three separable box
@@ -40,6 +42,7 @@ use rayon::prelude::*;
 use crate::color::ColorLaw;
 use crate::graph::BlendMode;
 use crate::ids::ParamId;
+use crate::look;
 
 /// Rec.709 luma weights: the glow's threshold and the grade's saturation.
 pub const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -113,6 +116,12 @@ pub enum ParamKind {
         default: usize,
         renamed: &'static [(&'static str, usize)],
     },
+    /// GM13: a key into the cut's embedded files (`Cut::blobs`) — a LUT's
+    /// .cube text. Set by loading a file, never by a column.
+    Blob,
+    /// GM13: exact chip → chip pairs (a palette variant's map), set from the
+    /// palette, never by a column.
+    ColorMap,
 }
 
 /// One parameter of an FX kind: the inspector, the defaults and the binds
@@ -136,18 +145,27 @@ impl ParamSpec {
             ParamKind::Choice { options, default, .. } => {
                 FxValue::Choice(options[default].to_string())
             }
+            ParamKind::Blob => FxValue::Blob {
+                blob: String::new(),
+            },
+            ParamKind::ColorMap => FxValue::Map {
+                map: Vec::new(),
+                from: String::new(),
+            },
         }
     }
 
-    /// Can a param column drive it? Every kind so far can: a number, a flag
-    /// and a choice read the column's value, and a colour mixes its chip
-    /// toward its second chip ([`ParamSpec::to_key`]) by the column's 0–1.
+    /// Can a param column drive it? A number, a flag and a choice read the
+    /// column's value, and a colour mixes its chip toward its second chip
+    /// ([`ParamSpec::to_key`]) by the column's 0–1. A file and a colour map
+    /// (GM13) cannot.
     pub fn bindable(&self) -> bool {
         match self.kind {
             ParamKind::Float { .. }
             | ParamKind::Color { .. }
             | ParamKind::Bool { .. }
             | ParamKind::Choice { .. } => true,
+            ParamKind::Blob | ParamKind::ColorMap => false,
         }
     }
 
@@ -176,6 +194,8 @@ impl ParamSpec {
                     self.default_value()
                 }
             }
+            (ParamKind::Blob, Some(v @ FxValue::Blob { .. }))
+            | (ParamKind::ColorMap, Some(v @ FxValue::Map { .. })) => v.clone(),
             _ => self.default_value(),
         }
     }
@@ -207,12 +227,14 @@ impl ParamSpec {
                 let mix = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8;
                 Some(FxValue::Color([mix(0), mix(1), mix(2), mix(3)]))
             }
+            ParamKind::Blob | ParamKind::ColorMap => None,
         }
     }
 }
 
 /// One stored parameter value (untagged JSON: a number, a bool, an RGBA
-/// array or a choice name).
+/// array, a choice name, and GM13's `{"blob": key}` and
+/// `{"map": [[chip, chip], ...], "from": variant}` objects).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum FxValue {
@@ -220,6 +242,15 @@ pub enum FxValue {
     Float(f32),
     Color([u8; 4]),
     Choice(String),
+    /// GM13: a key into `Cut::blobs` ("" = no file).
+    Blob { blob: String },
+    /// GM13: exact chip → chip pairs, and the palette variant they were
+    /// taken from (`palette/variant`, what the app refreshes them by).
+    Map {
+        map: Vec<([u8; 4], [u8; 4])>,
+        #[serde(default)]
+        from: String,
+    },
 }
 
 impl std::fmt::Display for FxValue {
@@ -231,6 +262,16 @@ impl std::fmt::Display for FxValue {
             Self::Float(x) => write!(f, "{x}"),
             Self::Color(c) => write!(f, "#{:02x}{:02x}{:02x}{:02x}", c[0], c[1], c[2], c[3]),
             Self::Choice(s) => write!(f, "{s}"),
+            // The file's bytes join the recipe in eval (a key alone would
+            // keep a replaced LUT's cache).
+            Self::Blob { blob } => write!(f, "blob:{blob:?}"),
+            Self::Map { map, from } => {
+                write!(f, "map({from:?}:")?;
+                for (a, b) in map {
+                    write!(f, "{}>{};", Self::Color(*a), Self::Color(*b))?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -378,6 +419,22 @@ impl FxValues {
         }
     }
 
+    /// GM13: a file parameter's key into `Cut::blobs` ("" = none).
+    pub fn blob(&self, key: &str) -> &str {
+        match self.value(key) {
+            FxValue::Blob { blob } => blob,
+            v => panic!("'{key}' is not a file: {v:?}"),
+        }
+    }
+
+    /// GM13: a colour map parameter's chip pairs.
+    pub fn map(&self, key: &str) -> &[([u8; 4], [u8; 4])] {
+        match self.value(key) {
+            FxValue::Map { map, .. } => map,
+            v => panic!("'{key}' is not a colour map: {v:?}"),
+        }
+    }
+
     /// `key=value,...` in spec order: the eval hash's part of the recipe.
     pub fn recipe(&self) -> String {
         self.kind
@@ -399,6 +456,24 @@ pub enum FxKind {
     Glow,
     Diffusion,
     Grade,
+    // GM13: the satsuei look (maths in `crate::look`).
+    Para,
+    LightWrap,
+    Rim,
+    Vignette,
+    Grain,
+    MotionBlur,
+    Lut,
+    Matte,
+    PaletteMap,
+}
+
+/// GM13: what an effect reads beyond its inputs and values — the frame
+/// (Grain's pattern) and the cut's embedded files (a LUT's .cube).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FxCtx<'a> {
+    pub frame: u32,
+    pub blobs: Option<&'a BTreeMap<String, std::sync::Arc<Vec<u8>>>>,
 }
 
 /// A Float spec (GM10: the Camera node's specs use it too).
@@ -475,8 +550,142 @@ const GRADE_SPECS: &[ParamSpec] = &[
     float("tint", "tint (magenta–green)", "Magenta (positive) or green (negative): a green gain.", -1.0, 1.0, 0.0, 0.01),
 ];
 
+const fn color(key: &'static str, label: &'static str, help: &'static str, default: [u8; 4]) -> ParamSpec {
+    ParamSpec {
+        key,
+        label,
+        help,
+        kind: ParamKind::Color { default },
+    }
+}
+
+const fn choice(
+    key: &'static str,
+    label: &'static str,
+    help: &'static str,
+    options: &'static [&'static str],
+) -> ParamSpec {
+    ParamSpec {
+        key,
+        label,
+        help,
+        kind: ParamKind::Choice {
+            options,
+            default: 0,
+            renamed: &[],
+        },
+    }
+}
+
+const fn flag(key: &'static str, label: &'static str, help: &'static str, default: bool) -> ParamSpec {
+    ParamSpec {
+        key,
+        label,
+        help,
+        kind: ParamKind::Bool { default },
+    }
+}
+
+const PARA_SPECS: &[ParamSpec] = &[
+    choice("shape", "shape", "Linear runs from colour A to colour B along the angle; radial runs from A at the centre out to B.", &["linear", "radial"]),
+    color("color_a", "colour A", "The gradient's start: the top (linear, at 90) or the centre (radial).", [255, 214, 170, 255]),
+    color("color_b", "colour B", "The gradient's end: the bottom (linear, at 90) or the rim (radial).", [96, 104, 168, 255]),
+    float("angle", "angle", "Linear: the direction from A to B in degrees; 90 is top to bottom, 0 left to right.", -360.0, 360.0, 90.0, 0.5),
+    float("center_x", "centre x", "Radial: the centre across the frame; 0 is the left edge, 1 the right.", -1.0, 2.0, 0.5, 0.005),
+    float("center_y", "centre y", "Radial: the centre down the frame; 0 is the top edge, 1 the bottom.", -1.0, 2.0, 0.5, 0.005),
+    float("radius", "radius", "Radial: where colour B is reached, as a share of the half-diagonal.", 0.01, 4.0, 1.0, 0.005),
+    choice("mode", "mode", "Multiply shades, screen lights, overlay deepens the contrast.", &["multiply", "screen", "overlay"]),
+    float("amount", "amount", "How strongly the para is laid on; 0 leaves the image as it is.", 0.0, 1.0, 0.5, 0.01),
+];
+
+const LIGHT_WRAP_SPECS: &[ParamSpec] = &[
+    float("radius", "radius", "How far the background's light reaches into the character, in pixels.", 0.0, 200.0, 12.0, 0.1),
+    float("intensity", "intensity", "How strongly the wrapped light is added; 0 turns it off.", 0.0, 4.0, 0.6, 0.01),
+];
+
+const RIM_SPECS: &[ParamSpec] = &[
+    float("angle", "light from", "Where the light comes from, in degrees: 0 is the right, 90 above.", -360.0, 360.0, 45.0, 0.5),
+    float("width", "width", "How deep the rim reaches in from the edge, in pixels.", 0.0, 64.0, 3.0, 0.1),
+    float("softness", "softness", "Blurs the rim, in pixels; 0 keeps it hard.", 0.0, 64.0, 1.0, 0.1),
+    float("intensity", "intensity", "How strongly the rim light is added; 0 turns it off.", 0.0, 4.0, 1.0, 0.01),
+    color("color", "colour", "The rim light's colour.", [255, 246, 224, 255]),
+];
+
+const VIGNETTE_SPECS: &[ParamSpec] = &[
+    float("amount", "amount", "How far the corners fade; 0 turns it off.", 0.0, 1.0, 0.35, 0.01),
+    float("radius", "radius", "Where the fade starts, as a share of the half-diagonal.", 0.0, 2.0, 0.6, 0.005),
+    float("softness", "softness", "How gradually it fades past the radius (a share of the half-diagonal).", 0.01, 2.0, 0.6, 0.005),
+    color("color", "colour", "What the corners fade toward.", [0, 0, 0, 255]),
+];
+
+const GRAIN_SPECS: &[ParamSpec] = &[
+    float("amount", "amount", "How strong the grain is; 0 turns it off.", 0.0, 1.0, 0.04, 0.001),
+    float("size", "size", "One grain's size in pixels.", 1.0, 16.0, 1.0, 0.05),
+    float("seed", "seed", "Another seed gives another grain, just as steady from frame to frame.", 0.0, 9999.0, 0.0, 1.0),
+    flag("mono", "mono", "On: one grain for all three channels. Off: each channel its own.", true),
+];
+
+const MOTION_BLUR_SPECS: &[ParamSpec] = &[
+    float("length", "length", "How far the image smears, in pixels; 0 leaves it sharp.", 0.0, 500.0, 12.0, 0.1),
+    float("angle", "angle", "The smear's direction in degrees: 0 is across, 90 up and down.", -360.0, 360.0, 0.0, 0.5),
+];
+
+const LUT_SPECS: &[ParamSpec] = &[
+    ParamSpec {
+        key: "lut",
+        label: "LUT file",
+        help: "The .cube 3D LUT, stored inside the project so the cut renders on its own.",
+        kind: ParamKind::Blob,
+    },
+    float("mix", "mix", "How much of the LUT's look is mixed in; 0 is the source.", 0.0, 1.0, 1.0, 0.01),
+];
+
+const MATTE_SPECS: &[ParamSpec] = &[
+    choice("channel", "matte from", "The matte input's (else the image's own) alpha, or its luma.", &["alpha", "luma"]),
+    flag("invert", "invert", "On: keeps what the matte leaves out.", false),
+    float("choke", "choke / spread", "Shrinks (positive) or grows (negative) the matte, in pixels.", -64.0, 64.0, 0.0, 0.1),
+    flag("white", "output matte", "On: outputs the matte itself, white, to drive a grade or a blend. Off: cuts the image by it.", false),
+];
+
+const PALETTE_MAP_SPECS: &[ParamSpec] = &[ParamSpec {
+    key: "map",
+    label: "variant",
+    help: "The palette variant whose colours replace the model's: each exact chip colour becomes the variant's.",
+    kind: ParamKind::ColorMap,
+}];
+
 impl FxKind {
-    pub const ALL: &'static [FxKind] = &[FxKind::Blur, FxKind::Glow, FxKind::Diffusion, FxKind::Grade];
+    /// GM9's kinds: the add menu's FX category.
+    pub const CORE: &'static [FxKind] = &[FxKind::Blur, FxKind::Glow, FxKind::Diffusion, FxKind::Grade];
+
+    /// GM13's satsuei kinds: the add menu's Look category.
+    pub const LOOK: &'static [FxKind] = &[
+        FxKind::Para,
+        FxKind::LightWrap,
+        FxKind::Rim,
+        FxKind::Vignette,
+        FxKind::Grain,
+        FxKind::MotionBlur,
+        FxKind::Lut,
+        FxKind::Matte,
+        FxKind::PaletteMap,
+    ];
+
+    pub const ALL: &'static [FxKind] = &[
+        FxKind::Blur,
+        FxKind::Glow,
+        FxKind::Diffusion,
+        FxKind::Grade,
+        FxKind::Para,
+        FxKind::LightWrap,
+        FxKind::Rim,
+        FxKind::Vignette,
+        FxKind::Grain,
+        FxKind::MotionBlur,
+        FxKind::Lut,
+        FxKind::Matte,
+        FxKind::PaletteMap,
+    ];
 
     /// The node's name in the graph and the add-node menu.
     pub fn name(self) -> &'static str {
@@ -485,6 +694,15 @@ impl FxKind {
             Self::Glow => "Glow",
             Self::Diffusion => "Diffusion",
             Self::Grade => "Grade",
+            Self::Para => "Para",
+            Self::LightWrap => "Light wrap",
+            Self::Rim => "Rim light",
+            Self::Vignette => "Vignette",
+            Self::Grain => "Grain",
+            Self::MotionBlur => "Motion blur",
+            Self::Lut => "LUT",
+            Self::Matte => "Matte",
+            Self::PaletteMap => "Palette map",
         }
     }
 
@@ -495,6 +713,15 @@ impl FxKind {
             Self::Glow => "Adds a glow around the bright parts: tōkakō / T-kō, transmitted light.",
             Self::Diffusion => "Mixes in a soft copy of the image: difyūjon, the diffusion filter.",
             Self::Grade => "Colour grade: lift, gamma, gain, saturation, exposure, temperature and tint.",
+            Self::Para => "Lays a two-colour gradient over the image (para): light or shade across the shot.",
+            Self::LightWrap => "Bleeds the background's light into the edges of the character.",
+            Self::Rim => "A rim of light along the edges that face the light, from the alpha.",
+            Self::Vignette => "Fades the corners of the frame toward a colour.",
+            Self::Grain => "Film grain: steady for a frame and seed, different on the next frame.",
+            Self::MotionBlur => "Smears the image along a direction: speed and camera shake.",
+            Self::Lut => "Grades through a .cube 3D LUT stored in the project.",
+            Self::Matte => "Cuts the image by a matte from alpha or luma, with invert and choke / spread.",
+            Self::PaletteMap => "Swaps the palette's chip colours for a variant's: day, evening, night.",
         }
     }
 
@@ -505,7 +732,16 @@ impl FxKind {
             Self::Blur => Some("bokashi"),
             Self::Glow => Some("tōkakō"),
             Self::Diffusion => Some("difyūjon"),
-            Self::Grade => None,
+            Self::Para => Some("para"),
+            Self::Grade
+            | Self::LightWrap
+            | Self::Rim
+            | Self::Vignette
+            | Self::Grain
+            | Self::MotionBlur
+            | Self::Lut
+            | Self::Matte
+            | Self::PaletteMap => None,
         }
     }
 
@@ -535,7 +771,22 @@ impl FxKind {
                 "soft light",
             ],
             Self::Grade => &["colour", "color", "correction", "levels", "exposure"],
+            Self::Para => &["gradient", "shade", "light", "satsuei"],
+            Self::LightWrap => &["wrap", "edge light", "background light", "satsuei"],
+            Self::Rim => &["rim", "rimu raito", "edge light", "backlight"],
+            Self::Vignette => &["corners", "edge darkening", "lens"],
+            Self::Grain => &["noise", "film grain", "texture"],
+            Self::MotionBlur => &["directional blur", "speed", "smear", "camera shake", "nagashi"],
+            Self::Lut => &["cube", ".cube", "look", "grade", "colour", "color"],
+            Self::Matte => &["mask", "key", "choke", "spread", "cut out"],
+            Self::PaletteMap => &["variant", "time of day", "evening", "night", "recolour", "recolor"],
         }
+    }
+
+    /// GM13: does the output change from frame to frame by itself (Grain)?
+    /// The eval recipe then spells the frame.
+    pub fn uses_frame(self) -> bool {
+        matches!(self, Self::Grain)
     }
 
     /// Input pins: the image, and for Glow an optional matte.
@@ -545,7 +796,8 @@ impl FxKind {
 
     pub fn input_names(self) -> &'static [&'static str] {
         match self {
-            Self::Glow => &["image", "matte"],
+            Self::Glow | Self::Para | Self::Matte => &["image", "matte"],
+            Self::LightWrap => &["image", "background", "matte"],
             _ => &["image"],
         }
     }
@@ -557,6 +809,19 @@ impl FxKind {
                 "the picture that glows",
                 "optional; only where this is opaque glows",
             ],
+            Self::Para => &[
+                "the picture the para lies on",
+                "optional; only where this is opaque gets the para",
+            ],
+            Self::Matte => &[
+                "the picture to cut",
+                "optional; the matte (else the picture's own)",
+            ],
+            Self::LightWrap => &[
+                "the picture with the character in it",
+                "the background whose light wraps in",
+                "optional; the character whose edges take the light (else the picture's alpha)",
+            ],
             _ => &["the picture the effect works on"],
         }
     }
@@ -567,6 +832,15 @@ impl FxKind {
             Self::Glow => GLOW_SPECS,
             Self::Diffusion => DIFFUSION_SPECS,
             Self::Grade => GRADE_SPECS,
+            Self::Para => PARA_SPECS,
+            Self::LightWrap => LIGHT_WRAP_SPECS,
+            Self::Rim => RIM_SPECS,
+            Self::Vignette => VIGNETTE_SPECS,
+            Self::Grain => GRAIN_SPECS,
+            Self::MotionBlur => MOTION_BLUR_SPECS,
+            Self::Lut => LUT_SPECS,
+            Self::Matte => MATTE_SPECS,
+            Self::PaletteMap => PALETTE_MAP_SPECS,
         }
     }
 
@@ -585,6 +859,20 @@ impl FxKind {
         w: u32,
         h: u32,
     ) -> Image {
+        self.apply_in(v, law, inputs, w, h, FxCtx::default())
+    }
+
+    /// [`Self::apply`] at a frame, with the cut's embedded files (GM13:
+    /// Grain reads the frame, a LUT its file).
+    pub fn apply_in(
+        self,
+        v: &FxValues,
+        law: ColorLaw,
+        inputs: &[Option<&Image>],
+        w: u32,
+        h: u32,
+        ctx: FxCtx<'_>,
+    ) -> Image {
         let empty;
         let src = match inputs.first().copied().flatten() {
             Some(img) => img,
@@ -593,6 +881,7 @@ impl FxKind {
                 &empty
             }
         };
+        let pin = |i: usize| inputs.get(i).copied().flatten();
         match self {
             Self::Blur => blur_edges(
                 src,
@@ -600,9 +889,21 @@ impl FxKind {
                 v.float("radius_y"),
                 v.flag("repeat_edges"),
             ),
-            Self::Glow => glow(v, law, src, inputs.get(1).copied().flatten()),
+            Self::Glow => glow(v, law, src, pin(1)),
             Self::Diffusion => diffusion(v, src),
             Self::Grade => grade(v, src),
+            Self::Para => look::para(v, law, src, pin(1)),
+            Self::LightWrap => look::light_wrap(v, src, pin(1), pin(2)),
+            Self::Rim => look::rim(v, law, src),
+            Self::Vignette => look::vignette(v, law, src),
+            Self::Grain => look::grain(v, src, ctx.frame),
+            Self::MotionBlur => look::directional_blur(src, v.float("length"), v.float("angle")),
+            Self::Lut => {
+                let text = ctx.blobs.and_then(|b| b.get(v.blob("lut")));
+                look::lut_fx(v, law, src, text.map(|t| t.as_slice()))
+            }
+            Self::Matte => look::matte(v, src, pin(1)),
+            Self::PaletteMap => look::palette_map(src, law, v.map("map")),
         }
     }
 }

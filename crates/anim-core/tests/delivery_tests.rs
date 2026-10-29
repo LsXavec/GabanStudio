@@ -136,7 +136,7 @@ fn wire_graph(e: &mut Engine, at: CutRef) {
             Command::AddNode {
                 at,
                 id: src,
-                kind: NodeKind::DrawingSource { column },
+                kind: NodeKind::source(column),
             },
             Command::AddNode {
                 at,

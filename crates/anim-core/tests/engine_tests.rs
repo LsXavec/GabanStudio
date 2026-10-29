@@ -77,7 +77,7 @@ fn fixture() -> Fixture {
                 Command::AddNode {
                     at,
                     id: n_src,
-                    kind: NodeKind::DrawingSource { column: col },
+                    kind: NodeKind::source(col),
                 },
                 Command::AddNode {
                     at,
@@ -705,7 +705,7 @@ fn raster_fixture() -> (Engine, CutRef, SceneId, CutId, ColumnId, DrawingId, Lay
                 Command::AddNode {
                     at,
                     id: src,
-                    kind: NodeKind::DrawingSource { column: col },
+                    kind: NodeKind::source(col),
                 },
                 Command::SetOutput {
                     at,

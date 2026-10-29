@@ -81,7 +81,12 @@ CREATE TABLE IF NOT EXISTS drawing_defs(
 CREATE TABLE IF NOT EXISTS audio_tracks(
     cut_id INTEGER NOT NULL, ord INTEGER NOT NULL, json TEXT NOT NULL,
     bytes BLOB NOT NULL, PRIMARY KEY(cut_id, ord));
+CREATE TABLE IF NOT EXISTS cut_blobs(
+    cut_id INTEGER NOT NULL, key TEXT NOT NULL, bytes BLOB NOT NULL,
+    PRIMARY KEY(cut_id, key));
 ";
+// GM13 (D2): a cut's embedded files (a LUT's .cube) are a v11 side table
+// too, with no version bump: an older build ignores the table.
 // GM12 (D2): sound tracks are a v11 side table, added with no version bump.
 // Row ord 0 holds the first track's settings only (its clip stays in
 // cut_audio, unchanged; written only when they differ from the default);
@@ -167,7 +172,7 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
          DELETE FROM param_columns; DELETE FROM param_keys;
          DELETE FROM cut_audio; DELETE FROM cel_layer_defs;
          DELETE FROM cut_meta; DELETE FROM column_defs; DELETE FROM cut_memos;
-         DELETE FROM drawing_defs; DELETE FROM audio_tracks;",
+         DELETE FROM drawing_defs; DELETE FROM audio_tracks; DELETE FROM cut_blobs;",
     )?;
 
     let mut put_meta = tx.prepare("INSERT INTO meta(key, value) VALUES (?1, ?2)")?;
@@ -250,6 +255,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
         let mut ins_track = tx.prepare(
             "INSERT INTO audio_tracks(cut_id, ord, json, bytes) VALUES (?1, ?2, ?3, ?4)",
         )?;
+        let mut ins_blob =
+            tx.prepare("INSERT INTO cut_blobs(cut_id, key, bytes) VALUES (?1, ?2, ?3)")?;
 
         for (s_ord, scene) in project.scenes.iter().enumerate() {
             ins_scene.execute((scene.id.0 as i64, &scene.name, s_ord as i64))?;
@@ -267,6 +274,9 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                 }
                 for (frame, text) in &cut.memos {
                     ins_memo.execute((cut.id.0 as i64, *frame as i64, text))?;
+                }
+                for (key, bytes) in &cut.blobs {
+                    ins_blob.execute((cut.id.0 as i64, key, bytes.as_slice()))?;
                 }
                 // Only non-default defs are stored (set_column_def keeps the
                 // map canonical); a column without a row is a plain Cel.
@@ -530,6 +540,8 @@ pub fn load(path: &Path) -> Result<Project> {
         && has_table("cut_memos");
     // GM6: added inside v11, so probed on its own.
     let drawing_defs = version >= 11 && has_table("drawing_defs");
+    // GM13: likewise.
+    let cut_blobs = version >= 11 && has_table("cut_blobs");
     // GM12: likewise.
     let audio_tracks = version >= 11 && has_table("audio_tracks");
 
@@ -671,6 +683,15 @@ pub fn load(path: &Path) -> Result<Project> {
                         EngineError::Corrupt(format!("audio track {ord} of cut {cut_id}: {e}"))
                     })?;
                     cut.tracks.push(crate::audio::AudioTrack { props, clip });
+                }
+            }
+            if cut_blobs {
+                let mut stmt = conn.prepare("SELECT key, bytes FROM cut_blobs WHERE cut_id = ?1")?;
+                let rows: Vec<(String, Vec<u8>)> = stmt
+                    .query_map((cut_id,), |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<std::result::Result<_, _>>()?;
+                for (key, bytes) in rows {
+                    cut.blobs.insert(key, std::sync::Arc::new(bytes));
                 }
             }
 

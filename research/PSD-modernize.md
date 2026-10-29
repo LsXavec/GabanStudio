@@ -2653,3 +2653,24 @@ what was not verified.
   name and length); `has_sound` / `any_solo` / `mix_key` walk `tracks_iter`, no Vec per frame. 18
   `sound_tests`, 17 `playback_*`, `sheetui_waveform_*`, `render_queue_mixdown_*`; the colour-literal pin
   83 → 82. Not verified: the real window, its file dialogs and a real device.
+- 2026-10-29 — GM13 Satsuei look: passes, light FX and the satsuei template (core). Engine: `look.rs` —
+  role passes (`DrawingSource { column, roles, absorb_trace }`, both serde-defaulted so an old node reads
+  and a plain one writes byte-for-byte as before; `NodeKind::source` / `pass`), the trace-line absorb
+  (iro-tore: ShadowLine / HighlightLine pixels take the paint under them, else the nearest within 3 px by
+  chamfer 3-4, coverage kept), and the nine look kinds `FxKind::LOOK` (Para, Light wrap, Rim light,
+  Vignette, Grain, Motion blur, LUT, Matte, Palette map; maths once in `look.rs`, `fx.rs` dispatches;
+  each the identity at its neutral setting); `FxCtx { frame, blobs }` — Grain's recipe spells the frame,
+  a LUT's the file's hash; `.cube` reader (`parse_cube`, errors say which line); the cut's files
+  (`Cut.blobs`, `SetCutBlob` with an exact inverse, SQLite `cut_blobs`); `satsuei_template` — BG →
+  Camera; per cel column paint pass (absorb) × Shadow → Matte (white) → Grade 0.75 (Multiply), Highlight
+  → Glow (Screen), Line pass (Normal); Book over; then Diffusion → Para → Light wrap (BG camera, the
+  characters) → Grade → Grain → Vignette → Output, one batch, laid out. App: the graph pane's "Build
+  satsuei graph" button (greyed with the reason when the cut has no drawing column), one undo step;
+  filtered sources route to the CPU worker with the FX (D9), the job cut carries the cut's files; the
+  source inspector's pass picker and "absorb trace lines"; the add menu's "Look" category (the FX
+  category stays the four core kinds the GM9 search test pins); a LUT parameter's "load .cube…"
+  (refused with the reason when it does not read; file + node in one step); palette variants per
+  character (Palette panel ▸ variants) feed the Palette map's picker and refresh its nodes in one step.
+  19 `look_tests`, 3 `comproom_*`. Not verified: the real window, the file dialog, GPU display of the
+  look at size and its speed at 1920×1080. Left: chromatic aberration, light rays, colour Curves; a
+  registered verb (menu / palette entry) for Build satsuei graph.

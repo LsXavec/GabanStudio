@@ -365,7 +365,9 @@ impl Drawing {
         self.flatten_where(&|role| purpose.keeps(role))
     }
 
-    fn flatten_where(
+    /// [`Self::flatten`] of only the layers whose role `keep` accepts (GM11's
+    /// purposes, GM13's role passes). Same arithmetic.
+    pub(crate) fn flatten_where(
         &self,
         keep: &dyn Fn(LayerRole) -> bool,
     ) -> std::collections::BTreeMap<TileCoord, Arc<TileData>> {
@@ -888,6 +890,11 @@ pub struct Cut {
     /// entry; never in `content_hash` (D1).
     #[serde(default)]
     pub drawing_defs: std::collections::BTreeMap<DrawingId, DrawingDef>,
+    /// GM13 (D15): files a cut renders from, embedded so the cut renders on
+    /// its own — a .cube LUT's text, by key (`lut.<name>`). Saved in the
+    /// `cut_blobs` side table; edited only through SetCutBlob.
+    #[serde(default)]
+    pub blobs: std::collections::BTreeMap<String, Arc<Vec<u8>>>,
 }
 
 impl Cut {
@@ -908,6 +915,7 @@ impl Cut {
             memos: Default::default(),
             column_defs: Default::default(),
             drawing_defs: Default::default(),
+            blobs: Default::default(),
         }
     }
 

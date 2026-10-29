@@ -159,6 +159,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         });
     if let Some(ri) = remove_role {
         state.palettes.characters[ci].roles.remove(ri);
+        // GM13: the variants stay aligned to the model.
+        for v in &mut state.palettes.characters[ci].variants {
+            if ri < v.colors.len() {
+                v.colors.remove(ri);
+            }
+        }
         // GM7: the pots after it moved up one; the ring finds its colour.
         state.active_chip = None;
         model_changed = true;
@@ -171,6 +177,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     }
     if armed_pot.is_some() {
         state.active_chip = armed_pot;
+    }
+    if !state.palettes.characters.is_empty() {
+        variants_ui(ui, state, ci);
     }
 
     // Footer: the EDIT MODEL latch — deliberately keyless (model edits are
@@ -204,6 +213,71 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             state.active_chip = None;
             state.meta_dirty = true;
         }
+    }
+}
+
+/// GM13: the character's time-of-day variants (day, evening, night ...): a
+/// row of chips each, aligned to the model's roles. A Palette map node set
+/// to a variant follows it: once a chip edit ends (the pointer is up), the
+/// stale nodes refresh in one undo step.
+fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
+    let stale_id = egui::Id::new("palette variants stale");
+    let name_id = egui::Id::new("palette variant name");
+    ui.separator();
+    plate::legend(ui, "variants").on_hover_text(
+        "time-of-day colours of this character, one per chip: a Palette map node in the \
+         graph swaps the model's chips for a variant's",
+    );
+    let mut stale = false;
+    let mut remove: Option<usize> = None;
+    let ch = &mut state.palettes.characters[ci];
+    let roles: Vec<[u8; 4]> = ch.roles.iter().map(|r| r.color).collect();
+    for (vi, v) in ch.variants.iter_mut().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(&v.name);
+            for (ri, model) in roles.iter().enumerate() {
+                let mut c = v.colors.get(ri).copied().unwrap_or(*model);
+                if ui.color_edit_button_srgba_unmultiplied(&mut c).changed() {
+                    v.colors.resize(ri.max(v.colors.len()), *model);
+                    if ri < v.colors.len() {
+                        v.colors[ri] = c;
+                    } else {
+                        v.colors.push(c);
+                    }
+                    stale = true;
+                }
+            }
+            if ui.small_button("×").on_hover_text("remove this variant").clicked() {
+                remove = Some(vi);
+            }
+        });
+    }
+    if let Some(vi) = remove {
+        ch.variants.remove(vi);
+    }
+    let mut name: String = ui.data_mut(|d| d.get_temp(name_id).unwrap_or_default());
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .hint_text("variant name… (evening)")
+                .desired_width(110.0),
+        );
+        let trimmed = name.trim().to_string();
+        if ui.button("+ variant").clicked() && !trimmed.is_empty() {
+            ch.add_variant(trimmed);
+            name.clear();
+            stale = true;
+        }
+    });
+    ui.data_mut(|d| d.insert_temp(name_id, name));
+    if stale || remove.is_some() {
+        state.meta_dirty = true;
+        ui.data_mut(|d| d.insert_temp(stale_id, true));
+    }
+    let pending = ui.data(|d| d.get_temp::<bool>(stale_id).unwrap_or(false));
+    if pending && !ui.input(|i| i.pointer.any_down()) {
+        ui.data_mut(|d| d.insert_temp(stale_id, false));
+        state.refresh_palette_maps();
     }
 }
 

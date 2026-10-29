@@ -248,7 +248,7 @@ fn a_transform_bound_to_cam_columns_renders_as_before_this_part() {
     let cam_y = r.param("cam.y", &[(0, 2.0, ParamInterp::Linear), (23, -5.75, ParamInterp::Linear)]);
     let cam_scale =
         r.param("cam.scale", &[(0, 1.0, ParamInterp::Linear), (23, 1.5, ParamInterp::Ease)]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let binds = TransformBinds { tx: Some(cam_x), ty: Some(cam_y), scale: Some(cam_scale), rotate: None };
     let xf = r.node(NodeKind::Transform { translate: (0.0, 0.0), scale: 1.0, rotate_deg: 3.0, binds });
     r.connect(src, xf, 0);
@@ -326,7 +326,7 @@ fn render_node_rect_at_the_frame_is_todays_render_and_a_wider_rect_shows_beyond_
     // renderer at the frame is bit-for-bit the frame renderer.
     let mut r = rig(24);
     r.paint(&[(-1, 0), (0, 0), (1, 0)], pattern);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let xf = r.node(NodeKind::Transform {
         translate: (3.25, -1.5),
         scale: 1.2,
@@ -361,7 +361,7 @@ fn a_pan_across_a_wide_paper_crops_it_pixel_exact_at_both_ends() {
         (0..47).flat_map(|tx| (0..17).map(move |ty| (tx, ty))).collect();
     r.paint(&tiles, pattern);
     let pan = r.param("cam pan x", &[(0, 0.0, ParamInterp::Linear), (47, 1080.0, ParamInterp::Linear)]);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let (cam, out) = r.camera(&[(src, 0.0)], &[]);
     let NodeKind::Camera { planes, params, mut binds } = r.cut().graph.node(cam).unwrap().kind.clone()
     else {
@@ -391,7 +391,7 @@ fn zoom_two_shows_the_centre_half_like_the_transform_reference() {
     // reference through the same bilinear sampler.
     let mut r = rig(24);
     r.paint(&[(0, 0)], pattern);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let (_, out) = r.camera(&[(src, 0.0)], &[("zoom", 2.0)]);
     let shot = r.render(out, 0, 64, 64);
     let xf = r.node(NodeKind::Transform {
@@ -418,7 +418,7 @@ fn rotate_ninety_moves_a_marker_where_the_map_says() {
     // other way: paper (40, 10) lands at output (10, 63 − 40).
     let mut r = rig(24);
     r.paint(&[(0, 0)], marker(40, 10));
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let (cam, out) = r.camera(&[(src, 0.0)], &[("rotate_deg", 90.0)]);
     let shot = r.render(out, 0, 64, 64);
     let (x, y, a) = brightest(&shot, 64);
@@ -453,7 +453,7 @@ fn shake_is_seeded_bounded_and_still_at_zero_amplitude() {
     // offset is the frame's shake.
     let mut r = rig(24);
     r.paint(&[(0, 0)], pattern);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let (cam, out) = r.camera(&[(src, 0.0)], &[("shake_amp", 3.0), ("shake_seed", 9.0)]);
     assert_eq!(bits(&r.render(out, 5, 64, 64)), bits(&r.render(out, 5, 64, 64)));
     let st = CameraState::at(r.cut(), cam, 5).unwrap();
@@ -474,8 +474,8 @@ fn two_planes_at_depth_0_and_2_with_k_half_move_100_and_50_under_a_100_px_pan() 
     r.paint(&[(0, 0), (1, 0), (2, 0), (3, 0)], marker(150, 10));
     let (col_far, d_far, l_far) = r.column("far");
     r.paint_on(d_far, l_far, &[(0, 0), (1, 0), (2, 0), (3, 0)], marker(150, 40));
-    let near = r.node(NodeKind::DrawingSource { column: r.col });
-    let far = r.node(NodeKind::DrawingSource { column: col_far });
+    let near = r.node(NodeKind::source(r.col));
+    let far = r.node(NodeKind::source(col_far));
     let (cam, out) = r.camera(&[(near, 0.0), (far, 2.0)], &[("parallax_k", 0.5)]);
     let st = CameraState::at(r.cut(), cam, 0).unwrap();
     assert_eq!((st.parallax(0.0), st.parallax(2.0)), (1.0, 0.5));
@@ -501,7 +501,7 @@ fn depth_of_field_blurs_a_plane_by_aperture_times_its_distance_from_focus() {
     assert_eq!(camera::dof_radius(0.0, 9.0, 1.0), 0.0);
     let mut r = rig(24);
     r.paint(&[(0, 0)], marker(30, 30));
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let sharp = r.render(src, 0, 64, 64);
     let shot = |r: &mut Rig, z: f32, set: &[(&str, f32)]| {
         let (_, out) = r.camera(&[(src, z)], set);
@@ -523,7 +523,7 @@ fn a_tile_at_negative_coordinates_renders_through_the_camera() {
     // (tile −1) shows once the camera pans 64 px left.
     let mut r = rig(24);
     r.paint(&[(-1, 0)], marker(-30, 20));
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let (cam, out) = r.camera(&[(src, 0.0)], &[("pan_x", -64.0)]);
     // On the default paper there is nothing left of the frame to see.
     assert_eq!(brightest(&r.render(out, 0, 64, 64), 64).2, 0.0);
@@ -581,7 +581,7 @@ fn field_guide_and_safe_frames_are_pinned_for_hd() {
 fn a_bound_camera_animates_and_the_eval_hash_follows_it_and_the_paper() {
     let mut r = rig(24);
     r.paint(&[(0, 0)], pattern);
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
+    let src = r.node(NodeKind::source(r.col));
     let (cam, _) = r.camera(&[(src, 0.0)], &[]);
     let h0 = r.hash(0);
     assert_eq!(r.hash(7), h0, "a still camera hashes alike on every frame");
@@ -617,8 +617,8 @@ fn camera_nodes_and_the_paper_round_trip_through_the_store() {
     let mut r = rig(24);
     r.paint(&[(-1, 0), (0, 0)], pattern);
     let (col_b, _, _) = r.column("B");
-    let src = r.node(NodeKind::DrawingSource { column: r.col });
-    let src_b = r.node(NodeKind::DrawingSource { column: col_b });
+    let src = r.node(NodeKind::source(r.col));
+    let src_b = r.node(NodeKind::source(col_b));
     let (cam, out) = r.camera(&[(src, 2.5), (src_b, -0.5)], &[("zoom", 1.25), ("aperture", 1.5)]);
     let pan = r.param("cam pan y", &[(0, -12.0, ParamInterp::Ease)]);
     let NodeKind::Camera { planes, params, mut binds } = r.cut().graph.node(cam).unwrap().kind.clone()

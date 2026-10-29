@@ -177,6 +177,7 @@ pub fn build_sample() -> AppState {
                     color: [246, 160, 128, 255],
                 },
             ],
+            variants: Vec::new(),
         }],
     };
     s.auto_comp();
