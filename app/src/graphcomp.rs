@@ -495,8 +495,14 @@ impl GraphCompositor {
     /// Upload one finished render (a size or law change since its job
     /// drops it).
     fn land_one(&mut self, d: FxDone) {
+        let Some(texels) = d.texels else {
+            // The render panicked: stop waiting (the lamp goes out) and
+            // keep the last result.
+            self.fx.fail(d.key, d.generation);
+            return;
+        };
         if d.generation != self.fx.generation()
-            || d.texels.len() != (self.width * self.height * 4) as usize
+            || texels.len() != (self.width * self.height * 4) as usize
         {
             return;
         }
@@ -523,7 +529,7 @@ impl GraphCompositor {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            bytemuck::cast_slice(&d.texels),
+            bytemuck::cast_slice(&texels),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(8 * self.width),
@@ -641,7 +647,7 @@ impl GraphCompositor {
                         let job = FxJob {
                             key,
                             generation: self.fx.generation(),
-                            cut: cut.clone(),
+                            cut: job_cut(cut, id, frame),
                             law: self.law,
                             width: self.width,
                             height: self.height,
@@ -651,10 +657,10 @@ impl GraphCompositor {
                             None => Some(job),
                         };
                         if let Some(job) = unsent {
-                            // No worker (no thread, or a render panicked):
-                            // render here this once rather than wait forever.
+                            // No worker (no thread, or it is gone): render
+                            // here this once rather than wait forever.
                             self.fx_worker = None;
-                            let d = render_job(&job);
+                            let d = render_job_guarded(&job, render_job);
                             self.land_one(d);
                         }
                     }
@@ -940,6 +946,61 @@ pub fn cpu_roots(cut: &Cut) -> Vec<NodeId> {
     roots
 }
 
+/// What a CPU render of `node` at `frame` reads, and nothing more: the
+/// cut's sheet and graph with only the drawings and images that subtree
+/// shows at that frame (their tiles are shared handles). A job's snapshot
+/// then costs what the frame shows, not the whole cut — no other frames'
+/// drawings, no audio, no memos. Every field is named, so a new one is a
+/// decision here.
+pub fn job_cut(cut: &Cut, node: NodeId, frame: u32) -> Cut {
+    let mut drawings = HashSet::new();
+    let mut images = HashSet::new();
+    let mut seen = HashSet::new();
+    let mut stack = vec![node];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Ok(n) = cut.graph.node(id) else {
+            continue;
+        };
+        match &n.kind {
+            NodeKind::DrawingSource { column } => {
+                drawings.extend(source_drawing(cut, *column, frame).map(|d| d.id));
+            }
+            NodeKind::ImageSource { image } => {
+                images.insert(*image);
+            }
+            _ => {}
+        }
+        stack.extend(n.inputs.iter().flatten().map(|(src, _)| *src));
+    }
+    Cut {
+        id: cut.id,
+        name: cut.name.clone(),
+        frame_count: cut.frame_count,
+        drawings: cut
+            .drawings
+            .iter()
+            .filter(|d| drawings.contains(&d.id))
+            .cloned()
+            .collect(),
+        xsheet: cut.xsheet.clone(),
+        graph: cut.graph.clone(),
+        images: cut
+            .images
+            .iter()
+            .filter(|i| images.contains(&i.id))
+            .cloned()
+            .collect(),
+        audio: None,
+        meta: Default::default(),
+        memos: Default::default(),
+        column_defs: cut.column_defs.clone(),
+        drawing_defs: Default::default(),
+    }
+}
+
 /// What a CPU render is filed under: the node, the frame, and the
 /// evaluator's hash of the node's value (its parameters, their bound
 /// values and everything upstream) — anything that changes the pixels
@@ -957,6 +1018,9 @@ pub struct FxKey {
 pub struct FxCache<T> {
     shown: HashMap<NodeId, (FxKey, T)>,
     pending: HashMap<NodeId, FxKey>,
+    /// A key whose render panicked, per node: not asked for again (it
+    /// would only fail again); an edit makes a new key, which is.
+    failed: HashMap<NodeId, FxKey>,
     /// Bumped by `clear` (a colour law or size change): results of older
     /// jobs are dropped on arrival.
     generation: u64,
@@ -967,17 +1031,20 @@ impl<T> Default for FxCache<T> {
         Self {
             shown: HashMap::new(),
             pending: HashMap::new(),
+            failed: HashMap::new(),
             generation: 0,
         }
     }
 }
 
 impl<T> FxCache<T> {
-    /// Should a job for `key` be sent? False when it is shown or already in
-    /// flight; true marks it in flight (a newer key replaces an older one).
+    /// Should a job for `key` be sent? False when it is shown, already in
+    /// flight or failed; true marks it in flight (a newer key replaces an
+    /// older one).
     pub fn want(&mut self, key: FxKey) -> bool {
         if self.shown.get(&key.node).is_some_and(|(k, _)| *k == key)
             || self.pending.get(&key.node) == Some(&key)
+            || self.failed.get(&key.node) == Some(&key)
         {
             return false;
         }
@@ -999,6 +1066,18 @@ impl<T> FxCache<T> {
         true
     }
 
+    /// A render panicked: the node stops waiting for it (no lamp lit
+    /// forever) and keeps what it showed.
+    pub fn fail(&mut self, key: FxKey, generation: u64) {
+        if generation != self.generation {
+            return;
+        }
+        if self.pending.get(&key.node) == Some(&key) {
+            self.pending.remove(&key.node);
+        }
+        self.failed.insert(key.node, key);
+    }
+
     /// What `node` shows now, and whether it is exactly `key`.
     pub fn shown(&self, node: NodeId) -> Option<(&T, FxKey)> {
         self.shown.get(&node).map(|(k, t)| (t, *k))
@@ -1016,11 +1095,13 @@ impl<T> FxCache<T> {
     pub fn clear(&mut self) {
         self.shown.clear();
         self.pending.clear();
+        self.failed.clear();
         self.generation += 1;
     }
 }
 
-/// One CPU render for the worker: a snapshot, so the document stays free.
+/// One CPU render for the worker: a snapshot ([`job_cut`]), so the
+/// document stays free.
 pub struct FxJob {
     pub key: FxKey,
     pub generation: u64,
@@ -1030,11 +1111,12 @@ pub struct FxJob {
     pub height: u32,
 }
 
-/// A finished render: Rgba16Float texels (premultiplied), ready to upload.
+/// A finished render: Rgba16Float texels (premultiplied), ready to upload;
+/// None when the render panicked.
 pub struct FxDone {
     pub key: FxKey,
     pub generation: u64,
-    pub texels: Vec<u16>,
+    pub texels: Option<Vec<u16>>,
 }
 
 /// The worker's whole job — the export's own `render_node`, as f16 bits.
@@ -1050,8 +1132,18 @@ pub fn render_job(job: &FxJob) -> FxDone {
     FxDone {
         key: job.key,
         generation: job.generation,
-        texels: px.into_iter().map(anim_core::raster::f32_to_f16_bits).collect(),
+        texels: Some(px.into_iter().map(anim_core::raster::f32_to_f16_bits).collect()),
     }
+}
+
+/// `render` with its panic caught: the job answers "failed" (no texels)
+/// instead of taking the worker down with the key left in flight.
+pub fn render_job_guarded(job: &FxJob, render: impl FnOnce(&FxJob) -> FxDone) -> FxDone {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render(job))).unwrap_or(FxDone {
+        key: job.key,
+        generation: job.generation,
+        texels: None,
+    })
 }
 
 /// The FX worker thread. Jobs queued for one node collapse to the newest
@@ -1076,7 +1168,7 @@ impl FxWorker {
                         newest.insert(j.key.node, j);
                     }
                     for j in newest.into_values() {
-                        if done_tx.send(render_job(&j)).is_err() {
+                        if done_tx.send(render_job_guarded(&j, render_job)).is_err() {
                             return; // the compositor is gone
                         }
                     }
@@ -1198,7 +1290,7 @@ mod fx_tests {
         let job = FxJob {
             key: k0,
             generation: cache.generation(),
-            cut: s.cut().clone(),
+            cut: job_cut(s.cut(), grade, 0),
             law,
             width: 8,
             height: 8,
@@ -1209,8 +1301,9 @@ mod fx_tests {
             .into_iter()
             .map(anim_core::raster::f32_to_f16_bits)
             .collect();
-        assert_eq!(done.texels, plain);
-        assert!(cache.accept(done.key, done.generation, done.texels));
+        let texels = done.texels.expect("rendered");
+        assert_eq!(texels, plain);
+        assert!(cache.accept(done.key, done.generation, texels));
         assert!(!cache.rendering(), "landed");
         assert!(!cache.want(k0), "a hit sends nothing");
         // A parameter edit changes the hash, so the key; the last result
@@ -1232,5 +1325,73 @@ mod fx_tests {
         cache.clear();
         assert!(!cache.accept(k1, old, Vec::new()), "a result from before the clear");
         assert!(cache.shown(grade).is_none() && !cache.rendering());
+    }
+
+    /// Two tiles of ink on the cel the active column shows at this frame.
+    fn ink(s: &mut AppState) {
+        use anim_core::raster::{TILE_LEN, TileData};
+        let ink = Arc::new(TileData::from_vec(vec![0x3C00; TILE_LEN]));
+        let slot = s.active_slot_resolved().expect("an armed layer");
+        s.commit_raster(vec![((0, 0), ink.clone()), ((1, 0), ink)], slot);
+    }
+
+    #[test]
+    fn fxnode_a_job_holds_only_what_its_frame_shows_and_renders_the_same() {
+        use crate::config::Action;
+        let mut h = EditorHarness::new();
+        ink(h.state_mut());
+        h.perform(Action::NextFrame);
+        h.perform(Action::NewDrawing);
+        ink(h.state_mut());
+        let s = h.state_mut();
+        let col = s.view.active_column;
+        s.graph_add_node(NodeKind::DrawingSource { column: col }, (0.0, 0.0));
+        let src = s.selected_node.unwrap();
+        s.graph_add_node(NodeKind::effect(FxKind::Blur), (200.0, 0.0));
+        let blur = s.selected_node.unwrap();
+        s.graph_connect(src, blur, 0);
+        let (cut, law) = (s.cut(), s.engine.project.color_law);
+        assert!(cut.drawings.len() >= 2, "a drawing on each frame");
+        for frame in [0, 1] {
+            let shown = source_drawing(cut, col, frame).map(|d| d.id);
+            assert!(shown.is_some(), "frame {frame} shows a drawing");
+            let slim = job_cut(cut, blur, frame);
+            let held: Vec<_> = slim.drawings.iter().map(|d| d.id).collect();
+            assert_eq!(held, Vec::from_iter(shown), "frame {frame}: only its own drawing");
+            assert!(slim.audio.is_none() && slim.meta.is_empty() && slim.memos.is_empty());
+            let px = anim_core::export::render_node_px(&slim, law, blur, frame, 24, 24);
+            assert!(px.chunks_exact(4).any(|p| p[3] > 0.0), "frame {frame}: the ink renders");
+            assert_eq!(
+                px,
+                anim_core::export::render_node_px(cut, law, blur, frame, 24, 24),
+                "frame {frame}: the snapshot renders the cut's own pixels"
+            );
+        }
+    }
+
+    #[test]
+    fn fxnode_a_render_that_panics_stops_the_wait_and_is_not_retried() {
+        let k = FxKey { node: NodeId(7), frame: 0, hash: 1 };
+        let mut cache: FxCache<Vec<u16>> = FxCache::default();
+        assert!(cache.want(k));
+        let job = FxJob {
+            key: k,
+            generation: cache.generation(),
+            cut: Cut::new(anim_core::ids::CutId(1), "empty", 1),
+            law: ColorLaw::default(),
+            width: 1,
+            height: 1,
+        };
+        // The worker survives it (this panic is the test's own).
+        let done = render_job_guarded(&job, |_| panic!("deliberate test panic: a broken FX"));
+        assert!(done.texels.is_none(), "a panic answers no pixels");
+        cache.fail(done.key, done.generation);
+        assert!(!cache.rendering(), "nothing left in flight: the lamp goes out");
+        assert!(!cache.want(k), "the same key is not sent again");
+        assert!(cache.want(FxKey { hash: 2, ..k }), "an edit tries again");
+        assert!(cache.rendering());
+        // And a render that does not panic passes through untouched.
+        let fine = render_job_guarded(&job, render_job);
+        assert_eq!(fine.texels.map(|t| t.len()), Some(4));
     }
 }

@@ -3392,9 +3392,7 @@ impl AppState {
                 kind: anim_core::graph::NodeKind::ImageSource { image },
             },
         ];
-        cmds.extend(self.layout_edit(|l| {
-            l.insert(node, pos);
-        }));
+        cmds.extend(self.layout_edit(node, Some(pos)));
         let r = self.engine.apply("import image", cmds);
         if r.is_ok() {
             self.node_positions.insert(node.0, pos);
@@ -3408,9 +3406,7 @@ impl AppState {
         let at = self.at();
         let id = self.engine.alloc_node_id();
         let mut cmds = vec![Command::AddNode { at, id, kind }];
-        cmds.extend(self.layout_edit(|l| {
-            l.insert(id, pos);
-        }));
+        cmds.extend(self.layout_edit(id, Some(pos)));
         let r = self.engine.apply("add node", cmds);
         if r.is_ok() {
             self.node_positions.insert(id.0, pos);
@@ -3419,57 +3415,39 @@ impl AppState {
         self.report(r, "node added");
     }
 
-    /// GM9: the cut's saved node layout (`cut_meta["graph.layout"]`).
+    /// GM9: the cut's saved node layout (its `graph.layout.<id>` keys).
     pub fn graph_layout(&self) -> std::collections::BTreeMap<NodeId, (f32, f32)> {
-        self.cut()
-            .meta
-            .get(anim_core::graph::LAYOUT_KEY)
-            .map(|j| anim_core::graph::layout_from_json(j))
-            .unwrap_or_default()
+        anim_core::graph::layout_from_meta(&self.cut().meta)
     }
 
-    /// GM9: where a node sits in graph space — a live drag, else the saved
-    /// layout, else its session spot (`ensure_node_layout`'s first layout).
+    /// GM9: where a node sits in graph space — a live drag, else its saved
+    /// place, else its session spot (`ensure_node_layout`'s default).
     pub fn node_pos(&self, id: NodeId) -> (f32, f32) {
         if let Some((n, p)) = self.graph_ui.drag.as_ref().map(|d| (d.node, d.pos))
             && n == id
         {
             return p;
         }
-        self.graph_layout()
-            .get(&id)
-            .copied()
+        self.cut()
+            .meta
+            .get(&anim_core::graph::layout_key(id))
+            .and_then(|j| anim_core::graph::pos_from_json(j))
             .or_else(|| self.node_positions.get(&id.0).copied())
             .unwrap_or((40.0, 40.0))
     }
 
-    /// GM9: the SetCutMeta that writes the layout of every live node with
-    /// `edit` applied (so the first save freezes the shown layout too);
-    /// None when nothing changes.
-    fn layout_edit(
-        &self,
-        edit: impl FnOnce(&mut std::collections::BTreeMap<NodeId, (f32, f32)>),
-    ) -> Option<Command> {
-        let ids: Vec<NodeId> = self.cut().graph.nodes().map(|n| n.id).collect();
-        let mut layout: std::collections::BTreeMap<NodeId, (f32, f32)> =
-            ids.iter().map(|&id| (id, self.node_pos(id))).collect();
-        edit(&mut layout);
-        let before = self.cut().meta.get(anim_core::graph::LAYOUT_KEY).cloned();
-        let after = Some(anim_core::graph::layout_to_json(&layout));
-        (after != before).then(|| Command::SetCutMeta {
-            at: self.at(),
-            key: anim_core::graph::LAYOUT_KEY.into(),
-            before,
-            after,
-        })
+    /// GM9: the SetCutMeta that saves one node's place (None forgets it).
+    /// It touches that node's key alone, so a guest's add, move or removal
+    /// never waits on another artist's places, and undoing it (per author
+    /// too) reverts nobody else's moves. None when nothing changes.
+    fn layout_edit(&self, id: NodeId, pos: Option<(f32, f32)>) -> Option<Command> {
+        anim_core::graph::place_node(self.cut(), self.at(), id, pos)
     }
 
     /// GM9: a node drag lands as ONE undo step — its new place in the saved
     /// layout (the drag itself only moved the view).
     pub fn graph_move_node(&mut self, id: NodeId, pos: (f32, f32)) {
-        let Some(cmd) = self.layout_edit(|l| {
-            l.insert(id, pos);
-        }) else {
+        let Some(cmd) = self.layout_edit(id, Some(pos)) else {
             return;
         };
         let r = self.engine.apply("move node", vec![cmd]);
@@ -3479,9 +3457,7 @@ impl AppState {
     pub fn graph_remove_node(&mut self, id: NodeId) {
         let at = self.at();
         let mut cmds = vec![Command::RemoveNode { at, id }];
-        cmds.extend(self.layout_edit(|l| {
-            l.remove(&id);
-        }));
+        cmds.extend(self.layout_edit(id, None));
         let r = self.engine.apply("remove node", cmds);
         if r.is_ok() {
             self.node_positions.remove(&id.0);
@@ -3538,13 +3514,12 @@ impl AppState {
         let mut new_positions: Vec<(u64, (f32, f32))> = Vec::new();
         {
             let cut = self.cut();
-            // GM9: a node with a saved place keeps it.
+            // GM9: a node with a saved place keeps it. Every node holds its
+            // slot in its column (placed or not), so a node never placed by
+            // hand finds the same spot after a save and load.
             let saved = self.graph_layout();
             let (mut n_src, mut n_mid, mut n_out) = (0, 0, 0);
             for node in cut.graph.nodes() {
-                if self.node_positions.contains_key(&node.id.0) || saved.contains_key(&node.id) {
-                    continue;
-                }
                 use anim_core::graph::NodeKind::*;
                 let (col_x, row) = match node.kind {
                     DrawingSource { .. } | Solid { .. } | ImageSource { .. } => {
@@ -3560,6 +3535,9 @@ impl AppState {
                         (480.0, n_out - 1)
                     }
                 };
+                if self.node_positions.contains_key(&node.id.0) || saved.contains_key(&node.id) {
+                    continue;
+                }
                 new_positions.push((node.id.0, (col_x, 40.0 + row as f32 * 90.0)));
             }
         }

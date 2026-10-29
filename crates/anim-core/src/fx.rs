@@ -1,28 +1,33 @@
-//! Compositing FX (GM9, D9): blur, glow (T-kō), diffusion (tōkakō and the
-//! soft diffusion filter) and grade, implemented ONCE, here, on premultiplied
-//! f32 RGBA frames. The CPU golden renderer (`export`'s Effect arm) calls
-//! [`FxKind::apply`]; the GPU compositor never re-implements them — it renders
-//! an FX subtree through this module on a worker and uploads the result
-//! (NEVER-DO 2), so the composite view, the viewer and export agree.
+//! Compositing FX (GM9, D9): blur (bokashi), glow (tōkakō, T-kō), diffusion
+//! (difyūjon, the soft diffusion filter) and grade, implemented ONCE, here,
+//! on premultiplied f32 RGBA frames. The CPU golden renderer (`export`'s
+//! Effect arm) calls [`FxKind::apply`]; the GPU compositor never
+//! re-implements them — it renders an FX subtree through this module on a
+//! worker and uploads the result (NEVER-DO 2), so the composite view, the
+//! viewer and export agree.
 //!
 //! Every kind declares its parameters as [`ParamSpec`]s: the node graph's
 //! inspector is generated from them, a stored value that is missing takes the
-//! spec default, and every number can be bound to an X-sheet param column (the
-//! Transform binds' law). Later parts add FX by declaring specs.
+//! spec default, and every parameter can be bound to an X-sheet param column
+//! (the Transform binds' law; a colour's column mixes its chip toward a second
+//! chip). Later parts add FX by declaring specs.
 //!
 //! Formulas (pinned by tests/fx_tests.rs — change them together):
 //! - **Blur** radius r: a Gaussian with σ = r/2, done as three separable box
 //!   passes whose widths come from boxes-for-Gauss ([`box_sizes`]). Each pass
 //!   is a running sum, O(pixels) whatever r is. r = 0 is the identity;
-//!   outside the image is transparent.
+//!   outside the image is transparent, or with "repeat edges" the edge pixel
+//!   repeated.
 //! - **Glow**: `bright = max(luma(unpremult) − threshold, 0)/(1 − threshold)`,
 //!   which multiplies the pixel (premultiplied, so coverage carries) and the
 //!   tint; `glow = blur(bright, radius) × intensity`; `out = input + glow`
 //!   (Add, clamped only at the finishers). A wired matte input multiplies
 //!   `bright` by the matte's alpha.
 //! - **Diffusion**: `d = blur(input, radius)`;
-//!   `out = mix(input, screen(input, d), mix)`. Soft light takes the Overlay
-//!   blend's curve instead of screen. Both are `export`'s blend formulas.
+//!   `out = mix(input, screen(input, d), mix)`. The overlay mode takes the
+//!   Overlay blend's curve instead of screen (files say "soft light" for it
+//!   from before it was named for what it is). Both are `export`'s blend
+//!   formulas.
 //! - **Grade**, on unpremultiplied colour:
 //!   `c = pow(max(0, gain·(c + lift·(1−c))), 1/gamma) · 2^exposure`; then
 //!   saturation mixes with Rec.709 luma; then temperature and tint are
@@ -102,9 +107,11 @@ pub enum ParamKind {
     Color { default: [u8; 4] },
     Bool { default: bool },
     /// One of `options` (stored by name, so reordering never remaps a file).
+    /// `renamed` reads an option's former names as that option.
     Choice {
         options: &'static [&'static str],
         default: usize,
+        renamed: &'static [(&'static str, usize)],
     },
 }
 
@@ -126,19 +133,33 @@ impl ParamSpec {
             ParamKind::Float { default, .. } => FxValue::Float(default),
             ParamKind::Color { default } => FxValue::Color(default),
             ParamKind::Bool { default } => FxValue::Bool(default),
-            ParamKind::Choice { options, default } => FxValue::Choice(options[default].to_string()),
+            ParamKind::Choice { options, default, .. } => {
+                FxValue::Choice(options[default].to_string())
+            }
         }
     }
 
-    /// Can a param column drive it? A number, a flag or a choice can; a
-    /// colour has no single number to key.
+    /// Can a param column drive it? Every kind so far can: a number, a flag
+    /// and a choice read the column's value, and a colour mixes its chip
+    /// toward its second chip ([`ParamSpec::to_key`]) by the column's 0–1.
     pub fn bindable(&self) -> bool {
-        !matches!(self.kind, ParamKind::Color { .. })
+        match self.kind {
+            ParamKind::Float { .. }
+            | ParamKind::Color { .. }
+            | ParamKind::Bool { .. }
+            | ParamKind::Choice { .. } => true,
+        }
+    }
+
+    /// Where a bound colour keeps its second chip (the column's 1; the
+    /// stored chip is its 0). Missing → the spec default.
+    pub fn to_key(&self) -> String {
+        format!("{}.to", self.key)
     }
 
     /// A stored value read through this spec: missing, wrong-typed or
-    /// non-finite → the default; a number is clamped into range; an unknown
-    /// choice name → the default.
+    /// non-finite → the default; a number is clamped into range; a choice's
+    /// former name → that option; an unknown choice name → the default.
     pub fn read(&self, v: Option<&FxValue>) -> FxValue {
         match (self.kind, v) {
             (ParamKind::Float { min, max, .. }, Some(FxValue::Float(x))) if x.is_finite() => {
@@ -146,19 +167,25 @@ impl ParamSpec {
             }
             (ParamKind::Color { .. }, Some(FxValue::Color(c))) => FxValue::Color(*c),
             (ParamKind::Bool { .. }, Some(FxValue::Bool(b))) => FxValue::Bool(*b),
-            (ParamKind::Choice { options, .. }, Some(FxValue::Choice(s)))
-                if options.contains(&s.as_str()) =>
-            {
-                FxValue::Choice(s.clone())
+            (ParamKind::Choice { options, renamed, .. }, Some(FxValue::Choice(s))) => {
+                if options.contains(&s.as_str()) {
+                    FxValue::Choice(s.clone())
+                } else if let Some((_, i)) = renamed.iter().find(|(old, _)| *old == s.as_str()) {
+                    FxValue::Choice(options[*i].to_string())
+                } else {
+                    self.default_value()
+                }
             }
             _ => self.default_value(),
         }
     }
 
-    /// A bound column's value read through this spec: a number clamped into
-    /// range, a flag on at 0.5 and above, a choice by its rounded index.
-    /// None for a colour or a non-finite value (the stored value stands).
-    pub fn from_column(&self, x: f32) -> Option<FxValue> {
+    /// A bound column's value `x` read through this spec: a number clamped
+    /// into range, a flag on at 0.5 and above, a choice by its rounded
+    /// index, a colour mixed from its stored chip (0) toward its second chip
+    /// (1) per byte, rounded, with `x` clamped to 0–1. None for a non-finite
+    /// value (the stored value stands).
+    pub fn from_column(&self, x: f32, params: &FxParams) -> Option<FxValue> {
         if !x.is_finite() {
             return None;
         }
@@ -169,7 +196,17 @@ impl ParamSpec {
                 let i = (x.round().max(0.0) as usize).min(options.len() - 1);
                 Some(FxValue::Choice(options[i].to_string()))
             }
-            ParamKind::Color { .. } => None,
+            ParamKind::Color { .. } => {
+                let (FxValue::Color(a), FxValue::Color(b)) = (
+                    self.read(params.get(self.key)),
+                    self.read(params.get(&self.to_key())),
+                ) else {
+                    return None;
+                };
+                let t = x.clamp(0.0, 1.0);
+                let mix = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8;
+                Some(FxValue::Color([mix(0), mix(1), mix(2), mix(3)]))
+            }
         }
     }
 }
@@ -274,7 +311,7 @@ impl FxValues {
                     .get(s.key)
                     .filter(|_| s.bindable())
                     .and_then(&column)
-                    .and_then(|x| s.from_column(x))
+                    .and_then(|x| s.from_column(x, params))
                     .unwrap_or_else(|| s.read(params.get(s.key)))
             })
             .collect();
@@ -323,9 +360,9 @@ impl FxValues {
             panic!("'{key}' is not a choice");
         };
         match spec.kind {
-            ParamKind::Choice { options, default } => {
-                options.iter().position(|o| o == s).unwrap_or(default)
-            }
+            ParamKind::Choice {
+                options, default, ..
+            } => options.iter().position(|o| o == s).unwrap_or(default),
             _ => 0,
         }
     }
@@ -378,6 +415,12 @@ const fn float(
 const BLUR_SPECS: &[ParamSpec] = &[
     float("radius_x", "radius x", "Horizontal blur radius in pixels (a Gaussian of sigma r/2); 0 leaves it sharp.", 0.0, 500.0, 4.0, 0.1),
     float("radius_y", "radius y", "Vertical blur radius in pixels (a Gaussian of sigma r/2); 0 leaves it sharp.", 0.0, 500.0, 4.0, 0.1),
+    ParamSpec {
+        key: "repeat_edges",
+        label: "repeat edges",
+        help: "On: the frame's edge pixels repeat past it, so a full frame keeps its edges. Off: past the edge is transparent.",
+        kind: ParamKind::Bool { default: false },
+    },
 ];
 
 const GLOW_SPECS: &[ParamSpec] = &[
@@ -400,10 +443,12 @@ const DIFFUSION_SPECS: &[ParamSpec] = &[
     ParamSpec {
         key: "mode",
         label: "mode",
-        help: "Screen brightens like transmitted light; soft light adds contrast like a diffusion filter.",
+        help: "Screen lays the soft copy on as a bright haze; overlay deepens the contrast as a diffusion filter does.",
         kind: ParamKind::Choice {
-            options: &["screen", "soft light"],
+            options: &["screen", "overlay"],
             default: 0,
+            // It always ran the Overlay curve; files from before say so.
+            renamed: &[("soft light", 1)],
         },
     },
 ];
@@ -414,8 +459,8 @@ const GRADE_SPECS: &[ParamSpec] = &[
     float("gain", "gain", "Scales the whole range: the highlights move most.", 0.0, 8.0, 1.0, 0.01),
     float("saturation", "saturation", "0 is grey, 1 unchanged, above 1 richer colour.", 0.0, 4.0, 1.0, 0.01),
     float("exposure", "exposure", "Brightness in stops: +1 doubles, -1 halves.", -10.0, 10.0, 0.0, 0.01),
-    float("temperature", "temperature", "Warmer (positive) or cooler (negative): red and blue gains.", -1.0, 1.0, 0.0, 0.01),
-    float("tint", "tint", "Magenta (positive) or green (negative): a green gain.", -1.0, 1.0, 0.0, 0.01),
+    float("temperature", "temperature (warm–cool)", "Warmer (positive) or cooler (negative): red and blue gains.", -1.0, 1.0, 0.0, 0.01),
+    float("tint", "tint (magenta–green)", "Magenta (positive) or green (negative): a green gain.", -1.0, 1.0, 0.0, 0.01),
 ];
 
 impl FxKind {
@@ -435,18 +480,48 @@ impl FxKind {
     pub fn help(self) -> &'static str {
         match self {
             Self::Blur => "Softens the image with a Gaussian blur (bokashi).",
-            Self::Glow => "Adds a glow around the bright parts (T-kou).",
-            Self::Diffusion => "Mixes in a soft copy for transmitted light or a diffusion filter (tokako).",
+            Self::Glow => "Adds a glow around the bright parts: tōkakō / T-kō, transmitted light.",
+            Self::Diffusion => "Mixes in a soft copy of the image: difyūjon, the diffusion filter.",
             Self::Grade => "Colour grade: lift, gamma, gain, saturation, exposure, temperature and tint.",
         }
     }
 
-    /// Search words for the add-node menu (romaji and trade words).
+    /// The studio's own word (romaji), shown beside the name in the
+    /// add-node menu; None where the English is the trade word.
+    pub fn term(self) -> Option<&'static str> {
+        match self {
+            Self::Blur => Some("bokashi"),
+            Self::Glow => Some("tōkakō"),
+            Self::Diffusion => Some("difyūjon"),
+            Self::Grade => None,
+        }
+    }
+
+    /// Search words for the add-node menu (romaji, as typed with or
+    /// without long marks, and trade words).
     pub fn aliases(self) -> &'static [&'static str] {
         match self {
             Self::Blur => &["bokashi", "gaussian", "soften"],
-            Self::Glow => &["t-kou", "tkou", "light", "bloom"],
-            Self::Diffusion => &["tokako", "transmitted light", "soft focus", "haze"],
+            Self::Glow => &[
+                "tōkakō",
+                "toukakou",
+                "tokakou",
+                "tokako",
+                "t-kō",
+                "t-kou",
+                "tkou",
+                "transmitted light",
+                "light",
+                "bloom",
+            ],
+            Self::Diffusion => &[
+                "difyūjon",
+                "difyujon",
+                "diffusion filter",
+                "soft focus",
+                "haze",
+                "soft light",
+            ],
             Self::Grade => &["colour", "color", "correction", "levels", "exposure"],
         }
     }
@@ -460,6 +535,17 @@ impl FxKind {
         match self {
             Self::Glow => &["image", "matte"],
             _ => &["image"],
+        }
+    }
+
+    /// What each input pin takes (its tooltip in the graph), by pin.
+    pub fn input_help(self) -> &'static [&'static str] {
+        match self {
+            Self::Glow => &[
+                "the picture that glows",
+                "optional; only where this is opaque glows",
+            ],
+            _ => &["the picture the effect works on"],
         }
     }
 
@@ -496,7 +582,12 @@ impl FxKind {
             }
         };
         match self {
-            Self::Blur => blur(src, v.float("radius_x"), v.float("radius_y")),
+            Self::Blur => blur_edges(
+                src,
+                v.float("radius_x"),
+                v.float("radius_y"),
+                v.flag("repeat_edges"),
+            ),
             Self::Glow => glow(v, law, src, inputs.get(1).copied().flatten()),
             Self::Diffusion => diffusion(v, src),
             Self::Grade => grade(v, src),
@@ -530,35 +621,43 @@ pub fn box_sizes(sigma: f32, n: usize) -> Vec<usize> {
 
 /// One horizontal box pass of radius `r` over every row: a running sum (f64,
 /// so adding and dropping samples leaves no drift), divided by the full
-/// width `2r + 1` — samples outside the row are transparent.
-fn box_rows(src: &[f32], w: usize, r: usize) -> Vec<f32> {
+/// width `2r + 1` — samples outside the row are transparent, or with
+/// `repeat` the row's end pixel.
+fn box_rows(src: &[f32], w: usize, r: usize, repeat: bool) -> Vec<f32> {
     if r == 0 || w == 0 {
         return src.to_vec();
     }
     let inv = 1.0 / (2 * r + 1) as f64;
+    let (wi, ri) = (w as isize, r as isize);
     let mut out = vec![0.0f32; src.len()];
     out.par_chunks_mut(w * 4)
         .zip(src.par_chunks(w * 4))
         .for_each(|(o, s)| {
+            // Sample k of the row, outside it included.
+            let at = |k: isize, c: usize| -> f64 {
+                if (0..wi).contains(&k) {
+                    s[k as usize * 4 + c] as f64
+                } else if repeat {
+                    s[k.clamp(0, wi - 1) as usize * 4 + c] as f64
+                } else {
+                    0.0
+                }
+            };
             let mut acc = [0.0f64; 4];
-            for k in 0..r.min(w) {
+            for k in -ri..ri {
                 for c in 0..4 {
-                    acc[c] += s[k * 4 + c] as f64;
+                    acc[c] += at(k, c);
                 }
             }
-            for x in 0..w {
-                if x + r < w {
-                    for c in 0..4 {
-                        acc[c] += s[(x + r) * 4 + c] as f64;
-                    }
+            for x in 0..wi {
+                for c in 0..4 {
+                    acc[c] += at(x + ri, c);
                 }
                 for c in 0..4 {
-                    o[x * 4 + c] = (acc[c] * inv) as f32;
+                    o[x as usize * 4 + c] = (acc[c] * inv) as f32;
                 }
-                if x >= r {
-                    for c in 0..4 {
-                        acc[c] -= s[(x - r) * 4 + c] as f64;
-                    }
+                for c in 0..4 {
+                    acc[c] -= at(x - ri, c);
                 }
             }
         });
@@ -582,19 +681,25 @@ fn transpose(src: &[f32], w: usize, h: usize) -> Vec<f32> {
 
 /// Gaussian blur with radius `rx` across and `ry` down (σ = r/2 each), as
 /// three box passes per axis. A radius of 0 (or not a number) leaves that
-/// axis untouched.
+/// axis untouched. Outside the image is transparent.
 pub fn blur(img: &Image, rx: f32, ry: f32) -> Image {
+    blur_edges(img, rx, ry, false)
+}
+
+/// [`blur`], with `repeat` sampling past the edges as the edge pixel (the
+/// Blur node's "repeat edges").
+pub fn blur_edges(img: &Image, rx: f32, ry: f32, repeat: bool) -> Image {
     let (w, h) = (img.w as usize, img.h as usize);
     let mut px = img.px.clone();
     if rx.is_finite() && rx > 0.0 {
         for b in box_sizes(rx / 2.0, 3) {
-            px = box_rows(&px, w, (b - 1) / 2);
+            px = box_rows(&px, w, (b - 1) / 2, repeat);
         }
     }
     if ry.is_finite() && ry > 0.0 {
         let mut t = transpose(&px, w, h);
         for b in box_sizes(ry / 2.0, 3) {
-            t = box_rows(&t, h, (b - 1) / 2);
+            t = box_rows(&t, h, (b - 1) / 2, repeat);
         }
         px = transpose(&t, h, w);
     }

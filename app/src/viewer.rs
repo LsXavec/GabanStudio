@@ -109,8 +109,15 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
                 Color32::from_rgba_unmultiplied(83, 137, 196, 200),
             );
             if matches!(graph, GraphView::Rendering(_)) {
-                // GM9: the lamp — an FX render is pending.
+                // GM9: the lamp, and in words — an FX render is pending.
                 painter.circle_filled(pos2(tag.right() + 8.0, tag.center().y), 4.0, crate::plate::TALLY);
+                painter.text(
+                    pos2(tag.right() + 16.0, tag.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "rendering FX…",
+                    egui::FontId::proportional(12.0),
+                    crate::plate::LEGEND,
+                );
             }
         }
         GraphView::NoOutput | GraphView::Off => hint(

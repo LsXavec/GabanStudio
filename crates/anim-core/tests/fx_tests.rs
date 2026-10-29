@@ -139,6 +139,27 @@ fn blur_outside_the_image_is_transparent() {
     assert!(out.pixel(0, 0)[3] < out.pixel(0, 16)[3], "a corner fades more");
 }
 
+#[test]
+fn blur_repeat_edges_keeps_a_full_frame_full() {
+    // Off by default; on, the samples past the frame are its edge pixels, so
+    // a flat opaque frame stays flat and opaque to the corners.
+    assert!(!values(FxKind::Blur, &[]).flag("repeat_edges"));
+    let src = from_rgba8(32, 32, |_, _| [200, 100, 50, 255]);
+    let out = run(FxKind::Blur, &[("repeat_edges", FxValue::Bool(true))], &src);
+    for (o, s) in out.px.iter().zip(&src.px) {
+        assert!((o - s).abs() < 1e-6, "{o} vs {s}");
+    }
+    let faded = run(FxKind::Blur, &[], &src);
+    assert!(faded.pixel(0, 0)[3] < 0.9, "off, the corner fades");
+    // A dot on the edge keeps more of itself: what spreads past the edge
+    // comes back as the edge pixel, where transparency would lose it.
+    let mut edge = Image::new(16, 1);
+    edge.set_pixel(0, 0, [1.0; 4]);
+    let kept = run(FxKind::Blur, &[("repeat_edges", FxValue::Bool(true))], &edge);
+    let lost = run(FxKind::Blur, &[], &edge);
+    assert!(kept.pixel(0, 0)[3] > lost.pixel(0, 0)[3]);
+}
+
 // ---- Glow ------------------------------------------------------------------------
 
 #[test]
@@ -191,7 +212,7 @@ fn glow_intensity_zero_is_the_identity_and_the_matte_gates_it() {
 #[test]
 fn diffusion_mix_zero_is_the_identity() {
     let src = swatches();
-    for mode in ["screen", "soft light"] {
+    for mode in ["screen", "overlay"] {
         let out = run(
             FxKind::Diffusion,
             &[("mix", FxValue::Float(0.0)), ("mode", FxValue::Choice(mode.into()))],
@@ -199,13 +220,17 @@ fn diffusion_mix_zero_is_the_identity() {
         );
         assert_eq!(out, src, "{mode}");
     }
+    // A file from before the rename says "soft light": it reads as overlay.
+    let old = values(FxKind::Diffusion, &[("mode", FxValue::Choice("soft light".into()))]);
+    assert_eq!(old.choice("mode"), 1);
+    assert_eq!(old, values(FxKind::Diffusion, &[("mode", FxValue::Choice("overlay".into()))]));
 }
 
 #[test]
 fn diffusion_mix_one_matches_the_pinned_values_on_a_ramp() {
     // A horizontal ramp c = x/63, opaque. Inside it the blur of a linear
     // ramp is the ramp, so screen(c, c) = 2c − c² and the Overlay curve
-    // (soft light) gives 2c² below one half, 1 − 2(1 − c)² above.
+    // gives 2c² below one half, 1 − 2(1 − c)² above.
     let mut ramp = Image::new(64, 64);
     for y in 0..64 {
         for x in 0..64 {
@@ -216,7 +241,7 @@ fn diffusion_mix_one_matches_the_pinned_values_on_a_ramp() {
     let c = |x: u32| ramp.pixel(x, 32)[0];
     let pinned_screen = [(16u32, 1760.0f32 / 3969.0), (32, 3008.0 / 3969.0), (47, 3713.0 / 3969.0)];
     let pinned_soft = [(16u32, 512.0f32 / 3969.0), (32, 2047.0 / 3969.0), (47, 3457.0 / 3969.0)];
-    for (mode, pinned) in [("screen", pinned_screen), ("soft light", pinned_soft)] {
+    for (mode, pinned) in [("screen", pinned_screen), ("overlay", pinned_soft)] {
         let out = run(
             FxKind::Diffusion,
             &[
@@ -239,6 +264,50 @@ fn diffusion_mix_one_matches_the_pinned_values_on_a_ramp() {
             assert!((got[0] - exact).abs() < 1e-5, "{mode} x {x}: {} vs {exact}", got[0]);
             assert!((got[0] - want).abs() < 1e-5, "{mode} x {x}: {} vs pinned {want}", got[0]);
             assert!((got[3] - 1.0).abs() < 1e-6);
+        }
+    }
+}
+
+#[test]
+fn diffusion_matches_the_pinned_values_where_the_soft_copy_differs() {
+    // An opaque grey field (1/4) with one bright pixel (3/4). Radius 2 is
+    // σ 1, one 3-wide box per axis, so the soft copy d is the 3×3 mean:
+    // 11/36 on and beside the bright pixel, 1/4 away from it. Screen is
+    // a + d − ad; overlay 2ad where a ≤ 1/2, else 1 − 2(1 − a)(1 − d).
+    assert_eq!(box_sizes(1.0, 3), vec![1, 1, 3]);
+    let mut field = Image::new(9, 9);
+    for y in 0..9 {
+        for x in 0..9 {
+            let v = if (x, y) == (4, 4) { 0.75 } else { 0.25 };
+            field.set_pixel(x, y, [v, v, v, 1.0]);
+        }
+    }
+    // (x on row 4, pinned value at mix 1): the bright pixel, its neighbour,
+    // and a pixel whose window misses it.
+    let pinned = [
+        ("screen", [(4u32, 119.0f32 / 144.0), (5, 69.0 / 144.0), (2, 7.0 / 16.0)]),
+        ("overlay", [(4u32, 47.0 / 72.0), (5, 11.0 / 72.0), (2, 1.0 / 8.0)]),
+    ];
+    for (mode, rows) in pinned {
+        for mix in [1.0f32, 0.5] {
+            let out = run(
+                FxKind::Diffusion,
+                &[
+                    ("radius", FxValue::Float(2.0)),
+                    ("mix", FxValue::Float(mix)),
+                    ("mode", FxValue::Choice(mode.into())),
+                ],
+                &field,
+            );
+            for (x, want) in rows {
+                let a = field.pixel(x, 4)[0];
+                let expect = a + (want - a) * mix;
+                let got = out.pixel(x, 4);
+                for c in 0..3 {
+                    assert!((got[c] - expect).abs() < 1e-6, "{mode} mix {mix} x {x}: {got:?} vs {expect}");
+                }
+                assert!((got[3] - 1.0).abs() < 1e-6);
+            }
         }
     }
 }
@@ -393,6 +462,37 @@ fn a_bound_parameter_animates_formula_exact_between_keys() {
 }
 
 #[test]
+fn a_bound_tint_mixes_its_two_chips_by_the_column() {
+    // A colour's column (0–1) mixes its stored chip toward its second chip
+    // (`tint.to`), per byte, rounded.
+    let mut r = rig(FxKind::Glow);
+    let NodeKind::Effect { fx, mut params, mut binds } = r.kind() else { unreachable!() };
+    let spec = FxKind::Glow.spec("tint").unwrap();
+    assert!(spec.bindable());
+    params.set("threshold", FxValue::Float(0.0));
+    params.set("tint", FxValue::Color([255, 0, 0, 255]));
+    params.set(&spec.to_key(), FxValue::Color([0, 0, 255, 255]));
+    binds.set("tint", Some(r.param));
+    r.set_kind(NodeKind::Effect { fx, params: params.clone(), binds: binds.clone() });
+    r.key(0, 0.0);
+    r.key(10, 1.0);
+    let tint = |r: &Rig, frame: u32| {
+        let cut = r.engine.project.cut(r.at.scene, r.at.cut).unwrap();
+        cut.fx_at(fx, &params, &binds, frame).color("tint")
+    };
+    assert_eq!(tint(&r, 0), [255, 0, 0, 255]);
+    assert_eq!(tint(&r, 5), [128, 0, 128, 255], "halfway: 127.5 rounds up");
+    assert_eq!(tint(&r, 10), [0, 0, 255, 255]);
+    let (f0, f10) = (r.pixel(0), r.pixel(10));
+    assert!(f0[0] > f10[0] && f10[2] > f0[2], "red glow, then blue: {f0:?} {f10:?}");
+    // Frame 10 renders exactly as the second chip, static.
+    let mut fixed = params.clone();
+    fixed.set("tint", FxValue::Color([0, 0, 255, 255]));
+    r.set_kind(NodeKind::Effect { fx, params: fixed, binds: FxBinds::default() });
+    assert_eq!(r.pixel(10), f10);
+}
+
+#[test]
 fn eval_hash_follows_parameters_and_bound_values() {
     let mut r = rig(FxKind::Blur);
     let h0 = r.hash(0);
@@ -443,7 +543,9 @@ fn effect_nodes_and_the_graph_layout_round_trip_through_the_store() {
     if let NodeKind::Effect { params, .. } = &mut dkind {
         params.set("mode", FxValue::Choice("soft light".into()));
     }
-    let layout = graph::layout_to_json(&[(glow, (12.5, -40.0)), (grade, (300.0, 80.25))].into());
+    let cut = r.engine.project.cut(at.scene, at.cut).unwrap();
+    let place_glow = graph::place_node(cut, at, glow, Some((12.5, -40.0))).unwrap();
+    let place_grade = graph::place_node(cut, at, grade, Some((300.0, 80.25))).unwrap();
     r.engine
         .apply(
             "more",
@@ -451,7 +553,8 @@ fn effect_nodes_and_the_graph_layout_round_trip_through_the_store() {
                 Command::AddNode { at, id: grade, kind: NodeKind::effect(FxKind::Grade) },
                 Command::AddNode { at, id: diff, kind: dkind },
                 Command::Connect { at, from: solid, from_pin: 0, to: glow, to_pin: 1 },
-                Command::SetCutMeta { at, key: graph::LAYOUT_KEY.into(), before: None, after: Some(layout) },
+                place_glow,
+                place_grade,
             ],
         )
         .unwrap();
@@ -466,14 +569,49 @@ fn effect_nodes_and_the_graph_layout_round_trip_through_the_store() {
         back.project.cut(at.scene, at.cut).unwrap(),
     );
     assert_eq!(a.graph, b.graph, "every Effect, param, bind and wire survives");
-    let pos = graph::layout_from_json(&b.meta[graph::LAYOUT_KEY]);
+    let pos = graph::layout_from_meta(&b.meta);
     assert_eq!(pos.get(&glow), Some(&(12.5, -40.0)));
     assert_eq!(pos.get(&grade), Some(&(300.0, 80.25)));
+    assert_eq!(pos.len(), 2, "a node never placed has no key");
     // And the loaded file renders the same.
     assert_eq!(
         graph_composite_pixel(a, 0, 8, 8, 4, 4),
         graph_composite_pixel(b, 0, 8, 8, 4, 4)
     );
+}
+
+#[test]
+fn two_artists_place_nodes_apart_and_undo_their_own_add_alone() {
+    // Each node's place is its own meta key: artist A's add (node and place)
+    // and artist B's move of another node, both made against the same
+    // state, both land; undoing A's add takes A's node and place and leaves
+    // B's move standing.
+    let mut r = rig(FxKind::Blur);
+    let (at, blur) = (r.at, r.fx);
+    let added = r.engine.alloc_node_id();
+    let cut = r.engine.project.cut(at.scene, at.cut).unwrap();
+    let a_place = graph::place_node(cut, at, added, Some((300.0, 40.0))).unwrap();
+    let b_place = graph::place_node(cut, at, blur, Some((120.0, 90.0))).unwrap();
+    let before = r.pixel(0);
+    r.engine.set_author(Some("A".into()));
+    let add = Command::AddNode { at, id: added, kind: NodeKind::effect(FxKind::Glow) };
+    r.engine.apply("add node", vec![add, a_place]).unwrap();
+    r.engine.set_author(Some("B".into()));
+    r.engine.apply("move node", vec![b_place]).unwrap();
+    r.engine.set_author(None);
+    let layout = |r: &Rig| {
+        let cut = r.engine.project.cut(r.at.scene, r.at.cut).unwrap();
+        graph::layout_from_meta(&cut.meta)
+    };
+    assert_eq!(layout(&r), [(blur, (120.0, 90.0)), (added, (300.0, 40.0))].into());
+    assert_eq!(r.engine.undo_last_by(Some("A")).unwrap(), "add node");
+    let cut = r.engine.project.cut(at.scene, at.cut).unwrap();
+    assert!(cut.graph.node(added).is_err(), "A's node is gone");
+    assert_eq!(layout(&r), [(blur, (120.0, 90.0))].into(), "B's move stands");
+    // B can still take back its own move; a place renders nothing.
+    assert_eq!(r.engine.undo_last_by(Some("B")).unwrap(), "move node");
+    assert!(layout(&r).is_empty());
+    assert_eq!(r.pixel(0), before);
 }
 
 #[test]
@@ -508,6 +646,10 @@ fn old_node_json_loads_unchanged_and_missing_params_take_defaults() {
             assert!(!s.help.is_empty());
             if let ParamKind::Float { min, max, default, step } = s.kind {
                 assert!(min <= default && default <= max && step > 0.0, "{kind:?}.{}", s.key);
+            }
+            if let ParamKind::Choice { options, default, renamed } = s.kind {
+                let named = |i: usize| i < options.len();
+                assert!(named(default) && renamed.iter().all(|(_, i)| named(*i)), "{kind:?}.{}", s.key);
             }
         }
         assert_eq!(NodeKind::effect(*kind).input_count(), kind.inputs());

@@ -6,9 +6,11 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 
+use crate::command::{Command, CutRef};
 use crate::error::{EngineError, Result};
 use crate::fx::{FxBinds, FxKind, FxParams};
 use crate::ids::{ColumnId, ImageId, NodeId, ParamId};
+use crate::model::Cut;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BlendMode {
@@ -151,23 +153,67 @@ impl NodeKind {
     }
 }
 
-/// GM9 (D3): the cut meta key holding the node graph's layout — JSON
-/// `{"<node id>": [x, y], ...}` in graph-space points. Positions are not
-/// rendered, so setting it invalidates nothing.
+/// GM9 (D3): the node graph's layout lives in cut meta, one key per node —
+/// `graph.layout.<node id>` = JSON `[x, y]` in graph-space points — so two
+/// artists placing different nodes never edit the same key (one whole-layout
+/// value made every add, move and removal a precondition on every other
+/// node's place). Positions are not rendered, so setting one invalidates
+/// nothing.
 pub const LAYOUT_KEY: &str = "graph.layout";
 
-/// Read a `graph.layout` value (an unreadable one is an empty layout: the
-/// pane places nodes afresh rather than refusing the cut).
-pub fn layout_from_json(json: &str) -> BTreeMap<NodeId, (f32, f32)> {
-    serde_json::from_str::<BTreeMap<u64, (f32, f32)>>(json)
-        .map(|m| m.into_iter().map(|(id, p)| (NodeId(id), p)).collect())
-        .unwrap_or_default()
+/// The layout key of one node.
+pub fn layout_key(node: NodeId) -> String {
+    format!("{LAYOUT_KEY}.{}", node.0)
 }
 
-/// Write a `graph.layout` value.
-pub fn layout_to_json(layout: &BTreeMap<NodeId, (f32, f32)>) -> String {
-    let plain: BTreeMap<u64, (f32, f32)> = layout.iter().map(|(id, p)| (id.0, *p)).collect();
-    serde_json::to_string(&plain).unwrap_or_else(|_| "{}".into())
+/// Is `key` a layout key (an edit that renders nothing)?
+pub fn is_layout_key(key: &str) -> bool {
+    key.strip_prefix(LAYOUT_KEY)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+}
+
+/// A node's place from its layout value (an unreadable one is no place: the
+/// pane gives the node a default spot rather than refusing the cut).
+pub fn pos_from_json(json: &str) -> Option<(f32, f32)> {
+    serde_json::from_str::<(f32, f32)>(json)
+        .ok()
+        .filter(|(x, y)| x.is_finite() && y.is_finite())
+}
+
+/// A node's layout value.
+pub fn pos_to_json(pos: (f32, f32)) -> String {
+    serde_json::to_string(&pos).unwrap_or_else(|_| "[0.0,0.0]".into())
+}
+
+/// Every saved place in a cut's meta, by node.
+pub fn layout_from_meta(meta: &BTreeMap<String, String>) -> BTreeMap<NodeId, (f32, f32)> {
+    let prefix = format!("{LAYOUT_KEY}.");
+    meta.range(prefix.clone()..)
+        .take_while(|(k, _)| k.starts_with(&prefix))
+        .filter_map(|(k, v)| {
+            let id = k[prefix.len()..].parse::<u64>().ok()?;
+            Some((NodeId(id), pos_from_json(v)?))
+        })
+        .collect()
+}
+
+/// The edit that saves `node`'s place as `pos` (None forgets it). It
+/// touches that node's key alone; None when nothing would change.
+pub fn place_node(
+    cut: &Cut,
+    at: CutRef,
+    node: NodeId,
+    pos: Option<(f32, f32)>,
+) -> Option<Command> {
+    let key = layout_key(node);
+    let before = cut.meta.get(&key).cloned();
+    let after = pos.map(pos_to_json);
+    (after != before).then_some(Command::SetCutMeta {
+        at,
+        key,
+        before,
+        after,
+    })
 }
 
 /// A connection source: the output pin of another node.

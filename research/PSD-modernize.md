@@ -2483,3 +2483,22 @@ what was not verified.
   bindable parameter; one gesture, one step). 17 `fx_tests`, 6 `fxnode_*` app tests. Left: the stretch
   (a glow driven only by its matte); colour parameters cannot be bound. Not verified: the GPU path on a
   real GPU (upload, blit, the dot) and the real window.
+- 2026-10-29 — GM9 review fixes. Node places moved from the one `graph.layout` map to a key per node,
+  `graph.layout.<node id>` = `[x, y]` (`graph::layout_key`, `place_node`, `layout_from_meta`): an add,
+  move or removal touches its own node's key only, so a guest's step is never refused over another
+  artist's places and `undo_last_by` reverts nobody else's moves; a node never placed by hand takes the
+  same column slot after a load. `Action::AddNode` ("Add node…", group Composite, Project ▸ Add node…,
+  Tab in both keymaps, context Node Graph) opens the add menu; the graph's hints name its chord. Input
+  pins are named in the node body (Legend dim) with a tooltip of what each takes
+  (`FxKind::input_names`, `input_help`). Every parameter is bindable: a bound colour mixes its chip toward
+  a second chip (`<key>.to`, shown only while bound) by the column's 0–1, per byte. Diffusion's "soft
+  light" is now "overlay", what it always ran (old files read through `ParamKind::Choice::renamed`; "soft
+  light" stays a search alias), with values pinned where the soft copy differs. Blur gains "repeat edges".
+  Studio terms beside the English in the add menu and as aliases: bokashi, tōkakō / T-kō, difyūjon; Grade
+  labels "temperature (warm–cool)", "tint (magenta–green)". A new column is "Glow radius", then "Glow
+  radius 2"…; hover text on the kind label, combos and bind pickers. graphcomp: a job's `Cut` holds only
+  what its subtree shows at that frame (`job_cut`); a render that panics answers no pixels, the lamp goes
+  out and that key is not retried (`FxCache::fail`); the views say "rendering FX…" beside the TALLY dot.
+  21 `fx_tests`, 11 `fxnode_*` app tests. Left: the stretch; a per-FX "Add effect ▸" submenu; a removed
+  unplaced node lets the unplaced nodes after it close ranks at the next load. Not verified: the real
+  window and the GPU path on a real GPU.

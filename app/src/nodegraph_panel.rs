@@ -23,17 +23,28 @@ fn node_height(inputs: usize) -> f32 {
 }
 
 /// GM9: the pane's session-only view state (positions themselves live in
-/// the cut's `graph.layout`).
+/// the cut's `graph.layout.<id>` keys).
 #[derive(Default)]
 pub struct GraphUi {
     /// The searchable add-node menu, while open.
     pub add_menu: Option<AddMenu>,
+    /// The add-node verb ran (Tab, the menus, the palette): the pane opens
+    /// the menu on its next frame.
+    ask_menu: bool,
     /// A node drag in progress: shown live, committed once on release.
     pub drag: Option<NodeDrag>,
     /// Each node's screen rect this frame.
     pub node_rects: Vec<(NodeId, Rect)>,
     /// The Effect inspector's gesture in progress.
     pub fx: crate::fxui::FxEdit,
+}
+
+impl GraphUi {
+    /// `Action::AddNode`: open the add-node menu at the pointer when it is
+    /// over the graph, else in the graph's middle.
+    pub fn ask_add_menu(&mut self) {
+        self.ask_menu = true;
+    }
 }
 
 pub struct AddMenu {
@@ -68,6 +79,8 @@ enum Make {
 struct Entry {
     category: &'static str,
     name: String,
+    /// The studio's own word (romaji), shown beside the name (D7 labels).
+    term: Option<&'static str>,
     aliases: &'static [&'static str],
     help: &'static str,
     make: Make,
@@ -84,6 +97,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
         .map(|c| Entry {
             category: "Source",
             name: format!("Drawing: column {}", c.name),
+            term: None,
             aliases: &["drawingsource", "cel", "column"],
             help: "the column's drawing at each frame",
             make: Make::Node(NodeKind::DrawingSource { column: c.id }),
@@ -92,6 +106,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
     v.push(Entry {
         category: "Source",
         name: "Solid".into(),
+        term: None,
         aliases: &["colour", "color", "fill", "constant"],
         help: "a constant colour layer",
         make: Make::Node(NodeKind::Solid {
@@ -101,6 +116,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
     v.push(Entry {
         category: "Source",
         name: "Image (PNG)…".into(),
+        term: None,
         aliases: &["imagesource", "png", "background", "plate", "reference"],
         help: "import a background plate / reference image into this cut — \
             stored inside the project file, wired as an ImageSource node",
@@ -109,6 +125,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
     v.push(Entry {
         category: "Transform",
         name: "Transform".into(),
+        term: None,
         aliases: &["move", "scale", "rotate", "camera"],
         help: "moves, scales and rotates its input",
         make: Make::Node(NodeKind::Transform {
@@ -121,8 +138,9 @@ fn entries(state: &AppState) -> Vec<Entry> {
     v.push(Entry {
         category: "Blend",
         name: "Blend".into(),
+        term: None,
         aliases: &["composite", "over", "merge"],
-        help: "composites input 1 over input 0",
+        help: "composites its 'over' input on top of its 'under' input",
         make: Make::Node(NodeKind::Blend {
             mode: BlendMode::Normal,
         }),
@@ -131,6 +149,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
         v.push(Entry {
             category: "FX",
             name: fx.name().into(),
+            term: fx.term(),
             aliases: fx.aliases(),
             help: fx.help(),
             make: Make::Node(NodeKind::effect(fx)),
@@ -139,6 +158,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
     v.push(Entry {
         category: "Output",
         name: "Output".into(),
+        term: None,
         aliases: &["result", "final"],
         help: "the cut's final image",
         make: Make::Node(NodeKind::Output),
@@ -250,6 +270,10 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                             if row.clicked() {
                                 pick = Some(i);
                             }
+                            // GM9: the romaji term beside the English (D7).
+                            if let Some(t) = e.term {
+                                ui.label(egui::RichText::new(format!("· {t}")).color(crate::plate::legend_dim()));
+                            }
                             ui.label(egui::RichText::new(e.category).color(crate::plate::legend_dim()));
                         });
                     }
@@ -290,6 +314,28 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
     state.graph_ui.add_menu = Some(menu);
 }
 
+/// GM9: input pin `pin`'s name (painted beside it) and what it takes (its
+/// tooltip). An Effect's come from its FX kind, so a later kind's pins are
+/// named where it is declared.
+fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
+    let (names, takes): (&[&str], &[&str]) = match kind {
+        NodeKind::Blend { .. } => (
+            &["under", "over"],
+            &["the layer underneath", "the layer composited on top of it"],
+        ),
+        NodeKind::Effect { fx, .. } => (fx.input_names(), fx.input_help()),
+        NodeKind::Transform { .. } => (&["image"], &["the picture it moves, scales and rotates"]),
+        NodeKind::Output => (&["image"], &["the cut's final picture"]),
+        NodeKind::DrawingSource { .. } | NodeKind::Solid { .. } | NodeKind::ImageSource { .. } => {
+            (&[], &[])
+        }
+    };
+    (
+        names.get(pin).copied().unwrap_or("input"),
+        takes.get(pin).copied().unwrap_or("an image"),
+    )
+}
+
 fn kind_color(kind: &NodeKind) -> Color32 {
     match kind {
         NodeKind::DrawingSource { .. } => Color32::from_rgb(83, 137, 196),
@@ -324,17 +370,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let origin = rect.left_top() + vec2(state.graph_pan.0, state.graph_pan.1);
     let to_screen = |p: (f32, f32)| pos2(origin.x + p.0, origin.y + p.1);
 
-    // GM9: Tab with the pointer over the graph, or a right-click on empty
-    // graph space, opens the add-node menu there (never while typing).
+    // GM9: the add-node verb (Tab over the graph — never while typing —
+    // or the menus and the palette) opens the add-node menu at the
+    // pointer, or in the graph's middle when the pointer is elsewhere; a
+    // right-click on empty graph space opens it there.
     let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
-    let tab = state.graph_ui.add_menu.is_none()
-        && hover.is_some()
-        && !ui.ctx().text_edit_focused()
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
+    let asked = std::mem::take(&mut state.graph_ui.ask_menu);
     let open_at = if response.secondary_clicked() {
         response.interact_pointer_pos()
-    } else if tab {
-        hover
+    } else if asked {
+        Some(hover.unwrap_or_else(|| rect.center()))
     } else {
         None
     };
@@ -544,15 +589,26 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             },
         );
 
-        // Input pins: wire drop target; right-click disconnects.
+        // Input pins: wire drop target; right-click disconnects. GM9: each
+        // is named inside the body, and says what it takes.
         for pin in 0..nv.inputs.len() {
             let ip = in_pin_pos(nv, pin);
-            let ip_rect = Rect::from_center_size(ip, vec2(16.0, 16.0));
-            let ip_resp = ui.interact(
-                ip_rect,
-                ui.id().with(("inpin", nv.id.0, pin)),
-                Sense::click(),
+            let (name, takes) = pin_label(&nv.kind, pin);
+            painter.text(
+                ip + vec2(PIN_R + 4.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                name,
+                egui::FontId::proportional(10.0),
+                crate::plate::legend_dim(),
             );
+            let ip_rect = Rect::from_center_size(ip, vec2(16.0, 16.0));
+            let ip_resp = ui
+                .interact(
+                    ip_rect,
+                    ui.id().with(("inpin", nv.id.0, pin)),
+                    Sense::click(),
+                )
+                .on_hover_text(format!("{name}: {takes} (right-click to disconnect)"));
             if state.pending_wire.is_some() && released && ip_resp.hovered() {
                 wire_drop = Some((nv.id, pin as u16));
             }
@@ -586,12 +642,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // GM9: the searchable add-node menu (opened above).
     add_menu_ui(ui, state);
 
-    // Hint when empty.
+    // Hint when empty (GM9: the add verb by its chord in this keymap).
     if nodes.is_empty() {
+        let add = crate::menus::chord_label(ui.ctx(), crate::config::Action::AddNode)
+            .map(|c| format!("{c} or right-click"))
+            .unwrap_or_else(|| "Right-click".into());
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            "Tab or right-click to add nodes — the cut's compositing graph lives here",
+            format!("{add} to add nodes — the cut's compositing graph lives here"),
             egui::FontId::proportional(13.0),
             Color32::from_rgb(139, 141, 131),
         );
@@ -602,9 +661,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
 fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal_wrapped(|ui| {
         let Some(id) = state.selected_node else {
+            // GM9: the add verb said by its chord in this keymap.
+            let add = crate::menus::chord_label(ui.ctx(), crate::config::Action::AddNode)
+                .map(|c| format!("{c} or right-click"))
+                .unwrap_or_else(|| "right-click".into());
             ui.label(
-                egui::RichText::new("no node selected — click one; right-click adds/removes")
-                    .color(crate::plate::legend_dim()),
+                egui::RichText::new(format!(
+                    "no node selected — click one; {add} adds, right-click a node removes it"
+                ))
+                .color(crate::plate::legend_dim()),
             );
             return;
         };
@@ -614,11 +679,14 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
         };
         let mut kind = node.kind.clone();
         let mut changed = false;
-        ui.label(
+        let title = ui.label(
             egui::RichText::new(kind.name())
                 .strong()
                 .color(kind_color(&kind)),
         );
+        if let NodeKind::Effect { fx, .. } = &kind {
+            title.on_hover_text(fx.help());
+        }
         match &mut kind {
             NodeKind::Solid { rgba } => {
                 let mut rgb = [rgba[0], rgba[1], rgba[2]];
@@ -893,6 +961,19 @@ mod tests {
     #[test]
     fn fxnode_node_drag_is_one_entry_and_positions_survive_save_and_load() {
         let mut h = graph_pane();
+        // Two nodes nobody placed by hand (an older file's): they take
+        // their column's default slots.
+        let at = h.state().at();
+        let raw: Vec<NodeId> = (0..2).map(|_| h.state_mut().engine.alloc_node_id()).collect();
+        let cmds = raw
+            .iter()
+            .map(|&id| anim_core::command::Command::AddNode {
+                at,
+                id,
+                kind: NodeKind::effect(FxKind::Grade),
+            })
+            .collect();
+        h.state_mut().engine.apply("unplaced nodes", cmds).expect("added");
         h.state_mut()
             .graph_add_node(NodeKind::effect(FxKind::Blur), (300.0, 300.0));
         let id = h.state().selected_node.unwrap();
@@ -905,15 +986,59 @@ mod tests {
         assert_eq!(h.state().graph_layout().get(&id), Some(&(420.0, 340.0)));
         let r1 = node_rect(&h, id);
         assert!((r1.left_top() - (r0.left_top() + vec2(120.0, 40.0))).length() < 0.01);
-        // Saved with the cut, every node's place; back after a load.
+        h.state_mut().graph_move_node(raw[0], (500.0, 500.0));
+        h.run();
+        // Saved with the cut, each hand-placed node's place under its own
+        // key; after a load those come back and every other node finds the
+        // same default slot.
         let file = h.data_dir().join("layout.gaban");
         let s = h.state_mut();
         s.begin_save(file.clone());
         assert!(s.wait_save(), "the save landed");
         let saved = h.state().graph_layout();
-        assert_eq!(saved.len(), h.state().cut().graph.nodes().count());
-        let back = AppState::load_from(file).expect("the file opens");
+        assert_eq!(saved.len(), 2, "the dragged Blur and the moved Grade: {saved:?}");
+        let mut back = AppState::load_from(file).expect("the file opens");
         assert_eq!(back.graph_layout(), saved);
+        back.ensure_node_layout();
+        for n in h.state().cut().graph.nodes() {
+            assert_eq!(back.node_pos(n.id), h.state().node_pos(n.id), "{:?} kept its spot", n.id);
+        }
         assert_eq!(back.node_pos(id), (420.0, 340.0));
+        assert_eq!(back.node_pos(raw[0]), (500.0, 500.0));
+    }
+
+    #[test]
+    fn fxnode_add_node_is_a_verb_that_opens_the_menu() {
+        assert!(Action::ALL.contains(&Action::AddNode), "in the registry");
+        assert_eq!(Action::AddNode.label(), "Add node…");
+        let mut h = graph_pane();
+        assert!(h.state().graph_ui.add_menu.is_none());
+        h.perform(Action::AddNode);
+        h.run();
+        assert!(h.state().graph_ui.add_menu.is_some(), "the verb opens the menu\n{}", h.describe());
+        assert!(h.typing(), "its field has the keys");
+        // Escape closes it, and the verb opens it again.
+        h.key(egui::Key::Escape);
+        assert!(h.state().graph_ui.add_menu.is_none(), "Escape closes\n{}", h.describe());
+        h.perform(Action::AddNode);
+        h.run();
+        assert!(h.state().graph_ui.add_menu.is_some());
+    }
+
+    #[test]
+    fn fxnode_input_pins_say_what_they_take() {
+        let glow = NodeKind::effect(FxKind::Glow);
+        assert_eq!(pin_label(&glow, 0).0, "image");
+        assert_eq!(pin_label(&glow, 1).0, "matte");
+        assert!(pin_label(&glow, 1).1.contains("opaque"), "the matte says what it does");
+        let blend = NodeKind::Blend {
+            mode: BlendMode::Normal,
+        };
+        assert_eq!([pin_label(&blend, 0).0, pin_label(&blend, 1).0], ["under", "over"]);
+        // Every FX kind names each of its inputs.
+        for fx in FxKind::ALL {
+            assert_eq!(fx.input_names().len(), fx.inputs(), "{fx:?}");
+            assert_eq!(fx.input_help().len(), fx.inputs(), "{fx:?}");
+        }
     }
 }

@@ -4241,8 +4241,16 @@ impl CanvasView {
                 Color32::from_rgb(139, 141, 131), // Legend: the app speaking
             );
             if composite_pending {
-                // GM9: the lamp — an FX render is pending (the last result shows).
+                // GM9: the lamp, and in words — an FX render is pending
+                // (the last result shows until it lands).
                 painter.circle_filled(pos2(tag.right() + 8.0, tag.center().y), 4.0, crate::plate::TALLY);
+                painter.text(
+                    pos2(tag.right() + 16.0, tag.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    "rendering FX…",
+                    egui::FontId::proportional(12.0),
+                    crate::plate::LEGEND,
+                );
             }
         }
         if let Some(note) = composite_note {

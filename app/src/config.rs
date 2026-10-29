@@ -137,6 +137,8 @@ pub enum Action {
     ShowPaintCheck,
     // GM8: the auto-comp and the project's own settings window.
     BuildComposite,
+    /// GM9: the node graph's searchable add-node menu, at the pointer.
+    AddNode,
     ProjectSettings,
     /// GM8: the Welcome screen again (templates, recent, the sample).
     WelcomeScreen,
@@ -150,6 +152,8 @@ pub enum Group {
     View,
     Sheet,
     Cut,
+    /// GM9: the node graph's verbs.
+    Composite,
     Room,
     Window,
     Help,
@@ -165,6 +169,7 @@ impl Group {
         Group::Playback,
         Group::Sheet,
         Group::Cut,
+        Group::Composite,
         Group::Tool,
         Group::Room,
         Group::Window,
@@ -177,6 +182,7 @@ impl Group {
             Group::View => "view",
             Group::Sheet => "sheet",
             Group::Cut => "cut",
+            Group::Composite => "composite",
             Group::Room => "room",
             Group::Window => "window",
             Group::Help => "help",
@@ -356,6 +362,7 @@ impl Action {
         Action::ConvertColorsToSrgb,
         Action::ShowPaintCheck,
         Action::BuildComposite,
+        Action::AddNode,
         Action::ProjectSettings,
         Action::WelcomeScreen,
     ];
@@ -472,6 +479,7 @@ impl Action {
             Action::ConvertColorsToSrgb => "Convert colours to sRGB…",
             Action::ShowPaintCheck => "Nuri check (paint check)",
             Action::BuildComposite => "Build composite from sheet",
+            Action::AddNode => "Add node…",
             Action::ProjectSettings => "Project settings…",
             Action::WelcomeScreen => "Welcome screen…",
         }
@@ -594,6 +602,7 @@ impl Action {
             ConvertColorsToSrgb => "Store this saved project's colours as exact sRGB chips (a backup is written first).",
             ShowPaintCheck => "Open the nuri check pane: unpainted holes and off-palette colours, click to jump.",
             BuildComposite => "Replace the node graph with every rendered column in sheet order (one undo step).",
+            AddNode => "Open the searchable add-node menu where the pointer is on the node graph: sources, blends, FX, output.",
             ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
             WelcomeScreen => "Show the Welcome screen: templates, recent files and the sample cut (unsaved work is asked about first).",
         }
@@ -623,6 +632,7 @@ impl Action {
             | HandlesFlat | HandlesBroken => Group::Sheet,
             FrameCurves => Group::View,
             PrevCut | NextCut => Group::Cut,
+            AddNode => Group::Composite,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
@@ -720,6 +730,8 @@ impl Action {
             // GM7: the project's own menu, beside its colour law.
             ConvertColorsToSrgb => "Project/Convert colours to sRGB…",
             BuildComposite => "Project/Build composite from sheet",
+            // GM9: beside the auto-comp, where graphs are made.
+            AddNode => "Project/Add node…",
             ProjectSettings => "Project/Project settings…",
             WelcomeScreen => "File/Welcome screen…",
             PrevCut => "Cut/Previous cut",
@@ -786,6 +798,19 @@ impl Action {
             RoomEdit => &["edit", "henshu", "editing"],
             // GM8: the auto-comp and the project's settings.
             BuildComposite => &["auto comp", "autocomp", "wire graph", "build graph"],
+            // GM9: the FX it adds, by their trade words too.
+            AddNode => &[
+                "node",
+                "add effect",
+                "fx",
+                "blur",
+                "bokashi",
+                "glow",
+                "tōkakō",
+                "t-kou",
+                "diffusion",
+                "grade",
+            ],
             ProjectSettings => &["project properties", "resolution", "frame rate", "canvas size"],
             WelcomeScreen => &["templates", "new from template", "start page", "welcome"],
             // GM5: the sheet verbs by the words a timing sheet uses.
@@ -861,6 +886,7 @@ impl Action {
             | InterpBezier | HandlesAuto | HandlesSmooth | HandlesFlat | HandlesBroken => {
                 Ctx::Curves
             }
+            AddNode => Ctx::NodeGraph,
             _ => Ctx::Global,
         }
     }
@@ -889,6 +915,9 @@ impl Action {
                 // GM6: and the pixel clipboard, over the canvas only.
                 | Action::CopyPixels
                 | Action::PastePixels
+                // GM9: Tab adds a node only over the graph (elsewhere it
+                // stays egui's focus key).
+                | Action::AddNode
         )
     }
 
@@ -1090,6 +1119,9 @@ impl Action {
                 shift: true,
                 ..ctrl("K")
             }),
+            // GM9: Tab over the node graph, as in Nuke, Blender and
+            // Fusion; the same in both presets.
+            AddNode => Some(k("Tab")),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto

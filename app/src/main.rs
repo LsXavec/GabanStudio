@@ -2913,6 +2913,12 @@ impl Editor {
                 self.open_pane(Pane::XSheet);
                 self.state.sheet_ui.ask_entry();
             }
+            // GM9: the graph comes forward and opens its add-node menu on
+            // its next frame (the node it adds is the edit).
+            Action::AddNode => {
+                self.open_pane(Pane::NodeGraph);
+                self.state.graph_ui.ask_add_menu();
+            }
             Action::ResetLayout => {
                 let st = self.stage.unwrap_or(Stage::Drawing);
                 self.dock = st.dock();
@@ -3272,7 +3278,8 @@ impl Editor {
             | Action::ConvertColorsToSrgb
             | Action::ProjectSettings
             | Action::WelcomeScreen
-            | Action::TypeIntoCell => {} // the chrome's, handled above
+            | Action::TypeIntoCell
+            | Action::AddNode => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
     }
@@ -3311,6 +3318,7 @@ fn is_chrome(action: Action) -> bool {
             | Action::ProjectSettings
             | Action::WelcomeScreen
             | Action::TypeIntoCell
+            | Action::AddNode
     )
 }
 
@@ -3381,6 +3389,8 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::KindUnset
             // GM8: nothing modal opens over a live stroke (D7).
             | Action::WelcomeScreen
+            // GM9: nor the add-node menu (it brings a pane forward).
+            | Action::AddNode
     )
 }
 
