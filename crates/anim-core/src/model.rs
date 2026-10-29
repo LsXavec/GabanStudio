@@ -943,6 +943,18 @@ pub struct Scene {
     pub cuts: Vec<Cut>,
 }
 
+/// GM8: the project-level settings one `SetProjectProps` swaps (the colour
+/// law is not here — it changes only through the sRGB conversion).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectProps {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub dpi: f32,
+    pub default_cut_frames: Option<u32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Project {
     pub name: String,
@@ -968,6 +980,9 @@ pub struct Project {
     /// every file that predates the key, so old projects render as they
     /// always did; the New Project dialog makes Srgb projects.
     pub color_law: crate::color::ColorLaw,
+    /// GM8 (D13, `meta.default_cut_frames`): the length new cuts get.
+    /// Unset means 48; the templates set 72.
+    pub default_cut_frames: Option<u32>,
 }
 
 impl Project {
@@ -982,6 +997,24 @@ impl Project {
             next_id: 1,
             app_meta: std::collections::BTreeMap::new(),
             color_law: crate::color::ColorLaw::Legacy,
+            default_cut_frames: None,
+        }
+    }
+
+    /// The length a new cut gets (D13: 48 when the project never set one).
+    pub fn cut_frames(&self) -> u32 {
+        self.default_cut_frames.unwrap_or(48)
+    }
+
+    /// The project-level settings the Project Settings window edits.
+    pub fn props(&self) -> ProjectProps {
+        ProjectProps {
+            name: self.name.clone(),
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            dpi: self.dpi,
+            default_cut_frames: self.default_cut_frames,
         }
     }
 

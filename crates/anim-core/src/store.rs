@@ -172,6 +172,10 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
     put_meta.execute(("next_id", project.next_id.to_string()))?;
     // D8: how chips are stored. A file without the key loads as Legacy.
     put_meta.execute(("color_law", project.color_law.key()))?;
+    // D13: written only when the project set one (unset = 48 on load).
+    if let Some(n) = project.default_cut_frames {
+        put_meta.execute(("default_cut_frames", n.to_string()))?;
+    }
     // Opaque app-owned data (character palettes, etc.) under an `app.`
     // prefix — see the `app_meta` doc comment on Project. NOTE: an OLDER
     // build's save() doesn't know this prefix and only re-inserts the keys
@@ -405,6 +409,53 @@ fn sane_opacity(raw: f64) -> f32 {
     if v.is_finite() { v.clamp(0.0, 1.0) } else { 1.0 }
 }
 
+fn read_app_meta(conn: &Connection) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT key, value FROM meta WHERE key LIKE 'app.%'")?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map((), |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(k, v)| k.strip_prefix("app.").map(|s| (s.to_string(), v)))
+        .collect())
+}
+
+/// GM8: the app_meta key of the file's preview image (`app.thumb` on
+/// disk). `read_meta` returns it; `load` leaves it out of the project.
+pub const PREVIEW_KEY: &str = "thumb";
+
+/// GM8: what the Welcome screen's recent cards show — read from the meta
+/// table alone (no drawing, tile or graph row is touched), read-only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FileMeta {
+    pub name: String,
+    pub fps: u32,
+    pub width: u32,
+    pub height: u32,
+    pub app_meta: std::collections::BTreeMap<String, String>,
+}
+
+pub fn read_meta(path: &Path) -> Result<FileMeta> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let get = |key: &str| -> Option<String> {
+        conn.query_row("SELECT value FROM meta WHERE key = ?1", (key,), |r| {
+            r.get::<_, String>(0)
+        })
+        .ok()
+    };
+    let num = |key: &str, default: u32| get(key).and_then(|s| s.parse().ok()).unwrap_or(default);
+    Ok(FileMeta {
+        name: get("name").ok_or_else(|| EngineError::Corrupt("missing meta key 'name'".into()))?,
+        fps: num("fps", 24),
+        width: num("width", 1920),
+        height: num("height", 1080),
+        app_meta: read_app_meta(&conn)?,
+    })
+}
+
 pub fn load(path: &Path) -> Result<Project> {
     let conn = Connection::open(path)?;
 
@@ -475,21 +526,16 @@ pub fn load(path: &Path) -> Result<Project> {
         project.color_law = crate::color::ColorLaw::from_key(&key)
             .ok_or(EngineError::NewerColorLaw(key))?;
     }
+    project.default_cut_frames = get_meta_opt("default_cut_frames")
+        .and_then(|s| s.parse().ok())
+        .filter(|n| *n > 0);
     // Opaque app-owned data: every `app.`-prefixed meta row, prefix
     // stripped. Absent entirely in files saved before this existed — an
     // empty map, exactly like project.app_meta's own default.
-    {
-        let mut stmt =
-            conn.prepare("SELECT key, value FROM meta WHERE key LIKE 'app.%'")?;
-        let rows: Vec<(String, String)> = stmt
-            .query_map((), |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<std::result::Result<_, _>>()?;
-        for (key, value) in rows {
-            if let Some(stripped) = key.strip_prefix("app.") {
-                project.app_meta.insert(stripped.to_string(), value);
-            }
-        }
-    }
+    project.app_meta = read_app_meta(&conn)?;
+    // GM8: the file's preview is the FILE's, written fresh by every save —
+    // never document content, so a loaded project never carries a stale one.
+    project.app_meta.remove(PREVIEW_KEY);
 
     // Scenes
     let mut stmt = conn.prepare("SELECT id, name FROM scenes ORDER BY ord")?;

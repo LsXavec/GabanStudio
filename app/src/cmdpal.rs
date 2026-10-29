@@ -586,10 +586,13 @@ mod tests {
     #[test]
     fn cmdui_room_items_carry_the_room_names() {
         use crate::workspace::Stage;
+        // GM8 (D12): five spine rooms — Finishing split into ink & paint
+        // and composite.
         let rooms = [
             Action::RoomLayout,
             Action::RoomDrawing,
             Action::RoomFinishing,
+            Action::RoomComposite,
             Action::RoomEdit,
         ];
         assert_eq!(rooms.len(), Stage::ALL.len());
@@ -603,14 +606,15 @@ mod tests {
             ("drawing", Action::RoomDrawing),
             ("paint", Action::RoomFinishing),
             ("ink", Action::RoomFinishing),
+            ("composite", Action::RoomComposite),
             ("edit", Action::RoomEdit),
         ] {
             assert!(score(word, a).is_some(), "{word:?} finds {a:?}");
         }
         let mut h = EditorHarness::new();
         h.click("room");
-        h.click("shiage (paint)");
-        assert_eq!(h.editor().stage, Some(Stage::Finishing));
+        h.click("shiage (ink & paint)");
+        assert_eq!(h.editor().stage, Some(Stage::InkPaint));
     }
 
     #[test]

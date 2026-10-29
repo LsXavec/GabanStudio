@@ -2446,3 +2446,19 @@ what was not verified.
   `color_tests`, 13 `inkpaint_*` app tests (the Shift / Ctrl+Shift click now through the harness). Left:
   a project-scope recolour and the colour-law convert still run on the UI thread (a worker needs
   stale-diff protection). Not verified: the real window.
+- 2026-10-29 — GM8 Welcome, templates, rooms and the sample cut. Start-up shows the Welcome screen
+  (welcome.rs) unless its "Show at startup" latch is off: four template cards (templates.rs: Srgb law,
+  `default_cut_frames`, columns with BG / Ref kinds, the first room, an auto-comp graph), Custom size…,
+  Open…, 12 recent cards read through `store::read_meta` (missing files greyed with Remove), the sample
+  cut (sample.rs: 640×360, a BG plate and a 12-drawing ball bounce on twos, keys marked, a Ball palette)
+  and the Quick start checklist. Rooms (D12): `Stage::InkPaint` (key still "finishing") and
+  `Stage::Composite` ("composite", Shiage (full); graph + curves, viewer with the canvas behind it,
+  palette; composite view on); a room missing from a saved `room_stack` gets its built-in binding; the
+  slate tab's hover is the room card. `Command::SetProjectProps` (exact inverse, all nodes invalidated)
+  behind Project ▸ Project settings…; Project ▸ Build composite from sheet (one undo step, byte parity
+  with the column render). `Project.default_cut_frames` (meta, unset = 48). The save worker writes a
+  256-px base64 PNG thumbnail (≤ 64 KB) into `app.thumb`; `load` leaves it out of the document. UI scale
+  80–200% in Settings ▸ General (`ui.scale`, egui's zoom factor). Quick start ticks persist in
+  `ui.quick_start`; Help ▸ Quick start gains the checklist with Show me. 13 `welcome_*` tests and a
+  composite-room probe. Left: newproject.rs still keeps its own resolution presets; the role chooser
+  (stretch). Not verified: the real window.

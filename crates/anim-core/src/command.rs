@@ -10,7 +10,9 @@ use std::collections::HashSet;
 use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
-use crate::model::{AudioClip, CelLayer, Cut, Drawing, DrawingDef, LayerProps, Project, Stroke};
+use crate::model::{
+    AudioClip, CelLayer, Cut, Drawing, DrawingDef, LayerProps, Project, ProjectProps, Stroke,
+};
 use crate::raster::TileDiff;
 use crate::xsheet::{Column, ColumnDef, Exposure, ParamColumn, ParamKey};
 
@@ -309,11 +311,26 @@ pub enum Command {
         before: DrawingDef,
         after: DrawingDef,
     },
+    /// GM8: the project's name, size, fps, dpi and default cut length.
+    /// `before` must be what the project holds now; the inverse swaps the
+    /// two. A size change keeps every tile (pixels never move).
+    SetProjectProps {
+        before: ProjectProps,
+        after: ProjectProps,
+    },
 }
+
+/// No cut has id 0 (ids start at 1), so a project-level command's
+/// invalidation roots pass through `invalidation_closure` untouched.
+pub const PROJECT_LEVEL: CutRef = CutRef {
+    scene: SceneId(0),
+    cut: CutId(0),
+};
 
 impl Command {
     pub fn cut_ref(&self) -> CutRef {
         match self {
+            Command::SetProjectProps { .. } => PROJECT_LEVEL,
             Command::AddImage { at, .. }
             | Command::RemoveImage { at, .. }
             | Command::AddDrawing { at, .. }
@@ -1680,6 +1697,43 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 }],
                 // Kind and chart never reach pixels (D1).
                 invalidation_roots: vec![],
+            })
+        }
+
+        Command::SetProjectProps { before, after } => {
+            if project.props() != *before {
+                return Err(EngineError::InvalidCommand(
+                    "the project settings changed since this edit was made".into(),
+                ));
+            }
+            if after.width == 0 || after.height == 0 || after.fps == 0 {
+                return Err(EngineError::InvalidCommand(
+                    "size and fps must be at least 1".into(),
+                ));
+            }
+            if after.default_cut_frames == Some(0) || !(after.dpi > 0.0) {
+                return Err(EngineError::InvalidCommand(
+                    "cut length and dpi must be positive".into(),
+                ));
+            }
+            project.name = after.name.clone();
+            project.width = after.width;
+            project.height = after.height;
+            project.fps = after.fps;
+            project.dpi = after.dpi;
+            project.default_cut_frames = after.default_cut_frames;
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetProjectProps {
+                    before: after.clone(),
+                    after: before.clone(),
+                }],
+                // The frame size reaches every render: all nodes, every cut.
+                invalidation_roots: project
+                    .scenes
+                    .iter()
+                    .flat_map(|s| s.cuts.iter())
+                    .flat_map(|c| c.graph.nodes().map(|n| n.id))
+                    .collect(),
             })
         }
     }

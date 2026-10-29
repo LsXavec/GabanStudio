@@ -34,13 +34,16 @@ mod palette_panel;
 mod plate;
 mod proc;
 mod runs;
+mod sample;
 mod shortcuts;
 mod stabilizer;
+mod templates;
 #[cfg(test)]
 mod testkit;
 mod uidump;
 mod update;
 mod viewer;
+mod welcome;
 mod workspace;
 mod worksafe;
 mod xsheet_panel;
@@ -71,7 +74,9 @@ fn stage_key(stage: Option<Stage>) -> &'static str {
     match stage {
         Some(Stage::Layout) => "layout",
         Some(Stage::Drawing) => "drawing",
-        Some(Stage::Finishing) => "finishing",
+        // GM8: the ink & paint room keeps its old key (saved bindings).
+        Some(Stage::InkPaint) => "finishing",
+        Some(Stage::Composite) => "composite",
         Some(Stage::Edit) => "edit",
         None => "custom",
     }
@@ -251,6 +256,8 @@ struct App {
     editor: Option<Editor>,
     /// When Some, the New Project dialog is showing (startup, or "New…").
     new_form: Option<NewProjectForm>,
+    /// GM8: when Some (and nothing is open), the Welcome screen shows.
+    welcome: Option<welcome::Welcome>,
     /// User config (rebindable keyboard shortcuts + performance).
     config: Config,
     settings_open: bool,
@@ -2418,6 +2425,7 @@ impl App {
             data_dir,
             editor: restored,
             new_form: None,
+            welcome: None,
             update_rx: {
                 // The dev channel wins: an armed dev build never
                 // self-updates (NEVER-DO 4). Sweep any stepped-aside
@@ -2847,6 +2855,8 @@ impl Editor {
         // (a shortcut, a menu or the palette itself).
         if out != Performed::Ignored {
             self.palette.note_run(action);
+            // GM8: the first run of a Quick start step's verb ticks it.
+            welcome::tick(&mut self.quick_start, action);
         }
         out
     }
@@ -2885,6 +2895,10 @@ impl Editor {
             // DANGER confirm (the convert itself runs from the confirm).
             Action::ShowPaintCheck => self.open_pane(Pane::PaintCheck),
             Action::ConvertColorsToSrgb => self.state.convert_confirm = true,
+            // GM8: the project's settings window (its Apply is the edit).
+            Action::ProjectSettings => {
+                self.project_form = Some(ProjectForm::of(&self.state.engine.project));
+            }
             Action::FrameCurves => curves_panel::frame_stored(&mut self.state),
             Action::TypeIntoCell => {
                 self.open_pane(Pane::XSheet);
@@ -2906,7 +2920,8 @@ impl Editor {
             Action::MirrorView => self.canvas.toggle_mirror(),
             Action::RoomLayout => self.enter_room(Stage::Layout),
             Action::RoomDrawing => self.enter_room(Stage::Drawing),
-            Action::RoomFinishing => self.enter_room(Stage::Finishing),
+            Action::RoomFinishing => self.enter_room(Stage::InkPaint),
+            Action::RoomComposite => self.enter_room(Stage::Composite),
             Action::RoomEdit => self.enter_room(Stage::Edit),
             _ => {}
         }
@@ -3134,6 +3149,10 @@ impl Editor {
             Action::MakeInbetweens => {
                 s.make_inbetweens();
             }
+            // GM8: the auto-comp — the whole graph in one undo step.
+            Action::BuildComposite => {
+                s.auto_comp();
+            }
             Action::KindKey
             | Action::KindBreakdown
             | Action::KindInbetween
@@ -3237,11 +3256,13 @@ impl Editor {
             | Action::RoomLayout
             | Action::RoomDrawing
             | Action::RoomFinishing
+            | Action::RoomComposite
             | Action::RoomEdit
             | Action::ShowCurves
             | Action::FrameCurves
             | Action::ShowPaintCheck
             | Action::ConvertColorsToSrgb
+            | Action::ProjectSettings
             | Action::TypeIntoCell => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
@@ -3272,11 +3293,13 @@ fn is_chrome(action: Action) -> bool {
             | Action::RoomLayout
             | Action::RoomDrawing
             | Action::RoomFinishing
+            | Action::RoomComposite
             | Action::RoomEdit
             | Action::ShowCurves
             | Action::FrameCurves
             | Action::ShowPaintCheck
             | Action::ConvertColorsToSrgb
+            | Action::ProjectSettings
             | Action::TypeIntoCell
     )
 }
@@ -3722,6 +3745,77 @@ struct Editor {
     /// GM3: where each pane was drawn this frame — the pane under the
     /// pointer picks which shortcuts apply.
     pane_rects: Vec<(Pane, egui::Rect)>,
+    /// GM8: the Quick start steps done this session (the App ORs them
+    /// into `config.ui.quick_start`).
+    pub quick_start: [bool; 5],
+    /// GM8: the Project Settings window's draft, while it is open.
+    pub project_form: Option<ProjectForm>,
+}
+
+/// GM8: the Project Settings window's draft (applied as one command).
+pub struct ProjectForm {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub cut_frames: u32,
+    pub dpi: f32,
+}
+
+impl ProjectForm {
+    fn of(p: &anim_core::model::Project) -> Self {
+        Self {
+            name: p.name.clone(),
+            width: p.width,
+            height: p.height,
+            fps: p.fps,
+            cut_frames: p.cut_frames(),
+            dpi: p.dpi,
+        }
+    }
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// GM8 start-up route: the Welcome screen unless its latch is off (then
+/// the New Project form, as before).
+fn startup_shows_welcome(config: &Config) -> bool {
+    config.ui.show_welcome
+}
+
+/// GM8: the UI scale (Settings ▸ General) as egui's zoom factor.
+fn apply_ui_scale(ctx: &egui::Context, config: &Config) {
+    ctx.set_zoom_factor(config.ui.zoom());
+}
+
+/// GM8: OR this session's Quick start ticks into the config; true when
+/// one is new (the caller saves).
+fn merge_quick_start(config: &mut Config, ticks: &[bool; 5]) -> bool {
+    let mut changed = false;
+    for (c, t) in config.ui.quick_start.iter_mut().zip(ticks) {
+        if *t && !*c {
+            *c = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// GM8: Remove on a Welcome recent card — off the config's list and the
+/// screen (the caller saves the config; the file is never touched).
+fn forget_recent(config: &mut Config, w: &mut welcome::Welcome, path: &std::path::Path) {
+    config.session.recent.retain(|p| p != path);
+    w.forget(path);
+}
+
+/// GM8: a template's project in its first room.
+fn open_template(i: usize, rs: Option<&RenderState>, data_dir: Option<&std::path::Path>) -> Editor {
+    let t = &templates::ALL[i.min(templates::ALL.len() - 1)];
+    let mut editor = Editor::from_state(t.build(), rs, data_dir);
+    editor.enter_room(t.room);
+    editor
 }
 
 /// GM2: an action that drops the open document — asked about first when
@@ -4061,9 +4155,9 @@ impl Editor {
         self.dock = st.dock();
         if self.canvas.apply_view(&st.view(), &mut self.state) {
             self.stage = Some(st);
-            // LINE GUARD defaults ON in the Finishing room (shiage charter)
-            // and OFF elsewhere.
-            self.state.view.line_guard = matches!(st, Stage::Finishing);
+            // LINE GUARD defaults ON in the ink & paint room (shiage
+            // charter) and OFF elsewhere.
+            self.state.view.line_guard = matches!(st, Stage::InkPaint);
             self.state.status = format!("room: {}", st.name());
         }
     }
@@ -4132,6 +4226,8 @@ impl Editor {
             palette: cmdpal::Palette::default(),
             help: menus::HelpWindows::default(),
             pane_rects: Vec::new(),
+            quick_start: [false; 5],
+            project_form: None,
         }
     }
     fn from_state(
@@ -4195,6 +4291,103 @@ impl Editor {
             palette: cmdpal::Palette::default(),
             help: menus::HelpWindows::default(),
             pane_rects: Vec::new(),
+            quick_start: [false; 5],
+            project_form: None,
+        }
+    }
+
+    /// GM8: "Show me" on Quick start step `i`: do the step, or open its room.
+    fn show_me(&mut self, i: usize) {
+        match welcome::STEPS.get(i).map(|s| s.show_me) {
+            Some(welcome::ShowMe::Perform(a)) => {
+                self.perform(a);
+            }
+            Some(welcome::ShowMe::Room(st)) => self.enter_room(st),
+            None => {}
+        }
+    }
+
+    /// GM8 Project Settings: name, size (with its aspect), fps, default
+    /// cut length and dpi — Apply is one undoable `SetProjectProps`; the
+    /// colour law shows read-only beside its Convert verb.
+    fn project_settings_window(&mut self, ctx: &egui::Context) {
+        let Some(form) = self.project_form.as_mut() else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        let mut convert = false;
+        let law = self.state.engine.project.color_law;
+        egui::Window::new("Project settings")
+            .open(&mut open)
+            .default_width(340.0)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                plate::surface(ui);
+                egui::Grid::new("project_settings").num_columns(2).show(ui, |ui| {
+                    ui.label("name");
+                    ui.text_edit_singleline(&mut form.name);
+                    ui.end_row();
+                    ui.label("resolution");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut form.width).range(16..=16384));
+                        ui.label("×");
+                        ui.add(egui::DragValue::new(&mut form.height).range(16..=16384));
+                        let g = gcd(form.width, form.height).max(1);
+                        ui.label(
+                            egui::RichText::new(format!("{}:{}", form.width / g, form.height / g))
+                                .color(plate::legend_dim()),
+                        );
+                    });
+                    ui.end_row();
+                    ui.label("fps");
+                    ui.add(egui::DragValue::new(&mut form.fps).range(1..=240));
+                    ui.end_row();
+                    ui.label("default cut length");
+                    ui.add(egui::DragValue::new(&mut form.cut_frames).range(1..=100_000).suffix(" frames"));
+                    ui.end_row();
+                    ui.label("dpi");
+                    ui.add(egui::DragValue::new(&mut form.dpi).range(1.0..=2400.0));
+                    ui.end_row();
+                    ui.label("colour law");
+                    ui.horizontal(|ui| {
+                        plate::value(ui, law.label());
+                        if law != anim_core::color::ColorLaw::Srgb
+                            && ui.small_button("Convert…").clicked()
+                        {
+                            convert = true;
+                        }
+                    });
+                    ui.end_row();
+                });
+                ui.separator();
+                if ui.button("Apply").clicked() {
+                    apply = true;
+                }
+            });
+        if apply {
+            let after = anim_core::model::ProjectProps {
+                name: form.name.clone(),
+                width: form.width.max(1),
+                height: form.height.max(1),
+                fps: form.fps.max(1),
+                dpi: form.dpi.max(1.0),
+                default_cut_frames: Some(form.cut_frames.max(1)),
+            };
+            let resized = (after.width, after.height)
+                != (self.state.engine.project.width, self.state.engine.project.height);
+            if self.state.set_project_props(after) && resized {
+                // The tiles never move; the canvas layers rebuild at the
+                // new size on the next frame.
+                self.paint = None;
+                self.graph = None;
+            }
+        }
+        if convert {
+            self.perform(Action::ConvertColorsToSrgb);
+        }
+        if !open || apply {
+            self.project_form = None;
         }
     }
 
@@ -4253,6 +4446,11 @@ impl Editor {
             }
             Action::ConvertColorsToSrgb if s.file_path.is_none() => {
                 Err("save the project first — the backup goes beside its file")
+            }
+            // GM8: the project's size and rate are the host's in a room.
+            Action::ProjectSettings if guest => Err("the host owns the project settings"),
+            Action::BuildComposite if s.cut().render_order().is_empty() => {
+                Err("no column reaches the composite")
             }
             a if stroke_guarded(a) && self.canvas.stroke_active() => {
                 Err("finish the stroke first")
@@ -4743,9 +4941,27 @@ impl eframe::App for App {
                 self.tablet_rx = spawn_tablet_thread(frame, ui.ctx().clone());
             }
         }
-        // Nothing open and no dialog -> show the startup dialog.
-        if self.editor.is_none() && self.new_form.is_none() {
-            self.new_form = Some(NewProjectForm::default());
+        // GM8: the UI scale (Settings ▸ General), as egui's zoom factor.
+        apply_ui_scale(ui.ctx(), &self.config);
+        // Nothing open and no dialog -> the Welcome screen (GM8), or the
+        // New Project form when its "Show at startup" latch is off.
+        if self.editor.is_none() && self.new_form.is_none() && self.welcome.is_none() {
+            if startup_shows_welcome(&self.config) {
+                self.welcome = Some(welcome::Welcome::new(&self.config.session.recent));
+            } else {
+                self.new_form = Some(NewProjectForm::default());
+            }
+        }
+        if self.editor.is_some() {
+            self.welcome = None;
+        }
+        // GM8: this session's Quick start ticks reach the config, and the
+        // editor's checklist shows every tick ever made.
+        if let Some(e) = &mut self.editor {
+            if merge_quick_start(&mut self.config, &e.quick_start) {
+                self.config.save();
+            }
+            e.quick_start = self.config.ui.quick_start;
         }
 
         // Apply live settings (read as locals to avoid borrowing self.config
@@ -5181,6 +5397,8 @@ impl eframe::App for App {
         // New Project dialog: full-screen when no project, modal window over one.
         if self.new_form.is_some() {
             self.show_new_dialog(ui);
+        } else if self.editor.is_none() && self.welcome.is_some() {
+            self.show_welcome(ui);
         }
 
         // Cap the redraw rate (playback still runs at the project frame rate).
@@ -5219,6 +5437,64 @@ impl eframe::App for App {
 }
 
 impl App {
+    /// GM8: the Welcome screen in the central area, and what its cards ask.
+    fn show_welcome(&mut self, ui: &mut egui::Ui) {
+        let Some(mut w) = self.welcome.take() else {
+            return;
+        };
+        let mut show = self.config.ui.show_welcome;
+        let ticks = self.config.ui.quick_start;
+        let mut action = None;
+        egui::CentralPanel::default().show(ui, |ui| {
+            action = welcome::ui(ui, &mut w, &mut show, &ticks);
+        });
+        if show != self.config.ui.show_welcome {
+            self.config.ui.show_welcome = show;
+            self.config.save();
+        }
+        let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
+        let opened = |state: AppState| Editor::from_state(state, rs, dir);
+        match action {
+            Some(welcome::WelcomeAction::Template(i)) => {
+                self.editor = Some(open_template(i, rs, dir));
+            }
+            Some(welcome::WelcomeAction::Custom) => {
+                self.new_form = Some(NewProjectForm::default());
+            }
+            Some(welcome::WelcomeAction::Open) => match AppState::pick_and_open() {
+                Some(Ok(state)) => self.editor = Some(opened(state)),
+                Some(Err(msg)) => {
+                    self.notes.push(format!("could not open that project — {msg}"));
+                }
+                None => {}
+            },
+            Some(welcome::WelcomeAction::OpenRecent(path)) => {
+                match AppState::load_from(path.clone()) {
+                    Ok(state) => self.editor = Some(opened(state)),
+                    Err(msg) => {
+                        self.notes.push(format!("could not open that project — {msg}"));
+                    }
+                }
+            }
+            Some(welcome::WelcomeAction::Remove(path)) => {
+                forget_recent(&mut self.config, &mut w, &path);
+                self.config.save();
+            }
+            Some(welcome::WelcomeAction::Sample) => {
+                self.editor = Some(opened(sample::build_sample()));
+            }
+            Some(welcome::WelcomeAction::ShowMe(step)) => {
+                let mut editor = opened(sample::build_sample());
+                editor.show_me(step);
+                self.editor = Some(editor);
+            }
+            None => {}
+        }
+        if self.editor.is_none() {
+            self.welcome = Some(w);
+        }
+    }
+
     fn show_new_dialog(&mut self, ui: &mut egui::Ui) {
         let has_editor = self.editor.is_some();
         let mut form = self.new_form.take().expect("dialog shown with a form");
@@ -5336,10 +5612,22 @@ struct ProbeRun {
 /// quick fix); the Layout room's canvas pane is the cut's preview, which
 /// is measured in its place.
 fn probe_run(stage: Stage, ppp: f32) -> ProbeRun {
+    probe_run_zoom(stage, ppp, 100)
+}
+
+/// GM8: the same pass under a UI scale (percent), applied the way the App
+/// applies it — egui's zoom factor over the display's scale.
+fn probe_run_zoom(stage: Stage, ppp: f32, ui_scale: u32) -> ProbeRun {
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(ppp);
     dress(&ctx);
-    let config = Config::default();
+    let mut config = Config::default();
+    config.ui.scale = ui_scale;
+    if ui_scale != 100 {
+        // The headless display is 1 px per point, so the zoom factor IS
+        // the scale over it: `ppp` × the UI scale.
+        ctx.set_zoom_factor(ppp * config.ui.zoom());
+    }
     let pen = config.pen.clone();
     let layers_cfg = config.layers.clone();
     let mut state = AppState::new_project("probe", 1920, 1080, 24, 300.0);
@@ -6000,6 +6288,8 @@ impl Editor {
                                     encoding: false,
                                 });
                                 self.state.status = "exporting…".into();
+                                // GM8: the Quick start's last step.
+                                self.quick_start[welcome::EXPORT_STEP] = true;
                             }
                         }
                         if ui
@@ -6043,6 +6333,7 @@ impl Editor {
                                     encoding: false,
                                 });
                                 self.state.status = "exporting…".into();
+                                self.quick_start[welcome::EXPORT_STEP] = true;
                             }
                         }
                     });
@@ -6301,11 +6592,17 @@ impl Editor {
                     let (kanji, romaji) = match st {
                         Stage::Layout => ("レイアウト", "layout"),
                         Stage::Drawing => ("原画", "genga"),
-                        Stage::Finishing => ("仕上げ", "shiage"),
+                        Stage::InkPaint => ("仕上げ", "shiage"),
+                        Stage::Composite => ("撮影", "satsuei"),
                         Stage::Edit => ("編集", "henshū"),
                     };
+                    // GM8 room card: term, purpose and the tools it arms.
+                    let (term, purpose, arms) = st.card();
                     if slate_tab(ui, self.stage == Some(*st), kanji, romaji, st.name())
-                        .on_hover_text(st.describes())
+                        .on_hover_text(format!(
+                            "{term} — {purpose}\n{}\narms: {arms}",
+                            st.describes()
+                        ))
                         .clicked()
                     {
                         self.enter_room(*st);

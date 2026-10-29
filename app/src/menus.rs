@@ -270,11 +270,17 @@ impl crate::Editor {
                     }
                 });
             });
+        let ticks = self.quick_start;
+        let mut show_me = None;
         egui::Window::new("Quick start")
             .open(&mut help.quick_start)
             .default_width(420.0)
             .show(ctx, |ui| {
                 plate::surface(ui);
+                // GM8: the five first steps, each ticked the first time its
+                // verb runs, each with "Show me".
+                show_me = crate::welcome::checklist_ui(ui, &ticks);
+                ui.separator();
                 // Said in THIS keymap's chords, so it never lies.
                 let k = |a| crate::cmdpal::chord_of(binds, a).unwrap_or_else(|| "—".into());
                 use Action::*;
@@ -322,5 +328,10 @@ impl crate::Editor {
                 plate::value(ui, &format!("version {}", env!("CARGO_PKG_VERSION")));
                 ui.label("A node-graph 2D animation studio: draw, time, paint, edit.");
             });
+        if let Some(step) = show_me {
+            self.show_me(step);
+        }
+        // GM8: the project's own settings window, while open.
+        self.project_settings_window(ctx);
     }
 }

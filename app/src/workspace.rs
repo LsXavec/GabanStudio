@@ -102,9 +102,13 @@ pub enum Stage {
     Layout,
     /// Genga + douga + sakkan merged: the daily drawing room.
     Drawing,
-    /// Paint + composite merged: fill against the line column with the
-    /// character palette at hand, graph result live alongside.
-    Finishing,
+    /// Ink & paint (GM8 D12: was "Finishing"; its room key stays
+    /// "finishing" so saved stack bindings keep working): fill against the
+    /// line column with the character palette at hand, result alongside.
+    InkPaint,
+    /// Satsuei (GM8 D12): the node graph large, viewer and palette beside
+    /// it, curves tabbed with the graph; composite view on.
+    Composite,
     /// Timing + review: the X-sheet is the master artifact (camera columns
     /// will land HERE too, per the C1 decision), viewer + graph beside it.
     Edit,
@@ -112,8 +116,13 @@ pub enum Stage {
 
 impl Stage {
     /// The spine, in pipeline order.
-    pub const ALL: &'static [Stage] =
-        &[Stage::Layout, Stage::Drawing, Stage::Finishing, Stage::Edit];
+    pub const ALL: &'static [Stage] = &[
+        Stage::Layout,
+        Stage::Drawing,
+        Stage::InkPaint,
+        Stage::Composite,
+        Stage::Edit,
+    ];
 
     /// Button label: the anime-pipeline term (romaji) + English, so the
     /// rooms read instantly for both audiences. ("Layout" is already the
@@ -122,7 +131,8 @@ impl Stage {
         match self {
             Stage::Layout => "layout",
             Stage::Drawing => "genga (drawing)",
-            Stage::Finishing => "shiage (paint)",
+            Stage::InkPaint => "shiage (ink & paint)",
+            Stage::Composite => "satsuei (composite)",
             Stage::Edit => "henshū (edit)",
         }
     }
@@ -132,8 +142,20 @@ impl Stage {
         match self {
             Stage::Layout => "ekonte + layout — storyboard and framing against reference",
             Stage::Drawing => "genga + dōga + sakkan — keys, inbetweens, supervision",
-            Stage::Finishing => "shiage + satsuei — ink & paint with the composite live beside you",
+            Stage::InkPaint => "shiage — ink & paint with the result live beside you",
+            Stage::Composite => "satsuei — compositing: the node graph, curves and the result",
             Stage::Edit => "henshū — timing and review; the sheet is the master",
+        }
+    }
+
+    /// GM8 room card: (term, one-line purpose, the tools it arms).
+    pub fn card(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Stage::Layout => ("レイアウト", "frame the shot against reference", "brush"),
+            Stage::Drawing => ("原画", "draw keys and inbetweens", "brush · onion skin"),
+            Stage::InkPaint => ("仕上げ", "fill and check the colour", "fill · line guard"),
+            Stage::Composite => ("撮影", "build the composite in the graph", "composite view"),
+            Stage::Edit => ("編集", "time and review the cut", "select"),
         }
     }
 
@@ -162,7 +184,7 @@ impl Stage {
                 tree.split_above(canvas, 0.11, vec![Pane::Brush]);
                 ds
             }
-            Stage::Finishing => {
+            Stage::InkPaint => {
                 // Edit canvas + live composite viewer SIDE BY SIDE (the A2
                 // motivation), palette under the viewer — GM7: the nuri
                 // check tabbed behind it, the room's last pass.
@@ -173,6 +195,16 @@ impl Stage {
                 let [canvas, side] = tree.split_right(canvas, 0.58, vec![Pane::Viewer(0)]);
                 tree.split_below(side, 0.55, vec![Pane::Palette, Pane::PaintCheck]);
                 tree.split_above(canvas, 0.11, vec![Pane::Brush]);
+                ds
+            }
+            Stage::Composite => {
+                // The graph large with curves tabbed beside it; the result
+                // viewer (canvas tabbed behind it) and the palette at right.
+                let mut ds = DockState::new(vec![Pane::NodeGraph, Pane::Curves]);
+                let tree = ds.main_surface_mut();
+                let [_, side] =
+                    tree.split_right(NodeIndex::root(), 0.58, vec![Pane::Viewer(0), Pane::Canvas]);
+                tree.split_below(side, 0.62, vec![Pane::Palette]);
                 ds
             }
             Stage::Edit => {
@@ -205,9 +237,13 @@ impl Stage {
                 onion: true,
                 ..base
             },
-            Stage::Finishing => WorkspaceView {
+            Stage::InkPaint => WorkspaceView {
                 tool: CanvasTool::Fill,
                 fill_ref_cel: true,
+                ..base
+            },
+            Stage::Composite => WorkspaceView {
+                composite_view: true,
                 ..base
             },
             Stage::Edit => WorkspaceView {

@@ -721,8 +721,8 @@ mod tests {
         for word in ["kensa", "shiage kensa"] {
             assert!(crate::cmdpal::score(word, Action::ShowPaintCheck).is_some(), "{word}");
         }
-        // Tabbed behind the palette in the finishing room.
-        let dock = Stage::Finishing.dock();
+        // Tabbed behind the palette in the ink & paint room (GM8 D12).
+        let dock = Stage::InkPaint.dock();
         let node = |p: Pane| {
             let (at, _) = dock.iter_all_tabs().find(|(_, t)| **t == p)?;
             Some((at.surface, at.node))

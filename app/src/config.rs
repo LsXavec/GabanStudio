@@ -66,7 +66,10 @@ pub enum Action {
     ZoomFit,
     RoomLayout,
     RoomDrawing,
+    /// GM8 (D12): the ink & paint room; the variant keeps its old name so
+    /// saved keybinds still load.
     RoomFinishing,
+    RoomComposite,
     RoomEdit,
     // GM4: the canvas view's own verbs and the pen's size steps.
     ZoomIn,
@@ -132,6 +135,9 @@ pub enum Action {
     // GM7: ink and paint — the colour-law migration and the paint check.
     ConvertColorsToSrgb,
     ShowPaintCheck,
+    // GM8: the auto-comp and the project's own settings window.
+    BuildComposite,
+    ProjectSettings,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -292,6 +298,7 @@ impl Action {
         Action::RoomLayout,
         Action::RoomDrawing,
         Action::RoomFinishing,
+        Action::RoomComposite,
         Action::RoomEdit,
         Action::ZoomIn,
         Action::ZoomOut,
@@ -346,6 +353,8 @@ impl Action {
         Action::ResetShift,
         Action::ConvertColorsToSrgb,
         Action::ShowPaintCheck,
+        Action::BuildComposite,
+        Action::ProjectSettings,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -403,7 +412,8 @@ impl Action {
             // first, then English), so one room has one name on the bar.
             Action::RoomLayout => "layout room",
             Action::RoomDrawing => "genga (drawing) room",
-            Action::RoomFinishing => "shiage (paint) room",
+            Action::RoomFinishing => "shiage (ink & paint) room",
+            Action::RoomComposite => "satsuei (composite) room",
             Action::RoomEdit => "henshū (edit) room",
             Action::ZoomIn => "Zoom in",
             Action::ZoomOut => "Zoom out",
@@ -458,6 +468,8 @@ impl Action {
             Action::ResetShift => "Reset shift & trace",
             Action::ConvertColorsToSrgb => "Convert colours to sRGB…",
             Action::ShowPaintCheck => "Nuri check (paint check)",
+            Action::BuildComposite => "Build composite from sheet",
+            Action::ProjectSettings => "Project settings…",
         }
     }
 
@@ -513,7 +525,8 @@ impl Action {
             ZoomFit => "Fit the whole paper back in its pane, centred; a turned view keeps its turn.",
             RoomLayout => "Open the layout room: the cut's preview and timing.",
             RoomDrawing => "Open the genga (drawing) room: canvas and sheet.",
-            RoomFinishing => "Open the shiage (paint) room: palettes and fill.",
+            RoomFinishing => "Open the shiage (ink & paint) room: palettes and fill.",
+            RoomComposite => "Open the satsuei (composite) room: the node graph, curves and the result.",
             RoomEdit => "Open the henshū (edit) room: cuts and the sheet head.",
             ZoomIn => "Zoom the canvas in one step on the zoom ladder.",
             ZoomOut => "Zoom the canvas out one step on the zoom ladder.",
@@ -576,6 +589,8 @@ impl Action {
             ResetShift => "Put every shifted light-table ghost back where it belongs.",
             ConvertColorsToSrgb => "Store this saved project's colours as exact sRGB chips (a backup is written first).",
             ShowPaintCheck => "Open the nuri check pane: unpainted holes and off-palette colours, click to jump.",
+            BuildComposite => "Wire every rendered column into the node graph in sheet order (one undo step).",
+            ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
         }
     }
 
@@ -583,9 +598,8 @@ impl Action {
     pub fn group(self) -> Group {
         use Action::*;
         match self {
-            NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb => {
-                Group::File
-            }
+            NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
+            | BuildComposite | ProjectSettings => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
@@ -607,7 +621,7 @@ impl Action {
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
-            RoomLayout | RoomDrawing | RoomFinishing | RoomEdit => Group::Room,
+            RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit => Group::Room,
             ResetLayout | ShowCurves | ShowPaintCheck => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
         }
@@ -700,13 +714,16 @@ impl Action {
             ShowPaintCheck => "Window/Nuri check (paint check)",
             // GM7: the project's own menu, beside its colour law.
             ConvertColorsToSrgb => "Project/Convert colours to sRGB…",
+            BuildComposite => "Project/Build composite from sheet",
+            ProjectSettings => "Project/Project settings…",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             // Each item is its room detent's Stage::name (a test holds them
             // together).
             RoomLayout => "Room/layout",
             RoomDrawing => "Room/genga (drawing)",
-            RoomFinishing => "Room/shiage (paint)",
+            RoomFinishing => "Room/shiage (ink & paint)",
+            RoomComposite => "Room/satsuei (composite)",
             RoomEdit => "Room/henshū (edit)",
             ResetLayout => "Window/Reset layout",
             QuickStart => "Help/Quick start",
@@ -759,7 +776,11 @@ impl Action {
             RoomLayout => &["lo"],
             RoomDrawing => &["drawing", "douga"],
             RoomFinishing => &["paint", "ink", "colour"],
+            RoomComposite => &["composite", "compositing", "photography"],
             RoomEdit => &["edit", "henshu", "editing"],
+            // GM8: the auto-comp and the project's settings.
+            BuildComposite => &["auto comp", "autocomp", "wire graph", "build graph"],
+            ProjectSettings => &["project properties", "resolution", "frame rate", "canvas size"],
             // GM5: the sheet verbs by the words a timing sheet uses.
             InsertFrames => &["insert frames", "add frame", "open a frame"],
             DeleteFrames => &["delete frames", "remove frame", "close a frame"],
@@ -1063,9 +1084,10 @@ impl Action {
                 ..ctrl("K")
             }),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
-            | RoomFinishing | RoomEdit | ShowCurves | InterpHold | InterpLinear | InterpEase
-            | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
-            | HandlesFlat | HandlesBroken | ConvertColorsToSrgb => None,
+            | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
+            | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
+            | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
+            | BuildComposite | ProjectSettings => None,
         }
     }
 }
@@ -1784,6 +1806,7 @@ pub fn default_room_stacks() -> std::collections::BTreeMap<String, String> {
         ("layout", "Layout (LO)"),
         ("drawing", "Solo merged"),
         ("finishing", "Shiage (full)"),
+        ("composite", "Shiage (full)"),
         ("edit", "Solo merged"),
         ("custom", "Solo merged"),
     ]
@@ -1806,12 +1829,15 @@ impl LayersConfig {
 
     /// The stack bound to `room` (falls back to Solo merged if the bound
     /// name no longer exists — a deleted user stack never strands a room).
+    /// GM8: a room the saved map never named (a config older than the
+    /// room) gets its built-in default binding.
     pub fn stack_for_room(&self, room: &str) -> StackPreset {
         let all = self.all_stacks();
         let want = self
             .room_stack
             .get(room)
             .cloned()
+            .or_else(|| default_room_stacks().remove(room))
             .unwrap_or_else(|| "Solo merged".into());
         all.iter()
             .find(|s| s.name == want)
@@ -1957,8 +1983,18 @@ impl Default for SessionConfig {
 }
 
 /// UI behaviour toggles (Settings -> UI Features).
-#[derive(Debug, serde::Serialize, serde::Deserialize, Clone, Default)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct UiConfig {
+    /// GM8: the UI scale in percent (80–200), applied as egui's zoom
+    /// factor (D13: 100%).
+    #[serde(default = "default_ui_scale")]
+    pub scale: u32,
+    /// GM8: the Welcome screen's "Show at startup" latch.
+    #[serde(default = "default_true")]
+    pub show_welcome: bool,
+    /// GM8: the Quick start steps already done (see welcome::STEPS).
+    #[serde(default)]
+    pub quick_start: [bool; 5],
     /// Freeze the pane layout: no dragging, splitting, or closing panes
     /// until unlocked. The arrangement itself is untouched.
     #[serde(default)]
@@ -1968,6 +2004,31 @@ pub struct UiConfig {
     /// so edits can be asked for by an element's true name.
     #[serde(default)]
     pub exact_descriptions: bool,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            scale: default_ui_scale(),
+            show_welcome: true,
+            quick_start: [false; 5],
+            lock_positions: false,
+            exact_descriptions: false,
+        }
+    }
+}
+
+pub const UI_SCALE_RANGE: std::ops::RangeInclusive<u32> = 80..=200;
+
+fn default_ui_scale() -> u32 {
+    100
+}
+
+impl UiConfig {
+    /// egui's zoom factor for the persisted scale (clamped to 80–200%).
+    pub fn zoom(&self) -> f32 {
+        self.scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end()) as f32 / 100.0
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3188,6 +3249,19 @@ pub(crate) fn general_page(
             *show_autosaves = true;
         }
     }
+    // GM8: the UI scale, applied as egui's zoom factor on the next frame.
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("UI scale");
+        let mut pct = config.ui.scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end());
+        let r = ui.add(egui::Slider::new(&mut pct, UI_SCALE_RANGE).step_by(10.0).suffix("%"));
+        if r.changed() {
+            config.ui.scale = pct;
+        }
+        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            changed = true;
+        }
+    });
     if changed {
         config.save();
     }
@@ -3439,6 +3513,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
         ("layout", "layout room"),
         ("drawing", "genga room"),
         ("finishing", "shiage room"),
+        ("composite", "satsuei room"),
         ("edit", "henshū room"),
         ("custom", "custom rooms"),
     ] {

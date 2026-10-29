@@ -734,7 +734,8 @@ mod tests {
         for room in [
             "room layout",
             "room genga (drawing)",
-            "room shiage (paint)",
+            "room shiage (ink & paint)",
+            "room satsuei (composite)",
             "room henshū (edit)",
         ] {
             assert!(h.has(room), "room switcher lacks {room:?}:\n{tree}");
@@ -1125,7 +1126,13 @@ mod tests {
 
     #[test]
     fn testkit_probe_finishing_room() {
-        probe_room(Stage::Finishing);
+        // GM8 (D12): the room is ink & paint now; its key stays "finishing".
+        probe_room(Stage::InkPaint);
+    }
+
+    #[test]
+    fn testkit_probe_composite_room() {
+        probe_room(Stage::Composite);
     }
 
     #[test]

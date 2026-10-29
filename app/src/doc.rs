@@ -29,6 +29,76 @@ pub enum StackRequest {
     Save(String),
 }
 
+/// GM8 auto-comp ("Build composite from sheet"): a DrawingSource for each
+/// rendered column in `render_order()` (bottom → top), chained with Normal
+/// Blends (input 0 below, input 1 above) into a fresh Output. The cut's old
+/// nodes go first, so the batch is the whole graph — one undo step. Its
+/// render equals the column render byte for byte.
+pub fn build_auto_comp(
+    cut: &Cut,
+    at: CutRef,
+    mut alloc: impl FnMut() -> NodeId,
+) -> Vec<Command> {
+    use anim_core::graph::{BlendMode, NodeKind};
+    let mut cmds: Vec<Command> = cut
+        .graph
+        .nodes()
+        .map(|n| Command::RemoveNode { at, id: n.id })
+        .collect();
+    let mut below: Option<NodeId> = None;
+    for column in cut.render_order() {
+        let src = alloc();
+        cmds.push(Command::AddNode {
+            at,
+            id: src,
+            kind: NodeKind::DrawingSource { column },
+        });
+        below = Some(match below {
+            None => src,
+            Some(under) => {
+                let blend = alloc();
+                cmds.push(Command::AddNode {
+                    at,
+                    id: blend,
+                    kind: NodeKind::Blend {
+                        mode: BlendMode::Normal,
+                    },
+                });
+                for (from, to_pin) in [(under, 0), (src, 1)] {
+                    cmds.push(Command::Connect {
+                        at,
+                        from,
+                        from_pin: 0,
+                        to: blend,
+                        to_pin,
+                    });
+                }
+                blend
+            }
+        });
+    }
+    let out = alloc();
+    cmds.push(Command::AddNode {
+        at,
+        id: out,
+        kind: NodeKind::Output,
+    });
+    if let Some(top) = below {
+        cmds.push(Command::Connect {
+            at,
+            from: top,
+            from_pin: 0,
+            to: out,
+            to_pin: 0,
+        });
+    }
+    cmds.push(Command::SetOutput {
+        at,
+        node: Some(out),
+    });
+    cmds
+}
+
 /// The merged solo douga/shiage pair — "color" bottom, "line" top — the
 /// fallback new-cel template (and the Solo merged stack preset).
 pub fn solo_template() -> Vec<LayerProps> {
@@ -3104,7 +3174,8 @@ impl AppState {
         let n = self.engine.project.scenes.len() + 1;
         self.meta_dirty = true;
         let scene = self.engine.add_scene(format!("SC{n:02}"));
-        let Ok(cut) = self.engine.add_cut(scene, "CUT01", 48) else {
+        let frames = self.engine.project.cut_frames();
+        let Ok(cut) = self.engine.add_cut(scene, "CUT01", frames) else {
             self.refuse("refused — the scene could not be created");
             return;
         };
@@ -3128,7 +3199,8 @@ impl AppState {
             .map(|s| s.cuts.len())
             .unwrap_or(0);
         let id = self.engine.alloc_cut_id();
-        let mut cut = Cut::new(id, format!("CUT{:02}", index + 1), 48);
+        let frames = self.engine.project.cut_frames();
+        let mut cut = Cut::new(id, format!("CUT{:02}", index + 1), frames);
         let column = self.engine.alloc_column_id();
         cut.xsheet.columns.push(Column::new(column, "A"));
         let r = self.engine.apply(
@@ -3658,6 +3730,60 @@ impl AppState {
         }
     }
 
+    /// GM8 "Build composite from sheet": the current cut's graph becomes
+    /// the auto-comp chain ([`build_auto_comp`]) — one undo step.
+    pub fn auto_comp(&mut self) -> bool {
+        let at = self.at();
+        let mut next = self.engine.project.next_id;
+        let Some(cmds) = self
+            .engine
+            .project
+            .cut(at.scene, at.cut)
+            .map(|cut| {
+                build_auto_comp(cut, at, || {
+                    next += 1;
+                    NodeId(next - 1)
+                })
+            })
+        else {
+            return false;
+        };
+        self.engine.project.next_id = next;
+        match self.engine.apply("build composite from sheet", cmds) {
+            Ok(()) => {
+                self.status = "composite built from the sheet".into();
+                true
+            }
+            Err(e) => {
+                self.refuse(format!("refused — the composite could not be built ({e})"));
+                false
+            }
+        }
+    }
+
+    /// GM8 Project Settings: one undoable `SetProjectProps`. The tiles
+    /// never move, so a new size keeps every pixel (the canvas rebuilds its
+    /// layers from the project size on its next frame).
+    pub fn set_project_props(&mut self, after: anim_core::model::ProjectProps) -> bool {
+        let before = self.engine.project.props();
+        if before == after {
+            return false;
+        }
+        match self.engine.apply(
+            "project settings",
+            vec![Command::SetProjectProps { before, after }],
+        ) {
+            Ok(()) => {
+                self.status = "project settings changed".into();
+                true
+            }
+            Err(e) => {
+                self.refuse(format!("refused — {e}"));
+                false
+            }
+        }
+    }
+
     /// GM7 CONVERT (Convert colours to sRGB…): a saved Legacy project
     /// becomes Srgb. The current document goes to
     /// `<stem>.pre-srgb.animproj` beside its file FIRST; every texel is then
@@ -3704,14 +3830,21 @@ impl AppState {
         // Palettes are project data but outside the undo/Command system —
         // freshen the project's opaque meta right before the snapshot, the
         // same point every other "current in-memory state" gets synced.
-        let project = self.snapshot_project();
+        let mut project = self.snapshot_project();
         // Save As inherits the unknown tables of the file it came from.
         let template = self.file_path.clone();
         let rev = self.engine.revision();
         let meta_was_dirty = std::mem::take(&mut self.meta_dirty);
         let (tx, rx) = std::sync::mpsc::channel();
         let target = path.clone();
+        let at = self.at();
         std::thread::spawn(move || {
+            // GM8: the Welcome card's thumbnail — the current cut's frame 0,
+            // rendered here on the worker (CPU), never on the pen's frame.
+            match crate::welcome::render_thumb(&project, at) {
+                Some(t) => project.app_meta.insert(crate::welcome::THUMB_KEY.into(), t),
+                None => project.app_meta.remove(crate::welcome::THUMB_KEY),
+            };
             let r = anim_core::store::save_atomic_from(
                 &project,
                 &target,
