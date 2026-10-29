@@ -33,6 +33,7 @@ mod plate;
 mod proc;
 mod runs;
 mod shortcuts;
+mod stabilizer;
 #[cfg(test)]
 mod testkit;
 mod uidump;
@@ -153,6 +154,9 @@ fn main() -> eframe::Result<()> {
 fn dress(ctx: &egui::Context) {
     ctx.set_visuals(plate::visuals());
     plate::install_fonts(ctx);
+    // GM4: Ctrl+= / Ctrl+- / Ctrl+0 are the canvas's zoom verbs (D6
+    // Actions); egui's own UI zoom would swallow those keys first.
+    ctx.options_mut(|o| o.zoom_with_keyboard = false);
 }
 
 /// A GUI-subsystem build has no console: re-attach to the launching
@@ -2873,6 +2877,14 @@ impl Editor {
                 self.state.status = format!("layout reset: {}", st.name());
             }
             Action::ZoomFit => self.canvas.fit_view(),
+            // GM4: the view verbs move the view only, never the paper.
+            Action::ZoomIn => self.canvas.zoom_in(),
+            Action::ZoomOut => self.canvas.zoom_out(),
+            Action::Zoom100 => self.canvas.zoom_100(),
+            Action::RotateViewLeft => self.canvas.rotate_view(-canvas::ROTATE_STEP_DEG),
+            Action::RotateViewRight => self.canvas.rotate_view(canvas::ROTATE_STEP_DEG),
+            Action::ResetRotation => self.canvas.set_view_rotation(0.0),
+            Action::MirrorView => self.canvas.toggle_mirror(),
             Action::RoomLayout => self.enter_room(Stage::Layout),
             Action::RoomDrawing => self.enter_room(Stage::Drawing),
             Action::RoomFinishing => self.enter_room(Stage::Finishing),
@@ -2890,6 +2902,14 @@ impl Editor {
         }
         if action == Action::ToggleAlphaLock {
             ed.canvas.toggle_alpha_lock();
+            return;
+        }
+        // GM4: `[` / `]` step the brush size — never mid-stroke (the live
+        // stroke's dabs would change size under the pen), like a preset.
+        if matches!(action, Action::BrushSmaller | Action::BrushBigger) {
+            if !ed.canvas.stroke_active() {
+                ed.canvas.brush_size_step(action == Action::BrushBigger);
+            }
             return;
         }
         // Tool switches are canvas-owned; set_tool refuses mid-stroke itself
@@ -3106,10 +3126,18 @@ impl Editor {
             | Action::Quit
             | Action::ResetLayout
             | Action::ZoomFit
+            | Action::ZoomIn
+            | Action::ZoomOut
+            | Action::Zoom100
+            | Action::RotateViewLeft
+            | Action::RotateViewRight
+            | Action::ResetRotation
+            | Action::MirrorView
             | Action::RoomLayout
             | Action::RoomDrawing
             | Action::RoomFinishing
             | Action::RoomEdit => {} // the chrome's, handled above
+            Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
     }
 }
@@ -3128,6 +3156,13 @@ fn is_chrome(action: Action) -> bool {
             | Action::Quit
             | Action::ResetLayout
             | Action::ZoomFit
+            | Action::ZoomIn
+            | Action::ZoomOut
+            | Action::Zoom100
+            | Action::RotateViewLeft
+            | Action::RotateViewRight
+            | Action::ResetRotation
+            | Action::MirrorView
             | Action::RoomLayout
             | Action::RoomDrawing
             | Action::RoomFinishing
@@ -4104,6 +4139,7 @@ impl Editor {
             Action::ToggleCompositeView => Some(self.canvas.composite_view),
             Action::MissCheck => Some(self.canvas.miss_check),
             Action::ToggleLoop => Some(self.state.view.loop_playback),
+            Action::MirrorView => Some(self.canvas.view_mirrored()),
             _ => None,
         }
     }
@@ -4537,6 +4573,11 @@ impl eframe::App for App {
                         }
                     }
                 }
+            }
+            // GM4: the OPTIONS row's stabilizer level persists with the pen.
+            if let Some(level) = editor.canvas.stabilizer_request.take() {
+                self.config.pen.stabilizer = level;
+                self.config.save();
             }
             if presets_dirty {
                 // v0.2.5: the host's session brushes never persist.

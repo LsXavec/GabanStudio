@@ -102,6 +102,31 @@ pub struct Dab {
     pub tip: f32,
 }
 
+/// GM4: the `Dab::hardness` that marks an ALIASED dab (any value above
+/// 1.5). The flag rides the dab, not a uniform, so a peer's replayed
+/// stroke keeps its own edge and the wire's Dab layout is unchanged.
+pub const ALIASED_HARDNESS: f32 = 2.0;
+
+/// GM4: the procedural dab's coverage at `dist` texels from a round dab's
+/// centre — the CPU mirror of the shader's `fs_main` (tip masks aside).
+/// The rim AA width is `fwidth(rr)` along the dab's radius, |d(rr)/dr| =
+/// 2·dist/radius² per texel.
+pub fn dab_coverage(dist: f32, radius: f32, hardness: f32, aliased: bool) -> f32 {
+    let rr = (dist * dist) / (radius * radius).max(1e-6);
+    if aliased || hardness > 1.5 {
+        return if rr <= 1.0 { 1.0 } else { 0.0 };
+    }
+    let fw = (2.0 * dist / (radius * radius).max(1e-6)).max(1e-5);
+    let h = hardness.clamp(0.01, 0.99);
+    let o = if rr <= h {
+        1.0 - rr * (1.0 / h - 1.0)
+    } else {
+        (h / (1.0 - h)) * (1.0 - rr)
+    };
+    let aa = ((1.0 - rr) / fw).clamp(0.0, 1.0);
+    o.clamp(0.0, 1.0) * aa
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -284,6 +309,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let fi = clamp(floor(in.tip - 1.0), 0.0, frames - 1.0);
         let auv = vec2<f32>(uv.x, (clamp(uv.y, 0.0, 1.0) + fi) / frames);
         opa = textureSampleLevel(tip_tex, tip_samp, vec2<f32>(clamp(uv.x, 0.0, 1.0), auv.y), 0.0).a * inb;
+    } else if (in.hardness > 1.5) {
+        // GM4 ALIASED (hardness = ALIASED_HARDNESS): full cover inside the
+        // rim, nothing outside, no rim AA — hard 0/255 lines.
+        opa = select(0.0, 1.0, rr <= 1.0);
     } else {
         let fw = max(fwidth(rr), 1e-5);
         let h = clamp(in.hardness, 0.01, 0.99);
@@ -1614,5 +1643,37 @@ impl PaintLayer {
         drop(data);
         staging.unmap();
         out
+    }
+}
+
+#[cfg(test)]
+mod viewnav_tests {
+    use super::*;
+
+    #[test]
+    fn viewnav_aliased_coverage_is_binary_and_the_wgsl_validates() {
+        for radius in [0.5f32, 1.0, 3.0, 7.5, 20.0] {
+            for k in 0..=300 {
+                let d = k as f32 * radius * 1.5 / 300.0;
+                let c = dab_coverage(d, radius, 0.85, true);
+                assert!(c == 0.0 || c == 1.0, "aliased r {radius} d {d}: {c}");
+                assert_eq!(c, dab_coverage(d, radius, ALIASED_HARDNESS, false));
+                let soft = dab_coverage(d, radius, 0.85, false);
+                assert!((0.0..=1.0).contains(&soft));
+                if d > radius {
+                    assert_eq!(soft, 0.0, "nothing outside the rim");
+                }
+            }
+            assert_eq!(dab_coverage(0.0, radius, 0.3, false), 1.0, "full at the centre");
+        }
+        // Softer hardness, less ink halfway out.
+        assert!(dab_coverage(5.0, 10.0, 0.2, false) < dab_coverage(5.0, 10.0, 0.9, false));
+        let module = naga::front::wgsl::parse_str(SHADER).expect("SHADER parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("SHADER validates");
     }
 }

@@ -68,6 +68,16 @@ pub enum Action {
     RoomDrawing,
     RoomFinishing,
     RoomEdit,
+    // GM4: the canvas view's own verbs and the pen's size steps.
+    ZoomIn,
+    ZoomOut,
+    Zoom100,
+    RotateViewLeft,
+    RotateViewRight,
+    ResetRotation,
+    MirrorView,
+    BrushSmaller,
+    BrushBigger,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -227,6 +237,15 @@ impl Action {
         Action::RoomDrawing,
         Action::RoomFinishing,
         Action::RoomEdit,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::Zoom100,
+        Action::RotateViewLeft,
+        Action::RotateViewRight,
+        Action::ResetRotation,
+        Action::MirrorView,
+        Action::BrushSmaller,
+        Action::BrushBigger,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -286,6 +305,15 @@ impl Action {
             Action::RoomDrawing => "genga (drawing) room",
             Action::RoomFinishing => "shiage (paint) room",
             Action::RoomEdit => "henshū (edit) room",
+            Action::ZoomIn => "Zoom in",
+            Action::ZoomOut => "Zoom out",
+            Action::Zoom100 => "Actual size (100%)",
+            Action::RotateViewLeft => "Rotate view left 15°",
+            Action::RotateViewRight => "Rotate view right 15°",
+            Action::ResetRotation => "Reset view rotation",
+            Action::MirrorView => "Mirror view (display only)",
+            Action::BrushSmaller => "Brush smaller",
+            Action::BrushBigger => "Brush bigger",
         }
     }
 
@@ -338,11 +366,20 @@ impl Action {
             Settings => "Shortcuts, pen, performance and the rest.",
             Quit => "Close the app (asks first about unsaved work).",
             ResetLayout => "Put this room's panes back where they started.",
-            ZoomFit => "Fit the canvas back in its pane at 100%.",
+            ZoomFit => "Fit the whole paper back in its pane, centred.",
             RoomLayout => "Open the layout room: the cut's preview and timing.",
             RoomDrawing => "Open the genga (drawing) room: canvas and sheet.",
             RoomFinishing => "Open the shiage (paint) room: palettes and fill.",
             RoomEdit => "Open the henshū (edit) room: cuts and the sheet head.",
+            ZoomIn => "Zoom the canvas in one step on the zoom ladder.",
+            ZoomOut => "Zoom the canvas out one step on the zoom ladder.",
+            Zoom100 => "One paper pixel to one screen point.",
+            RotateViewLeft => "Turn the view 15° anticlockwise (Shift+Space+drag turns freely).",
+            RotateViewRight => "Turn the view 15° clockwise (Shift+Space+drag turns freely).",
+            ResetRotation => "Turn the view back upright.",
+            MirrorView => "Flip the view left to right; the drawing itself is untouched.",
+            BrushSmaller => "Step the brush size down the size ladder.",
+            BrushBigger => "Step the brush size up the size ladder.",
         }
     }
 
@@ -352,7 +389,8 @@ impl Action {
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll => Group::Edit,
-            ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck => Group::View,
+            ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
+            | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView => Group::View,
             PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop => {
                 Group::Playback
             }
@@ -360,7 +398,7 @@ impl Action {
             PrevCut | NextCut => Group::Cut,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
-            | CycleCelLayer | CycleCelLayerBack => Group::Tool,
+            | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
             RoomLayout | RoomDrawing | RoomFinishing | RoomEdit => Group::Room,
             ResetLayout => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
@@ -385,6 +423,13 @@ impl Action {
             ClearCel => "Edit/Clear active layer",
             ClearCelAll => "Edit/Clear whole cel",
             ZoomFit => "View/Fit view",
+            ZoomIn => "View/Zoom in",
+            ZoomOut => "View/Zoom out",
+            Zoom100 => "View/Actual size (100%)",
+            RotateViewLeft => "View/Rotate left 15°",
+            RotateViewRight => "View/Rotate right 15°",
+            ResetRotation => "View/Reset rotation",
+            MirrorView => "View/Mirror view",
             ToggleOnion => "View/Onion skin",
             ToggleCompositeView => "View/Composite view",
             MissCheck => "View/Miss check",
@@ -414,7 +459,7 @@ impl Action {
             About => "Help/About",
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
-            | CycleCelLayer | CycleCelLayerBack => return None,
+            | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => return None,
         })
     }
 
@@ -449,6 +494,11 @@ impl Action {
             CommandPalette => &["search", "commands"],
             ShortcutSheet => &["keys", "hotkeys", "cheat sheet"],
             ZoomFit => &["zoom", "reset view"],
+            ZoomIn | ZoomOut => &["magnify", "scale view"],
+            Zoom100 => &["100%", "pixel size", "one to one"],
+            RotateViewLeft | RotateViewRight | ResetRotation => &["turn", "tilt canvas", "spin"],
+            MirrorView => &["flop", "reverse view", "flip horizontal"],
+            BrushSmaller | BrushBigger => &["size", "brush size", "bracket"],
             // The English words still find the rooms by their romaji names.
             RoomLayout => &["lo"],
             RoomDrawing => &["drawing", "douga"],
@@ -464,7 +514,8 @@ impl Action {
         match self {
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
-            | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll => Ctx::Canvas,
+            | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll
+            | BrushSmaller | BrushBigger => Ctx::Canvas,
             NewDrawing | ClearFrameKey | RemoveColumn => Ctx::Sheet,
             _ => Ctx::Global,
         }
@@ -518,6 +569,8 @@ impl Action {
                 ..Chord::ctrl("Z")
             }],
             Action::CommandPalette => vec![Chord::plain("F3")],
+            // GM4: the keypad's plus zooms in beside Ctrl+=.
+            Action::ZoomIn => vec![Chord::ctrl("Plus")],
             _ => Vec::new(),
         }
     }
@@ -595,6 +648,17 @@ impl Action {
             Settings => Some(ctrl("Comma")),
             Quit => Some(ctrl("Q")),
             ZoomFit => Some(ctrl("0")),
+            // GM4: the view keys sit on Ctrl so the bare keys stay the
+            // painter's; R is not used (holding R is the flip).
+            ZoomIn => Some(ctrl("Equals")),
+            ZoomOut => Some(ctrl("Minus")),
+            Zoom100 => Some(ctrl("1")),
+            RotateViewLeft => Some(ctrl("OpenBracket")),
+            RotateViewRight => Some(ctrl("CloseBracket")),
+            ResetRotation => Some(ctrl("Backslash")),
+            MirrorView => Some(k("H")),
+            BrushSmaller => Some(k("OpenBracket")),
+            BrushBigger => Some(k("CloseBracket")),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomEdit => None,
         }
@@ -685,8 +749,15 @@ impl Chord {
         s
     }
 
+    /// GM4: bare Space — the canvas's hand while held, so its verb fires
+    /// on the release (a tap), not the press.
+    pub(crate) fn is_space_tap(&self) -> bool {
+        self.keys.len() == 1 && self.keys[0] == "Space" && !self.ctrl && !self.shift && !self.alt
+    }
+
     /// Fires when every key is held, at least one was pressed THIS frame, and
-    /// the modifiers match exactly.
+    /// the modifiers match exactly. Bare Space fires on its release instead
+    /// (GM4: a hold that drags pans; see `shortcuts::collect`).
     pub(crate) fn matches(&self, i: &egui::InputState) -> bool {
         if self.keys.is_empty() {
             return false;
@@ -694,6 +765,9 @@ impl Chord {
         let m = i.modifiers;
         if m.command != self.ctrl || m.shift != self.shift || m.alt != self.alt {
             return false;
+        }
+        if self.is_space_tap() {
+            return i.key_released(egui::Key::Space);
         }
         let mut any_pressed = false;
         for name in &self.keys {
@@ -883,6 +957,10 @@ pub struct PenConfig {
     /// force-disables if a driver ever misbehaves.
     #[serde(default = "default_true")]
     pub native_tablet: bool,
+    /// GM4: the stroke stabilizer, 0 (raw) to 10 — how long the pulled
+    /// string between pen and ink is.
+    #[serde(default)]
+    pub stabilizer: u8,
 }
 
 fn default_true() -> bool {
@@ -1045,10 +1123,22 @@ pub struct BrushPreset {
     /// size up to 2×, opacity down to ¼ at a flat pen).
     #[serde(default = "default_tilt_strength")]
     pub tilt_strength: f32,
+    /// GM4: the dab's edge, MyPaint's falloff — toward 1 hard, toward 0
+    /// soft. 0.85 is the edge every brush had before it was a setting.
+    #[serde(default = "default_hardness")]
+    pub hardness: f32,
+    /// GM4: aliased — every dab covers fully or not at all (hard 0/255
+    /// lines, no edge smoothing), for pixel-exact fill boundaries.
+    #[serde(default)]
+    pub aliased: bool,
 }
 
 pub fn default_tilt_strength() -> f32 {
     0.5
+}
+
+pub fn default_hardness() -> f32 {
+    0.85
 }
 
 impl Default for BrushPreset {
@@ -1068,6 +1158,8 @@ impl Default for BrushPreset {
             tilt_opacity: false,
             tilt_shape: false,
             tilt_strength: default_tilt_strength(),
+            hardness: default_hardness(),
+            aliased: false,
         }
     }
 }
@@ -1095,6 +1187,8 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
             tilt_opacity: true,
             tilt_shape: true,
             tilt_strength: 0.7,
+            hardness: default_hardness(),
+            aliased: false,
         },
         // The committed key line: pressure drives SIZE only, tight floor —
         // a light touch is a thin black line, never a grey one.
@@ -1113,6 +1207,8 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
             tilt_opacity: false,
             tilt_shape: false,
             tilt_strength: 0.5,
+            hardness: default_hardness(),
+            aliased: false,
         },
         // The sakkan's correction: faint trial stroke at light pressure,
         // unmistakably loud over both other inks at full press.
@@ -1131,6 +1227,8 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
             tilt_opacity: false,
             tilt_shape: true,
             tilt_strength: 0.5,
+            hardness: default_hardness(),
+            aliased: false,
         },
     ]
 }

@@ -81,6 +81,10 @@ impl Rig {
         );
         // GM2: the shell's outbox and autosave interval, as the App wires them.
         self.requests.append(&mut self.editor.requests);
+        // GM4: the OPTIONS row's stabilizer level, saved as the App saves it.
+        if let Some(level) = self.editor.canvas.stabilizer_request.take() {
+            self.config.pen.stabilizer = level;
+        }
         self.editor.autosave.minutes = self.config.session.autosave_minutes;
         // The shell's shortcut dispatch, minus the dialogs: requests are
         // logged, never carried out. GM2: it stands down while the "Save
@@ -326,6 +330,70 @@ impl EditorHarness {
         self.h.input_mut().events.push(primary(at, false));
         self.h.step();
         self.run();
+    }
+
+    /// GM4: hold these modifiers over the frames that follow (NONE lifts).
+    pub fn set_mods(&mut self, mods: egui::Modifiers) {
+        self.h.input_mut().modifiers = mods;
+    }
+
+    /// GM4: press `key` and keep it down (the Space hand) — no release.
+    pub fn hold_key(&mut self, key: egui::Key) {
+        let input = self.h.input_mut();
+        let modifiers = input.modifiers;
+        input.events.push(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        self.h.step();
+    }
+
+    /// GM4: lift a key [`hold_key`](Self::hold_key) pressed.
+    pub fn release_key(&mut self, key: egui::Key) {
+        let input = self.h.input_mut();
+        let modifiers = input.modifiers;
+        input.events.push(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: false,
+            repeat: false,
+            modifiers,
+        });
+        self.h.step();
+        self.run();
+    }
+
+    /// GM4: the primary button down at `pts[0]`, through every point (one
+    /// frame each), up at the last — under the held modifiers.
+    pub fn drag_path(&mut self, pts: &[egui::Pos2]) {
+        let button = |pos, pressed, modifiers| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        let input = self.h.input_mut();
+        let m = input.modifiers;
+        input.events.push(egui::Event::PointerMoved(pts[0]));
+        input.events.push(button(pts[0], true, m));
+        self.h.step();
+        for p in &pts[1..] {
+            self.h.input_mut().events.push(egui::Event::PointerMoved(*p));
+            self.h.step();
+        }
+        let last = *pts.last().unwrap();
+        self.h.input_mut().events.push(button(last, false, m));
+        self.h.step();
+        self.run();
+    }
+
+    /// GM4: a click at `pos` (press and release, no movement) under the
+    /// held modifiers.
+    pub fn click_pos(&mut self, pos: egui::Pos2) {
+        self.drag_path(&[pos]);
     }
 
     /// GM2: the window's close button — one frame with a Close event on the

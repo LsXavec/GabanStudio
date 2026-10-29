@@ -100,6 +100,150 @@ const TILT_ASPECT_GAIN: f32 = 1.5;
 /// near-vertical pen has no meaningful direction to point.
 const TILT_NEEDLE_MIN: f32 = 0.05;
 
+/// GM4: the keyed zoom stops, in screen points per paper px (1.0 = 100%).
+pub const ZOOM_LADDER: [f32; 14] = [
+    0.125,
+    0.25,
+    1.0 / 3.0,
+    0.5,
+    2.0 / 3.0,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    4.0,
+    6.0,
+    8.0,
+    12.0,
+    16.0,
+];
+
+/// GM4: the `[` / `]` brush-size stops, in paper px.
+pub const SIZE_LADDER: [f32; 24] = [
+    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 20.0, 25.0, 30.0, 40.0, 50.0,
+    60.0, 80.0, 100.0, 120.0, 150.0, 200.0, 250.0, 300.0,
+];
+
+/// GM4: the keyed rotate step and the Ctrl snap while turning.
+pub const ROTATE_STEP_DEG: f32 = 15.0;
+
+/// GM4: the next stop on `ladder` strictly above (`up`) or below `v`,
+/// clamped at the ends.
+pub fn ladder_step(ladder: &[f32], v: f32, up: bool) -> f32 {
+    let eps = 1e-4 * v.abs().max(1.0);
+    if up {
+        ladder.iter().copied().find(|s| *s > v + eps).unwrap_or(*ladder.last().unwrap())
+    } else {
+        ladder.iter().rev().copied().find(|s| *s < v - eps).unwrap_or(ladder[0])
+    }
+}
+
+/// GM4: the canvas view — paper to screen and back. The paper mirrors
+/// about its own vertical centre line (display only), then turns about
+/// its centre by `rotation_deg` (clockwise on screen, y down), scales by
+/// `zoom` (screen points per paper px) and sits at the pane `center`
+/// plus `pan`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViewXform {
+    pub zoom: f32,
+    pub pan: egui::Vec2,
+    pub rotation_deg: f32,
+    pub mirror: bool,
+    /// The pane's centre on screen (where pan 0 puts the paper's centre).
+    pub center: Pos2,
+    /// The paper's size in paper px.
+    pub paper: egui::Vec2,
+}
+
+impl Default for ViewXform {
+    fn default() -> Self {
+        Self {
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            rotation_deg: 0.0,
+            mirror: false,
+            center: Pos2::ZERO,
+            paper: vec2(DEFAULT_PAPER_W as f32, DEFAULT_PAPER_H as f32),
+        }
+    }
+}
+
+/// Turn `v` by `deg` (clockwise on a y-down screen).
+pub fn rotate_vec(v: egui::Vec2, deg: f32) -> egui::Vec2 {
+    let (s, c) = deg.to_radians().sin_cos();
+    vec2(v.x * c - v.y * s, v.x * s + v.y * c)
+}
+
+impl ViewXform {
+    pub fn paper_to_screen(&self, p: Pos2) -> Pos2 {
+        let mut v = (p - self.paper * 0.5).to_vec2() * self.zoom;
+        if self.mirror {
+            v.x = -v.x;
+        }
+        self.center + self.pan + rotate_vec(v, self.rotation_deg)
+    }
+
+    pub fn screen_to_paper(&self, s: Pos2) -> Pos2 {
+        let d = s - self.center - self.pan;
+        let mut v = rotate_vec(d, -self.rotation_deg) / self.zoom.max(1e-6);
+        if self.mirror {
+            v.x = -v.x;
+        }
+        (self.paper * 0.5 + v).to_pos2()
+    }
+
+    /// A screen direction (pen tilt) in paper axes: turned back by the
+    /// view angle and unmirrored, length kept.
+    pub fn dir_to_paper(&self, d: [f32; 2]) -> [f32; 2] {
+        let mut v = rotate_vec(vec2(d[0], d[1]), -self.rotation_deg);
+        if self.mirror {
+            v.x = -v.x;
+        }
+        [v.x, v.y]
+    }
+
+    /// The paper's corners on screen: (0,0), (w,0), (w,h), (0,h).
+    pub fn paper_corners(&self) -> [Pos2; 4] {
+        let (w, h) = (self.paper.x, self.paper.y);
+        [pos2(0.0, 0.0), pos2(w, 0.0), pos2(w, h), pos2(0.0, h)].map(|p| self.paper_to_screen(p))
+    }
+
+    /// The screen box around the (possibly turned) paper.
+    pub fn paper_bounds(&self) -> Rect {
+        let c = self.paper_corners();
+        Rect::from_points(&c)
+    }
+}
+
+/// GM4: the textured paper quad — every paper image (below / active / wet
+/// / above / remote / onion / other columns / composite) goes through
+/// here, so it turns, mirrors and zooms with the view.
+pub fn paper_image_mesh(xf: &ViewXform, tex: egui::TextureId, tint: Color32) -> egui::Mesh {
+    let mut mesh = egui::Mesh::with_texture(tex);
+    let uvs = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0), pos2(0.0, 1.0)];
+    for (pos, uv) in xf.paper_corners().into_iter().zip(uvs) {
+        mesh.vertices.push(egui::epaint::Vertex { pos, uv, color: tint });
+    }
+    mesh.add_triangle(0, 1, 2);
+    mesh.add_triangle(0, 2, 3);
+    mesh
+}
+
+fn paint_paper_image(painter: &egui::Painter, xf: &ViewXform, tex: egui::TextureId, tint: Color32) {
+    painter.add(egui::Shape::mesh(paper_image_mesh(xf, tex, tint)));
+}
+
+/// GM4: one sample of the stroke as the paper receives it — after the
+/// view mapping and the stabilizer. The test tap: recorded even without
+/// a GPU paint layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StrokeSample {
+    pub x: f32,
+    pub y: f32,
+    pub pressure: f32,
+    pub tilt: [f32; 2],
+}
+
 /// The canvas's active TOOL — the abstraction workspaces will restore per
 /// stage (LENS-DOCK: workspace = layout + tool/mode). `Paint` keeps the
 /// existing brush/eraser pair (which sub-tool via `erasing`); `Select` is
@@ -597,6 +741,36 @@ pub struct CanvasView {
     /// arriving as plain mouse events, or Windows Ink is off). Drives the red
     /// "MOUSE — no pen pressure" badge so the failure is visible, not silent.
     dbg_mouse_mode: bool,
+    /// GM4: the view's turn (degrees, clockwise on screen) and its
+    /// display-only left-right mirror.
+    rotation_deg: f32,
+    mirror: bool,
+    /// GM4: the last frame's fit scale (screen points per paper px at
+    /// zoom 1) and view — keyed zoom and the tests read them.
+    last_fit: f32,
+    xf: ViewXform,
+    /// GM4: the Space hand. `space_was_down` finds the hold's edges; the
+    /// hand is engaged for a hold that began off-stroke; `hand_turn` is a
+    /// Shift-turn's grab (start angle, start pointer angle, start pan).
+    space_was_down: bool,
+    hand_engaged: bool,
+    hand_turn: Option<(f32, f32, egui::Vec2)>,
+    /// GM4: the stroke tap — every sample the paper receives, after the
+    /// view mapping and the stabilizer; cleared at stroke start, recorded
+    /// with or without a paint layer.
+    pub stroke_tap: Vec<StrokeSample>,
+    /// GM4: the stabilizer level (pen config), the live string, and the
+    /// last raw paper point fed to it (the pen-up point).
+    stabilizer: u8,
+    stab: Option<crate::stabilizer::Stabilizer>,
+    stab_raw: Pos2,
+    /// GM4: an OPTIONS-row stabilizer change for the app to save.
+    pub(crate) stabilizer_request: Option<u8>,
+    /// GM4: the dab edge (MyPaint hardness) and the aliased toggle.
+    pub brush_hardness: f32,
+    pub brush_aliased: bool,
+    /// GM4: where the last stroke ended — Shift+click rules on from here.
+    line_anchor: Option<Pos2>,
 }
 
 impl CanvasView {
@@ -720,6 +894,21 @@ impl CanvasView {
             native_active: false,
             stroke_from_mouse: false,
             dbg_mouse_mode: false,
+            rotation_deg: 0.0,
+            mirror: false,
+            last_fit: 1.0,
+            xf: ViewXform::default(),
+            space_was_down: false,
+            hand_engaged: false,
+            hand_turn: None,
+            stroke_tap: Vec::new(),
+            stabilizer: 0,
+            stab: None,
+            stab_raw: Pos2::ZERO,
+            stabilizer_request: None,
+            brush_hardness: crate::config::default_hardness(),
+            brush_aliased: false,
+            line_anchor: None,
         }
     }
 
@@ -752,6 +941,8 @@ impl CanvasView {
         self.tilt_opacity = p.tilt_opacity;
         self.tilt_shape = p.tilt_shape;
         self.tilt_strength = p.tilt_strength;
+        self.brush_hardness = p.hardness;
+        self.brush_aliased = p.aliased;
         if let Some(c) = p.color {
             self.brush_color = c;
         }
@@ -776,6 +967,8 @@ impl CanvasView {
             tilt_opacity: self.tilt_opacity,
             tilt_shape: self.tilt_shape,
             tilt_strength: self.tilt_strength,
+            hardness: self.brush_hardness,
+            aliased: self.brush_aliased,
         }
     }
 
@@ -784,6 +977,89 @@ impl CanvasView {
     pub fn fit_view(&mut self) {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
+        self.sync_xf();
+    }
+
+    /// GM4: the view as last drawn (screen ↔ paper).
+    pub fn view_xform(&self) -> ViewXform {
+        self.xf
+    }
+
+    /// GM4: the view's turn in degrees and its mirror.
+    pub fn view_rotation(&self) -> f32 {
+        self.rotation_deg
+    }
+
+    pub fn view_mirrored(&self) -> bool {
+        self.mirror
+    }
+
+    /// GM4: screen points per paper px (1.0 = 100%).
+    pub fn abs_zoom(&self) -> f32 {
+        self.last_fit * self.zoom
+    }
+
+    /// GM4: zoom to `z` screen points per paper px about the pane centre.
+    fn set_abs_zoom(&mut self, z: f32) {
+        let old = self.abs_zoom().max(1e-6);
+        self.zoom = z / self.last_fit.max(1e-6);
+        self.pan *= z / old;
+        self.sync_xf();
+    }
+
+    /// GM4: Zoom in / out one ladder stop, and 100%.
+    pub fn zoom_in(&mut self) {
+        self.set_abs_zoom(ladder_step(&ZOOM_LADDER, self.abs_zoom(), true));
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.set_abs_zoom(ladder_step(&ZOOM_LADDER, self.abs_zoom(), false));
+    }
+
+    pub fn zoom_100(&mut self) {
+        self.set_abs_zoom(1.0);
+    }
+
+    /// GM4: turn the view to `deg` (kept in (-180, 180]) about the pane
+    /// centre, so the paper point there stays put.
+    pub fn set_view_rotation(&mut self, deg: f32) {
+        let mut d = deg % 360.0;
+        if d > 180.0 {
+            d -= 360.0;
+        } else if d <= -180.0 {
+            d += 360.0;
+        }
+        self.pan = rotate_vec(self.pan, d - self.rotation_deg);
+        self.rotation_deg = d;
+        self.sync_xf();
+    }
+
+    pub fn rotate_view(&mut self, deg: f32) {
+        self.set_view_rotation(self.rotation_deg + deg);
+    }
+
+    /// GM4: mirror the display left to right about the pane centre.
+    pub fn toggle_mirror(&mut self) {
+        let v = rotate_vec(self.pan, -self.rotation_deg);
+        self.pan = rotate_vec(vec2(-v.x, v.y), self.rotation_deg);
+        self.mirror = !self.mirror;
+        self.sync_xf();
+    }
+
+    /// GM4: `[` / `]` — the brush size one stop along the size ladder.
+    pub fn brush_size_step(&mut self, up: bool) {
+        self.raster_brush_px = ladder_step(&SIZE_LADDER, self.raster_brush_px, up);
+    }
+
+    pub fn brush_size(&self) -> f32 {
+        self.raster_brush_px
+    }
+
+    fn sync_xf(&mut self) {
+        self.xf.zoom = self.last_fit * self.zoom;
+        self.xf.pan = self.pan;
+        self.xf.rotation_deg = self.rotation_deg;
+        self.xf.mirror = self.mirror;
     }
 
     /// GM3: the live selection as a paper-space polygon (Delete clears
@@ -1396,6 +1672,8 @@ impl CanvasView {
             && self.tilt_opacity == p.tilt_opacity
             && self.tilt_shape == p.tilt_shape
             && e(self.tilt_strength, p.tilt_strength)
+            && e(self.brush_hardness, p.hardness)
+            && self.brush_aliased == p.aliased
     }
 
     /// One pencil-box slot (genga room charter): an XL detent carrying the
@@ -2112,7 +2390,8 @@ impl CanvasView {
         if crate::menus::hover_tip(fit, Action::ZoomFit, "").clicked() {
             self.fit_view();
         }
-        vline(ui, "zoom", format!("{:3.0}%", self.zoom * 100.0));
+        // GM4: absolute — 100% is one paper px to one screen point.
+        vline(ui, "zoom", format!("{:3.0}%", self.abs_zoom() * 100.0));
         ui.add_space(10.0);
         plate::legend(ui, "input");
         ui.add_space(2.0);
@@ -2717,6 +2996,34 @@ impl CanvasView {
                             self.lasso_grow = grow;
                         }
                         _ => {
+                            // GM4: the pen aids sit here — the dab's edge,
+                            // aliased, and the stabilizer.
+                            plate::legend(ui, "hardness");
+                            let mut hard = self.brush_hardness;
+                            plate::field(
+                                ui,
+                                egui::DragValue::new(&mut hard).range(0.0..=1.0).speed(0.01),
+                            )
+                            .on_hover_text("the dab's edge: toward 1 hard, toward 0 soft");
+                            self.brush_hardness = hard;
+                            if plate::detent(ui, self.brush_aliased, "aliased")
+                                .on_hover_text("hard 0/255 edges, no smoothing (pixel-exact fills)")
+                                .clicked()
+                            {
+                                self.brush_aliased = !self.brush_aliased;
+                            }
+                            plate::legend(ui, "stabilizer");
+                            let mut stab = self.stabilizer;
+                            plate::field(
+                                ui,
+                                egui::DragValue::new(&mut stab)
+                                    .range(0..=crate::stabilizer::MAX_LEVEL),
+                            )
+                            .on_hover_text("0 = raw pen; higher pulls the ink on a longer string");
+                            if stab != self.stabilizer {
+                                self.stabilizer = stab;
+                                self.stabilizer_request = Some(stab);
+                            }
                             // Brush / eraser edits live on the RIGHT RAIL
                             // (owner 2026-08-17): hover the canvas's right
                             // edge. The deck stays clear; the row stays
@@ -2747,6 +3054,7 @@ impl CanvasView {
         presets: &[BrushPreset],
     ) {
         self.pen_curve = pen.pressure_curve.clone();
+        self.stabilizer = pen.stabilizer.min(crate::stabilizer::MAX_LEVEL);
         // PSD-brush-engine: install the armed preset's tip/grain on the
         // paint layer — once per arm, never mid-stroke (stroke_active
         // can't be true on the frame an arm click happened).
@@ -2829,19 +3137,65 @@ impl CanvasView {
         let paper_w = state.engine.project.width as f32;
         let paper_h = state.engine.project.height as f32;
 
-        // View transform: fit paper into rect, then user zoom/pan on top.
+        // View transform (GM4 ViewXform): fit paper into rect, then the
+        // user's zoom / pan / turn / mirror on top.
         let fit = ((rect.width() / paper_w).min(rect.height() / paper_h) * 0.94).max(0.01);
-        let scale = fit * self.zoom;
-        let origin = rect.center() - vec2(paper_w, paper_h) * scale * 0.5 + self.pan;
-        let to_screen = |p: Pos2| -> Pos2 { origin + p.to_vec2() * scale };
-        let to_paper = |s: Pos2| -> Pos2 { ((s - origin) / scale).to_pos2() };
+        self.last_fit = fit;
+        self.xf.center = rect.center();
+        self.xf.paper = vec2(paper_w, paper_h);
+        self.sync_xf();
 
-        // Session presence: our pointer, in paper space, when over the paper.
-        self.presence_pos = response
-            .hover_pos()
-            .map(|hp| to_paper(hp))
-            .filter(|pp| pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= paper_w && pp.y <= paper_h)
-            .map(|pp| [pp.x, pp.y]);
+        // GM4 SPACE HAND: held Space (not typing) takes the pointer — a
+        // drag pans, Shift+drag turns (Ctrl snaps to 15°). A hold that
+        // began mid-stroke never engages; releasing Space restores the
+        // tool. Works during playback too: it only moves the view.
+        let space = ui.input(|i| i.key_down(egui::Key::Space))
+            && !ui.ctx().egui_wants_keyboard_input();
+        if space && !self.space_was_down {
+            self.hand_engaged = !self.stroke_active();
+            self.hand_turn = None;
+            crate::shortcuts::clear_hand_drag(ui.ctx());
+        }
+        if !space {
+            self.hand_engaged = false;
+            self.hand_turn = None;
+        }
+        self.space_was_down = space;
+        let hand = space && self.hand_engaged;
+        if hand {
+            let m = ui.input(|i| i.modifiers);
+            let pointer = response.interact_pointer_pos();
+            if response.dragged_by(egui::PointerButton::Primary) {
+                crate::shortcuts::note_hand_drag(ui.ctx());
+                if m.shift
+                    && let Some(p) = pointer
+                {
+                    let c = rect.center();
+                    let ang = (p.y - c.y).atan2(p.x - c.x).to_degrees();
+                    let (start, start_ang, start_pan) =
+                        *self.hand_turn.get_or_insert((self.rotation_deg, ang, self.pan));
+                    let mut target = start + (ang - start_ang);
+                    if m.command {
+                        target = (target / ROTATE_STEP_DEG).round() * ROTATE_STEP_DEG;
+                    }
+                    self.pan = start_pan;
+                    self.rotation_deg = start;
+                    self.set_view_rotation(target);
+                } else {
+                    self.hand_turn = None;
+                    self.pan += response.drag_delta();
+                }
+                self.sync_xf();
+            }
+            if response.drag_stopped() {
+                self.hand_turn = None;
+            }
+            ui.ctx().set_cursor_icon(if response.dragged() {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+        }
 
         // Zoom at cursor / middle-drag pan — DISABLED during playback: the pen
         // resting or hovering on the drawing display (hover scroll deltas, a
@@ -2853,42 +3207,99 @@ impl CanvasView {
                 if scroll.abs() > 0.0
                     && let Some(mouse) = response.hover_pos()
                 {
-                    let before = to_paper(mouse);
-                    self.zoom = (self.zoom * (scroll * 0.0015).exp()).clamp(0.2, 10.0);
-                    let scale2 = fit * self.zoom;
-                    let origin2 = rect.center() - vec2(paper_w, paper_h) * scale2 * 0.5 + self.pan;
-                    let after = origin2 + before.to_vec2() * scale2;
+                    let before = self.xf.screen_to_paper(mouse);
+                    // The relative 0.2–10× range, widened to the keyed
+                    // ladder's ends so a wheel never snaps a keyed zoom back.
+                    let lo = (0.2f32).min(ZOOM_LADDER[0] / fit);
+                    let hi = (10.0f32).max(ZOOM_LADDER[ZOOM_LADDER.len() - 1] / fit);
+                    self.zoom = (self.zoom * (scroll * 0.0015).exp()).clamp(lo, hi);
+                    self.sync_xf();
+                    let after = self.xf.paper_to_screen(before);
                     self.pan += mouse - after;
+                    self.sync_xf();
                 }
             }
             // Middle-drag pans.
             if response.dragged_by(egui::PointerButton::Middle) {
                 self.pan += response.drag_delta();
+                self.sync_xf();
             }
         }
 
+        let xf = self.xf;
+        let scale = xf.zoom;
+        let to_screen = |p: Pos2| -> Pos2 { xf.paper_to_screen(p) };
+        let to_paper = |s: Pos2| -> Pos2 { xf.screen_to_paper(s) };
+
+        // Session presence: our pointer, in paper space, when over the paper.
+        self.presence_pos = response
+            .hover_pos()
+            .map(|hp| to_paper(hp))
+            .filter(|pp| pp.x >= 0.0 && pp.y >= 0.0 && pp.x <= paper_w && pp.y <= paper_h)
+            .map(|pp| [pp.x, pp.y]);
+
         // ---- Paper --------------------------------------------------------
-        let paper_rect =
-            Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
-        painter.rect_filled(
-            paper_rect,
-            2,
-            if self.miss_check {
-                crate::plate::GRAPHITE
-            } else {
-                crate::plate::PAPER
-            },
-        );
-        painter.rect_stroke(
-            paper_rect,
-            2,
-            egui::Stroke::new(1.0, crate::plate::legend_dim()),
-            egui::StrokeKind::Outside,
-        );
+        // Upright (unturned) the paper is the old axis-aligned rect; turned,
+        // it is the corners' polygon and `paper_rect` its screen box (text
+        // labels anchor to the box).
+        let upright = self.rotation_deg == 0.0;
+        let paper_rect = xf.paper_bounds();
+        let paper_fill = if self.miss_check {
+            crate::plate::GRAPHITE
+        } else {
+            crate::plate::PAPER
+        };
+        if upright {
+            painter.rect_filled(paper_rect, 2, paper_fill);
+            painter.rect_stroke(
+                paper_rect,
+                2,
+                egui::Stroke::new(1.0, crate::plate::legend_dim()),
+                egui::StrokeKind::Outside,
+            );
+        } else {
+            painter.add(egui::Shape::convex_polygon(
+                xf.paper_corners().to_vec(),
+                paper_fill,
+                egui::Stroke::new(1.0, crate::plate::legend_dim()),
+            ));
+        }
         // Paper furniture (Phase 4): field / safe / peg guides in Ao — the
         // scaffold ink, printed under the drawing like a real layout sheet.
-        {
-            let ao = Color32::from_rgba_unmultiplied(83, 137, 196, 110);
+        let ao = Color32::from_rgba_unmultiplied(83, 137, 196, 110);
+        if !upright {
+            // GM4: turned, the guides are paper-space shapes mapped through
+            // the view (the peg bar's screen sizes become paper sizes).
+            let g = egui::Stroke::new(1.0, ao);
+            let paper_box = |c: Pos2, half: egui::Vec2| -> egui::Shape {
+                let pts = [
+                    pos2(c.x - half.x, c.y - half.y),
+                    pos2(c.x + half.x, c.y - half.y),
+                    pos2(c.x + half.x, c.y + half.y),
+                    pos2(c.x - half.x, c.y + half.y),
+                ];
+                egui::Shape::closed_line(pts.iter().map(|p| to_screen(*p)).collect(), g)
+            };
+            let pc = pos2(paper_w * 0.5, paper_h * 0.5);
+            if self.show_field {
+                painter.add(paper_box(pc, vec2(paper_w, paper_h) * 0.45));
+            }
+            if self.show_safe {
+                painter.add(paper_box(pc, vec2(paper_w, paper_h) * 0.4));
+                let arm = 10.0 / scale.max(1e-6);
+                painter.line_segment([to_screen(pc - vec2(arm, 0.0)), to_screen(pc + vec2(arm, 0.0))], g);
+                painter.line_segment([to_screen(pc - vec2(0.0, arm)), to_screen(pc + vec2(0.0, arm))], g);
+            }
+            if self.show_peg {
+                let u = 1.0 / scale.max(1e-6);
+                let pc = pos2(paper_w * 0.5, paper_h * 0.95);
+                painter.circle_stroke(to_screen(pc), 5.0, g);
+                for dx in [-70.0f32, 70.0] {
+                    painter.add(paper_box(pc + vec2(dx * u, 0.0), vec2(10.0, 4.5) * u));
+                }
+            }
+        }
+        if upright {
             let g = egui::Stroke::new(1.0, ao);
             if self.show_field {
                 painter.rect_stroke(
@@ -2927,7 +3338,9 @@ impl CanvasView {
         }
 
         // ---- Pen input (edit mode only) -----------------------------------
-        if !state.view.playing {
+        if hand && !state.view.playing {
+            // GM4: the Space hand has the pointer — no tool input, no tap.
+        } else if !state.view.playing {
             match self.tool {
                 CanvasTool::Paint => {
                     self.handle_pen(ui, &response, rect, &to_paper, scale, state, native_pen);
@@ -3302,8 +3715,7 @@ impl CanvasView {
         // every editing-display step below.
         let edit_view = composite_tex.is_none();
         if let Some(id) = composite_tex {
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            painter.image(id, paper_rect, uv, Color32::WHITE);
+            paint_paper_image(&painter, &xf, id, Color32::WHITE);
             // Painted overlay tag (zero layout impact) so the mode is never
             // ambiguous — this view looks like art, not like a mode.
             painter.text(
@@ -3339,8 +3751,7 @@ impl CanvasView {
                 if self.raster
                     && let Some(id) = other_tex.and_then(|p| p.other_column_id(col.id))
                 {
-                    let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                    painter.image(id, paper_rect, uv, Color32::WHITE);
+                    paint_paper_image(&painter, &xf, id, Color32::WHITE);
                 }
                 if let Some(id) = col.resolve(frame)
                     && let Some(d) = cut.drawing(id)
@@ -3424,7 +3835,6 @@ impl CanvasView {
             && self.raster
             && let Some(p) = paint
         {
-            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             // Ghost BEHIND leans Ao (continuity), ghost AHEAD leans
             // Legend (spec defect 14) — as multiply tints for now; the
             // true re-ink lands on the VECTOR path in Phase 4, and the
@@ -3434,14 +3844,14 @@ impl CanvasView {
                 // THE FLIP: the previous drawing full-strength, alone —
                 // the current cel steps aside until R lifts.
                 if let Some(id) = p.onion_id(0) {
-                    painter.image(id, paper_rect, uv, Color32::WHITE);
+                    paint_paper_image(&painter, &xf, id, Color32::WHITE);
                 }
             } else {
                 if let Some(id) = p.onion_id(0) {
-                    painter.image(
+                    paint_paper_image(
+                        &painter,
+                        &xf,
                         id,
-                        paper_rect,
-                        uv,
                         Color32::from_rgba_unmultiplied(160, 195, 232, ga),
                     );
                 }
@@ -3453,15 +3863,15 @@ impl CanvasView {
                     } else {
                         (205u8, 206u8, 199u8)
                     };
-                    painter.image(
+                    paint_paper_image(
+                        &painter,
+                        &xf,
                         id,
-                        paper_rect,
-                        uv,
                         Color32::from_rgba_unmultiplied(t.0, t.1, t.2, ga),
                     );
                 }
                 // Layers under the active one (per-layer opacities baked in).
-                painter.image(p.below_id(), paper_rect, uv, Color32::WHITE);
+                paint_paper_image(&painter, &xf, p.below_id(), Color32::WHITE);
                 // Active layer: the texture holds FULL-strength pixels (so the
                 // pen-up readback stays bit-exact); its layer opacity is applied
                 // here as a display tint. from_white_alpha is an exact o×texel
@@ -3473,7 +3883,7 @@ impl CanvasView {
                     .unwrap_or((true, 1.0));
                 if a_visible {
                     let t = (a_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-                    painter.image(p.texture_id(), paper_rect, uv, Color32::from_white_alpha(t));
+                    paint_paper_image(&painter, &xf, p.texture_id(), Color32::from_white_alpha(t));
                     // Live brush stroke over it, at stroke × layer opacity
                     // (both factors, or the stroke pops at pen-up).
                     // KNOWN latent deviation: where the stroke overlaps existing
@@ -3487,15 +3897,15 @@ impl CanvasView {
                             * a_opacity.clamp(0.0, 1.0)
                             * 255.0)
                             .round() as u8;
-                        painter.image(p.wet_id(), paper_rect, uv, Color32::from_white_alpha(wa));
+                        paint_paper_image(&painter, &xf, p.wet_id(), Color32::from_white_alpha(wa));
                     }
                 }
                 // Layers over the active one.
-                painter.image(p.above_id(), paper_rect, uv, Color32::WHITE);
+                paint_paper_image(&painter, &xf, p.above_id(), Color32::WHITE);
                 // STAGE 2: other artists' LIVE ink, straight from their
                 // dab streams (alpha pre-scaled; cleared at commit).
                 if !self.remote_live.is_empty() {
-                    painter.image(p.remote_id(), paper_rect, uv, Color32::WHITE);
+                    paint_paper_image(&painter, &xf, p.remote_id(), Color32::WHITE);
                 }
             }
         }
@@ -3571,12 +3981,13 @@ impl CanvasView {
         let fage = ui.input(|i| i.time) - self.flash_since;
         if fage < 0.9 && state.refusal_seq != 0 {
             let fppp = ui.ctx().pixels_per_point();
-            painter.rect_stroke(
-                paper_rect,
-                2.0,
-                egui::Stroke::new(crate::plate::device_px(2.0, fppp), crate::plate::AKA),
-                egui::StrokeKind::Outside,
-            );
+            let flash = egui::Stroke::new(crate::plate::device_px(2.0, fppp), crate::plate::AKA);
+            if upright {
+                painter.rect_stroke(paper_rect, 2.0, flash, egui::StrokeKind::Outside);
+            } else {
+                // GM4: turned, the flash rides the paper's own edge.
+                painter.add(egui::Shape::closed_line(xf.paper_corners().to_vec(), flash));
+            }
             ui.ctx().request_repaint();
         }
 
@@ -3986,6 +4397,7 @@ impl CanvasView {
         && !state.view.playing
         && !self.composite_view // review mode: painting refused, OS cursor back
         && self.tool == CanvasTool::Paint // select tool keeps the OS cursor
+        && !hand // GM4: the Space hand shows its own grab cursor
         && let Some(pos) = ui.input(|i| i.pointer.latest_pos())
         && rect.contains(pos)
         && ui.ctx().layer_id_at(pos) == Some(ui.layer_id())
@@ -4461,7 +4873,12 @@ impl CanvasView {
         }
         let base = linear_rgba(self.brush_color);
         let flow = self.brush_flow.clamp(0.0, 1.0);
-        let hardness = 0.85;
+        // GM4: the brush's own edge; aliased rides the hardness sentinel.
+        let hardness = if self.brush_aliased {
+            crate::paint::ALIASED_HARDNESS
+        } else {
+            self.brush_hardness.clamp(0.0, 1.0)
+        };
         // PSD-brush-engine: the armed preset's machinery. None = the old
         // path, byte-identical (tip stays 0, spacing stays 0.1).
         let eng = self.brush_engine.as_ref();
@@ -4963,6 +5380,17 @@ impl CanvasView {
         {
             state.status = "selection cleared".into();
         }
+        // GM4 EYEDROPPER: Alt+click picks the composited colour instead.
+        if ui.input(|i| i.modifiers.alt) {
+            if (response.clicked_by(egui::PointerButton::Primary)
+                || response.drag_started_by(egui::PointerButton::Primary))
+                && let Some(pos) = response.interact_pointer_pos().or(response.hover_pos())
+                && rect.contains(pos)
+            {
+                self.eyedrop(pos, to_paper, state);
+            }
+            return;
+        }
         if !response.drag_started_by(egui::PointerButton::Primary) {
             return;
         }
@@ -5141,11 +5569,12 @@ impl CanvasView {
         self.begin_stream(state);
         self.current.clear();
         let p = to_paper(pos);
-        self.current.push(StrokePoint {
+        self.tap_begin(p);
+        self.push_point(StrokePoint {
             x: p.x,
             y: p.y,
             pressure: p0,
-            tilt: self.smoothed_tilt,
+            tilt: self.xf.dir_to_paper(self.smoothed_tilt),
         });
         true
     }
@@ -5154,11 +5583,113 @@ impl CanvasView {
     /// synthesized from the committed points instead).
     fn stroke_end(&mut self, state: &mut AppState) {
         if self.touch_active {
+            self.stab_catch_up();
+            self.line_anchor = self.current.last().map(|l| pos2(l.x, l.y));
             self.finish_stroke(state);
             self.mouse_lockout = 1;
         }
         self.touch_active = false;
         self.seed_pending = false;
+    }
+
+    /// GM4: a new stroke's tap, and the stabilizer's string tied at its
+    /// first paper point (string length in screen points, so `1 / zoom`).
+    fn tap_begin(&mut self, p: Pos2) {
+        self.stroke_tap.clear();
+        let mut s =
+            crate::stabilizer::Stabilizer::new(self.stabilizer, 1.0 / self.xf.zoom.max(1e-6));
+        s.feed([p.x, p.y]);
+        self.stab = Some(s);
+        self.stab_raw = p;
+    }
+
+    /// GM4: one raw paper point through the stabilizer — the ink point to
+    /// draw, or None while the pen is inside the string's slack.
+    fn stab_feed(&mut self, p: Pos2) -> Option<Pos2> {
+        self.stab_raw = p;
+        match self.stab.as_mut() {
+            Some(s) => s.feed([p.x, p.y]).map(|q| pos2(q[0], q[1])),
+            None => Some(p),
+        }
+    }
+
+    /// GM4: pen-up — reel the string in, so the stroke ends on the pen-up
+    /// point (nothing at level 0).
+    fn stab_catch_up(&mut self) {
+        let Some(mut s) = self.stab.take() else {
+            return;
+        };
+        let Some(last) = self.current.last().copied() else {
+            return;
+        };
+        for q in s.finish([self.stab_raw.x, self.stab_raw.y]) {
+            self.push_point(StrokePoint {
+                x: q[0],
+                y: q[1],
+                ..last
+            });
+        }
+    }
+
+    /// GM4: append to the live stroke and its tap.
+    fn push_point(&mut self, sp: StrokePoint) {
+        self.stroke_tap.push(StrokeSample {
+            x: sp.x,
+            y: sp.y,
+            pressure: sp.pressure,
+            tilt: sp.tilt,
+        });
+        self.current.push(sp);
+    }
+
+    /// GM4: Shift+click after a stroke — a straight segment from where the
+    /// last stroke ended to the click, a point every ~2 screen points, each
+    /// exactly on the segment. The stroke's own guards and commit run.
+    #[allow(clippy::too_many_arguments)]
+    fn rule_line(
+        &mut self,
+        from: Pos2,
+        click: Pos2,
+        force: Option<f32>,
+        rect: Rect,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        state: &mut AppState,
+        from_mouse: bool,
+    ) -> bool {
+        if !self.stroke_start(click, force, Some([0.0, 0.0]), rect, to_paper, state) {
+            return false;
+        }
+        let to = to_paper(click);
+        let first = self.current[0];
+        self.current.clear();
+        self.stroke_tap.clear();
+        self.stab = None;
+        let n = (((to - from).length() * self.xf.zoom / 2.0).ceil() as usize).max(1);
+        for k in 0..=n {
+            let t = k as f32 / n as f32;
+            let p = from.lerp(to, t);
+            self.push_point(StrokePoint {
+                x: p.x,
+                y: p.y,
+                ..first
+            });
+        }
+        self.seed_pending = false;
+        self.stroke_from_mouse = from_mouse;
+        self.stroke_end(state);
+        true
+    }
+
+    /// GM4 EYEDROPPER: the composited colour under `screen` into the brush.
+    fn eyedrop(&mut self, screen: Pos2, to_paper: &impl Fn(Pos2) -> Pos2, state: &mut AppState) {
+        let p = to_paper(screen);
+        match pick_color(state, p.x, p.y, self.composite_view) {
+            Some(c) => {
+                self.brush_color = c;
+                state.status = format!("picked #{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+            }
+            None => state.refuse("nothing to pick — the paper is bare there"),
+        }
     }
 
     #[allow(clippy::too_many_arguments)] // one call site; a struct would be noise
@@ -5177,6 +5708,11 @@ impl CanvasView {
         }
         let events = ui.input(|i| i.events.clone());
         let mut touch_seen = false;
+        // GM4: Alt = the eyedropper (no ink); Shift on a fresh press after
+        // a stroke = rule a straight line on from where it ended.
+        let mods = ui.input(|i| i.modifiers);
+        let picking = mods.alt && !self.touch_active && self.current.is_empty();
+        let ruling = mods.shift && !mods.alt && !self.touch_active && self.current.is_empty();
 
         // native_pen is collected ONCE per frame from the tablet thread,
         // which is bound to the MAIN window's HWND (see main.rs's
@@ -5235,9 +5771,18 @@ impl CanvasView {
                             // the paper used to stroke THROUGH it. Same
                             // layer test the brush cursor already uses.
                             if ui.ctx().layer_id_at(s.pos) == Some(ui.layer_id()) {
-                                self.stroke_start(
-                                    s.pos, s.pressure, s.tilt, rect, to_paper, state,
-                                );
+                                if picking {
+                                    if rect.contains(s.pos) {
+                                        self.eyedrop(s.pos, to_paper, state);
+                                    }
+                                } else if ruling && let Some(a) = self.line_anchor {
+                                    let f = s.pressure.filter(|f| *f > 0.0).or(Some(self.last_pressure));
+                                    self.rule_line(a, s.pos, f, rect, to_paper, state, false);
+                                } else {
+                                    self.stroke_start(
+                                        s.pos, s.pressure, s.tilt, rect, to_paper, state,
+                                    );
+                                }
                             }
                         }
                         PenPhase::Move => {
@@ -5272,9 +5817,18 @@ impl CanvasView {
                         // (Same clickthrough gate as the native path: raw
                         // Touch events also bypass egui's layering.)
                         if ui.ctx().layer_id_at(*pos) == Some(ui.layer_id()) {
-                            self.stroke_start(
-                                *pos, *force, Some([0.0, 0.0]), rect, to_paper, state,
-                            );
+                            if picking {
+                                if rect.contains(*pos) {
+                                    self.eyedrop(*pos, to_paper, state);
+                                }
+                            } else if ruling && let Some(a) = self.line_anchor {
+                                let f = force.filter(|f| *f > 0.0).or(Some(self.last_pressure));
+                                self.rule_line(a, *pos, f, rect, to_paper, state, false);
+                            } else {
+                                self.stroke_start(
+                                    *pos, *force, Some([0.0, 0.0]), rect, to_paper, state,
+                                );
+                            }
                         }
                     }
                     egui::TouchPhase::Move => {
@@ -5299,6 +5853,29 @@ impl CanvasView {
         // pressure pen has been seen this session (Windows synthesizes pen→mouse
         // clicks that would otherwise paint flat-pressure blobs on light taps).
         if !self.touch_active && !touch_seen && self.mouse_lockout == 0 && !self.seen_pen {
+            // GM4: Alt+click picks; Shift+click rules on from the last
+            // stroke's end. Neither inks a drag of its own.
+            let click = response.clicked_by(egui::PointerButton::Primary)
+                || (response.drag_started_by(egui::PointerButton::Primary)
+                    && (picking || (ruling && self.line_anchor.is_some())));
+            if (picking || ruling) && self.current.is_empty() {
+                if click
+                    && let Some(pos) = response.interact_pointer_pos().or(response.hover_pos())
+                {
+                    if picking {
+                        if rect.contains(pos) {
+                            self.eyedrop(pos, to_paper, state);
+                        }
+                    } else if let Some(a) = self.line_anchor {
+                        self.rule_line(a, pos, Some(MOUSE_PRESSURE), rect, to_paper, state, true);
+                        // The mouse never set the pen lockout; keep it so.
+                        self.mouse_lockout = 0;
+                    }
+                }
+                if picking || self.line_anchor.is_some() {
+                    return;
+                }
+            }
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if self.composite_view {
                     state.refuse("refused — composite view is read-only (C to edit)");
@@ -5337,7 +5914,8 @@ impl CanvasView {
                 self.begin_stream(state);
                 if let Some(p) = response.interact_pointer_pos() {
                     let p = to_paper(p);
-                    self.current.push(StrokePoint {
+                    self.tap_begin(p);
+                    self.push_point(StrokePoint {
                         x: p.x,
                         y: p.y,
                         pressure: MOUSE_PRESSURE,
@@ -5353,9 +5931,10 @@ impl CanvasView {
                 // committed it blind (and in raster mode latched
                 // raster_stroke_done with the flush section skipped =
                 // composite-view softlock).
-                if let Some(p) = response.interact_pointer_pos() {
-                    let p = to_paper(p);
-                    self.current.push(StrokePoint {
+                if let Some(p) = response.interact_pointer_pos()
+                    && let Some(p) = self.stab_feed(to_paper(p))
+                {
+                    self.push_point(StrokePoint {
                         x: p.x,
                         y: p.y,
                         pressure: MOUSE_PRESSURE,
@@ -5368,7 +5947,9 @@ impl CanvasView {
                 // Discard a stationary click (no real drag) so a bare mouse click
                 // paints nothing; only commit an actual dragged stroke. Mouse has
                 // no pressure, so no taper is synthesized here.
+                self.stab_catch_up();
                 if self.mouse_path_len_px(scale) >= MOUSE_MIN_TRAVEL_PX {
+                    self.line_anchor = self.current.last().map(|l| pos2(l.x, l.y));
                     self.finish_stroke(state);
                 } else {
                     self.current.clear();
@@ -5395,12 +5976,20 @@ impl CanvasView {
         to_paper: &impl Fn(Pos2) -> Pos2,
         scale: f32,
     ) {
-        let p = to_paper(pos);
-        let moved = self
-            .current
-            .last()
-            .map(|last| ((p.x - last.x).powi(2) + (p.y - last.y).powi(2)).sqrt() * scale)
-            .unwrap_or(f32::INFINITY);
+        // GM4: through the stabilizer's string; inside its slack the point
+        // banks like a stationary sample (pressure and tilt still track).
+        let fed = self.stab_feed(to_paper(pos));
+        let p = fed
+            .or_else(|| self.current.last().map(|l| pos2(l.x, l.y)))
+            .unwrap_or(self.stab_raw);
+        let moved = if fed.is_none() {
+            0.0
+        } else {
+            self.current
+                .last()
+                .map(|last| ((p.x - last.x).powi(2) + (p.y - last.y).powi(2)).sqrt() * scale)
+                .unwrap_or(f32::INFINITY)
+        };
 
         // Pressure comes ONLY from the tablet. Some(>0) is real (a stroke start
         // is a rapid pressure rise while nearly stationary — that is normal, NOT
@@ -5430,10 +6019,14 @@ impl CanvasView {
         if let Some(t) = tilt {
             if self.seed_pending {
                 self.smoothed_tilt = t;
+                let pt = self.xf.dir_to_paper(t);
                 if self.dabs_flushed == 0
                     && let Some(first) = self.current.first_mut()
                 {
-                    first.tilt = t;
+                    first.tilt = pt;
+                    if let Some(s) = self.stroke_tap.first_mut() {
+                        s.tilt = pt;
+                    }
                 }
                 self.last_tilt = t;
                 self.tilt_seen = true;
@@ -5455,6 +6048,9 @@ impl CanvasView {
                 && let Some(first) = self.current.first_mut()
             {
                 first.pressure = raw;
+                if let Some(s) = self.stroke_tap.first_mut() {
+                    s.pressure = raw;
+                }
             }
             self.seed_pending = false;
         }
@@ -5475,19 +6071,24 @@ impl CanvasView {
             // (pressing or tilting while stationary would darken or gap the
             // stroke tip); the live values reach the stroke through the next
             // APPENDED point instead, which only extends the tail.
+            let pt = self.xf.dir_to_paper(self.smoothed_tilt);
             if !self.raster
                 && let Some(lp) = self.current.last_mut()
             {
                 lp.pressure = self.smoothed_pressure;
-                lp.tilt = self.smoothed_tilt;
+                lp.tilt = pt;
+                if let Some(s) = self.stroke_tap.last_mut() {
+                    s.pressure = self.smoothed_pressure;
+                    s.tilt = pt;
+                }
             }
             return;
         }
-        self.current.push(StrokePoint {
+        self.push_point(StrokePoint {
             x: p.x,
             y: p.y,
             pressure: self.smoothed_pressure,
-            tilt: self.smoothed_tilt,
+            tilt: self.xf.dir_to_paper(self.smoothed_tilt),
         });
     }
     fn finish_stroke(&mut self, state: &mut AppState) {
@@ -5832,6 +6433,26 @@ fn finalize_selection(draft: Vec<Pos2>, shape: SelShape, scale: f32) -> Option<V
             Some(draft)
         }
     }
+}
+
+/// GM4 EYEDROPPER: the composited RGBA (straight, 8-bit) at paper pixel
+/// (x, y) of the current frame — the column stack, or the graph's output
+/// in composite view. None off the paper or where it is bare.
+pub fn pick_color(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[u8; 4]> {
+    let (w, h) = (state.engine.project.width, state.engine.project.height);
+    let (xi, yi) = (x.floor(), y.floor());
+    if xi < 0.0 || yi < 0.0 || xi >= w as f32 || yi >= h as f32 {
+        return None;
+    }
+    let cut = state.cut();
+    let frame = state.view.frame;
+    let buf = composite
+        .then(|| anim_core::export::render_graph_frame(cut, frame, w, h))
+        .flatten()
+        .unwrap_or_else(|| anim_core::export::render_frame(cut, frame, w, h));
+    let i = (yi as usize * w as usize + xi as usize) * 4;
+    let px: [u8; 4] = buf.get(i..i + 4)?.try_into().ok()?;
+    (px[3] > 0).then_some(px)
 }
 
 fn linear_rgba(c: [u8; 4]) -> [f32; 4] {
@@ -6252,5 +6873,378 @@ mod erase_race_tests {
         let wire = diff_guest_tiles(&base, &readback);
         assert_eq!(wire.len(), 1);
         assert_eq!(wire[0].2.len(), TILE_LEN);
+    }
+}
+
+/// GM4: the canvas view and the pen aids, headless (no window, no GPU:
+/// the harness canvas runs without a paint layer, so strokes take the
+/// vector path and the tap records them).
+#[cfg(test)]
+mod viewnav_tests {
+    use super::*;
+    use crate::config::{Keymap, clashes, default_binds};
+    use crate::testkit::{CTRL, EditorHarness};
+    use egui::{Key, Modifiers};
+
+    fn xf(rot: f32, mirror: bool, zoom: f32) -> ViewXform {
+        ViewXform {
+            zoom,
+            pan: vec2(13.0, -7.5),
+            rotation_deg: rot,
+            mirror,
+            center: pos2(640.0, 400.0),
+            paper: vec2(1920.0, 1080.0),
+        }
+    }
+
+    fn harness() -> EditorHarness {
+        let mut h = EditorHarness::new();
+        h.run();
+        h
+    }
+
+    /// A gently curving paper path near the paper's centre.
+    fn paper_path() -> Vec<Pos2> {
+        (0..9)
+            .map(|k| {
+                let k = k as f32;
+                pos2(820.0 + k * 40.0, 520.0 + (k * 0.7).sin() * 50.0)
+            })
+            .collect()
+    }
+
+    /// Drag `paper` through the harness under the view as set, and return
+    /// the stroke's tap.
+    fn tap_for(rot: f32, mirror: bool, stabilizer: u8) -> (Vec<StrokeSample>, ViewXform) {
+        let mut h = harness();
+        h.rig_mut().config.pen.stabilizer = stabilizer;
+        h.editor_mut().canvas.set_view_rotation(rot);
+        if mirror {
+            h.editor_mut().canvas.toggle_mirror();
+        }
+        h.run();
+        let xf = h.editor().canvas.view_xform();
+        let screen: Vec<Pos2> = paper_path().iter().map(|p| xf.paper_to_screen(*p)).collect();
+        h.drag_path(&screen);
+        (h.editor().canvas.stroke_tap.clone(), xf)
+    }
+
+    fn strokes_on_frame(h: &EditorHarness) -> usize {
+        h.state().cut().drawings.iter().map(|d| d.strokes.len()).sum()
+    }
+
+    #[test]
+    fn viewnav_screen_paper_round_trip() {
+        let pts = [pos2(0.0, 0.0), pos2(1920.0, 1080.0), pos2(333.3, 812.9), pos2(960.0, 540.0)];
+        for rot in [0.0, 15.0, 90.0, 137.0] {
+            for mirror in [false, true] {
+                for zoom in [0.25, 1.0, 3.7] {
+                    let v = xf(rot, mirror, zoom);
+                    for p in pts {
+                        let back = v.screen_to_paper(v.paper_to_screen(p));
+                        assert!(
+                            (back - p).length() < 1e-3,
+                            "rot {rot} mirror {mirror} zoom {zoom}: {p:?} came back {back:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn viewnav_rotated_view_taps_the_same_paper_path() {
+        let (upright, _) = tap_for(0.0, false, 0);
+        let (turned, xf90) = tap_for(90.0, false, 0);
+        assert_eq!(xf90.rotation_deg, 90.0);
+        assert!(upright.len() >= 5, "the stroke was tapped: {}", upright.len());
+        assert_eq!(upright.len(), turned.len());
+        for (a, b) in upright.iter().zip(&turned) {
+            let d = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+            assert!(d <= 0.5, "{a:?} vs {b:?}: {d} px apart");
+        }
+    }
+
+    #[test]
+    fn viewnav_mirror_changes_only_the_display() {
+        let (plain, xf0) = tap_for(0.0, false, 0);
+        let (mirrored, xfm) = tap_for(0.0, true, 0);
+        assert!(xfm.mirror && !xf0.mirror);
+        // The display differs: an off-centre paper point lands elsewhere.
+        let p = pos2(200.0, 300.0);
+        assert!((xf0.paper_to_screen(p) - xfm.paper_to_screen(p)).length() > 10.0);
+        // The paper receives the same samples.
+        assert_eq!(plain.len(), mirrored.len());
+        for (a, b) in plain.iter().zip(&mirrored) {
+            assert!((a.x - b.x).abs() < 1e-3 && (a.y - b.y).abs() < 1e-3, "{a:?} vs {b:?}");
+            assert_eq!((a.pressure, a.tilt), (b.pressure, b.tilt));
+        }
+    }
+
+    #[test]
+    fn viewnav_zoom_keys_walk_the_ladder_100_and_fit() {
+        let mut h = harness();
+        let fit = h.editor().canvas.abs_zoom();
+        h.key_mods(CTRL, Key::Equals);
+        let z1 = h.editor().canvas.abs_zoom();
+        assert_eq!(z1, ladder_step(&ZOOM_LADDER, fit, true));
+        assert!(ZOOM_LADDER.contains(&z1), "{z1} is a ladder stop");
+        h.key_mods(CTRL, Key::Equals);
+        let z2 = h.editor().canvas.abs_zoom();
+        assert_eq!(z2, ladder_step(&ZOOM_LADDER, z1, true));
+        h.key_mods(CTRL, Key::Minus);
+        assert_eq!(h.editor().canvas.abs_zoom(), z1);
+        // 100%: one paper px is one screen point.
+        h.key_mods(CTRL, Key::Num1);
+        let v = h.editor().canvas.view_xform();
+        assert!((v.zoom - 1.0).abs() < 1e-5, "100% is zoom 1, got {}", v.zoom);
+        let step = v.paper_to_screen(pos2(101.0, 100.0)) - v.paper_to_screen(pos2(100.0, 100.0));
+        assert!((step.length() - 1.0).abs() < 1e-4);
+        // Fit centres the paper in the pane at the fit scale.
+        h.key_mods(CTRL, Key::Num0);
+        let v = h.editor().canvas.view_xform();
+        let centre = v.paper_to_screen(pos2(960.0, 540.0));
+        assert!((centre - h.editor().canvas.dbg_rect.center()).length() < 1e-3);
+        assert!((v.zoom - fit).abs() < 1e-5);
+        // The ladder's ends hold.
+        assert_eq!(ladder_step(&ZOOM_LADDER, 16.0, true), 16.0);
+        assert_eq!(ladder_step(&ZOOM_LADDER, 0.125, false), 0.125);
+        let fired: Vec<Action> = h.performed().iter().map(|(a, _)| *a).collect();
+        for a in [Action::ZoomIn, Action::ZoomOut, Action::Zoom100, Action::ZoomFit] {
+            assert!(fired.contains(&a), "{a:?} fired from its chord");
+        }
+    }
+
+    #[test]
+    fn viewnav_space_drag_pans_without_ink_or_playback() {
+        let mut h = harness();
+        let strokes0 = strokes_on_frame(&h);
+        let pan0 = h.editor().canvas.view_xform().pan;
+        let c = h.editor().canvas.dbg_rect.center();
+        h.hold_key(Key::Space);
+        h.drag_path(&[c, c + vec2(30.0, 0.0), c + vec2(60.0, 20.0), c + vec2(90.0, 40.0)]);
+        let pan1 = h.editor().canvas.view_xform().pan;
+        assert!((pan1 - pan0).length() > 30.0, "the hand panned: {pan0:?} → {pan1:?}");
+        assert!(h.editor().canvas.stroke_tap.is_empty(), "the hand inks nothing");
+        assert_eq!(strokes_on_frame(&h), strokes0);
+        assert!(!h.state().view.playing);
+        h.release_key(Key::Space);
+        assert!(!h.state().view.playing, "a dragged hold is not a tap");
+        assert!(!h.performed().iter().any(|(a, _)| *a == Action::PlayPause));
+        // Releasing Space hands the pointer back to the brush.
+        h.drag_path(&[c, c + vec2(30.0, 0.0), c + vec2(60.0, 10.0)]);
+        assert!(!h.editor().canvas.stroke_tap.is_empty(), "the brush is back");
+        assert_eq!(strokes_on_frame(&h), strokes0 + 1);
+    }
+
+    #[test]
+    fn viewnav_space_tap_plays_once_and_r_still_flips() {
+        let mut h = harness();
+        h.key(Key::Space);
+        let plays = h.performed().iter().filter(|(a, _)| *a == Action::PlayPause).count();
+        assert_eq!(plays, 1, "one tap, one PlayPause");
+        assert!(h.state().view.playing);
+        h.key(Key::Space);
+        assert!(!h.state().view.playing);
+        h.hold_key(Key::R);
+        h.run();
+        assert!(h.editor().canvas.flip_held, "holding R still flips");
+        h.release_key(Key::R);
+        assert!(!h.editor().canvas.flip_held);
+    }
+
+    #[test]
+    fn viewnav_brackets_walk_the_size_ladder() {
+        let mut h = harness();
+        h.editor_mut().canvas.raster_brush_px = 14.0;
+        h.key(Key::CloseBracket);
+        assert_eq!(h.editor().canvas.brush_size(), 16.0);
+        h.key(Key::CloseBracket);
+        assert_eq!(h.editor().canvas.brush_size(), 20.0);
+        h.key(Key::OpenBracket);
+        h.key(Key::OpenBracket);
+        h.key(Key::OpenBracket);
+        assert_eq!(h.editor().canvas.brush_size(), 12.0);
+        // Off the ladder, a step lands on the next stop; the ends hold.
+        h.editor_mut().canvas.raster_brush_px = 15.0;
+        h.key(Key::CloseBracket);
+        assert_eq!(h.editor().canvas.brush_size(), 16.0);
+        h.editor_mut().canvas.raster_brush_px = 300.0;
+        h.key(Key::CloseBracket);
+        assert_eq!(h.editor().canvas.brush_size(), 300.0);
+        h.editor_mut().canvas.raster_brush_px = 1.0;
+        h.key(Key::OpenBracket);
+        assert_eq!(h.editor().canvas.brush_size(), 1.0);
+    }
+
+    #[test]
+    fn viewnav_hardness_and_aliased_persist_in_the_preset() {
+        let mut c = CanvasView::new();
+        assert_eq!(c.brush_hardness, crate::config::default_hardness());
+        c.brush_hardness = 0.4;
+        c.brush_aliased = true;
+        let p = c.snapshot_preset("pixel".into());
+        assert_eq!((p.hardness, p.aliased), (0.4, true));
+        let json = serde_json::to_string(&p).unwrap();
+        let back: BrushPreset = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+        let mut d = CanvasView::new();
+        d.apply_preset(&back);
+        assert_eq!((d.brush_hardness, d.brush_aliased), (0.4, true));
+        // A preset saved before GM4 reads back with the old edge.
+        let mut old = serde_json::to_value(&BrushPreset::default()).unwrap();
+        old.as_object_mut().unwrap().remove("hardness");
+        old.as_object_mut().unwrap().remove("aliased");
+        let old: BrushPreset = serde_json::from_value(old).unwrap();
+        assert_eq!((old.hardness, old.aliased), (0.85, false));
+    }
+
+    #[test]
+    fn viewnav_stabilizer_tail_lands_on_pen_up_in_the_canvas() {
+        let (tap, xf) = tap_for(0.0, false, 5);
+        let (raw, _) = tap_for(0.0, false, 0);
+        let pen_up = paper_path().last().copied().unwrap();
+        let last = tap.last().expect("tapped");
+        let d = ((last.x - pen_up.x).powi(2) + (last.y - pen_up.y).powi(2)).sqrt();
+        assert!(d < 1e-2, "the tail caught up to pen-up: {d} px off");
+        assert_ne!(tap.len(), raw.len(), "level 5 is not the raw pen");
+        assert_eq!(xf.rotation_deg, 0.0);
+    }
+
+    #[test]
+    fn viewnav_shift_click_rules_a_straight_line() {
+        let mut h = harness();
+        let c = h.editor().canvas.dbg_rect.center();
+        h.drag_path(&[c, c + vec2(20.0, 0.0), c + vec2(40.0, 10.0), c + vec2(60.0, 20.0)]);
+        let strokes = strokes_on_frame(&h);
+        let anchor = h.editor().canvas.line_anchor.expect("the stroke left an anchor");
+        let xf = h.editor().canvas.view_xform();
+        let click = c + vec2(-90.0, 70.0);
+        h.set_mods(Modifiers::SHIFT);
+        h.click_pos(click);
+        h.set_mods(Modifiers::NONE);
+        let end = xf.screen_to_paper(click);
+        let tap = h.editor().canvas.stroke_tap.clone();
+        assert!(tap.len() >= 10, "the line was tapped: {} samples", tap.len());
+        let seg = end - anchor;
+        for s in &tap {
+            let p = pos2(s.x, s.y);
+            let t = ((p - anchor).dot(seg) / seg.length_sq()).clamp(0.0, 1.0);
+            let off = (p - (anchor + seg * t)).length();
+            assert!(off <= 0.5, "{p:?} is {off} px off the segment");
+        }
+        let (first, last) = (tap[0], tap[tap.len() - 1]);
+        assert!((pos2(first.x, first.y) - anchor).length() < 1e-3);
+        assert!((pos2(last.x, last.y) - end).length() < 1e-3);
+        assert_eq!(strokes_on_frame(&h), strokes + 1, "the line committed as a stroke");
+    }
+
+    #[test]
+    fn viewnav_eyedropper_picks_the_rendered_pixel() {
+        use anim_core::raster::{TILE, TILE_LEN, f32_to_f16_bits};
+        let mut h = harness();
+        let slot = h.state().active_slot_resolved().expect("an armed layer");
+        let rgba = [0.25f32, 0.5, 0.125, 1.0];
+        let mut px = vec![0u16; TILE_LEN];
+        for i in 0..TILE * TILE {
+            for ch in 0..4 {
+                px[i * 4 + ch] = f32_to_f16_bits(rgba[ch]);
+            }
+        }
+        h.state_mut()
+            .commit_raster(vec![((15, 8), Arc::new(TileData::from_vec(px)))], slot)
+            .expect("the tile committed");
+        let (x, y) = (970u32, 530u32);
+        let (w, ht) = (h.state().engine.project.width, h.state().engine.project.height);
+        let frame = anim_core::export::render_frame(h.state().cut(), h.state().view.frame, w, ht);
+        let i = ((y * w + x) * 4) as usize;
+        let want = [frame[i], frame[i + 1], frame[i + 2], frame[i + 3]];
+        assert_eq!(want[3], 255, "the known pixel is inked");
+        let got = pick_color(h.state(), x as f32 + 0.5, y as f32 + 0.5, false);
+        assert_eq!(got, Some(want));
+        assert_eq!(pick_color(h.state(), 5.5, 5.5, false), None, "bare paper picks nothing");
+        // Alt+click with the brush puts that colour in the brush.
+        h.editor_mut().canvas.brush_color = [1, 2, 3, 255];
+        h.run();
+        let s = h.editor().canvas.view_xform().paper_to_screen(pos2(x as f32 + 0.5, y as f32 + 0.5));
+        h.set_mods(Modifiers::ALT);
+        h.click_pos(s);
+        h.set_mods(Modifiers::NONE);
+        assert_eq!(h.editor().canvas.brush_color, want);
+        assert!(h.editor().canvas.stroke_tap.is_empty(), "the pick inks nothing");
+    }
+
+    #[test]
+    fn viewnav_new_verbs_are_actions_with_free_chords() {
+        let verbs = [
+            Action::ZoomIn,
+            Action::ZoomOut,
+            Action::Zoom100,
+            Action::RotateViewLeft,
+            Action::RotateViewRight,
+            Action::ResetRotation,
+            Action::MirrorView,
+            Action::BrushSmaller,
+            Action::BrushBigger,
+        ];
+        for km in [Keymap::Gaban, Keymap::Industry] {
+            let binds = default_binds(km);
+            assert_eq!(clashes(&binds), vec![], "{km:?} has no chord conflict");
+            for a in verbs {
+                assert!(Action::ALL.contains(&a));
+                assert!((1..=120).contains(&a.help().chars().count()), "{a:?} has help");
+                let b = binds.iter().find(|b| b.action == a).expect("bound");
+                let c = b.chord.as_ref().unwrap_or_else(|| panic!("{a:?} has a chord in {km:?}"));
+                for k in &c.keys {
+                    assert!(egui::Key::from_name(k).is_some(), "{k} is a key");
+                    assert_ne!(k, "R", "R stays the flip");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn viewnav_keyed_rotate_mirror_and_tilt_turn_with_the_view() {
+        let mut h = harness();
+        h.key_mods(CTRL, Key::CloseBracket);
+        h.key_mods(CTRL, Key::CloseBracket);
+        assert_eq!(h.editor().canvas.view_rotation(), 30.0);
+        h.key_mods(CTRL, Key::OpenBracket);
+        assert_eq!(h.editor().canvas.view_rotation(), 15.0);
+        // The pane centre's paper point holds still while the view turns.
+        let v = h.editor().canvas.view_xform();
+        let mid = v.screen_to_paper(h.editor().canvas.dbg_rect.center());
+        h.key_mods(CTRL, Key::Backslash);
+        assert_eq!(h.editor().canvas.view_rotation(), 0.0);
+        let v0 = h.editor().canvas.view_xform();
+        assert!((v0.screen_to_paper(h.editor().canvas.dbg_rect.center()) - mid).length() < 1e-2);
+        h.key(Key::H);
+        assert!(h.editor().canvas.view_mirrored());
+        // A screen tilt reaches the paper turned back by the view angle.
+        for rot in [0.0, 15.0, 90.0, 137.0] {
+            let v = xf(rot, false, 1.0);
+            let t = v.dir_to_paper([0.6, 0.0]);
+            let back = rotate_vec(vec2(t[0], t[1]), rot);
+            assert!((back - vec2(0.6, 0.0)).length() < 1e-5);
+        }
+        let t = xf(90.0, false, 1.0).dir_to_paper([1.0, 0.0]);
+        assert!((t[0] - 0.0).abs() < 1e-5 && (t[1] + 1.0).abs() < 1e-5, "{t:?}");
+    }
+
+    #[test]
+    fn viewnav_paper_image_is_one_quad_at_the_turned_corners() {
+        let v = xf(90.0, true, 0.5);
+        let mesh = paper_image_mesh(&v, egui::TextureId::default(), plate::PAPER);
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices, vec![0, 1, 2, 0, 2, 3]);
+        let corners = v.paper_corners();
+        let uvs = [pos2(0.0, 0.0), pos2(1.0, 0.0), pos2(1.0, 1.0), pos2(0.0, 1.0)];
+        for (k, vert) in mesh.vertices.iter().enumerate() {
+            assert_eq!(vert.pos, corners[k]);
+            assert_eq!(vert.uv, uvs[k]);
+        }
+        // Turned 90°, the paper's screen box stands on its short side.
+        let b = v.paper_bounds();
+        assert!((b.width() - 540.0).abs() < 1e-2 && (b.height() - 960.0).abs() < 1e-2);
     }
 }

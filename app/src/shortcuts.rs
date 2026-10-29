@@ -19,7 +19,9 @@ use crate::config::{Action, Binding, Chord, Ctx};
 /// [`Action::ALL`] order.
 pub fn collect(ctx: &egui::Context, binds: &[Binding], here: Ctx) -> Vec<Action> {
     let typing = ctx.text_edit_focused();
-    ctx.input(|i| fired(i, binds, typing, here))
+    let released = ctx.input(|i| i.key_released(egui::Key::Space));
+    let hand = take_hand_drag(ctx, released);
+    ctx.input(|i| fired(i, binds, typing, here, hand))
 }
 
 /// The same over one viewport's input — the popout canvas is its own OS
@@ -31,10 +33,43 @@ pub fn collect_for(
     here: Ctx,
 ) -> Vec<Action> {
     let typing = ctx.text_edit_focused();
-    ctx.input_for(viewport, |i| fired(i, binds, typing, here))
+    let released = ctx.input_for(viewport, |i| i.key_released(egui::Key::Space));
+    let hand = take_hand_drag(ctx, released);
+    ctx.input_for(viewport, |i| fired(i, binds, typing, here, hand))
 }
 
-fn fired(i: &egui::InputState, binds: &[Binding], typing: bool, here: Ctx) -> Vec<Action> {
+/// GM4: the canvas notes that the Space hold dragged (the hand panned or
+/// turned the view), so the release that ends the hold is not a tap.
+pub fn note_hand_drag(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.insert_temp(hand_id(), true));
+}
+
+/// GM4: forget a stale note when a new Space hold starts.
+pub fn clear_hand_drag(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<bool>(hand_id()));
+}
+
+fn hand_id() -> egui::Id {
+    egui::Id::new("gm4-space-hand-dragged")
+}
+
+/// Did the Space hold drag? Space's release ends the hold, so it also
+/// clears the note.
+fn take_hand_drag(ctx: &egui::Context, released: bool) -> bool {
+    let dragged = ctx.data(|d| d.get_temp::<bool>(hand_id()).unwrap_or(false));
+    if released && dragged {
+        clear_hand_drag(ctx);
+    }
+    dragged
+}
+
+fn fired(
+    i: &egui::InputState,
+    binds: &[Binding],
+    typing: bool,
+    here: Ctx,
+    hand_dragged: bool,
+) -> Vec<Action> {
     Action::ALL
         .iter()
         .copied()
@@ -43,7 +78,10 @@ fn fired(i: &egui::InputState, binds: &[Binding], typing: bool, here: Ctx) -> Ve
                 return false;
             };
             b.chords().any(|c| {
-                (!typing || fires_over_field(c)) && c.matches(i) && aimed_here(*a, c, binds, here)
+                (!typing || fires_over_field(c))
+                    && c.matches(i)
+                    && !(hand_dragged && c.is_space_tap())
+                    && aimed_here(*a, c, binds, here)
             })
         })
         .collect()

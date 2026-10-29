@@ -2324,3 +2324,16 @@ what was not verified.
   not search pane names or settings (stretch); cut sits after window on the slate (its old place).
   Not verified: the real window's menus and F3, the Settings ▸ Shortcuts preset detents (config tested,
   not the page), and the App's own palette gate (the testkit mirrors it).
+- 2026-10-29 — GM4 canvas view and pen aids: `ViewXform` (zoom, pan, turn, display-only mirror) maps
+  screen↔paper for every tool; paper images are one textured quad each (`paint_paper_image`). Space
+  hand: drag pans, Shift+drag turns (Ctrl snaps 15°), PlayPause moved to Space's release (a tap). Nine
+  new Actions in both keymaps: zoom in/out on a pinned ladder (Ctrl+= / Ctrl+-), 100% (Ctrl+1), rotate
+  ±15° (Ctrl+[ / Ctrl+]), reset (Ctrl+\), mirror (H), brush size `[` / `]` on a size ladder; egui's
+  own keyboard UI zoom is off so Ctrl+= / - / 0 reach them. Hardness and aliased in the OPTIONS row and
+  the preset; aliased rides the dab's hardness (`ALIASED_HARDNESS`, the wire's Dab is unchanged) with a
+  CPU mirror `dab_coverage`. Stabilizer 0–10 (pulled string + light smoothing, `stabilizer.rs`, tail
+  reeled to pen-up), Shift+click rules a line from the last stroke, Alt+click picks the composited
+  colour. Stroke tap (`stroke_tap`) for the harness. 17 `viewnav_*` tests; colour literals unchanged at
+  86. Left: two-finger touch rotation, per-viewer flip (stretch). Not verified: the real window, the
+  mesh and aliased shader on a GPU, tablet tilt on hardware, and the Legacy colour law on a repainted
+  pick (GM7).
