@@ -10,6 +10,7 @@ use eframe::egui;
 use crate::canvas::{DEFAULT_PAPER_H, DEFAULT_PAPER_W};
 use crate::doc::AppState;
 use crate::plate;
+use crate::templates;
 
 /// (label, width, height). Width 0 = "Custom" (leave the fields as the user set).
 const PRESETS: &[(&str, u32, u32)] = &[
@@ -38,6 +39,10 @@ pub struct NewProjectForm {
     pub fps: u32,
     pub dpi: u32,
     pub preset: usize,
+    /// GM8: the Welcome template this cut starts from (`templates::ALL`):
+    /// its columns, cut length and first room, at this form's size and
+    /// rate. None: a blank cut with one column.
+    pub template: Option<usize>,
 }
 
 impl Default for NewProjectForm {
@@ -51,6 +56,7 @@ impl Default for NewProjectForm {
             fps: 24,
             dpi: 300,
             preset: 2, // Full HD 1080p
+            template: None,
         }
     }
 }
@@ -67,10 +73,28 @@ impl NewProjectForm {
             "" => "Untitled".to_string(),
             n => n.to_string(),
         };
-        let mut state =
-            AppState::new_project(name, self.width, self.height, self.fps, self.dpi as f32);
+        let mut state = match self.template() {
+            // GM8: the template's sheet, cut length and graph; the paper
+            // and rate are this form's (the same clamps as new_project).
+            Some(t) => {
+                let mut s = t.build();
+                let p = &mut s.engine.project;
+                p.name = name;
+                p.width = self.width.max(1);
+                p.height = self.height.max(1);
+                p.fps = self.fps.clamp(1, 240);
+                p.dpi = (self.dpi as f32).max(1.0);
+                s
+            }
+            None => AppState::new_project(name, self.width, self.height, self.fps, self.dpi as f32),
+        };
         state.engine.project.color_law = ColorLaw::Srgb;
         state
+    }
+
+    /// GM8: the template chosen, if any.
+    pub fn template(&self) -> Option<&'static templates::Template> {
+        self.template.and_then(|i| templates::ALL.get(i))
     }
 }
 
@@ -106,6 +130,30 @@ pub fn form_ui(
                     .desired_width(220.0)
                     .hint_text("the cut's name"),
             );
+            ui.end_row();
+            // GM8: the Welcome's templates — picking one sets the paper and
+            // rate; its columns, cut length and room come with it.
+            plate::legend(ui, "start from");
+            egui::ComboBox::from_id_salt("np_template")
+                .selected_text(form.template().map_or("blank (one column)", |t| t.name))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut form.template, None, "blank (one column)");
+                    for (i, t) in templates::ALL.iter().enumerate() {
+                        if ui
+                            .selectable_value(&mut form.template, Some(i), t.name)
+                            .on_hover_text(format!("{} · {}", t.summary(), t.tooltip()))
+                            .clicked()
+                        {
+                            form.width = t.width;
+                            form.height = t.height;
+                            form.fps = t.fps;
+                            form.preset = PRESETS
+                                .iter()
+                                .position(|p| (p.1, p.2) == (t.width, t.height))
+                                .unwrap_or(0);
+                        }
+                    }
+                });
             ui.end_row();
             plate::legend(ui, "paper");
             egui::ComboBox::from_id_salt("np_preset")

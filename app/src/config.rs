@@ -138,6 +138,8 @@ pub enum Action {
     // GM8: the auto-comp and the project's own settings window.
     BuildComposite,
     ProjectSettings,
+    /// GM8: the Welcome screen again (templates, recent, the sample).
+    WelcomeScreen,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -355,6 +357,7 @@ impl Action {
         Action::ShowPaintCheck,
         Action::BuildComposite,
         Action::ProjectSettings,
+        Action::WelcomeScreen,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -470,6 +473,7 @@ impl Action {
             Action::ShowPaintCheck => "Nuri check (paint check)",
             Action::BuildComposite => "Build composite from sheet",
             Action::ProjectSettings => "Project settings…",
+            Action::WelcomeScreen => "Welcome screen…",
         }
     }
 
@@ -516,7 +520,7 @@ impl Action {
             NewProject => "Start a new project (asks first about unsaved work).",
             CommandPalette => "Search every command by name and run it.",
             ShortcutSheet => "List every shortcut, grouped and searchable.",
-            QuickStart => "The first five minutes: draw, time, play, save.",
+            QuickStart => "The first five minutes: draw, mark a key, inbetween, play, export.",
             About => "Version and credits.",
             History => "Every step so far; click one to go back or forward to it.",
             Settings => "Shortcuts, pen, performance and the rest.",
@@ -589,8 +593,9 @@ impl Action {
             ResetShift => "Put every shifted light-table ghost back where it belongs.",
             ConvertColorsToSrgb => "Store this saved project's colours as exact sRGB chips (a backup is written first).",
             ShowPaintCheck => "Open the nuri check pane: unpainted holes and off-palette colours, click to jump.",
-            BuildComposite => "Wire every rendered column into the node graph in sheet order (one undo step).",
+            BuildComposite => "Replace the node graph with every rendered column in sheet order (one undo step).",
             ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
+            WelcomeScreen => "Show the Welcome screen: templates, recent files and the sample cut (unsaved work is asked about first).",
         }
     }
 
@@ -599,7 +604,7 @@ impl Action {
         use Action::*;
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings => Group::File,
+            | BuildComposite | ProjectSettings | WelcomeScreen => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
@@ -716,6 +721,7 @@ impl Action {
             ConvertColorsToSrgb => "Project/Convert colours to sRGB…",
             BuildComposite => "Project/Build composite from sheet",
             ProjectSettings => "Project/Project settings…",
+            WelcomeScreen => "File/Welcome screen…",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             // Each item is its room detent's Stage::name (a test holds them
@@ -781,6 +787,7 @@ impl Action {
             // GM8: the auto-comp and the project's settings.
             BuildComposite => &["auto comp", "autocomp", "wire graph", "build graph"],
             ProjectSettings => &["project properties", "resolution", "frame rate", "canvas size"],
+            WelcomeScreen => &["templates", "new from template", "start page", "welcome"],
             // GM5: the sheet verbs by the words a timing sheet uses.
             InsertFrames => &["insert frames", "add frame", "open a frame"],
             DeleteFrames => &["delete frames", "remove frame", "close a frame"],
@@ -1087,7 +1094,7 @@ impl Action {
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings => None,
+            | BuildComposite | ProjectSettings | WelcomeScreen => None,
         }
     }
 }
@@ -3250,18 +3257,35 @@ pub(crate) fn general_page(
         }
     }
     // GM8: the UI scale, applied as egui's zoom factor on the next frame.
+    // While the handle is held the new value waits (egui memory): applied
+    // mid-drag it would rescale the slider under the pointer and the value
+    // would jump. It lands on release (a click or a key lands at once).
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.label("UI scale");
-        let mut pct = config.ui.scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end());
+        let held_id = ui.make_persistent_id("gm8_ui_scale_held");
+        let committed = config.ui.scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end());
+        let mut pct = ui.data(|d| d.get_temp::<u32>(held_id)).unwrap_or(committed);
         let r = ui.add(egui::Slider::new(&mut pct, UI_SCALE_RANGE).step_by(10.0).suffix("%"));
-        if r.changed() {
-            config.ui.scale = pct;
-        }
-        if r.drag_stopped() || (r.changed() && !r.dragged()) {
-            changed = true;
+        if r.dragged() || r.is_pointer_button_down_on() {
+            ui.data_mut(|d| d.insert_temp(held_id, pct));
+        } else {
+            ui.data_mut(|d| d.remove::<u32>(held_id));
+            if pct != committed {
+                config.ui.scale = pct;
+                changed = true;
+            }
         }
     });
+    // GM8: the Welcome screen's start-up latch lives here too, so a latch
+    // turned off on that screen can be turned back on.
+    ui.add_space(6.0);
+    if crate::plate::latch(ui, &mut config.ui.show_welcome, "Show the Welcome screen at startup")
+        .on_hover_text("off: start-up opens the New Project form (File ▸ Welcome screen… still shows it)")
+        .changed()
+    {
+        changed = true;
+    }
     if changed {
         config.save();
     }

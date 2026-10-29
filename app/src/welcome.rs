@@ -31,7 +31,11 @@ pub const RECENT_CARDS: usize = 12;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShowMe {
     Perform(Action),
-    Room(Stage),
+    /// Do it when the cut allows (a charted key for inbetweens), else open
+    /// the room where it is set up.
+    Try(Action, Stage),
+    /// The editing room, with the status line pointing at File ▸ Export….
+    Export,
 }
 
 pub struct Step {
@@ -44,7 +48,7 @@ pub struct Step {
 
 pub const STEPS: [Step; 5] = [
     Step {
-        label: "Draw a drawing",
+        label: "Make a new drawing",
         ticks_on: Some(Action::NewDrawing),
         show_me: ShowMe::Perform(Action::NewDrawing),
     },
@@ -56,7 +60,7 @@ pub const STEPS: [Step; 5] = [
     Step {
         label: "Make an inbetween",
         ticks_on: Some(Action::MakeInbetweens),
-        show_me: ShowMe::Room(Stage::Drawing),
+        show_me: ShowMe::Try(Action::MakeInbetweens, Stage::Drawing),
     },
     Step {
         label: "Play",
@@ -66,7 +70,7 @@ pub const STEPS: [Step; 5] = [
     Step {
         label: "Export",
         ticks_on: None,
-        show_me: ShowMe::Room(Stage::Edit),
+        show_me: ShowMe::Export,
     },
 ];
 
@@ -85,9 +89,14 @@ pub fn tick(ticks: &mut [bool; 5], action: Action) -> bool {
     changed
 }
 
-/// The checklist rows: a tick, the step, and "Show me". Returns the step
-/// whose button was clicked.
-pub fn checklist_ui(ui: &mut egui::Ui, ticks: &[bool; 5]) -> Option<usize> {
+/// The checklist rows: a tick, the step, its chord (from `binds`, so the
+/// keys are learnt with the step) and "Show me". Returns the step whose
+/// button was clicked.
+pub fn checklist_ui(
+    ui: &mut egui::Ui,
+    ticks: &[bool; 5],
+    binds: &[crate::config::Binding],
+) -> Option<usize> {
     let mut clicked = None;
     for (i, step) in STEPS.iter().enumerate() {
         ui.horizontal(|ui| {
@@ -98,11 +107,17 @@ pub fn checklist_ui(ui: &mut egui::Ui, ticks: &[bool; 5]) -> Option<usize> {
                 plate::legend_dim()
             }));
             ui.label(format!("{}. {}", i + 1, step.label));
+            if let Some(chord) = step.ticks_on.and_then(|a| crate::cmdpal::chord_of(binds, a)) {
+                ui.label(egui::RichText::new(chord).color(plate::legend_dim()));
+            }
             if ui
                 .small_button("Show me")
                 .on_hover_text(match step.show_me {
                     ShowMe::Perform(a) => format!("does it: {}", a.label()),
-                    ShowMe::Room(st) => format!("opens the {} room", st.name()),
+                    ShowMe::Try(a, st) => {
+                        format!("does it: {} (or opens the {} room)", a.label(), st.name())
+                    }
+                    ShowMe::Export => "opens the edit room; export is File ▸ Export…".into(),
                 })
                 .clicked()
             {
@@ -269,12 +284,19 @@ pub enum WelcomeAction {
     Sample,
     /// "Show me" on a Quick start step: open the sample, then do the step.
     ShowMe(usize),
+    /// Settings… (the shell's window, over the screen).
+    Settings,
+    /// Close the screen shown over an open cut (File ▸ Welcome screen…).
+    Back,
 }
 
 #[derive(Default)]
 pub struct Welcome {
     pub cards: Vec<RecentCard>,
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
+    /// Shown again over an open cut (File ▸ Welcome screen…): a modal with
+    /// a way back, and the cut stays open until a card replaces it.
+    pub over_editor: bool,
 }
 
 impl Welcome {
@@ -282,6 +304,15 @@ impl Welcome {
         Self {
             cards: recent_cards(recent),
             textures: HashMap::new(),
+            over_editor: false,
+        }
+    }
+
+    /// The screen again over an open cut.
+    pub fn over_editor(recent: &[PathBuf]) -> Self {
+        Self {
+            over_editor: true,
+            ..Self::new(recent)
         }
     }
 
@@ -313,23 +344,35 @@ fn section(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).strong().color(plate::LEGEND));
 }
 
-/// The Welcome screen, drawn into the central area.
+/// The Welcome screen, drawn into the central area (or a modal over an
+/// open cut). `binds` names the chords beside Open… and the checklist.
 pub fn ui(
     ui: &mut egui::Ui,
     w: &mut Welcome,
     show_at_startup: &mut bool,
     ticks: &[bool; 5],
+    binds: &[crate::config::Binding],
 ) -> Option<WelcomeAction> {
     let mut out = None;
     plate::surface(ui);
     egui::ScrollArea::vertical().show(ui, |ui| {
-        ui.heading("Gaban Studio");
+        ui.horizontal(|ui| {
+            ui.heading("Gaban Studio");
+            if w.over_editor
+                && ui
+                    .button("Back to the cut")
+                    .on_hover_text("closes this screen; the open cut is untouched — Esc")
+                    .clicked()
+            {
+                out = Some(WelcomeAction::Back);
+            }
+        });
         ui.add_space(8.0);
         section(ui, "New from template");
         ui.horizontal_wrapped(|ui| {
             for (i, t) in templates::ALL.iter().enumerate() {
                 ui.vertical(|ui| {
-                    if ui.button(t.name).on_hover_text(t.summary()).clicked() {
+                    if ui.button(t.name).on_hover_text(t.tooltip()).clicked() {
                         out = Some(WelcomeAction::Template(i));
                     }
                     ui.label(
@@ -350,7 +393,11 @@ pub fn ui(
         });
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if ui.button("Open…").clicked() {
+            let open_hint = match crate::cmdpal::chord_of(binds, Action::Open) {
+                Some(chord) => format!("Open a saved project (.animproj) — {chord}"),
+                None => "Open a saved project (.animproj)".into(),
+            };
+            if ui.button("Open…").on_hover_text(open_hint).clicked() {
                 out = Some(WelcomeAction::Open);
             }
             if ui
@@ -359,6 +406,13 @@ pub fn ui(
                 .clicked()
             {
                 out = Some(WelcomeAction::Sample);
+            }
+            if ui
+                .button("Settings…")
+                .on_hover_text("theme, UI scale, pen and shortcuts — before the first cut")
+                .clicked()
+            {
+                out = Some(WelcomeAction::Settings);
             }
         });
         ui.add_space(8.0);
@@ -416,11 +470,13 @@ pub fn ui(
         });
         ui.add_space(8.0);
         section(ui, "Quick start");
-        if let Some(step) = checklist_ui(ui, ticks) {
+        if let Some(step) = checklist_ui(ui, ticks, binds) {
             out = Some(WelcomeAction::ShowMe(step));
         }
         ui.add_space(8.0);
-        ui.checkbox(show_at_startup, "Show at startup");
+        plate::latch(ui, show_at_startup, "Show at startup").on_hover_text(
+            "off: start-up opens the New Project form; Settings ▸ General turns it back on",
+        );
     });
     out
 }
@@ -572,6 +628,7 @@ mod tests {
         let mut show = true;
         let mut got = None;
         let mut dressed = false;
+        let binds = crate::config::Config::default().keybinds;
         let mut h = egui_kittest::Harness::builder()
             .with_size(egui::vec2(1280.0, 800.0))
             .build_ui(|ui| {
@@ -581,7 +638,7 @@ mod tests {
                     ui.ctx().request_repaint();
                     return;
                 }
-                if let Some(a) = super::ui(ui, &mut w, &mut show, &[false; 5]) {
+                if let Some(a) = super::ui(ui, &mut w, &mut show, &[false; 5], &binds) {
                     got = Some(a);
                 }
             });
@@ -622,6 +679,7 @@ mod tests {
         let mut show = true;
         let mut got = None;
         let mut dressed = false;
+        let binds = config.keybinds.clone();
         {
             let mut h = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(1280.0, 800.0))
@@ -631,7 +689,7 @@ mod tests {
                         ui.ctx().request_repaint();
                         return;
                     }
-                    if let Some(a) = super::ui(ui, &mut w, &mut show, &[false; 5]) {
+                    if let Some(a) = super::ui(ui, &mut w, &mut show, &[false; 5], &binds) {
                         got = Some(a);
                     }
                 });
@@ -831,5 +889,295 @@ mod tests {
         assert!(h.editor().quick_start[3]);
         h.perform(Action::PlayPause);
         h.run();
+    }
+
+    #[test]
+    fn welcome_resize_keeps_the_pixels_and_the_layers() {
+        let mut h = crate::testkit::EditorHarness::with_state(crate::sample::build_sample());
+        let (w0, h0) = crate::sample::SIZE;
+        let cut0 = h.state().cut().clone();
+        let before = render_frame(&cut0, 0, w0, h0);
+        let layers = (h.editor().paint.is_some(), h.editor().graph.is_some());
+        h.perform(Action::ProjectSettings);
+        h.run();
+        let form = h.editor_mut().project_form.as_mut().unwrap();
+        (form.width, form.height) = (800, 450);
+        h.click("Apply");
+        h.run();
+        let p = &h.state().engine.project;
+        assert_eq!((p.width, p.height), (800, 450));
+        // The GPU paint layer and compositor are kept: they follow the
+        // size on their own (`ensure_size`), never dropped for good.
+        assert_eq!(
+            (h.editor().paint.is_some(), h.editor().graph.is_some()),
+            layers
+        );
+        // No tile moved: the old picture sits at the top-left of the
+        // bigger paper, the rest is empty.
+        let cut1 = h.state().cut();
+        assert_eq!(cut1.drawings, cut0.drawings);
+        let after = render_frame(cut1, 0, 800, 450);
+        for y in 0..450usize {
+            for x in 0..800usize {
+                let px = &after[(y * 800 + x) * 4..][..4];
+                if x < w0 as usize && y < h0 as usize {
+                    assert_eq!(px, &before[(y * w0 as usize + x) * 4..][..4], "({x}, {y})");
+                } else {
+                    assert_eq!(px[3], 0, "({x}, {y}) is past the old paper");
+                }
+            }
+        }
+        h.perform(Action::Undo);
+        h.run();
+        let p = &h.state().engine.project;
+        assert_eq!((p.width, p.height), (w0, h0));
+    }
+
+    #[test]
+    fn welcome_new_columns_reach_the_auto_comp() {
+        use anim_core::raster::{RasterLayer, TILE_LEN, TileData};
+        use anim_core::xsheet::ColumnKind;
+        let mut s = templates::ALL[1].build(); // BG, A, B
+        s.add_column();
+        assert_eq!(s.engine.history_len(), 1, "the column and its chain: one step");
+        s.new_drawing_at_frame();
+        let id = s.current_drawing().expect("a drawing in the new column");
+        let at = s.at();
+        let texel = anim_core::color::ColorLaw::Srgb.texel([200, 30, 30, 255]);
+        let rgba: Vec<u16> = texel.iter().copied().cycle().take(TILE_LEN).collect();
+        let cut = s.engine.project.cut_mut(at.scene, at.cut).unwrap();
+        let d = cut.drawings.iter_mut().find(|d| d.id == id).unwrap();
+        d.layers[0].raster = RasterLayer {
+            tiles: std::collections::BTreeMap::from([(
+                (0, 0),
+                std::sync::Arc::new(TileData::from_vec(rgba)),
+            )]),
+        };
+        // The graph follows the sheet: its render is the column render,
+        // the new column's pixels included.
+        let cut = s.cut();
+        assert_eq!(crate::doc::auto_chain(&cut.graph), Some(cut.render_order()));
+        let column = render_frame(cut, 0, 320, 180);
+        assert!(column.chunks(4).any(|p| p[3] > 0), "the new column draws");
+        let law = s.engine.project.color_law;
+        assert!(render_graph_frame_law(cut, law, 0, 320, 180) == Some(column));
+        // A kind change and a removal re-steer it too, one step each.
+        let a = cut.xsheet.columns[1].id;
+        let added = s.view.active_column;
+        s.view.active_column = a;
+        let n = s.engine.history_len();
+        s.set_column_kind(ColumnKind::Ref);
+        assert_eq!(s.engine.history_len(), n + 1);
+        assert!(!s.cut().render_order().contains(&a));
+        assert_eq!(crate::doc::auto_chain(&s.cut().graph), Some(s.cut().render_order()));
+        s.view.active_column = added;
+        s.remove_active_column();
+        assert_eq!(crate::doc::auto_chain(&s.cut().graph), Some(s.cut().render_order()));
+        // Undo brings the column and its chain back together.
+        s.engine.undo().unwrap();
+        assert!(s.cut().render_order().contains(&added));
+        assert_eq!(crate::doc::auto_chain(&s.cut().graph), Some(s.cut().render_order()));
+        // A graph shaped by hand is never touched.
+        s.graph_add_node(anim_core::graph::NodeKind::Output, (40.0, 40.0));
+        let shaped = s.cut().graph.clone();
+        s.add_column();
+        assert_eq!(s.cut().graph, shaped);
+    }
+
+    #[test]
+    fn welcome_build_composite_asks_over_a_hand_graph() {
+        let mut h = crate::testkit::EditorHarness::with_state(crate::sample::build_sample());
+        // Over the auto-comp it runs at once, one step.
+        let n0 = h.state().engine.history_len();
+        assert_eq!(h.perform(Action::BuildComposite), crate::Performed::Done);
+        assert_eq!(h.state().engine.history_len(), n0 + 1);
+        assert_eq!(h.state().auto_comp_confirm, None);
+        // A node added by hand: the verb asks first and changes nothing.
+        h.state_mut()
+            .graph_add_node(anim_core::graph::NodeKind::Output, (40.0, 40.0));
+        let shaped = h.state().cut().graph.clone();
+        let n = shaped.nodes().count();
+        let steps = h.state().engine.history_len();
+        h.perform(Action::BuildComposite);
+        h.run();
+        assert!(h.has(&format!(
+            "Replace the node graph ({n} nodes)? Undo brings it back."
+        )));
+        assert_eq!(h.state().cut().graph, shaped);
+        h.click("Cancel");
+        h.run();
+        assert_eq!(h.state().auto_comp_confirm, None);
+        assert_eq!(h.state().cut().graph, shaped);
+        // Held DANGER: replaced in one step, and undo brings it back.
+        h.perform(Action::BuildComposite);
+        h.run();
+        h.hold("Replace");
+        assert_eq!(h.state().engine.history_len(), steps + 1);
+        assert!(crate::doc::auto_chain(&h.state().cut().graph).is_some());
+        h.perform(Action::Undo);
+        h.run();
+        assert_eq!(h.state().cut().graph, shaped);
+        assert!(Action::BuildComposite.help().starts_with("Replace the node graph"));
+    }
+
+    #[test]
+    fn welcome_screen_comes_back_after_startup() {
+        // File ▸ Welcome screen…: a clean cut goes at once.
+        let mut s = crate::sample::build_sample();
+        s.saved_rev = s.engine.revision();
+        let mut h = crate::testkit::EditorHarness::with_state(s);
+        assert_eq!(Action::WelcomeScreen.menu(), Some("File/Welcome screen…"));
+        assert_eq!(h.perform(Action::WelcomeScreen), crate::Performed::Done);
+        assert!(h.editor().request_welcome);
+        // Unsaved work is asked about first.
+        h.editor_mut().request_welcome = false;
+        h.state_mut().add_column();
+        assert!(h.state().is_dirty());
+        h.perform(Action::WelcomeScreen);
+        h.run();
+        assert!(h.editor().leave_pending() && !h.editor().request_welcome);
+        h.hold("Don't Save");
+        assert!(h.editor().request_welcome);
+        // The palette finds it by the words a newcomer types.
+        assert!(Action::WelcomeScreen.aliases().contains(&"templates"));
+        // Over a cut the screen stays until a card or Back ends it.
+        let c = crate::config::Config::default();
+        let again = Welcome::over_editor(&[]);
+        assert_eq!(
+            crate::startup_route(true, false, Some(&again), &c),
+            crate::Startup::Keep
+        );
+        // Settings ▸ General carries the start-up latch, so it can be
+        // turned back on.
+        let mut config = c.clone();
+        config.ui.show_welcome = false;
+        let mut flag = false;
+        let mut dressed = false;
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(900.0, 900.0))
+            .build_ui(|ui| {
+                // The plate's fonts go live on the next pass.
+                if !std::mem::replace(&mut dressed, true) {
+                    crate::dress(ui.ctx());
+                    ui.ctx().request_repaint();
+                    return;
+                }
+                crate::config::general_page(ui, &mut config, None, &mut flag);
+            });
+        h.run();
+        assert!(
+            h.query_by_label("Show the Welcome screen at startup")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn welcome_startup_route_picks_the_screen() {
+        use crate::{Startup, startup_route};
+        let mut c = crate::config::Config::default();
+        // Nothing open: the Welcome screen.
+        assert_eq!(startup_route(false, false, None, &c), Startup::Welcome);
+        // The latch off: the New Project form, as before GM8.
+        c.ui.show_welcome = false;
+        assert_eq!(startup_route(false, false, None, &c), Startup::NewForm);
+        // A cut restored under the start-up screen (recovery, a handover)
+        // drops it; a form over the screen keeps it for its Cancel.
+        c.ui.show_welcome = true;
+        let start = Welcome::default();
+        assert_eq!(
+            startup_route(true, false, Some(&start), &c),
+            Startup::DropWelcome
+        );
+        assert_eq!(startup_route(false, true, Some(&start), &c), Startup::Keep);
+        assert_eq!(startup_route(true, false, None, &c), Startup::Keep);
+        assert_eq!(startup_route(false, true, None, &c), Startup::Keep);
+    }
+
+    #[test]
+    fn welcome_show_me_works_from_the_screen() {
+        // Step 1 on the sample: its empty column B takes the new drawing.
+        let (ed, did) = crate::welcome_show_me(0, None, None);
+        assert_eq!(did, crate::Performed::Done);
+        assert!(ed.quick_start[0], "step 1 ticked");
+        let b = ed.state.cut().xsheet.column(ed.state.view.active_column).unwrap();
+        assert_eq!(b.name, "B");
+        assert!(ed.state.current_drawing().is_some());
+        // Every step does something from the screen it is offered on.
+        for (i, step) in STEPS.iter().enumerate() {
+            let (ed, did) = crate::welcome_show_me(i, None, None);
+            assert_eq!(did, crate::Performed::Done, "step {}", i + 1);
+            if let Some(a) = step.ticks_on.filter(|a| *a != Action::MakeInbetweens) {
+                assert!(ed.quick_start[i], "step {} ({a:?}) ticked", i + 1);
+            }
+        }
+        // The sample still renders as before: B is empty.
+        let s = crate::sample::build_practice();
+        let (w, h) = crate::sample::SIZE;
+        let cut = s.cut();
+        assert!(
+            render_graph_frame_law(cut, s.engine.project.color_law, 0, w, h)
+                == Some(render_frame(cut, 0, w, h))
+        );
+    }
+
+    #[test]
+    fn welcome_animatic_board_renders_under_a() {
+        let t = templates::ALL
+            .iter()
+            .find(|t| t.name.starts_with("Animatic"))
+            .unwrap();
+        let s = t.build();
+        let cut = s.cut();
+        let names: Vec<&str> = cut
+            .render_order()
+            .iter()
+            .map(|id| cut.xsheet.column(*id).unwrap().name.as_str())
+            .collect();
+        assert_eq!(names, ["BOARD", "A"], "the boards render, A above them");
+        assert!(t.tooltip().contains("BOARD, A"));
+    }
+
+    #[test]
+    fn welcome_new_project_form_offers_the_templates() {
+        use crate::newproject::{NewProjectForm, form_ui};
+        // The blank form is unchanged: one column, a 48-frame cut.
+        let blank = NewProjectForm::default().new_state();
+        assert_eq!(blank.cut().xsheet.columns.len(), 1);
+        assert_eq!(blank.frame_count(), 48);
+        // Picked in the form, a template brings its sheet and cut length.
+        let mut form = NewProjectForm::default();
+        let mut dressed = false;
+        {
+            let mut h = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(700.0, 700.0))
+                .build_ui(|ui| {
+                    if !std::mem::replace(&mut dressed, true) {
+                        crate::dress(ui.ctx());
+                        ui.ctx().request_repaint();
+                        return;
+                    }
+                    form_ui(ui, &mut form, true);
+                });
+            h.run();
+            // The first combo on the form is "start from".
+            h.query_all_by_role(egui::accesskit::Role::ComboBox)
+                .next()
+                .expect("the template combo")
+                .click();
+            h.run();
+            h.get_by_label("Animatic / storyboard").click();
+            h.run();
+        }
+        assert_eq!(form.template, Some(3));
+        assert_eq!((form.width, form.height, form.fps), (1920, 1080, 24));
+        form.name = "boards".into();
+        let s = form.new_state();
+        let p = &s.engine.project;
+        assert_eq!(p.name, "boards");
+        assert_eq!(p.default_cut_frames, Some(120));
+        assert_eq!(p.color_law, anim_core::color::ColorLaw::Srgb);
+        assert_eq!(s.frame_count(), 120);
+        let names: Vec<&str> = s.cut().xsheet.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["BOARD", "A"]);
     }
 }

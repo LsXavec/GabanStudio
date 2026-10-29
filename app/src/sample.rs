@@ -1,7 +1,8 @@
 //! GM8: the sample cut, built procedurally (no binary assets): a BG plate
 //! (sky gradient over ground), a ball bounce over 24 frames on twos — 12
-//! drawings, the keys marked Key and the rest Inbetween — and a palette
-//! with line and paint roles. It opens untitled; Save As keeps it.
+//! drawings, the keys marked Key and the rest Inbetween — an empty column B
+//! above it for practice, and a palette with line and paint roles. It opens
+//! untitled; Save As keeps it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -75,6 +76,8 @@ pub fn build_sample() -> AppState {
     let at = s.at();
     let ball_col = s.view.active_column;
     let bg_col = s.engine.add_column(at, "BG").expect("fresh cut");
+    // Empty: Quick start's first steps draw here, not over the ball.
+    s.engine.add_column(at, "B").expect("fresh cut");
     let mut ids = Vec::new();
     for _ in 0..13 {
         ids.push((
@@ -151,7 +154,7 @@ pub fn build_sample() -> AppState {
             c.set_key(2 * i as u32, Exposure::Drawing(id));
         }
     }
-    // The ball's column sits above the plate in the sheet.
+    // The ball's column (and B after it) sits above the plate in the sheet.
     cut.xsheet.columns.sort_by_key(|c| c.id != bg_col);
     s.palettes = Palettes {
         characters: vec![CharacterPalette {
@@ -178,5 +181,17 @@ pub fn build_sample() -> AppState {
     };
     s.auto_comp();
     s.engine.clear_history();
+    s
+}
+
+/// The sample with its empty column B active on frame 0 — where Quick
+/// start's "Show me" begins (a new drawing needs an empty cell).
+pub fn build_practice() -> AppState {
+    let mut s = build_sample();
+    let b = s.cut().xsheet.columns.iter().find(|c| c.name == "B").map(|c| c.id);
+    if let Some(b) = b {
+        s.view.active_column = b;
+    }
+    s.view.frame = 0;
     s
 }

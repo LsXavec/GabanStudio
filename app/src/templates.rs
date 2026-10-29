@@ -61,7 +61,9 @@ pub const ALL: &[Template] = &[
         fps: 24,
         cut_frames: 120,
         room: Stage::Edit,
-        columns: &[("BOARD", ColumnKind::Ref), A],
+        // The boards are the picture (a BG-band column, so they render and
+        // export), the A column draws over them.
+        columns: &[("BOARD", ColumnKind::Bg), A],
     },
 ];
 
@@ -71,6 +73,16 @@ impl Template {
         format!(
             "{}×{} · {} fps · {} frames",
             self.width, self.height, self.fps, self.cut_frames
+        )
+    }
+
+    /// The card's hover: the room it opens in and the columns it starts with.
+    pub fn tooltip(&self) -> String {
+        let columns: Vec<&str> = self.columns.iter().map(|(name, _)| *name).collect();
+        format!(
+            "opens in the {} room · columns {}",
+            self.room.name(),
+            columns.join(", ")
         )
     }
 

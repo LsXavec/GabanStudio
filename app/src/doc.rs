@@ -99,6 +99,93 @@ pub fn build_auto_comp(
     cmds
 }
 
+/// GM8: the columns (bottom → top) of a graph that is exactly an auto-comp
+/// chain — DrawingSources joined by Normal Blends (input 0 below, input 1
+/// above) into the Output, and no other node — or None for a graph a hand
+/// has shaped. The bare Output is the chain of no columns.
+pub fn auto_chain(graph: &anim_core::graph::Graph) -> Option<Vec<ColumnId>> {
+    use anim_core::graph::{BlendMode, NodeKind};
+    let total = graph.nodes().count();
+    let out = graph.node(graph.output?).ok()?;
+    if out.kind != NodeKind::Output {
+        return None;
+    }
+    let (mut cols, mut seen) = (Vec::new(), 1);
+    let mut next = out.inputs.first().copied().flatten();
+    while let Some((id, pin)) = next {
+        // `seen` bounds the walk: a node met twice is no chain.
+        if pin != 0 || seen >= total {
+            return None;
+        }
+        let node = graph.node(id).ok()?;
+        seen += 1;
+        next = match node.kind {
+            NodeKind::DrawingSource { column } => {
+                cols.push(column);
+                None
+            }
+            NodeKind::Blend {
+                mode: BlendMode::Normal,
+            } => {
+                let (src, 0) = node.inputs.get(1).copied().flatten()? else {
+                    return None;
+                };
+                let NodeKind::DrawingSource { column } = graph.node(src).ok()?.kind else {
+                    return None;
+                };
+                seen += 1;
+                cols.push(column);
+                Some(node.inputs.first().copied().flatten()?)
+            }
+            _ => return None,
+        };
+    }
+    cols.reverse();
+    (seen == total).then_some(cols)
+}
+
+/// GM8: `cut`'s sheet scaffolding as `cmds` would leave it — the column
+/// list, their definitions and the graph, never a drawing — enough to ask
+/// its `render_order` before the batch applies.
+fn sheet_after(cut: &Cut, cmds: &[Command]) -> Cut {
+    let mut c = Cut::new(cut.id, String::new(), cut.frame_count);
+    c.xsheet.columns = cut
+        .xsheet
+        .columns
+        .iter()
+        .map(|col| Column::new(col.id, col.name.clone()))
+        .collect();
+    c.column_defs = cut.column_defs.clone();
+    c.graph = cut.graph.clone();
+    for cmd in cmds {
+        match cmd {
+            Command::AddColumn {
+                index, column, def, ..
+            } => {
+                let i = (*index).min(c.xsheet.columns.len());
+                c.xsheet
+                    .columns
+                    .insert(i, Column::new(column.id, column.name.clone()));
+                c.set_column_def(column.id, *def);
+            }
+            Command::RemoveColumn { id, .. } => {
+                c.xsheet.columns.retain(|col| col.id != *id);
+                c.column_defs.remove(id);
+            }
+            Command::MoveColumn { id, to_index, .. } => {
+                if let Some(from) = c.xsheet.columns.iter().position(|col| col.id == *id) {
+                    let moved = c.xsheet.columns.remove(from);
+                    let i = (*to_index).min(c.xsheet.columns.len());
+                    c.xsheet.columns.insert(i, moved);
+                }
+            }
+            Command::SetColumnDef { column, def, .. } => c.set_column_def(*column, *def),
+            _ => {}
+        }
+    }
+    c
+}
+
 /// The merged solo douga/shiage pair — "color" bottom, "line" top — the
 /// fallback new-cel template (and the Solo merged stack preset).
 pub fn solo_template() -> Vec<LayerProps> {
@@ -460,6 +547,9 @@ pub struct AppState {
     pub paintcheck: crate::paintcheck::PaintCheck,
     /// GM7: the Convert colours to sRGB DANGER confirm is open.
     pub convert_confirm: bool,
+    /// GM8: the Build composite DANGER confirm is open — the graph shaped
+    /// by hand it would replace has this many nodes.
+    pub auto_comp_confirm: Option<usize>,
 }
 
 impl AppState {
@@ -540,6 +630,7 @@ impl AppState {
             recolour_offer: None,
             paintcheck: Default::default(),
             convert_confirm: false,
+            auto_comp_confirm: None,
         }
     }
 
@@ -628,6 +719,7 @@ impl AppState {
             recolour_offer: None,
             paintcheck: Default::default(),
             convert_confirm: false,
+            auto_comp_confirm: None,
         })
     }
 
@@ -2295,7 +2387,7 @@ impl AppState {
         let index = self.cut().xsheet.columns.len();
         let name = format!("{}", (b'A' + (index as u8 % 26)) as char);
         let id = self.engine.alloc_column_id();
-        let r = self.engine.apply(
+        let r = self.apply_columns(
             "add column",
             vec![Command::AddColumn {
                 at,
@@ -2308,6 +2400,29 @@ impl AppState {
             self.view.active_column = id;
         }
         self.report(r, "column added");
+    }
+
+    /// GM8: a column scaffolding batch (add, remove, move, kind, hidden)
+    /// as ONE undo step. While the cut's graph is still an auto-comp chain
+    /// ([`auto_chain`]) and the batch changes what renders, the chain is
+    /// rebuilt over the sheet the batch leaves, in the same step — so a
+    /// column added to a template reaches the composite, the viewer and the
+    /// export. A graph shaped by hand is never touched.
+    fn apply_columns(&mut self, label: &str, mut cmds: Vec<Command>) -> anim_core::error::Result<()> {
+        let at = self.at();
+        let cut = self.cut();
+        if let Some(chain) = auto_chain(&cut.graph) {
+            let after = sheet_after(cut, &cmds);
+            if after.render_order() != chain {
+                let mut next = self.engine.project.next_id;
+                cmds.extend(build_auto_comp(&after, at, || {
+                    next += 1;
+                    NodeId(next - 1)
+                }));
+                self.engine.project.next_id = next;
+            }
+        }
+        self.engine.apply(label, cmds)
     }
 
     // ---- GM5: the sheet verbs, on the sheet cursor ------------------------
@@ -2433,9 +2548,8 @@ impl AppState {
     fn set_active_column_def(&mut self, label: &str, def: ColumnDef, done: &str) {
         let at = self.at();
         let column = self.view.active_column;
-        let r = self
-            .engine
-            .apply(label, vec![Command::SetColumnDef { at, column, def }]);
+        // GM8: a kind or hidden change re-steers an auto-comp graph too.
+        let r = self.apply_columns(label, vec![Command::SetColumnDef { at, column, def }]);
         self.report(r, done);
     }
 
@@ -3001,9 +3115,7 @@ impl AppState {
             .or_else(|| idx.checked_sub(1).and_then(|i| cols.get(i)))
             .copied()
             .unwrap_or(removed);
-        let r = self
-            .engine
-            .apply("remove column", vec![Command::RemoveColumn { at, id: removed }]);
+        let r = self.apply_columns("remove column", vec![Command::RemoveColumn { at, id: removed }]);
         if r.is_ok() {
             self.view.active_column = new_active;
             self.view.selected_drawing = None;
@@ -3727,6 +3839,20 @@ impl AppState {
             Err(RR::OutsideSelection) => {
                 self.status = "clicked outside the selection (Esc clears it)".into()
             }
+        }
+    }
+
+    /// GM8 "Build composite from sheet" as the verb runs it: at once over
+    /// an empty graph or an earlier auto-comp; over a graph shaped by hand,
+    /// the DANGER confirm first (it replaces every node; undo brings them
+    /// back).
+    pub fn request_auto_comp(&mut self) {
+        let graph = &self.cut().graph;
+        let n = graph.nodes().count();
+        if n == 0 || auto_chain(graph).is_some() {
+            self.auto_comp();
+        } else {
+            self.auto_comp_confirm = Some(n);
         }
     }
 

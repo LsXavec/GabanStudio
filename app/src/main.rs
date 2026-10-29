@@ -2714,6 +2714,7 @@ impl App {
         // answered before the copy that asked goes away.
         if self.settings_open
             || self.new_form.is_some()
+            || self.welcome.is_some()
             || editor.leave_pending()
             || !self.recovery.is_empty()
         {
@@ -2898,6 +2899,13 @@ impl Editor {
             // GM8: the project's settings window (its Apply is the edit).
             Action::ProjectSettings => {
                 self.project_form = Some(ProjectForm::of(&self.state.engine.project));
+            }
+            // GM8: the Welcome screen again, past the unsaved guard (a
+            // choice on it may open another document); the shell shows it.
+            Action::WelcomeScreen => {
+                if !self.hold_leave(Leave::Welcome) {
+                    self.request_welcome = true;
+                }
             }
             Action::FrameCurves => curves_panel::frame_stored(&mut self.state),
             Action::TypeIntoCell => {
@@ -3149,10 +3157,9 @@ impl Editor {
             Action::MakeInbetweens => {
                 s.make_inbetweens();
             }
-            // GM8: the auto-comp — the whole graph in one undo step.
-            Action::BuildComposite => {
-                s.auto_comp();
-            }
+            // GM8: the auto-comp — the whole graph in one undo step (a
+            // graph shaped by hand asks first, DANGER).
+            Action::BuildComposite => s.request_auto_comp(),
             Action::KindKey
             | Action::KindBreakdown
             | Action::KindInbetween
@@ -3263,6 +3270,7 @@ impl Editor {
             | Action::ShowPaintCheck
             | Action::ConvertColorsToSrgb
             | Action::ProjectSettings
+            | Action::WelcomeScreen
             | Action::TypeIntoCell => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
@@ -3300,6 +3308,7 @@ fn is_chrome(action: Action) -> bool {
             | Action::ShowPaintCheck
             | Action::ConvertColorsToSrgb
             | Action::ProjectSettings
+            | Action::WelcomeScreen
             | Action::TypeIntoCell
     )
 }
@@ -3369,6 +3378,8 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::KindBreakdown
             | Action::KindInbetween
             | Action::KindUnset
+            // GM8: nothing modal opens over a live stroke (D7).
+            | Action::WelcomeScreen
     )
 }
 
@@ -3637,6 +3648,8 @@ struct Editor {
     graph: Option<graphcomp::GraphCompositor>,
     /// Set when the user clicks "New…"; the App picks it up to show the dialog.
     request_new: bool,
+    /// GM8: File ▸ Welcome screen… was answered; the App shows the screen.
+    request_welcome: bool,
     /// Set when the user clicks "settings".
     request_settings: bool,
     /// PSD-shipping: UPDATE READY clicked in the Foot (App acts on it).
@@ -3785,6 +3798,40 @@ fn startup_shows_welcome(config: &Config) -> bool {
     config.ui.show_welcome
 }
 
+/// GM8: what the shell does about its start-up screens this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Startup {
+    /// A cut, a form or the screen is up: leave it.
+    Keep,
+    Welcome,
+    NewForm,
+    /// A cut opened under the start-up screen (a restore, a card): drop it.
+    DropWelcome,
+}
+
+/// GM8: the start-up route from the facts alone — nothing open and no
+/// dialog shows the Welcome screen (or the New Project form with its latch
+/// off); a cut opening drops the start-up screen, but not one asked for
+/// over the cut (File ▸ Welcome screen…).
+fn startup_route(
+    editor: bool,
+    form: bool,
+    welcome: Option<&welcome::Welcome>,
+    config: &Config,
+) -> Startup {
+    match welcome {
+        None if !editor && !form => {
+            if startup_shows_welcome(config) {
+                Startup::Welcome
+            } else {
+                Startup::NewForm
+            }
+        }
+        Some(w) if editor && !w.over_editor => Startup::DropWelcome,
+        _ => Startup::Keep,
+    }
+}
+
 /// GM8: the UI scale (Settings ▸ General) as egui's zoom factor.
 fn apply_ui_scale(ctx: &egui::Context, config: &Config) {
     ctx.set_zoom_factor(config.ui.zoom());
@@ -3818,6 +3865,18 @@ fn open_template(i: usize, rs: Option<&RenderState>, data_dir: Option<&std::path
     editor
 }
 
+/// GM8: "Show me" on the Welcome screen — the sample, its empty column B
+/// active on frame 0 (a new drawing needs an empty cell), then the step.
+fn welcome_show_me(
+    step: usize,
+    rs: Option<&RenderState>,
+    data_dir: Option<&std::path::Path>,
+) -> (Editor, Performed) {
+    let mut editor = Editor::from_state(sample::build_practice(), rs, data_dir);
+    let did = editor.show_me(step);
+    (editor, did)
+}
+
 /// GM2: an action that drops the open document — asked about first when
 /// the document has unsaved changes.
 #[derive(Debug, Clone, PartialEq)]
@@ -3829,6 +3888,8 @@ pub enum Leave {
     /// The recovery dialog's "Open recovered" over a document that has
     /// work of its own (a handover restore, say): asked about like an Open.
     Recover(worksafe::Recovered),
+    /// GM8: File ▸ Welcome screen… — its cards open other documents.
+    Welcome,
 }
 
 /// GM2: an edit to the recent list from the Open Recent menu.
@@ -4180,6 +4241,7 @@ impl Editor {
             paint,
             graph,
             request_new: false,
+            request_welcome: false,
             request_settings: false,
             request_update: false,
             update_tag: None,
@@ -4247,6 +4309,7 @@ impl Editor {
             paint,
             graph,
             request_new: false,
+            request_welcome: false,
             request_update: false,
             update_tag: None,
             request_settings: false,
@@ -4297,13 +4360,30 @@ impl Editor {
     }
 
     /// GM8: "Show me" on Quick start step `i`: do the step, or open its room.
-    fn show_me(&mut self, i: usize) {
+    /// Marking a key on an empty cell draws the drawing first (step 2 right
+    /// after opening a cut).
+    pub(crate) fn show_me(&mut self, i: usize) -> Performed {
         match welcome::STEPS.get(i).map(|s| s.show_me) {
             Some(welcome::ShowMe::Perform(a)) => {
-                self.perform(a);
+                if a == Action::KindKey && self.state.current_drawing().is_none() {
+                    self.perform(Action::NewDrawing);
+                }
+                self.perform(a)
             }
-            Some(welcome::ShowMe::Room(st)) => self.enter_room(st),
-            None => {}
+            Some(welcome::ShowMe::Try(a, st)) => {
+                if self.can_perform(a).is_ok() {
+                    self.perform(a)
+                } else {
+                    self.enter_room(st);
+                    Performed::Done
+                }
+            }
+            Some(welcome::ShowMe::Export) => {
+                self.enter_room(Stage::Edit);
+                self.state.status = "export: File ▸ Export… — a PNG sequence or an MP4".into();
+                Performed::Done
+            }
+            None => Performed::Ignored,
         }
     }
 
@@ -4328,11 +4408,16 @@ impl Editor {
                     ui.label("name");
                     ui.text_edit_singleline(&mut form.name);
                     ui.end_row();
-                    ui.label("resolution");
+                    // The paper is anchored top-left: art keeps its place.
+                    const RESIZE_NOTE: &str =
+                        "the canvas grows or crops from the top-left; drawings are not scaled";
+                    ui.label("resolution").on_hover_text(RESIZE_NOTE);
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut form.width).range(16..=16384));
+                        ui.add(egui::DragValue::new(&mut form.width).range(16..=16384))
+                            .on_hover_text(RESIZE_NOTE);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(&mut form.height).range(16..=16384));
+                        ui.add(egui::DragValue::new(&mut form.height).range(16..=16384))
+                            .on_hover_text(RESIZE_NOTE);
                         let g = gcd(form.width, form.height).max(1);
                         ui.label(
                             egui::RichText::new(format!("{}:{}", form.width / g, form.height / g))
@@ -4374,14 +4459,11 @@ impl Editor {
                 dpi: form.dpi.max(1.0),
                 default_cut_frames: Some(form.cut_frames.max(1)),
             };
-            let resized = (after.width, after.height)
-                != (self.state.engine.project.width, self.state.engine.project.height);
-            if self.state.set_project_props(after) && resized {
-                // The tiles never move; the canvas layers rebuild at the
-                // new size on the next frame.
-                self.paint = None;
-                self.graph = None;
-            }
+            // The tiles never move. The GPU paint layer and compositor are
+            // KEPT: both follow the project size on their own next frame
+            // (`ensure_size` in the canvas and the graph view), the same way
+            // an undone resize or a host's resize mirrored to a guest does.
+            self.state.set_project_props(after);
         }
         if convert {
             self.perform(Action::ConvertColorsToSrgb);
@@ -4449,6 +4531,7 @@ impl Editor {
             }
             // GM8: the project's size and rate are the host's in a room.
             Action::ProjectSettings if guest => Err("the host owns the project settings"),
+            Action::WelcomeScreen if guest => Err("leave the room first to open your own file"),
             Action::BuildComposite if s.cut().render_order().is_empty() => {
                 Err("no column reaches the composite")
             }
@@ -4640,6 +4723,7 @@ impl Editor {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Leave::New => self.request_new = true,
+            Leave::Welcome => self.request_welcome = true,
             // Land any in-flight gesture in the CURRENT project first — its
             // commit must not cross into the opened one.
             Leave::Open => {
@@ -4709,6 +4793,7 @@ impl Editor {
         }
         self.leave_modal(ctx);
         self.convert_modal(ctx);
+        self.auto_comp_modal(ctx);
         // The title is rebuilt only when what it shows changes.
         let dirty = self.state.is_dirty();
         let stale = self.title_from.as_ref().is_none_or(|(d, f, n)| {
@@ -4727,6 +4812,45 @@ impl Editor {
 
     /// GM7: Convert colours to sRGB — a held DANGER that says every step
     /// before it runs (D8).
+    /// GM8: "Build composite from sheet" over a graph shaped by hand — a
+    /// DANGER confirm, since it replaces every node (undo brings them back).
+    fn auto_comp_modal(&mut self, ctx: &egui::Context) {
+        let Some(n) = self.state.auto_comp_confirm else {
+            return;
+        };
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("gm8_auto_comp")).show(ctx, |ui| {
+            plate::legend(ui, "build composite from sheet");
+            ui.label(format!("Replace the node graph ({n} nodes)? Undo brings it back."));
+            ui.label(
+                egui::RichText::new("every rendered column, in sheet order, chained into the output")
+                    .color(plate::legend_dim()),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if plate::danger_hint(ui, "Replace", "replaces every node of this cut's graph") {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                    choice = Some(false);
+                }
+            });
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => {
+                self.state.auto_comp_confirm = None;
+                self.state.auto_comp();
+            }
+            Some(false) => self.state.auto_comp_confirm = None,
+            None => {}
+        }
+    }
+
     fn convert_modal(&mut self, ctx: &egui::Context) {
         if !self.state.convert_confirm {
             return;
@@ -4945,15 +5069,18 @@ impl eframe::App for App {
         apply_ui_scale(ui.ctx(), &self.config);
         // Nothing open and no dialog -> the Welcome screen (GM8), or the
         // New Project form when its "Show at startup" latch is off.
-        if self.editor.is_none() && self.new_form.is_none() && self.welcome.is_none() {
-            if startup_shows_welcome(&self.config) {
+        match startup_route(
+            self.editor.is_some(),
+            self.new_form.is_some(),
+            self.welcome.as_ref(),
+            &self.config,
+        ) {
+            Startup::Welcome => {
                 self.welcome = Some(welcome::Welcome::new(&self.config.session.recent));
-            } else {
-                self.new_form = Some(NewProjectForm::default());
             }
-        }
-        if self.editor.is_some() {
-            self.welcome = None;
+            Startup::NewForm => self.new_form = Some(NewProjectForm::default()),
+            Startup::DropWelcome => self.welcome = None,
+            Startup::Keep => {}
         }
         // GM8: this session's Quick start ticks reach the config, and the
         // editor's checklist shows every tick ever made.
@@ -5095,6 +5222,10 @@ impl eframe::App for App {
                 editor.request_new = false;
                 self.new_form = Some(NewProjectForm::default());
             }
+            if editor.request_welcome {
+                editor.request_welcome = false;
+                self.welcome = Some(welcome::Welcome::over_editor(&self.config.session.recent));
+            }
             if editor.request_settings {
                 editor.request_settings = false;
                 self.settings_open = true;
@@ -5120,6 +5251,7 @@ impl eframe::App for App {
             .is_some_and(|e| !e.leave_pending() && !e.palette.open)
             && self.recovery.is_empty()
             && self.new_form.is_none()
+            && self.welcome.is_none()
             && self.capturing.is_none()
         {
             let here = match &mut self.editor {
@@ -5395,9 +5527,10 @@ impl eframe::App for App {
         }
 
         // New Project dialog: full-screen when no project, modal window over one.
+        // The Welcome screen likewise (GM8: a modal over an open cut).
         if self.new_form.is_some() {
             self.show_new_dialog(ui);
-        } else if self.editor.is_none() && self.welcome.is_some() {
+        } else if self.welcome.is_some() {
             self.show_welcome(ui);
         }
 
@@ -5437,32 +5570,55 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// GM8: the Welcome screen in the central area, and what its cards ask.
+    /// GM8: the Welcome screen — the central area when nothing is open, a
+    /// modal over the cut when File ▸ Welcome screen… asked — and what its
+    /// cards ask. A card that opens a document ends the screen.
     fn show_welcome(&mut self, ui: &mut egui::Ui) {
         let Some(mut w) = self.welcome.take() else {
             return;
         };
         let mut show = self.config.ui.show_welcome;
         let ticks = self.config.ui.quick_start;
+        let binds = &self.config.keybinds;
         let mut action = None;
-        egui::CentralPanel::default().show(ui, |ui| {
-            action = welcome::ui(ui, &mut w, &mut show, &ticks);
-        });
+        let over_cut = self.editor.is_some();
+        if over_cut {
+            let ctx = ui.ctx().clone();
+            let room = ctx.content_rect();
+            let modal = egui::Modal::new(egui::Id::new("gm8_welcome")).show(&ctx, |ui| {
+                ui.set_width((room.width() - 120.0).clamp(320.0, 980.0));
+                ui.set_max_height((room.height() - 120.0).max(240.0));
+                welcome::ui(ui, &mut w, &mut show, &ticks, binds)
+            });
+            // Esc or a click outside: back to the cut.
+            let back = modal.should_close();
+            action = modal.inner.or(back.then_some(welcome::WelcomeAction::Back));
+        } else {
+            egui::CentralPanel::default().show(ui, |ui| {
+                action = welcome::ui(ui, &mut w, &mut show, &ticks, binds);
+            });
+        }
         if show != self.config.ui.show_welcome {
             self.config.ui.show_welcome = show;
             self.config.save();
         }
         let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
         let opened = |state: AppState| Editor::from_state(state, rs, dir);
+        let mut done = false;
         match action {
             Some(welcome::WelcomeAction::Template(i)) => {
                 self.editor = Some(open_template(i, rs, dir));
+                done = true;
             }
+            // The form shows over the screen; its Cancel comes back here.
             Some(welcome::WelcomeAction::Custom) => {
                 self.new_form = Some(NewProjectForm::default());
             }
             Some(welcome::WelcomeAction::Open) => match AppState::pick_and_open() {
-                Some(Ok(state)) => self.editor = Some(opened(state)),
+                Some(Ok(state)) => {
+                    self.editor = Some(opened(state));
+                    done = true;
+                }
                 Some(Err(msg)) => {
                     self.notes.push(format!("could not open that project — {msg}"));
                 }
@@ -5470,7 +5626,10 @@ impl App {
             },
             Some(welcome::WelcomeAction::OpenRecent(path)) => {
                 match AppState::load_from(path.clone()) {
-                    Ok(state) => self.editor = Some(opened(state)),
+                    Ok(state) => {
+                        self.editor = Some(opened(state));
+                        done = true;
+                    }
                     Err(msg) => {
                         self.notes.push(format!("could not open that project — {msg}"));
                     }
@@ -5482,21 +5641,29 @@ impl App {
             }
             Some(welcome::WelcomeAction::Sample) => {
                 self.editor = Some(opened(sample::build_sample()));
+                done = true;
             }
             Some(welcome::WelcomeAction::ShowMe(step)) => {
-                let mut editor = opened(sample::build_sample());
-                editor.show_me(step);
-                self.editor = Some(editor);
+                self.editor = Some(welcome_show_me(step, rs, dir).0);
+                done = true;
             }
+            // Over a cut the modal would sit above the Settings window.
+            Some(welcome::WelcomeAction::Settings) => {
+                self.settings_open = true;
+                done = over_cut;
+            }
+            Some(welcome::WelcomeAction::Back) => done = true,
             None => {}
         }
-        if self.editor.is_none() {
+        if !done {
             self.welcome = Some(w);
         }
     }
 
     fn show_new_dialog(&mut self, ui: &mut egui::Ui) {
         let has_editor = self.editor.is_some();
+        // GM8: Custom size… from the Welcome screen can go back to it.
+        let can_cancel = has_editor || self.welcome.is_some();
         let mut form = self.new_form.take().expect("dialog shown with a form");
         let mut action = None;
         if has_editor {
@@ -5520,18 +5687,22 @@ impl App {
                         .inner_margin(24.0)
                         .show(ui, |ui| {
                             ui.set_max_width(440.0);
-                            action = newproject::form_ui(ui, &mut form, false);
+                            action = newproject::form_ui(ui, &mut form, can_cancel);
                         });
                 });
             });
         }
         match action {
             Some(FormAction::Create) => {
-                self.editor = Some(Editor::from_form(
-                    &form,
-                    self.render_state.as_ref(),
-                    self.data_dir.as_deref(),
-                ));
+                let mut editor =
+                    Editor::from_form(&form, self.render_state.as_ref(), self.data_dir.as_deref());
+                // GM8: a template's cut opens in its first room.
+                if let Some(t) = form.template() {
+                    editor.enter_room(t.room);
+                }
+                self.editor = Some(editor);
+                // A Welcome screen behind the form has done its job.
+                self.welcome = None;
             }
             Some(FormAction::Open) => match AppState::pick_and_open() {
                 Some(Ok(state)) => {
@@ -5540,6 +5711,7 @@ impl App {
                         self.render_state.as_ref(),
                         self.data_dir.as_deref(),
                     ));
+                    self.welcome = None;
                 }
                 // AUDIT [16]: a failed load used to vanish — the same
                 // dialog reappeared with no reason. Carry the reason back
@@ -5555,7 +5727,8 @@ impl App {
                 }
             },
             Some(FormAction::Cancel) => {
-                // Only offered when an editor exists behind the dialog.
+                // Only offered when an editor or the Welcome screen is
+                // behind the dialog; that is what shows again.
             }
             None => {
                 self.new_form = Some(form); // still editing the form
@@ -6154,6 +6327,8 @@ impl Editor {
                     // GM2: New/Open/Recent go through the unsaved guard
                     // (GM3: the registry's items, Editor::invoke).
                     self.menu_item(ui, Action::NewProject);
+                    // GM8: templates, recent files and the sample again.
+                    self.menu_item(ui, Action::WelcomeScreen);
                     self.menu_item(ui, Action::Open);
                     ui.menu_button("Open Recent", |ui| {
                         if self.recent_shown.is_empty() {

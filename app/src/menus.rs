@@ -278,8 +278,8 @@ impl crate::Editor {
             .show(ctx, |ui| {
                 plate::surface(ui);
                 // GM8: the five first steps, each ticked the first time its
-                // verb runs, each with "Show me".
-                show_me = crate::welcome::checklist_ui(ui, &ticks);
+                // verb runs, each with its chord and "Show me".
+                show_me = crate::welcome::checklist_ui(ui, &ticks, binds);
                 ui.separator();
                 // Said in THIS keymap's chords, so it never lies.
                 let k = |a| crate::cmdpal::chord_of(binds, a).unwrap_or_else(|| "—".into());

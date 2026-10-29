@@ -336,6 +336,21 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             state.graph_add_node(NodeKind::Output, world);
             ui.close();
         }
+        // GM8: the whole graph from the sheet, where graphs are made (a
+        // graph shaped by hand is asked about first, DANGER).
+        ui.separator();
+        let build = crate::config::Action::BuildComposite;
+        let can = !state.cut().render_order().is_empty();
+        let resp = ui.add_enabled(can, egui::Button::new(build.label()));
+        let resp = if can {
+            resp.on_hover_text(build.help())
+        } else {
+            resp.on_disabled_hover_text("no column reaches the composite")
+        };
+        if resp.clicked() {
+            state.request_auto_comp();
+            ui.close();
+        }
     });
 
     // Hint when empty.

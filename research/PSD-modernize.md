@@ -1199,7 +1199,7 @@ satsuei part, the checklist moved up from Stretch, and the role chooser moved do
   | TV anime HD | 1920×1080 | 24 | 72 | layout | BG, A, B, C |
   | Web 720p | 1280×720 | 24 | 72 | genga | BG, A, B |
   | Feature UHD | 3840×2160 | 24 | 72 | layout | BG, A, B, C, D |
-  | Animatic / storyboard | 1920×1080 | 24 | 120 | henshū | BOARD (Ref), A |
+  | Animatic / storyboard | 1920×1080 | 24 | 120 | henshū | BOARD (BG band: the boards render and export), A |
 
   The manga part adds Manga B5, Manga A4 and Webtoon.
 - **Auto-comp: "Build composite from sheet"** creates a DrawingSource for each rendered column in
