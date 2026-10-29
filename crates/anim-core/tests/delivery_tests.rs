@@ -612,6 +612,7 @@ fn presets_cover_the_delivery_list() {
             "TIFF 16-bit",
             "EXR half (linear)",
             "PNG 8-bit",
+            "Line test PNG",
             "H.264 review",
             "H.265",
             "ProRes 422 HQ",
@@ -628,8 +629,134 @@ fn presets_cover_the_delivery_list() {
     assert_eq!(p("Line test").purpose, Purpose::LineTest);
     assert_eq!(p("Master PNG 16-bit").purpose, Purpose::Final);
     assert!(PRESETS.iter().all(|p| p.scale == 1.0 || p.scale == 0.5));
-    assert_eq!(PRESETS.iter().filter(|p| !p.format.is_video()).count(), 4);
+    assert_eq!(PRESETS.iter().filter(|p| !p.format.is_video()).count(), 5);
     assert!(Preset::named("Master PNG 8-bit").is_none());
+    // The line test as frames needs no ffmpeg: PNG 8-bit, black on white.
+    let lt = p("Line test PNG");
+    assert_eq!(
+        (lt.format, lt.alpha, lt.purpose, lt.burn_ins),
+        (Format::Png8, false, Purpose::LineTest, BurnIns::LINE_TEST)
+    );
+}
+
+#[test]
+fn frame_tokens_are_found_and_a_huge_pad_is_capped() {
+    let names = Names {
+        project: "show".into(),
+        scene: "s01".into(),
+        cut: "c012".into(),
+    };
+    // A typed pad wider than a u32 frame has digits no longer panics the
+    // worker: it pads to MAX_FRAME_PAD.
+    assert_eq!(
+        deliver::expand_pattern("{cut}_{frame:070000}", &names, 7, "png"),
+        format!("c012_{:010}.png", 7)
+    );
+    assert_eq!(deliver::MAX_FRAME_PAD, 10);
+    for (pattern, named) in [
+        (deliver::DEFAULT_PATTERN, true),
+        ("{cut}-{frame}", true),
+        ("{frame:070000}", true),
+        ("{project}_{cut}", false),
+        ("{frame", false),
+        ("{take}", false),
+    ] {
+        assert_eq!(deliver::has_frame_token(pattern), named, "{pattern}");
+    }
+    // An image sequence whose pattern lost its frame keeps one file a frame.
+    assert_eq!(
+        deliver::sequence_pattern("{project}_{cut}"),
+        "{project}_{cut}_{frame:04}"
+    );
+    assert_eq!(
+        deliver::sequence_pattern(deliver::DEFAULT_PATTERN),
+        deliver::DEFAULT_PATTERN
+    );
+    let a = deliver::expand_pattern(&deliver::sequence_pattern("{cut}"), &names, 1, "png");
+    let b = deliver::expand_pattern(&deliver::sequence_pattern("{cut}"), &names, 2, "png");
+    assert_eq!((a.as_str(), b.as_str()), ("c012_0001.png", "c012_0002.png"));
+}
+
+#[test]
+fn final_renders_the_same_from_a_snapshot_filtered_once() {
+    let all = [
+        (LayerRole::Color, [0.8, 0.6, 0.4, 1.0]),
+        (LayerRole::Line, [0.0, 0.0, 0.5, 1.0]),
+        (LayerRole::Correction, [1.0, 0.0, 0.0, 1.0]),
+    ];
+    for graph in [false, true] {
+        let (mut e, at) = rig(&all, true);
+        if graph {
+            wire_graph(&mut e, at);
+        }
+        let law = ColorLaw::Legacy;
+        let mut once = cut(&e, at).clone();
+        deliver::retain_purpose(&mut once, Purpose::Final);
+        assert!(
+            once.drawings[0]
+                .layers
+                .iter()
+                .all(|l| l.props.role != LayerRole::Correction)
+        );
+        assert_eq!(once, deliver::purpose_cut(cut(&e, at), Purpose::Final));
+        let fin = deliver::render(cut(&e, at), law, 0, W, H, &opts(Purpose::Final));
+        let pre = deliver::render(&once, law, 0, W, H, &opts(Purpose::Final));
+        assert_eq!(fin, pre, "graph {graph}");
+        assert_eq!(pre.pixel(50, 6), [0.0; 4], "graph {graph}: no correction");
+    }
+}
+
+#[test]
+fn parse_cli_names_a_cut_and_pick_cut_finds_it() {
+    let args = |s: &[&str]| s.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+    let job = deliver::parse_cli(&args(&[
+        "--render",
+        "ep01.animproj",
+        "--preset",
+        "PNG 8-bit",
+        "--out",
+        "d",
+        "--scene",
+        "s02",
+        "--cut",
+        "c030",
+    ]))
+    .unwrap();
+    assert_eq!(
+        (job.scene.as_deref(), job.cut.as_deref()),
+        (Some("s02"), Some("c030"))
+    );
+    let plain = deliver::parse_cli(&args(&[
+        "--render", "x", "--preset", "PNG 8-bit", "--out", "d",
+    ]))
+    .unwrap();
+    assert_eq!((plain.scene, plain.cut), (None, None));
+    let missing = deliver::parse_cli(&args(&[
+        "--render", "x", "--preset", "PNG 8-bit", "--out", "d", "--cut",
+    ]));
+    assert!(missing.unwrap_err().contains("--cut needs a value"));
+    assert!(deliver::CLI_USAGE.contains("[--cut <name>]"));
+    // A project of two scenes, three cuts.
+    let mut e = Engine::new("ep01");
+    let s1 = e.add_scene("s01");
+    let s2 = e.add_scene("s02");
+    let c1 = e.add_cut(s1, "c010", 3).unwrap();
+    let c2 = e.add_cut(s1, "c020", 3).unwrap();
+    let c3 = e.add_cut(s2, "c030", 3).unwrap();
+    let r = |scene, cut| CutRef { scene, cut };
+    let p = &e.project;
+    assert_eq!(deliver::pick_cut(p, None, None), Ok(r(s1, c1)));
+    assert_eq!(deliver::pick_cut(p, None, Some("C020")), Ok(r(s1, c2)));
+    assert_eq!(deliver::pick_cut(p, None, Some("c030")), Ok(r(s2, c3)));
+    assert_eq!(deliver::pick_cut(p, Some("s02"), None), Ok(r(s2, c3)));
+    assert_eq!(
+        deliver::pick_cut(p, Some("s02"), Some("c030")),
+        Ok(r(s2, c3))
+    );
+    let err = deliver::pick_cut(p, Some("s01"), Some("c030")).unwrap_err();
+    assert!(err.contains("no cut named \"c030\"") && err.contains("c010, c020"), "{err}");
+    let err = deliver::pick_cut(p, Some("s09"), None).unwrap_err();
+    assert!(err.contains("no scene named \"s09\"") && err.contains("s01, s02"), "{err}");
 }
 
 #[test]

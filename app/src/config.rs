@@ -144,6 +144,10 @@ pub enum Action {
     WelcomeScreen,
     /// GM10: Cut ▸ Paper size… — the sheet the camera pans over.
     PaperSize,
+    /// GM11: Window ▸ Render Queue — the delivery jobs, on a worker.
+    ShowRenderQueue,
+    /// GM11: View ▸ Final look — the composite as the master delivers it.
+    ToggleFinalLook,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -368,6 +372,8 @@ impl Action {
         Action::ProjectSettings,
         Action::WelcomeScreen,
         Action::PaperSize,
+        Action::ShowRenderQueue,
+        Action::ToggleFinalLook,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -486,6 +492,8 @@ impl Action {
             Action::ProjectSettings => "Project settings…",
             Action::WelcomeScreen => "Welcome screen…",
             Action::PaperSize => "Paper size…",
+            Action::ShowRenderQueue => "Render Queue (delivery)",
+            Action::ToggleFinalLook => "Final look (delivery)",
         }
     }
 
@@ -610,6 +618,8 @@ impl Action {
             ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
             WelcomeScreen => "Show the Welcome screen: templates, recent files and the sample cut (unsaved work is asked about first).",
             PaperSize => "Set the cut's paper: the sheet the camera pans over, larger than the frame for BG pans and hiki slides.",
+            ShowRenderQueue => "Open the render queue: delivery jobs (PNG16, TIFF16, EXR, ProRes, line test) rendered on a worker.",
+            ToggleFinalLook => "Show the composite as the master delivers it: no rough, reference or correction layers, rendered on a worker.",
         }
     }
 
@@ -623,7 +633,7 @@ impl Action {
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
             | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView | PinToLightTable
-            | ShiftTrace | ResetShift => Group::View,
+            | ShiftTrace | ResetShift | ToggleFinalLook => Group::View,
             MakeInbetweens | KindKey | KindBreakdown | KindInbetween | KindUnset => Group::Sheet,
             PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop => {
                 Group::Playback
@@ -642,7 +652,7 @@ impl Action {
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
             RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit => Group::Room,
-            ResetLayout | ShowCurves | ShowPaintCheck => Group::Window,
+            ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
         }
     }
@@ -732,6 +742,9 @@ impl Action {
             FrameCurves => "View/Frame curves",
             ShowCurves => "Window/Curves (graph editor)",
             ShowPaintCheck => "Window/Nuri check (paint check)",
+            // GM11: the delivery — its queue, and the look it renders.
+            ShowRenderQueue => "Window/Render Queue (delivery)",
+            ToggleFinalLook => "View/Final look (delivery)",
             // GM7: the project's own menu, beside its colour law.
             ConvertColorsToSrgb => "Project/Convert colours to sRGB…",
             BuildComposite => "Project/Build composite from sheet",
@@ -870,6 +883,25 @@ impl Action {
                 "holes",
                 "unpainted",
                 "stray colours",
+            ],
+            // GM11: the delivery by the words a satsuei desk uses for it.
+            ShowRenderQueue => &[
+                "render",
+                "export",
+                "deliver",
+                "output",
+                "line test",
+                "prores",
+                "satsuei out",
+            ],
+            ToggleFinalLook => &[
+                "final look",
+                "final render",
+                "delivery look",
+                "master look",
+                "hide rough",
+                "hide corrections",
+                "sakkan",
             ],
             _ => &[],
         }
@@ -1129,6 +1161,17 @@ impl Action {
             // GM9: Tab over the node graph, as in Nuke, Blender and
             // Fusion; the same in both presets.
             AddNode => Some(k("Tab")),
+            // GM11: the queue on Ctrl+Shift+E (the other studios' export
+            // key), the final look on Shift with the composite view's C;
+            // the same in both presets.
+            ShowRenderQueue => Some(Chord {
+                shift: true,
+                ..ctrl("E")
+            }),
+            ToggleFinalLook => Some(Chord {
+                shift: true,
+                ..k("C")
+            }),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto

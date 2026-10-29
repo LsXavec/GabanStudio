@@ -11,9 +11,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::color::ColorLaw;
+use crate::command::CutRef;
 use crate::export::{composite_for, graph_composite};
 use crate::fx::Image;
-use crate::model::{Cut, LayerRole};
+use crate::model::{Cut, LayerRole, Project};
 use crate::text::{self, Face};
 
 // ---- Purpose -----------------------------------------------------------------
@@ -77,10 +78,23 @@ impl Default for RenderOpts {
 /// [`crate::model::Drawing::flatten_for`] does. Tiles are Arc'd: cheap.
 pub fn purpose_cut(cut: &Cut, purpose: Purpose) -> Cut {
     let mut c = cut.clone();
-    for d in &mut c.drawings {
+    retain_purpose(&mut c, purpose);
+    c
+}
+
+/// [`purpose_cut`] in place: a job's snapshot is filtered once, and each
+/// frame then renders from it without another clone.
+pub fn retain_purpose(cut: &mut Cut, purpose: Purpose) {
+    for d in &mut cut.drawings {
         d.layers.retain(|l| purpose.keeps(l.props.role));
     }
-    c
+}
+
+/// Whether `cut` holds a layer that `purpose` leaves out.
+fn drops_any(cut: &Cut, purpose: Purpose) -> bool {
+    cut.drawings
+        .iter()
+        .any(|d| d.layers.iter().any(|l| !purpose.keeps(l.props.role)))
 }
 
 /// One frame for delivery, premultiplied, in stored values (D8), at the
@@ -102,7 +116,16 @@ pub fn render(
             .unwrap_or_else(|| composite_for(cut, frame, width, height, Purpose::View)),
         Purpose::Final => match cut.graph.output {
             Some(_) => {
-                graph_composite(&purpose_cut(cut, Purpose::Final), law, frame, width, height)
+                // A snapshot already filtered ([`retain_purpose`]) renders
+                // as it is; only a cut with something to drop is cloned.
+                let filtered;
+                let source = if drops_any(cut, Purpose::Final) {
+                    filtered = purpose_cut(cut, Purpose::Final);
+                    &filtered
+                } else {
+                    cut
+                };
+                graph_composite(source, law, frame, width, height)
                     .unwrap_or_else(|| vec![0.0; width as usize * height as usize * 4])
             }
             None => composite_for(cut, frame, width, height, Purpose::Final),
@@ -569,6 +592,14 @@ pub const PRESETS: &[Preset] = &[
         BurnIns::NONE,
         Purpose::View,
     ),
+    // The animator's douga/genga check as frames: works without ffmpeg.
+    preset(
+        "Line test PNG",
+        Format::Png8,
+        false,
+        BurnIns::LINE_TEST,
+        Purpose::LineTest,
+    ),
     preset(
         "H.264 review",
         Format::Video(Codec::H264),
@@ -666,7 +697,8 @@ pub fn sanitize(s: &str) -> String {
 
 /// Expand `pattern` for frame number `frame` (counted from 1, as the sheet
 /// counts) and add `.ext`. Tokens: `{project}`, `{scene}`, `{cut}`,
-/// `{frame}` and `{frame:0N}` (zero-padded to N); an unknown token stays as
+/// `{frame}` and `{frame:0N}` (zero-padded to N, at most
+/// [`MAX_FRAME_PAD`]); an unknown token stays as
 /// written. The result is one file name: characters a path cannot hold
 /// become `_`, and trailing dots and spaces (which Windows drops) go.
 pub fn expand_pattern(pattern: &str, names: &Names, frame: u32, ext: &str) -> String {
@@ -677,6 +709,27 @@ pub fn expand_pattern(pattern: &str, names: &Names, frame: u32, ext: &str) -> St
 /// separator it leaves dangling at the end).
 pub fn video_name(pattern: &str, names: &Names, ext: &str) -> String {
     expand(pattern, names, None, ext)
+}
+
+/// The widest `{frame:0N}` pad: a u32 frame has at most 10 digits, and a
+/// wider one (`{frame:070000}`) would overflow the formatter.
+pub const MAX_FRAME_PAD: usize = 10;
+
+/// Whether `pattern` names the frame (`{frame}` or `{frame:0N}`) — else
+/// every frame of an image sequence would get one file name.
+pub fn has_frame_token(pattern: &str) -> bool {
+    let n = Names::default();
+    expand(pattern, &n, Some(1), "") != expand(pattern, &n, Some(2), "")
+}
+
+/// An image sequence's pattern: `pattern`, with `_{frame:04}` added when it
+/// does not name the frame (each frame keeps its own file).
+pub fn sequence_pattern(pattern: &str) -> String {
+    if has_frame_token(pattern) {
+        pattern.to_string()
+    } else {
+        format!("{pattern}_{{frame:04}}")
+    }
 }
 
 fn expand(pattern: &str, names: &Names, frame: Option<u32>, ext: &str) -> String {
@@ -699,6 +752,7 @@ fn expand(pattern: &str, names: &Names, frame: Option<u32>, ext: &str) -> String
             t => t
                 .strip_prefix("frame:")
                 .and_then(|w| w.parse::<usize>().ok())
+                .map(|w| w.min(MAX_FRAME_PAD))
                 .map(|w| frame.map(|f| format!("{f:0w$}")).unwrap_or_default()),
         };
         match value {
@@ -892,12 +946,17 @@ pub enum CliSource {
     Sample,
 }
 
-/// `animstudio --render <file.animproj | --sample> --preset <name> --out <dir>`.
+/// `animstudio --render <file.animproj | --sample> --preset <name> --out <dir>
+/// [--scene <name>] [--cut <name>]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CliJob {
     pub source: CliSource,
     pub preset: &'static Preset,
     pub out: PathBuf,
+    /// `--scene`: the scene to look in (None = every scene).
+    pub scene: Option<String>,
+    /// `--cut`: the cut to render (None = the first cut, see [`pick_cut`]).
+    pub cut: Option<String>,
 }
 
 /// Exit codes of the batch render.
@@ -905,8 +964,50 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_FAILED: i32 = 1;
 pub const EXIT_USAGE: i32 = 2;
 
-pub const CLI_USAGE: &str =
-    "usage: animstudio --render <file.animproj | --sample> --preset <name> --out <dir>";
+pub const CLI_USAGE: &str = "usage: animstudio --render <file.animproj | --sample> --preset <name> \
+     --out <dir> [--scene <name>] [--cut <name>]";
+
+/// The cut a batch job renders: the cut named `cut` in the scene named
+/// `scene` (names ignore case; an unnamed scene is any scene), else the
+/// first cut of that scene, else of the project. Err says what is there.
+pub fn pick_cut(
+    project: &Project,
+    scene: Option<&str>,
+    cut: Option<&str>,
+) -> Result<CutRef, String> {
+    let same = |a: &str, b: &str| a.trim().eq_ignore_ascii_case(b.trim());
+    let scenes: Vec<_> = project
+        .scenes
+        .iter()
+        .filter(|s| scene.is_none_or(|n| same(&s.name, n)))
+        .collect();
+    if scenes.is_empty() {
+        let all: Vec<&str> = project.scenes.iter().map(|s| s.name.as_str()).collect();
+        return Err(match scene {
+            Some(n) => format!("no scene named \"{n}\" — scenes: {}", all.join(", ")),
+            None => "the project has no scene".into(),
+        });
+    }
+    let found = scenes.iter().find_map(|s| {
+        s.cuts
+            .iter()
+            .find(|c| cut.is_none_or(|n| same(&c.name, n)))
+            .map(|c| CutRef {
+                scene: s.id,
+                cut: c.id,
+            })
+    });
+    found.ok_or_else(|| match cut {
+        Some(n) => {
+            let all: Vec<&str> = scenes
+                .iter()
+                .flat_map(|s| s.cuts.iter().map(|c| c.name.as_str()))
+                .collect();
+            format!("no cut named \"{n}\" — cuts: {}", all.join(", "))
+        }
+        None => "the project has no cut".into(),
+    })
+}
 
 /// Whether the command line asks for a batch render.
 pub fn is_cli(args: &[String]) -> bool {
@@ -917,6 +1018,7 @@ pub fn is_cli(args: &[String]) -> bool {
 /// `Err` is a usage error (exit [`EXIT_USAGE`]) that says why.
 pub fn parse_cli(args: &[String]) -> Result<CliJob, String> {
     let (mut source, mut preset, mut out) = (None, None, None);
+    let (mut scene, mut cut) = (None, None);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = |flag: &str| {
@@ -941,6 +1043,8 @@ pub fn parse_cli(args: &[String]) -> Result<CliJob, String> {
                 })?);
             }
             "--out" => out = Some(PathBuf::from(value("--out")?)),
+            "--scene" => scene = Some(value("--scene")?),
+            "--cut" => cut = Some(value("--cut")?),
             other => return Err(format!("unknown argument \"{other}\"\n{CLI_USAGE}")),
         }
     }
@@ -948,5 +1052,7 @@ pub fn parse_cli(args: &[String]) -> Result<CliJob, String> {
         source: source.ok_or_else(|| format!("--render needs a file or --sample\n{CLI_USAGE}"))?,
         preset: preset.ok_or_else(|| format!("--preset is missing\n{CLI_USAGE}"))?,
         out: out.ok_or_else(|| format!("--out is missing\n{CLI_USAGE}"))?,
+        scene,
+        cut,
     })
 }

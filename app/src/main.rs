@@ -197,7 +197,12 @@ fn cli_exit(args: &[String], data_dir: Option<&std::path::Path>) -> i32 {
     let job = match anim_core::deliver::parse_cli(args) {
         Ok(job) => job,
         Err(e) => {
-            eprintln!("animstudio: {e}\n{CLI_USAGE}");
+            // Most errors end in the usage already: say it once.
+            if e.contains(CLI_USAGE) {
+                eprintln!("animstudio: {e}");
+            } else {
+                eprintln!("animstudio: {e}\n{CLI_USAGE}");
+            }
             return EXIT_USAGE;
         }
     };
@@ -214,9 +219,9 @@ fn cli_exit(args: &[String], data_dir: Option<&std::path::Path>) -> i32 {
 }
 
 /// GM11: one batch job, synchronously, one line per frame: the file's (or
-/// the in-memory sample's) first cut under the preset into `job.out`. The
-/// data dir's config gives the ffmpeg location and the artist; None = the
-/// defaults.
+/// the in-memory sample's) cut — the one `--scene` / `--cut` name, else the
+/// first — under the preset into `job.out`. The data dir's config gives the
+/// ffmpeg location and the artist; None = the defaults.
 fn run_cli_job(
     job: &anim_core::deliver::CliJob,
     data_dir: Option<&std::path::Path>,
@@ -228,12 +233,19 @@ fn run_cli_job(
         anim_core::deliver::CliSource::Sample => sample::build_sample().engine.project.clone(),
     };
     let config = data_dir.map(|d| Config::load_from(d).0).unwrap_or_default();
-    let scene = project.scenes.first().ok_or("the project has no scene")?;
-    let cut = scene.cuts.first().ok_or("the project has no cut")?;
-    let at = anim_core::command::CutRef {
-        scene: scene.id,
-        cut: cut.id,
-    };
+    let at = anim_core::deliver::pick_cut(&project, job.scene.as_deref(), job.cut.as_deref())?;
+    // More than one cut to choose from: say which one this renders.
+    let cuts: usize = project.scenes.iter().map(|s| s.cuts.len()).sum();
+    if let (true, Some(scene), Some(cut)) = (
+        cuts > 1,
+        project.scene(at.scene),
+        project.cut(at.scene, at.cut),
+    ) {
+        println!(
+            "rendering cut \"{}\" of scene \"{}\" ({cuts} cuts; --scene / --cut pick another)",
+            cut.name, scene.name
+        );
+    }
     let spec = render_queue::JobSpec::new(
         &project,
         at,
@@ -489,23 +501,6 @@ impl rodio::Source for ClipSource {
     fn total_duration(&self) -> Option<Duration> {
         None
     }
-}
-
-/// State for a running background export (C3) — polled once per frame
-/// (`Editor::poll_export`), same drain pattern as `App::pump_tablet`. Lives
-/// on `Editor` (not `App`): it's scoped to the open project, same as `dock`
-/// or `workspaces`.
-struct ExportJob {
-    rx: std::sync::mpsc::Receiver<export::ExportProgress>,
-    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// "PNG sequence" / "MP4" — for the progress window title and the
-    /// completion status message.
-    kind: &'static str,
-    total: usize,
-    done: usize,
-    /// MP4 only: frame rendering finished, now inside the (unprogressable)
-    /// ffmpeg subprocess.
-    encoding: bool,
 }
 
 /// STAGE 1 (PSD-multiplayer-rescope): a remote stroke being gathered
@@ -2616,6 +2611,11 @@ impl App {
             if let Some(dir) = ed.state.render_queue.show_folder.take() {
                 proc::show_folder(&dir);
             }
+            // GM8: a job rendering is the Quick start's export step, from
+            // File ▸ Export… or the queue's own Start.
+            if ed.state.render_queue.busy() {
+                ed.quick_start[welcome::EXPORT_STEP] = true;
+            }
             let mut recent_changed = match ed.recent_edit.take() {
                 Some(RecentEdit::Remove(p)) => {
                     self.config.session.recent.retain(|r| r != &p);
@@ -2789,8 +2789,9 @@ impl App {
             self.devloop.note = Some("rebuild ready — finishing your stroke first".into());
             return;
         }
-        if editor.export_job.is_some() {
-            self.devloop.note = Some("rebuild ready — waiting for the export".into());
+        // GM11: a render queue job is never cut off half-written.
+        if editor.state.render_queue.busy() {
+            self.devloop.note = Some("rebuild ready — waiting for the render queue".into());
             return;
         }
         // GM2's modals too: a pending "Save changes?" or recovery offer is
@@ -2992,6 +2993,19 @@ impl Editor {
             }
             // GM10: the cut's paper window (its "set paper" is the edit).
             Action::PaperSize => self.paper_form = Some(PaperForm::of(&self.state)),
+            // GM11: the delivery jobs' pane, and the composite viewers'
+            // final look (a view: the document is untouched).
+            Action::ShowRenderQueue => self.open_pane(Pane::RenderQueue),
+            Action::ToggleFinalLook => {
+                self.final_look.on = !self.final_look.on;
+                self.state.status = if self.final_look.on {
+                    "final look: the composite as the master delivers it (no rough, reference or \
+                     correction layers)"
+                        .into()
+                } else {
+                    "final look off: the composite shows every layer".into()
+                };
+            }
             Action::FrameCurves => curves_panel::frame_stored(&mut self.state),
             Action::TypeIntoCell => {
                 self.open_pane(Pane::XSheet);
@@ -3363,6 +3377,8 @@ impl Editor {
             | Action::ProjectSettings
             | Action::WelcomeScreen
             | Action::PaperSize
+            | Action::ShowRenderQueue
+            | Action::ToggleFinalLook
             | Action::TypeIntoCell
             | Action::AddNode => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
@@ -3403,6 +3419,8 @@ fn is_chrome(action: Action) -> bool {
             | Action::ProjectSettings
             | Action::WelcomeScreen
             | Action::PaperSize
+            | Action::ShowRenderQueue
+            | Action::ToggleFinalLook
             | Action::TypeIntoCell
             | Action::AddNode
     )
@@ -3791,10 +3809,9 @@ struct Editor {
     /// Per-instance viewer-pane state (zoom/pan), keyed by the pane's viewer
     /// id — the first multi-instance pane state (session-only).
     viewers: std::collections::HashMap<u8, viewer::ViewerView>,
-    /// In-flight background export (C3) — None = no export running. Export
-    /// menu buttons are disabled while this is Some, so only one job runs
-    /// at a time (its own worker thread, same shape as the tablet backend).
-    export_job: Option<ExportJob>,
+    /// GM11: the composite viewers' "final look" — the master's purpose
+    /// rendered on a worker (File ▸ Export… itself adds render queue jobs).
+    pub final_look: viewer::FinalLook,
     /// Export frame-range buffer (0-based, inclusive), shown in the export
     /// menu — None = "whole cut" (recomputed fresh from the current cut's
     /// length every time the menu renders, so it's never stale).
@@ -4124,6 +4141,8 @@ struct EditorTabs<'a> {
     /// for every VISIBLE consumer (canvas composite view + viewer panes).
     graph: viewer::GraphView,
     viewers: &'a mut std::collections::HashMap<u8, viewer::ViewerView>,
+    /// GM11: the viewers' "final look" latch (the Editor's FinalLook).
+    final_look: &'a mut bool,
     /// The active spine stage — panes may lens their CONTENT by room.
     stage: Option<Stage>,
     pen: &'a PenConfig,
@@ -4214,7 +4233,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                     // area the layout probe measures here.
                     self.canvas.dbg_rect = ui.available_rect_before_wrap();
                     let vs = self.viewers.entry(u8::MAX).or_default();
-                    viewer::ui(ui, self.state, self.graph, vs);
+                    viewer::ui(ui, self.state, self.graph, vs, self.final_look);
                 } else {
                     self.canvas.ui(
                         ui,
@@ -4230,7 +4249,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             }
             Pane::Viewer(id) => {
                 let vs = self.viewers.entry(*id).or_default();
-                viewer::ui(ui, self.state, self.graph, vs);
+                viewer::ui(ui, self.state, self.graph, vs, self.final_look);
             }
         }
     }
@@ -4381,7 +4400,7 @@ impl Editor {
             preset_name: String::new(),
             forge: forge::ForgeState::default(),
             viewers: Default::default(),
-            export_job: None,
+            final_look: Default::default(),
             export_range: None,
             float_viewer: floatwin::FloatViewer::new(),
             float_canvas: floatcanvas::FloatCanvas::default(),
@@ -4448,7 +4467,7 @@ impl Editor {
             preset_name: String::new(),
             forge: forge::ForgeState::default(),
             viewers: Default::default(),
-            export_job: None,
+            final_look: Default::default(),
             export_range: None,
             float_viewer: floatwin::FloatViewer::new(),
             float_canvas: floatcanvas::FloatCanvas::default(),
@@ -4500,7 +4519,10 @@ impl Editor {
             }
             Some(welcome::ShowMe::Export) => {
                 self.enter_room(Stage::Edit);
-                self.state.status = "export: File ▸ Export… — a PNG sequence or an MP4".into();
+                self.open_pane(Pane::RenderQueue);
+                self.state.status = "export: the render queue — pick a preset, \"+ this cut\", \
+                                     then Start (File ▸ Export… adds a job too)"
+                    .into();
                 Performed::Done
             }
             None => Performed::Ignored,
@@ -4727,6 +4749,32 @@ impl Editor {
         }
     }
 
+    /// GM11: File ▸ Export…'s PNG sequence (`dest` a folder) or MP4 (`dest`
+    /// the file) — a render queue job for this cut over the menu's frame
+    /// range (None = the whole cut), the queue brought forward and started
+    /// (a job already rendering finishes first).
+    pub(crate) fn queue_export(
+        &mut self,
+        ctx: &egui::Context,
+        kind: render_queue::ExportKind,
+        dest: &std::path::Path,
+    ) {
+        let Some(i) = render_queue::export_job(&mut self.state, kind, dest, self.export_range)
+        else {
+            return;
+        };
+        self.open_pane(Pane::RenderQueue);
+        render_queue::start(&mut self.state, ctx);
+        let job = &self.state.render_queue.queue.jobs[i];
+        self.state.status = format!(
+            "queued {} ({}) — the render queue renders it while you work",
+            job.label,
+            job.preset().name
+        );
+        // GM8: the Quick start's last step.
+        self.quick_start[welcome::EXPORT_STEP] = true;
+    }
+
     /// GM3: may this action run now? Err says why not, in the artist's
     /// words — a menu item that cannot run is greyed and says so.
     pub fn can_perform(&self, action: Action) -> Result<(), &'static str> {
@@ -4863,6 +4911,8 @@ impl Editor {
             Action::PinToLightTable => Some(
                 self.state.current_drawing().is_some_and(|d| self.state.view.light.is_pinned(d)),
             ),
+            // GM11: the composite viewers' delivery look.
+            Action::ToggleFinalLook => Some(self.final_look.on),
             _ => None,
         }
     }
@@ -6227,57 +6277,6 @@ impl Editor {
         self.audio_playing = true;
     }
 
-    /// Drain this frame's export-progress messages. A disconnected channel
-    /// (the worker thread panicked) is treated as a silent failure — the
-    /// job just disappears rather than spinning forever; a real crash there
-    /// would already have printed to stderr.
-    fn poll_export(&mut self) {
-        let Some(job) = &mut self.export_job else {
-            return;
-        };
-        // (String, failed?) — a failure refuses, success and cancel chatter.
-        let mut finished: Option<(String, bool)> = None;
-        loop {
-            match job.rx.try_recv() {
-                Ok(export::ExportProgress::Frame) => job.done += 1,
-                Ok(export::ExportProgress::Encoding) => job.encoding = true,
-                Ok(export::ExportProgress::Done(result)) => {
-                    finished = Some(match result {
-                        Ok((n, note)) => {
-                            (format!("exported {n} frame(s) ({}){note}", job.kind), false)
-                        }
-                        Err(e) if e == export::CANCELLED => {
-                            ("export cancelled".into(), false)
-                        }
-                        Err(e) => (
-                            format!("the {} export did not finish — {e}", job.kind),
-                            true,
-                        ),
-                    });
-                    break;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    finished = Some((
-                        format!("the {} export stopped without finishing", job.kind),
-                        true,
-                    ));
-                    break;
-                }
-            }
-        }
-        if let Some((status, failed)) = finished {
-            self.export_job = None;
-            // AUDIT [19]: a failure after minutes of rendering used to
-            // fade out of the chatter lane in four seconds.
-            if failed {
-                self.state.refuse(status);
-            } else {
-                self.state.status = status;
-            }
-        }
-    }
-
     /// THE FOOT's right lane: the room lamp, the tape counter, and the pen
     /// diagnostics. Laid out FIRST from the row's right edge so a long
     /// chatter line can never push it off the screen (the clipping the
@@ -6376,52 +6375,6 @@ impl Editor {
         }
     }
 
-    /// The export-progress window (Krita-style small modal, matching
-    /// `config::settings_window`'s pattern) — a Cancel button and either a
-    /// determinate bar (frame rendering) or an indeterminate one (MP4's
-    /// ffmpeg subprocess, which has no cheap progress signal).
-    fn export_progress_window(&mut self, ctx: &egui::Context) {
-        let Some(job) = &self.export_job else { return };
-        let mut open = true;
-        egui::Window::new(format!("Exporting — {}", job.kind))
-            .open(&mut open)
-            .resizable(false)
-            .collapsible(false)
-            .show(ctx, |ui| {
-                plate::surface(ui);
-                ui.set_min_width(260.0);
-                // AUDIT [15]: this was a stock egui ProgressBar — the one
-                // surface the artist stares at for minutes, speaking a
-                // different language from the app behind it.
-                if job.encoding {
-                    plate::legend(ui, "encoding video");
-                    plate::meter(ui, None, 240.0);
-                } else {
-                    let frac = if job.total > 0 {
-                        job.done as f32 / job.total as f32
-                    } else {
-                        0.0
-                    };
-                    plate::legend(ui, "rendering frames");
-                    plate::meter(ui, Some(frac), 240.0);
-                    ui.label(
-                        egui::RichText::new(format!("{} / {}", job.done, job.total))
-                            .monospace()
-                            .size(11.0)
-                            .color(plate::STRUCK),
-                    );
-                }
-                ui.add_space(6.0);
-                if ui.button("cancel").clicked() {
-                    job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                }
-            });
-        // The window's own ✕ also cancels — closing it must not orphan the
-        // worker thread silently rendering in the background.
-        if !open && let Some(job) = &self.export_job {
-            job.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }
     fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -6501,8 +6454,6 @@ impl Editor {
                 );
             }
         }
-        self.poll_export();
-        self.export_progress_window(ui.ctx());
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.state.tick(dt);
         self.sync_audio(dt);
@@ -6601,15 +6552,29 @@ impl Editor {
                     self.menu_item(ui, Action::Save);
                     self.menu_item(ui, Action::SaveAs);
                     ui.menu_button("Export…", |ui| {
+                        // GM11: every export is a render queue job, rendered
+                        // on its worker while the artist keeps drawing; the
+                        // queue itself has every preset.
+                        if ui
+                            .button("open the render queue (all presets)")
+                            .on_hover_text(
+                                "Window ▸ Render Queue: PNG16, TIFF16, EXR, ProRes, the line \
+                                 test, burn-ins and a slate",
+                            )
+                            .clicked()
+                        {
+                            ui.close();
+                            self.perform(Action::ShowRenderQueue);
+                        }
+                        ui.separator();
                         // Frame range (C3): 1-based in the UI (matches the
                         // "N / total" frame readout elsewhere), 0-based
-                        // internally. None = whole cut — recomputed fresh every
-                        // time the menu opens so it can never point past a cut
-                        // that's since gotten shorter.
+                        // internally. None = whole cut (read when the job
+                        // starts) until a field is moved, so it can never
+                        // point past a cut that's since gotten shorter.
                         let n = self.state.frame_count();
-                        let (mut a, mut b) = self.export_range.unwrap_or((0, n.saturating_sub(1)));
-                        a = a.min(n.saturating_sub(1));
-                        b = b.clamp(a, n.saturating_sub(1));
+                        let (mut a, mut b) = render_queue::resolve(n, self.export_range);
+                        let shown = (a, b);
                         ui.horizontal(|ui| {
                             ui.label("frames");
                             let mut a1 = a + 1;
@@ -6628,7 +6593,9 @@ impl Editor {
                                 b = b1 - 1;
                             }
                         });
-                        self.export_range = Some((a, b));
+                        if (a, b) != shown {
+                            self.export_range = Some((a, b));
+                        }
                         if ui
                             .small_button("whole cut")
                             .on_hover_text("reset the range to frame 1 – last")
@@ -6638,16 +6605,14 @@ impl Editor {
                         }
                         ui.separator();
 
-                        // Both spawns are near-identical: clone the cut (an
-                        // owned, immutable snapshot the worker thread renders
-                        // from — never a live reference, see export.rs), hand it
-                        // to a background thread, and track the job for the
-                        // progress window. Buttons disable while one is running
-                        // (one export at a time).
-                        let busy = self.export_job.is_some();
+                        // GM11: each picks where, then queues its job over
+                        // this range and starts the queue (Editor::queue_export).
                         if ui
-                            .add_enabled(!busy, egui::Button::new("PNG sequence…"))
-                            .on_hover_text("one PNG per frame, transparent background")
+                            .button("PNG sequence…")
+                            .on_hover_text(
+                                "a render queue job (PNG 8-bit): one PNG per frame, transparent \
+                                 background — it starts at once",
+                            )
                             .clicked()
                         {
                             ui.close();
@@ -6656,41 +6621,19 @@ impl Editor {
                                 dlg = dlg.set_directory(dir);
                             }
                             if let Some(dir) = dlg.pick_folder() {
-                                let cut = self.state.cut().clone();
-                                let (w, h) = (
-                                    self.state.engine.project.width,
-                                    self.state.engine.project.height,
-                                );
-                                let cancel =
-                                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                let rx = export::spawn_png_sequence(
-                                    cut,
-                                    self.state.engine.project.color_law,
-                                    w,
-                                    h,
-                                    dir,
-                                    a..=b,
-                                    ui.ctx().clone(),
-                                    cancel.clone(),
-                                );
-                                self.export_job = Some(ExportJob {
-                                    rx,
-                                    cancel,
-                                    kind: "PNG sequence",
-                                    total: (b - a + 1) as usize,
-                                    done: 0,
-                                    encoding: false,
-                                });
-                                self.state.status = "exporting…".into();
-                                // GM8: the Quick start's last step.
-                                self.quick_start[welcome::EXPORT_STEP] = true;
+                                let ctx = ui.ctx().clone();
+                                self.queue_export(&ctx, render_queue::ExportKind::Png, &dir);
                             }
                         }
-                        if ui
-                            .add_enabled(!busy, egui::Button::new("MP4 video…"))
-                            .on_hover_text("white background — needs ffmpeg on PATH")
-                            .clicked()
-                        {
+                        let ffmpeg = self.state.render_queue.ffmpeg_path().is_some();
+                        let mp4 = ui
+                            .add_enabled(ffmpeg, egui::Button::new("MP4 video…"))
+                            .on_hover_text(
+                                "a render queue job (H.264 review): white background — it starts \
+                                 at once",
+                            )
+                            .on_disabled_hover_text(render_queue::NEEDS_FFMPEG);
+                        if mp4.clicked() {
                             ui.close();
                             let mut dlg = rfd::FileDialog::new()
                                 .add_filter("MP4 video", &["mp4"])
@@ -6699,36 +6642,8 @@ impl Editor {
                                 dlg = dlg.set_directory(dir);
                             }
                             if let Some(path) = dlg.save_file() {
-                                let cut = self.state.cut().clone();
-                                let (w, h) = (
-                                    self.state.engine.project.width,
-                                    self.state.engine.project.height,
-                                );
-                                let fps = self.state.fps();
-                                let cancel =
-                                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                let rx = export::spawn_mp4(
-                                    cut,
-                                    self.state.engine.project.color_law,
-                                    w,
-                                    h,
-                                    fps,
-                                    path,
-                                    a..=b,
-                                    ui.ctx().clone(),
-                                    cancel.clone(),
-                                    self.state.render_queue.configured_ffmpeg(),
-                                );
-                                self.export_job = Some(ExportJob {
-                                    rx,
-                                    cancel,
-                                    kind: "MP4",
-                                    total: (b - a + 1) as usize,
-                                    done: 0,
-                                    encoding: false,
-                                });
-                                self.state.status = "exporting…".into();
-                                self.quick_start[welcome::EXPORT_STEP] = true;
+                                let ctx = ui.ctx().clone();
+                                self.queue_export(&ctx, render_queue::ExportKind::Mp4, &path);
                             }
                         }
                     });
@@ -7134,8 +7049,12 @@ impl Editor {
                         // its settings live on the canvas deck + right rail.
                         // GM14: the Curves pane is the registry's own item
                         // (Window ▸ Curves (graph editor), listed below);
-                        // GM7: so is Window ▸ Nuri check (paint check).
-                        if matches!(*pane, Pane::Brush | Pane::Curves | Pane::PaintCheck) {
+                        // GM7: so is Window ▸ Nuri check (paint check), and
+                        // GM11: Window ▸ Render Queue (delivery).
+                        if matches!(
+                            *pane,
+                            Pane::Brush | Pane::Curves | Pane::PaintCheck | Pane::RenderQueue
+                        ) {
                             continue;
                         }
                         let present = self.dock.iter_all_tabs().any(|(_, t)| t == pane);
@@ -7416,7 +7335,11 @@ impl Editor {
         let float_open = self.float_viewer.is_open();
         let mut graph = viewer::GraphView::Off;
         if viewers_open || composite_needed || float_open {
-            graph = if self.state.cut().graph.output.is_none() {
+            graph = if self.final_look.on {
+                // GM11: the master's look, rendered by the CPU on a worker
+                // (D9) — no GPU needed; the last frame stays up meanwhile.
+                self.final_look.view(&self.state, ui.ctx())
+            } else if self.state.cut().graph.output.is_none() {
                 viewer::GraphView::NoOutput
             } else if let (Some(g), Some(p)) = (&mut self.graph, &mut self.paint) {
                 let (w, h) = (
@@ -7502,6 +7425,7 @@ impl Editor {
             paint: self.paint.as_mut(),
             graph,
             viewers: &mut self.viewers,
+            final_look: &mut self.final_look.on,
             pen,
             layers_cfg,
             presets,

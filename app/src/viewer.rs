@@ -7,6 +7,11 @@
 //! Interaction: wheel = zoom at cursor, any drag = pan, double-click = fit.
 //! No document mutation happens here, so none of the canvas guards apply.
 
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+
+use anim_core::command::CutRef;
+use anim_core::deliver::{self, Purpose, RenderOpts};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
@@ -31,6 +36,128 @@ pub enum GraphView {
     Rendering(egui::TextureId),
 }
 
+/// GM11: the composite as the master delivers it — [`Purpose::Final`]: no
+/// rough, reference or correction (sakkan) layers and no Ref columns —
+/// rendered by the CPU on a worker from a snapshot (D9) and shown by every
+/// composite view in place of the graph's GPU render while its latch is
+/// on. The last finished frame stays up, with the TALLY dot, while the
+/// next one renders; one render runs at a time.
+#[derive(Default)]
+pub struct FinalLook {
+    /// The latch: every viewer's "final look" and View ▸ Final look.
+    pub on: bool,
+    /// The views' texture (made the first time the look is shown).
+    tex: Option<egui::TextureHandle>,
+    /// What the texture holds.
+    shown: Option<LookKey>,
+    /// The last finished frame, as uploaded (straight sRGB bytes).
+    pub image: Option<Arc<egui::ColorImage>>,
+    /// The frame on the worker, and where its answer comes.
+    pending: Option<(LookKey, Receiver<Arc<egui::ColorImage>>)>,
+}
+
+/// What a final-look frame shows: another cut, frame or size, or any edit
+/// (a new revision), renders again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LookKey {
+    at: CutRef,
+    frame: u32,
+    revision: u64,
+    size: (u32, u32),
+}
+
+impl FinalLook {
+    /// This frame's view for every composite consumer: the finished frame
+    /// (Ready), or the last one kept up while this one renders
+    /// (Rendering). Never waits; the snapshot is the one clone made here.
+    pub fn view(&mut self, state: &AppState, ctx: &egui::Context) -> GraphView {
+        let p = &state.engine.project;
+        let key = LookKey {
+            at: state.at(),
+            frame: state.view.frame,
+            revision: state.engine.revision(),
+            size: (p.width, p.height),
+        };
+        if let Some((k, rx)) = &self.pending {
+            match rx.try_recv() {
+                Ok(img) => {
+                    let k = *k;
+                    self.pending = None;
+                    self.show(k, img);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.pending = None,
+            }
+        }
+        let tex = self
+            .tex
+            .get_or_insert_with(|| {
+                let blank = egui::ColorImage::filled([1, 1], Color32::TRANSPARENT);
+                ctx.load_texture("final look", blank, egui::TextureOptions::LINEAR)
+            })
+            .id();
+        if self.shown == Some(key) {
+            return GraphView::Ready(tex);
+        }
+        if self.pending.is_none()
+            && let Some(cut) = p.cut(key.at.scene, key.at.cut)
+        {
+            let cut = cut.clone();
+            let law = p.color_law;
+            // A frame wider than the device's textures shows as the half
+            // proxy (it is a look, not the delivery).
+            let side = ctx.input(|i| i.max_texture_side);
+            let scale = if key.size.0.max(key.size.1) as usize > side {
+                0.5
+            } else {
+                1.0
+            };
+            let (tx, rx) = channel();
+            let repaint = ctx.clone();
+            std::thread::spawn(move || {
+                let mut cut = cut;
+                deliver::retain_purpose(&mut cut, Purpose::Final);
+                let opts = RenderOpts {
+                    purpose: Purpose::Final,
+                    scale,
+                };
+                let img = deliver::render(&cut, law, key.frame, key.size.0, key.size.1, &opts);
+                let bytes: Vec<u8> = img
+                    .px
+                    .chunks_exact(4)
+                    .flat_map(anim_core::export::straight_rgba8)
+                    .collect();
+                let size = [img.w as usize, img.h as usize];
+                let _ = tx.send(Arc::new(egui::ColorImage::from_rgba_unmultiplied(
+                    size, &bytes,
+                )));
+                repaint.request_repaint();
+            });
+            self.pending = Some((key, rx));
+        }
+        GraphView::Rendering(tex)
+    }
+
+    fn show(&mut self, key: LookKey, img: Arc<egui::ColorImage>) {
+        if let Some(t) = &mut self.tex {
+            t.set(img.clone(), egui::TextureOptions::LINEAR);
+        }
+        self.image = Some(img);
+        self.shown = Some(key);
+    }
+
+    /// Tests: block until the frame on the worker is in (no sleep, no
+    /// clock).
+    #[cfg(test)]
+    pub fn wait(&mut self) {
+        if let Some((k, rx)) = self.pending.take()
+            && let Ok(img) = rx.recv()
+        {
+            self.show(k, img);
+        }
+    }
+}
+
 /// Per-instance view state (keyed by the pane's viewer id; session-only).
 pub struct ViewerView {
     zoom: f32,
@@ -52,7 +179,15 @@ impl Default for ViewerView {
     }
 }
 
-pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut ViewerView) {
+/// `final_look` is the shared [`FinalLook`] latch: its deck control sits
+/// beside "safe", and `graph` is the final look's frame while it is on.
+pub fn ui(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    graph: GraphView,
+    vs: &mut ViewerView,
+    final_look: &mut bool,
+) {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -110,17 +245,26 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
             let tag = painter.text(
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
                 egui::Align2::LEFT_TOP,
-                "🎬 composite",
+                if *final_look {
+                    "🎬 final look"
+                } else {
+                    "🎬 composite"
+                },
                 egui::FontId::proportional(12.0),
                 Color32::from_rgba_unmultiplied(83, 137, 196, 200),
             );
             if matches!(graph, GraphView::Rendering(_)) {
-                // GM9: the lamp, and in words — an FX render is pending.
+                // GM9: the lamp, and in words — an FX render is pending
+                // (GM11: or the final look's CPU frame).
                 painter.circle_filled(pos2(tag.right() + 8.0, tag.center().y), 4.0, crate::plate::TALLY);
                 painter.text(
                     pos2(tag.right() + 16.0, tag.center().y),
                     egui::Align2::LEFT_CENTER,
-                    "rendering FX…",
+                    if *final_look {
+                        "rendering final look…"
+                    } else {
+                        "rendering FX…"
+                    },
                     egui::FontId::proportional(12.0),
                     crate::plate::LEGEND,
                 );
@@ -154,6 +298,14 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
         crate::plate::latch(ui, &mut vs.safe, "safe")
             .on_hover_text("action safe (93%) and title safe (90%) over the composite")
     });
+    // GM11: the delivery's look, beside it (a fixed slot: nothing moves).
+    let at = Rect::from_min_size(rect.left_bottom() + vec2(96.0, -28.0), vec2(120.0, 22.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+        crate::plate::latch(ui, final_look, "final look").on_hover_text(
+            "the composite as the master delivers it: no rough, reference or correction \
+             (sakkan) layers, no Ref columns — rendered on a worker",
+        )
+    });
 }
 
 #[cfg(test)]
@@ -168,10 +320,15 @@ mod tests {
         let (w, fh) = (state.engine.project.width, state.engine.project.height);
         let ctx = egui::Context::default();
         let mut vs = ViewerView::default();
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| super::ui(ui, state, GraphView::Off, &mut vs));
+        let mut fin = false;
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin)
+        });
         assert_eq!(vs.drawn_safe, None, "off by default");
         vs.safe = true;
-        let _ = ctx.run_ui(egui::RawInput::default(), |ui| super::ui(ui, state, GraphView::Off, &mut vs));
+        let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin)
+        });
         assert_eq!(vs.drawn_safe, Some(anim_core::camera::safe_frames(w, fh)));
     }
 }

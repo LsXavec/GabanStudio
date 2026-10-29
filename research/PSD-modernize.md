@@ -2563,3 +2563,25 @@ what was not verified.
   File ▸ Export PNG and MP4 items still run their own exporters (not yet queue jobs); the composite view's
   "Final look" toggle; adding hand-picked cuts (the pane adds this cut, every cut of the scene, or a frame
   range). Not verified: a real ffmpeg encode (tests spawn nothing), the real window.
+- 2026-10-29 — GM11 review fixes; the three Left items are done. File ▸ Export… is the render queue's:
+  "open the render queue (all presets)" first, then the menu's frame range (the whole cut until a field
+  moves), "PNG sequence…" (PNG 8-bit) and "MP4 video…" (H.264 review, greyed with "needs ffmpeg" when none
+  is found); each queues a job (`Editor::queue_export`, `render_queue::export_job`), brings the queue
+  forward and starts it. The v0.3 exporters and their window are gone (`export.rs` keeps `suggest_dir` and
+  the ffmpeg search); Show me ▸ Export opens the Edit room's queue; the dev loop's rebuild waits for a
+  rendering queue. `Action::ShowRenderQueue` ("Render Queue (delivery)", Window, Window ▸ Render Queue
+  (delivery), aliases render/export/deliver/output/line test/prores/satsuei out, Ctrl+Shift+E in both
+  keymaps, Global) opens it from any room. "Final look": a latch on every viewer beside "safe" and
+  `Action::ToggleFinalLook` (View ▸ Final look (delivery), Shift+C) show the composite as the master
+  delivers it (Purpose::Final), rendered by the CPU on a worker from a snapshot (`viewer::FinalLook`, keyed
+  by cut, frame, engine revision and size), the last frame kept up with the TALLY dot meanwhile. A
+  whole-cut job keeps `frames: None` and reads the cut's length when it starts (`Job { frames, span }`,
+  `resolve`). New "Line test PNG" preset (PNG 8-bit, black on white, no ffmpeg). A Final job's snapshot is
+  filtered once (`retain_purpose`), not per frame. `{frame:0N}` pads at most 10 (`MAX_FRAME_PAD`); an image
+  pattern without a frame token gets `_{frame:04}` (`sequence_pattern`). The pane: "look again" searches
+  for ffmpeg again; "half size (proxy)" per job; "pick cuts" latches and "+ selected cuts" (in the
+  project's order); "+ frames" defaults to the whole cut; the output field's hint names the configured
+  default or `render` beside the project; the plate's meter in place of the progress bar; hovers on the
+  controls. CLI: `--scene` / `--cut` (`pick_cut`; names ignore case, an unknown name lists what is there),
+  the cut it renders said when there are several, the usage said once. 18 `delivery_tests`, 14
+  `render_queue_*`. Not verified: a real ffmpeg encode, the real window and its file dialogs.

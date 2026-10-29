@@ -14,7 +14,9 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use anim_core::color::ColorLaw;
 use anim_core::command::CutRef;
-use anim_core::deliver::{self, AudioIn, BurnIns, Codec, Format, Names, PRESETS, Preset, Slate};
+use anim_core::deliver::{
+    self, AudioIn, BurnIns, Codec, Format, Names, PRESETS, Preset, Purpose, Slate,
+};
 use anim_core::fx::Image;
 use anim_core::model::{Cut, Project};
 use eframe::egui;
@@ -45,11 +47,17 @@ pub struct Job {
     pub at: CutRef,
     /// The list's row: the cut's name and, for a range, its frames.
     pub label: String,
-    /// Inclusive source frames (0-based).
-    pub frames: (u32, u32),
+    /// The frames asked for (inclusive, 0-based); None = the whole cut,
+    /// its length read when the job starts.
+    pub frames: Option<(u32, u32)>,
+    /// The frames it renders: the ask against the cut as it was added, and
+    /// again at its start (the progress counts these).
+    pub span: (u32, u32),
     /// An index into [`PRESETS`].
     pub preset: usize,
     pub burn_ins: BurnIns,
+    /// A half-size proxy (50%) whatever the preset's scale.
+    pub half: bool,
     pub out: PathBuf,
     pub pattern: String,
     pub state: JobState,
@@ -59,7 +67,7 @@ pub struct Job {
 
 impl Job {
     pub fn total(&self) -> usize {
-        (self.frames.1.saturating_sub(self.frames.0) + 1) as usize
+        (self.span.1.saturating_sub(self.span.0) + 1) as usize
     }
 
     pub fn preset(&self) -> &'static Preset {
@@ -143,15 +151,26 @@ impl Queue {
     }
 }
 
+/// `frames` against a cut of `frame_count` frames: None = all of them; a
+/// range is kept inside the cut.
+pub fn resolve(frame_count: u32, frames: Option<(u32, u32)>) -> (u32, u32) {
+    let last = frame_count.saturating_sub(1);
+    frames.map_or((0, last), |(a, b)| {
+        (a.min(last), b.min(last).max(a.min(last)))
+    })
+}
+
 /// Everything a job renders from, taken when it starts (the cut is a
-/// snapshot: Arc'd tiles, cheap).
+/// snapshot: Arc'd tiles, cheap; a Final job's is filtered once here, not
+/// per frame).
 pub struct JobSpec {
     pub cut: Cut,
     pub law: ColorLaw,
     pub size: (u32, u32),
     pub fps: u32,
     pub frames: (u32, u32),
-    pub preset: &'static Preset,
+    /// The job's own copy: a proxy job halves its scale.
+    pub preset: Preset,
     pub burn_ins: BurnIns,
     pub slate: Slate,
     pub out: PathBuf,
@@ -166,7 +185,7 @@ impl JobSpec {
         project: &Project,
         at: CutRef,
         frames: Option<(u32, u32)>,
-        preset: &'static Preset,
+        preset: &Preset,
         burn_ins: BurnIns,
         out: PathBuf,
         pattern: String,
@@ -174,17 +193,18 @@ impl JobSpec {
     ) -> Option<JobSpec> {
         let scene = project.scene(at.scene)?;
         let cut = project.cut(at.scene, at.cut)?;
-        let last = cut.frame_count.saturating_sub(1);
-        let frames = frames.map_or((0, last), |(a, b)| {
-            (a.min(last), b.min(last).max(a.min(last)))
-        });
+        let frames = resolve(cut.frame_count, frames);
+        let mut snapshot = cut.clone();
+        if preset.purpose == Purpose::Final {
+            deliver::retain_purpose(&mut snapshot, Purpose::Final);
+        }
         Some(JobSpec {
-            cut: cut.clone(),
+            cut: snapshot,
             law: project.color_law,
             size: (project.width, project.height),
             fps: project.fps,
             frames,
-            preset,
+            preset: *preset,
             burn_ins,
             slate: Slate {
                 names: Names {
@@ -207,7 +227,7 @@ impl JobSpec {
             self.law,
             f,
             self.size,
-            self.preset,
+            &self.preset,
             self.burn_ins,
             &self.slate,
         )
@@ -230,12 +250,15 @@ pub fn render_job(
         let ffmpeg = ffmpeg.ok_or_else(|| NEEDS_FFMPEG.to_string())?;
         return render_video(spec, codec, ffmpeg, cancel, tick);
     }
+    // A pattern that does not name the frame gets `_{frame:04}`: one file
+    // per frame, never each frame over the last.
+    let pattern = deliver::sequence_pattern(&spec.pattern);
     let mut n = 0;
     for f in spec.frames.0..=spec.frames.1 {
         if cancel.load(Ordering::Relaxed) {
             return Err(CANCELLED.into());
         }
-        let name = deliver::expand_pattern(&spec.pattern, &spec.slate.names, f + 1, format.ext());
+        let name = deliver::expand_pattern(&pattern, &spec.slate.names, f + 1, format.ext());
         deliver::write_frame(&spec.out.join(name), &spec.frame(f), format, spec.law)?;
         n += 1;
         tick(f);
@@ -356,6 +379,9 @@ struct Worker {
     job: usize,
     rx: Receiver<Progress>,
     cancel: Arc<AtomicBool>,
+    /// Said with the finished job (cels whose legacy vector strokes no
+    /// render includes, as v0.3's exports said).
+    note: String,
 }
 
 impl Drop for Worker {
@@ -371,12 +397,18 @@ impl Drop for Worker {
 pub struct Draft {
     pub preset: usize,
     pub burn_ins: BurnIns,
+    /// Render at half size (a 50% proxy) whatever the preset's scale.
+    pub half: bool,
     /// The output folder; empty = the configured default, else a `render`
     /// folder beside the project file.
     pub out: String,
     pub pattern: String,
-    /// "+ frames" adds this inclusive range (0-based).
-    pub range: (u32, u32),
+    /// "+ frames" adds this inclusive range (0-based); None = the whole
+    /// cut (the fields show it until one is moved).
+    pub range: Option<(u32, u32)>,
+    /// "+ selected cuts" queues these, one job each, in the project's
+    /// order (picked in the pane's "pick cuts" fold-out, scene by scene).
+    pub picked: Vec<CutRef>,
 }
 
 impl Default for Draft {
@@ -384,9 +416,11 @@ impl Default for Draft {
         Self {
             preset: 0,
             burn_ins: PRESETS[0].burn_ins,
+            half: false,
             out: String::new(),
             pattern: deliver::DEFAULT_PATTERN.into(),
-            range: (0, 0),
+            range: None,
+            picked: Vec::new(),
         }
     }
 }
@@ -455,6 +489,19 @@ impl RenderQueue {
         }
         state_file.and_then(Path::parent).map(|d| d.join("render"))
     }
+
+    /// What an empty output-folder field means, said in the field: the
+    /// default from Settings ▸ General, else `render` beside the project.
+    pub fn out_hint(&self, state_file: Option<&Path>) -> String {
+        let default = self.config.out_dir.trim();
+        if !default.is_empty() {
+            return default.to_string();
+        }
+        match state_file.and_then(Path::parent) {
+            Some(dir) => dir.join("render").display().to_string(),
+            None => "render/ beside the project (save it first)".into(),
+        }
+    }
 }
 
 /// `unix` seconds as a local YYYY-MM-DD (the burn-in's date).
@@ -480,39 +527,130 @@ fn today() -> String {
     )
 }
 
-/// Add a job for cut `at` over `frames` (None = the whole cut) from the
-/// form. Refuses on the Aka lane without an output folder.
+/// Add a job for cut `at` over `frames` (None = the whole cut, however
+/// long it is when the job starts) from the form. Refuses on the Aka lane
+/// without an output folder.
 pub fn add_job(state: &mut AppState, at: CutRef, frames: Option<(u32, u32)>) -> bool {
     let Some(out) = state.render_queue.out_dir(state.file_path.as_deref()) else {
         state
             .refuse("the render queue needs an output folder: type one, or save the project first");
         return false;
     };
-    let Some(cut) = state.engine.project.cut(at.scene, at.cut) else {
-        return false;
-    };
-    let last = cut.frame_count.saturating_sub(1);
-    let frames = frames.map_or((0, last), |(a, b)| {
-        (a.min(last), b.min(last).max(a.min(last)))
-    });
-    let label = if frames == (0, last) {
-        cut.name.clone()
-    } else {
-        format!("{} · {}–{}", cut.name, frames.0 + 1, frames.1 + 1)
-    };
     let d = state.render_queue.draft.clone();
-    state.render_queue.queue.push(Job {
+    push_job(state, at, frames, d.preset, d.burn_ins, d.half, out, d.pattern).is_some()
+}
+
+/// Queue one job; its index, or None when the cut is gone.
+#[allow(clippy::too_many_arguments)]
+fn push_job(
+    state: &mut AppState,
+    at: CutRef,
+    frames: Option<(u32, u32)>,
+    preset: usize,
+    burn_ins: BurnIns,
+    half: bool,
+    out: PathBuf,
+    pattern: String,
+) -> Option<usize> {
+    let cut = state.engine.project.cut(at.scene, at.cut)?;
+    let span = resolve(cut.frame_count, frames);
+    let label = match frames {
+        None => cut.name.clone(),
+        Some(_) => format!("{} · {}–{}", cut.name, span.0 + 1, span.1 + 1),
+    };
+    let q = &mut state.render_queue.queue;
+    q.push(Job {
         at,
         label,
         frames,
-        preset: d.preset,
-        burn_ins: d.burn_ins,
+        span,
+        preset,
+        burn_ins,
+        half,
         out,
-        pattern: d.pattern,
+        pattern,
         state: JobState::Queued,
         done: 0,
     });
-    true
+    Some(q.jobs.len() - 1)
+}
+
+/// "+ selected cuts": one job per picked cut, in the project's order.
+/// The number queued.
+pub fn add_picked(state: &mut AppState) -> usize {
+    let picked = &state.render_queue.draft.picked;
+    let cuts: Vec<CutRef> = state
+        .engine
+        .project
+        .scenes
+        .iter()
+        .flat_map(|s| {
+            s.cuts.iter().map(|c| CutRef {
+                scene: s.id,
+                cut: c.id,
+            })
+        })
+        .filter(|c| picked.contains(c))
+        .collect();
+    let mut n = 0;
+    for c in cuts {
+        if !add_job(state, c, None) {
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
+/// What File ▸ Export… queues (GM11: the menu's two items are queue jobs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportKind {
+    /// A PNG sequence into a folder (PNG 8-bit, alpha kept).
+    Png,
+    /// One MP4 file (H.264, on white).
+    Mp4,
+}
+
+impl ExportKind {
+    pub fn preset(self) -> usize {
+        let name = match self {
+            ExportKind::Png => "PNG 8-bit",
+            ExportKind::Mp4 => "H.264 review",
+        };
+        PRESETS.iter().position(|p| p.name == name).unwrap_or(0)
+    }
+}
+
+/// File ▸ Export…'s job for the current cut over `frames` (None = the
+/// whole cut): a PNG sequence into the folder `dest` named by the form's
+/// pattern, or an MP4 at the file `dest` (its folder; its name as the
+/// pattern). No burn-ins, as v0.3's exports had none. The job's index.
+pub fn export_job(
+    state: &mut AppState,
+    kind: ExportKind,
+    dest: &Path,
+    frames: Option<(u32, u32)>,
+) -> Option<usize> {
+    let (out, pattern) = match kind {
+        ExportKind::Png => (dest.to_path_buf(), state.render_queue.draft.pattern.clone()),
+        ExportKind::Mp4 => (
+            dest.parent().map(Path::to_path_buf).unwrap_or_default(),
+            dest.file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| deliver::DEFAULT_PATTERN.into()),
+        ),
+    };
+    let at = state.at();
+    push_job(
+        state,
+        at,
+        frames,
+        kind.preset(),
+        BurnIns::NONE,
+        false,
+        out,
+        pattern,
+    )
 }
 
 /// Start the queue (a no-op while a job renders).
@@ -538,17 +676,19 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
     loop {
         let job = state.render_queue.queue.jobs[i].clone();
         let artist = state.render_queue.artist.clone();
+        // The ask is read now: a whole-cut job renders the cut's length at
+        // its start, not when it was added.
         let spec = JobSpec::new(
             &state.engine.project,
             job.at,
-            Some(job.frames),
+            job.frames,
             job.preset(),
             job.burn_ins,
             job.out.clone(),
             job.pattern.clone(),
             artist,
         );
-        let Some(spec) = spec else {
+        let Some(mut spec) = spec else {
             match state
                 .render_queue
                 .queue
@@ -561,10 +701,23 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
                 None => return,
             }
         };
+        if job.half {
+            spec.preset.scale = 0.5;
+        }
+        state.render_queue.queue.jobs[i].span = spec.frames;
+        let note = match anim_core::export::vector_stroke_cels(&spec.cut) {
+            0 => String::new(),
+            n => format!(" ({n} cel(s) carry legacy vector strokes — not included)"),
+        };
         let ffmpeg = state.render_queue.ffmpeg_path();
         let cancel = Arc::new(AtomicBool::new(false));
         let rx = spawn(spec, ffmpeg, cancel.clone(), Some(ctx.clone()));
-        state.render_queue.worker = Some(Worker { job: i, rx, cancel });
+        state.render_queue.worker = Some(Worker {
+            job: i,
+            rx,
+            cancel,
+            note,
+        });
         return;
     }
 }
@@ -576,6 +729,7 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
         return;
     };
     let job = w.job;
+    let note = w.note.clone();
     let mut finished = None;
     let mut frames = 0;
     loop {
@@ -605,7 +759,7 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
         .map(|j| j.label.clone())
         .unwrap_or_default();
     match &result {
-        Ok(n) => state.status = format!("rendered {label}: {n} frame(s)"),
+        Ok(n) => state.status = format!("rendered {label}: {n} frame(s){note}"),
         Err(e) if e == CANCELLED => state.status = format!("render of {label} stopped"),
         Err(e) => state.refuse(format!("the render of {label} did not finish — {e}")),
     }
@@ -670,39 +824,79 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                     );
                 }
                 None => {
-                    ui.label(egui::RichText::new(NEEDS_FFMPEG).color(plate::legend_dim()))
-                        .on_hover_text("set its location on Settings ▸ General");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new(NEEDS_FFMPEG).color(plate::legend_dim()))
+                            .on_hover_text("set its location on Settings ▸ General");
+                        // The search is cached; one installed while the app
+                        // is open is found when asked (files only, nothing
+                        // runs to look).
+                        if ui
+                            .small_button("look again")
+                            .on_hover_text(
+                                "search for ffmpeg again (after installing it, or copying \
+                                 it beside the app)",
+                            )
+                            .clicked()
+                        {
+                            state.render_queue.ffmpeg = None;
+                        }
+                    });
                 }
             }
+            let out_hint = state.render_queue.out_hint(state.file_path.as_deref());
             let d = &mut state.render_queue.draft;
             ui.horizontal_wrapped(|ui| {
                 ui.label("burn-ins");
-                plate::latch(ui, &mut d.burn_ins.project, "project");
-                plate::latch(ui, &mut d.burn_ins.cut, "cut");
-                plate::latch(ui, &mut d.burn_ins.frame, "frame (s+k)");
-                plate::latch(ui, &mut d.burn_ins.timecode, "timecode");
-                plate::latch(ui, &mut d.burn_ins.date, "date");
-                plate::latch(ui, &mut d.burn_ins.artist, "artist");
+                let b = &mut d.burn_ins;
+                for (on, label, tip) in [
+                    (&mut b.project, "project", "the project's name, top left"),
+                    (&mut b.cut, "cut", "the scene and cut, top left"),
+                    (
+                        &mut b.frame,
+                        "frame (s+k)",
+                        "the frame number and seconds+koma, as the timesheet counts, \
+                         bottom left",
+                    ),
+                    (&mut b.timecode, "timecode", "HH:MM:SS:FF non-drop, bottom right"),
+                    (&mut b.date, "date", "the render's date, top right"),
+                    (
+                        &mut b.artist,
+                        "artist",
+                        "your name from Settings ▸ Session, top right",
+                    ),
+                ] {
+                    plate::latch(ui, on, label).on_hover_text(tip);
+                }
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label("size");
+                plate::latch(ui, &mut d.half, "half size (proxy)").on_hover_text(
+                    "render at 50% (each pixel the mean of a 2×2 block): quick review \
+                     copies of any preset",
+                );
             });
             ui.horizontal(|ui| {
                 ui.label("output folder");
                 ui.add(
                     egui::TextEdit::singleline(&mut d.out)
-                        .hint_text("beside the project: render/")
+                        .hint_text(out_hint)
                         .desired_width(220.0),
                 );
             });
             ui.horizontal(|ui| {
                 ui.label("file names");
                 ui.add(egui::TextEdit::singleline(&mut d.pattern).desired_width(220.0))
-                    .on_hover_text("{project} {scene} {cut} {frame} {frame:04}");
+                    .on_hover_text(
+                        "{project} {scene} {cut} {frame} {frame:04}; an image sequence \
+                         whose pattern has no frame gets _{frame:04}",
+                    );
             });
             let at = state.at();
             let n = state.cut().frame_count.max(1);
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .button("+ this cut")
-                    .on_hover_text("the whole current cut")
+                    .on_hover_text("the whole current cut (its length when the job starts)")
                     .clicked()
                 {
                     add_job(state, at, None);
@@ -732,20 +926,77 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                         }
                     }
                 }
-                let (mut a, mut b) = state.render_queue.draft.range;
-                a = a.min(n - 1);
-                b = b.clamp(a, n - 1);
+                let picked = state.render_queue.draft.picked.len();
+                if ui
+                    .add_enabled(picked > 0, egui::Button::new("+ selected cuts"))
+                    .on_hover_text(format!(
+                        "one job per cut picked below ({picked} picked), in the project's order"
+                    ))
+                    .on_disabled_hover_text("pick cuts in \"pick cuts\" below first")
+                    .clicked()
+                {
+                    add_picked(state);
+                }
+            });
+            // The cuts to queue together: this scene's, as latches (picks
+            // in other scenes are kept while this one shows).
+            let scene_cuts: Vec<(CutRef, String)> = state
+                .engine
+                .project
+                .scene(at.scene)
+                .map(|s| {
+                    s.cuts
+                        .iter()
+                        .map(|c| {
+                            let r = CutRef {
+                                scene: at.scene,
+                                cut: c.id,
+                            };
+                            (r, c.name.clone())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            egui::CollapsingHeader::new("pick cuts")
+                .id_salt("render queue pick cuts")
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        let picked = &mut state.render_queue.draft.picked;
+                        for (c, name) in &scene_cuts {
+                            let mut on = picked.contains(c);
+                            if plate::latch(ui, &mut on, name)
+                                .on_hover_text("queued by \"+ selected cuts\"")
+                                .changed()
+                            {
+                                picked.retain(|p| p != c);
+                                if on {
+                                    picked.push(*c);
+                                }
+                            }
+                        }
+                    });
+                });
+            ui.horizontal_wrapped(|ui| {
+                // Untouched, the range is the whole cut (as File ▸ Export's).
+                let (a, b) = resolve(n, state.render_queue.draft.range);
                 let (mut a1, mut b1) = (a + 1, b + 1);
-                ui.add(egui::DragValue::new(&mut a1).range(1..=n).prefix("from "));
-                ui.add(egui::DragValue::new(&mut b1).range(1..=n).prefix("to "));
-                state.render_queue.draft.range = (a1 - 1, (b1 - 1).max(a1 - 1));
+                let moved_a = ui
+                    .add(egui::DragValue::new(&mut a1).range(1..=n).prefix("from "))
+                    .changed();
+                let moved_b = ui
+                    .add(egui::DragValue::new(&mut b1).range(1..=n).prefix("to "))
+                    .changed();
+                if moved_a || moved_b {
+                    state.render_queue.draft.range = Some((a1 - 1, (b1 - 1).max(a1 - 1)));
+                }
                 if ui
                     .button("+ frames")
                     .on_hover_text("this cut, those frames only")
                     .clicked()
                 {
                     let r = state.render_queue.draft.range;
-                    add_job(state, at, Some(r));
+                    add_job(state, at, r);
                 }
             });
             ui.separator();
@@ -754,6 +1005,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 let waiting = rq.queue.jobs.iter().any(|j| j.state == JobState::Queued);
                 if ui
                     .add_enabled(!rq.busy() && waiting, egui::Button::new("Start"))
+                    .on_hover_text(
+                        "render the queued jobs in order on a worker; you can keep drawing",
+                    )
                     .clicked()
                 {
                     start(state, ui.ctx());
@@ -771,6 +1025,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                         !state.render_queue.busy(),
                         egui::Button::new("clear finished"),
                     )
+                    .on_hover_text("remove the done, failed and stopped jobs from the list")
                     .clicked()
                 {
                     state.render_queue.queue.clear_finished();
@@ -789,11 +1044,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                         JobState::Failed(e) => (format!("failed: {e}"), plate::AKA),
                         JobState::Stopped => ("stopped".to_string(), plate::legend_dim()),
                     };
-                    ui.label(format!("{} · {}", job.label, job.preset().name));
-                    ui.add(
-                        egui::ProgressBar::new(job.done as f32 / job.total() as f32)
-                            .desired_width(90.0)
-                            .text(format!("{}/{}", job.done, job.total())),
+                    let half = if job.half { " · 50%" } else { "" };
+                    ui.label(format!("{} · {}{half}", job.label, job.preset().name));
+                    // The plate's meter, as the export window had (AUDIT
+                    // [15]); the count rides beside it.
+                    plate::meter(ui, Some(job.done as f32 / job.total() as f32), 90.0);
+                    ui.label(
+                        egui::RichText::new(format!("{}/{}", job.done, job.total()))
+                            .monospace()
+                            .size(11.0)
+                            .color(plate::STRUCK),
                     );
                     ui.label(egui::RichText::new(word).color(color));
                     if job.state == JobState::Done && ui.small_button("show folder").clicked() {
@@ -820,7 +1080,17 @@ fn preset_help(p: &Preset) -> String {
         Format::Video(Codec::DnxhrHq) => "DNxHR HQ QuickTime (ffmpeg)",
     };
     let alpha = if p.alpha { "alpha kept" } else { "on white" };
-    format!("{what}; {} look; {alpha}", p.purpose.label())
+    let look = match p.purpose {
+        Purpose::Final => "final: no rough, reference or correction (sakkan) layers, no Ref columns",
+        Purpose::View => "view: everything the composite view shows",
+        Purpose::LineTest => "line test: line layers only, black on white",
+    };
+    let burn = if p.burn_ins.is_empty() {
+        ""
+    } else {
+        "; burn-ins"
+    };
+    format!("{what}; {look}; {alpha}{burn}")
 }
 
 #[cfg(test)]
@@ -891,9 +1161,11 @@ mod tests {
                 cut: anim_core::ids::CutId(i as u64),
             },
             label: format!("c{i}"),
-            frames: (0, 2),
+            frames: None,
+            span: (0, 2),
             preset: 0,
             burn_ins: BurnIns::NONE,
+            half: false,
             out: out.to_path_buf(),
             pattern: deliver::DEFAULT_PATTERN.into(),
             state: JobState::Queued,
@@ -1127,6 +1399,8 @@ mod tests {
         ] {
             assert_eq!(h.node_enabled(video), Some(false), "{video}");
         }
+        // The line test as frames needs none.
+        assert_eq!(h.node_enabled("Line test PNG"), Some(true));
         // With one found, they come alive.
         h.state_mut().render_queue.ffmpeg =
             Some((String::new(), Some(PathBuf::from("C:/x/ffmpeg.exe"))));
@@ -1215,5 +1489,370 @@ mod tests {
             deliver::EXIT_OK
         );
         assert!(!files(&dir.path().join("s")).is_empty());
+    }
+
+    // ---- review fixes ----
+
+    /// `small()` with a sakkan (correction) layer on its drawing: a red
+    /// block at 30..40 × 20..30, clear of the line's 8..20 × 4..12.
+    fn small_with_sakkan() -> AppState {
+        let mut s = small();
+        let at = s.at();
+        let d = s.cut().drawings[0].id;
+        let l = s.engine.alloc_layer_id();
+        let mut px = vec![0u16; TILE_LEN];
+        for y in 20..30 {
+            for x in 30..40 {
+                for c in 0..4 {
+                    px[(y * TILE + x) * 4 + c] = f32_to_f16_bits([1.0, 0.0, 0.0, 1.0][c]);
+                }
+            }
+        }
+        s.engine
+            .apply(
+                "sakkan",
+                vec![
+                    Command::AddCelLayer {
+                        at,
+                        drawing: d,
+                        index: 1,
+                        layer: CelLayer::with_role(l, "sakkan", LayerRole::Correction),
+                    },
+                    Command::PaintTiles {
+                        at,
+                        id: d,
+                        layer: l,
+                        diff: vec![((0, 0), None, Some(Arc::new(TileData::from_vec(px))))],
+                    },
+                ],
+            )
+            .expect("the sakkan layer");
+        s
+    }
+
+    #[test]
+    fn render_queue_a_whole_cut_job_renders_the_cut_as_it_is_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = small();
+        s.render_queue.ffmpeg = Some((String::new(), None));
+        s.render_queue.draft.out = dir.path().display().to_string();
+        // "+ frames" with its fields untouched is the whole cut too.
+        assert_eq!(Draft::default().range, None);
+        let at = s.at();
+        assert!(add_job(&mut s, at, None));
+        assert_eq!(s.render_queue.queue.jobs[0].frames, None);
+        // Lengthened after it was queued: the job renders the new length…
+        s.engine
+            .apply("len", vec![Command::SetFrameCount { at, frames: 5 }])
+            .unwrap();
+        let ctx = egui::Context::default();
+        start(&mut s, &ctx);
+        assert_eq!(s.render_queue.queue.jobs[0].span, (0, 4));
+        // …as the cut was at Start: edits after it (longer still, frame 1
+        // emptied) stay out.
+        let column = s.view.active_column;
+        s.engine
+            .apply(
+                "edit",
+                vec![
+                    Command::SetFrameCount { at, frames: 7 },
+                    Command::SetCell {
+                        at,
+                        column,
+                        frame: 0,
+                        key: None,
+                    },
+                ],
+            )
+            .unwrap();
+        wait(&mut s, &ctx);
+        let j = &s.render_queue.queue.jobs[0];
+        assert_eq!((j.state.clone(), j.done, j.total()), (JobState::Done, 5, 5));
+        let names = files(dir.path());
+        assert_eq!(names.len(), 5, "{names:?}");
+        let (_, _, px) = png16(&dir.path().join(&names[0]), 10, 6);
+        assert_eq!(px, [0, 0, 32768, 65535], "frame 1's drawing, as it was at Start");
+        // An empty output folder means the configured default, else
+        // `render` beside the project file — the field's hint says which.
+        let mut rq = RenderQueue::default();
+        assert_eq!(rq.out_hint(None), "render/ beside the project (save it first)");
+        let file = Path::new("C:/show/ep1.animproj");
+        assert_eq!(
+            rq.out_hint(Some(file)),
+            Path::new("C:/show").join("render").display().to_string()
+        );
+        rq.config.out_dir = "D:/deliveries".into();
+        assert_eq!(rq.out_hint(Some(file)), "D:/deliveries");
+    }
+
+    #[test]
+    fn render_queue_is_a_window_verb_with_chords_and_opens_from_any_room() {
+        use crate::config::{Ctx, Group, Keymap, clashes, default_binds};
+        let a = Action::ShowRenderQueue;
+        assert_eq!(a.menu(), Some("Window/Render Queue (delivery)"));
+        assert_eq!((a.group(), a.context()), (Group::Window, Ctx::Global));
+        assert!(a.help().contains("render queue") && a.help().len() <= 120);
+        for word in [
+            "render",
+            "export",
+            "deliver",
+            "output",
+            "line test",
+            "prores",
+            "satsuei out",
+        ] {
+            assert!(a.aliases().contains(&word), "{word}");
+            assert!(crate::cmdpal::score(word, a).is_some(), "{word}");
+        }
+        assert_eq!(crate::cmdpal::ranked("render queue", &[]).first(), Some(&a));
+        // One chord in both keymaps (never R, the flip), clashing with none;
+        // the final look sits on Shift with the composite view's C.
+        for &km in Keymap::ALL {
+            let binds = default_binds(km);
+            let chord = crate::cmdpal::chord_of(&binds, a);
+            assert_eq!(chord.as_deref(), Some("Ctrl+Shift+E"), "{km:?}");
+            let fin = crate::cmdpal::chord_of(&binds, Action::ToggleFinalLook);
+            assert_eq!(fin.as_deref(), Some("Shift+C"), "{km:?}");
+            assert!(clashes(&binds).is_empty(), "{km:?}: {:?}", clashes(&binds));
+        }
+        // The drawing room has no queue: the verb brings one, forward.
+        let mut h = EditorHarness::new();
+        h.perform(Action::RoomDrawing);
+        h.run();
+        assert!(h.editor().dock.find_tab(&Pane::RenderQueue).is_none());
+        h.perform(a);
+        h.run();
+        assert!(h.editor().dock.find_tab(&Pane::RenderQueue).is_some());
+        assert!(h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+        // The edit room's queue sits behind the node graph; the chord
+        // brings it forward.
+        h.perform(Action::RoomEdit);
+        h.run();
+        assert!(!h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+        let ctrl_shift = egui::Modifiers {
+            shift: true,
+            ..crate::testkit::CTRL
+        };
+        h.key_mods(ctrl_shift, egui::Key::E);
+        assert_eq!(h.performed().last().map(|p| p.0), Some(a));
+        assert!(h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+    }
+
+    #[test]
+    fn render_queue_final_look_hides_the_sakkan_layer_in_the_viewer() {
+        let mut h = EditorHarness::with_state(small_with_sakkan());
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::Viewer(0)]);
+        h.run();
+        assert_eq!(Action::ToggleFinalLook.menu(), Some("View/Final look (delivery)"));
+        assert_eq!(h.editor().is_on(Action::ToggleFinalLook), Some(false));
+        assert_eq!(h.node_toggled("final look"), Some(false), "{}", h.describe());
+        // The viewer's latch turns it on: the frame renders on a worker
+        // (no GPU here — the look is the CPU's).
+        h.click("final look");
+        assert!(h.editor().final_look.on);
+        h.run_frames(2);
+        h.editor_mut().final_look.wait();
+        h.run();
+        assert_eq!(h.node_toggled("final look"), Some(true));
+        let img = h.editor().final_look.image.clone().expect("a final-look frame");
+        assert_eq!(img.size, [64, 36]);
+        let alpha = |x: usize, y: usize| img.pixels[y * 64 + x].a();
+        assert_eq!(alpha(10, 6), 255, "the line is delivered");
+        assert_eq!(alpha(35, 25), 0, "the sakkan layer is not");
+        // The composite view's look of the same frame has it: the toggle
+        // is what hid it.
+        let s = h.state();
+        let law = s.engine.project.color_law;
+        let view = deliver::render(s.cut(), law, 0, 64, 36, &deliver::RenderOpts::default());
+        assert!(view.pixel(35, 25)[3] > 0.99);
+        // The verb (View ▸ Final look, Shift+C) turns it off again.
+        h.perform(Action::ToggleFinalLook);
+        h.run();
+        assert_eq!(h.editor().is_on(Action::ToggleFinalLook), Some(false));
+        assert_eq!(h.node_toggled("final look"), Some(false));
+    }
+
+    #[test]
+    fn render_queue_file_export_is_a_queue_job_that_starts_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = EditorHarness::with_state(small());
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        h.perform(Action::RoomDrawing);
+        h.run();
+        // The menu: the queue itself first; the MP4 greyed without ffmpeg.
+        h.click("file");
+        h.hover("Export… ⏵");
+        assert_eq!(h.node_enabled("PNG sequence…"), Some(true), "{}", h.describe());
+        assert_eq!(h.node_enabled("MP4 video…"), Some(false));
+        h.click("open the render queue (all presets)");
+        assert!(h.editor().dock.find_tab(&Pane::RenderQueue).is_some());
+        // PNG sequence…, past its folder dialog: a PNG 8-bit job over the
+        // whole cut, the queue forward and started.
+        let ctx = h.ctx();
+        h.editor_mut()
+            .queue_export(&ctx, ExportKind::Png, dir.path());
+        let j = h.state().render_queue.queue.jobs[0].clone();
+        assert_eq!(
+            (j.preset().name, j.frames, j.burn_ins),
+            ("PNG 8-bit", None, BurnIns::NONE)
+        );
+        assert_eq!(j.out, dir.path());
+        assert!(h.state().render_queue.busy(), "started at once");
+        assert!(h.editor().quick_start[crate::welcome::EXPORT_STEP]);
+        wait(h.state_mut(), &ctx);
+        h.run();
+        assert_eq!(h.state().render_queue.queue.jobs[0].state, JobState::Done);
+        assert_eq!(files(dir.path()).len(), 3);
+        assert!(h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+        // MP4 video…: H.264 review into the file's folder, named by it,
+        // over the menu's range.
+        let mp4 = dir.path().join("take2.mp4");
+        let i = export_job(h.state_mut(), ExportKind::Mp4, &mp4, Some((1, 2))).unwrap();
+        let j = &h.state().render_queue.queue.jobs[i];
+        assert_eq!(
+            (j.preset().name, j.frames, j.span),
+            ("H.264 review", Some((1, 2)), (1, 2))
+        );
+        assert_eq!((j.out.as_path(), j.pattern.as_str()), (dir.path(), "take2"));
+        assert!(j.label.ends_with("2–3"), "{}", j.label);
+    }
+
+    #[test]
+    fn render_queue_selected_cuts_queue_in_the_projects_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = small();
+        let first = s.at();
+        s.new_cut(first.scene);
+        s.new_cut(first.scene);
+        s.goto_cut(first.scene, first.cut);
+        let cuts: Vec<CutRef> = s.engine.project.scenes[0]
+            .cuts
+            .iter()
+            .map(|c| CutRef {
+                scene: first.scene,
+                cut: c.id,
+            })
+            .collect();
+        assert_eq!(cuts.len(), 3);
+        let mut h = EditorHarness::with_state(s);
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        h.state_mut().render_queue.draft.out = dir.path().display().to_string();
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
+        h.run();
+        assert_eq!(h.node_enabled("+ selected cuts"), Some(false), "nothing picked");
+        h.click("pick cuts");
+        h.click("CUT03");
+        h.click("CUT01");
+        assert_eq!(h.state().render_queue.draft.picked, vec![cuts[2], cuts[0]]);
+        h.click("+ selected cuts");
+        let queued: Vec<CutRef> = h
+            .state()
+            .render_queue
+            .queue
+            .jobs
+            .iter()
+            .map(|j| j.at)
+            .collect();
+        assert_eq!(queued, vec![cuts[0], cuts[2]], "the project's order");
+        // Its latch again drops a cut from the pick.
+        h.click("CUT03");
+        assert_eq!(h.state().render_queue.draft.picked, vec![cuts[0]]);
+    }
+
+    #[test]
+    fn render_queue_line_test_png_proxies_and_frameless_patterns_need_no_ffmpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = small();
+        // The line test as frames: black line on white, no ffmpeg.
+        let p = Preset::named("Line test PNG").unwrap();
+        assert!(!p.format.is_video());
+        let sp = JobSpec::new(
+            &s.engine.project,
+            s.at(),
+            None,
+            p,
+            BurnIns::NONE,
+            dir.path().join("lt"),
+            deliver::DEFAULT_PATTERN.into(),
+            "mika".into(),
+        )
+        .unwrap();
+        let img = sp.frame(0);
+        let (ink, paper) = (img.pixel(10, 6), img.pixel(40, 30));
+        assert!(ink[..3].iter().all(|c| *c < 0.01) && ink[3] > 0.99, "{ink:?}");
+        assert!(paper.iter().all(|c| *c > 0.99), "{paper:?}");
+        let none = AtomicBool::new(false);
+        assert_eq!(render_job(&sp, None, &none, &mut |_| {}), Ok(3));
+        assert_eq!(files(&dir.path().join("lt")).len(), 3);
+        // A pattern without a frame number still writes a file a frame, and
+        // the proxy latch halves the frame.
+        s.render_queue.ffmpeg = Some((String::new(), None));
+        s.render_queue.draft.out = dir.path().join("half").display().to_string();
+        s.render_queue.draft.pattern = "{cut}".into();
+        s.render_queue.draft.half = true;
+        let at = s.at();
+        assert!(add_job(&mut s, at, None));
+        let ctx = egui::Context::default();
+        start(&mut s, &ctx);
+        wait(&mut s, &ctx);
+        let names = files(&dir.path().join("half"));
+        assert_eq!(
+            names,
+            vec!["CUT01_0001.png", "CUT01_0002.png", "CUT01_0003.png"]
+        );
+        let (size, _, _) = png16(&dir.path().join("half").join(&names[0]), 0, 0);
+        assert_eq!(size, (32, 18), "half size");
+    }
+
+    #[test]
+    fn render_queue_cli_renders_the_cut_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = small();
+        let first = s.at();
+        s.new_cut(first.scene);
+        let second = s.at();
+        s.engine
+            .apply(
+                "len",
+                vec![Command::SetFrameCount {
+                    at: second,
+                    frames: 2,
+                }],
+            )
+            .unwrap();
+        let file = dir.path().join("two.animproj");
+        anim_core::store::save(&s.engine.project, &file).unwrap();
+        let args = |cut: &str, out: &str| -> Vec<String> {
+            [
+                "--render",
+                &file.display().to_string(),
+                "--preset",
+                "PNG 8-bit",
+                "--out",
+                &dir.path().join(out).display().to_string(),
+                "--cut",
+                cut,
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+        };
+        let data = tempfile::tempdir().unwrap();
+        // Names ignore case; no name is the first cut.
+        let job = deliver::parse_cli(&args("cut02", "b")).unwrap();
+        assert_eq!(crate::run_cli_job(&job, Some(data.path())), Ok(2), "CUT02's frames");
+        let unnamed = deliver::CliJob {
+            cut: None,
+            ..job.clone()
+        };
+        assert_eq!(crate::run_cli_job(&unnamed, Some(data.path())), Ok(3), "CUT01's");
+        // A cut that is not there fails the job, saying what is.
+        let missing = deliver::parse_cli(&args("CUT09", "c")).unwrap();
+        let err = crate::run_cli_job(&missing, Some(data.path())).unwrap_err();
+        assert!(err.contains("no cut named \"CUT09\"") && err.contains("CUT01, CUT02"), "{err}");
+        assert_eq!(
+            crate::cli_exit(&args("CUT09", "c"), Some(data.path())),
+            deliver::EXIT_FAILED
+        );
     }
 }

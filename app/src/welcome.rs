@@ -34,14 +34,15 @@ pub enum ShowMe {
     /// Do it when the cut allows (a charted key for inbetweens), else open
     /// the room where it is set up.
     Try(Action, Stage),
-    /// The editing room, with the status line pointing at File ▸ Export….
+    /// The editing room with its render queue forward (GM11: every export
+    /// is a queue job, File ▸ Export…'s too).
     Export,
 }
 
 pub struct Step {
     pub label: &'static str,
     /// The Action whose first run ticks the step (None: ticked elsewhere —
-    /// the export starts from its own menu).
+    /// the export when a render queue job starts).
     pub ticks_on: Option<Action>,
     pub show_me: ShowMe,
 }
@@ -74,7 +75,7 @@ pub const STEPS: [Step; 5] = [
     },
 ];
 
-/// The export step (ticked when an export job starts).
+/// The export step (ticked when a render queue job starts).
 pub const EXPORT_STEP: usize = 4;
 
 /// Tick the step `action` belongs to; true when a tick was new.
@@ -117,7 +118,9 @@ pub fn checklist_ui(
                     ShowMe::Try(a, st) => {
                         format!("does it: {} (or opens the {} room)", a.label(), st.name())
                     }
-                    ShowMe::Export => "opens the edit room; export is File ▸ Export…".into(),
+                    ShowMe::Export => {
+                        "opens the edit room's render queue (File ▸ Export… adds a job too)".into()
+                    }
                 })
                 .clicked()
             {
