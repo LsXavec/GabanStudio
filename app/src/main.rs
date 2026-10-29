@@ -2833,12 +2833,28 @@ impl Editor {
         if out == Performed::Done && self.state.refusal_seq != seq {
             out = Performed::Ignored;
         }
+        // GM3: the palette lists recent commands first, however they ran
+        // (a shortcut, a menu or the palette itself).
+        if out != Performed::Ignored {
+            self.palette.note_run(action);
+        }
         out
     }
 
     fn perform_into(&mut self, action: Action, out: &mut Performed) {
         if action == Action::NewProject {
             *out = Performed::App(AppRequest::NewProject);
+            return;
+        }
+        // STROKE GUARD: while a stroke is live, actions that would retarget or
+        // orphan its pen-up commit are dropped — frame nav would commit onto
+        // the wrong frame, an A-cycle onto the wrong layer, undo/clear against
+        // a vanished target. (Tool toggles are safe: the stroke latches them.)
+        // GM3: checked before the chrome's verbs — nothing modal opens and
+        // the dock is not rebuilt under a live stroke (D7).
+        if self.canvas.stroke_active() && stroke_guarded(action) {
+            self.state.refuse("refused — finish the stroke first");
+            *out = Performed::Ignored;
             return;
         }
         // GM3: the chrome's own verbs — windows, panes and rooms; the
@@ -2896,6 +2912,16 @@ impl Editor {
                 canvas::CanvasTool::Paint
             } else {
                 canvas::CanvasTool::Fill
+            };
+            ed.canvas.set_tool(next, &mut ed.state);
+            return;
+        }
+        // GM3: the deck's lasso fill, a toggle like the flood fill.
+        if action == Action::LassoFillTool {
+            let next = if ed.canvas.tool == canvas::CanvasTool::LassoFill {
+                canvas::CanvasTool::Paint
+            } else {
+                canvas::CanvasTool::LassoFill
             };
             ed.canvas.set_tool(next, &mut ed.state);
             return;
@@ -2978,15 +3004,11 @@ impl Editor {
         if matches!(action, Action::Save | Action::SaveAs | Action::Open) {
             ed.canvas.finish_gesture(&mut ed.state);
         }
-        // STROKE GUARD: while a stroke is live, actions that would retarget or
-        // orphan its pen-up commit are dropped — frame nav would commit onto
-        // the wrong frame, an A-cycle onto the wrong layer, undo/clear against
-        // a vanished target. (Tool toggles are safe: the stroke latches them.)
-        if ed.canvas.stroke_active() && stroke_guarded(action) {
-            ed.state.refuse("refused — finish the stroke first");
-            *out = Performed::Ignored;
-            return;
-        }
+        // GM3: with a selection, Delete (ClearCel) clears only inside it.
+        let selection = match action {
+            Action::ClearCel => ed.canvas.selection_poly(),
+            _ => None,
+        };
         let s = &mut ed.state;
         match action {
             Action::PlayPause => s.toggle_play(),
@@ -3009,7 +3031,10 @@ impl Editor {
             Action::NextCut => s.step_cut(true),
             Action::ToggleLoop => s.view.loop_playback = !s.view.loop_playback,
             Action::NewDrawing => s.new_drawing_at_frame(),
-            Action::ClearCel => s.clear_current_raster(),
+            Action::ClearCel => match &selection {
+                Some(poly) => s.clear_current_region(poly),
+                None => s.clear_current_raster(),
+            },
             Action::ClearCelAll => s.clear_current_cel_all(),
             Action::ClearFrameKey => s.clear_key_at_frame(),
             Action::RemoveColumn => s.remove_active_column(),
@@ -3020,6 +3045,7 @@ impl Editor {
             | Action::SelectTool
             | Action::BrushTool
             | Action::FillTool
+            | Action::LassoFillTool
             | Action::SelectAll => {} // handled above
             Action::Preset1
             | Action::Preset2
@@ -3113,10 +3139,13 @@ fn is_chrome(action: Action) -> bool {
 /// orphan its pen-up commit are dropped — frame nav would commit onto the
 /// wrong frame, an A-cycle onto the wrong layer, undo/clear against a
 /// vanished target. (Tool toggles are safe: the stroke latches them.)
+/// GM3: also the palette (a modal) and the layout reset (the dock).
 fn stroke_guarded(action: Action) -> bool {
     matches!(
         action,
-        Action::PlayPause
+        Action::CommandPalette
+            | Action::ResetLayout
+            | Action::PlayPause
             | Action::NextFrame
             | Action::PrevFrame
             | Action::FirstFrame
@@ -4030,9 +4059,10 @@ impl Editor {
     pub fn can_perform(&self, action: Action) -> Result<(), &'static str> {
         let guest = self.canvas.is_guest;
         let shared = guest || self.canvas.session_live;
+        let s = &self.state;
         match action {
-            Action::Undo if !shared && !self.state.engine.can_undo() => Err("nothing to undo"),
-            Action::Redo if !shared && !self.state.engine.can_redo() => {
+            Action::Undo if !shared && !s.engine.can_undo() => Err("nothing to undo"),
+            Action::Redo if !shared && !s.engine.can_redo() => {
                 Err("nothing to redo — undo something first")
             }
             Action::Save | Action::SaveAs if guest => Err("the host owns the file"),
@@ -4040,7 +4070,41 @@ impl Editor {
             a if stroke_guarded(a) && self.canvas.stroke_active() => {
                 Err("finish the stroke first")
             }
+            // The cheap state checks: the verb would refuse or do nothing.
+            Action::PrevCut | Action::NextCut
+                if s.engine.project.scenes.iter().map(|sc| sc.cuts.len()).sum::<usize>() < 2 =>
+            {
+                Err("this is the only cut")
+            }
+            Action::RemoveColumn if s.cut().xsheet.columns.len() <= 1 => {
+                Err("a cut keeps at least one column")
+            }
+            Action::ClearFrameKey
+                if s
+                    .cut()
+                    .xsheet
+                    .column(s.view.active_column)
+                    .and_then(|c| c.key_at(s.view.frame))
+                    .is_none() =>
+            {
+                Err("no key on this frame")
+            }
+            Action::ClearCel | Action::ClearCelAll if s.own_key_drawing().is_none() => {
+                Err("no drawing of this frame's own to clear")
+            }
             _ => Ok(()),
+        }
+    }
+
+    /// GM3: a toggle's state now (its menu item shows it checked); None
+    /// for a verb that is not a toggle.
+    pub fn is_on(&self, action: Action) -> Option<bool> {
+        match action {
+            Action::ToggleOnion => Some(self.state.view.onion),
+            Action::ToggleCompositeView => Some(self.canvas.composite_view),
+            Action::MissCheck => Some(self.canvas.miss_check),
+            Action::ToggleLoop => Some(self.state.view.loop_playback),
+            _ => None,
         }
     }
 
@@ -4053,7 +4117,6 @@ impl Editor {
             self.state.refuse(format!("refused — {why}"));
             return Performed::Ignored;
         }
-        self.palette.note_run(action);
         let r = self.perform(action);
         match r {
             Performed::App(AppRequest::NewProject) => self.leave(Leave::New, ctx),
@@ -5678,6 +5741,128 @@ impl Editor {
                 });
                 // GM3: the registry's own menus.
                 self.plain_menus(ui);
+                // Scene/cut navigation (C2): the model always supported
+                // more than one, there was just no way to reach them.
+                // GM3: beside the sheet menu, in the spec's menu order.
+                ui.menu_button("cut", |ui| {
+                    self.menu_items(ui, "Cut");
+                    ui.separator();
+                    ui.label(
+                        egui::RichText::new(format!("now editing: {}", self.state.cut().name))
+                            .color(plate::legend_dim()),
+                    );
+                    // Rename the current cut/scene (scaffolding, like
+                    // creation — not undoable). Empty-buffer pattern: type
+                    // a new name and confirm; no pre-seeding to fight.
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.rename_buf)
+                                .hint_text("new name…")
+                                .desired_width(110.0),
+                        );
+                        let name = self.rename_buf.trim().to_string();
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("rename cut"))
+                            .clicked()
+                        {
+                            self.state.rename_current_cut(&name);
+                            self.rename_buf.clear();
+                        }
+                        if ui
+                            .add_enabled(!name.is_empty(), egui::Button::new("rename scene"))
+                            .clicked()
+                        {
+                            self.state.rename_current_scene(&name);
+                            self.rename_buf.clear();
+                        }
+                    });
+                    // XDTS interop: the industry exposure-sheet exchange
+                    // format (Toei/OpenToonz/CSP). Export = this cut's
+                    // timing; import = a NEW cut built from the file.
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("export XDTS…")
+                            .on_hover_text("export this cut's timing as an exposure sheet (.xdts)")
+                            .clicked()
+                        {
+                            ui.close();
+                            let mut dlg = rfd::FileDialog::new()
+                                .add_filter("exposure sheet", &["xdts"])
+                                .set_file_name(format!("{}.xdts", self.state.cut().name));
+                            if let Some(dir) = export::suggest_dir(&self.state) {
+                                dlg = dlg.set_directory(dir);
+                            }
+                            if let Some(path) = dlg.save_file() {
+                                self.state.export_xdts(&path);
+                            }
+                        }
+                        if ui
+                            .button("import XDTS…")
+                            .on_hover_text("import an exposure sheet (.xdts) as a NEW cut")
+                            .clicked()
+                        {
+                            ui.close();
+                            if guard_gesture(&mut self.canvas, &mut self.state)
+                                && let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("exposure sheet", &["xdts"])
+                                    .pick_file()
+                            {
+                                self.state.import_xdts(&path);
+                            }
+                        }
+                    });
+                    ui.separator();
+                    let scenes: SceneCutTree = self
+                        .state
+                        .engine
+                        .project
+                        .scenes
+                        .iter()
+                        .map(|s| {
+                            (
+                                s.id,
+                                s.name.clone(),
+                                s.cuts.iter().map(|c| (c.id, c.name.clone())).collect(),
+                            )
+                        })
+                        .collect();
+                    for (scene_id, scene_name, cuts) in &scenes {
+                        ui.label(egui::RichText::new(scene_name).strong());
+                        for (cut_id, cut_name) in cuts {
+                            let current = *scene_id == self.state.view.scene
+                                && *cut_id == self.state.view.cut;
+                            if ui
+                                .selectable_label(current, format!("    {cut_name}"))
+                                .clicked()
+                                && !current
+                                && guard_gesture(&mut self.canvas, &mut self.state)
+                            {
+                                self.state.goto_cut(*scene_id, *cut_id);
+                                ui.close();
+                            }
+                        }
+                        if ui
+                            .small_button("+ cut")
+                            .on_hover_text("add a cut to this scene")
+                            .clicked()
+                            && guard_gesture(&mut self.canvas, &mut self.state)
+                        {
+                            self.state.new_cut(*scene_id);
+                            ui.close();
+                        }
+                        ui.add_space(4.0);
+                    }
+                    ui.separator();
+                    if ui
+                        .button("+ scene")
+                        .on_hover_text("a new scene with its first cut")
+                        .clicked()
+                        && guard_gesture(&mut self.canvas, &mut self.state)
+                    {
+                        self.state.new_scene();
+                        ui.close();
+                    }
+                });
 
                 // Slate identity: filename + dirty mark, then the cut's
                 // vitals as engraved fields (transport lives in the FOOT;
@@ -5997,127 +6182,6 @@ impl Editor {
                     }
                     ui.separator();
                     self.menu_items(ui, "Window");
-                });
-                // Scene/cut navigation (C2): the model always supported
-                // more than one, there was just no way to reach them.
-                ui.menu_button("cut", |ui| {
-                    self.menu_items(ui, "Cut");
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!("now editing: {}", self.state.cut().name))
-                            .color(plate::legend_dim()),
-                    );
-                    // Rename the current cut/scene (scaffolding, like
-                    // creation — not undoable). Empty-buffer pattern: type
-                    // a new name and confirm; no pre-seeding to fight.
-                    ui.horizontal(|ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.rename_buf)
-                                .hint_text("new name…")
-                                .desired_width(110.0),
-                        );
-                        let name = self.rename_buf.trim().to_string();
-                        if ui
-                            .add_enabled(!name.is_empty(), egui::Button::new("rename cut"))
-                            .clicked()
-                        {
-                            self.state.rename_current_cut(&name);
-                            self.rename_buf.clear();
-                        }
-                        if ui
-                            .add_enabled(!name.is_empty(), egui::Button::new("rename scene"))
-                            .clicked()
-                        {
-                            self.state.rename_current_scene(&name);
-                            self.rename_buf.clear();
-                        }
-                    });
-                    // XDTS interop: the industry exposure-sheet exchange
-                    // format (Toei/OpenToonz/CSP). Export = this cut's
-                    // timing; import = a NEW cut built from the file.
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button("export XDTS…")
-                            .on_hover_text("export this cut's timing as an exposure sheet (.xdts)")
-                            .clicked()
-                        {
-                            ui.close();
-                            let mut dlg = rfd::FileDialog::new()
-                                .add_filter("exposure sheet", &["xdts"])
-                                .set_file_name(format!("{}.xdts", self.state.cut().name));
-                            if let Some(dir) = export::suggest_dir(&self.state) {
-                                dlg = dlg.set_directory(dir);
-                            }
-                            if let Some(path) = dlg.save_file() {
-                                self.state.export_xdts(&path);
-                            }
-                        }
-                        if ui
-                            .button("import XDTS…")
-                            .on_hover_text("import an exposure sheet (.xdts) as a NEW cut")
-                            .clicked()
-                        {
-                            ui.close();
-                            if guard_gesture(&mut self.canvas, &mut self.state)
-                                && let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("exposure sheet", &["xdts"])
-                                    .pick_file()
-                            {
-                                self.state.import_xdts(&path);
-                            }
-                        }
-                    });
-                    ui.separator();
-                    let scenes: SceneCutTree = self
-                        .state
-                        .engine
-                        .project
-                        .scenes
-                        .iter()
-                        .map(|s| {
-                            (
-                                s.id,
-                                s.name.clone(),
-                                s.cuts.iter().map(|c| (c.id, c.name.clone())).collect(),
-                            )
-                        })
-                        .collect();
-                    for (scene_id, scene_name, cuts) in &scenes {
-                        ui.label(egui::RichText::new(scene_name).strong());
-                        for (cut_id, cut_name) in cuts {
-                            let current = *scene_id == self.state.view.scene
-                                && *cut_id == self.state.view.cut;
-                            if ui
-                                .selectable_label(current, format!("    {cut_name}"))
-                                .clicked()
-                                && !current
-                                && guard_gesture(&mut self.canvas, &mut self.state)
-                            {
-                                self.state.goto_cut(*scene_id, *cut_id);
-                                ui.close();
-                            }
-                        }
-                        if ui
-                            .small_button("+ cut")
-                            .on_hover_text("add a cut to this scene")
-                            .clicked()
-                            && guard_gesture(&mut self.canvas, &mut self.state)
-                        {
-                            self.state.new_cut(*scene_id);
-                            ui.close();
-                        }
-                        ui.add_space(4.0);
-                    }
-                    ui.separator();
-                    if ui
-                        .button("+ scene")
-                        .on_hover_text("a new scene with its first cut")
-                        .clicked()
-                        && guard_gesture(&mut self.canvas, &mut self.state)
-                    {
-                        self.state.new_scene();
-                        ui.close();
-                    }
                 });
                 self.help_menu(ui);
             });

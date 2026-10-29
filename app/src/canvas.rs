@@ -786,6 +786,20 @@ impl CanvasView {
         self.pan = egui::Vec2::ZERO;
     }
 
+    /// GM3: the live selection as a paper-space polygon (Delete clears
+    /// only inside it).
+    pub fn selection_poly(&self) -> Option<Vec<(f32, f32)>> {
+        self.selection
+            .as_ref()
+            .map(|p| p.iter().map(|q| (q.x, q.y)).collect())
+    }
+
+    /// GM3 tests: a selection without the GPU the select tool draws with.
+    #[cfg(test)]
+    pub fn set_selection(&mut self, poly: Vec<Pos2>) {
+        self.selection = Some(poly);
+    }
+
     /// An edit gesture is live: a stroke (pen down or its pen-up commit
     /// pending), a selection being drawn, or a lifted transform in flight.
     /// Gesture-unsafe actions (frame nav, undo, layer cycle, clears) must not
@@ -1498,17 +1512,31 @@ impl CanvasView {
                 egui::StrokeKind::Inside,
             );
         }
-        let mut hover = format!(
-            "{} — {:.0}px · flow {:.2} · opacity {:.2} (hotkey {digit})",
-            p.name, p.size_px, p.flow, p.opacity
-        );
-        if plate::exact() {
-            hover.push_str(&format!(
-                "\n[PENCIL SLOT '{}' · canvas.rs pencil_slot · preset in config.presets]",
-                p.name
-            ));
+        // GM3: the registry's line first (the chord as bound now), then
+        // the pencil's own numbers — built only while hovered.
+        let detail = || {
+            let mut more = format!(
+                "{} — {:.0}px · flow {:.2} · opacity {:.2}",
+                p.name, p.size_px, p.flow, p.opacity
+            );
+            if plate::exact() {
+                more.push_str(&format!(
+                    "\n[PENCIL SLOT '{}' · canvas.rs pencil_slot · preset in config.presets]",
+                    p.name
+                ));
+            }
+            more
+        };
+        match Action::preset_slot(digit) {
+            Some(a) => {
+                crate::menus::hover_tip_with(resp, a, detail);
+            }
+            None => {
+                resp.on_hover_ui(|ui| {
+                    ui.label(detail());
+                });
+            }
         }
-        resp.on_hover_text(hover);
     }
 
     /// The eraser as the pencil box's fourth detent.
@@ -1564,7 +1592,7 @@ impl CanvasView {
             );
         }
         // GM3: name, chord, one line of help — from the registry.
-        let resp = resp.on_hover_text(crate::menus::tip(ui.ctx(), Action::ToggleEraser));
+        let resp = crate::menus::hover_tip(resp, Action::ToggleEraser, "");
         if plate::exact() {
             resp.on_hover_text("[PENCIL SLOT 'eraser' · canvas.rs eraser_slot]");
         }
@@ -2018,17 +2046,24 @@ impl CanvasView {
                 cresp.on_hover_text(hover);
             }
         });
+        // GM3: the rail's tooltips lead with the registry's line too, so a
+        // rebound key is named as bound.
         let mut mc = self.miss_check;
-        plate::tool_latch(ui, &mut mc, Icon::Hole, "miss check", "").on_hover_text(
-            "hole-hunt (M): the ground goes dark; every unpainted pixel reads as a pit",
+        crate::menus::hover_tip(
+            plate::tool_latch(ui, &mut mc, Icon::Hole, "miss check", ""),
+            Action::MissCheck,
+            "hole-hunt: the ground goes dark; every unpainted pixel reads as a pit",
         );
         self.miss_check = mc;
         ui.add_space(10.0);
         plate::legend(ui, "lightbox");
         ui.add_space(2.0);
         let mut on = state.view.onion;
-        plate::latch(ui, &mut on, "onion")
-            .on_hover_text("ghost the neighbouring DRAWINGS (O) — a hold of the same drawing has no neighbour to ghost");
+        crate::menus::hover_tip(
+            plate::latch(ui, &mut on, "onion"),
+            Action::ToggleOnion,
+            "ghosts the neighbouring DRAWINGS — a hold of the same drawing has no neighbour to ghost",
+        );
         state.view.onion = on;
         let mut lo = state.view.onion_layer_only;
         plate::latch(ui, &mut lo, "line only")
@@ -2073,7 +2108,8 @@ impl CanvasView {
         ui.add_space(10.0);
         plate::legend(ui, "view");
         ui.add_space(2.0);
-        if plate::icon_button(ui, Icon::Fit, "fit", "reset zoom & pan").clicked() {
+        let fit = plate::icon_button(ui, Icon::Fit, "fit", "");
+        if crate::menus::hover_tip(fit, Action::ZoomFit, "").clicked() {
             self.fit_view();
         }
         vline(ui, "zoom", format!("{:3.0}%", self.zoom * 100.0));
@@ -2415,19 +2451,17 @@ impl CanvasView {
                 // Select commits any floating transform. A detent: clicking
                 // the armed position does nothing.
                 // GM3: every deck tooltip leads with the registry's line —
-                // name, the chord as bound now, one line of help.
-                let tip = |ui: &egui::Ui, a: Action, more: &str| {
-                    format!("{}\n{more}", crate::menus::tip(ui.ctx(), a))
-                };
+                // name, the chord as bound now, one line of help — built
+                // only while hovered.
+                use crate::menus::hover_tip;
                 let sel_on = self.tool == CanvasTool::Select;
-                if plate::tool_button(ui, sel_on, Icon::Select, lbl("select"), "select")
-                    .on_hover_text(tip(
-                        ui,
-                        Action::SelectTool,
-                        "drag = select, drag inside = move, corners = scale, just \
+                if hover_tip(
+                    plate::tool_button(ui, sel_on, Icon::Select, lbl("select"), "select"),
+                    Action::SelectTool,
+                    "drag = select, drag inside = move, corners = scale, just \
                     outside = rotate; Enter applies, Esc cancels",
-                    ))
-                    .clicked()
+                )
+                .clicked()
                     && !sel_on
                 {
                     self.set_tool(CanvasTool::Select, state);
@@ -2436,28 +2470,27 @@ impl CanvasView {
                 // arming a tool must never move the strip. Spec defect 4.)
                 // Fill / bucket tool (G): the shiage verb.
                 let fill_on = self.tool == CanvasTool::Fill;
-                if plate::tool_button(ui, fill_on, Icon::Fill, lbl("fill"), "fill")
-                    .on_hover_text(tip(
-                        ui,
-                        Action::FillTool,
-                        "click a region; line art bounds it. gap closes line \
+                if hover_tip(
+                    plate::tool_button(ui, fill_on, Icon::Fill, lbl("fill"), "fill"),
+                    Action::FillTool,
+                    "click a region; line art bounds it. gap closes line \
                     breaks; under tucks the flat beneath the lines; cel/layer \
                     picks the boundary reference",
-                    ))
-                    .clicked()
+                )
+                .clicked()
                     && !fill_on
                 {
                     self.set_tool(CanvasTool::Fill, state);
                 }
                 // Lasso fill: loop a region, it fills feathered.
                 let lf_on = self.tool == CanvasTool::LassoFill;
-                if plate::tool_button(ui, lf_on, Icon::Lasso, lbl("lasso fill"), "lasso fill")
-                    .on_hover_text(
-                        "lasso fill — draw a loop and it fills with the brush \
-                    colour; softness feathers the edge inward, grow shifts \
-                    the edge; one loop = one undo step",
-                    )
-                    .clicked()
+                if hover_tip(
+                    plate::tool_button(ui, lf_on, Icon::Lasso, lbl("lasso fill"), "lasso fill"),
+                    Action::LassoFillTool,
+                    "softness feathers the edge inward, grow shifts the edge; \
+                    one loop = one undo step",
+                )
+                .clicked()
                     && !lf_on
                 {
                     self.set_tool(CanvasTool::LassoFill, state);
@@ -2469,25 +2502,23 @@ impl CanvasView {
                 // layer already has coverage on — never paint outside its
                 // silhouette. Combines with brush or eraser.
                 let mut lock = self.alpha_lock;
-                plate::tool_latch(ui, &mut lock, Icon::Lock, lbl("lock"), "alpha lock")
-                    .on_hover_text(tip(
-                        ui,
-                        Action::ToggleAlphaLock,
-                        "ink only recolors pixels this layer already has \
+                hover_tip(
+                    plate::tool_latch(ui, &mut lock, Icon::Lock, lbl("lock"), "alpha lock"),
+                    Action::ToggleAlphaLock,
+                    "ink only recolors pixels this layer already has \
                     coverage on; the silhouette can't grow",
-                    ));
+                );
                 self.alpha_lock = lock;
                 // Composite view: the node graph's rendered output (review
                 // mode — painting pauses). Blocked mid-stroke: swapping the
                 // view under a live stroke would orphan its display.
                 let mut comp = self.composite_view;
-                plate::tool_latch(ui, &mut comp, Icon::Comp, lbl("comp"), "composite view")
-                    .on_hover_text(tip(
-                        ui,
-                        Action::ToggleCompositeView,
-                        "what the node graph renders (playback/export truth); \
+                hover_tip(
+                    plate::tool_latch(ui, &mut comp, Icon::Comp, lbl("comp"), "composite view"),
+                    Action::ToggleCompositeView,
+                    "what the node graph renders (playback/export truth); \
                     painting pauses here",
-                    ));
+                );
                 if comp != self.composite_view && !self.stroke_active() {
                     self.composite_view = comp;
                 }

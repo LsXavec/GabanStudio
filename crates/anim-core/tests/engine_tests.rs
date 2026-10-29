@@ -1162,3 +1162,22 @@ fn undo_to_jumps_by_single_steps_and_back() {
     assert_eq!(f.engine.position(), 5);
     assert_eq!(f.engine.project, states[5]);
 }
+
+#[test]
+fn history_entry_builds_one_row_exactly_as_history_does() {
+    let mut f = fixture();
+    f.engine.clear_history();
+    assert_eq!(f.engine.history_len(), 0);
+    assert_eq!(f.engine.history_entry(0), None);
+    for frame in 1..=5u32 {
+        edit_cell(&mut f, frame);
+    }
+    f.engine.undo_to(2).unwrap();
+    let rows = f.engine.history();
+    assert_eq!(f.engine.history_len(), rows.len());
+    for (i, row) in rows.iter().enumerate() {
+        assert_eq!(f.engine.history_entry(i).as_ref(), Some(row), "row {i}");
+    }
+    assert!(f.engine.history_entry(2).is_some_and(|e| !e.applied), "row 3 waits to be redone");
+    assert_eq!(f.engine.history_entry(rows.len()), None, "nothing past the end");
+}

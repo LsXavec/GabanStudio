@@ -29,6 +29,16 @@ pub const CTRL: egui::Modifiers = egui::Modifiers {
     ..egui::Modifiers::NONE
 };
 
+/// A primary-button press (or release) at `pos`.
+fn primary(pos: egui::Pos2, pressed: bool) -> egui::Event {
+    egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    }
+}
+
 /// What the harness drives each frame: the editor, the shell's config, the
 /// shell's notes, and the log of every shortcut dispatched with what
 /// perform returned.
@@ -289,6 +299,35 @@ impl EditorHarness {
         self.run();
     }
 
+    /// GM3: the pointer rests at `pos` (shortcuts aim at the pane under it).
+    pub fn point_at(&mut self, pos: egui::Pos2) {
+        self.h.input_mut().events.push(egui::Event::PointerMoved(pos));
+        self.h.step();
+        self.run();
+    }
+
+    /// GM3: press at `from` and move to `to` in `steps` frames with the
+    /// button still down — a stroke in progress; [`release`](Self::release)
+    /// lifts it.
+    pub fn press_and_move(&mut self, from: egui::Pos2, to: egui::Pos2, steps: usize) {
+        let input = self.h.input_mut();
+        input.events.push(egui::Event::PointerMoved(from));
+        input.events.push(primary(from, true));
+        self.h.step();
+        let steps = steps.max(1);
+        for i in 1..=steps {
+            let p = from + (to - from) * (i as f32 / steps as f32);
+            self.h.input_mut().events.push(egui::Event::PointerMoved(p));
+            self.h.step();
+        }
+    }
+
+    pub fn release(&mut self, at: egui::Pos2) {
+        self.h.input_mut().events.push(primary(at, false));
+        self.h.step();
+        self.run();
+    }
+
     /// GM2: the window's close button — one frame with a Close event on the
     /// root viewport. Returns the viewport commands that frame sent.
     pub fn request_close(&mut self) -> Vec<egui::ViewportCommand> {
@@ -359,6 +398,14 @@ impl EditorHarness {
     pub fn node_enabled(&self, label: &str) -> Option<bool> {
         let node = self.h.query_by_label(label)?;
         Some(!node.accesskit_node().is_disabled())
+    }
+
+    /// GM3: the ONE widget with this name — a toggle on or off (None when
+    /// it is not on screen or not a toggle).
+    pub fn node_toggled(&self, label: &str) -> Option<bool> {
+        let node = self.h.query_by_label(label)?;
+        let toggled = node.accesskit_node().toggled()?;
+        Some(toggled == egui::accesskit::Toggled::True)
     }
 
     #[track_caller]

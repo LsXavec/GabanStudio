@@ -925,6 +925,40 @@ impl AppState {
         self.report(r, "layer cleared");
     }
 
+    /// GM3: clear only the pixels inside `poly` (the selection, paper
+    /// space) on this frame's own cel's active layer — Delete with a
+    /// selection, the other studios' habit. One undo step; like
+    /// [`clear_current_raster`](Self::clear_current_raster), a no-op where
+    /// there is nothing to clear.
+    pub fn clear_current_region(&mut self, poly: &[(f32, f32)]) {
+        let Some(id) = self.own_key_drawing() else {
+            return;
+        };
+        let at = self.at();
+        let Some(l) = self.cut().drawing(id).and_then(|d| self.active_layer_of(d)) else {
+            return;
+        };
+        let Some(lift) = anim_core::edit::lift_region(&l.raster.tiles, poly) else {
+            return;
+        };
+        let diff: TileDiff = lift
+            .cleared
+            .into_iter()
+            .map(|(c, after)| (c, l.raster.tiles.get(&c).cloned(), after))
+            .collect();
+        let layer = l.id;
+        let r = self.engine.apply(
+            "clear selection",
+            vec![Command::PaintTiles {
+                at,
+                id,
+                layer,
+                diff,
+            }],
+        );
+        self.report(r, "erased inside the selection");
+    }
+
     /// Clear EVERY layer of this frame's own cel (Shift+D) — one undo step.
     pub fn clear_current_cel_all(&mut self) {
         let Some(id) = self.own_key_drawing() else {

@@ -15,7 +15,7 @@ pub struct Palette {
     pub open: bool,
     pub query: String,
     pub selected: usize,
-    /// Commands run from the menus or the palette, most recent first.
+    /// Commands run (by shortcut, menu or palette), most recent first.
     pub recent: Vec<Action>,
     /// Just opened: the field takes focus.
     fresh: bool,
@@ -133,6 +133,9 @@ impl crate::Editor {
             sel = (sel + 1).min(last);
         }
         self.palette.selected = sel;
+        // A command that cannot run now is dim and says why on hover.
+        let blocked: Vec<Option<&'static str>> =
+            rows.iter().map(|a| self.can_perform(*a).err()).collect();
         let mut run = if enter { rows.get(sel).copied() } else { None };
         let id = egui::Id::new("cmdpal");
         let area = egui::Modal::default_area(id.with("area"))
@@ -158,9 +161,21 @@ impl crate::Editor {
                     ui.label(egui::RichText::new("no command matches").color(plate::legend_dim()));
                 }
                 for (i, a) in rows.iter().enumerate() {
+                    let why = blocked[i];
                     ui.horizontal(|ui| {
-                        let row = plate::detent(ui, i == sel, a.label())
-                            .on_hover_text(crate::menus::tip_with(*a, chord_of(binds, *a)));
+                        let row = match why {
+                            Some(_) => plate::detent_dim(ui, i == sel, a.label()),
+                            None => plate::detent(ui, i == sel, a.label()),
+                        };
+                        // Built only while hovered.
+                        let row = row.on_hover_ui(|ui| {
+                            ui.set_max_width(ui.spacing().tooltip_width);
+                            let tip = crate::menus::tip_with(*a, chord_of(binds, *a));
+                            ui.label(match why {
+                                Some(w) => format!("{tip}\nnot now: {w}"),
+                                None => tip,
+                            });
+                        });
                         if i == sel && (up || down) {
                             row.scroll_to_me(None);
                         }
@@ -194,10 +209,15 @@ impl crate::Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
     use crate::canvas::CanvasTool;
     use crate::config::{self, Config, Ctx, Group, Keymap};
+    use crate::doc::AppState;
     use crate::testkit::{CTRL, EditorHarness};
     use crate::{AppRequest, Performed};
+    use anim_core::raster::{TILE, TILE_LEN, TileCoord, TileData};
     use eframe::egui;
 
     /// The menus a well-formed path may name.
@@ -265,7 +285,7 @@ mod tests {
         assert_eq!(ranked("onion", &[])[0], Action::ToggleOnion);
         // An alias alone finds it ("ghost" is nowhere in the name).
         assert!(score("ghost", Action::ToggleOnion).is_some());
-        assert!(score("light table", Action::ToggleOnion).is_some());
+        assert!(score("sukashi", Action::ToggleOnion).is_some());
         assert_eq!(ranked("ghost", &[])[0], Action::ToggleOnion);
         // Every word must match; nonsense finds nothing.
         assert!(ranked("zzqx", &[]).is_empty());
@@ -446,13 +466,32 @@ mod tests {
     fn cmdui_deck_tool_tooltips_name_their_chords() {
         let mut h = EditorHarness::new();
         let binds = h.rig().config.keybinds.clone();
-        for (button, action) in [
-            ("select", Action::SelectTool),
-            ("fill", Action::FillTool),
-            ("alpha lock", Action::ToggleAlphaLock),
-            ("composite view", Action::ToggleCompositeView),
-            ("eraser", Action::ToggleEraser),
+        let digit = 1 + h.rig().config.presets.iter().position(|p| p.name == "genga").unwrap();
+        let genga = format!("genga pencil ({digit})");
+        let genga_preset = Action::preset_slot(digit).expect("a pencil-box slot");
+        // The lightbox fold-out slides out when the pointer reaches the
+        // canvas's left edge (above its vertically centred content).
+        let edge = {
+            let r = h.editor().canvas.dbg_rect;
+            egui::pos2(r.left() + 4.0, r.top() + 4.0)
+        };
+        for (button, action, in_lightbox) in [
+            ("select", Action::SelectTool, false),
+            ("fill", Action::FillTool, false),
+            ("lasso fill", Action::LassoFillTool, false),
+            ("alpha lock", Action::ToggleAlphaLock, false),
+            ("composite view", Action::ToggleCompositeView, false),
+            ("eraser", Action::ToggleEraser, false),
+            // The fold-out and the pencil box name their chords as bound too.
+            ("miss check", Action::MissCheck, true),
+            ("onion", Action::ToggleOnion, true),
+            ("fit", Action::ZoomFit, true),
+            (genga.as_str(), genga_preset, false),
         ] {
+            if in_lightbox {
+                h.point_at(edge);
+                h.wait(0.5);
+            }
             let chord = chord_of(&binds, action).expect("bound");
             // "Name (chord) — help", the registry's own line.
             let line = crate::menus::tip_with(action, Some(chord.clone()));
@@ -480,5 +519,304 @@ mod tests {
         h.type_text("quit");
         h.key(egui::Key::Enter);
         assert_eq!(h.rig().requests, vec![AppRequest::Settings, AppRequest::Quit]);
+    }
+
+    // ---- review fixes ----
+
+    /// Two inked tiles side by side on this frame's own cel, active layer.
+    fn ink_two_tiles(h: &mut EditorHarness) {
+        let ink = Arc::new(TileData::from_vec(vec![0x3C00; TILE_LEN]));
+        let s = h.state_mut();
+        let slot = s.active_slot_resolved().expect("an armed layer");
+        s.commit_raster(vec![((0, 0), ink.clone()), ((1, 0), ink)], slot);
+    }
+
+    fn layer_tiles(h: &EditorHarness) -> BTreeMap<TileCoord, Arc<TileData>> {
+        h.state().active_layer_tiles().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn cmdui_industry_delete_clears_only_the_selection() {
+        let mut h = EditorHarness::new();
+        h.rig_mut().config.set_keymap(Keymap::Industry);
+        ink_two_tiles(&mut h);
+        let before = layer_tiles(&h);
+        assert!(before.contains_key(&(0, 0)) && before.contains_key(&(1, 0)));
+        // A selection over the first tile only; Delete over the canvas.
+        let t = TILE as f32;
+        let rect = vec![
+            egui::pos2(0.0, 0.0),
+            egui::pos2(t, 0.0),
+            egui::pos2(t, t),
+            egui::pos2(0.0, t),
+        ];
+        h.editor_mut().canvas.set_selection(rect);
+        let over_canvas = h.editor().canvas.dbg_rect.center();
+        h.point_at(over_canvas);
+        h.key(egui::Key::Delete);
+        assert_eq!(h.performed().last(), Some(&(Action::ClearCel, Performed::Done)));
+        let after = layer_tiles(&h);
+        assert!(!after.contains_key(&(0, 0)), "inside the selection: cleared");
+        assert_eq!(after.get(&(1, 0)), before.get(&(1, 0)), "outside it: untouched");
+        // One step, undone as one.
+        h.perform(Action::Undo);
+        assert_eq!(layer_tiles(&h), before);
+    }
+
+    #[test]
+    fn cmdui_lasso_fill_is_a_verb_with_a_chord() {
+        for &km in Keymap::ALL {
+            let binds = config::default_binds(km);
+            let lf = binds.iter().find(|b| b.action == Action::LassoFillTool).unwrap();
+            assert_eq!(lf.label().as_deref(), Some("Shift+G"), "{km:?}");
+        }
+        let mut h = EditorHarness::new();
+        h.key_mods(egui::Modifiers::SHIFT, egui::Key::G);
+        assert!(h.editor().canvas.tool == CanvasTool::LassoFill, "Shift+G arms the lasso fill");
+        h.key_mods(egui::Modifiers::SHIFT, egui::Key::G);
+        assert!(h.editor().canvas.tool == CanvasTool::Paint, "and goes back to the brush");
+        // "lasso" finds the lasso fill first, not the select tool.
+        assert_eq!(ranked("lasso", &[])[0], Action::LassoFillTool);
+        assert_eq!(ranked("fill loop", &[])[0], Action::LassoFillTool);
+        assert_eq!(ranked("lasso select", &[])[0], Action::SelectTool);
+    }
+
+    #[test]
+    fn cmdui_room_items_carry_the_room_names() {
+        use crate::workspace::Stage;
+        let rooms = [
+            Action::RoomLayout,
+            Action::RoomDrawing,
+            Action::RoomFinishing,
+            Action::RoomEdit,
+        ];
+        assert_eq!(rooms.len(), Stage::ALL.len());
+        for (a, st) in rooms.iter().zip(Stage::ALL) {
+            let item = a.menu().expect("in the Room menu");
+            assert!(item.starts_with("Room/") && item.contains(st.name()), "{a:?}: {item}");
+            assert!(a.label().contains(st.name()), "{a:?}: {}", a.label());
+        }
+        // The English words still find them.
+        for (word, a) in [
+            ("drawing", Action::RoomDrawing),
+            ("paint", Action::RoomFinishing),
+            ("ink", Action::RoomFinishing),
+            ("edit", Action::RoomEdit),
+        ] {
+            assert!(score(word, a).is_some(), "{word:?} finds {a:?}");
+        }
+        let mut h = EditorHarness::new();
+        h.click("room");
+        h.click("shiage (paint)");
+        assert_eq!(h.editor().stage, Some(Stage::Finishing));
+    }
+
+    #[test]
+    fn cmdui_old_configs_and_workspaces_still_load() {
+        use crate::workspace::Pane;
+        // A config from before GM3: no keymap, no extra chords, none of
+        // GM3's verbs, and F3 already the artist's own key.
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = serde_json::to_value(Config::default()).unwrap();
+        v.as_object_mut().unwrap().remove("keymap");
+        let binds = v["keybinds"].as_array_mut().unwrap();
+        binds.retain(|b| {
+            !matches!(b["action"].as_str(), Some("CommandPalette" | "History" | "LassoFillTool"))
+        });
+        for b in binds.iter_mut() {
+            b.as_object_mut().unwrap().remove("also");
+            if b["action"] == "ToggleLoop" {
+                b["chord"] = serde_json::json!({
+                    "keys": ["F3"], "ctrl": false, "shift": false, "alt": false
+                });
+            }
+        }
+        let path = config::config_path_in(dir.path());
+        std::fs::write(&path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        let (cfg, notes) = Config::load_from(dir.path());
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(cfg.keymap, Keymap::Gaban, "no keymap reads as gaban");
+        assert_eq!(cfg.keybinds.len(), Action::ALL.len(), "the new verbs are filled in");
+        let label = |c: &Config, a| c.binding(a).and_then(|b| b.label());
+        assert_eq!(label(&cfg, Action::Redo).as_deref(), Some("Ctrl+Y / Ctrl+Shift+Z"));
+        assert_eq!(label(&cfg, Action::CommandPalette).as_deref(), Some("Ctrl+K"), "F3 was taken");
+        assert_eq!(label(&cfg, Action::ToggleLoop).as_deref(), Some("F3"), "the artist's key stays");
+        assert_eq!(config::clashes(&cfg.keybinds), vec![], "no key fires two verbs");
+        // A later config where the artist dropped Redo's extra chord: it
+        // stays dropped, load after load.
+        let mut cfg = cfg;
+        cfg.binding_mut(Action::Redo).also.clear();
+        cfg.save_to(dir.path()).unwrap();
+        let (back, _) = Config::load_from(dir.path());
+        assert_eq!(label(&back, Action::Redo).as_deref(), Some("Ctrl+Y"));
+        // The History pane is stored by name, beside the old panes.
+        assert_eq!(serde_json::to_string(&Pane::History).unwrap(), "\"History\"");
+        assert_eq!(serde_json::from_str::<Pane>("\"History\"").unwrap(), Pane::History);
+        assert_eq!(serde_json::from_str::<Pane>("\"XSheet\"").unwrap(), Pane::XSheet);
+    }
+
+    #[test]
+    fn cmdui_history_is_not_written_into_the_project() {
+        // No project-file schema change: the history lives in memory only.
+        let mut h = EditorHarness::new();
+        for i in 0..3 {
+            h.state_mut().commit_stroke(stroke(i as f32));
+        }
+        h.state_mut().undo_to(2);
+        let file = h.data_dir().join("cut.gaban");
+        let s = h.state_mut();
+        s.begin_save(file.clone());
+        assert!(s.wait_save(), "the save landed");
+        let hash = |s: &AppState| s.cut().drawing(s.current_drawing().unwrap()).unwrap().content_hash();
+        let saved = hash(h.state());
+        let back = AppState::load_from(file).expect("the file opens");
+        assert_eq!(hash(&back), saved, "the drawing as it was at step 2");
+        assert_eq!(back.engine.history_len(), 0, "no history came back from the file");
+        assert_eq!(back.engine.position(), 0);
+    }
+
+    #[test]
+    fn cmdui_in_a_session_undo_goes_to_the_host_and_jumps_refuse() {
+        for (guest, hosting) in [(true, false), (false, true)] {
+            let mut h = EditorHarness::new();
+            h.editor_mut().canvas.is_guest = guest;
+            h.editor_mut().canvas.session_live = hosting;
+            let pos = h.state().engine.position();
+            // The menu's Undo is live in a session (the host decides) and
+            // asks the host.
+            h.click("edit");
+            assert_eq!(h.node_enabled("Undo"), Some(true));
+            h.click("Undo");
+            assert_eq!(h.editor().canvas.history_request, Some(false), "{guest} {hosting}");
+            assert_eq!(h.state().engine.position(), pos, "nothing undone here");
+            // The palette's Redo goes the same way.
+            h.editor_mut().canvas.history_request = None;
+            h.perform(Action::CommandPalette);
+            h.type_text("redo");
+            h.key(egui::Key::Enter);
+            assert_eq!(h.editor().canvas.history_request, Some(true));
+            // The History pane refuses a jump and says why.
+            h.perform(Action::History);
+            h.run();
+            h.click("0. start");
+            assert_eq!(h.state().engine.position(), pos, "no jump in a session");
+            assert!(h.state().refusal.contains("one step at a time"), "{}", h.state().refusal);
+        }
+    }
+
+    #[test]
+    fn cmdui_palette_never_opens_mid_stroke() {
+        let mut h = EditorHarness::new();
+        let c = h.editor().canvas.dbg_rect.center();
+        h.press_and_move(c, c + egui::vec2(40.0, 30.0), 4);
+        assert!(h.editor().canvas.stroke_active(), "the pen is down");
+        h.key_mods(CTRL, egui::Key::K);
+        assert!(!h.editor().palette.open, "nothing modal opens over a live stroke");
+        assert_eq!(h.performed().last(), Some(&(Action::CommandPalette, Performed::Ignored)));
+        assert!(h.state().refusal.contains("finish the stroke first"));
+        assert_eq!(h.editor().can_perform(Action::CommandPalette), Err("finish the stroke first"));
+        h.release(c + egui::vec2(40.0, 30.0));
+        assert!(!h.editor().canvas.stroke_active());
+        h.key_mods(CTRL, egui::Key::K);
+        assert!(h.editor().palette.open, "pen up: Ctrl+K opens it");
+    }
+
+    #[test]
+    fn cmdui_history_marks_the_saved_step_and_dims_undone_ones() {
+        let mut h = EditorHarness::new();
+        h.state_mut().engine.clear_history();
+        for i in 0..5 {
+            h.state_mut().commit_stroke(stroke(i as f32));
+        }
+        // Saved at step 3 (as a landed save leaves it), then back to step 1.
+        h.state_mut().undo_to(3);
+        let file = h.data_dir().join("cut.gaban");
+        let s = h.state_mut();
+        s.file_path = Some(file);
+        s.saved_rev = s.engine.revision();
+        h.state_mut().undo_to(1);
+        h.perform(Action::History);
+        h.run();
+        let (mark, row3) = (h.rect("SAVED"), h.rect("3. draw"));
+        assert!(
+            (mark.center().y - row3.center().y).abs() < 2.0,
+            "the saved mark sits on row 3: {mark:?} vs {row3:?}"
+        );
+        // Rows 2 to 5 wait to be redone; row 1 is the current step.
+        let e = &h.state().engine;
+        assert!(e.history_entry(0).is_some_and(|r| r.applied));
+        assert!((1..5).all(|i| e.history_entry(i).is_some_and(|r| !r.applied)));
+        // Clicking the saved row brings the saved state back.
+        h.click("3. draw");
+        assert_eq!(h.state().engine.revision(), h.state().saved_rev, "back at the saved step");
+    }
+
+    #[test]
+    fn cmdui_delete_removes_a_column_only_over_the_sheet() {
+        use crate::workspace::Pane;
+        let mut h = EditorHarness::new();
+        h.state_mut().add_column();
+        let cols = |h: &EditorHarness| h.state().cut().xsheet.columns.len();
+        assert_eq!(cols(&h), 2);
+        // A painter's Delete over the canvas leaves the sheet alone.
+        let over_canvas = h.editor().canvas.dbg_rect.center();
+        h.point_at(over_canvas);
+        h.key(egui::Key::Delete);
+        assert_eq!(cols(&h), 2, "Delete over the canvas kept the column");
+        // Over the sheet it removes the active column.
+        let sheet = h.editor().pane_rects.iter().find(|(p, _)| *p == Pane::XSheet).map(|(_, r)| *r);
+        let sheet = sheet.expect("the drawing room docks the sheet");
+        h.point_at(sheet.center());
+        h.key(egui::Key::Delete);
+        assert_eq!(cols(&h), 1, "Delete over the sheet removed it");
+    }
+
+    #[test]
+    fn cmdui_items_that_cannot_run_say_why() {
+        let mut h = EditorHarness::new();
+        let ed = h.editor();
+        assert_eq!(ed.can_perform(Action::NextCut), Err("this is the only cut"));
+        assert_eq!(ed.can_perform(Action::RemoveColumn), Err("a cut keeps at least one column"));
+        assert_eq!(ed.can_perform(Action::ClearFrameKey), Ok(()), "frame 0 holds the drawing");
+        h.perform(Action::NextFrame);
+        let ed = h.editor();
+        assert_eq!(ed.can_perform(Action::ClearFrameKey), Err("no key on this frame"));
+        assert!(ed.can_perform(Action::ClearCel).is_err(), "a held frame has no cel of its own");
+        // A second column makes Remove column runnable.
+        h.state_mut().add_column();
+        assert_eq!(h.editor().can_perform(Action::RemoveColumn), Ok(()));
+        // The palette dims what cannot run and says why on hover...
+        h.perform(Action::CommandPalette);
+        h.type_text("next cut");
+        h.hover("Next cut");
+        h.wait(1.0);
+        assert!(h.has_text_containing("not now: this is the only cut"), "{}", h.describe());
+        h.key(egui::Key::Escape);
+        assert!(!h.editor().palette.open);
+        // ...and the menu greys it.
+        h.click("cut");
+        assert_eq!(h.node_enabled("Next cut"), Some(false));
+    }
+
+    #[test]
+    fn cmdui_shortcuts_count_as_recent_and_toggles_show_their_state() {
+        let mut h = EditorHarness::new();
+        h.key(egui::Key::O);
+        assert_eq!(h.editor().palette.recent.first(), Some(&Action::ToggleOnion));
+        assert_eq!(h.editor().is_on(Action::ToggleOnion), Some(h.state().view.onion));
+        assert_eq!(h.editor().is_on(Action::Undo), None, "not a toggle");
+        // The view menu's toggles say whether they are on.
+        let onion = h.state().view.onion;
+        h.click("view");
+        assert_eq!(h.node_toggled("Onion skin"), Some(onion), "{}", h.describe());
+        h.click("Onion skin");
+        assert_eq!(h.state().view.onion, !onion);
+        h.click("view");
+        assert_eq!(h.node_toggled("Onion skin"), Some(!onion));
+        h.key(egui::Key::Escape);
+        // The About window says its name in glyphs the embedded font has.
+        h.perform(Action::About);
+        h.run();
+        assert!(h.has("GABAN STUDIO"), "{}", h.describe());
     }
 }

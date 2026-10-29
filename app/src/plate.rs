@@ -318,6 +318,17 @@ pub fn value(ui: &mut Ui, text: &str) -> Response {
 /// position is armed. Mutually exclusive with its neighbours; clicking an
 /// armed detent does nothing (the caller simply sets the same value again).
 pub fn detent(ui: &mut Ui, armed: bool, label: &str) -> Response {
+    detent_inked(ui, armed, label, false)
+}
+
+/// GM3: a detent for a position out of reach now (an undone history step,
+/// a command that cannot run) — the same control in dim ink. It still
+/// answers a click; the caller says why when it refuses.
+pub fn detent_dim(ui: &mut Ui, armed: bool, label: &str) -> Response {
+    detent_inked(ui, armed, label, true)
+}
+
+fn detent_inked(ui: &mut Ui, armed: bool, label: &str, dim: bool) -> Response {
     let text_w = text_width(ui, label, 11.5);
     let (rect, resp) = ui.allocate_exact_size(
         Vec2::new(CTRL_H + 4.0 + text_w + 8.0, CTRL_H),
@@ -330,14 +341,15 @@ pub fn detent(ui: &mut Ui, armed: bool, label: &str) -> Response {
             snap(rect.left() + CTRL_H * 0.5, ppp),
             snap(rect.center().y, ppp),
         );
-        p.circle_stroke(c, 5.0, Stroke::new(1.0, LEGEND));
+        let rest = if dim { legend_dim() } else { LEGEND };
+        p.circle_stroke(c, 5.0, Stroke::new(1.0, rest));
         if armed {
             p.circle_filled(c, 3.0, TALLY);
         }
         let ink = if armed || resp.hovered() {
             STRUCK
         } else {
-            LEGEND
+            rest
         };
         label_at(
             ui,

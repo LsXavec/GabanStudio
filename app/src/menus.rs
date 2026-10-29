@@ -57,6 +57,31 @@ pub fn tip_with(action: Action, chord: Option<String>) -> String {
     }
 }
 
+/// The registry tooltip with `more` on its own line, built only while the
+/// control is hovered (never every frame).
+pub fn hover_tip(resp: egui::Response, action: Action, more: &str) -> egui::Response {
+    hover_tip_with(resp, action, || more.to_string())
+}
+
+/// [`hover_tip`] whose extra line is itself built only on hover.
+pub fn hover_tip_with(
+    resp: egui::Response,
+    action: Action,
+    more: impl FnOnce() -> String,
+) -> egui::Response {
+    resp.on_hover_ui(|ui| {
+        // As on_hover_text does: a tooltip keeps its width.
+        ui.set_max_width(ui.spacing().tooltip_width);
+        let mut text = tip(ui.ctx(), action);
+        let more = more();
+        if !more.is_empty() {
+            text.push('\n');
+            text.push_str(&more);
+        }
+        ui.label(text);
+    })
+}
+
 /// The shortcut sheet's rows for `query`: every action with a chord, in
 /// group order, as (action, chord label). Pure.
 pub fn sheet_rows(binds: &[Binding], query: &str) -> Vec<(Action, String)> {
@@ -90,13 +115,15 @@ impl crate::Editor {
         let name = path.rsplit('/').next().unwrap_or(path);
         let chord = chord_label(ui.ctx(), action);
         let can = self.can_perform(action);
-        let mut button = egui::Button::new(name);
+        // A toggle shows whether it is on.
+        let on = self.is_on(action);
+        let mut button = egui::Button::new(name).selected(on.unwrap_or(false));
         if let Some(c) = &chord {
             button = button.shortcut_text(c.as_str());
         }
         let resp = ui.add_enabled(can.is_ok(), button);
         // The chord is drawn, not spoken: the item answers to its name.
-        plate::speak(&resp, egui::WidgetType::Button, None, name);
+        plate::speak(&resp, egui::WidgetType::Button, on, name);
         let tip = tip_with(action, chord);
         let resp = match can {
             Ok(()) => resp.on_hover_text(tip),
@@ -196,7 +223,8 @@ impl crate::Editor {
             .default_width(320.0)
             .show(ctx, |ui| {
                 plate::surface(ui);
-                plate::legend(ui, "画版 gaban studio");
+                // Latin only: the embedded JP subset has 画 but not 版.
+                plate::legend(ui, "gaban studio");
                 plate::value(ui, &format!("version {}", env!("CARGO_PKG_VERSION")));
                 ui.label("A node-graph 2D animation studio: draw, time, paint, edit.");
             });

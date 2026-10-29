@@ -1,6 +1,7 @@
 //! GM3: the History pane — every undo step as a row (its label and who
-//! made it), the current step armed, the saved point marked. Clicking a
-//! row undoes or redoes single steps until that row is current.
+//! made it), the current step armed, undone steps dim, the saved point
+//! marked. Clicking a row undoes or redoes single steps until that row is
+//! current.
 
 use eframe::egui;
 
@@ -16,20 +17,29 @@ pub fn row_label(n: usize, label: &str) -> String {
 /// artist and travels to the host, so a jump is refused there.
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, shared: bool) {
     plate::legend(ui, "history");
-    let rows = state.engine.history();
     let pos = state.engine.position();
     // The saved point means something only once there is a file.
     let saved = state.file_path.is_some().then_some(state.saved_rev);
     let base = state.engine.base_revision();
     let mut jump = None;
+    // Row 0 is the start, row n the step n. Only the rows on screen are
+    // built: a long session costs nothing per frame.
+    let rows = state.engine.history_len() + 1;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            row(ui, 0, "start", None, pos == 0, saved == Some(base), &mut jump);
-            for (i, e) in rows.iter().enumerate() {
+        .show_rows(ui, plate::CTRL_H, rows, |ui, range| {
+            for n in range {
+                if n == 0 {
+                    let at_saved = saved == Some(base);
+                    row(ui, 0, "start", None, true, pos == 0, at_saved, &mut jump);
+                    continue;
+                }
+                let Some(e) = state.engine.history_entry(n - 1) else {
+                    continue;
+                };
                 let who = e.author.as_deref().unwrap_or("you");
                 let at_saved = saved == Some(e.revision);
-                row(ui, i + 1, &e.label, Some(who), pos == i + 1, at_saved, &mut jump);
+                row(ui, n, &e.label, Some(who), e.applied, pos == n, at_saved, &mut jump);
             }
         });
     let Some(n) = jump.filter(|n| *n != pos) else {
@@ -44,17 +54,26 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, shared: b
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn row(
     ui: &mut egui::Ui,
     n: usize,
     label: &str,
     author: Option<&str>,
+    applied: bool,
     current: bool,
     saved: bool,
     jump: &mut Option<usize>,
 ) {
     ui.horizontal(|ui| {
-        if plate::detent(ui, current, &row_label(n, label)).clicked() {
+        let name = row_label(n, label);
+        // An undone step waits to be redone: dim, like every paint app's.
+        let detent = if applied {
+            plate::detent(ui, current, &name)
+        } else {
+            plate::detent_dim(ui, current, &name)
+        };
+        if detent.clicked() {
             *jump = Some(n);
         }
         if let Some(a) = author {

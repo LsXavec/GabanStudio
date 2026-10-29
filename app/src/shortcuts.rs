@@ -49,8 +49,12 @@ fn fired(i: &egui::InputState, binds: &[Binding], typing: bool, here: Ctx) -> Ve
         .collect()
 }
 
-/// A chord another action also uses fires only in its own pane.
+/// A chord another action also uses fires only in its own pane; so does
+/// a destructive pane verb's chord (see [`Action::pane_only`]).
 fn aimed_here(a: Action, c: &Chord, binds: &[Binding], here: Ctx) -> bool {
+    if a.pane_only() {
+        return a.context() == here;
+    }
     let shared = binds
         .iter()
         .any(|b| b.action != a && b.chords().any(|d| d == c));

@@ -45,6 +45,8 @@ pub enum Action {
     SelectTool,
     BrushTool,
     FillTool,
+    /// GM3: the deck's lasso fill tool (it had a button but no verb).
+    LassoFillTool,
     SelectAll,
     Undo,
     Redo,
@@ -140,7 +142,8 @@ pub enum Keymap {
     #[default]
     Gaban,
     /// The letters Clip Studio Paint, Toon Boom and Krita share: B brush,
-    /// E eraser, G fill, `,` / `.` frame steps, Delete clears.
+    /// E eraser, G fill, `,` / `.` frame steps, Delete clears (only the
+    /// selection when there is one).
     Industry,
 }
 
@@ -150,6 +153,19 @@ impl Keymap {
         match self {
             Keymap::Gaban => "gaban",
             Keymap::Industry => "industry",
+        }
+    }
+
+    /// The preset detent's tooltip on the Shortcuts page.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Keymap::Gaban => {
+                "gaban: one key per verb (F / S step frames, E new drawing); your own changes stay"
+            }
+            Keymap::Industry => {
+                "industry: the letters Clip Studio Paint, Toon Boom and Krita share (B brush, \
+                 E eraser, G fill, , / . frame steps); your own changes stay"
+            }
         }
     }
 }
@@ -190,6 +206,7 @@ impl Action {
         Action::SelectTool,
         Action::BrushTool,
         Action::FillTool,
+        Action::LassoFillTool,
         Action::SelectAll,
         Action::Undo,
         Action::Redo,
@@ -246,6 +263,7 @@ impl Action {
             Action::SelectTool => "Select / transform tool",
             Action::BrushTool => "Paint tool (brush)",
             Action::FillTool => "Flood fill tool",
+            Action::LassoFillTool => "Lasso fill tool",
             Action::SelectAll => "Select all",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
@@ -262,10 +280,12 @@ impl Action {
             Action::Quit => "Quit",
             Action::ResetLayout => "Reset layout",
             Action::ZoomFit => "Fit view (reset zoom & pan)",
-            Action::RoomLayout => "Layout room",
-            Action::RoomDrawing => "Drawing room (genga)",
-            Action::RoomFinishing => "Paint room (shiage)",
-            Action::RoomEdit => "Edit room (henshū)",
+            // The room detents' own names (Stage::name, D7/D12: romaji
+            // first, then English), so one room has one name on the bar.
+            Action::RoomLayout => "layout room",
+            Action::RoomDrawing => "genga (drawing) room",
+            Action::RoomFinishing => "shiage (paint) room",
+            Action::RoomEdit => "henshū (edit) room",
         }
     }
 
@@ -286,7 +306,7 @@ impl Action {
             NextCut => "Open the next cut in the scene list.",
             ToggleLoop => "Latch looping playback on or off.",
             NewDrawing => "Put a new blank drawing on this frame.",
-            ClearCel => "Erase the active layer of this drawing (undoable).",
+            ClearCel => "Erase the active layer of this drawing, or only the selection (undoable).",
             ClearCelAll => "Erase every layer of this drawing (undoable).",
             ToggleEraser => "Switch the pen between brush and eraser.",
             ToggleAlphaLock => "Paint only where ink already is (recolour).",
@@ -302,6 +322,7 @@ impl Action {
             SelectTool => "Select, move, scale and rotate ink.",
             BrushTool => "Back to the brush.",
             FillTool => "Flood-fill closed areas with the brush colour.",
+            LassoFillTool => "Draw a loop and it fills with the brush colour.",
             SelectAll => "Select everything on the active layer.",
             Undo => "Take back the last step.",
             Redo => "Re-apply the step you took back last.",
@@ -319,9 +340,9 @@ impl Action {
             ResetLayout => "Put this room's panes back where they started.",
             ZoomFit => "Fit the canvas back in its pane at 100%.",
             RoomLayout => "Open the layout room: the cut's preview and timing.",
-            RoomDrawing => "Open the drawing room (genga): canvas and sheet.",
-            RoomFinishing => "Open the paint room (shiage): palettes and fill.",
-            RoomEdit => "Open the edit room (henshū): cuts and the sheet head.",
+            RoomDrawing => "Open the genga (drawing) room: canvas and sheet.",
+            RoomFinishing => "Open the shiage (paint) room: palettes and fill.",
+            RoomEdit => "Open the henshū (edit) room: cuts and the sheet head.",
         }
     }
 
@@ -337,8 +358,8 @@ impl Action {
             }
             PrevKey | NextKey | NewDrawing | ClearFrameKey | RemoveColumn => Group::Sheet,
             PrevCut | NextCut => Group::Cut,
-            SelectTool | BrushTool | FillTool | ToggleEraser | ToggleAlphaLock | Preset1
-            | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
+            SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
+            | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack => Group::Tool,
             RoomLayout | RoomDrawing | RoomFinishing | RoomEdit => Group::Room,
             ResetLayout => Group::Window,
@@ -380,17 +401,19 @@ impl Action {
             RemoveColumn => "Sheet/Remove column",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
-            RoomLayout => "Room/Layout",
-            RoomDrawing => "Room/Drawing (genga)",
-            RoomFinishing => "Room/Paint (shiage)",
-            RoomEdit => "Room/Edit (henshū)",
+            // Each item is its room detent's Stage::name (a test holds them
+            // together).
+            RoomLayout => "Room/layout",
+            RoomDrawing => "Room/genga (drawing)",
+            RoomFinishing => "Room/shiage (paint)",
+            RoomEdit => "Room/henshū (edit)",
             ResetLayout => "Window/Reset layout",
             QuickStart => "Help/Quick start",
             ShortcutSheet => "Help/Keyboard shortcuts",
             CommandPalette => "Help/Command palette…",
             About => "Help/About",
-            SelectTool | BrushTool | FillTool | ToggleEraser | ToggleAlphaLock | Preset1
-            | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
+            SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
+            | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack => return None,
         })
     }
@@ -401,12 +424,14 @@ impl Action {
         match self {
             PlayPause => &["preview", "run"],
             MissCheck => &["holes", "gaps"],
-            ToggleOnion => &["ghost", "light table", "kasane"],
+            // "light table" stays free for the light table's own verb (GM6).
+            ToggleOnion => &["onion", "ghost", "sukashi"],
             ToggleCompositeView => &["render", "output", "comp"],
             ToggleEraser => &["rubber", "erase"],
             ToggleAlphaLock => &["preserve alpha", "lock transparency"],
-            SelectTool => &["move", "transform", "lasso"],
+            SelectTool => &["move", "transform", "lasso select"],
             FillTool => &["bucket", "paint"],
+            LassoFillTool => &["lasso fill", "fill loop"],
             NewDrawing => &["new cel", "blank"],
             ClearFrameKey => &["hold", "extend"],
             RemoveColumn => &["delete column"],
@@ -424,10 +449,11 @@ impl Action {
             CommandPalette => &["search", "commands"],
             ShortcutSheet => &["keys", "hotkeys", "cheat sheet"],
             ZoomFit => &["zoom", "reset view"],
-            RoomLayout => &["layout"],
-            RoomDrawing => &["genga"],
-            RoomFinishing => &["shiage", "colour"],
-            RoomEdit => &["henshu", "editing"],
+            // The English words still find the rooms by their romaji names.
+            RoomLayout => &["lo"],
+            RoomDrawing => &["drawing", "douga"],
+            RoomFinishing => &["paint", "ink", "colour"],
+            RoomEdit => &["edit", "henshu", "editing"],
             _ => &[],
         }
     }
@@ -436,12 +462,28 @@ impl Action {
     pub fn context(self) -> Ctx {
         use Action::*;
         match self {
-            SelectTool | BrushTool | FillTool | ToggleEraser | ToggleAlphaLock | Preset1
-            | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
+            SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
+            | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll => Ctx::Canvas,
             NewDrawing | ClearFrameKey | RemoveColumn => Ctx::Sheet,
             _ => Ctx::Global,
         }
+    }
+
+    /// GM3: a destructive verb whose chord fires only over its own pane,
+    /// even when no other action shares the chord (a painter's Delete over
+    /// the canvas must not remove the sheet's column). E (new drawing)
+    /// still fires anywhere: genga artists press it over the canvas.
+    pub fn pane_only(self) -> bool {
+        matches!(self, Action::RemoveColumn)
+    }
+
+    /// GM3: the verb that arms pencil-box slot `digit` (1-based), if any.
+    pub fn preset_slot(digit: usize) -> Option<Action> {
+        use Action::*;
+        [Preset1, Preset2, Preset3, Preset4, Preset5, Preset6, Preset7, Preset8]
+            .get(digit.checked_sub(1)?)
+            .copied()
     }
 
     /// GM3: the preset's chord for this action.
@@ -529,6 +571,13 @@ impl Action {
             SelectTool => Some(k("V")),
             BrushTool => Some(k("B")),
             FillTool => Some(k("G")),
+            // The other fill: Shift on the fill key.
+            LassoFillTool => Some(Chord {
+                keys: vec!["G".to_string()],
+                ctrl: false,
+                shift: true,
+                alt: false,
+            }),
             SelectAll => Some(ctrl("A")),
             Undo => Some(ctrl("Z")),
             Redo => Some(ctrl("Y")),
@@ -1609,7 +1658,7 @@ impl Config {
     pub fn load() -> Self {
         let Some(dir) = data_dir() else {
             let mut cfg = Self::default();
-            cfg.fill_missing();
+            cfg.fill_missing(false);
             return cfg;
         };
         let (mut cfg, notes) = Self::load_from(&dir);
@@ -1628,15 +1677,21 @@ impl Config {
         let path = config_path_in(dir);
         let mut cfg = Self::default();
         let mut notes = Vec::new();
+        // GM3: a file with no keymap was saved before the presets (and
+        // their extra chords) existed.
+        let mut before_keymaps = false;
         if let Ok(bytes) = std::fs::read(&path) {
             let mut dropped = Dropped::default();
             match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Ok(serde_json::Value::Object(map)) => cfg.read_sections(&map, &mut dropped),
+                Ok(serde_json::Value::Object(map)) => {
+                    before_keymaps = !map.contains_key("keymap");
+                    cfg.read_sections(&map, &mut dropped);
+                }
                 _ => dropped.reset.push("everything"),
             }
             note_dropped(&path, &bytes, &dropped, &mut notes);
         }
-        cfg.fill_missing();
+        cfg.fill_missing(before_keymaps);
         (cfg, notes)
     }
 
@@ -1679,24 +1734,33 @@ impl Config {
         write_atomic(&config_path_in(dir), json.as_bytes())
     }
 
-    /// Every action bound (missing ones get their default chord) and the
-    /// pencil box present.
-    fn fill_missing(&mut self) {
+    /// Every action bound (missing ones get their default chords where no
+    /// other binding already uses them) and the pencil box present.
+    /// `before_keymaps`: the file predates GM3's presets, so a binding
+    /// still at its preset chord gains the preset's extra chords that are
+    /// free. In a later file an empty `also` is the artist's choice and
+    /// stays empty.
+    fn fill_missing(&mut self, before_keymaps: bool) {
         let cfg = self;
         for a in Action::ALL {
             if !cfg.keybinds.iter().any(|b| b.action == *a) {
+                let chord = a.default_chord(cfg.keymap).filter(|c| cfg.conflict(*a, c).is_none());
+                let also = cfg.free_chords(*a, a.default_also());
                 cfg.keybinds.push(Binding {
                     action: *a,
-                    chord: a.default_chord(cfg.keymap),
-                    also: a.default_also(),
+                    chord,
+                    also,
                 });
             }
         }
-        // GM3: a binding still at its preset chord gains the preset's
-        // extra chords (configs saved before Ctrl+Shift+Z redid).
-        for b in &mut cfg.keybinds {
-            if b.also.is_empty() && b.chord == b.action.default_chord(cfg.keymap) {
-                b.also = b.action.default_also();
+        // GM3: configs saved before Ctrl+Shift+Z redid and F3 searched.
+        if before_keymaps {
+            for i in 0..cfg.keybinds.len() {
+                let b = &cfg.keybinds[i];
+                if b.also.is_empty() && b.chord == b.action.default_chord(cfg.keymap) {
+                    let a = b.action;
+                    cfg.keybinds[i].also = cfg.free_chords(a, a.default_also());
+                }
             }
         }
         // The pencil box must exist even in configs saved before it
@@ -1759,6 +1823,11 @@ impl Config {
                     && b.chords().any(|c| c == chord)
             })
             .map(|b| b.action)
+    }
+
+    /// GM3: the chords of `chords` no other action uses (see [`conflict`](Self::conflict)).
+    fn free_chords(&self, action: Action, chords: Vec<Chord>) -> Vec<Chord> {
+        chords.into_iter().filter(|c| self.conflict(action, c).is_none()).collect()
     }
 }
 
@@ -1929,9 +1998,9 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
     ui.horizontal(|ui| {
         crate::plate::legend(ui, "preset");
         for km in Keymap::ALL {
-            if crate::plate::detent(ui, config.keymap == *km, km.name()).clicked()
-                && config.keymap != *km
-            {
+            let detent = crate::plate::detent(ui, config.keymap == *km, km.name())
+                .on_hover_text(km.describe());
+            if detent.clicked() && config.keymap != *km {
                 config.set_keymap(*km);
                 config.save();
                 *capturing = None;

@@ -483,18 +483,35 @@ impl Engine {
     /// GM3: every kept step, oldest first — the undo stack (applied), then
     /// the redo stack in the order redo would re-apply it (not applied).
     pub fn history(&self) -> Vec<HistoryEntry> {
-        let row = |a: &Applied, applied: bool| HistoryEntry {
+        (0..self.history_len())
+            .filter_map(|i| self.history_entry(i))
+            .collect()
+    }
+
+    /// GM3: how many rows `history()` has, without building them.
+    pub fn history_len(&self) -> usize {
+        self.history.undo_stack.len() + self.history.redo_stack.len()
+    }
+
+    /// GM3: row `i` of `history()` alone — a pane draws only the rows on
+    /// screen, never the whole list each frame.
+    pub fn history_entry(&self, i: usize) -> Option<HistoryEntry> {
+        let h = &self.history;
+        let (a, applied) = match h.undo_stack.get(i) {
+            Some(a) => (a, true),
+            None => {
+                // The redo stack's top is the next row after the undo stack.
+                let j = i - h.undo_stack.len();
+                let k = h.redo_stack.len().checked_sub(j)?.checked_sub(1)?;
+                (&h.redo_stack[k], false)
+            }
+        };
+        Some(HistoryEntry {
             label: a.label.clone(),
             author: a.author.clone(),
             applied,
             revision: a.serial,
-        };
-        let h = &self.history;
-        h.undo_stack
-            .iter()
-            .map(|a| row(a, true))
-            .chain(h.redo_stack.iter().rev().map(|a| row(a, false)))
-            .collect()
+        })
     }
 
     /// GM3: how many rows of `history()` are applied.
@@ -511,8 +528,7 @@ impl Engine {
     /// (clamped to the history's length). Each step is the ordinary
     /// undo/redo, so revisions and the redo stack stay exact.
     pub fn undo_to(&mut self, position: usize) -> Result<()> {
-        let total = self.history.undo_stack.len() + self.history.redo_stack.len();
-        let target = position.min(total);
+        let target = position.min(self.history_len());
         while self.history.undo_stack.len() > target {
             self.undo()?;
         }
