@@ -72,7 +72,11 @@ impl Rig {
         self.requests.append(&mut self.editor.requests);
         self.editor.autosave.minutes = self.config.session.autosave_minutes;
         // The shell's shortcut dispatch, minus the dialogs: requests are
-        // logged, never carried out.
+        // logged, never carried out. GM2: it stands down while the "Save
+        // changes?" modal is up, as the App's does.
+        if self.editor.leave_pending() {
+            return;
+        }
         for a in shortcuts::collect(ui.ctx(), &self.config.keybinds) {
             self.editor.presets.clone_from(&self.config.presets);
             let r = self.editor.perform(a);
@@ -442,12 +446,57 @@ impl<S: 'static> PanelHarness<S> {
         let _ = self.h.try_run();
     }
 
+    /// GM2: press-and-hold the ONE widget with this name past a DANGER's
+    /// hold time, then release (EditorHarness::hold, on one panel).
+    #[track_caller]
+    pub fn hold(&mut self, label: &str) {
+        let count = self.h.query_all_by_label(label).count();
+        assert!(count == 1, "hold({label:?}): {count} widget(s)\n{}", self.describe());
+        let c = self.h.get_by_label(label).rect().center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: c,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let input = self.h.input_mut();
+        input.events.push(egui::Event::PointerMoved(c));
+        input.events.push(button(true));
+        self.h.step();
+        let now = self.h.ctx.input(|i| i.time);
+        self.h.input_mut().time = Some(now + 0.5);
+        self.h.step();
+        self.h.input_mut().time = None;
+        self.h.input_mut().events.push(button(false));
+        self.h.step();
+        let _ = self.h.try_run();
+    }
+
+    /// One key with no modifiers: press in one frame, release in the next.
+    pub fn key(&mut self, key: egui::Key) {
+        for pressed in [true, false] {
+            self.h.input_mut().events.push(egui::Event::Key {
+                key,
+                physical_key: Some(key),
+                pressed,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            });
+            self.h.step();
+        }
+        let _ = self.h.try_run();
+    }
+
     pub fn describe(&self) -> String {
         describe_tree(&self.h)
     }
 
     pub fn state(&self) -> &S {
         &self.h.state().0
+    }
+
+    pub fn state_mut(&mut self) -> &mut S {
+        &mut self.h.state_mut().0
     }
 }
 

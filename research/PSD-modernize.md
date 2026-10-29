@@ -2295,3 +2295,17 @@ what was not verified.
   colour literals unchanged at 86. Left: File ▸ Revert to Saved (stretch). Not verified: the real window
   close and title, the rfd dialogs, the panic hook in a real crash, the recovery modal at a real start-up,
   and two app instances sharing one running.json.
+- 2026-10-29 — The never-lose-work review fixes: a document carried across a rebuild or update relaunch
+  comes back dirty, and the relaunch takes this copy's running record with it (put back if it fails); one
+  running record per copy (`running-<pid>-<started>.json`) with a liveness check, so a second window is
+  never offered as a crash; shortcuts and the update check stand down while "Save changes?" or Recovery
+  is up (Enter saves, Esc cancels); Ctrl+S during a save queues one more instead of refusing, and a close
+  waits for a landing save; Recovery lists every autosave (local time and age, newest picked, untitled
+  wording) and Open recovered goes through the unsaved guard; DERIVE and SET on the swatch board mark
+  dirty; a close outranks a pending New/Open; the held DANGERs carry hints; the slate dot is named
+  "unsaved changes"; Open Recent shows the parent folder, checks the files once as it opens, and can clear
+  the list; a failed autosave says so once per streak on the Aka lane, a landed one leaves "autosaved
+  HH:MM"; Settings ▸ General names the autosave folder and opens it; every untitled document has its own
+  autosave group; the per-frame clones are gone. 31 `worksafe_*` tests; colour literals unchanged at 86.
+  Not verified: two real copies side by side, the relaunch hand-off, the opened folder window, the failed
+  autosave line (needs a real worker), and the App's own shortcut gate (the testkit mirrors it).

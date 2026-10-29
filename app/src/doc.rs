@@ -116,6 +116,10 @@ pub struct AppState {
     pub meta_dirty: bool,
     /// GM2: the save running on a worker thread, if any.
     pub saving: Option<SaveJob>,
+    /// GM2: this document's autosave group while it has no file — its own,
+    /// so two untitled projects that share a name never share (or prune)
+    /// each other's autosaves. A file's group comes from its path instead.
+    pub untitled_group: String,
     /// THE SWATCH BOARD's active character tab (shiage; UI-transient).
     pub active_character: usize,
     /// EDIT MODEL latch: the palette board exposes its editing controls
@@ -193,6 +197,7 @@ impl AppState {
         let at = CutRef { scene, cut };
         let active_column = engine.add_column(at, "A").expect("fresh cut");
         engine.clear_history();
+        let untitled_group = crate::worksafe::untitled_group(&engine.project.name);
         Self {
             engine,
             view: ViewContext {
@@ -219,6 +224,7 @@ impl AppState {
             saved_rev: 0,
             meta_dirty: false,
             saving: None,
+            untitled_group,
             active_character: 0,
             palette_edit: false,
             status: "new project — draw on the canvas to create frame 1".into(),
@@ -297,6 +303,7 @@ impl AppState {
             saved_rev: engine.revision(),
             meta_dirty: false,
             saving: None,
+            untitled_group: crate::worksafe::untitled_group(&engine.project.name),
             active_character: 0,
             palette_edit: false,
             status: "project loaded".into(),
@@ -2398,14 +2405,26 @@ impl AppState {
             || self.engine.revision() != self.saved_rev
     }
 
+    /// GM2: the palettes, for a write. They live outside undo, so a write
+    /// through here marks the document dirty (the swatch board's DERIVE
+    /// and the eye's SET; the palette pane marks its own field edits).
+    pub fn palettes_mut(&mut self) -> &mut crate::palette::Palettes {
+        self.meta_dirty = true;
+        &mut self.palettes
+    }
+
     /// GM2: write the document to `path` on a worker thread (NEVER-DO 6 —
     /// the pen never waits on the disk). The worker gets a snapshot: edits
     /// made after this call are not in the file and stay dirty. The write
     /// is atomic and keeps the previous version as `.bak`
     /// (`store::save_atomic_from`).
     pub fn begin_save(&mut self, path: PathBuf) {
-        if self.saving.is_some() {
-            self.refuse("a save is still running — save again when it lands");
+        if let Some(job) = &mut self.saving {
+            // Ctrl+S again while the disk is busy (muscle memory on a big
+            // cut) is not a contradiction: one more save, from a fresh
+            // snapshot, once this one lands.
+            job.again = Some(path);
+            self.status = "saving… (saving again when this lands)".into();
             return;
         }
         // Palettes are project data but outside the undo/Command system —
@@ -2433,6 +2452,7 @@ impl AppState {
             rev,
             path,
             meta_was_dirty,
+            again: None,
         });
     }
 
@@ -2448,20 +2468,39 @@ impl AppState {
         self.finish_save(r)
     }
 
-    /// GM2: block until the running save lands (tests; the shell polls).
+    /// GM2: block until the running save — and any save queued behind it —
+    /// lands (tests; the shell polls). True when the last one landed.
     #[cfg(test)]
     pub fn wait_save(&mut self) -> bool {
-        let Some(job) = &self.saving else { return false };
-        let r = job
-            .rx
-            .recv()
-            .unwrap_or_else(|_| Err("the save worker stopped".into()));
-        self.finish_save(r)
+        let mut landed = false;
+        while let Some(job) = &self.saving {
+            let r = job
+                .rx
+                .recv()
+                .unwrap_or_else(|_| Err("the save worker stopped".into()));
+            landed = self.finish_save(r);
+        }
+        landed
+    }
+
+    /// GM2 tests: a save that stays on the disk until the test lands it —
+    /// send its result on the returned sender (no thread, no timing).
+    #[cfg(test)]
+    pub fn save_in_flight(&mut self, path: PathBuf) -> std::sync::mpsc::Sender<Result<(), String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.saving = Some(SaveJob {
+            rx,
+            rev: self.engine.revision(),
+            path,
+            meta_was_dirty: std::mem::take(&mut self.meta_dirty),
+            again: None,
+        });
+        tx
     }
 
     fn finish_save(&mut self, r: Result<(), String>) -> bool {
         let Some(job) = self.saving.take() else { return false };
-        match r {
+        let landed = match r {
             Ok(()) => {
                 self.saved_rev = job.rev;
                 self.status = format!("saved {}", job.path.display());
@@ -2476,7 +2515,16 @@ impl AppState {
                 self.refuse(format!("SAVE FAILED — {e}. Your work is NOT on disk."));
                 false
             }
+        };
+        // The save asked for while this one ran. A repeat that would write
+        // the same bytes to the same file is skipped — it would only turn
+        // `.bak` into a copy of what was just saved.
+        if let Some(path) = job.again
+            && (!landed || self.is_dirty() || self.file_path.as_ref() != Some(&path))
+        {
+            self.begin_save(path);
         }
+        landed
     }
 
     pub fn open(&mut self) {
@@ -2487,7 +2535,7 @@ impl AppState {
         }
     }
 
-    /// GM2: open a known path (the recent list, a recovered autosave).
+    /// GM2: open a known path (the recent list).
     pub fn open_path(&mut self, path: PathBuf) {
         match Self::load_from(path) {
             Ok(new_state) => *self = new_state,
@@ -2505,6 +2553,9 @@ pub struct SaveJob {
     /// `meta_dirty` as it was when the snapshot was taken (restored if the
     /// save fails).
     meta_was_dirty: bool,
+    /// A save asked for while this one ran (its path): started from a
+    /// fresh snapshot when this one lands.
+    again: Option<PathBuf>,
 }
 
 #[cfg(test)]

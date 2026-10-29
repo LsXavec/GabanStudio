@@ -760,6 +760,12 @@ const DANGER_HOLD_S: f64 = 0.35;
 /// fills beside the label. Releasing early cancels. Returns true exactly
 /// once, at the moment the hold completes.
 pub fn danger(ui: &mut Ui, label: &str) -> bool {
+    danger_hint(ui, label, "")
+}
+
+/// DANGER with what it destroys said in plain words on hover. Every DANGER
+/// says "hold" there: a first-time hand clicks, and a click does nothing.
+pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
     let text_w = text_width(ui, label, 11.5);
     let (rect, resp) = ui.allocate_exact_size(
         Vec2::new(8.0 + text_w + 6.0 + CTRL_H, CTRL_H),
@@ -829,6 +835,11 @@ pub fn danger(ui: &mut Ui, label: &str) -> bool {
             p.circle_stroke(c, 6.0, Stroke::new(1.0, legend_dim()));
         }
     }
+    let _ = if hint.is_empty() {
+        resp.on_hover_text("press and hold to fire — a click does nothing")
+    } else {
+        resp.on_hover_text(format!("press and hold — {hint}"))
+    };
     fired
 }
 

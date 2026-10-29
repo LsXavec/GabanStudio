@@ -27,9 +27,16 @@ ureq = "3.4.0"
 flate2 = "1.1.9"
 
 # Release builds use the GUI subsystem (no console window); CLI flags such
-# as the layout probe re-attach to the parent terminal (GM1).
+# as the layout probe re-attach to the parent terminal (GM1). GM2: the
+# running records' liveness check (Threading) and the recovery rows' local
+# time (Time).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+] }
 
 [dev-dependencies]
 # WGSL shader-string validation in tests: cargo check can't see inside the

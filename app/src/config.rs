@@ -978,10 +978,10 @@ impl SessionConfig {
     }
 
     /// GM2: the recent list with each entry's "still on disk" flag (the
-    /// Open Recent menu checks each entry the same way while it is open).
+    /// Open Recent menu checks them the same way, once as it opens).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn recent_entries(&self) -> Vec<(PathBuf, bool)> {
-        self.recent.iter().map(|p| (p.clone(), p.is_file())).collect()
+        crate::worksafe::on_disk(&self.recent)
     }
 }
 
@@ -1078,7 +1078,7 @@ impl Default for Config {
 }
 
 /// The real data dir, `%APPDATA%/AnimStudio` (D11). It holds config.json,
-/// workspaces.json, autosave/, crash.log and running.json. Resolved by
+/// workspaces.json, autosave/, crash.log and running-*.json. Resolved by
 /// main() and the real-dir `load()`/`save()` wrappers only; everything else
 /// takes a dir. Under `cfg(test)` it refuses outright: tests pass their own
 /// temp dir and never reach the user's files (NEVER-DO 5).
@@ -1369,6 +1369,8 @@ pub fn settings_window(
     host_layout: bool,
     layout_name: &mut String,
     layout_act: &mut Option<LayoutAct>,
+    autosave_dir: Option<&Path>,
+    show_autosaves: &mut bool,
 ) {
     if !*open {
         *capturing = None;
@@ -1454,7 +1456,9 @@ pub fn settings_window(
                 // Right: the selected page.
                 ui.vertical(|ui| match category {
                     SettingsCategory::Shortcuts => shortcuts_page(ui, config, capturing),
-                    SettingsCategory::General => general_page(ui, config),
+                    SettingsCategory::General => {
+                        general_page(ui, config, autosave_dir, show_autosaves)
+                    }
                     SettingsCategory::Performance => performance_page(ui, config, backend, raster),
                     SettingsCategory::Pen => pen_page(ui, config),
                     SettingsCategory::Layers => layers_page(ui, config),
@@ -2111,8 +2115,15 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
 }
 
 /// GM2: Settings ▸ General — the autosave interval (writes only to the
-/// data folder's autosave/, never the user's file).
-fn general_page(ui: &mut egui::Ui, config: &mut Config) {
+/// data folder's autosave/, never the user's file) and where that folder
+/// is: after a mistaken Don't Save its autosaves are the only copy.
+/// "show autosave folder" only raises the flag — the shell opens it.
+pub(crate) fn general_page(
+    ui: &mut egui::Ui,
+    config: &mut Config,
+    autosave_dir: Option<&Path>,
+    show_autosaves: &mut bool,
+) {
     crate::plate::legend(ui, "general");
     ui.separator();
     ui.label("autosave every");
@@ -2134,6 +2145,20 @@ fn general_page(ui: &mut egui::Ui, config: &mut Config) {
         )
         .color(crate::plate::legend_dim()),
     );
+    if let Some(dir) = autosave_dir {
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(dir.display().to_string())
+                    .monospace()
+                    .size(10.0)
+                    .color(crate::plate::LEGEND),
+            )
+            .selectable(true),
+        );
+        if ui.button("show autosave folder").clicked() {
+            *show_autosaves = true;
+        }
+    }
     if changed {
         config.save();
     }

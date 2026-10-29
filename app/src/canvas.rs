@@ -573,7 +573,7 @@ pub struct CanvasView {
     splotches: Vec<([f32; 2], f32, [u8; 4])>,
     /// The Eye is editing this palette role (char idx, role idx); "set"
     /// writes it back, DANGER-guarded (palettes have no undo).
-    eye_target: Option<(usize, usize)>,
+    pub(crate) eye_target: Option<(usize, usize)>,
     /// The Eye's sticky HSV (hue survives greys) + the rgb it derives from.
     eye_hsv: [f32; 3],
     eye_sync_rgb: [u8; 3],
@@ -1566,7 +1566,7 @@ impl CanvasView {
     /// table) · THE DISH (mixing splotches) · THE EYE (compact SV+hue).
     /// Picking never writes the model; only the Eye's held "set" and the
     /// row's held DERIVE write (DANGER — palettes have no undo).
-    fn dish_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+    pub(crate) fn dish_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         // ---- ARMED WELL + row context ----
         let mut armed_role: Option<String> = None;
         let mut row_chips: Vec<[u8; 4]> = Vec::new();
@@ -1710,14 +1710,15 @@ impl CanvasView {
                     // DERIVE (held DANGER — writes the model, no undo there):
                     // this row's shadow from its normal, the systematic way.
                     if plate::danger(ui, "derive") {
-                        let ch = &mut state.palettes.characters[ci];
-                        if let Some(norm) = ch
+                        let normal = state.palettes.characters[ci]
                             .roles
                             .iter()
                             .find(|r| r.name == "normal")
-                            .map(|r| r.color)
-                        {
+                            .map(|r| r.color);
+                        if let Some(norm) = normal {
                             let sh = crate::palette::derive_shadow(norm);
+                            // GM2: through palettes_mut — unsaved work.
+                            let ch = &mut state.palettes_mut().characters[ci];
                             match ch.roles.iter_mut().find(|r| r.name == "shadow") {
                                 Some(r) => r.color = sh,
                                 None => ch.roles.push(crate::palette::ColorRole {
@@ -1925,7 +1926,8 @@ impl CanvasView {
                         );
                         // Writes the model — held DANGER (no undo there).
                         if plate::danger(ui, "set") {
-                            state.palettes.characters[ci].roles[ri].color = self.brush_color;
+                            // GM2: through palettes_mut — unsaved work.
+                            state.palettes_mut().characters[ci].roles[ri].color = self.brush_color;
                             state.status = format!("{l} updated");
                             self.eye_target = None;
                         }
