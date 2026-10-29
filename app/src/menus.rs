@@ -333,5 +333,7 @@ impl crate::Editor {
         }
         // GM8: the project's own settings window, while open.
         self.project_settings_window(ctx);
+        // GM10: the cut's paper window, while open.
+        self.paper_size_window(ctx);
     }
 }

@@ -38,6 +38,35 @@ pub const PAPER_KEY: &str = "camera.paper";
 /// frame's, in px (a paper is rendered whole under a camera).
 pub const MAX_PAPER: u32 = 16384;
 
+/// The largest paper area, in px (32 Mpx). A camera renders each plane as
+/// a premultiplied f32 buffer of the whole paper, and a blurred plane or a
+/// Blend under it holds several at once: at 32 Mpx one buffer is 512 MiB,
+/// while a 16384² paper would be 4 GiB and abort the render on a failed
+/// allocation. It still takes a 4K frame three times wide (11520×2160).
+pub const MAX_PAPER_AREA: u64 = 1 << 25;
+
+/// A paper `scale_w × scale_h` the size of the frame, centred on it (the
+/// Paper size presets: 1.5× or 2× wide for a BG pan or hiki, 2× tall for a
+/// PAN up).
+pub fn centred_paper(width: u32, height: u32, scale_w: f32, scale_h: f32) -> IRect {
+    let w = (width as f32 * scale_w).round().max(1.0) as u32;
+    let h = (height as f32 * scale_h).round().max(1.0) as u32;
+    IRect {
+        x: (width as i32 - w as i32) / 2,
+        y: (height as i32 - h as i32) / 2,
+        w,
+        h,
+    }
+}
+
+/// The paper's limits in words (the Paper size window and its refusal).
+pub fn paper_limits() -> String {
+    format!(
+        "each side 1 to {MAX_PAPER} px, at most {} Mpx, the corner within {MAX_PAPER} px of the frame's",
+        MAX_PAPER_AREA >> 20
+    )
+}
+
 /// The fields of the field guide.
 pub const FIELDS: u32 = 12;
 
@@ -80,13 +109,19 @@ impl IRect {
         }
     }
 
-    /// Can it be a paper? Both sides 1..=MAX_PAPER, the corner within
-    /// MAX_PAPER of the frame's.
+    /// Can it be a paper? Both sides 1..=MAX_PAPER, the area at most
+    /// MAX_PAPER_AREA, the corner within MAX_PAPER of the frame's.
     pub fn is_valid_paper(&self) -> bool {
         (1..=MAX_PAPER).contains(&self.w)
             && (1..=MAX_PAPER).contains(&self.h)
+            && self.area() <= MAX_PAPER_AREA
             && self.x.unsigned_abs() <= MAX_PAPER
             && self.y.unsigned_abs() <= MAX_PAPER
+    }
+
+    /// Its area in px.
+    pub fn area(&self) -> u64 {
+        self.w as u64 * self.h as u64
     }
 }
 
@@ -145,9 +180,10 @@ pub fn paper(cut: &Cut, width: u32, height: u32) -> IRect {
 
 /// The edit that sets the cut's paper (the frame itself is stored as no
 /// key, so the default paper leaves old cuts' meta as it was). None when
-/// nothing would change or `rect` cannot be a paper.
+/// nothing would change or `rect` cannot be a paper (the frame always can:
+/// it is what a cut renders with no key).
 pub fn set_paper(cut: &Cut, at: CutRef, rect: IRect, width: u32, height: u32) -> Option<Command> {
-    if !rect.is_valid_paper() {
+    if rect != IRect::frame(width, height) && !rect.is_valid_paper() {
         return None;
     }
     let before = cut.meta.get(PAPER_KEY).cloned();

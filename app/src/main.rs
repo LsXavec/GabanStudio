@@ -2908,6 +2908,8 @@ impl Editor {
                     self.request_welcome = true;
                 }
             }
+            // GM10: the cut's paper window (its "set paper" is the edit).
+            Action::PaperSize => self.paper_form = Some(PaperForm::of(&self.state)),
             Action::FrameCurves => curves_panel::frame_stored(&mut self.state),
             Action::TypeIntoCell => {
                 self.open_pane(Pane::XSheet);
@@ -3278,6 +3280,7 @@ impl Editor {
             | Action::ConvertColorsToSrgb
             | Action::ProjectSettings
             | Action::WelcomeScreen
+            | Action::PaperSize
             | Action::TypeIntoCell
             | Action::AddNode => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
@@ -3317,6 +3320,7 @@ fn is_chrome(action: Action) -> bool {
             | Action::ConvertColorsToSrgb
             | Action::ProjectSettings
             | Action::WelcomeScreen
+            | Action::PaperSize
             | Action::TypeIntoCell
             | Action::AddNode
     )
@@ -3696,9 +3700,8 @@ struct Editor {
     ws_name: String,
     /// Buffer for the cut ▾ menu's rename field.
     rename_buf: String,
-    /// GM10: the cut ▾ menu's paper size while it is being typed (None
-    /// shows the cut's own paper).
-    paper_buf: Option<anim_core::camera::IRect>,
+    /// GM10: the Paper size window's draft, while it is open.
+    pub paper_form: Option<PaperForm>,
     /// Buffer for the Presets pane's "save current as" name field.
     preset_name: String,
     /// THE BRUSH FORGE (PSD-brush-forge): the draft under the hammer.
@@ -3777,6 +3780,24 @@ struct Editor {
     pub quick_start: [bool; 5],
     /// GM8: the Project Settings window's draft, while it is open.
     pub project_form: Option<ProjectForm>,
+}
+
+/// GM10: the Paper size window's draft — the paper being typed for the cut
+/// it was opened on (a cut switch re-reads it, so one cut's typing never
+/// lands on another).
+pub struct PaperForm {
+    pub cut: anim_core::command::CutRef,
+    pub rect: anim_core::camera::IRect,
+}
+
+impl PaperForm {
+    fn of(s: &AppState) -> Self {
+        let (w, h) = (s.engine.project.width, s.engine.project.height);
+        Self {
+            cut: s.at(),
+            rect: anim_core::camera::paper(s.cut(), w, h),
+        }
+    }
 }
 
 /// GM8: the Project Settings window's draft (applied as one command).
@@ -4273,7 +4294,7 @@ impl Editor {
             workspaces,
             ws_name: String::new(),
             rename_buf: String::new(),
-            paper_buf: None,
+            paper_form: None,
             preset_name: String::new(),
             forge: forge::ForgeState::default(),
             viewers: Default::default(),
@@ -4340,7 +4361,7 @@ impl Editor {
             workspaces,
             ws_name: String::new(),
             rename_buf: String::new(),
-            paper_buf: None,
+            paper_form: None,
             preset_name: String::new(),
             forge: forge::ForgeState::default(),
             viewers: Default::default(),
@@ -4486,6 +4507,105 @@ impl Editor {
         }
         if !open || apply {
             self.project_form = None;
+        }
+    }
+
+    /// GM10 Cut ▸ Paper size: the cut's paper (kami) in frame pixels —
+    /// typed, or a preset centred on the frame — set as one undo step.
+    fn paper_size_window(&mut self, ctx: &egui::Context) {
+        use anim_core::camera::{self, IRect};
+        if self.paper_form.as_ref().is_some_and(|f| f.cut != self.state.at()) {
+            self.paper_form = Some(PaperForm::of(&self.state));
+        }
+        let Some(form) = self.paper_form.as_mut() else {
+            return;
+        };
+        let (fw, fh) = (self.state.engine.project.width, self.state.engine.project.height);
+        let frame = IRect::frame(fw, fh);
+        let now = camera::paper(self.state.cut(), fw, fh);
+        let mut open = true;
+        let mut set = false;
+        egui::Window::new("Paper size")
+            .open(&mut open)
+            .default_width(320.0)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                plate::surface(ui);
+                plate::legend(ui, "paper (BG sheet)").on_hover_text(
+                    "kami (paper): the sheet the camera pans over; make it wider than the frame for a \
+                     BG pan or hiki slide",
+                );
+                let max = camera::MAX_PAPER as i32;
+                egui::Grid::new("paper_size").num_columns(2).show(ui, |ui| {
+                    const CORNER: &str = "the paper's top-left in frame px; below 0 reaches left of or above the frame";
+                    ui.label("corner").on_hover_text(CORNER);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut form.rect.x).range(-max..=max).prefix("x "))
+                            .on_hover_text(CORNER);
+                        ui.add(egui::DragValue::new(&mut form.rect.y).range(-max..=max).prefix("y "))
+                            .on_hover_text(CORNER);
+                    });
+                    ui.end_row();
+                    const SIZE: &str = "the paper's width and height in px (the frame is the default)";
+                    ui.label("size").on_hover_text(SIZE);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::DragValue::new(&mut form.rect.w).range(1..=camera::MAX_PAPER).prefix("w "))
+                            .on_hover_text(SIZE);
+                        ui.add(egui::DragValue::new(&mut form.rect.h).range(1..=camera::MAX_PAPER).prefix("h "))
+                            .on_hover_text(SIZE);
+                    });
+                    ui.end_row();
+                });
+                // The studio's usual papers, centred on the frame.
+                ui.horizontal(|ui| {
+                    for (label, sw, sh, tip) in [
+                        ("1.5× wide", 1.5, 1.0, "half a frame more, centred: a hiki slide or a short BG pan"),
+                        ("2× wide", 2.0, 1.0, "a frame more, centred: a BG pan of half a frame either way"),
+                        ("2× tall", 1.0, 2.0, "a frame taller, centred: a PAN up or down"),
+                    ] {
+                        if ui.button(label).on_hover_text(tip).clicked() {
+                            form.rect = camera::centred_paper(fw, fh, sw, sh);
+                        }
+                    }
+                    if ui
+                        .button("paper = frame")
+                        .on_hover_text("the paper is the frame again (the default)")
+                        .clicked()
+                    {
+                        form.rect = frame;
+                    }
+                });
+                let ok = form.rect == frame || form.rect.is_valid_paper();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}×{} = {:.1} Mpx · {}",
+                        form.rect.w,
+                        form.rect.h,
+                        form.rect.area() as f64 / (1u64 << 20) as f64,
+                        camera::paper_limits()
+                    ))
+                    .color(plate::legend_dim()),
+                );
+                ui.separator();
+                if ui
+                    .add_enabled(ok && form.rect != now, egui::Button::new("set paper"))
+                    .on_hover_text("the cut's paper becomes this rect (one undo step)")
+                    .on_disabled_hover_text(if ok {
+                        "this is the cut's paper already"
+                    } else {
+                        "past the paper's limits (see above)"
+                    })
+                    .clicked()
+                {
+                    set = true;
+                }
+            });
+        let rect = form.rect;
+        if set {
+            self.state.set_cut_paper(rect);
+        }
+        if !open || set {
+            self.paper_form = None;
         }
     }
 
@@ -6594,48 +6714,8 @@ impl Editor {
                             self.rename_buf.clear();
                         }
                     });
-                    // GM10: Cut ▸ Paper size — the sheet the camera pans
-                    // over, in frame pixels (x/y may go negative); "set"
-                    // is one undo step, "frame" puts the paper back.
-                    let (fw, fh) = (self.state.engine.project.width, self.state.engine.project.height);
-                    let mut p = self
-                        .paper_buf
-                        .unwrap_or_else(|| anim_core::camera::paper(self.state.cut(), fw, fh));
-                    let cap = anim_core::camera::MAX_PAPER;
-                    let typed = ui
-                        .horizontal(|ui| {
-                            plate::legend(ui, "paper");
-                            let max = cap as i32;
-                            let a = ui.add(egui::DragValue::new(&mut p.x).range(-max..=max).prefix("x "));
-                            let b = ui.add(egui::DragValue::new(&mut p.y).range(-max..=max).prefix("y "));
-                            let c = ui.add(egui::DragValue::new(&mut p.w).range(1..=cap).prefix("w "));
-                            let d = ui.add(egui::DragValue::new(&mut p.h).range(1..=cap).prefix("h "));
-                            a.changed() || b.changed() || c.changed() || d.changed()
-                        })
-                        .inner;
-                    if typed {
-                        self.paper_buf = Some(p);
-                    }
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(self.paper_buf.is_some(), egui::Button::new("set paper"))
-                            .on_hover_text(format!(
-                                "the cut's paper becomes this rect (sides up to {cap} px, the GPU layer cap)"
-                            ))
-                            .clicked()
-                        {
-                            self.state.set_cut_paper(p);
-                            self.paper_buf = None;
-                        }
-                        if ui
-                            .button("frame")
-                            .on_hover_text("the paper is the frame again (the default)")
-                            .clicked()
-                        {
-                            self.state.set_cut_paper(anim_core::camera::IRect::frame(fw, fh));
-                            self.paper_buf = None;
-                        }
-                    });
+                    // GM10: Cut ▸ Paper size… is a verb (listed above
+                    // with the cut's others); its window holds the fields.
                     // XDTS interop: the industry exposure-sheet exchange
                     // format (Toei/OpenToonz/CSP). Export = this cut's
                     // timing; import = a NEW cut built from the file.

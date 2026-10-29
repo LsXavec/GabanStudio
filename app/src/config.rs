@@ -142,6 +142,8 @@ pub enum Action {
     ProjectSettings,
     /// GM8: the Welcome screen again (templates, recent, the sample).
     WelcomeScreen,
+    /// GM10: Cut ▸ Paper size… — the sheet the camera pans over.
+    PaperSize,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -365,6 +367,7 @@ impl Action {
         Action::AddNode,
         Action::ProjectSettings,
         Action::WelcomeScreen,
+        Action::PaperSize,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -482,6 +485,7 @@ impl Action {
             Action::AddNode => "Add node…",
             Action::ProjectSettings => "Project settings…",
             Action::WelcomeScreen => "Welcome screen…",
+            Action::PaperSize => "Paper size…",
         }
     }
 
@@ -605,6 +609,7 @@ impl Action {
             AddNode => "Open the searchable add-node menu where the pointer is on the node graph: sources, blends, FX, output.",
             ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
             WelcomeScreen => "Show the Welcome screen: templates, recent files and the sample cut (unsaved work is asked about first).",
+            PaperSize => "Set the cut's paper: the sheet the camera pans over, larger than the frame for BG pans and hiki slides.",
         }
     }
 
@@ -631,7 +636,7 @@ impl Action {
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
             | HandlesFlat | HandlesBroken => Group::Sheet,
             FrameCurves => Group::View,
-            PrevCut | NextCut => Group::Cut,
+            PrevCut | NextCut | PaperSize => Group::Cut,
             AddNode => Group::Composite,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
@@ -736,6 +741,7 @@ impl Action {
             WelcomeScreen => "File/Welcome screen…",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
+            PaperSize => "Cut/Paper size…",
             // Each item is its room detent's Stage::name (a test holds them
             // together).
             RoomLayout => "Room/layout",
@@ -813,6 +819,7 @@ impl Action {
             ],
             ProjectSettings => &["project properties", "resolution", "frame rate", "canvas size"],
             WelcomeScreen => &["templates", "new from template", "start page", "welcome"],
+            PaperSize => &["paper", "hiki", "BG pan", "pan paper", "kami", "BG sheet"],
             // GM5: the sheet verbs by the words a timing sheet uses.
             InsertFrames => &["insert frames", "add frame", "open a frame"],
             DeleteFrames => &["delete frames", "remove frame", "close a frame"],
@@ -1126,7 +1133,7 @@ impl Action {
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings | WelcomeScreen => None,
+            | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize => None,
         }
     }
 }

@@ -3509,19 +3509,19 @@ impl AppState {
     }
 
     /// GM10: Cut ▸ Paper size — the cut's paper in frame pixels (the frame
-    /// itself clears the key), one undo step. A rect past the texture cap
-    /// or without area is refused, and says so.
+    /// itself clears the key), one undo step. A rect past the side or area
+    /// cap, or without area, is refused, and says so.
     pub fn set_cut_paper(&mut self, rect: anim_core::camera::IRect) {
-        if !rect.is_valid_paper() {
+        let (w, h) = (self.engine.project.width as u32, self.engine.project.height as u32);
+        if rect != anim_core::camera::IRect::frame(w, h) && !rect.is_valid_paper() {
             self.refuse(format!(
-                "paper {}×{} refused: each side must be 1 to {} px",
+                "paper {}×{} refused: {}",
                 rect.w,
                 rect.h,
-                anim_core::camera::MAX_PAPER
+                anim_core::camera::paper_limits()
             ));
             return;
         }
-        let (w, h) = (self.engine.project.width as u32, self.engine.project.height as u32);
         let Some(cmd) = anim_core::camera::set_paper(self.cut(), self.at(), rect, w, h) else {
             return;
         };

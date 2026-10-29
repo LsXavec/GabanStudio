@@ -295,6 +295,32 @@ fn the_default_paper_is_the_frame_and_a_set_paper_reads_back_and_undoes() {
 }
 
 #[test]
+fn a_paper_past_the_area_budget_is_refused_but_the_frame_never_is() {
+    // A camera renders each plane over the whole paper in f32, so the paper
+    // is bounded by area as well as by side: 16384² would need 4 GiB a buffer.
+    let mut r = rig(48);
+    let square = IRect { x: 0, y: 0, w: camera::MAX_PAPER, h: camera::MAX_PAPER };
+    assert!(!square.is_valid_paper() && square.area() > camera::MAX_PAPER_AREA);
+    assert!(camera::set_paper(r.cut(), r.at, square, 1920, 1080).is_none(), "refused");
+    // 4K three frames wide is the budget's design case and still fits.
+    let hiki = IRect { x: -3840, y: 0, w: 11520, h: 2160 };
+    assert!(hiki.is_valid_paper() && hiki.area() <= camera::MAX_PAPER_AREA);
+    r.set_paper(hiki, 3840, 2160);
+    assert_eq!(camera::paper(r.cut(), 3840, 2160), hiki);
+    // One pixel past the budget is refused; a stored one reads as the frame.
+    let over = IRect { x: 0, y: 0, w: 8192, h: (camera::MAX_PAPER_AREA / 8192 + 1) as u32 };
+    assert!(!over.is_valid_paper(), "{over:?}");
+    let (at, before) = (r.at, r.cut().meta.get(camera::PAPER_KEY).cloned());
+    let after = Some(camera::paper_to_json(over));
+    r.engine.apply("over", vec![Command::SetCutMeta { at, key: camera::PAPER_KEY.into(), before, after }]).unwrap();
+    assert_eq!(camera::paper(r.cut(), 3840, 2160), IRect::frame(3840, 2160));
+    // A frame past the budget (DCI 8K) is still the paper it always was.
+    let eight_k = IRect::frame(8192, 4320);
+    assert!(!eight_k.is_valid_paper());
+    assert!(camera::set_paper(r.cut(), r.at, eight_k, 8192, 4320).is_some(), "the frame clears the key");
+}
+
+#[test]
 fn render_node_rect_at_the_frame_is_todays_render_and_a_wider_rect_shows_beyond_it() {
     // Criterion 1's engine half: no camera, the default paper — the rect
     // renderer at the frame is bit-for-bit the frame renderer.

@@ -2520,3 +2520,17 @@ what was not verified.
   5 `camview_*` app tests. Shake frequency is in cycles per frame (the camera knows no fps). Left: paint
   layers at paper size (GPU cap shown), fill/lasso clipped to the paper, painting beyond the frame, the
   stretch (camera path overlay, motion blur). Not verified: the real window and a real GPU.
+- 2026-10-29 — GM10 review fixes. The paper is bounded by area as well as side: `MAX_PAPER_AREA` 32 Mpx
+  (a camera renders each plane as an f32 buffer of the whole paper, so 16384² would need 4 GiB a buffer
+  and abort the render); the frame is always a valid paper (an 8K frame past the budget still clears the
+  key). `Action::PaperSize` ("Paper size…", group Cut, Cut ▸ Paper size…, aliases paper/hiki/BG pan/pan
+  paper/kami/BG sheet, no chord) opens a Paper size window in place of the cut ▾ fields: "paper (BG
+  sheet)" with corner and size fields, presets 1.5× wide / 2× wide / 2× tall centred on the frame and
+  "paper = frame", the limits and the draft's Mpx shown, "set paper" one undo step; the draft belongs to
+  the cut it was opened on and re-reads on a cut switch. The field guide, its numbers, the safe frames
+  and the centre cross ride the output camera's z 0 map (`Furniture::view`/`quad`), so they follow a
+  panned, zoomed or turned camera; with no camera they sit on the frame as before. The camera frame is
+  Ao at 2 px, not Aka. 15 `camera_tests`, 7 `camview_*`. Still Left, a core item that needs its own part:
+  paint layers at paper size (origin offset through upload, readback, brush uniforms and display; the
+  device's `max_texture_dimension_2d` cap shown), painting beyond the frame, fill/lasso clipped to the
+  paper; also the camera frame shown only in the Layout/Composite rooms (the canvas knows no room).

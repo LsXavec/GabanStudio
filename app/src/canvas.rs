@@ -460,13 +460,29 @@ pub(crate) struct Furniture {
     /// The output camera's frame on the paper, corners clockwise from its
     /// top left.
     pub camera: Option<[(f32, f32); 4]>,
-    /// Fields 1 to 12, while the field toggle is on.
+    /// Fields 1 to 12, while the field toggle is on (rects of the camera's
+    /// frame; `quad` puts them on the paper).
     pub fields: Vec<anim_core::camera::Rect>,
-    /// Action and title safe, while the safe toggle is on.
+    /// Action and title safe, while the safe toggle is on (likewise).
     pub safe: Option<anim_core::camera::SafeFrames>,
+    /// The output camera's frame map (its z 0 plane) the guides ride on:
+    /// None without a camera, when the camera's frame is the frame itself.
+    pub view: Option<anim_core::camera::PlaneMap>,
 }
 
 impl Furniture {
+    /// A point of the camera's frame (a guide's) on the paper.
+    pub(crate) fn on_paper(&self, (u, v): (f32, f32)) -> (f32, f32) {
+        self.view.map_or((u, v), |m| m.map(u, v))
+    }
+
+    /// A guide rect's corners on the paper, clockwise from its top left —
+    /// where the canvas draws it: a panned, zoomed or turned camera carries
+    /// its field chart and safe frames along.
+    pub(crate) fn quad(&self, r: &anim_core::camera::Rect) -> [(f32, f32); 4] {
+        r.corners().map(|p| self.on_paper(p))
+    }
+
     /// What goes on a `width`×`height` sheet for `cut` at `frame`.
     pub(crate) fn of(
         cut: &anim_core::model::Cut,
@@ -477,13 +493,13 @@ impl Furniture {
     ) -> Self {
         use anim_core::camera::{self, CameraState, IRect};
         let paper = camera::paper(cut, width, height);
+        let st = camera::output_camera(cut).and_then(|n| CameraState::at(cut, n, frame));
         Self {
             paper: (paper != IRect::frame(width, height)).then_some(paper),
-            camera: camera::output_camera(cut)
-                .and_then(|n| CameraState::at(cut, n, frame))
-                .map(|st| camera::frame_rect_on_paper(&st, width, height)),
+            camera: st.as_ref().map(|st| camera::frame_rect_on_paper(st, width, height)),
             fields: if field { camera::field_guide(width, height) } else { Vec::new() },
             safe: safe.then(|| camera::safe_frames(width, height)),
+            view: st.map(|st| st.plane_map(0.0, width, height)),
         }
     }
 }
@@ -3770,10 +3786,16 @@ impl CanvasView {
                 let corners = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)];
                 painter.add(outline(corners, egui::Stroke::new(1.0, crate::plate::legend_dim())));
             }
+            // The guides sit on the camera's frame (the frame itself with
+            // no camera), so they are drawn through `quad`.
+            let on_paper = |p: (f32, f32)| {
+                let (x, y) = furniture.on_paper(p);
+                to_screen(pos2(x, y))
+            };
             for (n, r) in furniture.fields.iter().enumerate() {
-                painter.add(outline(r.corners(), g));
+                painter.add(outline(furniture.quad(r), g));
                 painter.text(
-                    to_screen(pos2(r.x, r.y)) + vec2(2.0, 1.0),
+                    on_paper((r.x, r.y)) + vec2(2.0, 1.0),
                     egui::Align2::LEFT_TOP,
                     format!("{}", n + 1),
                     egui::FontId::monospace(9.0),
@@ -3781,17 +3803,21 @@ impl CanvasView {
                 );
             }
             if let Some(s) = furniture.safe {
-                painter.add(outline(s.action.corners(), g));
-                painter.add(outline(s.title.corners(), g));
+                painter.add(outline(furniture.quad(&s.action), g));
+                painter.add(outline(furniture.quad(&s.title), g));
             }
             if self.show_field || self.show_safe {
-                let pc = pos2(paper_w * 0.5, paper_h * 0.5);
-                let arm = 10.0 / scale.max(1e-6);
-                painter.line_segment([to_screen(pc - vec2(arm, 0.0)), to_screen(pc + vec2(arm, 0.0))], g);
-                painter.line_segment([to_screen(pc - vec2(0.0, arm)), to_screen(pc + vec2(0.0, arm))], g);
+                // 10 screen px arms, in the camera frame's units (a T.U.
+                // camera's frame is smaller on the paper).
+                let (cx, cy) = (paper_w * 0.5, paper_h * 0.5);
+                let arm = 10.0 / scale.max(1e-6) * furniture.view.map_or(1.0, |m| m.zoom);
+                painter.line_segment([on_paper((cx - arm, cy)), on_paper((cx + arm, cy))], g);
+                painter.line_segment([on_paper((cx, cy - arm)), on_paper((cx, cy + arm))], g);
             }
             if let Some(c) = furniture.camera {
-                painter.add(outline(c, egui::Stroke::new(1.5, crate::plate::AKA)));
+                // Ao, the scaffold ink, at full strength and heavier than
+                // the guides (Aka is kept for refusals: the plate law).
+                painter.add(outline(c, egui::Stroke::new(2.0, crate::plate::AO)));
             }
         }
         self.furniture = furniture;
@@ -9044,5 +9070,98 @@ mod camview_tests {
         let f = &h.editor().canvas.furniture;
         assert!(f.fields.is_empty());
         assert_eq!(f.safe, Some(camera::safe_frames(w, fh)));
+    }
+
+    /// A Camera feeding the output, panned `pan_x` paper px at `zoom`.
+    fn output_camera(h: &mut EditorHarness, pan_x: f32, zoom: f32) -> anim_core::ids::NodeId {
+        let s = h.state_mut();
+        s.graph_add_node(NodeKind::camera(), (200.0, 0.0));
+        let cam = s.selected_node.expect("the new camera is selected");
+        s.graph_set_output(cam);
+        let Ok(NodeKind::Camera { planes, mut params, binds }) =
+            s.cut().graph.node(cam).map(|n| n.kind.clone())
+        else {
+            panic!("a Camera node");
+        };
+        params.set("pan_x", FxValue::Float(pan_x));
+        params.set("zoom", FxValue::Float(zoom));
+        s.graph_set_kind(cam, NodeKind::Camera { planes, params, binds });
+        h.run();
+        cam
+    }
+
+    #[test]
+    fn camview_the_field_guide_and_safe_frames_ride_the_camera_frame_on_the_paper() {
+        let mut h = harness();
+        let (w, fh) = frame_size(&h);
+        h.editor_mut().canvas.show_field = true;
+        h.editor_mut().canvas.show_safe = true;
+        h.run();
+        // No camera: the guides sit on the frame itself.
+        let f = h.editor().canvas.furniture.clone();
+        assert_eq!(f.view, None);
+        assert_eq!(f.quad(&f.fields[0]), f.fields[0].corners());
+        // A camera 300 px right at zoom 2 (T.U.) carries them along.
+        let cam = output_camera(&mut h, 300.0, 2.0);
+        let st = CameraState::at(h.state().cut(), cam, h.state().view.frame).expect("the camera resolves");
+        let f = h.editor().canvas.furniture.clone();
+        assert_eq!(f.view, Some(st.plane_map(0.0, w, fh)));
+        // The 12th field is the camera's whole frame: the camera rect itself.
+        let twelve = f.quad(f.fields.last().expect("12 fields"));
+        assert_eq!(Some(twelve), f.camera);
+        // Action safe is 93% of the half-size frame, centred 300 px right.
+        let action = f.quad(&f.safe.expect("the safe frames").action);
+        let (cx, cy) = (w as f32 / 2.0 + 300.0, fh as f32 / 2.0);
+        let (hw, hh) = (w as f32 * 0.93 / 4.0, fh as f32 * 0.93 / 4.0);
+        let want = [(cx - hw, cy - hh), (cx + hw, cy - hh), (cx + hw, cy + hh), (cx - hw, cy + hh)];
+        for (d, e) in action.iter().zip(want) {
+            assert!((d.0 - e.0).abs() < 1e-2 && (d.1 - e.1).abs() < 1e-2, "{action:?} vs {want:?}");
+        }
+        // The module rects themselves stay the frame's (criterion 9).
+        assert_eq!(f.fields, camera::field_guide(w, fh));
+    }
+
+    #[test]
+    fn camview_paper_size_is_a_verb_whose_window_sets_the_paper_in_one_step() {
+        let mut h = harness();
+        let (w, fh) = frame_size(&h);
+        // D6: in the registry, the Cut menu and the palette.
+        assert!(Action::ALL.contains(&Action::PaperSize));
+        assert_eq!(Action::PaperSize.menu(), Some("Cut/Paper size…"));
+        assert_eq!(crate::cmdpal::ranked("paper size", &[]).first(), Some(&Action::PaperSize));
+        for word in ["hiki", "BG pan", "kami"] {
+            assert!(crate::cmdpal::ranked(word, &[]).contains(&Action::PaperSize), "{word}");
+        }
+        // perform opens the window on the cut's paper.
+        h.perform(Action::PaperSize);
+        h.run();
+        let form = h.editor().paper_form.as_ref().expect("the window is open");
+        assert_eq!(form.rect, IRect::frame(w, fh));
+        assert!(h.has("set paper"));
+        // A preset fills the fields centred on the frame; "set paper" sets it.
+        h.click("2× wide");
+        h.run();
+        let wide = IRect { x: -(w as i32) / 2, y: 0, w: 2 * w, h: fh };
+        assert_eq!(h.editor().paper_form.as_ref().map(|f| f.rect), Some(wide));
+        h.click("set paper");
+        h.run();
+        assert_eq!(camera::paper(h.state().cut(), w, fh), wide);
+        assert_eq!(h.editor().canvas.furniture.paper, Some(wide));
+        assert!(h.editor().paper_form.is_none(), "set closes the window");
+        h.perform(Action::Undo);
+        h.run();
+        assert_eq!(camera::paper(h.state().cut(), w, fh), IRect::frame(w, fh), "one undo step");
+        // A draft typed on one cut never lands on another: a cut switch
+        // re-reads the new cut's paper.
+        h.perform(Action::PaperSize);
+        h.run();
+        h.click("2× tall");
+        h.run();
+        let scene = h.state().view.scene;
+        h.state_mut().new_cut(scene);
+        h.run();
+        let form = h.editor().paper_form.as_ref().expect("still open");
+        assert_eq!(form.cut, h.state().at());
+        assert_eq!(form.rect, IRect::frame(w, fh));
     }
 }
