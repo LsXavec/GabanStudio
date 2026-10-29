@@ -51,6 +51,9 @@ pub struct Rig {
     pub performed: Vec<(Action, Performed)>,
     /// GM2: what the editor asked the shell for (logged, never carried out).
     pub requests: Vec<AppRequest>,
+    /// GM4: native pen samples the next frame hands the canvas — the
+    /// tablet thread's place (empty = no tablet, as before).
+    pub pen: Vec<crate::PenSample>,
     dressed: bool,
 }
 
@@ -66,6 +69,7 @@ impl Rig {
             return;
         }
         self.notes.say(&mut self.editor);
+        let pen = std::mem::take(&mut self.pen);
         let Rig { editor, config, .. } = self;
         let mut presets_dirty = false;
         editor.ui(
@@ -74,7 +78,7 @@ impl Rig {
             &config.layers,
             &mut config.presets,
             &mut presets_dirty,
-            &[],
+            &pen,
             config.ui.lock_positions,
             None,
             &config.keybinds,
@@ -135,6 +139,7 @@ impl EditorHarness {
             notes,
             performed: Vec::new(),
             requests: Vec::new(),
+            pen: Vec::new(),
             dressed: false,
         };
         let h = Harness::builder()
@@ -510,6 +515,11 @@ impl EditorHarness {
 
     pub fn editor_mut(&mut self) -> &mut Editor {
         &mut self.h.state_mut().editor
+    }
+
+    /// GM4: the harness's egui context (a texture a test lifts lives here).
+    pub fn ctx(&self) -> egui::Context {
+        self.h.ctx.clone()
     }
 
     /// Every shortcut dispatched so far, with what perform returned.

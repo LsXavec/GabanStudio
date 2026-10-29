@@ -349,8 +349,6 @@ impl Drawing {
     /// This is the GOLDEN REFERENCE the GPU compositor is tested against, and
     /// the future export/eval path. It is NOT the interactive display path.
     pub fn flatten(&self) -> std::collections::BTreeMap<TileCoord, Arc<TileData>> {
-        use crate::raster::{TILE_LEN, f16_bits_to_f32, f32_to_f16_bits};
-
         // Collect every coordinate any visible layer touches.
         let mut coords: std::collections::BTreeSet<TileCoord> = std::collections::BTreeSet::new();
         for layer in &self.layers {
@@ -361,36 +359,44 @@ impl Drawing {
 
         let mut out = std::collections::BTreeMap::new();
         for coord in coords {
-            // f32 working buffer, linear premultiplied.
-            let mut acc = vec![0.0f32; TILE_LEN];
-            for layer in &self.layers {
-                if !layer.props.visible || layer.props.opacity <= 0.0 {
-                    continue;
-                }
-                let Some(tile) = layer.raster.tiles.get(&coord) else {
-                    continue;
-                };
-                let op = layer.props.opacity.clamp(0.0, 1.0);
-                // src-over: out = src*op + out*(1 - src.a*op), premultiplied.
-                for (px, spx) in acc.chunks_exact_mut(4).zip(tile.rgba.chunks_exact(4)) {
-                    let sa = f16_bits_to_f32(spx[3]) * op;
-                    let keep = 1.0 - sa;
-                    for c in 0..4 {
-                        let s = f16_bits_to_f32(spx[c]) * op;
-                        px[c] = s + px[c] * keep;
-                    }
-                }
-            }
-            let rgba: Vec<u16> = acc
-                .iter()
-                .map(|v| f32_to_f16_bits(v.clamp(0.0, 1.0)))
-                .collect();
-            let tile = TileData::from_vec(rgba);
-            if !tile.is_empty() {
+            if let Some(tile) = self.flatten_tile(coord) {
                 out.insert(coord, Arc::new(tile));
             }
         }
         out
+    }
+
+    /// One tile of [`Self::flatten`] (same arithmetic); None where no
+    /// visible layer leaves ink.
+    pub fn flatten_tile(&self, coord: TileCoord) -> Option<TileData> {
+        use crate::raster::{TILE_LEN, f16_bits_to_f32, f32_to_f16_bits};
+
+        // f32 working buffer, linear premultiplied.
+        let mut acc = vec![0.0f32; TILE_LEN];
+        for layer in &self.layers {
+            if !layer.props.visible || layer.props.opacity <= 0.0 {
+                continue;
+            }
+            let Some(tile) = layer.raster.tiles.get(&coord) else {
+                continue;
+            };
+            let op = layer.props.opacity.clamp(0.0, 1.0);
+            // src-over: out = src*op + out*(1 - src.a*op), premultiplied.
+            for (px, spx) in acc.chunks_exact_mut(4).zip(tile.rgba.chunks_exact(4)) {
+                let sa = f16_bits_to_f32(spx[3]) * op;
+                let keep = 1.0 - sa;
+                for c in 0..4 {
+                    let s = f16_bits_to_f32(spx[c]) * op;
+                    px[c] = s + px[c] * keep;
+                }
+            }
+        }
+        let rgba: Vec<u16> = acc
+            .iter()
+            .map(|v| f32_to_f16_bits(v.clamp(0.0, 1.0)))
+            .collect();
+        let tile = TileData::from_vec(rgba);
+        (!tile.is_empty()).then_some(tile)
     }
 }
 

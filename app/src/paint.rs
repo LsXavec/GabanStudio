@@ -127,6 +127,18 @@ pub fn dab_coverage(dist: f32, radius: f32, hardness: f32, aliased: bool) -> f32
     o.clamp(0.0, 1.0) * aa
 }
 
+/// GM4: a dab texel's final alpha — the CPU mirror of `fs_main`'s tail.
+/// `shape` is the coverage (procedural or tip mask), `color_a` the dab's
+/// alpha (brush alpha × flow × pressure opacity), `grain_keep` the paper
+/// grain's multiplier (1 = no grain). An ALIASED dab is its shape cut at
+/// half and nothing else: 0 or 1, never a grey.
+pub fn dab_alpha(shape: f32, color_a: f32, grain_keep: f32, hardness: f32) -> f32 {
+    if hardness > 1.5 {
+        return if shape >= 0.5 { 1.0 } else { 0.0 };
+    }
+    shape * color_a * grain_keep
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -334,6 +346,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let g = textureSampleLevel(grain_tex, grain_samp, guv, 0.0);
         let luma = dot(g.rgb, vec3<f32>(0.299, 0.587, 0.114));
         a = a * (1.0 - u.grain.w * (1.0 - luma));
+    }
+    if (in.hardness > 1.5) {
+        // GM4 ALIASED: the shape alone decides (a tip mask cut at half);
+        // flow, pressure opacity, colour alpha and grain never thin it —
+        // every texel is 0 or 1 (CPU mirror: dab_alpha).
+        a = select(0.0, 1.0, opa >= 0.5);
     }
     return vec4<f32>(in.color.rgb * a, a);       // premultiplied
 }
@@ -1675,5 +1693,30 @@ mod viewnav_tests {
         )
         .validate(&module)
         .expect("SHADER validates");
+    }
+
+    #[test]
+    fn viewnav_aliased_dabs_ignore_flow_pressure_tips_and_grain() {
+        // A thinned dab (alpha 0.4 = flow × pressure opacity) over grain,
+        // procedural and tip-shaped: aliased, every texel is 0 or 1.
+        for radius in [0.5f32, 3.0, 20.0] {
+            for k in 0..=200 {
+                let d = k as f32 * radius * 1.5 / 200.0;
+                let shape = dab_coverage(d, radius, 0.85, true);
+                let a = dab_alpha(shape, 0.4, 0.7, ALIASED_HARDNESS);
+                assert_eq!(a, shape, "aliased r {radius} d {d}: {a}");
+                assert!(a == 0.0 || a == 1.0);
+            }
+        }
+        for mask in [0.0f32, 0.2, 0.49, 0.5, 0.75, 1.0] {
+            let a = dab_alpha(mask, 0.4, 0.7, ALIASED_HARDNESS);
+            assert_eq!(a, if mask >= 0.5 { 1.0 } else { 0.0 }, "tip mask {mask}");
+        }
+        // Soft dabs keep every thinning.
+        assert!((dab_alpha(0.5, 0.4, 0.7, 0.85) - 0.14).abs() < 1e-6);
+        // The shader's tail is the same law, after the grain.
+        let tail = SHADER.find("a = select(0.0, 1.0, opa >= 0.5);").expect("aliased tail");
+        let grain = SHADER.find("a = a * (1.0 - u.grain.w").expect("grain");
+        assert!(tail > grain, "the aliased cut comes after every thinning");
     }
 }

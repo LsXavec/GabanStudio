@@ -214,6 +214,10 @@ impl crate::Editor {
                         k(CommandPalette),
                         k(ShortcutSheet)
                     ),
+                    // GM4: the canvas gestures no menu shows.
+                    "6. Hold Space and drag the canvas to move the view (Shift+drag turns it); \
+                     Alt+click picks a colour; Shift+click rules on from the last stroke."
+                        .into(),
                 ] {
                     ui.label(line);
                 }

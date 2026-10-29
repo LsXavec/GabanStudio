@@ -322,7 +322,7 @@ impl Action {
     pub fn help(self) -> &'static str {
         use Action::*;
         match self {
-            PlayPause => "Start or stop playback of the cut.",
+            PlayPause => "Start or stop playback of the cut. Held on the canvas, Space drags the view (Shift+drag turns it).",
             NextFrame => "Step one frame forward.",
             PrevFrame => "Step one frame back.",
             FirstFrame => "Jump to the cut's first frame.",
@@ -366,7 +366,7 @@ impl Action {
             Settings => "Shortcuts, pen, performance and the rest.",
             Quit => "Close the app (asks first about unsaved work).",
             ResetLayout => "Put this room's panes back where they started.",
-            ZoomFit => "Fit the whole paper back in its pane, centred.",
+            ZoomFit => "Fit the whole paper back in its pane, centred; a turned view keeps its turn.",
             RoomLayout => "Open the layout room: the cut's preview and timing.",
             RoomDrawing => "Open the genga (drawing) room: canvas and sheet.",
             RoomFinishing => "Open the shiage (paint) room: palettes and fill.",
@@ -497,7 +497,7 @@ impl Action {
             ZoomIn | ZoomOut => &["magnify", "scale view"],
             Zoom100 => &["100%", "pixel size", "one to one"],
             RotateViewLeft | RotateViewRight | ResetRotation => &["turn", "tilt canvas", "spin"],
-            MirrorView => &["flop", "reverse view", "flip horizontal"],
+            MirrorView => &["flop", "reverse view", "flip horizontal", "hanten", "flip canvas"],
             BrushSmaller | BrushBigger => &["size", "brush size", "bracket"],
             // The English words still find the rooms by their romaji names.
             RoomLayout => &["lo"],

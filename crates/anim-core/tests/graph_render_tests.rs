@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use anim_core::Engine;
 use anim_core::command::{Command, CutRef};
-use anim_core::export::{render_frame, render_graph_frame, srgb_to_linear};
+use anim_core::export::{
+    composite_pixel, graph_composite_pixel, linear_to_srgb, render_frame, render_graph_frame,
+    srgb_to_linear, straight_rgba8,
+};
 use anim_core::graph::{BlendMode, NodeKind};
 use anim_core::ids::*;
 use anim_core::model::CelLayer;
@@ -480,4 +483,56 @@ fn unconnected_inputs_render_transparent() {
     r2.set_output(out2);
     let img2 = render_graph_frame(r2.cut(), 0, W, H).unwrap();
     assert_eq!(opaque_px_count(&img2), 0);
+}
+
+/// GM4: the eyedropper's one-pixel reads are the rendered frame's pixels —
+/// opaque, part-covered and bare texels alike, column stack and graph.
+#[test]
+fn composite_pixel_is_the_rendered_frame_pixel() {
+    let mut r = rig();
+    let mut texels = vec![0u16; TILE_LEN];
+    for (x, y, rgba) in [
+        (0usize, 0usize, [0.9f32, 0.0, 0.3, 0.9]),
+        (3, 5, [0.25, 0.5, 0.125, 1.0]),
+        (10, 20, [0.1, 0.05, 0.2, 0.5]),
+        (63, 63, [0.004, 0.002, 0.001, 0.01]),
+    ] {
+        for c in 0..4 {
+            texels[(y * 64 + x) * 4 + c] = f32_to_f16_bits(rgba[c]);
+        }
+    }
+    let (at, id, layer) = (r.at, r.d, r.layer);
+    let tile = Arc::new(TileData::from_vec(texels));
+    r.engine
+        .apply(
+            "paint",
+            vec![Command::PaintTiles { at, id, layer, diff: vec![((0, 0), None, Some(tile))] }],
+        )
+        .unwrap();
+    let frame = render_frame(r.cut(), 0, W, H);
+    for y in 0..H {
+        for x in 0..W {
+            let one = straight_rgba8(&composite_pixel(r.cut(), 0, x, y));
+            assert_eq!(one, px(&frame, x, y), "({x}, {y})");
+        }
+    }
+
+    let solid = r.node(NodeKind::Solid { rgba: [200, 40, 90, 180] });
+    let out = r.node(NodeKind::Output);
+    r.connect(solid, out, 0);
+    r.set_output(out);
+    let img = render_graph_frame(r.cut(), 0, W, H).unwrap();
+    for (x, y) in [(0, 0), (3, 5), (63, 63)] {
+        let one = graph_composite_pixel(r.cut(), 0, W, H, x, y).expect("an output");
+        assert_eq!(straight_rgba8(&one), px(&img, x, y), "({x}, {y})");
+    }
+}
+
+/// GM4: linear→sRGB undoes the EOTF on every byte — a picked pixel comes
+/// back as the chip that painted it.
+#[test]
+fn linear_to_srgb_brings_every_byte_home() {
+    for b in 0..=255u8 {
+        assert_eq!(linear_to_srgb(srgb_to_linear(b)), b, "byte {b}");
+    }
 }

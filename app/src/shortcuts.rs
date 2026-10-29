@@ -38,8 +38,9 @@ pub fn collect_for(
     ctx.input_for(viewport, |i| fired(i, binds, typing, here, hand))
 }
 
-/// GM4: the canvas notes that the Space hold dragged (the hand panned or
-/// turned the view), so the release that ends the hold is not a tap.
+/// GM4: the canvas notes that the Space hold dragged — anything moved the
+/// view while Space was down (the hand's drag or turn, a wheel zoom, a
+/// middle drag) — so the release that ends the hold is not a tap.
 pub fn note_hand_drag(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(hand_id(), true));
 }

@@ -47,17 +47,22 @@ fn splat_flat(
                     continue;
                 }
                 let s = &tile.rgba[(row * TILE + cx) * 4..][..4];
-                let sa = f16_bits_to_f32(s[3]);
-                if sa <= 0.0 {
-                    continue; // premultiplied: fully transparent texel
-                }
                 let dst = &mut acc[((py as usize) * w + px as usize) * 4..][..4];
-                let keep = 1.0 - sa;
-                for c in 0..4 {
-                    dst[c] = f16_bits_to_f32(s[c]) + dst[c] * keep;
-                }
+                over_texel(dst, s);
             }
         }
+    }
+}
+
+/// Premultiplied src-over of one f16 texel onto one f32 pixel.
+fn over_texel(dst: &mut [f32], s: &[u16]) {
+    let sa = f16_bits_to_f32(s[3]);
+    if sa <= 0.0 {
+        return; // premultiplied: fully transparent texel
+    }
+    let keep = 1.0 - sa;
+    for c in 0..4 {
+        dst[c] = f16_bits_to_f32(s[c]) + dst[c] * keep;
     }
 }
 
@@ -76,17 +81,62 @@ fn composite(cut: &Cut, frame: u32, width: u32, height: u32) -> Vec<f32> {
     acc
 }
 
+/// ONE pixel of the column composite at `frame` (premultiplied f32): the
+/// same flatten and src-over as [`render_frame`], touching only the tile
+/// under (x, y) in each drawing — the eyedropper's read, without the frame.
+pub fn composite_pixel(cut: &Cut, frame: u32, x: u32, y: u32) -> [f32; 4] {
+    let t = TILE as u32;
+    let coord = ((x / t) as i32, (y / t) as i32);
+    let i = (((y % t) * t + x % t) * 4) as usize;
+    let mut px = [0.0f32; 4];
+    for col in &cut.xsheet.columns {
+        let Some(id) = col.resolve(frame) else {
+            continue;
+        };
+        let Some(d) = cut.drawing(id) else {
+            continue;
+        };
+        if let Some(tile) = d.flatten_tile(coord) {
+            over_texel(&mut px, &tile.rgba[i..i + 4]);
+        }
+    }
+    px
+}
+
+/// ONE pixel of the graph composite at `frame` (premultiplied f32). The
+/// graph's transforms resample whole images, so this renders the frame;
+/// `None` = no wired output.
+pub fn graph_composite_pixel(
+    cut: &Cut,
+    frame: u32,
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+) -> Option<[f32; 4]> {
+    let acc = graph_composite(cut, frame, width, height)?;
+    let i = ((y * width + x) * 4) as usize;
+    acc.get(i..i + 4)?.try_into().ok()
+}
+
+/// One premultiplied f32 pixel → straight RGBA8 (transparent stays 0).
+pub fn straight_rgba8(px: &[f32]) -> [u8; 4] {
+    let mut o = [0u8; 4];
+    let a = px[3].clamp(0.0, 1.0);
+    if a > 0.0 {
+        for c in 0..3 {
+            o[c] = ((px[c] / a).clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+    }
+    o[3] = (a * 255.0).round() as u8;
+    o
+}
+
 /// Premultiplied f32 → straight RGBA8 over a transparent background.
 fn to_straight_rgba8(acc: &[f32]) -> Vec<u8> {
     let mut out = vec![0u8; acc.len()];
     for (o, px) in out.chunks_exact_mut(4).zip(acc.chunks_exact(4)) {
-        let a = px[3].clamp(0.0, 1.0);
-        if a > 0.0 {
-            for c in 0..3 {
-                o[c] = ((px[c] / a).clamp(0.0, 1.0) * 255.0).round() as u8;
-            }
-        }
-        o[3] = (a * 255.0).round() as u8;
+        o.copy_from_slice(&straight_rgba8(px));
     }
     out
 }
@@ -145,6 +195,19 @@ pub fn srgb_to_linear(v: u8) -> f32 {
     } else {
         ((s + 0.055) / 1.055).powf(2.4)
     }
+}
+
+/// Linear→sRGB OETF, the exact inverse of [`srgb_to_linear`]: a stored
+/// linear channel back to the chip byte that paints it (the eyedropper's
+/// way home). Every byte round-trips.
+pub fn linear_to_srgb(v: f32) -> u8 {
+    let v = v.clamp(0.0, 1.0);
+    let s = if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    };
+    (s.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// Blend `top` over `bottom` per `mode`, premultiplied, in place on `bottom`.

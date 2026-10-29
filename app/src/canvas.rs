@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anim_core::edit::{self, FloatingPatch};
-use anim_core::ids::{ColumnId, DrawingId, LayerId};
+use anim_core::ids::{ColumnId, CutId, DrawingId, LayerId, SceneId};
 use anim_core::model::{Stroke, StrokePoint};
 use anim_core::raster::{TileCoord, TileData};
 use eframe::egui;
@@ -315,9 +315,12 @@ impl Floating {
     }
 }
 
+/// A handle drag, measured in PAPER space (GM4): under a turned or
+/// mirrored view a screen delta is not a paper delta, so the grab point,
+/// its distance and its angle about the pivot are all taken on the paper.
 enum FloatDrag {
     Move {
-        start_ptr: Pos2,
+        start_paper: Pos2,
         start_translate: egui::Vec2,
     },
     Scale {
@@ -751,10 +754,13 @@ pub struct CanvasView {
     xf: ViewXform,
     /// GM4: the Space hand. `space_was_down` finds the hold's edges; the
     /// hand is engaged for a hold that began off-stroke; `hand_turn` is a
-    /// Shift-turn's grab (start angle, start pointer angle, start pan).
+    /// Shift-turn's grab (start angle, start pointer angle, start pan);
+    /// `hand_view` the view (zoom, pan, turn, mirror) the hold began on —
+    /// a hold that moved it is a drag, never a PlayPause tap.
     space_was_down: bool,
     hand_engaged: bool,
     hand_turn: Option<(f32, f32, egui::Vec2)>,
+    hand_view: (f32, egui::Vec2, f32, bool),
     /// GM4: the stroke tap — every sample the paper receives, after the
     /// view mapping and the stabilizer; cleared at stroke start, recorded
     /// with or without a paint layer.
@@ -769,8 +775,22 @@ pub struct CanvasView {
     /// GM4: the dab edge (MyPaint hardness) and the aliased toggle.
     pub brush_hardness: f32,
     pub brush_aliased: bool,
-    /// GM4: where the last stroke ended — Shift+click rules on from here.
+    /// GM4: where the last stroke ended — Shift+click rules on from here —
+    /// with where it landed (scene, cut, column, frame, layer slot) and the
+    /// document revision its commit left (None until the commit lands). A
+    /// move off that spot or any edit after it retires the anchor.
     line_anchor: Option<Pos2>,
+    anchor_at: AnchorAt,
+    anchor_rev: Option<u64>,
+}
+
+/// GM4: the spot a Shift+click line continues on — scene, cut, column,
+/// frame and the armed layer slot.
+type AnchorAt = (SceneId, CutId, ColumnId, u32, Option<usize>);
+
+fn anchor_at(state: &AppState) -> AnchorAt {
+    let v = &state.view;
+    (v.scene, v.cut, v.active_column, v.frame, state.active_slot_resolved())
 }
 
 impl CanvasView {
@@ -901,6 +921,7 @@ impl CanvasView {
             space_was_down: false,
             hand_engaged: false,
             hand_turn: None,
+            hand_view: (1.0, egui::Vec2::ZERO, 0.0, false),
             stroke_tap: Vec::new(),
             stabilizer: 0,
             stab: None,
@@ -909,6 +930,8 @@ impl CanvasView {
             brush_hardness: crate::config::default_hardness(),
             brush_aliased: false,
             line_anchor: None,
+            anchor_at: (SceneId(u64::MAX), CutId(u64::MAX), ColumnId(u64::MAX), u32::MAX, None),
+            anchor_rev: None,
         }
     }
 
@@ -972,12 +995,28 @@ impl CanvasView {
         }
     }
 
-    /// GM3: fit the canvas back in its pane — zoom 100 %, no pan (the
-    /// rail's fit button and View › Fit view).
+    /// GM3: fit the canvas back in its pane — no pan, the whole paper in
+    /// view (the rail's fit button and View › Fit view). GM4: a turned view
+    /// keeps its turn and fits the turned paper's box.
     pub fn fit_view(&mut self) {
-        self.zoom = 1.0;
+        self.zoom = self.turned_fit();
         self.pan = egui::Vec2::ZERO;
         self.sync_xf();
+    }
+
+    /// GM4: the relative zoom that fits the turned paper — its screen box,
+    /// (w|cos|+h|sin|) × (w|sin|+h|cos|), against the pane, over the
+    /// upright fit. Exactly 1 upright (and before the first frame).
+    fn turned_fit(&self) -> f32 {
+        let (w, h) = (self.xf.paper.x, self.xf.paper.y);
+        let pane = self.dbg_rect.size();
+        if self.rotation_deg == 0.0 || w <= 0.0 || h <= 0.0 || pane.x <= 0.0 || pane.y <= 0.0 {
+            return 1.0;
+        }
+        let (s, c) = self.rotation_deg.to_radians().sin_cos();
+        let (s, c) = (s.abs(), c.abs());
+        let (bw, bh) = (w * c + h * s, w * s + h * c);
+        (pane.x / bw).min(pane.y / bh) / (pane.x / w).min(pane.y / h)
     }
 
     /// GM4: the view as last drawn (screen ↔ paper).
@@ -1076,6 +1115,22 @@ impl CanvasView {
         self.selection = Some(poly);
     }
 
+    /// GM4: the view as the Space hold compares it — zoom, pan, turn, mirror.
+    fn view_now(&self) -> (f32, egui::Vec2, f32, bool) {
+        (self.zoom, self.pan, self.rotation_deg, self.mirror)
+    }
+
+    /// GM4: the pen is mid-gesture — a stroke (down, or its pen-up commit
+    /// pending), a selection outline being drawn, or a transform handle
+    /// being dragged. A Space hold that starts here never takes the hand.
+    fn pen_busy(&self) -> bool {
+        self.touch_active
+            || !self.current.is_empty()
+            || self.raster_stroke_done
+            || self.sel_draft.is_some()
+            || self.floating.as_ref().is_some_and(|f| f.drag.is_some())
+    }
+
     /// An edit gesture is live: a stroke (pen down or its pen-up commit
     /// pending), a selection being drawn, or a lifted transform in flight.
     /// Gesture-unsafe actions (frame nav, undo, layer cycle, clears) must not
@@ -1106,6 +1161,7 @@ impl CanvasView {
             self.commit_floating(state);
         }
         self.sel_draft = None;
+        self.line_anchor = None; // a ruled line follows a stroke, not a tool switch
         self.tool = tool;
         state.status = match tool {
             CanvasTool::Select => "select: drag = select, drag inside = move, corners = scale, \
@@ -1114,9 +1170,11 @@ impl CanvasView {
             CanvasTool::LassoFill => "lasso fill: draw a loop — it fills with the brush             colour; softness feathers inward, grow shifts the edge"
                 .into(),
             CanvasTool::Fill => "fill: click a region — line art bounds it; gap closes line \
-            breaks, under tucks the flat beneath the lines"
+            breaks, under tucks the flat beneath the lines; Alt+click picks a colour"
                 .into(),
-            CanvasTool::Paint => "paint".into(),
+            CanvasTool::Paint => "paint: Alt+click picks a colour, Shift+click rules on from \
+            the last stroke, Space+drag pans (Shift+drag turns)"
+                .into(),
         };
     }
 
@@ -1202,29 +1260,46 @@ impl CanvasView {
             );
             return false;
         }
+        let Some(punched) = self.lift_floating(state, ctx, poly) else {
+            return false;
+        };
+        paint.sync_active(&punched);
+        true
+    }
+
+    /// The CPU half of a lift: check the target, cut the pixels into a
+    /// floating patch with its preview texture, and return the layer's
+    /// tiles with the hole punched for the display. None = refused (the
+    /// status line says why).
+    fn lift_floating(
+        &mut self,
+        state: &mut AppState,
+        ctx: &egui::Context,
+        poly: Option<&[Pos2]>,
+    ) -> Option<BTreeMap<TileCoord, Arc<TileData>>> {
         if state.active_layer_props().is_some_and(|p| !p.visible) {
             state.status = format!(
                 "layer '{}' is hidden — press A to switch or click its eye",
                 state.active_layer_name()
             );
-            return false;
+            return None;
         }
         if state.refuse_if_locked() {
-            return false;
+            return None;
         }
         let Some(did) = state.own_key_drawing() else {
             state.status =
                 "held/blank frame — a transform edits a frame's OWN cel (draw here first)".into();
-            return false;
+            return None;
         };
         let (kd, kl, _) = state.active_layer_key();
         if kd != did.0 || kl == u64::MAX {
             state.status = "no raster layer here to transform".into();
-            return false;
+            return None;
         }
         let Some(tiles) = state.active_layer_tiles().cloned() else {
             state.status = "no raster layer here to transform".into();
-            return false;
+            return None;
         };
         let lift = match poly {
             Some(p) => {
@@ -1238,7 +1313,7 @@ impl CanvasView {
                 "selection has no ink on layer '{}'",
                 state.active_layer_name()
             );
-            return false;
+            return None;
         };
 
         // Preview texture (premultiplied bytes — the raw-texel display law).
@@ -1262,7 +1337,6 @@ impl CanvasView {
                 None => punched.remove(c),
             };
         }
-        paint.sync_active(&punched);
         let pivot = pos2(
             lift.patch.x0 as f32 + lift.patch.w as f32 / 2.0,
             lift.patch.y0 as f32 + lift.patch.h as f32 / 2.0,
@@ -1281,7 +1355,7 @@ impl CanvasView {
             drag: None,
         });
         self.selection = None; // absorbed into the floating transform
-        true
+        Some(punched)
     }
 
     /// Commit the floating transform: resample + merge → ONE PaintTiles
@@ -1380,9 +1454,11 @@ impl CanvasView {
                 self.commit_floating(state);
             }
         }
-        let Some(paint) = paint else {
-            return; // no GPU: the select tool has nothing to lift/preview
-        };
+        // No GPU: nothing to lift or preview — but a transform already
+        // floating still takes its handle drags.
+        if paint.is_none() && self.floating.is_none() {
+            return;
+        }
         let ptr = response.interact_pointer_pos();
         if response.drag_started_by(egui::PointerButton::Primary)
             && let Some(pos) = ptr
@@ -1393,13 +1469,14 @@ impl CanvasView {
                 self.float_drag_start(pos, pp, to_screen, state);
             } else if let Some(sel) = self.selection.clone()
                 && point_in_poly(&sel, pp)
+                && let Some(paint) = paint
             {
                 // Drag inside the selection = lift it and start moving.
                 if self.try_lift(state, paint, ui.ctx(), Some(&sel))
                     && let Some(f) = &mut self.floating
                 {
                     f.drag = Some(FloatDrag::Move {
-                        start_ptr: pos,
+                        start_paper: pp,
                         start_translate: f.translate,
                     });
                 }
@@ -1409,32 +1486,8 @@ impl CanvasView {
         } else if response.dragged_by(egui::PointerButton::Primary)
             && let Some(pos) = ptr
         {
-            if let Some(f) = &mut self.floating {
-                match &f.drag {
-                    Some(FloatDrag::Move {
-                        start_ptr,
-                        start_translate,
-                    }) => {
-                        f.translate = *start_translate + (pos - *start_ptr) / scale;
-                    }
-                    Some(FloatDrag::Scale {
-                        start_dist,
-                        start_scale,
-                    }) => {
-                        let pivot_s = to_screen(f.pivot + f.translate);
-                        let d = (pos - pivot_s).length().max(1.0);
-                        f.scale = (start_scale * d / start_dist.max(1.0)).clamp(0.05, 20.0);
-                    }
-                    Some(FloatDrag::Rotate {
-                        start_angle,
-                        start_rotate,
-                    }) => {
-                        let pivot_s = to_screen(f.pivot + f.translate);
-                        let a = (pos - pivot_s).angle();
-                        f.rotate = start_rotate + (a - start_angle);
-                    }
-                    None => {}
-                }
+            if self.floating.is_some() {
+                self.float_drag_to(to_paper(pos), 1.0 / scale.max(1e-6));
             } else if let Some(draft) = &mut self.sel_draft {
                 let pp = to_paper(pos);
                 match self.sel_shape {
@@ -1465,7 +1518,9 @@ impl CanvasView {
         }
     }
 
-    /// Hit-test a drag start against the floating transform's handles.
+    /// Hit-test a drag start against the floating transform's handles (in
+    /// screen px — the handles are screen-sized); the drag itself is taken
+    /// on the paper (`pp`).
     fn float_drag_start(
         &mut self,
         pos: Pos2,
@@ -1474,7 +1529,7 @@ impl CanvasView {
         state: &mut AppState,
     ) {
         let Some(f) = &mut self.floating else { return };
-        let pivot_s = to_screen(f.pivot + f.translate);
+        let centre = f.pivot + f.translate;
         let corners_s: Vec<Pos2> = f.corners().iter().map(|c| to_screen(*c)).collect();
         let nearest = corners_s
             .iter()
@@ -1482,14 +1537,14 @@ impl CanvasView {
             .fold(f32::INFINITY, f32::min);
         if nearest <= 12.0 {
             f.drag = Some(FloatDrag::Scale {
-                start_dist: (pos - pivot_s).length(),
+                start_dist: (pp - centre).length(),
                 start_scale: f.scale,
             });
             return;
         }
         if nearest <= 28.0 {
             f.drag = Some(FloatDrag::Rotate {
-                start_angle: (pos - pivot_s).angle(),
+                start_angle: (pp - centre).angle(),
                 start_rotate: f.rotate,
             });
             return;
@@ -1513,13 +1568,44 @@ impl CanvasView {
                 && inv.y < (f.patch.y0 + f.patch.h as i32) as f32;
             if inside {
                 f.drag = Some(FloatDrag::Move {
-                    start_ptr: pos,
+                    start_paper: pp,
                     start_translate: f.translate,
                 });
                 return;
             }
         }
         self.commit_floating(state);
+    }
+
+    /// Carry the floating transform's handle drag to the paper point `pp`.
+    /// Moves follow the paper delta and turns the paper angle about the
+    /// pivot, so a turned or mirrored view drags the pixels under the pen;
+    /// `min_d` (one screen px, in paper px) keeps a scale grab off zero.
+    fn float_drag_to(&mut self, pp: Pos2, min_d: f32) {
+        let Some(f) = &mut self.floating else { return };
+        let centre = f.pivot + f.translate;
+        match &f.drag {
+            Some(FloatDrag::Move {
+                start_paper,
+                start_translate,
+            }) => {
+                f.translate = *start_translate + (pp - *start_paper);
+            }
+            Some(FloatDrag::Scale {
+                start_dist,
+                start_scale,
+            }) => {
+                let d = (pp - centre).length().max(min_d);
+                f.scale = (start_scale * d / start_dist.max(min_d)).clamp(0.05, 20.0);
+            }
+            Some(FloatDrag::Rotate {
+                start_angle,
+                start_rotate,
+            }) => {
+                f.rotate = start_rotate + ((pp - centre).angle() - start_angle);
+            }
+            None => {}
+        }
     }
 
     /// Select-tool overlay: marching-ants selection outline, the floating
@@ -1637,6 +1723,30 @@ impl CanvasView {
     /// applied) — resync the raster display from truth.
     pub(crate) fn engine_changed(&mut self) {
         self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+        self.line_anchor = None; // the anchor's stroke may be gone
+    }
+
+    /// GM4: the Shift+click anchor holds only while its stroke is the last
+    /// thing that happened where the pen is. A frame, cut, column or layer
+    /// change retires it, and so does any edit after the stroke's commit
+    /// landed (undo, redo, another stroke's commit replaces it anyway).
+    fn retire_line_anchor(&mut self, state: &AppState) {
+        if self.line_anchor.is_none() {
+            return;
+        }
+        if anchor_at(state) != self.anchor_at {
+            self.line_anchor = None;
+            return;
+        }
+        if self.stroke_active() {
+            return; // a raster commit lands on the pen-up flush
+        }
+        let rev = state.engine.revision();
+        match self.anchor_rev {
+            None => self.anchor_rev = Some(rev),
+            Some(r) if r != rev => self.line_anchor = None,
+            Some(_) => {}
+        }
     }
 
     /// THE FORGE reads the armed engine to seed a draft.
@@ -2392,6 +2502,20 @@ impl CanvasView {
         }
         // GM4: absolute — 100% is one paper px to one screen point.
         vline(ui, "zoom", format!("{:3.0}%", self.abs_zoom() * 100.0));
+        // GM4: the turn and the mirror stand by the zoom — the angle, the
+        // upright detent (armed when upright; a click turns it back) and
+        // the mirror latch.
+        vline(ui, "turn", format!("{:4.0}°", self.rotation_deg));
+        let upright = plate::detent(ui, self.rotation_deg == 0.0, "upright");
+        if crate::menus::hover_tip(upright, Action::ResetRotation, "").clicked() {
+            self.set_view_rotation(0.0);
+        }
+        let mut mirrored = self.mirror;
+        let flip = plate::latch(ui, &mut mirrored, "mirror");
+        crate::menus::hover_tip(flip, Action::MirrorView, "");
+        if mirrored != self.mirror {
+            self.toggle_mirror();
+        }
         ui.add_space(10.0);
         plate::legend(ui, "input");
         ui.add_space(2.0);
@@ -3000,14 +3124,25 @@ impl CanvasView {
                             // aliased, and the stabilizer.
                             plate::legend(ui, "hardness");
                             let mut hard = self.brush_hardness;
+                            // Shown as a percent (the stored edge stays 0–1).
                             plate::field(
                                 ui,
-                                egui::DragValue::new(&mut hard).range(0.0..=1.0).speed(0.01),
+                                egui::DragValue::new(&mut hard)
+                                    .range(0.0..=1.0)
+                                    .speed(0.01)
+                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                                    .custom_parser(|s| {
+                                        let s = s.trim().trim_end_matches('%').trim();
+                                        s.parse::<f64>().ok().map(|v| v / 100.0)
+                                    }),
                             )
-                            .on_hover_text("the dab's edge: toward 1 hard, toward 0 soft");
+                            .on_hover_text("the dab's edge: toward 100% hard, toward 0% soft");
                             self.brush_hardness = hard;
                             if plate::detent(ui, self.brush_aliased, "aliased")
-                                .on_hover_text("hard 0/255 edges, no smoothing (pixel-exact fills)")
+                                .on_hover_text(
+                                    "hard 0/255 edges, no smoothing (pixel-exact fills): \
+                                     flow, pressure opacity and paper grain are off",
+                                )
                                 .clicked()
                             {
                                 self.brush_aliased = !self.brush_aliased;
@@ -3019,7 +3154,10 @@ impl CanvasView {
                                 egui::DragValue::new(&mut stab)
                                     .range(0..=crate::stabilizer::MAX_LEVEL),
                             )
-                            .on_hover_text("0 = raw pen; higher pulls the ink on a longer string");
+                            .on_hover_text(
+                                "tebure hosei (stabilization): 0 = raw pen; \
+                                 higher pulls the ink on a longer string",
+                            );
                             if stab != self.stabilizer {
                                 self.stabilizer = stab;
                                 self.stabilizer_request = Some(stab);
@@ -3152,8 +3290,11 @@ impl CanvasView {
         let space = ui.input(|i| i.key_down(egui::Key::Space))
             && !ui.ctx().egui_wants_keyboard_input();
         if space && !self.space_was_down {
-            self.hand_engaged = !self.stroke_active();
+            // A pen-busy hold never engages; a lifted transform resting
+            // between drags does (the hand moves only the view).
+            self.hand_engaged = !self.pen_busy();
             self.hand_turn = None;
+            self.hand_view = self.view_now();
             crate::shortcuts::clear_hand_drag(ui.ctx());
         }
         if !space {
@@ -3224,6 +3365,11 @@ impl CanvasView {
                 self.pan += response.drag_delta();
                 self.sync_xf();
             }
+        }
+        // GM4: whatever moved the view during the Space hold (the hand, a
+        // wheel zoom, a middle drag, a keyed turn) makes it a drag.
+        if space && self.view_now() != self.hand_view {
+            crate::shortcuts::note_hand_drag(ui.ctx());
         }
 
         let xf = self.xf;
@@ -3338,6 +3484,7 @@ impl CanvasView {
         }
 
         // ---- Pen input (edit mode only) -----------------------------------
+        self.retire_line_anchor(state);
         if hand && !state.view.playing {
             // GM4: the Space hand has the pointer — no tool input, no tap.
         } else if !state.view.playing {
@@ -4952,7 +5099,8 @@ impl CanvasView {
             let mut color = base;
             color[3] *= flow * a * lighten;
             // tilt→shape: flatten + rotate the stamp along the lean direction
-            // (paper axes = screen axes — the canvas never rotates).
+            // (in paper axes — GM4: the tilt was turned back by the view's
+            // angle and unmirrored when it was sampled, `dir_to_paper`).
             let radius = radius_of(pr, tn);
             let mag = (tv[0] * tv[0] + tv[1] * tv[1]).sqrt();
             let (dir, aspect) = if self.tilt_shape && mag > 1e-4 {
@@ -5584,7 +5732,6 @@ impl CanvasView {
     fn stroke_end(&mut self, state: &mut AppState) {
         if self.touch_active {
             self.stab_catch_up();
-            self.line_anchor = self.current.last().map(|l| pos2(l.x, l.y));
             self.finish_stroke(state);
             self.mouse_lockout = 1;
         }
@@ -5680,13 +5827,15 @@ impl CanvasView {
         true
     }
 
-    /// GM4 EYEDROPPER: the composited colour under `screen` into the brush.
+    /// GM4 EYEDROPPER: the composited colour under `screen` into the brush,
+    /// as the chip that paints it; the brush keeps its own alpha (a soft
+    /// edge's coverage is not a colour).
     fn eyedrop(&mut self, screen: Pos2, to_paper: &impl Fn(Pos2) -> Pos2, state: &mut AppState) {
         let p = to_paper(screen);
-        match pick_color(state, p.x, p.y, self.composite_view) {
-            Some(c) => {
-                self.brush_color = c;
-                state.status = format!("picked #{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+        match pick_chip(state, p.x, p.y, self.composite_view) {
+            Some([r, g, b]) => {
+                self.brush_color = [r, g, b, self.brush_color[3]];
+                state.status = format!("picked #{r:02x}{g:02x}{b:02x}");
             }
             None => state.refuse("nothing to pick — the paper is bare there"),
         }
@@ -5949,7 +6098,6 @@ impl CanvasView {
                 // no pressure, so no taper is synthesized here.
                 self.stab_catch_up();
                 if self.mouse_path_len_px(scale) >= MOUSE_MIN_TRAVEL_PX {
-                    self.line_anchor = self.current.last().map(|l| pos2(l.x, l.y));
                     self.finish_stroke(state);
                 } else {
                     self.current.clear();
@@ -6092,6 +6240,11 @@ impl CanvasView {
         });
     }
     fn finish_stroke(&mut self, state: &mut AppState) {
+        // GM4: Shift+click rules on from where this stroke ends, on this
+        // spot, until anything else happens (`retire_line_anchor`).
+        self.line_anchor = self.current.last().map(|l| pos2(l.x, l.y));
+        self.anchor_at = anchor_at(state);
+        self.anchor_rev = None;
         // Snapshot the captured pressure range (pre-taper) for the diagnostic.
         if !self.current.is_empty() {
             self.dbg_min = self
@@ -6143,6 +6296,7 @@ impl CanvasView {
             color: self.brush_color,
         };
         state.commit_stroke(stroke);
+        self.anchor_rev = Some(state.engine.revision());
     }
 }
 
@@ -6435,24 +6589,42 @@ fn finalize_selection(draft: Vec<Pos2>, shape: SelShape, scale: f32) -> Option<V
     }
 }
 
-/// GM4 EYEDROPPER: the composited RGBA (straight, 8-bit) at paper pixel
-/// (x, y) of the current frame — the column stack, or the graph's output
-/// in composite view. None off the paper or where it is bare.
-pub fn pick_color(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[u8; 4]> {
+/// GM4 EYEDROPPER: the composited pixel at paper (x, y) of the current
+/// frame, premultiplied linear f32 — the column stack (one tile per
+/// drawing, not the frame), or the graph's output in composite view.
+/// None off the paper or where it is bare.
+fn pick_sample(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[f32; 4]> {
     let (w, h) = (state.engine.project.width, state.engine.project.height);
     let (xi, yi) = (x.floor(), y.floor());
     if xi < 0.0 || yi < 0.0 || xi >= w as f32 || yi >= h as f32 {
         return None;
     }
+    let (xi, yi) = (xi as u32, yi as u32);
     let cut = state.cut();
     let frame = state.view.frame;
-    let buf = composite
-        .then(|| anim_core::export::render_graph_frame(cut, frame, w, h))
+    let px = composite
+        .then(|| anim_core::export::graph_composite_pixel(cut, frame, w, h, xi, yi))
         .flatten()
-        .unwrap_or_else(|| anim_core::export::render_frame(cut, frame, w, h));
-    let i = (yi as usize * w as usize + xi as usize) * 4;
-    let px: [u8; 4] = buf.get(i..i + 4)?.try_into().ok()?;
-    (px[3] > 0).then_some(px)
+        .unwrap_or_else(|| anim_core::export::composite_pixel(cut, frame, xi, yi));
+    (anim_core::export::straight_rgba8(&px)[3] > 0).then_some(px)
+}
+
+/// GM4 EYEDROPPER: the composited RGBA (straight, 8-bit) at paper pixel
+/// (x, y) — the exact bytes a render of the frame holds there (the tests'
+/// window on the pick; the brush takes [`pick_chip`]).
+#[cfg(test)]
+pub fn pick_color(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[u8; 4]> {
+    pick_sample(state, x, y, composite).map(|px| anim_core::export::straight_rgba8(&px))
+}
+
+/// GM4 EYEDROPPER: the brush chip that paints the pixel at (x, y) — the
+/// stored colour is linear, so it goes back through the curve
+/// `linear_rgba` takes it out by (until GM7's colour law decodes it).
+pub fn pick_chip(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[u8; 3]> {
+    let px = pick_sample(state, x, y, composite)?;
+    let a = px[3].clamp(0.0, 1.0);
+    let enc = anim_core::export::linear_to_srgb;
+    Some([enc(px[0] / a), enc(px[1] / a), enc(px[2] / a)])
 }
 
 fn linear_rgba(c: [u8; 4]) -> [f32; 4] {
@@ -7163,14 +7335,21 @@ mod viewnav_tests {
         let got = pick_color(h.state(), x as f32 + 0.5, y as f32 + 0.5, false);
         assert_eq!(got, Some(want));
         assert_eq!(pick_color(h.state(), 5.5, 5.5, false), None, "bare paper picks nothing");
-        // Alt+click with the brush puts that colour in the brush.
+        // Alt+click with the brush puts that colour in the brush — as the
+        // chip that paints it (the stored pixel is linear), the brush's
+        // alpha kept; repainting the chip lays the stored colour back.
         h.editor_mut().canvas.brush_color = [1, 2, 3, 255];
         h.run();
         let s = h.editor().canvas.view_xform().paper_to_screen(pos2(x as f32 + 0.5, y as f32 + 0.5));
         h.set_mods(Modifiers::ALT);
         h.click_pos(s);
         h.set_mods(Modifiers::NONE);
-        assert_eq!(h.editor().canvas.brush_color, want);
+        let chip = pick_chip(h.state(), x as f32 + 0.5, y as f32 + 0.5, false).expect("inked");
+        assert_eq!(h.editor().canvas.brush_color, [chip[0], chip[1], chip[2], 255]);
+        let back = linear_rgba(h.editor().canvas.brush_color);
+        for c in 0..3 {
+            assert!((back[c] - rgba[c]).abs() < 4e-3, "channel {c}: {} vs {}", back[c], rgba[c]);
+        }
         assert!(h.editor().canvas.stroke_tap.is_empty(), "the pick inks nothing");
     }
 
@@ -7246,5 +7425,413 @@ mod viewnav_tests {
         // Turned 90°, the paper's screen box stands on its short side.
         let b = v.paper_bounds();
         assert!((b.width() - 540.0).abs() < 1e-2 && (b.height() - 960.0).abs() < 1e-2);
+    }
+
+    /// Commit one solid tile of premultiplied linear `rgba` at `coord` on
+    /// the armed layer.
+    fn ink_tile(h: &mut EditorHarness, coord: (i32, i32), rgba: [f32; 4]) {
+        use anim_core::raster::{TILE, TILE_LEN, f32_to_f16_bits};
+        let slot = h.state().active_slot_resolved().expect("an armed layer");
+        let mut px = vec![0u16; TILE_LEN];
+        for i in 0..TILE * TILE {
+            for ch in 0..4 {
+                px[i * 4 + ch] = f32_to_f16_bits(rgba[ch]);
+            }
+        }
+        h.state_mut()
+            .commit_raster(vec![(coord, Arc::new(TileData::from_vec(px)))], slot)
+            .expect("the tile committed");
+    }
+
+    /// The armed layer's stored texel at paper (x, y), premultiplied.
+    fn texel(h: &EditorHarness, x: i32, y: i32) -> [f32; 4] {
+        use anim_core::raster::{TILE, f16_bits_to_f32};
+        let t = TILE as i32;
+        let Some(tile) = h
+            .state()
+            .active_layer_tiles()
+            .and_then(|m| m.get(&(x.div_euclid(t), y.div_euclid(t))))
+        else {
+            return [0.0; 4];
+        };
+        let i = ((y.rem_euclid(t) * t + x.rem_euclid(t)) * 4) as usize;
+        std::array::from_fn(|c| f16_bits_to_f32(tile.rgba[i + c]))
+    }
+
+    /// Alt+click the paper point `p` through the view as it stands.
+    fn alt_click(h: &mut EditorHarness, p: Pos2) {
+        let s = h.editor().canvas.view_xform().paper_to_screen(p);
+        h.set_mods(Modifiers::ALT);
+        h.click_pos(s);
+        h.set_mods(Modifiers::NONE);
+    }
+
+    /// One solid tile inked at paper (960..1024, 512..576), the view at
+    /// 200 % turned `rot` (and mirrored), the Select tool armed and the
+    /// layer lifted into a floating transform (the CPU half of a lift —
+    /// the harness has no GPU to preview with).
+    fn lifted(rot: f32, mirror: bool) -> EditorHarness {
+        let mut h = harness();
+        ink_tile(&mut h, (15, 8), [0.25, 0.5, 0.125, 1.0]);
+        {
+            let c = &mut h.editor_mut().canvas;
+            c.set_abs_zoom(2.0);
+            c.set_view_rotation(rot);
+            if mirror {
+                c.toggle_mirror();
+            }
+        }
+        let ctx = h.ctx();
+        let ed = h.editor_mut();
+        ed.canvas.set_tool(CanvasTool::Select, &mut ed.state);
+        assert!(ed.canvas.lift_floating(&mut ed.state, &ctx, None).is_some(), "lifted");
+        h.run();
+        h
+    }
+
+    #[test]
+    fn viewnav_lifted_selection_moves_by_the_paper_delta_turned_and_mirrored() {
+        let mut h = lifted(90.0, true);
+        let xf = h.editor().canvas.view_xform();
+        let s = |p: Pos2| xf.paper_to_screen(p);
+        // Press beside the patch's middle; the drag takes hold there and
+        // carries it 100 px right, 40 px down on the paper.
+        let grab = pos2(992.0, 544.0);
+        let to = grab + vec2(100.0, 40.0);
+        let mut path = vec![s(grab) + vec2(-10.0, 0.0), s(grab)];
+        for k in 1..=4 {
+            path.push(s(grab.lerp(to, k as f32 / 4.0)));
+        }
+        h.drag_path(&path);
+        let t = h.editor().canvas.floating.as_ref().expect("still lifted").translate;
+        assert!((t - vec2(100.0, 40.0)).length() < 0.05, "moved by the paper delta: {t:?}");
+        let ed = h.editor_mut();
+        ed.canvas.finish_gesture(&mut ed.state);
+        h.run();
+        // The committed patch sits at (1060..1124, 552..616).
+        assert!(texel(&h, 1092, 584)[3] > 0.99, "the patch landed under the pen");
+        assert!(texel(&h, 1061, 553)[3] > 0.99 && texel(&h, 1122, 614)[3] > 0.99);
+        assert!(texel(&h, 1057, 584)[3] < 0.01 && texel(&h, 1092, 549)[3] < 0.01);
+        assert!(texel(&h, 992, 544)[3] < 0.01, "lifted off its old place");
+    }
+
+    #[test]
+    fn viewnav_lifted_selection_turns_the_paper_way_under_a_mirror() {
+        let mut h = lifted(90.0, true);
+        let xf = h.editor().canvas.view_xform();
+        let (pivot, corner) = {
+            let f = h.editor().canvas.floating.as_ref().expect("lifted");
+            (f.pivot + f.translate, f.corners()[1])
+        };
+        // Just outside the top-right corner is the turn handle; sweep it
+        // +30° about the pivot on the paper.
+        let arm = (corner - pivot) * 1.25;
+        let at = |deg: f32| xf.paper_to_screen(pivot + rotate_vec(arm, deg));
+        let d = (at(0.0) - xf.paper_to_screen(corner)).length();
+        assert!(d > 12.0 && d <= 28.0, "the grab is on the turn handle: {d}");
+        h.drag_path(&[at(-6.0), at(0.0), at(10.0), at(20.0), at(30.0)]);
+        let r = h.editor().canvas.floating.as_ref().expect("lifted").rotate.to_degrees();
+        assert!((r - 30.0).abs() < 0.1, "turned +30° on the paper, got {r}");
+    }
+
+    #[test]
+    fn viewnav_space_hand_pans_over_a_lifted_selection() {
+        let mut h = lifted(0.0, false);
+        let pan0 = h.editor().canvas.view_xform().pan;
+        // Grab the lifted patch itself: the hand, not the move, takes it.
+        let c = h.editor().canvas.view_xform().paper_to_screen(pos2(992.0, 544.0));
+        h.hold_key(Key::Space);
+        h.drag_path(&[c, c + vec2(30.0, 0.0), c + vec2(60.0, 20.0)]);
+        h.release_key(Key::Space);
+        let pan1 = h.editor().canvas.view_xform().pan;
+        assert!((pan1 - pan0).length() > 30.0, "the hand panned: {pan0:?} → {pan1:?}");
+        let f = h.editor().canvas.floating.as_ref().expect("still lifted");
+        assert_eq!(f.translate, vec2(0.0, 0.0), "the hand moved the view, not the ink");
+        assert!(!h.performed().iter().any(|(a, _)| *a == Action::PlayPause));
+    }
+
+    #[test]
+    fn viewnav_space_hold_that_zooms_is_not_a_tap() {
+        let mut h = harness();
+        h.hold_key(Key::Space);
+        h.key_mods(CTRL, Key::Equals);
+        h.run();
+        h.release_key(Key::Space);
+        let fired: Vec<Action> = h.performed().iter().map(|(a, _)| *a).collect();
+        assert!(fired.contains(&Action::ZoomIn), "the zoom fired");
+        assert!(!fired.contains(&Action::PlayPause), "a hold that moved the view is no tap");
+        assert!(!h.state().view.playing);
+    }
+
+    #[test]
+    fn viewnav_shift_space_drag_turns_and_ctrl_snaps_to_15() {
+        let mut h = harness();
+        let c = h.editor().canvas.dbg_rect.center();
+        let arc = |degs: &[f32]| -> Vec<Pos2> {
+            degs.iter()
+                .map(|d| {
+                    let a = d.to_radians();
+                    c + vec2(a.cos(), a.sin()) * 150.0
+                })
+                .collect()
+        };
+        // The turn takes hold at the second point (5°) and follows to 45°.
+        h.hold_key(Key::Space);
+        h.set_mods(Modifiers::SHIFT);
+        h.drag_path(&arc(&[0.0, 5.0, 15.0, 25.0, 35.0, 45.0]));
+        h.set_mods(Modifiers::NONE);
+        h.release_key(Key::Space);
+        let turned = h.editor().canvas.view_rotation();
+        assert!((turned - 40.0).abs() < 0.5, "Shift+Space+drag turned 40°, got {turned}");
+        assert!(h.editor().canvas.stroke_tap.is_empty(), "the hand inks nothing");
+        // With Ctrl the turn snaps to 15° steps.
+        h.hold_key(Key::Space);
+        h.set_mods(Modifiers { shift: true, ..CTRL });
+        h.drag_path(&arc(&[0.0, 5.0, 14.0, 23.0, 32.0]));
+        h.set_mods(Modifiers::NONE);
+        h.release_key(Key::Space);
+        let snapped = h.editor().canvas.view_rotation();
+        assert_ne!(snapped, turned, "the snapped drag turned too");
+        assert!((snapped / ROTATE_STEP_DEG - (snapped / ROTATE_STEP_DEG).round()).abs() < 1e-4);
+        assert!(!h.performed().iter().any(|(a, _)| *a == Action::PlayPause));
+    }
+
+    #[test]
+    fn viewnav_line_anchor_retires_off_its_frame_and_on_undo() {
+        let mut h = harness();
+        let c = h.editor().canvas.dbg_rect.center();
+        let stroke = [c, c + vec2(20.0, 0.0), c + vec2(40.0, 10.0), c + vec2(60.0, 20.0)];
+        let shift_click = |h: &mut EditorHarness| {
+            h.set_mods(Modifiers::SHIFT);
+            h.click_pos(c + vec2(-90.0, 70.0));
+            h.set_mods(Modifiers::NONE);
+        };
+        h.drag_path(&stroke);
+        assert!(h.editor().canvas.line_anchor.is_some(), "the stroke left an anchor");
+        // On the next frame the last stroke is not under the pen.
+        h.perform(Action::NextFrame);
+        let strokes = strokes_on_frame(&h);
+        shift_click(&mut h);
+        assert_eq!(strokes_on_frame(&h), strokes, "no line from another frame's stroke");
+        assert!(h.editor().canvas.line_anchor.is_none());
+        // An undone stroke takes its anchor with it.
+        h.perform(Action::PrevFrame);
+        h.drag_path(&stroke);
+        assert!(h.editor().canvas.line_anchor.is_some());
+        h.perform(Action::Undo);
+        let strokes = strokes_on_frame(&h);
+        shift_click(&mut h);
+        assert_eq!(strokes_on_frame(&h), strokes, "no line from an undone stroke");
+        // A tool switch drops it too.
+        h.drag_path(&stroke);
+        let ed = h.editor_mut();
+        ed.canvas.set_tool(CanvasTool::LassoFill, &mut ed.state);
+        ed.canvas.set_tool(CanvasTool::Paint, &mut ed.state);
+        assert!(h.editor().canvas.line_anchor.is_none());
+    }
+
+    #[test]
+    fn viewnav_fit_holds_the_turned_paper_in_the_pane() {
+        let mut h = harness();
+        h.editor_mut().canvas.set_view_rotation(45.0);
+        h.key_mods(CTRL, Key::Num0);
+        let canvas = &h.editor().canvas;
+        assert_eq!(canvas.view_rotation(), 45.0, "Fit keeps the turn");
+        let pane = canvas.dbg_rect;
+        let b = canvas.view_xform().paper_bounds();
+        assert!(pane.expand(1e-2).contains_rect(b), "{b:?} inside {pane:?}");
+        assert!(
+            b.width() >= pane.width() * 0.9 || b.height() >= pane.height() * 0.9,
+            "fitted, not shrunk: {b:?} in {pane:?}"
+        );
+        assert!((b.center() - pane.center()).length() < 1e-2, "centred");
+    }
+
+    #[test]
+    fn viewnav_eyedropper_brings_back_the_painted_chip_turned_and_mirrored() {
+        let mut h = harness();
+        h.editor_mut().canvas.set_view_rotation(90.0);
+        h.editor_mut().canvas.toggle_mirror();
+        h.run();
+        let p = pos2(970.5, 530.5);
+        // Darks included: an 8-bit linear read would lose them (32 → 34).
+        for chip in [[32u8, 64, 200], [1, 2, 3], [10, 20, 30], [128, 128, 128], [255, 128, 0]] {
+            ink_tile(&mut h, (15, 8), linear_rgba([chip[0], chip[1], chip[2], 255]));
+            h.editor_mut().canvas.brush_color = [9, 9, 9, 200];
+            h.run();
+            alt_click(&mut h, p);
+            let got = h.editor().canvas.brush_color;
+            for c in 0..3 {
+                assert!(got[c].abs_diff(chip[c]) <= 1, "{chip:?} came back {got:?}");
+            }
+            assert_eq!(got[3], 200, "the brush keeps its alpha");
+        }
+        // A half-covered pixel: its colour comes back, its coverage does not.
+        let lin = linear_rgba([200, 100, 50, 255]);
+        ink_tile(&mut h, (15, 8), [lin[0] * 0.5, lin[1] * 0.5, lin[2] * 0.5, 0.5]);
+        h.editor_mut().canvas.brush_color = [9, 9, 9, 255];
+        h.run();
+        alt_click(&mut h, p);
+        let got = h.editor().canvas.brush_color;
+        for (c, want) in [200u8, 100, 50].into_iter().enumerate() {
+            assert!(got[c].abs_diff(want) <= 1, "half alpha came back {got:?}");
+        }
+        assert_eq!(got[3], 255, "the brush keeps its alpha");
+    }
+
+    #[test]
+    fn viewnav_lasso_fill_lands_the_same_turned_and_mirrored() {
+        // Edges vertical, level, or 4 px across per px down, so every
+        // scanline crossing sits on a half pixel — the fill cannot flip a
+        // pixel on the view's rounding.
+        let loop_paper = [
+            pos2(800.5, 500.25),
+            pos2(1000.5, 500.25),
+            pos2(1200.5, 550.25),
+            pos2(1200.5, 650.25),
+            pos2(800.5, 650.25),
+        ];
+        let fill = |rot: f32, mirror: bool| -> EditorHarness {
+            let mut h = harness();
+            h.editor_mut().canvas.set_view_rotation(rot);
+            if mirror {
+                h.editor_mut().canvas.toggle_mirror();
+            }
+            let ed = h.editor_mut();
+            ed.canvas.set_tool(CanvasTool::LassoFill, &mut ed.state);
+            h.run();
+            let xf = h.editor().canvas.view_xform();
+            let mut path = vec![xf.paper_to_screen(loop_paper[0]) + vec2(-10.0, 0.0)];
+            path.extend(loop_paper.iter().map(|p| xf.paper_to_screen(*p)));
+            h.drag_path(&path);
+            h
+        };
+        let upright = fill(0.0, false);
+        let turned = fill(90.0, true);
+        assert!(texel(&upright, 900, 600)[3] > 0.99, "the loop filled");
+        assert!(texel(&upright, 790, 600)[3] < 0.01, "and only the loop");
+        for y in (480..680).step_by(3) {
+            for x in (780..1220).step_by(3) {
+                let (a, b) = (texel(&upright, x, y), texel(&turned, x, y));
+                for c in 0..4 {
+                    assert!((a[c] - b[c]).abs() < 1e-3, "({x}, {y}): {a:?} vs {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn viewnav_fill_tool_seeds_under_the_pen_turned_and_mirrored() {
+        use anim_core::raster::{TILE, TILE_LEN, f16_bits_to_f32, f32_to_f16_bits};
+        // A closed ink box, a 2 px rim round tile (20, 12) — paper
+        // (1280..1344, 768..832), well off the paper's centre: a seed the
+        // view put anywhere else lands on its rim or floods the paper.
+        let mut state = AppState::new_project("fill", 1920, 1080, 24, 300.0);
+        state.new_drawing_at_frame();
+        let slot = state.active_slot_resolved().expect("an armed layer");
+        let mut px = vec![0u16; TILE_LEN];
+        for y in 0..TILE {
+            for x in 0..TILE {
+                if x < 2 || y < 2 || x >= TILE - 2 || y >= TILE - 2 {
+                    for ch in 0..4 {
+                        px[(y * TILE + x) * 4 + ch] = f32_to_f16_bits(1.0);
+                    }
+                }
+            }
+        }
+        state
+            .commit_raster(vec![((20, 12), Arc::new(TileData::from_vec(px)))], slot)
+            .expect("the box committed");
+        // The fill tool's own input under a turned, mirrored, panned view
+        // (its GPU gate set by hand: the harness has no paint layer).
+        let xf = ViewXform {
+            zoom: 0.5,
+            pan: vec2(-40.0, 25.0),
+            rotation_deg: 90.0,
+            mirror: true,
+            center: pos2(400.0, 300.0),
+            paper: vec2(1920.0, 1080.0),
+        };
+        let mut h = egui_kittest::Harness::builder()
+            .with_size(vec2(800.0, 600.0))
+            .build_ui_state(
+                move |ui, (canvas, state): &mut (CanvasView, AppState)| {
+                    let rect = ui.max_rect();
+                    let response = ui.allocate_rect(rect, Sense::click_and_drag());
+                    canvas.raster = true;
+                    canvas.fill_input(ui, &response, rect, &|s| xf.screen_to_paper(s), state);
+                },
+                (CanvasView::new(), state),
+            );
+        h.step();
+        // Press on the box's middle; the fill seeds where the drag takes
+        // hold, 8 screen px on (16 paper px) — still inside the rim.
+        let at = xf.paper_to_screen(pos2(1312.0, 800.0));
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        };
+        h.input_mut().events.push(egui::Event::PointerMoved(at));
+        h.input_mut().events.push(button(at, true));
+        h.step();
+        h.input_mut().events.push(egui::Event::PointerMoved(at + vec2(8.0, 0.0)));
+        h.step();
+        h.input_mut().events.push(button(at + vec2(8.0, 0.0), false));
+        h.step();
+        let (_, state) = h.state();
+        let alpha = |x: i32, y: i32| -> f32 {
+            let t = TILE as i32;
+            state
+                .active_layer_tiles()
+                .and_then(|m| m.get(&(x.div_euclid(t), y.div_euclid(t))))
+                .map(|tile| {
+                    let i = ((y.rem_euclid(t) * t + x.rem_euclid(t)) * 4 + 3) as usize;
+                    f16_bits_to_f32(tile.rgba[i])
+                })
+                .unwrap_or(0.0)
+        };
+        assert!(
+            alpha(1312, 800) > 0.99 && alpha(1284, 772) > 0.99,
+            "the box filled: {}",
+            state.status
+        );
+        assert!(alpha(1250, 800) < 0.01, "and not past its rim");
+        assert!(alpha(500, 300) < 0.01, "the paper outside the box is bare");
+    }
+
+    #[test]
+    fn viewnav_pen_tilt_reaches_the_paper_turned_back() {
+        let mut h = harness();
+        h.rig_mut().config.pen.stabilizer = 0;
+        h.editor_mut().canvas.set_view_rotation(90.0);
+        h.run();
+        let xf = h.editor().canvas.view_xform();
+        // The pen leans right on screen; turned 90°, that is paper-up.
+        let tilt = [0.5f32, 0.0];
+        let sample = |p: Pos2, phase| PenSample {
+            pos: xf.paper_to_screen(p),
+            pressure: Some(0.6),
+            tilt: Some(tilt),
+            phase,
+        };
+        let path = paper_path();
+        let mut pen = vec![sample(path[0], PenPhase::Down)];
+        pen.extend(path[1..].iter().map(|p| sample(*p, PenPhase::Move)));
+        pen.push(sample(path[path.len() - 1], PenPhase::Up));
+        h.rig_mut().pen = pen;
+        h.run();
+        let tap = h.editor().canvas.stroke_tap.clone();
+        assert!(tap.len() >= 5, "the pen stroke was tapped: {}", tap.len());
+        let want = xf.dir_to_paper(tilt);
+        assert!(want[0].abs() < 1e-5 && (want[1] + 0.5).abs() < 1e-5, "{want:?}");
+        for s in &tap {
+            let off = (s.tilt[0] - want[0]).abs() + (s.tilt[1] - want[1]).abs();
+            assert!(off < 1e-4, "tilt {:?} reached the paper, want {want:?}", s.tilt);
+        }
+        for (s, p) in tap.iter().zip(&path) {
+            assert!((pos2(s.x, s.y) - *p).length() < 0.5, "{s:?} vs {p:?}");
+        }
     }
 }
