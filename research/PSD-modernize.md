@@ -2618,10 +2618,12 @@ what was not verified.
   DragValues that show their value while dragged and land as one `SetTrackProps` on release (one undo step
   per drag or click); REMOVE TRACK (DANGER) in the picker's context menu, the File menu's "Remove track N"
   gone. The waveform column draws the picked track's per-frame RMS (`playback::track_envelope`), read once
-  per change under `envelope_key` (cut, track, its settings and clip, fps), in plate tokens. Lip flap:
-  `Action::LipFlap` ("kuchipaku (lip flap)…", Sheet ▸ Lip flap…, aliases lip sync / kuchipaku / mouth, no
-  chord) opens a non-modal window — track, mouth column, the closed / half / open drawings (the column's
-  first three to start), an in–out range (the loop range, else the whole cut), the two threshold sliders,
+  per change under `envelope_key` (cut, track, its offset and clip, the cut's length and fps; per track,
+  not the mix key, so another track's edit reads nothing again), in plate tokens. Lip flap:
+  `Action::LipFlap` ("kuchipaku (lip flap)…", Sheet ▸ Lip flap…, group and context Sheet, aliases lip sync
+  / kuchipaku / mouth, no chord) opens a non-modal window — track (the first dialogue track to start),
+  mouth column, the closed / half / open drawings (the active column's first three to start), an in–out
+  range (the loop range, else the whole cut), the two threshold sliders,
   the envelope with the mouths it would write and their counts; "generate" is one `Engine::apply`
   (`AppState::generate_lip_flap`). Workers (NEVER-DO 6, D9): Import sound… / Add sound track… read and
   decode on a worker (`begin_sound_import` / `poll_sound_import`: "decoding NAME…", a second import refused
@@ -2641,14 +2643,13 @@ what was not verified.
   and the menus call `perform`. Transport (D7): fixed slots — the range readout says "—" when unset, × is
   greyed then, "dropped N" keeps its width; the tooltips name the range and the chord ("the loop range
   starts at this frame (Shift+I)"; loop off "stops at the end of the loop range (or the cut)"). Minors:
-  the loop range is per cut, rippled by Insert / Delete frame (view state:
-  undo and the range verbs leave it), a start past it plays on to the cut's end; stop never sounds a scrub
+  the loop range is per cut, rippled by Insert / Delete frame (view state: undo and the range verbs leave
+  it), a start past it plays on to the cut's end; stop never sounds a scrub
   snippet; scrub defaults on, lives in `perf.scrub_audio`, and the first sound import says so in the status
   line; a new track is named after its file and its kind guessed from the stem (`TrackKind::named`:
   bgm / music / m01 → Music, se / sfx / fx → Effects, serifu / dialogue / voice / vo → Dialogue, else
   Effects); the render queue's "mixdown WAV" latch (default on) per job — the WAV is named by
   `deliver::video_name`, which already trimmed the separator the frame token leaves (the test pins its
   name and length); `has_sound` / `any_solo` / `mix_key` walk `tracks_iter`, no Vec per frame. 18
-  `sound_tests`, 17 `playback_*`, `sheetui_waveform_*`,
-  `render_queue_mixdown_*`; the colour-literal pin 83 → 82. Not verified: the real window, its file dialogs
-  and a real device.
+  `sound_tests`, 17 `playback_*`, `sheetui_waveform_*`, `render_queue_mixdown_*`; the colour-literal pin
+  83 → 82. Not verified: the real window, its file dialogs and a real device.
