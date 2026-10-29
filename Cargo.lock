@@ -136,6 +136,7 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "rodio",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha1",

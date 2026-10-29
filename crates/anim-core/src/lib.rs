@@ -47,6 +47,9 @@ struct Applied {
     /// None = this machine's own hand. RUNTIME ONLY — never serialized,
     /// so saved files keep their exact schema (NEVER-DO 4).
     author: Option<String>,
+    /// GM2: this step's revision serial — unique per applied state, never
+    /// reused, so "undo back to the saved state" reads clean again.
+    serial: u64,
 }
 
 #[derive(Default)]
@@ -56,6 +59,43 @@ struct History {
     redo_stack: Vec<Applied>,
     /// Max undo steps kept; 0 = unlimited. Bounds undo RAM (raster tile diffs).
     limit: usize,
+    /// GM2: the last serial handed out (serials start at 1).
+    serial: u64,
+    /// GM2: the revision of the state under the bottom of the undo stack
+    /// (0 = as loaded; a trimmed step's serial once the limit drops it).
+    base: u64,
+}
+
+impl History {
+    fn next_serial(&mut self) -> u64 {
+        self.serial += 1;
+        self.serial
+    }
+
+    fn trim(&mut self) {
+        if self.limit > 0 {
+            while self.undo_stack.len() > self.limit {
+                if let Some(old) = self.undo_stack.pop_front() {
+                    self.base = old.serial;
+                }
+            }
+        }
+    }
+
+    /// Out-of-order surgery (session undo/redo of a step that is not on
+    /// top) produces a state no earlier revision described: give every
+    /// step above `from` a fresh serial and every redo step a fresh one too.
+    /// A false "dirty" is safe; a false "clean" loses work.
+    fn reserial_from(&mut self, from: usize) {
+        for i in from..self.undo_stack.len() {
+            let s = self.next_serial();
+            self.undo_stack[i].serial = s;
+        }
+        for i in 0..self.redo_stack.len() {
+            let s = self.next_serial();
+            self.redo_stack[i].serial = s;
+        }
+    }
 }
 
 /// SESSION v2: the (drawing, layer) a command writes to, when it has
@@ -247,20 +287,29 @@ impl Engine {
             self.applied_log.push(commands.clone());
         }
         let author = self.current_author.clone();
+        let serial = self.history.next_serial();
         self.history.undo_stack.push_back(Applied {
             label: label.into(),
             redo: commands,
             undo: inverses,
             author,
+            serial,
         });
         // Bound the history: drop the oldest steps beyond the limit.
-        if self.history.limit > 0 {
-            while self.history.undo_stack.len() > self.history.limit {
-                self.history.undo_stack.pop_front();
-            }
-        }
+        self.history.trim();
         self.history.redo_stack.clear();
         Ok(())
+    }
+
+    /// GM2: the document's revision — the serial of the state the undo
+    /// stack ends on. Every apply makes a new one; undo/redo return to the
+    /// exact earlier values, so `revision() == saved` means "as saved".
+    pub fn revision(&self) -> u64 {
+        self.history
+            .undo_stack
+            .back()
+            .map(|a| a.serial)
+            .unwrap_or(self.history.base)
     }
 
     pub fn undo(&mut self) -> Result<()> {
@@ -288,11 +337,7 @@ impl Engine {
     /// Cap the number of undo steps kept (0 = unlimited). Trims immediately.
     pub fn set_undo_limit(&mut self, limit: usize) {
         self.history.limit = limit;
-        if limit > 0 {
-            while self.history.undo_stack.len() > limit {
-                self.history.undo_stack.pop_front();
-            }
-        }
+        self.history.trim();
     }
 
     fn replay(&mut self, commands: &[Command]) -> Result<()> {
@@ -347,6 +392,7 @@ impl Engine {
                 }
             }
         }
+        let on_top = idx + 1 == self.history.undo_stack.len();
         let step = self
             .history
             .undo_stack
@@ -355,6 +401,9 @@ impl Engine {
         self.replay(&step.undo)?;
         let label = step.label.clone();
         self.history.redo_stack.push(step);
+        if !on_top {
+            self.history.reserial_from(idx);
+        }
         Ok(label)
     }
 
@@ -366,10 +415,15 @@ impl Engine {
             .iter()
             .rposition(|a| a.author.as_deref() == author)
             .ok_or(EngineError::NothingToRedo)?;
+        let on_top = idx + 1 == self.history.redo_stack.len();
         let step = self.history.redo_stack.remove(idx);
         self.replay(&step.redo)?;
         let label = step.label.clone();
         self.history.undo_stack.push_back(step);
+        if !on_top {
+            let top = self.history.undo_stack.len() - 1;
+            self.history.reserial_from(top);
+        }
         Ok(label)
     }
 
@@ -417,6 +471,8 @@ impl Engine {
     /// Forget all undo/redo history (e.g. after setup scripts, or to mark a
     /// "clean slate" point). The document itself is untouched.
     pub fn clear_history(&mut self) {
+        // The revision stays put: clearing history changes no content.
+        self.history.base = self.revision();
         self.history.undo_stack.clear();
         self.history.redo_stack.clear();
     }

@@ -36,6 +36,7 @@ mod uidump;
 mod update;
 mod viewer;
 mod workspace;
+mod worksafe;
 mod xsheet_panel;
 
 use canvas::{PenPhase, PenSample};
@@ -102,6 +103,10 @@ fn main() -> eframe::Result<()> {
     // below takes a dir. Config up front so the surface (V-Sync / frame
     // latency) reflects it.
     let data_dir = config::data_dir();
+    // GM2: a panic leaves crash.log (and running.json) in the data folder.
+    if let Some(dir) = &data_dir {
+        worksafe::install_panic_hook(dir.clone());
+    }
     let config = Config::load();
     let surface = eframe::egui_wgpu::SurfaceConfig {
         present_mode: if config.perf.vsync {
@@ -336,6 +341,17 @@ struct App {
     /// Host: the document generation last broadcast (change-driven
     /// snapshots — one truth, never a merge).
     session_sent_gen: u64,
+    /// GM2: the start-up crash check ran (first frame).
+    worksafe_started: bool,
+    /// GM2: what this session keeps in `<data>/running.json` (removed on a
+    /// clean exit; left behind by a crash).
+    running: worksafe::RunningRecord,
+    /// GM2: a crashed session's record + its autosaves, offered once.
+    recovery: Option<(worksafe::RunningRecord, Vec<std::path::PathBuf>)>,
+    /// GM2: "Later" — that record is carried to the next start.
+    recovery_later: Option<worksafe::RunningRecord>,
+    /// GM2: the document path last seen (the recent list follows it).
+    doc_seen: Option<std::path::PathBuf>,
 }
 
 /// Scratch-track playback (C4): a rodio output stream + sink, created
@@ -2448,6 +2464,134 @@ impl App {
             connect_code: String::new(),
             connect_error: String::new(),
             session_sent_gen: u64::MAX,
+            worksafe_started: false,
+            running: worksafe::RunningRecord::default(),
+            recovery: None,
+            recovery_later: None,
+            doc_seen: None,
+        }
+    }
+
+    /// GM2, once per frame: the start-up crash check (first frame), the
+    /// editor's requests, the recent list and the running record.
+    fn worksafe_shell(&mut self, ctx: &egui::Context) {
+        let Some(dir) = self.data_dir.clone() else { return };
+        if !self.worksafe_started {
+            self.worksafe_started = true;
+            // Read the last session's record BEFORE writing this one's.
+            if let Some(old) = worksafe::RunningRecord::read_in(&dir) {
+                let found = worksafe::recovery_candidates(&dir);
+                if !found.is_empty() {
+                    self.recovery = Some((old, found));
+                }
+            }
+            self.running = worksafe::RunningRecord {
+                pid: std::process::id(),
+                open: None,
+                autosave: None,
+                started: worksafe::unix_now(),
+            };
+            let _ = self.running.write_in(&dir);
+        }
+        let mut requests = Vec::new();
+        let mut record = self.running.clone();
+        if let Some(ed) = &mut self.editor {
+            requests = std::mem::take(&mut ed.requests);
+            ed.autosave.minutes = self.config.session.autosave_minutes;
+            if let Some(p) = ed.recent_remove.take() {
+                self.config.session.recent.retain(|r| r != &p);
+                self.config.save();
+            }
+            if ed.state.file_path != self.doc_seen {
+                self.doc_seen = ed.state.file_path.clone();
+                if let Some(p) = &self.doc_seen {
+                    self.config.session.push_recent(p);
+                    self.config.save();
+                }
+            }
+            if ed.recent != self.config.session.recent {
+                ed.recent = self.config.session.recent.clone();
+            }
+            record.open = ed.state.file_path.clone();
+            record.autosave = ed.last_autosave.clone();
+        }
+        if record != self.running {
+            self.running = record;
+            let _ = self.running.write_in(&dir);
+        }
+        for r in requests {
+            self.handle_request(ctx, r);
+        }
+        self.recovery_modal(ctx, &dir);
+    }
+
+    /// GM2: the crash-recovery offer — Open recovered / Discard / Later.
+    fn recovery_modal(&mut self, ctx: &egui::Context, dir: &std::path::Path) {
+        let Some((old, found)) = &self.recovery else { return };
+        let (old, found) = (old.clone(), found.clone());
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("gm2_recovery")).show(ctx, |ui| {
+            plate::legend(ui, "recovery");
+            ui.label("Recover unsaved work?");
+            let what = old
+                .open
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "an untitled project".into());
+            ui.label(
+                egui::RichText::new(format!(
+                    "the last session ended without closing; {} autosave(s) of {what} \
+                     are newer than the file",
+                    found.len()
+                ))
+                .color(plate::legend_dim()),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Open recovered").clicked() {
+                    choice = Some(0);
+                }
+                if plate::danger(ui, "Discard") {
+                    choice = Some(1);
+                }
+                if ui.button("Later").clicked() {
+                    choice = Some(2);
+                }
+            });
+        });
+        match choice {
+            Some(0) => {
+                self.recovery = None;
+                match AppState::load_from(found[0].clone()) {
+                    Ok(mut state) => {
+                        // The recovered work belongs to the original file
+                        // (or stays untitled) and is NOT on disk there yet.
+                        state.file_path = old.open.clone();
+                        state.meta_dirty = true;
+                        state.status = "recovered from autosave — save to keep it".into();
+                        self.editor = Some(Editor::from_state(
+                            state,
+                            self.render_state.as_ref(),
+                            Some(dir),
+                        ));
+                        self.new_form = None;
+                    }
+                    Err(e) => {
+                        if let Some(ed) = &mut self.editor {
+                            ed.state.refuse(format!("could not open the autosave — {e}"));
+                        }
+                    }
+                }
+            }
+            Some(1) => {
+                self.recovery = None;
+                worksafe::discard_autosaves(dir, &found);
+            }
+            Some(2) => {
+                self.recovery = None;
+                self.recovery_later = Some(old);
+            }
+            _ => {}
         }
     }
 
@@ -2621,15 +2765,20 @@ impl App {
     /// The shell-level verbs: dialogs, the file pickers, the window.
     fn handle_request(&mut self, ctx: &egui::Context, req: AppRequest) {
         match req {
-            AppRequest::NewProject => self.new_form = Some(NewProjectForm::default()),
+            // GM2: New/Open drop the open document — the guard asks first.
+            AppRequest::NewProject => match &mut self.editor {
+                Some(ed) => ed.leave(Leave::New, ctx),
+                None => self.new_form = Some(NewProjectForm::default()),
+            },
             AppRequest::Settings => self.settings_open = true,
+            // The close request itself is guarded (Editor::worksafe_frame).
             AppRequest::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             AppRequest::Save | AppRequest::SaveAs | AppRequest::Open => {
                 let Some(ed) = &mut self.editor else { return };
                 match req {
                     AppRequest::Save => ed.state.save(false),
                     AppRequest::SaveAs => ed.state.save(true),
-                    _ => ed.state.open(),
+                    _ => ed.leave(Leave::Open, ctx),
                 }
             }
         }
@@ -3246,6 +3395,53 @@ struct Editor {
     /// changes this key → the sound restarts on the right clip instead of
     /// the stale one playing on.
     audio_key: Option<(u64, u64, usize)>,
+    /// GM2: what the artist asked for that would drop unsaved work — the
+    /// "Save changes?" modal shows while this is Some.
+    leave: Option<Leave>,
+    /// GM2: "Save" was chosen in that modal — resume this once it lands.
+    leave_after_save: Option<Leave>,
+    /// GM2: the close was answered; the next close request goes through.
+    pub close_ok: bool,
+    /// GM2: requests for the shell (Save As from the modal); drained each
+    /// frame by the App (the testkit's rig logs them).
+    pub requests: Vec<AppRequest>,
+    /// GM2: the recent files (newest first), mirrored from the config.
+    pub recent: Vec<std::path::PathBuf>,
+    /// GM2: a recent entry the artist removed — the shell drops it.
+    pub recent_remove: Option<std::path::PathBuf>,
+    /// GM2: when the next autosave is due (the shell sets `minutes`).
+    pub autosave: worksafe::AutosaveClock,
+    autosave_job: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    /// GM2: the last autosave written this session (for running.json).
+    pub last_autosave: Option<std::path::PathBuf>,
+    /// GM2: the window title last sent (sent again only on change).
+    title: String,
+}
+
+/// GM2: an action that drops the open document — asked about first when
+/// the document has unsaved changes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Leave {
+    Close,
+    New,
+    Open,
+    OpenPath(std::path::PathBuf),
+}
+
+/// GM2: the window title — `●` leads it exactly while there are unsaved
+/// changes.
+pub fn window_title(state: &AppState) -> String {
+    let name = state
+        .file_path
+        .as_ref()
+        .and_then(|p| p.file_stem())
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| state.engine.project.name.clone());
+    if state.is_dirty() {
+        format!("● {name} — Gaban Studio")
+    } else {
+        format!("{name} — Gaban Studio")
+    }
 }
 
 /// (scene, name, [(cut, name)]) — the "cut ▾" menu's owned snapshot of the
@@ -3563,6 +3759,16 @@ impl Editor {
             audio_playing: false,
             audio_prev_frame: 0,
             audio_key: None,
+            leave: None,
+            leave_after_save: None,
+            close_ok: false,
+            requests: Vec::new(),
+            recent: Vec::new(),
+            recent_remove: None,
+            autosave: worksafe::AutosaveClock::new(worksafe::AUTOSAVE_DEFAULT_MIN),
+            autosave_job: None,
+            last_autosave: None,
+            title: String::new(),
         }
     }
     fn from_state(
@@ -3609,7 +3815,170 @@ impl Editor {
             audio_playing: false,
             audio_prev_frame: 0,
             audio_key: None,
+            leave: None,
+            leave_after_save: None,
+            close_ok: false,
+            requests: Vec::new(),
+            recent: Vec::new(),
+            recent_remove: None,
+            autosave: worksafe::AutosaveClock::new(worksafe::AUTOSAVE_DEFAULT_MIN),
+            autosave_job: None,
+            last_autosave: None,
+            title: String::new(),
         }
+    }
+
+    /// GM2: carry out `what` now when nothing would be lost (or this
+    /// machine is a guest — the host owns the document); otherwise ask.
+    pub fn leave(&mut self, what: Leave, ctx: &egui::Context) {
+        if self.canvas.is_guest || !self.state.is_dirty() {
+            self.go(what, ctx);
+        } else {
+            self.leave = Some(what);
+        }
+    }
+
+    fn go(&mut self, what: Leave, ctx: &egui::Context) {
+        match what {
+            Leave::Close => {
+                self.close_ok = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            Leave::New => self.request_new = true,
+            // Land any in-flight gesture in the CURRENT project first — its
+            // commit must not cross into the opened one.
+            Leave::Open => {
+                self.canvas.finish_gesture(&mut self.state);
+                self.state.open();
+            }
+            Leave::OpenPath(p) => {
+                self.canvas.finish_gesture(&mut self.state);
+                self.state.open_path(p);
+            }
+        }
+    }
+
+    /// GM2: the per-frame safety net — window close guard, the "Save
+    /// changes?" modal, the save that resumes a leave, the title, autosave.
+    fn worksafe_frame(&mut self, ctx: &egui::Context) {
+        self.state.poll_save();
+        // A window close (title-bar ×, Alt+F4, Quit) is held while the
+        // document has unsaved changes and nobody answered yet.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.close_ok {
+            if !self.canvas.is_guest && self.state.is_dirty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if self.leave.is_none() && self.leave_after_save.is_none() {
+                    self.leave = Some(Leave::Close);
+                }
+            }
+        }
+        // "Save" was chosen: go once the save lands clean; a failed or
+        // cancelled save asks again (never leaves work behind silently).
+        if let Some(what) = self.leave_after_save.take() {
+            if self.state.saving.is_some() {
+                self.leave_after_save = Some(what);
+            } else if self.state.is_dirty() {
+                self.leave = Some(what);
+            } else {
+                self.go(what, ctx);
+            }
+        }
+        self.leave_modal(ctx);
+        let title = window_title(&self.state);
+        if title != self.title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.title = title;
+        }
+        self.autosave_tick(ctx);
+    }
+
+    fn leave_modal(&mut self, ctx: &egui::Context) {
+        let Some(what) = self.leave.clone() else { return };
+        let name = self
+            .state
+            .file_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "this untitled project".into());
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("gm2_save_changes")).show(ctx, |ui| {
+            plate::legend(ui, "save changes");
+            ui.label("Save changes?");
+            ui.label(
+                egui::RichText::new(format!("{name} has edits that are not on disk."))
+                    .color(plate::legend_dim()),
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    choice = Some(0);
+                }
+                // Discarding work is destructive: a held DANGER (D7).
+                if plate::danger(ui, "Don't Save") {
+                    choice = Some(1);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(2);
+                }
+            });
+        });
+        match choice {
+            Some(0) => {
+                self.leave = None;
+                self.canvas.finish_gesture(&mut self.state);
+                if self.state.file_path.is_none() {
+                    // Untitled: Save means Save As — the shell owns dialogs.
+                    self.requests.push(AppRequest::SaveAs);
+                } else {
+                    self.state.save(false);
+                }
+                self.leave_after_save = Some(what);
+            }
+            Some(1) => {
+                self.leave = None;
+                self.canvas.finish_gesture(&mut self.state);
+                self.go(what, ctx);
+            }
+            Some(2) => self.leave = None,
+            _ => {}
+        }
+    }
+
+    /// GM2: autosave into the data folder when it is due (never the
+    /// user's file, never mid-stroke, never on the UI thread).
+    fn autosave_tick(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.autosave_job {
+            match rx.try_recv() {
+                Ok(Ok(path)) => {
+                    self.last_autosave = Some(path);
+                    self.autosave_job = None;
+                }
+                Ok(Err(e)) => {
+                    self.state.status = format!("autosave failed — {e}");
+                    self.autosave_job = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.autosave_job = None,
+            }
+        }
+        let Some(dir) = self.data_dir.clone() else { return };
+        if self.canvas.is_guest || self.autosave_job.is_some() {
+            return;
+        }
+        let (now, down) = ctx.input(|i| (i.time, i.pointer.any_down()));
+        let dirty = self.state.is_dirty();
+        if !self.autosave.tick(now, dirty, self.canvas.stroke_active(), down) {
+            return;
+        }
+        let project = self.state.snapshot_project();
+        let file = self.state.file_path.clone();
+        let seq = worksafe::unix_now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(worksafe::write_autosave(&dir, &project, file.as_deref(), seq));
+        });
+        self.autosave_job = Some(rx);
     }
 }
 
@@ -3621,6 +3990,16 @@ impl eframe::App for App {
         // download; a devloop-armed build never stages one.
         if let Some(staged) = self.update_staged.take() {
             let _ = crate::update::swap_staged(&staged);
+        }
+        // GM2: a clean exit removes the running record — unless the artist
+        // chose "Later" on a recovery offer, which carries it forward.
+        if let Some(dir) = &self.data_dir {
+            match &self.recovery_later {
+                Some(old) => {
+                    let _ = old.write_in(dir);
+                }
+                None => worksafe::RunningRecord::remove_in(dir),
+            }
         }
     }
 
@@ -3780,6 +4159,8 @@ impl eframe::App for App {
                 self.settings_category = config::SettingsCategory::Pen;
             }
         }
+        // GM2: requests from the save modal, the recent list, running.json.
+        self.worksafe_shell(&ui.ctx().clone());
 
         // Keyboard-shortcut dispatch — skipped while a dialog is up or while
         // capturing a rebind (so the captured key doesn't also fire an action).
@@ -4606,6 +4987,8 @@ impl Editor {
         ui_lock: bool,
         room: Option<(String, Vec<String>)>,
     ) {
+        // GM2: never lose work — close guard, save modal, title, autosave.
+        self.worksafe_frame(ui.ctx());
         // THE BRUSH LIBRARY (PSD-brush-library): the rail raised the
         // flag; the import runs HERE, where presets are mutable, and
         // never mid-stroke (NEVER-DO 3).
@@ -4698,17 +5081,50 @@ impl Editor {
                 // detent; the wordmark is deleted — the operator knows
                 // what he opened.
                 ui.menu_button("file", |ui| {
+                    // GM2: New/Open/Recent go through the unsaved guard.
                     if ui.button("New…").clicked() {
-                        self.request_new = true;
+                        self.leave(Leave::New, ui.ctx());
                         ui.close();
                     }
                     if ui.button("Open…").clicked() {
-                        // Land any in-flight gesture in the CURRENT project first
-                        // — its commit must not cross into the opened one.
-                        self.canvas.finish_gesture(&mut self.state);
-                        self.state.open();
+                        self.leave(Leave::Open, ui.ctx());
                         ui.close();
                     }
+                    ui.menu_button("Open Recent", |ui| {
+                        if self.recent.is_empty() {
+                            ui.label(
+                                egui::RichText::new("no recent files").color(plate::legend_dim()),
+                            );
+                        }
+                        for p in self.recent.clone() {
+                            let name = p
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            if p.is_file() {
+                                if ui
+                                    .button(&name)
+                                    .on_hover_text(p.display().to_string())
+                                    .clicked()
+                                {
+                                    self.leave(Leave::OpenPath(p), ui.ctx());
+                                    ui.close();
+                                }
+                            } else {
+                                // Missing: greyed, with its own Remove.
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!("{name} (missing)"))
+                                            .color(plate::legend_dim()),
+                                    )
+                                    .on_hover_text(p.display().to_string());
+                                    if ui.small_button("remove").clicked() {
+                                        self.recent_remove = Some(p.clone());
+                                    }
+                                });
+                            }
+                        }
+                    });
                     if ui.button("Save").clicked() {
                         // The saved file must contain what the screen shows.
                         self.canvas.finish_gesture(&mut self.state);
@@ -4897,7 +5313,9 @@ impl Editor {
                 // elision inside, and the dirty mark is a painted Tally
                 // dot in permanently reserved space (a character would
                 // change the string's width).
-                let dirty = self.state.engine.can_undo();
+                // GM2: the real dirty mark (revision vs saved + meta edits),
+                // not "has undo history".
+                let dirty = self.state.is_dirty();
                 let (frect, _) =
                     ui.allocate_exact_size(egui::vec2(150.0, 20.0), egui::Sense::hover());
                 {

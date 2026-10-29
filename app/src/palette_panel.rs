@@ -41,6 +41,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     let edit = state.palette_edit;
     let ci = state.active_character.min(n_chars.saturating_sub(1));
     let mut remove_role: Option<usize> = None;
+    // GM2: palette edits live outside the undo system — they mark the
+    // document dirty directly.
+    let mut model_changed = false;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -102,10 +105,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                                 let mut rgb = [role.color[0], role.color[1], role.color[2]];
                                 if ui.color_edit_button_srgb(&mut rgb).changed() {
                                     role.color = [rgb[0], rgb[1], rgb[2], role.color[3]];
+                                    model_changed = true;
                                 }
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut role.name).desired_width(72.0),
-                                );
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut role.name)
+                                            .desired_width(72.0),
+                                    )
+                                    .changed()
+                                {
+                                    model_changed = true;
+                                }
                                 if plate::danger(ui, "remove") {
                                     remove_role = Some(ri);
                                 }
@@ -127,11 +137,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                         name: "role".into(),
                         color: [200, 200, 200, 255],
                     });
+                    model_changed = true;
                 }
             }
         });
     if let Some(ri) = remove_role {
         state.palettes.characters[ci].roles.remove(ri);
+        model_changed = true;
+    }
+    if model_changed {
+        state.meta_dirty = true;
     }
 
     // Footer: the EDIT MODEL latch — deliberately keyless (model edits are
@@ -155,11 +170,13 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                 state.palettes.characters.push(CharacterPalette::new(name));
                 state.active_character = state.palettes.characters.len() - 1;
                 state.palette_new_name.clear();
+                state.meta_dirty = true;
             }
         });
         if !state.palettes.characters.is_empty() && plate::danger(ui, "REMOVE CHARACTER") {
             state.palettes.characters.remove(ci);
             state.active_character = 0;
+            state.meta_dirty = true;
         }
     }
 }

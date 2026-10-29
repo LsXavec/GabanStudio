@@ -1027,3 +1027,83 @@ fn save_is_a_full_rewrite_not_an_append() {
 
     std::fs::remove_file(&path).unwrap();
 }
+
+// ---- GM2: revision (the dirty mark's ground truth) ------------------------
+
+fn edit_cell(f: &mut Fixture, frame: u32) {
+    f.engine
+        .apply(
+            "edit",
+            vec![Command::SetCell {
+                at: f.at,
+                column: f.col,
+                frame,
+                key: Some(Exposure::Empty),
+            }],
+        )
+        .unwrap();
+}
+
+#[test]
+fn revision_follows_apply_undo_and_redo() {
+    assert_eq!(Engine::new("fresh").revision(), 0, "a new engine is revision 0");
+    let mut f = fixture();
+    let r1 = f.engine.revision();
+    assert_ne!(r1, 0);
+    edit_cell(&mut f, 3);
+    let r2 = f.engine.revision();
+    assert_ne!(r2, r1);
+    f.engine.undo().unwrap();
+    assert_eq!(f.engine.revision(), r1, "undo returns to the earlier revision");
+    f.engine.redo().unwrap();
+    assert_eq!(f.engine.revision(), r2, "redo returns to the later one");
+    // A different edit after an undo is a NEW revision, never a reused one.
+    f.engine.undo().unwrap();
+    edit_cell(&mut f, 9);
+    let r3 = f.engine.revision();
+    assert!(r3 != r1 && r3 != r2, "serials are never reused");
+    f.engine.undo().unwrap();
+    assert_eq!(f.engine.revision(), r1);
+}
+
+#[test]
+fn revision_survives_trim_and_clear_history() {
+    let mut f = fixture();
+    f.engine.set_undo_limit(2);
+    let mut seen = Vec::new();
+    for frame in 1..=4u32 {
+        edit_cell(&mut f, frame);
+        seen.push(f.engine.revision());
+    }
+    // Two steps kept: undoing both lands on the state after the 2nd edit.
+    f.engine.undo().unwrap();
+    f.engine.undo().unwrap();
+    assert!(f.engine.undo().is_err());
+    assert_eq!(f.engine.revision(), seen[1], "the trimmed base is that state");
+    // Clearing history changes no content, so no revision change.
+    f.engine.redo().unwrap();
+    let before = f.engine.revision();
+    f.engine.clear_history();
+    assert_eq!(f.engine.revision(), before);
+    edit_cell(&mut f, 7);
+    assert!(!seen.contains(&f.engine.revision()) && f.engine.revision() != before);
+}
+
+#[test]
+fn revision_out_of_order_session_undo_is_fresh() {
+    let mut f = fixture();
+    let r0 = f.engine.revision();
+    f.engine.set_author(Some("a".into()));
+    edit_cell(&mut f, 2);
+    let ra = f.engine.revision();
+    f.engine.set_author(Some("b".into()));
+    edit_cell(&mut f, 5);
+    let rb = f.engine.revision();
+    // Undo a's step from UNDER b's: a state no earlier revision described.
+    f.engine.undo_last_by(Some("a")).unwrap();
+    let mid = f.engine.revision();
+    assert!(mid != r0 && mid != ra && mid != rb, "out-of-order undo is fresh");
+    f.engine.redo_last_by(Some("a")).unwrap();
+    let back = f.engine.revision();
+    assert!(back != r0 && back != ra && back != mid);
+}

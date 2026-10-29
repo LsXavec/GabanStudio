@@ -107,6 +107,15 @@ pub struct AppState {
     /// undo/redo — the host's cheap "the document moved" signal (the
     /// engine's history is private, and rightly so).
     pub doc_gen: u64,
+    /// GM2: the engine revision last written to `file_path`. Dirty = the
+    /// engine moved off it, or `meta_dirty` (see `is_dirty`).
+    pub saved_rev: u64,
+    /// GM2: an edit outside the undo system since the last save —
+    /// scaffolding (columns, cuts, scenes, renames) and palette edits
+    /// change the file without moving the revision.
+    pub meta_dirty: bool,
+    /// GM2: the save running on a worker thread, if any.
+    pub saving: Option<SaveJob>,
     /// THE SWATCH BOARD's active character tab (shiage; UI-transient).
     pub active_character: usize,
     /// EDIT MODEL latch: the palette board exposes its editing controls
@@ -207,6 +216,9 @@ impl AppState {
             history_dirty: false,
             refusal_seq: 0,
             doc_gen: 0,
+            saved_rev: 0,
+            meta_dirty: false,
+            saving: None,
             active_character: 0,
             palette_edit: false,
             status: "new project — draw on the canvas to create frame 1".into(),
@@ -282,6 +294,9 @@ impl AppState {
             history_dirty: false,
             refusal_seq: 0,
             doc_gen: 0,
+            saved_rev: engine.revision(),
+            meta_dirty: false,
+            saving: None,
             active_character: 0,
             palette_edit: false,
             status: "project loaded".into(),
@@ -1572,6 +1587,7 @@ impl AppState {
         match self.engine.add_column(at, name) {
             Ok(id) => {
                 self.view.active_column = id;
+                self.meta_dirty = true;
                 self.status = "column added".into();
             }
             Err(e) => self.refuse(format!("could not add a column — {e}")),
@@ -1685,6 +1701,7 @@ impl AppState {
 
         // Scaffolding: the new cut + its columns (non-undoable, like every
         // scene/cut/column creation).
+        self.meta_dirty = true;
         let scene = self.view.scene;
         let cut_id = match self
             .engine
@@ -1799,6 +1816,7 @@ impl AppState {
     /// Rename the cut being edited (scaffolding, like scene/cut creation).
     pub fn rename_current_cut(&mut self, name: &str) {
         let at = self.at();
+        self.meta_dirty = true;
         match self.engine.rename_cut(at, name) {
             Ok(()) => self.status = format!("cut renamed to {name}"),
             Err(e) => self.status = format!("error: {e}"),
@@ -1807,6 +1825,7 @@ impl AppState {
 
     /// Rename the scene being edited (scaffolding).
     pub fn rename_current_scene(&mut self, name: &str) {
+        self.meta_dirty = true;
         match self.engine.rename_scene(self.view.scene, name) {
             Ok(()) => self.status = format!("scene renamed to {name}"),
             Err(e) => self.status = format!("error: {e}"),
@@ -1819,6 +1838,7 @@ impl AppState {
         let at = self.at();
         match self.engine.add_param_column(at, name) {
             Ok(id) => {
+                self.meta_dirty = true;
                 self.status = format!("param column '{name}' added");
                 Some(id)
             }
@@ -1873,6 +1893,7 @@ impl AppState {
             .copied()
             .unwrap_or(removed);
         self.engine.remove_column(at, removed);
+        self.meta_dirty = true;
         self.view.active_column = new_active;
         self.view.selected_drawing = None;
         self.status = "column removed".into();
@@ -1987,6 +2008,7 @@ impl AppState {
     /// is a natural fast-follow; the name field already supports it).
     pub fn new_scene(&mut self) {
         let n = self.engine.project.scenes.len() + 1;
+        self.meta_dirty = true;
         let scene = self.engine.add_scene(format!("SC{n:02}"));
         let Ok(cut) = self.engine.add_cut(scene, "CUT01", 48) else {
             self.refuse("refused — the scene could not be created");
@@ -2010,6 +2032,7 @@ impl AppState {
             .find(|s| s.id == scene)
             .map(|s| s.cuts.len() + 1)
             .unwrap_or(1);
+        self.meta_dirty = true;
         let Ok(cut) = self.engine.add_cut(scene, format!("CUT{n:02}"), 48) else {
             self.refuse("refused — the cut could not be created");
             return;
@@ -2364,21 +2387,98 @@ impl AppState {
             self.file_path.clone()
         };
         let Some(path) = path else { return };
+        self.begin_save(path);
+    }
+
+    /// GM2: unsaved changes exist — the ● in the title and on the slate.
+    /// A save still on its worker is not on disk yet, so it counts.
+    pub fn is_dirty(&self) -> bool {
+        self.meta_dirty
+            || self.saving.as_ref().is_some_and(|j| j.meta_was_dirty)
+            || self.engine.revision() != self.saved_rev
+    }
+
+    /// GM2: write the document to `path` on a worker thread (NEVER-DO 6 —
+    /// the pen never waits on the disk). The worker gets a snapshot: edits
+    /// made after this call are not in the file and stay dirty. The write
+    /// is atomic and keeps the previous version as `.bak`
+    /// (`store::save_atomic_from`).
+    pub fn begin_save(&mut self, path: PathBuf) {
+        if self.saving.is_some() {
+            self.refuse("a save is still running — save again when it lands");
+            return;
+        }
         // Palettes are project data but outside the undo/Command system —
-        // freshen the project's opaque meta right before the actual write,
-        // the same point every other "current in-memory state" gets synced.
-        self.palettes.save_into(&mut self.engine.project);
-        match self.engine.save(&path) {
+        // freshen the project's opaque meta right before the snapshot, the
+        // same point every other "current in-memory state" gets synced.
+        let project = self.snapshot_project();
+        // Save As inherits the unknown tables of the file it came from.
+        let template = self.file_path.clone();
+        let rev = self.engine.revision();
+        let meta_was_dirty = std::mem::take(&mut self.meta_dirty);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let target = path.clone();
+        std::thread::spawn(move || {
+            let r = anim_core::store::save_atomic_from(
+                &project,
+                &target,
+                template.as_deref(),
+                true,
+            );
+            let _ = tx.send(r.map_err(|e| e.to_string()));
+        });
+        self.status = format!("saving {}…", path.display());
+        self.saving = Some(SaveJob {
+            rx,
+            rev,
+            path,
+            meta_was_dirty,
+        });
+    }
+
+    /// GM2: collect a finished background save (the shell calls this every
+    /// frame). True when a save just landed.
+    pub fn poll_save(&mut self) -> bool {
+        let Some(job) = &self.saving else { return false };
+        let r = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(_) => Err("the save worker stopped".into()),
+        };
+        self.finish_save(r)
+    }
+
+    /// GM2: block until the running save lands (tests; the shell polls).
+    #[cfg(test)]
+    pub fn wait_save(&mut self) -> bool {
+        let Some(job) = &self.saving else { return false };
+        let r = job
+            .rx
+            .recv()
+            .unwrap_or_else(|_| Err("the save worker stopped".into()));
+        self.finish_save(r)
+    }
+
+    fn finish_save(&mut self, r: Result<(), String>) -> bool {
+        let Some(job) = self.saving.take() else { return false };
+        match r {
             Ok(()) => {
-                self.status = format!("saved {}", path.display());
-                self.file_path = Some(path);
+                self.saved_rev = job.rev;
+                self.status = format!("saved {}", job.path.display());
+                self.file_path = Some(job.path);
+                true
             }
             // AUDIT [2]: a save that did not happen is a CONTRADICTION,
             // not a remark — Aka lane + canvas edge flash, never a grey
             // line that fades in four seconds.
-            Err(e) => self.refuse(format!("SAVE FAILED — {e}. Your work is NOT on disk.")),
+            Err(e) => {
+                self.meta_dirty |= job.meta_was_dirty;
+                self.refuse(format!("SAVE FAILED — {e}. Your work is NOT on disk."));
+                false
+            }
         }
     }
+
     pub fn open(&mut self) {
         match Self::pick_and_open() {
             Some(Ok(new_state)) => *self = new_state,
@@ -2386,6 +2486,25 @@ impl AppState {
             None => {}
         }
     }
+
+    /// GM2: open a known path (the recent list, a recovered autosave).
+    pub fn open_path(&mut self, path: PathBuf) {
+        match Self::load_from(path) {
+            Ok(new_state) => *self = new_state,
+            Err(msg) => self.refuse(format!("could not open that file — {msg}")),
+        }
+    }
+}
+
+/// GM2: a save running on a worker thread — the UI never waits on the disk.
+pub struct SaveJob {
+    rx: std::sync::mpsc::Receiver<Result<(), String>>,
+    /// The revision the snapshot was taken at.
+    rev: u64,
+    path: PathBuf,
+    /// `meta_dirty` as it was when the snapshot was taken (restored if the
+    /// save fails).
+    meta_was_dirty: bool,
 }
 
 #[cfg(test)]

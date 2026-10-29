@@ -82,6 +82,52 @@ CREATE TABLE IF NOT EXISTS cel_layer_defs(
 // whose per-LAYER primary keys the old `tiles` PK (drawing_id,tx,ty) cannot
 // express (and CREATE IF NOT EXISTS would silently keep the old shape).
 
+/// GM2: save without ever leaving `path` half-written. The previous file is
+/// copied to `<path>.tmp` (so tables this build does not know survive the
+/// full rewrite), the project is saved into the copy, the old version is
+/// kept as `<name>.animproj.bak`, and the copy is renamed over `path`.
+pub fn save_atomic(project: &Project, path: &Path) -> Result<()> {
+    save_atomic_from(project, path, Some(path), true)
+}
+
+/// The general form: `template` is the file whose unknown tables the new
+/// file inherits (Save As passes the file it came from; None starts empty),
+/// `keep_bak` keeps the replaced file as `.bak` (autosaves keep none).
+pub fn save_atomic_from(
+    project: &Project,
+    path: &Path,
+    template: Option<&Path>,
+    keep_bak: bool,
+) -> Result<()> {
+    let tmp = sibling(path, ".tmp");
+    for stale in [".tmp", ".tmp-journal", ".tmp-wal", ".tmp-shm"] {
+        let _ = std::fs::remove_file(sibling(path, stale));
+    }
+    if let Some(src) = template.filter(|t| t.is_file()) {
+        std::fs::copy(src, &tmp)?;
+    }
+    if let Err(e) = save(project, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if keep_bak && path.is_file() {
+        let bak = sibling(path, ".bak");
+        let _ = std::fs::remove_file(&bak);
+        if std::fs::hard_link(path, &bak).is_err() {
+            std::fs::copy(path, &bak)?;
+        }
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// `<path><suffix>` — beside the file, same name plus a suffix.
+fn sibling(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(suffix);
+    std::path::PathBuf::from(s)
+}
+
 pub fn save(project: &Project, path: &Path) -> Result<()> {
     let mut conn = Connection::open(path)?;
     let tx = conn.transaction()?;

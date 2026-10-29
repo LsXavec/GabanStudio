@@ -765,6 +765,8 @@ pub fn danger(ui: &mut Ui, label: &str) -> bool {
         Vec2::new(8.0 + text_w + 6.0 + CTRL_H, CTRL_H),
         Sense::click_and_drag(),
     );
+    // GM2: a held DANGER is still a named button (screen readers, testkit).
+    speak(&resp, egui::WidgetType::Button, None, label);
     let id = resp.id;
     let fired_id = id.with("fired");
     let now = ui.input(|i| i.time);

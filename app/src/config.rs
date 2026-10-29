@@ -907,6 +907,8 @@ pub const LAYER_COLOR_ORDER: [&str; 6] = [
 pub enum SettingsCategory {
     #[default]
     Shortcuts,
+    /// GM2: everyday behaviour — autosave interval.
+    General,
     Performance,
     Pen,
     Layers,
@@ -951,6 +953,36 @@ pub struct SessionConfig {
     /// LAN-open rooms; the owner's amendment 2026-08-19).
     #[serde(default)]
     pub require_key: bool,
+    /// GM2: the most recent project files, newest first (deduped, at most
+    /// `RECENT_MAX`). Missing files stay listed, greyed, until removed.
+    #[serde(default)]
+    pub recent: Vec<PathBuf>,
+    /// GM2: autosave interval in minutes (0 = off; Settings ▸ General).
+    #[serde(default = "default_autosave_minutes")]
+    pub autosave_minutes: u32,
+}
+
+/// GM2: how many recent files the Open menu keeps.
+pub const RECENT_MAX: usize = 12;
+
+fn default_autosave_minutes() -> u32 {
+    5
+}
+
+impl SessionConfig {
+    /// GM2: put `path` at the front of the recent list (deduped, capped).
+    pub fn push_recent(&mut self, path: &Path) {
+        self.recent.retain(|p| p != path);
+        self.recent.insert(0, path.to_path_buf());
+        self.recent.truncate(RECENT_MAX);
+    }
+
+    /// GM2: the recent list with each entry's "still on disk" flag (the
+    /// Open Recent menu checks each entry the same way while it is open).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn recent_entries(&self) -> Vec<(PathBuf, bool)> {
+        self.recent.iter().map(|p| (p.clone(), p.is_file())).collect()
+    }
 }
 
 fn default_update_repo() -> String {
@@ -973,6 +1005,8 @@ impl Default for SessionConfig {
             host_port: default_port(),
             last_addr: String::new(),
             require_key: false,
+            recent: Vec::new(),
+            autosave_minutes: default_autosave_minutes(),
         }
     }
 }
@@ -1063,9 +1097,8 @@ pub fn config_path_in(dir: &Path) -> PathBuf {
     dir.join("config.json")
 }
 
-/// The autosave folder inside a data dir. Autosave itself lands in a later
-/// part; the testkit pins the path today.
-#[cfg_attr(not(test), allow(dead_code))]
+/// The autosave folder inside a data dir (GM2's `worksafe` writes there;
+/// the testkit pins the path).
 pub fn autosave_dir_in(dir: &Path) -> PathBuf {
     dir.join("autosave")
 }
@@ -1402,6 +1435,7 @@ pub fn settings_window(
                     // As selectables these rendered their labels in Tally,
                     // which is the armed LAMP, never text.
                     for (cat, label) in [
+                        (SettingsCategory::General, "general"),
                         (SettingsCategory::Performance, "performance"),
                         (SettingsCategory::Pen, "pen / tablet"),
                         (SettingsCategory::Layers, "layers"),
@@ -1420,6 +1454,7 @@ pub fn settings_window(
                 // Right: the selected page.
                 ui.vertical(|ui| match category {
                     SettingsCategory::Shortcuts => shortcuts_page(ui, config, capturing),
+                    SettingsCategory::General => general_page(ui, config),
                     SettingsCategory::Performance => performance_page(ui, config, backend, raster),
                     SettingsCategory::Pen => pen_page(ui, config),
                     SettingsCategory::Layers => layers_page(ui, config),
@@ -2072,6 +2107,35 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
                     .color(crate::plate::legend_dim()),
             );
         }
+    }
+}
+
+/// GM2: Settings ▸ General — the autosave interval (writes only to the
+/// data folder's autosave/, never the user's file).
+fn general_page(ui: &mut egui::Ui, config: &mut Config) {
+    crate::plate::legend(ui, "general");
+    ui.separator();
+    ui.label("autosave every");
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for m in crate::worksafe::AUTOSAVE_CHOICES {
+            let label = if m == 0 { "off".to_string() } else { format!("{m} min") };
+            let on = config.session.autosave_minutes == m;
+            if crate::plate::detent(ui, on, &label).clicked() && !on {
+                config.session.autosave_minutes = m;
+                changed = true;
+            }
+        }
+    });
+    ui.label(
+        egui::RichText::new(
+            "autosaves go to the data folder (newest 3 per project) — your file \
+             changes only when you save",
+        )
+        .color(crate::plate::legend_dim()),
+    );
+    if changed {
+        config.save();
     }
 }
 

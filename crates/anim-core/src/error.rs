@@ -38,6 +38,8 @@ pub enum EngineError {
     SchemaVersion(i64),
     #[error("corrupt project file: {0}")]
     Corrupt(String),
+    #[error("file error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, EngineError>;

@@ -39,6 +39,8 @@ pub struct Rig {
     /// said on the editor's Aka lane the way the app says them.
     pub notes: Notes,
     pub performed: Vec<(Action, Performed)>,
+    /// GM2: what the editor asked the shell for (logged, never carried out).
+    pub requests: Vec<AppRequest>,
     dressed: bool,
 }
 
@@ -66,6 +68,9 @@ impl Rig {
             config.ui.lock_positions,
             None,
         );
+        // GM2: the shell's outbox and autosave interval, as the App wires them.
+        self.requests.append(&mut self.editor.requests);
+        self.editor.autosave.minutes = self.config.session.autosave_minutes;
         // The shell's shortcut dispatch, minus the dialogs: requests are
         // logged, never carried out.
         for a in shortcuts::collect(ui.ctx(), &self.config.keybinds) {
@@ -108,6 +113,7 @@ impl EditorHarness {
             config,
             notes,
             performed: Vec::new(),
+            requests: Vec::new(),
             dressed: false,
         };
         let h = Harness::builder()
@@ -274,6 +280,62 @@ impl EditorHarness {
         self.h.input_mut().events.push(button(to, false));
         self.h.step();
         self.run();
+    }
+
+    /// GM2: the window's close button — one frame with a Close event on the
+    /// root viewport. Returns the viewport commands that frame sent.
+    pub fn request_close(&mut self) -> Vec<egui::ViewportCommand> {
+        self.h
+            .input_mut()
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .push(egui::ViewportEvent::Close);
+        self.h.step();
+        let cmds = self.root_commands();
+        self.run();
+        cmds
+    }
+
+    /// The viewport commands the last frame sent to the root window.
+    pub fn root_commands(&self) -> Vec<egui::ViewportCommand> {
+        self.h
+            .output()
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.commands.clone())
+            .unwrap_or_default()
+    }
+
+    /// GM2: press-and-hold the ONE widget with this name past a DANGER's
+    /// hold time, then release. Returns every root viewport command sent
+    /// on the way.
+    #[track_caller]
+    pub fn hold(&mut self, label: &str) -> Vec<egui::ViewportCommand> {
+        let c = self.rect(label).center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: c,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut cmds = Vec::new();
+        let input = self.h.input_mut();
+        input.events.push(egui::Event::PointerMoved(c));
+        input.events.push(button(true));
+        self.h.step();
+        cmds.extend(self.root_commands());
+        let now = self.h.ctx.input(|i| i.time);
+        self.h.input_mut().time = Some(now + 0.5);
+        self.h.step();
+        cmds.extend(self.root_commands());
+        self.h.input_mut().time = None;
+        self.h.input_mut().events.push(button(false));
+        self.h.step();
+        cmds.extend(self.root_commands());
+        self.run();
+        cmds
     }
 
     pub fn has(&self, label: &str) -> bool {

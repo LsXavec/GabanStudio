@@ -2283,3 +2283,15 @@ what was not verified.
   now installs the app's fonts — before this it could not draw the room tabs). Colour literals pinned at
   86. Left: the probe at 2.0 and a PanelHarness over the node graph pane (stretch). Not verified: a
   release build's console behaviour and the relaunch with CREATE_NO_WINDOW (both need a real window).
+- 2026-10-29 — The never-lose-work part: `Engine::revision()` (unique serials; undo/redo return to the
+  saved value; trimmed history keeps a base; out-of-order session undo gets fresh serials) with 3
+  revision tests; `store::save_atomic` (copy to `.tmp`, save, keep `.bak`, rename — unknown tables
+  survive); `AppState::{saved_rev, meta_dirty, is_dirty()}` with background saves from a snapshot;
+  scaffolding and palette edits mark dirty; `window_title` with ●; the slate dot reads `is_dirty`; window
+  close, New, Open and Open Recent go through a "Save changes?" modal (Save / held Don't Save / Cancel;
+  untitled Save asks the shell for Save As); new `worksafe.rs` (autosave clock, autosave paths and prune
+  to 3, running.json, recovery candidates and the recovery modal, crash log and panic hook);
+  Settings ▸ General autosave interval; 12 recent files in the session config. 15 `worksafe_*` tests;
+  colour literals unchanged at 86. Left: File ▸ Revert to Saved (stretch). Not verified: the real window
+  close and title, the rfd dialogs, the panic hook in a real crash, the recovery modal at a real start-up,
+  and two app instances sharing one running.json.
