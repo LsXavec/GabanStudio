@@ -548,6 +548,8 @@ pub struct AppState {
     pub recolour_offer: Option<crate::paintcheck::RecolourOffer>,
     /// GM7: the paint check pane — its scope, worker job and findings.
     pub paintcheck: crate::paintcheck::PaintCheck,
+    /// GM11: the render queue — its jobs, form and worker.
+    pub render_queue: crate::render_queue::RenderQueue,
     /// GM7: the Convert colours to sRGB DANGER confirm is open.
     pub convert_confirm: bool,
     /// GM8: the Build composite DANGER confirm is open — the graph shaped
@@ -633,6 +635,7 @@ impl AppState {
             active_chip: None,
             recolour_offer: None,
             paintcheck: Default::default(),
+            render_queue: Default::default(),
             convert_confirm: false,
             auto_comp_confirm: None,
         }
@@ -723,6 +726,7 @@ impl AppState {
             active_chip: None,
             recolour_offer: None,
             paintcheck: Default::default(),
+            render_queue: Default::default(),
             convert_confirm: false,
             auto_comp_confirm: None,
         })

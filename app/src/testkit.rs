@@ -100,6 +100,12 @@ impl Rig {
             self.config.light_table = cfg;
         }
         self.editor.autosave.minutes = self.config.session.autosave_minutes;
+        // GM11: the render queue's settings, as the App feeds them (its
+        // "show folder" is left for the test to read — nothing opens).
+        self.editor
+            .state
+            .render_queue
+            .configure(&self.config.render, &self.config.session.username);
         // The shell's shortcut dispatch, minus the dialogs: requests are
         // logged, never carried out. GM2: it stands down while the "Save
         // changes?" modal is up, as the App's does; GM3: and while the

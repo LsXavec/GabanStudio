@@ -23,6 +23,7 @@ use rayon::prelude::*;
 
 use crate::camera::{self, CameraState, IRect};
 use crate::color::ColorLaw;
+use crate::deliver::Purpose;
 use crate::fx::Image;
 use crate::graph::{BlendMode, Node, NodeKind, PlaneSpec};
 use crate::ids::NodeId;
@@ -106,6 +107,12 @@ fn over_texel(dst: &mut [f32], s: &[u16]) {
 /// `frame`, in [`Cut::render_order`] (BG, Cel, Book bands; hidden and Ref
 /// columns skipped — an all-Cel cut keeps plain sheet order).
 fn composite(cut: &Cut, frame: u32, width: u32, height: u32) -> Vec<f32> {
+    composite_for(cut, frame, width, height, Purpose::View)
+}
+
+/// GM11: the column composite as a render purpose sees each cel
+/// ([`crate::model::Drawing::flatten_for`]); View is exactly [`composite`].
+pub fn composite_for(cut: &Cut, frame: u32, width: u32, height: u32, purpose: Purpose) -> Vec<f32> {
     let mut acc = vec![0.0f32; width as usize * height as usize * 4];
     for col in cut.render_order().into_iter().filter_map(|id| cut.xsheet.column(id)) {
         let Some(id) = col.resolve(frame) else {
@@ -114,7 +121,11 @@ fn composite(cut: &Cut, frame: u32, width: u32, height: u32) -> Vec<f32> {
         let Some(d) = cut.drawing(id) else {
             continue;
         };
-        splat_flat(&mut acc, &d.flatten(), IRect::frame(width, height));
+        splat_flat(
+            &mut acc,
+            &d.flatten_for(purpose),
+            IRect::frame(width, height),
+        );
     }
     acc
 }
@@ -615,8 +626,8 @@ pub fn render_node_rect(
 
 /// Execute `cut.graph` at `frame` into a premultiplied f32 frame.
 /// `None` when no output node is wired — the caller falls back to the
-/// column-stack composite.
-fn graph_composite(
+/// column-stack composite. GM11: the delivery renderer's graph path.
+pub fn graph_composite(
     cut: &Cut,
     law: ColorLaw,
     frame: u32,

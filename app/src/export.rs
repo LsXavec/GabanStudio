@@ -111,11 +111,13 @@ pub fn spawn_mp4(
     range: RangeInclusive<u32>,
     ctx: egui::Context,
     cancel: Arc<AtomicBool>,
+    // GM11: Settings ▸ General's "ffmpeg location", tried first.
+    configured: Option<PathBuf>,
 ) -> Receiver<ExportProgress> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let result = (|| -> Result<(usize, String), String> {
-            let ffmpeg = ffmpeg_program()?;
+            let ffmpeg = ffmpeg_program(configured.as_deref())?;
             let tmp =
                 std::env::temp_dir().join(format!("animstudio_export_{}", std::process::id()));
             std::fs::create_dir_all(&tmp).map_err(|e| format!("temp dir: {e}"))?;
@@ -266,26 +268,65 @@ fn write_png(path: &Path, w: u32, h: u32, rgba: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// Locate ffmpeg: next to our own exe (portable bundling) → PATH → the
-/// winget package dir (winget edits the REGISTRY PATH, which processes
-/// launched from an already-open shell never see — the app must not demand
-/// a reboot to find a tool that's plainly installed).
-fn find_ffmpeg() -> Option<PathBuf> {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let local = dir.join("ffmpeg.exe");
+/// The ffmpeg executable's file name here.
+const FFMPEG_EXE: &str = if cfg!(windows) {
+    "ffmpeg.exe"
+} else {
+    "ffmpeg"
+};
+
+/// Locate ffmpeg with the real places: Settings ▸ General's "ffmpeg
+/// location" (`configured`), then [`find_ffmpeg_in`]'s order.
+pub fn find_ffmpeg(configured: Option<&Path>) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    find_ffmpeg_in(
+        configured,
+        exe.as_deref().and_then(Path::parent),
+        std::env::var_os("PATH").as_deref(),
+        local.as_deref(),
+    )
+}
+
+/// Locate ffmpeg: the configured location (the file, or a folder holding
+/// it) → next to our own exe (portable bundling) → PATH → the winget
+/// package dir (winget edits the REGISTRY PATH, which processes launched
+/// from an already-open shell never see — the app must not demand a reboot
+/// to find a tool that's plainly installed). GM11: files only — PATH's
+/// folders are scanned rather than `ffmpeg -version` spawned, so nothing
+/// runs to look.
+pub fn find_ffmpeg_in(
+    configured: Option<&Path>,
+    exe_dir: Option<&Path>,
+    path_var: Option<&std::ffi::OsStr>,
+    local_appdata: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(c) = configured {
+        if c.is_file() {
+            return Some(c.to_path_buf());
+        }
+        let inside = c.join(FFMPEG_EXE);
+        if inside.is_file() {
+            return Some(inside);
+        }
+    }
+    if let Some(dir) = exe_dir {
+        let local = dir.join(FFMPEG_EXE);
         if local.is_file() {
             return Some(local);
         }
     }
-    if works(Path::new("ffmpeg")) {
-        return Some(PathBuf::from("ffmpeg"));
+    if let Some(path) = path_var {
+        for dir in std::env::split_paths(path) {
+            let candidate = dir.join(FFMPEG_EXE);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
     }
     // winget install location: %LOCALAPPDATA%\Microsoft\WinGet\Packages\
     //   Gyan.FFmpeg_*\ffmpeg-*\bin\ffmpeg.exe
-    let base = std::env::var_os("LOCALAPPDATA")?;
-    let packages = PathBuf::from(base).join("Microsoft/WinGet/Packages");
+    let packages = local_appdata?.join("Microsoft/WinGet/Packages");
     let entries = std::fs::read_dir(&packages).ok()?;
     for entry in entries.flatten() {
         if !entry
@@ -295,7 +336,10 @@ fn find_ffmpeg() -> Option<PathBuf> {
         {
             continue;
         }
-        for sub in std::fs::read_dir(entry.path()).ok()?.flatten() {
+        let Ok(subs) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for sub in subs.flatten() {
             let candidate = sub.path().join("bin/ffmpeg.exe");
             if candidate.is_file() {
                 return Some(candidate);
@@ -305,18 +349,8 @@ fn find_ffmpeg() -> Option<PathBuf> {
     None
 }
 
-fn works(program: &Path) -> bool {
-    crate::proc::command(program)
-        .arg("-version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn ffmpeg_program() -> Result<PathBuf, String> {
-    find_ffmpeg().ok_or_else(|| {
+fn ffmpeg_program(configured: Option<&Path>) -> Result<PathBuf, String> {
+    find_ffmpeg(configured).ok_or_else(|| {
         "ffmpeg not found (looked next to the app, on PATH, and in the winget \
     install location) — install it (e.g. `winget install ffmpeg`) or \
     export a PNG sequence instead"

@@ -34,6 +34,7 @@ mod palette;
 mod palette_panel;
 mod plate;
 mod proc;
+mod render_queue;
 mod runs;
 mod sample;
 mod shortcuts;
@@ -99,6 +100,13 @@ fn main() -> eframe::Result<()> {
         attach_console();
         probe();
         return Ok(());
+    }
+    // GM11: the batch render (`--render <file | --sample> --preset <name>
+    // --out <dir>`) runs one job and exits — no window, no dev loop.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if anim_core::deliver::is_cli(&args) {
+        attach_console();
+        std::process::exit(cli_exit(&args, config::data_dir().as_deref()));
     }
     // Dev loop only: hand over to a shadow copy so cargo can overwrite this
     // binary while the app stays open (Windows locks a running exe).
@@ -181,6 +189,71 @@ fn attach_console() {
 }
 #[cfg(not(windows))]
 fn attach_console() {}
+
+/// GM11: the batch render's exit code — 0 rendered, 1 the job failed, 2
+/// bad arguments (the usage printed).
+fn cli_exit(args: &[String], data_dir: Option<&std::path::Path>) -> i32 {
+    use anim_core::deliver::{CLI_USAGE, EXIT_FAILED, EXIT_OK, EXIT_USAGE};
+    let job = match anim_core::deliver::parse_cli(args) {
+        Ok(job) => job,
+        Err(e) => {
+            eprintln!("animstudio: {e}\n{CLI_USAGE}");
+            return EXIT_USAGE;
+        }
+    };
+    match run_cli_job(&job, data_dir) {
+        Ok(n) => {
+            println!("rendered {n} frame(s) into {}", job.out.display());
+            EXIT_OK
+        }
+        Err(e) => {
+            eprintln!("animstudio: the render failed — {e}");
+            EXIT_FAILED
+        }
+    }
+}
+
+/// GM11: one batch job, synchronously, one line per frame: the file's (or
+/// the in-memory sample's) first cut under the preset into `job.out`. The
+/// data dir's config gives the ffmpeg location and the artist; None = the
+/// defaults.
+fn run_cli_job(
+    job: &anim_core::deliver::CliJob,
+    data_dir: Option<&std::path::Path>,
+) -> Result<usize, String> {
+    let project = match &job.source {
+        anim_core::deliver::CliSource::File(path) => {
+            anim_core::store::load(path).map_err(|e| format!("open {}: {e}", path.display()))?
+        }
+        anim_core::deliver::CliSource::Sample => sample::build_sample().engine.project.clone(),
+    };
+    let config = data_dir.map(|d| Config::load_from(d).0).unwrap_or_default();
+    let scene = project.scenes.first().ok_or("the project has no scene")?;
+    let cut = scene.cuts.first().ok_or("the project has no cut")?;
+    let at = anim_core::command::CutRef {
+        scene: scene.id,
+        cut: cut.id,
+    };
+    let spec = render_queue::JobSpec::new(
+        &project,
+        at,
+        None,
+        job.preset,
+        job.preset.burn_ins,
+        job.out.clone(),
+        anim_core::deliver::DEFAULT_PATTERN.into(),
+        config.session.username.clone(),
+    )
+    .ok_or("the cut is gone")?;
+    let typed = config.render.ffmpeg.trim();
+    let configured = (!typed.is_empty()).then(|| std::path::PathBuf::from(typed));
+    let ffmpeg = export::find_ffmpeg(configured.as_deref());
+    let total = spec.frames.1 - spec.frames.0 + 1;
+    let never = std::sync::atomic::AtomicBool::new(false);
+    render_queue::render_job(&spec, ffmpeg.as_deref(), &never, &mut |f| {
+        println!("frame {}/{total}", f - spec.frames.0 + 1);
+    })
+}
 
 /// A slate room tab (spec §4.2): kanji over romaji caps, framed, all four
 /// identical in structure; the active room is lit by the Tally lamp. `name`
@@ -2534,6 +2607,15 @@ impl App {
         if let Some(ed) = &mut self.editor {
             requests = std::mem::take(&mut ed.requests);
             ed.autosave.minutes = self.config.session.autosave_minutes;
+            // GM11: the render queue's settings, its worker read every frame
+            // (the pane shown or not), and its "show folder" opened here.
+            ed.state
+                .render_queue
+                .configure(&self.config.render, &self.config.session.username);
+            render_queue::poll(&mut ed.state, ctx);
+            if let Some(dir) = ed.state.render_queue.show_folder.take() {
+                proc::show_folder(&dir);
+            }
             let mut recent_changed = match ed.recent_edit.take() {
                 Some(RecentEdit::Remove(p)) => {
                     self.config.session.recent.retain(|r| r != &p);
@@ -4112,6 +4194,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 curves_panel::ui(ui, self.state, gesture_safe)
             }
             Pane::PaintCheck => paintcheck::ui(ui, self.state, self.canvas),
+            Pane::RenderQueue => render_queue::ui(ui, self.state),
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -6634,6 +6717,7 @@ impl Editor {
                                     a..=b,
                                     ui.ctx().clone(),
                                     cancel.clone(),
+                                    self.state.render_queue.configured_ffmpeg(),
                                 );
                                 self.export_job = Some(ExportJob {
                                     rx,

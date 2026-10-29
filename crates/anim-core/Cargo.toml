@@ -17,9 +17,18 @@ bytemuck = "1"
 # GM9 (D9, D16): the compositing FX run once, here, on the CPU — parallel
 # over rows.
 rayon = "1.12"
+# GM11 (D16): delivery writers. PNG16 and TIFF16 through image (png and
+# tiff are locked); image writes EXR only as f32, so the half-float EXR goes
+# through the exr crate its own `exr` feature builds on (both fetched).
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "exr"] }
+exr = { version = "1.74", default-features = false }
+# GM11: burn-in text — the app's Plex outlines rasterised on the CPU.
+ab_glyph = "0.2"
 
 [dev-dependencies]
 # Tests forge legacy (schema v4/v5) project files directly to prove migration.
 rusqlite = { version = "0.37", features = ["bundled"] }
 # Image tests encode their fixture PNGs in-test.
 png = "0.17"
+# GM11 (D16): delivery tests write their frames into a temp dir.
+tempfile = "3"

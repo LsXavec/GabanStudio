@@ -37,6 +37,8 @@ pub enum Pane {
     Curves,
     /// GM7: holes and stray colours across a cut, found on a worker.
     PaintCheck,
+    /// GM11: delivery jobs (presets, folders, patterns) rendered on a worker.
+    RenderQueue,
 }
 
 impl Pane {
@@ -54,6 +56,7 @@ impl Pane {
         Pane::History,
         Pane::Curves,
         Pane::PaintCheck,
+        Pane::RenderQueue,
     ];
 
     /// THE FORGE ROOM (PSD-brush-forge, owner amendment 2026-08-19:
@@ -83,6 +86,7 @@ impl Pane {
             Pane::History => "History".into(),
             Pane::Curves => "Curves".into(),
             Pane::PaintCheck => "Nuri check (paint check)".into(),
+            Pane::RenderQueue => "Render Queue".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }
@@ -199,22 +203,24 @@ impl Stage {
             }
             Stage::Composite => {
                 // The graph large with curves tabbed beside it; the result
-                // viewer (canvas tabbed behind it) and the palette at right.
+                // viewer (canvas tabbed behind it) and the palette at right,
+                // the render queue (GM11) tabbed behind it.
                 let mut ds = DockState::new(vec![Pane::NodeGraph, Pane::Curves]);
                 let tree = ds.main_surface_mut();
                 let [_, side] =
                     tree.split_right(NodeIndex::root(), 0.58, vec![Pane::Viewer(0), Pane::Canvas]);
-                tree.split_below(side, 0.62, vec![Pane::Palette]);
+                tree.split_below(side, 0.62, vec![Pane::Palette, Pane::RenderQueue]);
                 ds
             }
             Stage::Edit => {
                 // Sheet takes the left half; result viewer (canvas tabbed
-                // behind it for quick fixes) over the node graph.
+                // behind it for quick fixes) over the node graph, the render
+                // queue (GM11) tabbed behind it.
                 let mut ds = DockState::new(vec![Pane::Viewer(0), Pane::Canvas]);
                 let tree = ds.main_surface_mut();
                 let [view, sheet] = tree.split_left(NodeIndex::root(), 0.45, vec![Pane::XSheet]);
                 tree.split_below(sheet, 0.72, vec![Pane::Layers]);
-                tree.split_below(view, 0.62, vec![Pane::NodeGraph]);
+                tree.split_below(view, 0.62, vec![Pane::NodeGraph, Pane::RenderQueue]);
                 ds
             }
         }

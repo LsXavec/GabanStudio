@@ -2534,3 +2534,32 @@ what was not verified.
   paint layers at paper size (origin offset through upload, readback, brush uniforms and display; the
   device's `max_texture_dimension_2d` cap shown), painting beyond the frame, fill/lasso clipped to the
   paper; also the camera frame shown only in the Layout/Composite rooms (the canvas knows no room).
+- 2026-10-29 — GM11 Render queue and delivery. Engine: `deliver.rs` — `Purpose { View, Final, LineTest }`
+  (`keeps(role)`: Final drops Reference, Rough and Correction; LineTest keeps the line roles),
+  `RenderOpts { purpose, scale }`, `render(cut, law, frame, w, h, &opts)` (View is today's render on either
+  path; Final renders the graph on a role-filtered clone of the cut, or the column path through
+  `Drawing::flatten_for`, Ref columns skipped as before; LineTest is the column path's line roles, black on
+  white; scale under 0.75 is a 2×2 box half), `write_png16`/`write_tiff16` through image 0.25, `write_exr`
+  half through the exr crate (image writes EXR only as f32), scene-linear by the colour law, `write_png8`,
+  `ffmpeg_args` per codec (H.264 exactly v0.3's, H.265, ProRes 422 HQ and 4444, DNxHR HQ; the audio as v0.3
+  muxed it, `-ss`/`-t` kept, AAC 192k or `pcm_s24le`), ten `PRESETS`, `expand_pattern`/`video_name`
+  (sanitised), `burn_in` (Plex Mono through ab_glyph on a 60% black band in the four corners; s+k and
+  HH:MM:SS:FF), `deliver_frame`, `parse_cli`. `text.rs`: the Plex Sans and Mono statics (the app's fonts now
+  come from them), `layout_line`, `raster_line`. `flatten`, `render_frame` and `render_graph_frame` keep
+  their results. App: `render_queue.rs` — a pure `Queue` (in order, one at a time; a done or failed job
+  hands on, a stopped one stops the run), a `JobSpec` snapshot taken at the start, `render_job` (cancel read
+  before each frame; video piped as rawvideo RGBA into ffmpeg through `proc::command`), a worker with a
+  channel and an AtomicBool; the Render Queue pane (preset detents, the video ones disabled with "needs
+  ffmpeg (ffmpeg.org); image sequences work without it", burn-in latches, folder, pattern, + this cut,
+  + every cut in the scene, + frames, Start / Stop / clear finished, progress bars, "show folder"), tabbed
+  into the Composite and Edit docks and listed in the panes menu, polled every frame by the shell.
+  `find_ffmpeg_in(configured, exe_dir, path_var, local_appdata)` checks files only (PATH's folders scanned,
+  nothing spawned); `find_ffmpeg(configured)`; Settings › General "ffmpeg location" and "render output
+  folder" (`config.render`); `animstudio --render <file | --sample> --preset <name> --out <dir>` before the
+  dev loop and `run_native` (`cli_exit`, `run_cli_job`; 0/1/2). Fetched: image 0.25.10, exr 1.74.2,
+  ab_glyph 0.2.32 and their dependencies. 15 `delivery_tests`, 7 `render_queue_*` app tests. Deviations:
+  `render` takes the colour law and frame size (a cut knows neither); `ffmpeg_args` takes
+  `AudioIn { path, offset, secs }` to keep v0.3's seek and trim; `raster_line` takes the face. Left: the
+  File ▸ Export PNG and MP4 items still run their own exporters (not yet queue jobs); the composite view's
+  "Final look" toggle; adding hand-picked cuts (the pane adds this cut, every cut of the scene, or a frame
+  range). Not verified: a real ffmpeg encode (tests spawn nothing), the real window.

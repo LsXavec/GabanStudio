@@ -2107,6 +2107,9 @@ pub struct Config {
     /// offsets are session view state, never saved).
     #[serde(default)]
     pub light_table: crate::canvas::LightTableCfg,
+    /// GM11: where ffmpeg is and where renders go (Settings › General).
+    #[serde(default)]
+    pub render: RenderConfig,
     /// Transient: last Krita-import result line (not persisted).
     #[serde(skip)]
     pub last_import_note: String,
@@ -2130,10 +2133,22 @@ impl Default for Config {
             presets: default_presets(),
             onion: Default::default(),
             light_table: Default::default(),
+            render: RenderConfig::default(),
             last_import_note: String::new(),
             load_notes: Vec::new(),
         }
     }
+}
+
+/// GM11: the render queue's settings — ffmpeg's location (empty = search
+/// beside the app, PATH, then the winget package dir) and the default
+/// output folder (empty = a `render` folder beside the project file).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct RenderConfig {
+    #[serde(default)]
+    pub ffmpeg: String,
+    #[serde(default)]
+    pub out_dir: String,
 }
 
 /// The real data dir, `%APPDATA%/AnimStudio` (D11). It holds config.json,
@@ -3295,6 +3310,31 @@ pub(crate) fn general_page(
             *show_autosaves = true;
         }
     }
+    // GM11: where the render queue finds ffmpeg (tried before the search)
+    // and where its jobs write by default; saved when the field is left.
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("ffmpeg location");
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut config.render.ffmpeg)
+                .hint_text("empty: beside the app, PATH, winget")
+                .desired_width(240.0),
+        );
+        if r.lost_focus() {
+            changed = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("render output folder");
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut config.render.out_dir)
+                .hint_text("empty: render/ beside the project")
+                .desired_width(240.0),
+        );
+        if r.lost_focus() {
+            changed = true;
+        }
+    });
     // GM8: the UI scale, applied as egui's zoom factor on the next frame.
     // While the handle is held the new value waits (egui memory): applied
     // mid-drag it would rescale the slider under the pointer and the value

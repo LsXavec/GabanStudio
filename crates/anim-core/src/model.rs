@@ -351,17 +351,35 @@ impl Drawing {
     /// This is the GOLDEN REFERENCE the GPU compositor is tested against, and
     /// the future export/eval path. It is NOT the interactive display path.
     pub fn flatten(&self) -> std::collections::BTreeMap<TileCoord, Arc<TileData>> {
+        self.flatten_where(&|_| true)
+    }
+
+    /// GM11: [`Self::flatten`] as a render purpose sees the cel: Final
+    /// leaves out the Reference, Rough and Correction layers, LineTest keeps
+    /// the line roles only ([`Purpose::keeps`]). Same arithmetic; View is
+    /// exactly `flatten`.
+    pub fn flatten_for(
+        &self,
+        purpose: crate::deliver::Purpose,
+    ) -> std::collections::BTreeMap<TileCoord, Arc<TileData>> {
+        self.flatten_where(&|role| purpose.keeps(role))
+    }
+
+    fn flatten_where(
+        &self,
+        keep: &dyn Fn(LayerRole) -> bool,
+    ) -> std::collections::BTreeMap<TileCoord, Arc<TileData>> {
         // Collect every coordinate any visible layer touches.
         let mut coords: std::collections::BTreeSet<TileCoord> = std::collections::BTreeSet::new();
         for layer in &self.layers {
-            if layer.props.visible && layer.props.opacity > 0.0 {
+            if layer.props.visible && layer.props.opacity > 0.0 && keep(layer.props.role) {
                 coords.extend(layer.raster.tiles.keys().copied());
             }
         }
 
         let mut out = std::collections::BTreeMap::new();
         for coord in coords {
-            if let Some(tile) = self.flatten_tile(coord) {
+            if let Some(tile) = self.flatten_tile_where(coord, keep) {
                 out.insert(coord, Arc::new(tile));
             }
         }
@@ -371,12 +389,20 @@ impl Drawing {
     /// One tile of [`Self::flatten`] (same arithmetic); None where no
     /// visible layer leaves ink.
     pub fn flatten_tile(&self, coord: TileCoord) -> Option<TileData> {
+        self.flatten_tile_where(coord, &|_| true)
+    }
+
+    fn flatten_tile_where(
+        &self,
+        coord: TileCoord,
+        keep: &dyn Fn(LayerRole) -> bool,
+    ) -> Option<TileData> {
         use crate::raster::{TILE_LEN, f16_bits_to_f32, f32_to_f16_bits};
 
         // f32 working buffer, linear premultiplied.
         let mut acc = vec![0.0f32; TILE_LEN];
         for layer in &self.layers {
-            if !layer.props.visible || layer.props.opacity <= 0.0 {
+            if !layer.props.visible || layer.props.opacity <= 0.0 || !keep(layer.props.role) {
                 continue;
             }
             let Some(tile) = layer.raster.tiles.get(&coord) else {

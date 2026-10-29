@@ -192,19 +192,15 @@ pub fn mono_semibold() -> FontFamily {
 /// unexpected glyph degrades to a drawn shape, never tofu.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
+    // GM11 (D16): Plex Sans Regular and Mono Medium are the engine's own
+    // statics (the burn-ins rasterise them too) — the bytes live once.
     for (name, bytes) in [
-        (
-            "plex-sans",
-            &include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf")[..],
-        ),
+        ("plex-sans", anim_core::text::PLEX_SANS),
         (
             "plex-sans-sb",
             &include_bytes!("../assets/fonts/IBMPlexSans-SemiBold.ttf")[..],
         ),
-        (
-            "plex-mono",
-            &include_bytes!("../assets/fonts/IBMPlexMono-Medium.ttf")[..],
-        ),
+        ("plex-mono", anim_core::text::PLEX_MONO),
         (
             "plex-mono-sb",
             &include_bytes!("../assets/fonts/IBMPlexMono-SemiBold.ttf")[..],

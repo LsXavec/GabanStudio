@@ -14,6 +14,7 @@
 pub mod camera;
 pub mod color;
 pub mod command;
+pub mod deliver;
 pub mod edit;
 pub mod error;
 pub mod eval;
@@ -26,6 +27,7 @@ pub mod model;
 pub mod raster;
 pub mod sheet_ops;
 pub mod store;
+pub mod text;
 pub mod value;
 pub mod xdts;
 pub mod xsheet;
