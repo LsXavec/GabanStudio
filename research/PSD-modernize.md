@@ -2370,3 +2370,26 @@ what was not verified.
   selection tested without a device. Left: a column kind from a later build still reads as Cel and is
   re-saved as Cel (needs a raw pass-through of the def row; first needed by the camera part). Not
   verified: the real window (menus, chords over the real sheet pane) and the GPU compositor on a GPU.
+- 2026-10-29 — The sheet panel and graph editor part (GM14). Engine: `ParamInterp` gains EaseIn (t²),
+  EaseOut (1−(1−t)²) and Bezier, stored in the existing interp text ("ease_in", "ease_out", "bezier" or
+  "bezier:in_dt,in_dv,out_dt,out_dv,mode"; no new column, old words read as before). `Handles` with
+  auto / smooth / flat / broken modes (auto is the Catmull-Rom slope at 1/3 of each segment, so two auto
+  keys are exactly Linear); handles are refused on a non-Bezier key. `BezierSeg` clamps a handle into its
+  segment and solves time monotonically (Newton inside a bisection bracket); `ParamColumn::sample` (f64),
+  `handles_at`, `segment`. `Command::SetParamKeys` (one batch, validated whole, exact inverse) and
+  `sheet_ops::move_param_keys` (whole-frame shifts; a moved key replaces the key it lands on, never a
+  duplicate). App, the sheet panel: a range by click, Shift+click or drag feeds retime and reverse; Copy /
+  Cut / Paste cells (Ctrl+C / X / V, Ctrl+Shift+V inserts, over the sheet only) through `copy_block` /
+  `paste_block`, also answering the system clipboard's Copy / Cut / Paste events that egui-winit sends in
+  place of those keys; a typed entry on the cursor's cell (a name and Enter exposes it by name, x empties,
+  Enter moves down, Tab moves right; a text field, so B or 1 typed there fires nothing); a kind badge and
+  H / L toggles per column header; a memo column and memo field (SetMemo); a length field in frames or
+  seconds+frames (SetFrameCount); rows through `show_rows`. The Curves pane (panes menu): a column list,
+  curves in plate tokens, click / Shift+click / box select, key drags snapped to whole frames and handle
+  drags as one SetParamKeys each, interpolation and handle mode from the context menu, F frames the
+  selection or everything (taken before the sheet's F), wheel zoom, Alt- or middle-drag pan, the
+  current-frame line. 12 `curve_tests`, 7 `curves_*` and 7 `sheetui_*` app tests. Left: copying and
+  pasting keys between columns, an ease preset library, and a room that docks the Curves pane by default.
+  Not verified: the real window (the system clipboard round trip, Tab in the entry, wheel zoom), and on
+  Windows Shift+Delete arrives as a Cut event, so GM5's Shift+Delete chord does not reach the sheet there
+  (found here, not changed).

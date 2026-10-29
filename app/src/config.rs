@@ -94,6 +94,12 @@ pub enum Action {
     ColumnKindRef,
     ToggleColumnHidden,
     ToggleColumnLocked,
+    // GM14: the sheet's cell clipboard (the selected range, else the
+    // cursor's cell), over the sheet only.
+    CopyCells,
+    CutCells,
+    PasteCells,
+    PasteCellsInsert,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -276,6 +282,10 @@ impl Action {
         Action::ColumnKindRef,
         Action::ToggleColumnHidden,
         Action::ToggleColumnLocked,
+        Action::CopyCells,
+        Action::CutCells,
+        Action::PasteCells,
+        Action::PasteCellsInsert,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -358,6 +368,10 @@ impl Action {
             Action::ColumnKindRef => "Column kind: Ref (guide)",
             Action::ToggleColumnHidden => "Hide column",
             Action::ToggleColumnLocked => "Lock column",
+            Action::CopyCells => "Copy cells",
+            Action::CutCells => "Cut cells",
+            Action::PasteCells => "Paste cells",
+            Action::PasteCellsInsert => "Paste cells (insert)",
         }
     }
 
@@ -440,6 +454,10 @@ impl Action {
             ColumnKindRef => "Make the column a ref (guide): shown for reference, never rendered.",
             ToggleColumnHidden => "Hide or show the column: a hidden column is left out of every composite.",
             ToggleColumnLocked => "Lock or unlock the column: a locked column refuses paint and sheet edits.",
+            CopyCells => "Copy the selected sheet cells (or the cursor's cell) to the sheet clipboard.",
+            CutCells => "Copy the selected sheet cells, then empty them.",
+            PasteCells => "Paste the copied cells at the cursor, over the cells there.",
+            PasteCellsInsert => "Paste the copied cells at the cursor, pushing the cells there later.",
         }
     }
 
@@ -457,7 +475,8 @@ impl Action {
             PrevKey | NextKey | NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames
             | DeleteFrames | HoldPlus | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees
             | Reverse | ColumnKindCel | ColumnKindBg | ColumnKindBook | ColumnKindRef
-            | ToggleColumnHidden | ToggleColumnLocked => Group::Sheet,
+            | ToggleColumnHidden | ToggleColumnLocked | CopyCells | CutCells | PasteCells
+            | PasteCellsInsert => Group::Sheet,
             PrevCut | NextCut => Group::Cut,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
@@ -521,6 +540,10 @@ impl Action {
             ColumnKindRef => "Sheet/Column kind: Ref (guide)",
             ToggleColumnHidden => "Sheet/Hide column",
             ToggleColumnLocked => "Sheet/Lock column",
+            CopyCells => "Sheet/Copy cells",
+            CutCells => "Sheet/Cut cells",
+            PasteCells => "Sheet/Paste cells",
+            PasteCellsInsert => "Sheet/Paste cells (insert)",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             // Each item is its room detent's Stage::name (a test holds them
@@ -596,6 +619,10 @@ impl Action {
             ColumnKindRef => &["column kind", "guide", "reference"],
             ToggleColumnHidden => &["hide", "show column", "visibility"],
             ToggleColumnLocked => &["lock", "unlock", "protect"],
+            CopyCells => &["copy", "cells", "clipboard"],
+            CutCells => &["cut", "cells", "clipboard"],
+            PasteCells => &["paste", "cells", "clipboard"],
+            PasteCellsInsert => &["paste insert", "cells", "clipboard"],
             _ => &[],
         }
     }
@@ -611,7 +638,9 @@ impl Action {
             NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames | DeleteFrames | HoldPlus
             | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees | Reverse | ColumnKindCel
             | ColumnKindBg | ColumnKindBook | ColumnKindRef | ToggleColumnHidden
-            | ToggleColumnLocked => Ctx::Sheet,
+            | ToggleColumnLocked | CopyCells | CutCells | PasteCells | PasteCellsInsert => {
+                Ctx::Sheet
+            }
             _ => Ctx::Global,
         }
     }
@@ -624,7 +653,17 @@ impl Action {
     /// Delete deletes a frame only over the sheet (Industry's painter clears
     /// the whole cel with it over the canvas).
     pub fn pane_only(self) -> bool {
-        matches!(self, Action::RemoveColumn | Action::DeleteFrames)
+        // GM14: the cell clipboard too — Ctrl+V over the canvas must not
+        // paste cells into the sheet.
+        matches!(
+            self,
+            Action::RemoveColumn
+                | Action::DeleteFrames
+                | Action::CopyCells
+                | Action::CutCells
+                | Action::PasteCells
+                | Action::PasteCellsInsert
+        )
     }
 
     /// GM3: the verb that arms pencil-box slot `digit` (1-based), if any.
@@ -781,6 +820,14 @@ impl Action {
             ColumnKindRef => Some(alt("G")),
             ToggleColumnHidden => Some(alt("H")),
             ToggleColumnLocked => Some(alt("L")),
+            // GM14: the clipboard keys every studio uses; Shift inserts.
+            CopyCells => Some(ctrl("C")),
+            CutCells => Some(ctrl("X")),
+            PasteCells => Some(ctrl("V")),
+            PasteCellsInsert => Some(Chord {
+                shift: true,
+                ..ctrl("V")
+            }),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomEdit => None,
         }

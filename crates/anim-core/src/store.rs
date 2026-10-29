@@ -14,7 +14,7 @@ use crate::graph::{Node, NodeKind};
 use crate::ids::*;
 use crate::model::{CelLayer, Cut, Drawing, LayerProps, LayerRole, Project, Scene};
 use crate::raster::{RasterLayer, TileData};
-use crate::xsheet::{Column, ColumnDef, Exposure, ParamColumn, ParamInterp, ParamKey};
+use crate::xsheet::{Column, ColumnDef, Exposure, ParamColumn, ParamKey};
 
 const SCHEMA_VERSION: i64 = 11;
 
@@ -316,11 +316,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
                         p_ord as i64,
                     ))?;
                     for (frame, key) in pcol.keys() {
-                        let interp = match key.interp {
-                            ParamInterp::Hold => "hold",
-                            ParamInterp::Linear => "linear",
-                            ParamInterp::Ease => "ease",
-                        };
+                        // GM14: Bezier handles ride in the same TEXT column.
+                        let interp = key.interp_text();
                         ins_param_key.execute((
                             pcol.id.0 as i64,
                             frame as i64,
@@ -738,17 +735,19 @@ pub fn load(path: &Path) -> Result<Project> {
                         // loads as 0 (same law as sane_opacity).
                         let value = value as f32;
                         let value = if value.is_finite() { value } else { 0.0 };
-                        let interp = match interp.as_str() {
-                            "hold" => ParamInterp::Hold,
-                            "linear" => ParamInterp::Linear,
-                            "ease" => ParamInterp::Ease,
-                            other => {
-                                return Err(EngineError::Corrupt(format!(
-                                    "unknown param interp '{other}'"
-                                )));
-                            }
+                        let Some((interp, handles)) = ParamKey::parse_interp_text(&interp) else {
+                            return Err(EngineError::Corrupt(format!(
+                                "unknown param interp '{interp}'"
+                            )));
                         };
-                        pcol.set_key(frame as u32, ParamKey { value, interp });
+                        pcol.set_key(
+                            frame as u32,
+                            ParamKey {
+                                value,
+                                interp,
+                                handles,
+                            },
+                        );
                     }
                     cut.xsheet.params.push(pcol);
                 }

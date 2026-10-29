@@ -14,7 +14,7 @@ use anim_core::model::{CelLayer, LayerProps};
 use anim_core::model::{Cut, Stroke};
 use anim_core::raster::{TileCoord, TileData, TileDiff};
 use anim_core::sheet_ops;
-use anim_core::xsheet::{Column, ColumnDef, ColumnKind, Exposure, ParamColumn};
+use anim_core::xsheet::{Column, ColumnDef, ColumnKind, Exposure, ParamColumn, ParamKey};
 
 /// Bottom→top display slices of cel layers: (tiles, effective opacity).
 pub type LayerSlices<'a> = Vec<(&'a BTreeMap<TileCoord, Arc<TileData>>, f32)>;
@@ -177,6 +177,11 @@ pub struct AppState {
     pub param_buf_at: Option<(anim_core::ids::ParamId, u32)>,
     /// X-sheet keying strip: sticky interpolation choice for new keys.
     pub param_interp: anim_core::xsheet::ParamInterp,
+    /// GM14: the sheet panel's range anchor, cell clipboard and field
+    /// buffers — session-only view state.
+    pub sheet_ui: crate::xsheet_panel::SheetUi,
+    /// GM14: the curves pane's shown columns, key selection and view.
+    pub curves: crate::curves_panel::CurvesState,
 }
 
 impl AppState {
@@ -249,6 +254,8 @@ impl AppState {
             param_buf: 0.0,
             param_buf_at: None,
             param_interp: anim_core::xsheet::ParamInterp::Ease,
+            sheet_ui: Default::default(),
+            curves: Default::default(),
         }
     }
 
@@ -329,6 +336,8 @@ impl AppState {
             param_buf: 0.0,
             param_buf_at: None,
             param_interp: anim_core::xsheet::ParamInterp::Ease,
+            sheet_ui: Default::default(),
+            curves: Default::default(),
         })
     }
 
@@ -1776,15 +1785,12 @@ impl AppState {
     /// twos or threes): each drawing holds `step` frames, a kara run keeps
     /// its length, the cursor's frame stays put and what follows ripples.
     pub fn retime(&mut self, step: u32) {
-        let (from, to) = (self.view.frame, self.frame_count());
-        let built = sheet_ops::retime_range(
-            &self.engine.project,
-            self.at(),
-            &[self.view.active_column],
-            from,
-            to,
-            step,
-        );
+        // GM14: a selected range of cells retimes just that range.
+        let (columns, from, to) = self
+            .sheet_range()
+            .unwrap_or_else(|| (vec![self.view.active_column], self.view.frame, self.frame_count()));
+        let built =
+            sheet_ops::retime_range(&self.engine.project, self.at(), &columns, from, to, step);
         let nothing = format!("already on {step}s from frame {} down", from + 1);
         self.apply_sheet(
             &format!("retime to {step}s"),
@@ -1797,14 +1803,10 @@ impl AppState {
     /// Reverse the active column's timing from the cursor down: the drawing
     /// order flips and each exposure keeps its length.
     pub fn reverse_timing(&mut self) {
-        let (from, to) = (self.view.frame, self.frame_count());
-        let built = sheet_ops::reverse_range(
-            &self.engine.project,
-            self.at(),
-            &[self.view.active_column],
-            from,
-            to,
-        );
+        let (columns, from, to) = self
+            .sheet_range()
+            .unwrap_or_else(|| (vec![self.view.active_column], self.view.frame, self.frame_count()));
+        let built = sheet_ops::reverse_range(&self.engine.project, self.at(), &columns, from, to);
         self.apply_sheet(
             "reverse timing",
             built,
@@ -1863,6 +1865,214 @@ impl AppState {
             ("unlock column", format!("column {name} unlocked"))
         };
         self.set_active_column_def(label, ColumnDef { locked, ..def }, &done);
+    }
+
+    // ---- GM14: the sheet panel's range, clipboard and fields --------------
+
+    /// The selected range of cells: (columns left to right, first frame,
+    /// end frame exclusive). None when the selection is just the cursor's
+    /// cell — and the range lives only while the cursor stays where the
+    /// selection left it (a frame step elsewhere collapses it).
+    pub fn sheet_range(&self) -> Option<(Vec<ColumnId>, u32, u32)> {
+        let (anchor, head) = (self.sheet_ui.anchor?, self.sheet_ui.head?);
+        if head != (self.view.active_column, self.view.frame) || anchor == head {
+            return None;
+        }
+        let cols = &self.cut().xsheet.columns;
+        let ia = cols.iter().position(|c| c.id == anchor.0)?;
+        let ih = cols.iter().position(|c| c.id == head.0)?;
+        let ids = cols[ia.min(ih)..=ia.max(ih)].iter().map(|c| c.id).collect();
+        Some((ids, anchor.1.min(head.1), anchor.1.max(head.1) + 1))
+    }
+
+    /// Put the cursor on (column, frame) with the range running from
+    /// `anchor` (the same cell for a plain click).
+    pub fn select_cells(&mut self, anchor: (ColumnId, u32), column: ColumnId, frame: u32) {
+        self.view.active_column = column;
+        self.goto(frame);
+        self.sheet_ui.anchor = Some(anchor);
+        self.sheet_ui.head = Some((column, self.view.frame));
+    }
+
+    /// The range, else the cursor's own cell.
+    fn sheet_cells(&self) -> (Vec<ColumnId>, u32, u32) {
+        self.sheet_range().unwrap_or_else(|| {
+            (vec![self.view.active_column], self.view.frame, self.view.frame + 1)
+        })
+    }
+
+    /// Copy the selected cells to the sheet clipboard (no undo step).
+    pub fn copy_cells(&mut self) {
+        let (columns, from, to) = self.sheet_cells();
+        match sheet_ops::copy_block(&self.engine.project, self.at(), &columns, from, to) {
+            Ok(block) => {
+                self.status = format!(
+                    "copied {} × {} cells",
+                    block.columns.len(),
+                    block.len
+                );
+                self.sheet_ui.clipboard = Some(block);
+            }
+            Err(e) => self.report(Err(e), "copy"),
+        }
+    }
+
+    /// Copy the selected cells, then empty them — one undo step.
+    pub fn cut_cells(&mut self) {
+        self.copy_cells();
+        let Some(block) = &self.sheet_ui.clipboard else {
+            return;
+        };
+        let (columns, from, _) = self.sheet_cells();
+        let blank = sheet_ops::Block {
+            columns: vec![vec![(Exposure::Empty, block.len)]; block.columns.len()],
+            drawings: Vec::new(),
+            ..block.clone()
+        };
+        let at = self.at();
+        let built = sheet_ops::paste_block(
+            &mut self.engine.project,
+            &blank,
+            at,
+            columns[0],
+            from,
+            sheet_ops::PasteMode::Overwrite,
+        );
+        self.apply_sheet("cut cells", built, "cells cut", "nothing to cut");
+    }
+
+    /// Paste the sheet clipboard at the range's top-left (else the
+    /// cursor): over the cells there, or (insert) pushing them later. One
+    /// undo step.
+    pub fn paste_cells(&mut self, insert: bool) {
+        let Some(block) = self.sheet_ui.clipboard.clone() else {
+            self.refuse("nothing to paste: copy cells first (Ctrl+C over the sheet)");
+            return;
+        };
+        let (columns, frame, _) = self.sheet_cells();
+        let mode = if insert {
+            sheet_ops::PasteMode::Insert
+        } else {
+            sheet_ops::PasteMode::Overwrite
+        };
+        let at = self.at();
+        let built =
+            sheet_ops::paste_block(&mut self.engine.project, &block, at, columns[0], frame, mode);
+        let label = if insert { "paste cells (insert)" } else { "paste cells" };
+        self.apply_sheet(label, built, "cells pasted", "nothing to paste");
+    }
+
+    /// The typed entry on the cursor's cell: a drawing name exposes that
+    /// drawing (made fresh when the cut has none of that name), "x" makes
+    /// the cell empty. One undo step; blank text changes nothing.
+    pub fn enter_cell(&mut self, text: &str) {
+        let name = text.trim();
+        if name.is_empty() {
+            return;
+        }
+        let layers = self.new_cel_layers();
+        let at = self.at();
+        let (column, frame) = (self.view.active_column, self.view.frame);
+        let built =
+            sheet_ops::expose_by_name(&mut self.engine.project, at, column, frame, name, layers);
+        self.apply_sheet(
+            "enter cell",
+            built,
+            &format!("{name} at frame {}", frame + 1),
+            "already showing that",
+        );
+    }
+
+    /// Set the cut's length in frames — one undo step.
+    pub fn set_cut_length(&mut self, frames: u32) {
+        if frames == self.frame_count() {
+            return;
+        }
+        let at = self.at();
+        let r = self
+            .engine
+            .apply("cut length", vec![Command::SetFrameCount { at, frames }]);
+        if r.is_ok() {
+            self.view.frame = self.view.frame.min(frames.saturating_sub(1));
+        }
+        self.report(r, &format!("the cut is {frames} frames"));
+    }
+
+    /// Set (or, with blank text, clear) the memo on `frame` — one undo step.
+    pub fn set_memo(&mut self, frame: u32, text: &str) {
+        let text = text.trim();
+        let new = (!text.is_empty()).then(|| text.to_string());
+        if self.cut().memos.get(&frame) == new.as_ref() {
+            return;
+        }
+        let at = self.at();
+        let r = self
+            .engine
+            .apply("memo", vec![Command::SetMemo { at, frame, text: new }]);
+        self.report(r, &format!("memo at frame {}", frame + 1));
+    }
+
+    /// Hide or show one column from its header (the column becomes the
+    /// active one, as a header click does).
+    pub fn toggle_hidden_of(&mut self, column: ColumnId) {
+        self.view.active_column = column;
+        self.toggle_column_hidden();
+    }
+
+    /// Lock or unlock one column from its header.
+    pub fn toggle_locked_of(&mut self, column: ColumnId) {
+        self.view.active_column = column;
+        self.toggle_column_locked();
+    }
+
+    /// Step one column's kind Cel → BG → Book → Ref → Cel from its badge.
+    pub fn cycle_kind_of(&mut self, column: ColumnId) {
+        self.view.active_column = column;
+        let next = match self.active_column_def().kind {
+            ColumnKind::Cel => ColumnKind::Bg,
+            ColumnKind::Bg => ColumnKind::Book,
+            ColumnKind::Book => ColumnKind::Ref,
+            ColumnKind::Ref => ColumnKind::Cel,
+        };
+        self.set_column_kind(next);
+    }
+
+    // ---- GM14: the curves pane's edits ------------------------------------
+
+    /// Move the selected param keys by whole frames and a value delta as
+    /// ONE undo step (a curves-pane drag); a key landing on another
+    /// replaces it.
+    pub fn move_param_keys(&mut self, keys: &[(ParamId, u32)], frames: i64, dv: f32) -> bool {
+        let built =
+            sheet_ops::move_param_keys(&self.engine.project, self.at(), keys, frames, dv);
+        let before = self.engine.position();
+        self.apply_sheet("move keys", built, "keys moved", "keys stay put");
+        self.engine.position() != before
+    }
+
+    /// Replace param keys in place (interp or handle edits) as ONE undo
+    /// step. Each entry is (column, frame, new key).
+    pub fn set_param_keys(&mut self, label: &str, keys: Vec<(ParamId, u32, ParamKey)>) {
+        let at = self.at();
+        let mut edits = Vec::new();
+        for (column, frame, after) in keys {
+            let before = self.cut().xsheet.param(column).and_then(|p| p.key_at(frame));
+            if before != Some(after) {
+                edits.push(anim_core::command::ParamKeyEdit {
+                    column,
+                    frame,
+                    before,
+                    after: Some(after),
+                });
+            }
+        }
+        if edits.is_empty() {
+            return;
+        }
+        let r = self
+            .engine
+            .apply(label, vec![Command::SetParamKeys { at, keys: edits }]);
+        self.report(r, label);
     }
 
     /// Import a WAV as this cut's scratch audio track (one undo step;

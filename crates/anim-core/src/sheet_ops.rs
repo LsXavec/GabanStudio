@@ -383,3 +383,67 @@ pub fn paste_block(
     }
     Ok(commands)
 }
+
+/// GM14: move the selected param keys `frames` later (negative = earlier)
+/// and `dv` up, as one `SetParamKeys` (a curves-pane drag). The shift is
+/// clamped so no key passes frame 0, the whole selection moving together;
+/// a key landing on an unselected key's frame REPLACES it, so a drag never
+/// duplicates a key. Empty when nothing changes.
+pub fn move_param_keys(
+    project: &Project,
+    at: CutRef,
+    keys: &[(ParamId, u32)],
+    frames: i64,
+    dv: f32,
+) -> Result<Vec<Command>> {
+    use crate::command::ParamKeyEdit;
+    use crate::xsheet::ParamKey;
+    let cut = cut_at(project, at)?;
+    let lowest = keys.iter().map(|&(_, f)| f as i64).min().unwrap_or(0);
+    let highest = keys.iter().map(|&(_, f)| f as i64).max().unwrap_or(0);
+    let frames = frames.max(-lowest).min(u32::MAX as i64 - highest);
+    let mut columns: Vec<ParamId> = keys.iter().map(|&(p, _)| p).collect();
+    columns.sort();
+    columns.dedup();
+    let mut edits = Vec::new();
+    for pid in columns {
+        let col = cut.xsheet.param(pid).ok_or_else(|| {
+            EngineError::InvalidCommand(format!("unknown param column {pid}"))
+        })?;
+        let before: std::collections::BTreeMap<u32, ParamKey> = col.keys().collect();
+        let mut after = before.clone();
+        let moved: Vec<(u32, ParamKey)> = keys
+            .iter()
+            .filter(|&&(p, _)| p == pid)
+            .filter_map(|&(_, f)| after.remove(&f).map(|k| (f, k)))
+            .collect();
+        for (f, k) in moved {
+            let value = k.value + dv;
+            if !value.is_finite() {
+                return Err(EngineError::InvalidCommand(
+                    "the moved key's value is not finite".into(),
+                ));
+            }
+            after.insert((f as i64 + frames) as u32, ParamKey { value, ..k });
+        }
+        let mut frames_touched: Vec<u32> = before.keys().chain(after.keys()).copied().collect();
+        frames_touched.sort_unstable();
+        frames_touched.dedup();
+        for frame in frames_touched {
+            let (b, a) = (before.get(&frame).copied(), after.get(&frame).copied());
+            if b != a {
+                edits.push(ParamKeyEdit {
+                    column: pid,
+                    frame,
+                    before: b,
+                    after: a,
+                });
+            }
+        }
+    }
+    Ok(if edits.is_empty() {
+        Vec::new()
+    } else {
+        vec![Command::SetParamKeys { at, keys: edits }]
+    })
+}

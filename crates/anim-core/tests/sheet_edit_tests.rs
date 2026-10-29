@@ -279,6 +279,7 @@ fn inverse_fuzz_200_sheet_commands_undo_all_restores_everything() {
                         ParamKey {
                             value: step as f32,
                             interp: ParamInterp::Linear,
+                            handles: None,
                         },
                     );
                     Ok(vec![Command::AddParamColumn {
@@ -376,7 +377,7 @@ fn insert_three_frames_at_10_ripples_columns_params_and_memos() {
     fx.key(1, &[(5, b), (20, c)]);
     let at = fx.at;
     let p = fx.engine.add_param_column(at, "pan").unwrap();
-    let key = |v| Some(ParamKey { value: v, interp: ParamInterp::Linear });
+    let key = |v| Some(ParamKey { value: v, interp: ParamInterp::Linear, handles: None });
     fx.apply(vec![
         Command::SetParamKey { at, column: p, frame: 9, key: key(1.0) },
         Command::SetParamKey { at, column: p, frame: 10, key: key(2.0) },
@@ -411,7 +412,7 @@ fn delete_frames_undo_restores_removed_keys_params_and_memos() {
             at,
             column: p,
             frame: 5,
-            key: Some(ParamKey { value: 7.0, interp: ParamInterp::Hold }),
+            key: Some(ParamKey { value: 7.0, interp: ParamInterp::Hold, handles: None }),
         },
         Command::SetMemo { at, frame: 4, text: Some("gone".into()) },
     ]);

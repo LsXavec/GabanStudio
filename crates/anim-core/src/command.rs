@@ -25,6 +25,41 @@ pub struct CellEdit {
     pub after: Option<Exposure>,
 }
 
+/// GM14: one key of a SetParamKeys batch (a multi-key drag in the curves
+/// pane), checked like `CellEdit`: `before` must be what the frame holds.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParamKeyEdit {
+    pub column: ParamId,
+    pub frame: u32,
+    pub before: Option<ParamKey>,
+    pub after: Option<ParamKey>,
+}
+
+/// GM14: a param key the interpolator can take — a finite value, and
+/// finite handles only on a Bezier key (the store writes handles only
+/// in the "bezier:" text, so anything else would not round-trip).
+fn check_param_key(k: &ParamKey) -> Result<()> {
+    if !k.value.is_finite() {
+        return Err(EngineError::InvalidCommand(format!(
+            "param key value {} is not finite",
+            k.value
+        )));
+    }
+    if let Some(h) = k.handles {
+        if !h.is_finite() {
+            return Err(EngineError::InvalidCommand(
+                "param key handles are not finite".into(),
+            ));
+        }
+        if k.interp != crate::xsheet::ParamInterp::Bezier {
+            return Err(EngineError::InvalidCommand(
+                "param key handles need Bezier interpolation".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // Not `serde` — commands can carry `Arc<TileData>` (large pixel buffers), and
 // the edit history lives in memory, never persisted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,6 +191,10 @@ pub enum Command {
         frame: u32,
         key: Option<ParamKey>,
     },
+    /// GM14: a batch of param key edits as one command (a curves-pane drag
+    /// moves many keys in one undo step); the inverse is the batch reversed
+    /// with before/after swapped.
+    SetParamKeys { at: CutRef, keys: Vec<ParamKeyEdit> },
     AddNode {
         at: CutRef,
         id: NodeId,
@@ -281,6 +320,7 @@ impl Command {
             | Command::SetCell { at, .. }
             | Command::SetCutAudio { at, .. }
             | Command::SetParamKey { at, .. }
+            | Command::SetParamKeys { at, .. }
             | Command::AddNode { at, .. }
             | Command::RemoveNode { at, .. }
             | Command::Connect { at, .. }
@@ -843,13 +883,8 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             // math: reject non-finite at the boundary (validate, don't
             // clamp — same law as layer opacity) so NaN never reaches the
             // interpolator or the GPU.
-            if let Some(k) = key
-                && !k.value.is_finite()
-            {
-                return Err(EngineError::InvalidCommand(format!(
-                    "param key value {} is not finite",
-                    k.value
-                )));
+            if let Some(k) = key {
+                check_param_key(k)?;
             }
             let cut = cut_mut(project, *at)?;
             let col = cut
@@ -870,6 +905,61 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     key: prev,
                 }],
                 invalidation_roots: cut.graph.sources_of_param(*column),
+            })
+        }
+
+        Command::SetParamKeys { at, keys } => {
+            let cut = cut_mut(project, *at)?;
+            // Validate the whole batch first (in order, like SetCells),
+            // then apply: a refused batch leaves every key untouched.
+            let mut seen: std::collections::HashMap<(ParamId, u32), Option<ParamKey>> =
+                std::collections::HashMap::new();
+            for k in keys {
+                if let Some(after) = &k.after {
+                    check_param_key(after)?;
+                }
+                let col = cut.xsheet.param(k.column).ok_or_else(|| {
+                    EngineError::InvalidCommand(format!("unknown param column {}", k.column))
+                })?;
+                let now = seen
+                    .get(&(k.column, k.frame))
+                    .copied()
+                    .unwrap_or_else(|| col.key_at(k.frame));
+                if now != k.before {
+                    return Err(EngineError::InvalidCommand(format!(
+                        "{} key at frame {} changed since this edit was made",
+                        col.name,
+                        k.frame as u64 + 1
+                    )));
+                }
+                seen.insert((k.column, k.frame), k.after);
+            }
+            let mut roots = Vec::new();
+            for k in keys {
+                let col = cut.xsheet.param_mut(k.column).expect("validated above");
+                match k.after {
+                    Some(key) => col.set_key(k.frame, key),
+                    None => col.clear_key(k.frame),
+                };
+                roots.extend(cut.graph.sources_of_param(k.column));
+            }
+            roots.sort();
+            roots.dedup();
+            let inverse_keys = keys
+                .iter()
+                .rev()
+                .map(|k| ParamKeyEdit {
+                    before: k.after,
+                    after: k.before,
+                    ..*k
+                })
+                .collect();
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetParamKeys {
+                    at: *at,
+                    keys: inverse_keys,
+                }],
+                invalidation_roots: roots,
             })
         }
 

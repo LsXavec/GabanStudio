@@ -401,6 +401,30 @@ impl EditorHarness {
         self.drag_path(&[pos]);
     }
 
+    /// GM14: a secondary-button click at `pos` (a context menu opens).
+    pub fn right_click_pos(&mut self, pos: egui::Pos2) {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        self.h.input_mut().events.push(egui::Event::PointerMoved(pos));
+        self.h.input_mut().events.push(button(true));
+        self.h.step();
+        self.h.input_mut().events.push(button(false));
+        self.h.step();
+        self.run();
+    }
+
+    /// GM14: one raw input event for a frame — the system clipboard's
+    /// Copy / Cut / Paste, which egui-winit sends instead of Ctrl+C/X/V keys.
+    pub fn event(&mut self, event: egui::Event) {
+        self.h.input_mut().events.push(event);
+        self.h.step();
+        self.run();
+    }
+
     /// GM2: the window's close button — one frame with a Close event on the
     /// root viewport. Returns the viewport commands that frame sent.
     pub fn request_close(&mut self) -> Vec<egui::ViewportCommand> {

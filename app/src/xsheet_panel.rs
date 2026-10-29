@@ -2,7 +2,7 @@
 //! kept in its own digital exposure sheet), columns as layers. Keys show as
 //! ● + name; held frames show as │. Click any row to jump the playhead.
 
-use anim_core::ids::LayerId;
+use anim_core::ids::{ColumnId, LayerId};
 use anim_core::model::LayerProps;
 use anim_core::xsheet::Exposure;
 use eframe::egui;
@@ -22,6 +22,264 @@ const PARAM_COL_W: f32 = 58.0;
 /// The audio waveform column (frames are rows, so the waveform runs DOWN
 /// the sheet — the paper timesheet's audio track).
 const AUDIO_COL_W: f32 = 46.0;
+/// GM14: the memo/dialogue column (serifu and action notes per frame).
+const MEMO_COL_W: f32 = 96.0;
+
+/// GM14: the typed entry on the cursor's cell, and the toolbar fields.
+const ENTRY_ID: &str = "gaban_sheet_cell_entry";
+const LENGTH_ID: &str = "gaban_sheet_cut_length";
+const MEMO_ID: &str = "gaban_sheet_memo";
+
+/// GM14: the sheet panel's own state — view furniture, never in the file.
+#[derive(Default)]
+pub struct SheetUi {
+    /// The range's fixed corner (column, frame), and where the cursor was
+    /// put with it: the range lives while the cursor stays on `head`.
+    pub anchor: Option<(ColumnId, u32)>,
+    pub head: Option<(ColumnId, u32)>,
+    /// What Copy / Cut took (the sheet's own clipboard).
+    pub clipboard: Option<anim_core::sheet_ops::Block>,
+    /// The typed-entry field on the cursor's cell.
+    pub entry: String,
+    /// The cut-length field, and the length it was seeded from.
+    pub length: String,
+    length_at: Option<u32>,
+    /// The memo field, and the (cut, frame) it was seeded from.
+    pub memo: String,
+    memo_at: Option<(anim_core::ids::CutId, u32)>,
+    /// The rows laid out last frame: the sheet lays out only these.
+    pub rows_shown: std::ops::Range<usize>,
+    /// The top-left of frame 0's row on screen last frame (tests aim at
+    /// cells with it).
+    pub origin: Option<egui::Pos2>,
+}
+
+impl SheetUi {
+    /// The centre of drawing column `ci`'s cell on `frame`, as last drawn.
+    pub fn cell_center(&self, ci: usize, frame: u32) -> Option<egui::Pos2> {
+        self.origin.map(|o| {
+            o + vec2(
+                GUTTER_W + ci as f32 * COL_W + COL_W * 0.5,
+                frame as f32 * ROW_H + ROW_H * 0.5,
+            )
+        })
+    }
+}
+
+/// GM14: a cut length typed as frames ("60") or seconds+frames ("2+12",
+/// "2s+12k", "3s"); None for anything else, or zero.
+pub fn parse_length(text: &str, fps: u32) -> Option<u32> {
+    let t = text.trim().to_lowercase();
+    let num = |s: &str, unit: char| s.trim().trim_end_matches(unit).trim().parse::<u32>().ok();
+    let frames = match t.split_once('+') {
+        Some((s, k)) => num(s, 's')?.checked_mul(fps)?.checked_add(num(k, 'k')?)?,
+        None if t.ends_with('s') => num(&t, 's')?.checked_mul(fps)?,
+        None => t.parse::<u32>().ok()?,
+    };
+    (frames > 0).then_some(frames)
+}
+
+/// GM14: frames the way the paper sheet says them — seconds+frames.
+pub fn seconds_plus_frames(frames: u32, fps: u32) -> String {
+    let fps = fps.max(1);
+    format!("{}+{}", frames / fps, frames % fps)
+}
+
+/// GM14: the copied cells as text for the system clipboard (a tab per
+/// column, a line per frame, "x" for empty) — and so that the system's
+/// paste key reaches the app at all (it sends nothing when its clipboard
+/// is empty).
+fn block_text(state: &AppState, block: &anim_core::sheet_ops::Block) -> String {
+    let name = |e: Exposure| match e {
+        Exposure::Empty => "x".to_string(),
+        Exposure::Drawing(d) => block
+            .drawings
+            .iter()
+            .find(|x| x.id == d)
+            .map(|x| x.name.clone())
+            .or_else(|| state.cut().drawing(d).map(|x| x.name.clone()))
+            .unwrap_or_default(),
+    };
+    let mut rows = vec![Vec::new(); block.len as usize];
+    for runs in &block.columns {
+        let mut f = 0usize;
+        for &(e, n) in runs {
+            for i in 0..n as usize {
+                if let Some(row) = rows.get_mut(f + i) {
+                    row.push(if i == 0 { name(e) } else { String::new() });
+                }
+            }
+            f += n as usize;
+        }
+    }
+    rows.iter().map(|r| r.join("\t")).collect::<Vec<_>>().join("\n")
+}
+
+/// GM14: the system clipboard keys over the sheet. egui-winit turns
+/// Ctrl+C / Ctrl+X / Ctrl+V into Copy / Cut / Paste events (no key
+/// event), so the sheet answers them here, when the pointer is over it
+/// and no field is typing; the same verbs as the Copy/Cut/Paste cells
+/// actions. A frame that also carries the chord's key leaves it to the
+/// action, so one press never acts twice.
+fn clipboard_events(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+    if !ui.rect_contains_pointer(ui.max_rect()) || ui.ctx().text_edit_focused() {
+        return;
+    }
+    let (copy, cut, paste, shift, keyed) = ui.input(|i| {
+        let mut out = (false, false, false, i.modifiers.shift, false);
+        for e in &i.events {
+            match e {
+                egui::Event::Copy => out.0 = true,
+                // Shift+Delete is Cut on Windows too: only Ctrl+X cuts cells.
+                egui::Event::Cut if i.modifiers.command => out.1 = true,
+                egui::Event::Paste(_) => out.2 = true,
+                _ => {}
+            }
+        }
+        out.4 = i.modifiers.command
+            && [egui::Key::C, egui::Key::X, egui::Key::V]
+                .iter()
+                .any(|k| i.key_pressed(*k));
+        out
+    });
+    if keyed {
+        return;
+    }
+    if copy || cut {
+        if cut && gesture_safe {
+            state.cut_cells();
+        } else {
+            state.copy_cells();
+        }
+        if let Some(block) = &state.sheet_ui.clipboard {
+            let text = block_text(state, block);
+            ui.ctx().copy_text(text);
+        }
+    } else if paste && gesture_safe {
+        state.paste_cells(shift);
+    }
+}
+
+/// GM14: the cut's length field — frames or seconds+frames, Enter sets
+/// it (one undo step); beside it the length as seconds+frames.
+fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+    let (frames, fps) = (state.frame_count(), state.fps());
+    let id = egui::Id::new(LENGTH_ID);
+    let typing = ui.memory(|m| m.has_focus(id));
+    if !typing && state.sheet_ui.length_at != Some(frames) {
+        state.sheet_ui.length = frames.to_string();
+        state.sheet_ui.length_at = Some(frames);
+    }
+    plate::legend(ui, "length");
+    let resp = ui
+        .add(
+            egui::TextEdit::singleline(&mut state.sheet_ui.length)
+                .id(id)
+                .desired_width(44.0)
+                .font(egui::FontId::monospace(11.0)),
+        )
+        .on_hover_text(
+            "the cut's length: frames (60) or seconds+frames (2+12) — Enter sets it, one undo step",
+        );
+    ui.label(
+        egui::RichText::new(seconds_plus_frames(frames, fps))
+            .monospace()
+            .size(11.0)
+            .color(plate::LEGEND),
+    );
+    if resp.lost_focus() {
+        if ui.input(|i| i.key_pressed(egui::Key::Enter)) && gesture_safe {
+            match parse_length(&state.sheet_ui.length, fps) {
+                Some(n) => state.set_cut_length(n),
+                None => state.refuse("cut length: type frames (60) or seconds+frames (2+12)"),
+            }
+        }
+        // Reseed from the cut (the new length, or back to the old one).
+        state.sheet_ui.length_at = None;
+    }
+}
+
+/// GM14: the memo/dialogue field for the current frame (serifu, action
+/// notes): the frame's memo, set when the field lets go (Escape cancels).
+fn memo_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+    let here = (state.view.cut, state.view.frame);
+    let id = egui::Id::new(MEMO_ID);
+    let typing = ui.memory(|m| m.has_focus(id));
+    if !typing && state.sheet_ui.memo_at != Some(here) {
+        state.sheet_ui.memo = state.cut().memos.get(&here.1).cloned().unwrap_or_default();
+        state.sheet_ui.memo_at = Some(here);
+    }
+    plate::legend(ui, "memo");
+    let resp = ui
+        .add(
+            egui::TextEdit::singleline(&mut state.sheet_ui.memo)
+                .id(id)
+                .desired_width(130.0)
+                .hint_text("serifu / action"),
+        )
+        .on_hover_text("this frame's memo: dialogue (serifu) and action notes — one undo step");
+    if resp.lost_focus() {
+        let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        // The frame the field was seeded for, even if the playhead moved.
+        if let Some((cut, frame)) = state.sheet_ui.memo_at
+            && !escaped
+            && gesture_safe
+            && cut == state.view.cut
+        {
+            let text = state.sheet_ui.memo.clone();
+            state.set_memo(frame, &text);
+        }
+        state.sheet_ui.memo_at = None;
+    }
+}
+
+/// GM14: the typed entry on the cursor's cell — a text field, so a
+/// single-key shortcut never fires while it types. A drawing name and
+/// Enter exposes it ("x" = empty) and moves down; Tab enters and moves to
+/// the next column; Escape or a click away drops the text.
+fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe: bool) {
+    let id = egui::Id::new(ENTRY_ID);
+    if ui.memory(|m| m.has_focus(id)) {
+        ui.painter().rect_filled(cell, 0.0, plate::WELL);
+    }
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell));
+    let resp = child
+        .add(
+            egui::TextEdit::singleline(&mut state.sheet_ui.entry)
+                .id(id)
+                .frame(egui::Frame::NONE)
+                .lock_focus(true)
+                .desired_width(cell.width())
+                .font(egui::FontId::monospace(11.0))
+                .text_color(plate::STRUCK),
+        )
+        .on_hover_text("type a drawing name (x = empty): Enter enters it and moves down, Tab moves right");
+    let (enter, tab) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Tab)));
+    let tabbed = tab && resp.has_focus();
+    if !(resp.lost_focus() || tabbed) {
+        return;
+    }
+    if !(enter || tabbed) || !gesture_safe {
+        state.sheet_ui.entry.clear();
+        return;
+    }
+    let text = std::mem::take(&mut state.sheet_ui.entry);
+    state.enter_cell(&text);
+    if tabbed {
+        let cols: Vec<ColumnId> = state.cut().xsheet.columns.iter().map(|c| c.id).collect();
+        if let Some(i) = cols.iter().position(|c| *c == state.view.active_column)
+            && let Some(next) = cols.get(i + 1)
+        {
+            state.view.active_column = *next;
+        }
+    } else if state.view.frame + 1 < state.frame_count() {
+        state.goto(state.view.frame + 1);
+    }
+    // The cursor moved: the range collapses to it, and the field follows.
+    state.sheet_ui.anchor = None;
+    state.sheet_ui.head = None;
+    ui.memory_mut(|m| m.request_focus(id));
+}
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe: bool) {
     // Claim the full panel width EVERY frame. egui 0.35 panels are
@@ -31,6 +289,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     // would otherwise wobble the panel width and nudge the canvas
     // horizontally on every frame of playback.
     ui.set_min_width(ui.available_width());
+    clipboard_events(ui, state, gesture_safe);
 
     // (The title row is EVICTED — the dock tab and the Slate already name
     // this sheet; ~145pt of header chrome becomes grid rows. Spec §4.2.)
@@ -197,6 +456,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             // AUDIT [47]: it existed here too, two identical guarded
             // controls for one verb in one panel.)
         });
+        ui.add_space(6.0);
+        length_field(ui, state, gesture_safe);
+        ui.add_space(6.0);
+        memo_field(ui, state, gesture_safe);
     });
 
     // (Scratch audio import/remove is EVICTED to the Slate's file detent —
@@ -292,10 +555,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     let n_cols = state.cut().xsheet.columns.len();
     let n_params = state.cut().xsheet.params.len();
     let has_audio = state.cut().audio.is_some();
-    let sheet_w = GUTTER_W
+    let memo_x = GUTTER_W
         + n_cols as f32 * COL_W
         + n_params as f32 * PARAM_COL_W
         + if has_audio { AUDIO_COL_W } else { 0.0 };
+    let sheet_w = memo_x + MEMO_COL_W;
 
     // Header row. Param-column headers are clickable: selecting one opens
     // its keying strip above the sheet.
@@ -341,7 +605,84 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 plate::LEGEND,
             );
         }
+        // GM14: the memo/dialogue row beside the sheet.
+        let (rect, resp) = ui.allocate_exact_size(vec2(MEMO_COL_W, ROW_H), Sense::hover());
+        ui.painter().text(
+            rect.left_center(),
+            egui::Align2::LEFT_CENTER,
+            "memo",
+            egui::FontId::proportional(12.0),
+            plate::LEGEND,
+        );
+        resp.on_hover_text("serifu (dialogue) and action notes — edit in the memo field above");
     });
+    // GM14: each column's kind badge (a click steps Cel → BG → Book →
+    // Ref) and its hide and lock toggles — the GM5 verbs, per column.
+    let mut header_edit: Option<(ColumnId, u8)> = None;
+    ui.horizontal(|ui| {
+        ui.allocate_exact_size(vec2(GUTTER_W, ROW_H), Sense::hover());
+        for col in &state.cut().xsheet.columns {
+            let def = state.cut().column_def(col.id);
+            let (rect, _) = ui.allocate_exact_size(vec2(COL_W, ROW_H), Sense::hover());
+            let parts = [
+                (Rect::from_min_size(rect.min, vec2(40.0, ROW_H)), 0u8),
+                (Rect::from_min_size(rect.min + vec2(42.0, 0.0), vec2(20.0, ROW_H)), 1),
+                (Rect::from_min_size(rect.min + vec2(64.0, 0.0), vec2(20.0, ROW_H)), 2),
+            ];
+            for (r, what) in parts {
+                let resp = ui.interact(r, ui.id().with(("column_head", col.id, what)), Sense::click());
+                let (text, on, name) = match what {
+                    0 => (
+                        def.kind.label().to_string(),
+                        false,
+                        format!("kind of column {}: {}", col.name, def.kind.label()),
+                    ),
+                    1 => ("H".to_string(), def.hidden, format!("hide column {}", col.name)),
+                    _ => ("L".to_string(), def.locked, format!("lock column {}", col.name)),
+                };
+                let ink = match (what, on) {
+                    (1, true) => plate::AKA,
+                    (2, true) => plate::TALLY,
+                    _ if resp.hovered() => plate::STRUCK,
+                    _ => plate::legend_dim(),
+                };
+                let p = ui.painter();
+                p.rect_stroke(
+                    r.shrink(1.0),
+                    0.0,
+                    egui::Stroke::new(1.0, if on { ink } else { plate::legend_dim() }),
+                    egui::StrokeKind::Inside,
+                );
+                p.text(
+                    r.center(),
+                    egui::Align2::CENTER_CENTER,
+                    text,
+                    egui::FontId::monospace(10.0),
+                    ink,
+                );
+                let typ = if what == 0 {
+                    egui::WidgetType::Button
+                } else {
+                    egui::WidgetType::Checkbox
+                };
+                plate::speak(&resp, typ, (what > 0).then_some(on), &name);
+                let hover = match what {
+                    0 => "the column's kind: Cel, BG (haikei), Book (over the cels) or Ref (never rendered) — click for the next",
+                    1 => "hide or show the column: a hidden column is left out of every composite",
+                    _ => "lock or unlock the column: a locked column refuses paint and sheet edits",
+                };
+                if resp.on_hover_text(hover).clicked() && gesture_safe {
+                    header_edit = Some((col.id, what));
+                }
+            }
+        }
+    });
+    match header_edit {
+        Some((col, 0)) => state.cycle_kind_of(col),
+        Some((col, 1)) => state.toggle_hidden_of(col),
+        Some((col, _)) => state.toggle_locked_of(col),
+        None => {}
+    }
     if let Some(pid) = clicked_param {
         // Toggle: clicking the selected header closes its strip.
         state.param_sel = if state.param_sel == Some(pid) {
@@ -351,35 +692,37 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
         };
         state.param_buf_at = None;
     }
+    // Frame rows must abut: egui's default item_spacing.y would insert a
+    // few px between each allocated row, so ROW_H would NOT be the true
+    // row pitch and the continuation handles (which step by ROW_H) would
+    // drift farther down the more frames there are. Zero it here so the
+    // sheet is contiguous and ctop + frame*ROW_H lands exactly on a row.
+    // GM14: zeroed OUTSIDE the scroll area too — show_rows reads the row
+    // pitch from the outer spacing.
+    let col_ids: Vec<ColumnId> = state.cut().xsheet.columns.iter().map(|c| c.id).collect();
+    let range = state.sheet_range();
+    let frame_count = state.frame_count();
+    ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            // Frame rows must abut: egui's default item_spacing.y would insert a
-            // few px between each allocated row, so ROW_H would NOT be the true
-            // row pitch and the continuation handles (which step by ROW_H) would
-            // drift farther down the more frames there are. Zero it here so the
-            // sheet is contiguous and ctop + frame*ROW_H lands exactly on a row.
+        // GM14: only the visible rows are laid out (a 600-frame cut).
+        .show_rows(ui, ROW_H, frame_count as usize, |ui, rows| {
             ui.spacing_mut().item_spacing.y = 0.0;
+            state.sheet_ui.rows_shown = rows.clone();
             // THE RULE paints in ONE pass after the rows (spec §5.2) — from
             // a whole-sheet painter, never from painter_at(row_rect), which
             // would clip every stroke to one row.
             let sheet_painter = ui.painter().clone();
             let ppp = ui.ctx().pixels_per_point();
-            let frame_count = state.frame_count();
             let fps = state.fps();
             let mut clicked_frame: Option<u32> = None;
             // Content origin (top-left of frame 0's row) for handle geometry.
             let mut geom: Option<(f32, f32)> = None;
-            for frame in 0..frame_count {
-                let (row_rect, resp) = ui.allocate_exact_size(
-                    vec2(sheet_w.max(ui.available_width()), ROW_H),
-                    Sense::click(),
-                );
-                if frame == 0 {
-                    geom = Some((row_rect.top(), row_rect.left()));
-                }
-                if resp.clicked() {
-                    clicked_frame = Some(frame);
+            let row_w = sheet_w.max(ui.available_width());
+            for frame in rows.start as u32..rows.end as u32 {
+                let (row_rect, _) = ui.allocate_exact_size(vec2(row_w, ROW_H), Sense::hover());
+                if geom.is_none() {
+                    geom = Some((row_rect.top() - frame as f32 * ROW_H, row_rect.left()));
                 }
                 let painter = ui.painter_at(row_rect);
 
@@ -494,6 +837,112 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                             color,
                         );
                     }
+                }
+
+                // GM14: the memo/dialogue cell.
+                if let Some(memo) = cut.memos.get(&frame) {
+                    let cell = Rect::from_min_size(
+                        pos2(row_rect.left() + memo_x, row_rect.top()),
+                        vec2(MEMO_COL_W, ROW_H),
+                    );
+                    painter.with_clip_rect(cell).text(
+                        pos2(cell.left() + 4.0, cell.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        memo,
+                        egui::FontId::proportional(11.0),
+                        plate::STRUCK,
+                    );
+                }
+
+                // GM14: the selected range of cells (a wash), else the
+                // cursor's cell (a ring).
+                let cell_of = |ci: usize| {
+                    Rect::from_min_size(
+                        pos2(row_rect.left() + GUTTER_W + ci as f32 * COL_W, row_rect.top()),
+                        vec2(COL_W, ROW_H),
+                    )
+                };
+                match &range {
+                    Some((cols, f0, f1)) if (*f0..*f1).contains(&frame) => {
+                        for c in cols {
+                            if let Some(ci) = col_ids.iter().position(|x| x == c) {
+                                painter.rect_filled(cell_of(ci), 0.0, plate::AO.gamma_multiply(0.22));
+                            }
+                        }
+                    }
+                    None if is_current => {
+                        if let Some(ci) = col_ids.iter().position(|x| *x == state.view.active_column) {
+                            painter.rect_stroke(
+                                cell_of(ci),
+                                0.0,
+                                egui::Stroke::new(1.0, plate::TALLY),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // GM14: the cells answer clicks and drags. A click selects the
+            // cell (Shift+click runs the range from the anchor), a drag
+            // sweeps a range across columns and frames; a click outside
+            // the drawing columns jumps the playhead as before. Registered
+            // under the scrub lane, the handles and the entry field.
+            state.sheet_ui.origin = geom.map(|(ctop, cleft)| pos2(cleft, ctop));
+            if let Some((ctop, cleft)) = geom {
+                let shown = Rect::from_min_max(
+                    pos2(cleft, ctop + rows.start as f32 * ROW_H),
+                    pos2(cleft + row_w, ctop + rows.end as f32 * ROW_H),
+                );
+                let cresp = ui.interact(shown, ui.id().with("sheet_cells"), Sense::click_and_drag());
+                let cell_at = |p: egui::Pos2| {
+                    let f = (((p.y - ctop) / ROW_H).floor() as i64)
+                        .clamp(0, frame_count as i64 - 1) as u32;
+                    let ci = ((p.x - cleft - GUTTER_W) / COL_W).floor();
+                    let col = if ci >= 0.0 {
+                        col_ids.get(ci as usize).copied()
+                    } else {
+                        None
+                    };
+                    (col, f, p.x - cleft >= memo_x)
+                };
+                if cresp.clicked()
+                    && let Some(p) = cresp.interact_pointer_pos()
+                {
+                    match cell_at(p) {
+                        (Some(col), f, _) => {
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            let cursor = (state.view.active_column, state.view.frame);
+                            let live = state.sheet_ui.head == Some(cursor);
+                            let anchor = match state.sheet_ui.anchor {
+                                Some(a) if shift && live => a,
+                                _ if shift => cursor,
+                                _ => (col, f),
+                            };
+                            state.select_cells(anchor, col, f);
+                        }
+                        (None, f, memo) => {
+                            clicked_frame = Some(f);
+                            if memo {
+                                ui.memory_mut(|m| m.request_focus(egui::Id::new(MEMO_ID)));
+                            }
+                        }
+                    }
+                }
+                if cresp.drag_started()
+                    && let Some(p) = ui.input(|i| i.pointer.press_origin())
+                    && let (Some(col), f, _) = cell_at(p)
+                {
+                    state.select_cells((col, f), col, f);
+                }
+                if cresp.dragged()
+                    && let Some(p) = cresp.interact_pointer_pos()
+                    && let (Some(col), f, _) = cell_at(p)
+                    && let Some(anchor) = state.sheet_ui.anchor
+                    && (col, f) != (state.view.active_column, state.view.frame)
+                {
+                    state.select_cells(anchor, col, f);
                 }
             }
 
@@ -643,6 +1092,21 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             if let Some((ctop, cleft)) = geom {
                 continuation_handles(ui, state, ctop, cleft, frame_count);
             }
+            // GM14: the typed entry rides on the cursor's cell (right of
+            // the key dot), on top of everything else in the sheet.
+            if let Some((ctop, cleft)) = geom
+                && let Some(ci) = col_ids.iter().position(|c| *c == state.view.active_column)
+                && rows.contains(&(state.view.frame as usize))
+            {
+                let cell = Rect::from_min_size(
+                    pos2(
+                        cleft + GUTTER_W + ci as f32 * COL_W + 30.0,
+                        ctop + state.view.frame as f32 * ROW_H,
+                    ),
+                    vec2(COL_W - 32.0, ROW_H),
+                );
+                entry_field(ui, state, cell, gesture_safe);
+            }
             if let Some(f) = clicked_frame {
                 state.goto(f);
             }
@@ -714,9 +1178,15 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
             .on_hover_text("one undo step")
             .clicked()
         {
+            // GM14: a Bezier key keeps its handles (the curves pane's);
+            // any other interp has none to keep.
+            let handles = existing
+                .filter(|_| state.param_interp == ParamInterp::Bezier)
+                .and_then(|k| k.handles);
             let key = ParamKey {
                 value: state.param_buf,
                 interp: state.param_interp,
+                handles,
             };
             state.set_param_key(pid, Some(key));
         }
@@ -1430,4 +1900,203 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         }
     });
     ui.add_space(2.0);
+}
+
+/// GM14: the sheet panel driven through the harness — range select, the
+/// typed entry, the clipboard, the length field, the header toggles and a
+/// long cut.
+#[cfg(test)]
+mod sheetui_tests {
+    use anim_core::ids::ColumnId;
+    use anim_core::xsheet::Exposure;
+    use eframe::egui;
+
+    use super::{parse_length, seconds_plus_frames};
+    use crate::config::Action;
+    use crate::testkit::{CTRL, EditorHarness};
+    use crate::workspace::Pane;
+
+    /// Only the sheet on screen; column A shows drawings keyed at frames
+    /// 0, 4 and 8 of 48, the cursor on frame 0.
+    fn sheet() -> EditorHarness {
+        let mut h = EditorHarness::new();
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::XSheet]);
+        let s = h.state_mut();
+        for f in [4, 8] {
+            s.goto(f);
+            s.new_drawing_at_frame();
+        }
+        s.goto(0);
+        h.run();
+        h.run();
+        h
+    }
+
+    fn cell(h: &EditorHarness, ci: usize, frame: u32) -> egui::Pos2 {
+        h.state().sheet_ui.cell_center(ci, frame).expect("the sheet drew its rows")
+    }
+
+    fn column(h: &EditorHarness, ci: usize) -> ColumnId {
+        h.state().cut().xsheet.columns[ci].id
+    }
+
+    fn shown(h: &EditorHarness, ci: usize, frame: u32) -> Exposure {
+        h.state().cut().xsheet.columns[ci].shown(frame)
+    }
+
+    #[test]
+    fn sheetui_shift_click_selects_the_range_across_columns() {
+        let mut h = sheet();
+        h.state_mut().add_column();
+        h.run();
+        let (a, b) = (column(&h, 0), column(&h, 1));
+        h.click_pos(cell(&h, 0, 2));
+        assert_eq!(h.state().view.active_column, a);
+        assert_eq!(h.state().view.frame, 2);
+        assert_eq!(h.state().sheet_range(), None, "a click is just the cursor's cell");
+        h.set_mods(egui::Modifiers::SHIFT);
+        h.click_pos(cell(&h, 1, 5));
+        h.set_mods(egui::Modifiers::NONE);
+        assert_eq!(h.state().sheet_range(), Some((vec![a, b], 2, 6)));
+        // A drag sweeps a range too.
+        h.drag(cell(&h, 1, 10), cell(&h, 0, 12), 4);
+        assert_eq!(h.state().sheet_range(), Some((vec![a, b], 10, 13)));
+        // Stepping the cursor away collapses the range.
+        h.state_mut().goto(20);
+        assert_eq!(h.state().sheet_range(), None);
+    }
+
+    #[test]
+    fn sheetui_typed_entry_exposes_by_name_in_one_step_and_fires_no_tool() {
+        let mut h = sheet();
+        let c = cell(&h, 0, 2);
+        h.click_pos(c);
+        // The entry rides on the cursor's cell: a second click types.
+        h.click_pos(c);
+        assert!(h.typing(), "the entry took focus\n{}", h.describe());
+        let steps = h.state().engine.position();
+        h.key(egui::Key::Num3);
+        h.key(egui::Key::Enter);
+        let s = h.state();
+        let three = s.cut().drawings.iter().find(|d| d.name == "3").expect("drawing 3 made");
+        assert_eq!(s.cut().xsheet.columns[0].key_at(2), Some(Exposure::Drawing(three.id)));
+        assert_eq!(s.engine.position(), steps + 1, "one entry, one undo step");
+        assert_eq!(s.view.frame, 3, "Enter moves down");
+        assert!(h.typing(), "the entry follows the cursor");
+        // B, 1 and 2 are the brush and two presets — typed, they are text.
+        h.editor_mut().canvas.tool = crate::canvas::CanvasTool::Select;
+        h.key_mods(egui::Modifiers::SHIFT, egui::Key::B);
+        h.key(egui::Key::Num1);
+        h.key(egui::Key::Num2);
+        assert_eq!(h.state().sheet_ui.entry, "B12");
+        assert_eq!(h.editor().canvas.tool, crate::canvas::CanvasTool::Select, "no tool changed");
+        let fired: Vec<Action> = h.performed().iter().map(|(a, _)| *a).collect();
+        assert!(
+            !fired.iter().any(|a| matches!(
+                a,
+                Action::BrushTool | Action::Preset1 | Action::Preset2 | Action::Preset3
+            )),
+            "{fired:?}"
+        );
+        // "x" empties the cell.
+        h.key_mods(CTRL, egui::Key::A);
+        h.type_text("x");
+        h.key(egui::Key::Enter);
+        assert_eq!(h.state().cut().xsheet.columns[0].key_at(3), Some(Exposure::Empty));
+    }
+
+    #[test]
+    fn sheetui_copy_then_paste_on_another_column_reproduces_the_block() {
+        let mut h = sheet();
+        h.state_mut().add_column();
+        h.run();
+        h.click_pos(cell(&h, 0, 2));
+        h.set_mods(egui::Modifiers::SHIFT);
+        h.click_pos(cell(&h, 0, 5));
+        h.set_mods(egui::Modifiers::NONE);
+        h.key_mods(CTRL, egui::Key::C);
+        assert_eq!(h.state().sheet_ui.clipboard.as_ref().map(|b| b.len), Some(4));
+        h.click_pos(cell(&h, 1, 10));
+        let steps = h.state().engine.position();
+        h.key_mods(CTRL, egui::Key::V);
+        for i in 0..4 {
+            assert_eq!(shown(&h, 1, 10 + i), shown(&h, 0, 2 + i), "frame {}", 10 + i);
+        }
+        assert_eq!(shown(&h, 1, 14), Exposure::Empty, "the block's length only");
+        assert_eq!(h.state().engine.position(), steps + 1, "one paste, one undo step");
+        // The system clipboard's Paste event (what Ctrl+V sends in the
+        // real window) lands the same block.
+        h.click_pos(cell(&h, 1, 20));
+        h.event(egui::Event::Paste("1".into()));
+        for i in 0..4 {
+            assert_eq!(shown(&h, 1, 20 + i), shown(&h, 0, 2 + i), "frame {}", 20 + i);
+        }
+    }
+
+    #[test]
+    fn sheetui_length_field_sets_sixty_frames_in_one_step() {
+        let mut h = sheet();
+        let fields = h.text_fields();
+        let i = fields.iter().position(|t| t == "48").expect("the length field holds 48");
+        assert_eq!(fields.iter().filter(|t| *t == "48").count(), 1, "{fields:?}");
+        let steps = h.state().engine.position();
+        h.focus_text_field(i);
+        h.key_mods(CTRL, egui::Key::A);
+        h.type_text("60");
+        h.key(egui::Key::Enter);
+        assert_eq!(h.state().frame_count(), 60);
+        assert_eq!(h.state().engine.position(), steps + 1);
+        assert!(h.text_fields().iter().any(|t| t == "60"), "the field reseeds");
+        // Seconds+frames: 2+12 at 24 fps is 60 too — nothing to do.
+        h.focus_text_field(i);
+        h.key_mods(CTRL, egui::Key::A);
+        h.type_text("2+12");
+        h.key(egui::Key::Enter);
+        assert_eq!(h.state().frame_count(), 60);
+        assert_eq!(h.state().engine.position(), steps + 1);
+    }
+
+    #[test]
+    fn sheetui_header_hide_toggle_drops_the_column_from_the_render() {
+        let mut h = sheet();
+        let a = column(&h, 0);
+        assert!(h.state().cut().render_order().contains(&a));
+        assert_eq!(h.node_toggled("hide column A"), Some(false));
+        let steps = h.state().engine.position();
+        h.click("hide column A");
+        assert!(!h.state().cut().render_order().contains(&a));
+        assert_eq!(h.node_toggled("hide column A"), Some(true));
+        assert_eq!(h.state().engine.position(), steps + 1);
+        h.click("lock column A");
+        assert!(h.state().cut().column_def(a).locked);
+        h.click("kind of column A: Cel");
+        assert_ne!(h.state().cut().column_def(a).kind, anim_core::xsheet::ColumnKind::Cel);
+    }
+
+    #[test]
+    fn sheetui_a_600_frame_cut_lays_out_only_the_visible_rows() {
+        let mut h = sheet();
+        h.state_mut().set_cut_length(600);
+        h.run();
+        let rows = h.state().sheet_ui.rows_shown.clone();
+        assert!(!rows.is_empty() && rows.len() < 80, "{rows:?}");
+        h.state_mut().goto(599);
+        h.run();
+        let rows = h.state().sheet_ui.rows_shown.clone();
+        assert!(rows.len() < 80, "{rows:?}");
+        assert_eq!(h.state().frame_count(), 600);
+    }
+
+    #[test]
+    fn sheetui_length_text_reads_frames_and_seconds_plus_frames() {
+        assert_eq!(parse_length("60", 24), Some(60));
+        assert_eq!(parse_length(" 2+12 ", 24), Some(60));
+        assert_eq!(parse_length("2s+12k", 24), Some(60));
+        assert_eq!(parse_length("3s", 24), Some(72));
+        assert_eq!(parse_length("0", 24), None);
+        assert_eq!(parse_length("two", 24), None);
+        assert_eq!(parse_length("1+x", 24), None);
+        assert_eq!(seconds_plus_frames(60, 24), "2+12");
+        assert_eq!(seconds_plus_frames(48, 24), "2+0");
+    }
 }

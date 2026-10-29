@@ -17,6 +17,7 @@ mod floatcanvas;
 mod forge;
 mod floatwin;
 mod graphcomp;
+mod curves_panel;
 mod history_panel;
 mod icons;
 mod kpp;
@@ -3077,6 +3078,10 @@ impl Editor {
             Action::ColumnKindRef => s.set_column_kind(ColumnKind::Ref),
             Action::ToggleColumnHidden => s.toggle_column_hidden(),
             Action::ToggleColumnLocked => s.toggle_column_locked(),
+            Action::CopyCells => s.copy_cells(),
+            Action::CutCells => s.cut_cells(),
+            Action::PasteCells => s.paste_cells(false),
+            Action::PasteCellsInsert => s.paste_cells(true),
             Action::ToggleOnion => s.view.onion = !s.view.onion,
             Action::ToggleEraser
             | Action::ToggleAlphaLock
@@ -3230,6 +3235,10 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::ColumnKindRef
             | Action::ToggleColumnHidden
             | Action::ToggleColumnLocked
+            // GM14: the cell clipboard edits the sheet too.
+            | Action::CutCells
+            | Action::PasteCells
+            | Action::PasteCellsInsert
     )
 }
 
@@ -3801,6 +3810,10 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             ),
             Pane::Palette => palette_panel::ui(ui, self.state, self.canvas),
             Pane::NodeGraph => nodegraph_panel::ui(ui, self.state),
+            Pane::Curves => {
+                let gesture_safe = !self.canvas.stroke_active();
+                curves_panel::ui(ui, self.state, gesture_safe)
+            }
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -4178,6 +4191,10 @@ impl Editor {
             }
             Action::HoldPlus if s.exposure_here().is_some_and(|(_, next)| next.is_none()) => {
                 Err("the last drawing already holds to the end of the cut")
+            }
+            // GM14: nothing on the sheet clipboard yet.
+            Action::PasteCells | Action::PasteCellsInsert if s.sheet_ui.clipboard.is_none() => {
+                Err("copy cells first")
             }
             _ => Ok(()),
         }

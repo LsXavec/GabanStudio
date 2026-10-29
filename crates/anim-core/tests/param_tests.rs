@@ -9,7 +9,7 @@ use anim_core::ids::*;
 use anim_core::xsheet::{ParamColumn, ParamInterp, ParamKey};
 
 fn key(value: f32, interp: ParamInterp) -> ParamKey {
-    ParamKey { value, interp }
+    ParamKey { value, interp, handles: None }
 }
 
 // ---- Pure resolve semantics -------------------------------------------------

@@ -402,12 +402,227 @@ pub enum ParamInterp {
     /// Smoothstep ease-in-out to the next key's value (the classic camera
     /// slide: gentle start, gentle stop).
     Ease,
+    /// GM14: quadratic ease-in (t²): a gentle start, full speed at the next key.
+    EaseIn,
+    /// GM14: quadratic ease-out (1−(1−t)²): full speed away, a gentle stop.
+    EaseOut,
+    /// GM14: a cubic Bezier through this key's out handle and the next
+    /// key's in handle (see `Handles`; none = auto).
+    Bezier,
+}
+
+/// GM14: how a Bezier key's two handles behave.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum HandleMode {
+    /// Computed from the neighbours (a Catmull-Rom slope, 1/3 of each
+    /// segment long); the stored numbers are ignored.
+    #[default]
+    Auto,
+    /// Both handles on one line: dragging one turns the other.
+    Smooth,
+    /// Both handles level (dv is read as 0).
+    Flat,
+    /// The two handles move independently.
+    Broken,
+}
+
+impl HandleMode {
+    pub const ALL: [HandleMode; 4] = [Self::Auto, Self::Smooth, Self::Flat, Self::Broken];
+
+    /// The store word (also the menu label).
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Smooth => "smooth",
+            Self::Flat => "flat",
+            Self::Broken => "broken",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|m| m.key() == s)
+    }
+}
+
+/// GM14: a Bezier key's handles, relative to the key, in frames (`dt`,
+/// never negative in effect) and value units (`dv`). The in handle sits at
+/// (frame − in_dt, value − in_dv), the out handle at (frame + out_dt,
+/// value + out_dv), so a smooth key has in_dv/in_dt == out_dv/out_dt.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Handles {
+    pub in_dt: f32,
+    pub in_dv: f32,
+    pub out_dt: f32,
+    pub out_dv: f32,
+    pub mode: HandleMode,
+}
+
+impl Handles {
+    pub fn is_finite(&self) -> bool {
+        [self.in_dt, self.in_dv, self.out_dt, self.out_dv]
+            .iter()
+            .all(|v| v.is_finite())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParamKey {
     pub value: f32,
     pub interp: ParamInterp,
+    /// GM14: stored Bezier handles; `None` = auto. Read only on a Bezier
+    /// key (a non-Bezier key's handles are always auto).
+    #[serde(default)]
+    pub handles: Option<Handles>,
+}
+
+impl ParamKey {
+    /// GM14: the store's interp text: "hold", "linear", "ease", "ease_in",
+    /// "ease_out", "bezier", or "bezier:<in_dt>,<in_dv>,<out_dt>,<out_dv>,<mode>"
+    /// for a Bezier key with stored handles (one TEXT column, no new column).
+    pub fn interp_text(&self) -> String {
+        match self.interp {
+            ParamInterp::Hold => "hold".into(),
+            ParamInterp::Linear => "linear".into(),
+            ParamInterp::Ease => "ease".into(),
+            ParamInterp::EaseIn => "ease_in".into(),
+            ParamInterp::EaseOut => "ease_out".into(),
+            ParamInterp::Bezier => match self.handles {
+                None => "bezier".into(),
+                // `{}` on f32 is the shortest text that parses back exactly.
+                Some(h) => format!(
+                    "bezier:{},{},{},{},{}",
+                    h.in_dt,
+                    h.in_dv,
+                    h.out_dt,
+                    h.out_dv,
+                    h.mode.key()
+                ),
+            },
+        }
+    }
+
+    /// The inverse of `interp_text`; `None` for text it never writes.
+    pub fn parse_interp_text(text: &str) -> Option<(ParamInterp, Option<Handles>)> {
+        let interp = match text {
+            "hold" => ParamInterp::Hold,
+            "linear" => ParamInterp::Linear,
+            "ease" => ParamInterp::Ease,
+            "ease_in" => ParamInterp::EaseIn,
+            "ease_out" => ParamInterp::EaseOut,
+            "bezier" => ParamInterp::Bezier,
+            _ => {
+                let parts: Vec<&str> = text.strip_prefix("bezier:")?.split(',').collect();
+                let [a, b, c, d, mode] = parts.as_slice() else {
+                    return None;
+                };
+                let num = |s: &str| s.parse::<f32>().ok().filter(|v| v.is_finite());
+                let h = Handles {
+                    in_dt: num(a)?,
+                    in_dv: num(b)?,
+                    out_dt: num(c)?,
+                    out_dv: num(d)?,
+                    mode: HandleMode::from_key(mode)?,
+                };
+                return Some((ParamInterp::Bezier, Some(h)));
+            }
+        };
+        Some((interp, None))
+    }
+}
+
+/// GM14: one Bezier segment in (frame, value), its time handles clamped
+/// into the segment so frame never runs backwards (with both handle
+/// lengths in [0, L] the curve's frame is monotonic in its parameter).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BezierSeg {
+    pub p: [(f64, f64); 4],
+}
+
+impl BezierSeg {
+    /// From key `a` with its out handle `(dt, dv)` to key `b` with its in
+    /// handle `(dt, dv)`. A handle longer than the segment is scaled back
+    /// along its own direction; a negative length reads as 0.
+    pub fn new(a: (f64, f64), out_h: (f64, f64), in_h: (f64, f64), b: (f64, f64)) -> Self {
+        let l = (b.0 - a.0).max(0.0);
+        let clamp = |(dt, dv): (f64, f64)| {
+            if dt > l && dt > 0.0 {
+                (l, dv * l / dt)
+            } else {
+                (dt.max(0.0), dv)
+            }
+        };
+        let (odt, odv) = clamp(out_h);
+        let (idt, idv) = clamp(in_h);
+        Self {
+            p: [a, (a.0 + odt, a.1 + odv), (b.0 - idt, b.1 - idv), b],
+        }
+    }
+
+    fn cubic(s: f64, c: [f64; 4]) -> f64 {
+        let u = 1.0 - s;
+        u * u * u * c[0] + 3.0 * u * u * s * c[1] + 3.0 * u * s * s * c[2] + s * s * s * c[3]
+    }
+
+    pub fn x_at(&self, s: f64) -> f64 {
+        Self::cubic(s, self.p.map(|q| q.0))
+    }
+
+    pub fn y_at(&self, s: f64) -> f64 {
+        Self::cubic(s, self.p.map(|q| q.1))
+    }
+
+    fn dx_at(&self, s: f64) -> f64 {
+        let x = self.p.map(|q| q.0);
+        let u = 1.0 - s;
+        3.0 * (u * u * (x[1] - x[0]) + 2.0 * u * s * (x[2] - x[1]) + s * s * (x[3] - x[2]))
+    }
+
+    /// The curve parameter where the frame is `x`: Newton steps kept inside
+    /// a shrinking bracket, bisecting whenever a step would leave it.
+    pub fn solve(&self, x: f64) -> f64 {
+        let (x0, x3) = (self.p[0].0, self.p[3].0);
+        if x <= x0 || x3 <= x0 {
+            return 0.0;
+        }
+        if x >= x3 {
+            return 1.0;
+        }
+        let (mut lo, mut hi) = (0.0f64, 1.0f64);
+        let mut s = (x - x0) / (x3 - x0);
+        for _ in 0..64 {
+            let f = self.x_at(s) - x;
+            if f.abs() < 1e-12 * (x3 - x0).max(1.0) {
+                break;
+            }
+            if f < 0.0 {
+                lo = s;
+            } else {
+                hi = s;
+            }
+            let d = self.dx_at(s);
+            let next = if d > 1e-12 { s - f / d } else { f64::NAN };
+            s = if next > lo && next < hi {
+                next
+            } else {
+                0.5 * (lo + hi)
+            };
+            if hi - lo < 1e-15 {
+                break;
+            }
+        }
+        s
+    }
+
+    /// The value at frame `x` (the ends are exact).
+    pub fn value_at(&self, x: f64) -> f64 {
+        if x <= self.p[0].0 {
+            return self.p[0].1;
+        }
+        if x >= self.p[3].0 {
+            return self.p[3].1;
+        }
+        self.y_at(self.solve(x))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -480,10 +695,93 @@ impl ParamColumn {
                     ParamInterp::Hold => return Some(ka.value),
                     ParamInterp::Linear => t,
                     ParamInterp::Ease => t * t * (3.0 - 2.0 * t),
+                    ParamInterp::EaseIn => t * t,
+                    ParamInterp::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+                    ParamInterp::Bezier => {
+                        return Some(self.segment(*fa, *fb).value_at(frame as f64) as f32);
+                    }
                 };
                 Some(ka.value + (kb.value - ka.value) * t)
             }
         }
+    }
+
+    /// GM14: the value at a fractional frame (the curves pane draws with
+    /// it); the same laws as `resolve`, in f64.
+    pub fn sample(&self, x: f64) -> Option<f64> {
+        let (&f0, k0) = self.keys.iter().next()?;
+        if x <= f0 as f64 {
+            return Some(k0.value as f64);
+        }
+        let at = x.floor().min(u32::MAX as f64) as u32;
+        let (&fa, ka) = self.keys.range(..=at).next_back()?;
+        let after = (std::ops::Bound::Excluded(fa), std::ops::Bound::Unbounded);
+        let Some((&fb, kb)) = self.keys.range(after).next() else {
+            return Some(ka.value as f64);
+        };
+        let t = ((x - fa as f64) / (fb - fa) as f64).clamp(0.0, 1.0);
+        let t = match ka.interp {
+            ParamInterp::Hold => return Some(ka.value as f64),
+            ParamInterp::Linear => t,
+            ParamInterp::Ease => t * t * (3.0 - 2.0 * t),
+            ParamInterp::EaseIn => t * t,
+            ParamInterp::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+            ParamInterp::Bezier => return Some(self.segment(fa, fb).value_at(x)),
+        };
+        Some(ka.value as f64 + (kb.value as f64 - ka.value as f64) * t)
+    }
+
+    /// GM14: a key's effective handles: stored ones on a Bezier key (Flat
+    /// read level), otherwise computed — the Catmull-Rom slope through the
+    /// neighbours (one-sided at the ends), each handle 1/3 of its segment.
+    /// Two auto keys therefore make a straight line, exactly Linear.
+    pub fn handles_at(&self, frame: u32) -> Option<Handles> {
+        let key = self.keys.get(&frame)?;
+        let prev = self.keys.range(..frame).next_back();
+        let after = (std::ops::Bound::Excluded(frame), std::ops::Bound::Unbounded);
+        let next = self.keys.range(after).next();
+        let in_len = prev.map_or(0.0, |(f, _)| (frame - f) as f32 / 3.0);
+        let out_len = next.map_or(0.0, |(f, _)| (f - frame) as f32 / 3.0);
+        if key.interp == ParamInterp::Bezier
+            && let Some(h) = key.handles
+            && h.mode != HandleMode::Auto
+        {
+            return Some(if h.mode == HandleMode::Flat {
+                Handles {
+                    in_dv: 0.0,
+                    out_dv: 0.0,
+                    ..h
+                }
+            } else {
+                h
+            });
+        }
+        let slope = match (prev, next) {
+            (Some((fp, kp)), Some((fn_, kn))) => (kn.value - kp.value) / (fn_ - fp) as f32,
+            (None, Some((fn_, kn))) => (kn.value - key.value) / (fn_ - frame) as f32,
+            (Some((fp, kp)), None) => (key.value - kp.value) / (frame - fp) as f32,
+            (None, None) => 0.0,
+        };
+        Some(Handles {
+            in_dt: in_len,
+            in_dv: slope * in_len,
+            out_dt: out_len,
+            out_dv: slope * out_len,
+            mode: HandleMode::Auto,
+        })
+    }
+
+    /// GM14: the Bezier segment from the key at `fa` to the key at `fb`.
+    pub fn segment(&self, fa: u32, fb: u32) -> BezierSeg {
+        let point = |f: u32| (f as f64, self.keys.get(&f).map_or(0.0, |k| k.value as f64));
+        let ha = self.handles_at(fa);
+        let hb = self.handles_at(fb);
+        BezierSeg::new(
+            point(fa),
+            ha.map_or((0.0, 0.0), |h| (h.out_dt as f64, h.out_dv as f64)),
+            hb.map_or((0.0, 0.0), |h| (h.in_dt as f64, h.in_dv as f64)),
+            point(fb),
+        )
     }
 }
 

@@ -33,6 +33,8 @@ pub enum Pane {
     Viewer(u8),
     /// GM3: every undo step, current one marked; click one to go there.
     History,
+    /// GM14: the param columns' values over frames, as editable curves.
+    Curves,
 }
 
 impl Pane {
@@ -48,6 +50,7 @@ impl Pane {
         Pane::Palette,
         Pane::NodeGraph,
         Pane::History,
+        Pane::Curves,
     ];
 
     /// THE FORGE ROOM (PSD-brush-forge, owner amendment 2026-08-19:
@@ -75,6 +78,7 @@ impl Pane {
             Pane::Palette => "Palette".into(),
             Pane::NodeGraph => "Node Graph".into(),
             Pane::History => "History".into(),
+            Pane::Curves => "Curves".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }
