@@ -379,6 +379,15 @@ pub struct AppState {
     /// (None = not handed yet), so the paste key's text can tell our own
     /// pixels from text copied elsewhere since.
     pub pixel_clip_text: Option<String>,
+    /// GM7 CHIP PICK: the active chip — a role of the active character an
+    /// exact eyedrop matched (None = the brush colour is no chip).
+    pub active_chip: Option<usize>,
+    /// GM7: the swatch board's "Recolour paint" offer after a chip edit.
+    pub recolour_offer: Option<crate::paintcheck::RecolourOffer>,
+    /// GM7: the paint check pane — its scope, worker job and findings.
+    pub paintcheck: crate::paintcheck::PaintCheck,
+    /// GM7: the Convert colours to sRGB DANGER confirm is open.
+    pub convert_confirm: bool,
 }
 
 impl AppState {
@@ -455,6 +464,10 @@ impl AppState {
             curves: Default::default(),
             pixel_clip: None,
             pixel_clip_text: None,
+            active_chip: None,
+            recolour_offer: None,
+            paintcheck: Default::default(),
+            convert_confirm: false,
         }
     }
 
@@ -539,6 +552,10 @@ impl AppState {
             curves: Default::default(),
             pixel_clip: None,
             pixel_clip_text: None,
+            active_chip: None,
+            recolour_offer: None,
+            paintcheck: Default::default(),
+            convert_confirm: false,
         })
     }
 
@@ -3489,6 +3506,140 @@ impl AppState {
     pub fn palettes_mut(&mut self) -> &mut crate::palette::Palettes {
         self.meta_dirty = true;
         &mut self.palettes
+    }
+
+    // ---- GM7: ink and paint -------------------------------------------------
+
+    /// GM7 CHIP PICK: the active character's role whose chip is exactly
+    /// `rgb` (the first, when two share a colour).
+    pub fn chip_of(&self, rgb: [u8; 3]) -> Option<usize> {
+        let ch = self.palettes.characters.get(self.active_character)?;
+        ch.roles.iter().position(|r| r.color[..3] == rgb)
+    }
+
+    /// GM7 RECOLOUR: a chip (`role` of `character`) went from `from` to
+    /// `to` — offer to repaint the paint that used it. A drag through the
+    /// wheel keeps the ORIGINAL colour as the one to replace.
+    pub fn offer_recolour(&mut self, character: usize, role: usize, from: [u8; 4], to: [u8; 4]) {
+        let from = match &self.recolour_offer {
+            Some(o) if o.character == character && o.role == role => o.from,
+            _ => from,
+        };
+        let name = self
+            .palettes
+            .characters
+            .get(character)
+            .and_then(|c| c.roles.get(role))
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        self.recolour_offer = (from[..3] != to[..3]).then(|| crate::paintcheck::RecolourOffer {
+            character,
+            role,
+            name,
+            from,
+            to,
+        });
+    }
+
+    /// GM7 RECOLOUR: every opaque pixel of the offer's old chip in `scope`
+    /// becomes the new chip — Color / Shadow / Highlight / Custom layers
+    /// only, never a line role, as ONE undo step.
+    pub fn recolour(&mut self, scope: anim_core::color::RecolourScope) -> bool {
+        let Some(o) = self.recolour_offer.clone() else {
+            return false;
+        };
+        let cmds = anim_core::color::recolour(&self.engine.project, scope, o.from, o.to);
+        if cmds.is_empty() {
+            self.refuse(format!("nothing to recolour — no paint of '{}''s old colour there", o.name));
+            return false;
+        }
+        let n = cmds.len();
+        let r = self.engine.apply(format!("recolour paint '{}'", o.name), cmds);
+        let ok = r.is_ok();
+        self.report(r, &format!("recoloured '{}' on {n} layer(s)", o.name));
+        if ok {
+            self.recolour_offer = None;
+        }
+        ok
+    }
+
+    /// GM7 REFILL (Shift+click with Fill): the clicked flat — bounded by
+    /// the drawing's visible line art — becomes `chip`; with `all`
+    /// (Ctrl+Shift+click), every texel of the clicked colour on the layer.
+    /// `under_px` takes the same colour tucked under the line along.
+    pub fn refill_at(&mut self, seed: (i32, i32), chip: [u8; 4], all: bool, under_px: u32) {
+        if self.active_layer_props().is_some_and(|p| !p.visible) {
+            self.status = format!(
+                "layer '{}' is hidden — press A to switch or click its eye",
+                self.active_layer_name()
+            );
+            return;
+        }
+        if self.refuse_if_locked() {
+            return;
+        }
+        let (Some(did), Some(layer)) = (self.own_key_drawing(), self.active_layer_id()) else {
+            self.status =
+                "held/blank frame — a refill edits a frame's OWN cel (draw here first)".into();
+            return;
+        };
+        let (w, h) = (self.engine.project.width, self.engine.project.height);
+        let color = self.engine.project.color_law.premultiplied(chip);
+        let target = self.active_layer_tiles().cloned().unwrap_or_default();
+        let result = if all {
+            anim_core::color::replace_all(&target, seed, w, h, color).map(|(d, _)| d)
+        } else {
+            let bound = self
+                .cut()
+                .drawing(did)
+                .map(|d| {
+                    let mut lines = d.clone();
+                    lines.layers.retain(|l| l.props.role.is_line() && l.id != layer);
+                    lines.flatten()
+                })
+                .unwrap_or_default();
+            anim_core::color::refill(&target, &bound, seed, w, h, under_px, color)
+        };
+        use anim_core::color::RefillRefusal as RR;
+        match result {
+            Ok(diff) => {
+                let label = if all { "replace colour" } else { "refill" };
+                self.commit_region_edit(label, did, layer, diff);
+            }
+            Err(RR::OffPaper) => self.status = "clicked outside the paper".into(),
+            Err(RR::Bare) => self.refuse("nothing to refill — no paint there (a plain fill paints bare paper)"),
+            Err(RR::OnLine) => self.refuse("clicked on the line art — refill the paint beside it"),
+            Err(RR::Unchanged) => self.status = "that paint already is the brush colour".into(),
+        }
+    }
+
+    /// GM7 CONVERT (Convert colours to sRGB…): a saved Legacy project
+    /// becomes Srgb. The current document goes to
+    /// `<stem>.pre-srgb.animproj` beside its file FIRST; every texel is then
+    /// remapped so flat chips export as the chip, the history is cleared
+    /// (its steps hold the old values) and the document is dirty — the
+    /// user's file is untouched until Save. Ok = the backup's path.
+    pub fn convert_to_srgb(&mut self) -> Result<PathBuf, String> {
+        if self.engine.project.color_law == anim_core::color::ColorLaw::Srgb {
+            return Err("this project already stores exact sRGB chips".into());
+        }
+        let Some(path) = self.file_path.clone() else {
+            return Err("save the project first — the backup goes beside its file".into());
+        };
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("project");
+        let backup = path.with_file_name(format!("{stem}.pre-srgb.animproj"));
+        let snap = self.snapshot_project();
+        let template = path.is_file().then_some(path.as_path());
+        anim_core::store::save_atomic_from(&snap, &backup, template, false)
+            .map_err(|e| format!("the backup could not be written ({e})"))?;
+        anim_core::color::convert_legacy_to_srgb(&mut self.engine.project);
+        self.engine.clear_history();
+        self.engine.evaluator = anim_core::eval::Evaluator::new();
+        self.meta_dirty = true;
+        self.doc_gen = self.doc_gen.wrapping_add(1);
+        self.history_moved();
+        self.status = format!("colours converted to sRGB — backup {}", backup.display());
+        Ok(backup)
     }
 
     /// GM2: write the document to `path` on a worker thread (NEVER-DO 6 —

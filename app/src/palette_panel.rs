@@ -9,6 +9,7 @@
 //! Presentation only: `CharacterPalette`/`ColorRole` serde is untouched
 //! (the project format is NEVER-DO 1 territory).
 
+use anim_core::color::RecolourScope;
 use eframe::egui;
 use egui::{Color32, Sense, vec2};
 
@@ -37,6 +38,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     if n_chars == 0 {
         ui.label(egui::RichText::new("no characters yet — latch EDIT MODEL and add one").color(plate::legend_dim()));
     }
+    recolour_offer_ui(ui, state);
     ui.add_space(4.0);
     let edit = state.palette_edit;
     let ci = state.active_character.min(n_chars.saturating_sub(1));
@@ -44,6 +46,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     // GM2: palette edits live outside the undo system — they mark the
     // document dirty directly.
     let mut model_changed = false;
+    // GM7: a chip the wheel changed (role, old, new) — offers a recolour —
+    // and the pot a click armed (the active chip).
+    let mut chip_changed: Option<(usize, [u8; 4], [u8; 4])> = None;
+    let mut armed_pot: Option<usize> = None;
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -92,6 +98,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                             }
                             if presp.clicked() {
                                 canvas.brush_color = role.color;
+                                armed_pot = Some(ri);
                             }
                             let key_hint = if ri < 8 {
                                 format!(" · key {} with fill", ri + 1)
@@ -104,7 +111,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                                 // here; edits propagate everywhere.
                                 let mut rgb = [role.color[0], role.color[1], role.color[2]];
                                 if ui.color_edit_button_srgb(&mut rgb).changed() {
+                                    let old = role.color;
                                     role.color = [rgb[0], rgb[1], rgb[2], role.color[3]];
+                                    chip_changed = Some((ri, old, role.color));
                                     model_changed = true;
                                 }
                                 if ui
@@ -148,6 +157,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     if model_changed {
         state.meta_dirty = true;
     }
+    if let Some((ri, old, new)) = chip_changed {
+        state.offer_recolour(ci, ri, old, new);
+    }
+    if armed_pot.is_some() {
+        state.active_chip = armed_pot;
+    }
 
     // Footer: the EDIT MODEL latch — deliberately keyless (model edits are
     // rare and global; they cost a click).
@@ -179,4 +194,34 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             state.meta_dirty = true;
         }
     }
+}
+
+/// GM7 RECOLOUR: after a chip changed, offer to repaint the paint of its
+/// old colour — this cut, this scene or the whole project, one undo step
+/// each (paint roles only; line art is never touched).
+fn recolour_offer_ui(ui: &mut egui::Ui, state: &mut AppState) {
+    let Some(o) = state.recolour_offer.clone() else {
+        return;
+    };
+    let hex = |c: [u8; 4]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+    plate::legend(ui, "recolour paint");
+    ui.label(
+        egui::RichText::new(format!("'{}' {} → {}", o.name, hex(o.from), hex(o.to)))
+            .color(plate::legend_dim()),
+    );
+    let (at, scene) = (state.at(), state.view.scene);
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Recolour this cut").clicked() {
+            state.recolour(RecolourScope::Cut(at));
+        }
+        if ui.button("Recolour this scene").clicked() {
+            state.recolour(RecolourScope::Scene(scene));
+        }
+        if ui.button("Recolour project").clicked() {
+            state.recolour(RecolourScope::Project);
+        }
+        if ui.button("Keep paint").on_hover_text("leave the paint as it is").clicked() {
+            state.recolour_offer = None;
+        }
+    });
 }

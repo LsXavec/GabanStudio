@@ -4,9 +4,11 @@
 //! Presets here are a minimal starter set of standard resolutions; the full
 //! Krita-style saved/custom preset library is a later feature.
 
+use anim_core::color::ColorLaw;
 use eframe::egui;
 
 use crate::canvas::{DEFAULT_PAPER_H, DEFAULT_PAPER_W};
+use crate::doc::AppState;
 use crate::plate;
 
 /// (label, width, height). Width 0 = "Custom" (leave the fields as the user set).
@@ -50,6 +52,25 @@ impl Default for NewProjectForm {
             dpi: 300,
             preset: 2, // Full HD 1080p
         }
+    }
+}
+
+impl NewProjectForm {
+    /// The project this form creates. GM7 (D8): a NEW project stores exact
+    /// sRGB chips; `AppState::new_project` and the engine stay Legacy (old
+    /// files, and the tests that pin v0.3 pixels).
+    pub fn new_state(&self) -> AppState {
+        // AUDIT [31] follow-on: the name field now starts EMPTY so its
+        // hint is reachable, so an untyped name must still produce a
+        // named cut rather than a blank one.
+        let name = match self.name.trim() {
+            "" => "Untitled".to_string(),
+            n => n.to_string(),
+        };
+        let mut state =
+            AppState::new_project(name, self.width, self.height, self.fps, self.dpi as f32);
+        state.engine.project.color_law = ColorLaw::Srgb;
+        state
     }
 }
 

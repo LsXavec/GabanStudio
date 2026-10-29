@@ -28,6 +28,7 @@ mod net;
 mod newproject;
 mod nodegraph_panel;
 mod paint;
+mod paintcheck;
 mod palette;
 mod palette_panel;
 mod plate;
@@ -44,6 +45,7 @@ mod workspace;
 mod worksafe;
 mod xsheet_panel;
 
+use anim_core::color::ColorLaw;
 use anim_core::xsheet::ColumnKind;
 use canvas::{PenPhase, PenSample};
 use config::{
@@ -2879,6 +2881,10 @@ impl Editor {
             // cursor's cell (the sheet comes forward and its entry takes
             // the keys on its next frame).
             Action::ShowCurves => self.open_pane(Pane::Curves),
+            // GM7: the paint check pane, and the colour-law migration's
+            // DANGER confirm (the convert itself runs from the confirm).
+            Action::ShowPaintCheck => self.open_pane(Pane::PaintCheck),
+            Action::ConvertColorsToSrgb => self.state.convert_confirm = true,
             Action::FrameCurves => curves_panel::frame_stored(&mut self.state),
             Action::TypeIntoCell => {
                 self.open_pane(Pane::XSheet);
@@ -3232,6 +3238,8 @@ impl Editor {
             | Action::RoomEdit
             | Action::ShowCurves
             | Action::FrameCurves
+            | Action::ShowPaintCheck
+            | Action::ConvertColorsToSrgb
             | Action::TypeIntoCell => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
@@ -3265,6 +3273,8 @@ fn is_chrome(action: Action) -> bool {
             | Action::RoomEdit
             | Action::ShowCurves
             | Action::FrameCurves
+            | Action::ShowPaintCheck
+            | Action::ConvertColorsToSrgb
             | Action::TypeIntoCell
     )
 }
@@ -3909,6 +3919,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 let gesture_safe = !self.canvas.stroke_active();
                 curves_panel::ui(ui, self.state, gesture_safe)
             }
+            Pane::PaintCheck => paintcheck::ui(ui, self.state, self.canvas),
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -4060,20 +4071,8 @@ impl Editor {
         rs: Option<&RenderState>,
         data_dir: Option<&std::path::Path>,
     ) -> Self {
-        // AUDIT [31] follow-on: the name field now starts EMPTY so its
-        // hint is reachable, so an untyped name must still produce a
-        // named cut rather than a blank one.
-        let name = match form.name.trim() {
-            "" => "Untitled".to_string(),
-            n => n.to_string(),
-        };
-        let state = AppState::new_project(
-            name,
-            form.width,
-            form.height,
-            form.fps,
-            form.dpi as f32,
-        );
+        // GM7: the form's project is an Srgb one (newproject.rs).
+        let state = form.new_state();
         let paint = rs.map(|rs| PaintLayer::new(rs, form.width, form.height));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, form.width, form.height));
         let (workspaces, load_notes) = Self::load_workspaces(data_dir);
@@ -4245,6 +4244,14 @@ impl Editor {
             }
             Action::Save | Action::SaveAs if guest => Err("the host owns the file"),
             Action::Open if guest => Err("leave the room first to open your own file"),
+            // GM7: the migration rewrites every texel and clears history.
+            Action::ConvertColorsToSrgb if shared => Err("leave the room first — it rewrites every cel"),
+            Action::ConvertColorsToSrgb if s.engine.project.color_law == ColorLaw::Srgb => {
+                Err("this project already stores exact sRGB chips")
+            }
+            Action::ConvertColorsToSrgb if s.file_path.is_none() => {
+                Err("save the project first — the backup goes beside its file")
+            }
             a if stroke_guarded(a) && self.canvas.stroke_active() => {
                 Err("finish the stroke first")
             }
@@ -4501,6 +4508,7 @@ impl Editor {
             }
         }
         self.leave_modal(ctx);
+        self.convert_modal(ctx);
         // The title is rebuilt only when what it shows changes.
         let dirty = self.state.is_dirty();
         let stale = self.title_from.as_ref().is_none_or(|(d, f, n)| {
@@ -4515,6 +4523,56 @@ impl Editor {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(window_title(&self.state)));
         }
         self.autosave_tick(ctx);
+    }
+
+    /// GM7: Convert colours to sRGB — a held DANGER that says every step
+    /// before it runs (D8).
+    fn convert_modal(&mut self, ctx: &egui::Context) {
+        if !self.state.convert_confirm {
+            return;
+        }
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("gm7_convert_colours")).show(ctx, |ui| {
+            plate::legend(ui, "convert colours to sRGB");
+            ui.label("Store this project's colours as exact sRGB chips?");
+            for step in [
+                "1. A backup of the project as it is now goes to <name>.pre-srgb.animproj beside it.",
+                "2. Every painted pixel is remapped, so flat chips export as exactly the chip.",
+                "3. The undo history is cleared (its steps hold the old values).",
+                "4. The project is left unsaved — Save writes it.",
+            ] {
+                ui.label(egui::RichText::new(step).color(plate::legend_dim()));
+            }
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if plate::danger_hint(
+                    ui,
+                    "Convert",
+                    "rewrites every cel's colours and clears the undo history",
+                ) {
+                    choice = Some(true);
+                }
+                if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                    choice = Some(false);
+                }
+            });
+            ui.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+                    choice = Some(false);
+                }
+            });
+        });
+        match choice {
+            Some(true) => {
+                self.state.convert_confirm = false;
+                self.canvas.finish_gesture(&mut self.state);
+                if let Err(why) = self.state.convert_to_srgb() {
+                    self.state.refuse(format!("refused — {why}"));
+                }
+            }
+            Some(false) => self.state.convert_confirm = false,
+            None => {}
+        }
     }
 
     fn leave_modal(&mut self, ctx: &egui::Context) {
@@ -5920,6 +5978,7 @@ impl Editor {
                                     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                                 let rx = export::spawn_png_sequence(
                                     cut,
+                                    self.state.engine.project.color_law,
                                     w,
                                     h,
                                     dir,
@@ -5961,6 +6020,7 @@ impl Editor {
                                     std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                                 let rx = export::spawn_mp4(
                                     cut,
+                                    self.state.engine.project.color_law,
                                     w,
                                     h,
                                     fps,
@@ -6004,6 +6064,8 @@ impl Editor {
                         }
                     }
                     ui.separator();
+                    // GM7: the colour-law migration (a DANGER confirm).
+                    self.menu_item(ui, Action::ConvertColorsToSrgb);
                     self.menu_item(ui, Action::Settings);
                     self.menu_item(ui, Action::Quit);
                 });
@@ -6371,8 +6433,9 @@ impl Editor {
                         // The Brush window is RETIRED (owner 2026-08-17):
                         // its settings live on the canvas deck + right rail.
                         // GM14: the Curves pane is the registry's own item
-                        // (Window ▸ Curves (graph editor), listed below).
-                        if matches!(*pane, Pane::Brush | Pane::Curves) {
+                        // (Window ▸ Curves (graph editor), listed below);
+                        // GM7: so is Window ▸ Paint check.
+                        if matches!(*pane, Pane::Brush | Pane::Curves | Pane::PaintCheck) {
                             continue;
                         }
                         let present = self.dock.iter_all_tabs().any(|(_, t)| t == pane);
@@ -6671,7 +6734,8 @@ impl Editor {
                     Ok(v) => {
                         let hash = v.hash();
                         let cut = self.state.cut();
-                        viewer::GraphView::Ready(g.execute(hash, cut, frame, p))
+                        let law = self.state.engine.project.color_law;
+                        viewer::GraphView::Ready(g.execute(hash, cut, law, frame, p))
                     }
                     Err(_) => viewer::GraphView::EvalFailed,
                 }

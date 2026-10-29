@@ -19,6 +19,7 @@
 
 use std::collections::HashSet;
 
+use crate::color::ColorLaw;
 use crate::graph::{BlendMode, NodeKind};
 use crate::ids::NodeId;
 use crate::model::Cut;
@@ -116,7 +117,21 @@ pub fn graph_composite_pixel(
     x: u32,
     y: u32,
 ) -> Option<[f32; 4]> {
-    let acc = graph_composite(cut, frame, width, height)?;
+    graph_composite_pixel_law(cut, ColorLaw::Legacy, frame, width, height, x, y)
+}
+
+/// [`graph_composite_pixel`] under the project's colour law (D8: a Solid
+/// node's chip goes through [`ColorLaw::encode`]).
+pub fn graph_composite_pixel_law(
+    cut: &Cut,
+    law: ColorLaw,
+    frame: u32,
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+) -> Option<[f32; 4]> {
+    let acc = graph_composite(cut, law, frame, width, height)?;
     let i = ((y * width + x) * 4) as usize;
     acc.get(i..i + 4)?.try_into().ok()
 }
@@ -187,9 +202,9 @@ pub fn vector_stroke_cels(cut: &Cut) -> usize {
 
 // ---- Graph composite --------------------------------------------------------
 
-/// sRGB→linear EOTF for node colours. MUST match the app's brush-dab
-/// conversion (`linear_rgba` in canvas.rs) so a Solid node renders the same
-/// pixels as painting that colour; alpha stays straight.
+/// sRGB→linear EOTF: the Legacy law's chip encoding
+/// ([`ColorLaw::encode`], which the brush, the fills and a Solid node all
+/// go through, so a Solid renders the same pixels as painting its colour).
 pub fn srgb_to_linear(v: u8) -> f32 {
     let s = v as f32 / 255.0;
     if s <= 0.04045 {
@@ -203,13 +218,19 @@ pub fn srgb_to_linear(v: u8) -> f32 {
 /// linear channel back to the chip byte that paints it (the eyedropper's
 /// way home). Every byte round-trips.
 pub fn linear_to_srgb(v: f32) -> u8 {
+    (linear_to_srgb_f(v).clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// The same OETF unquantised: what [`linear_to_srgb`] rounds to a byte,
+/// and the per-texel remap of the Legacy→sRGB conversion
+/// ([`crate::color::convert_legacy_to_srgb`]).
+pub fn linear_to_srgb_f(v: f32) -> f32 {
     let v = v.clamp(0.0, 1.0);
-    let s = if v <= 0.0031308 {
+    if v <= 0.0031308 {
         v * 12.92
     } else {
         1.055 * v.powf(1.0 / 2.4) - 0.055
-    };
-    (s.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
 }
 
 /// Blend `top` over `bottom` per `mode`, premultiplied, in place on `bottom`.
@@ -329,6 +350,7 @@ fn transform_image(
 /// the visiting set keeps a corrupted file from recursing forever.
 fn render_node(
     cut: &Cut,
+    law: ColorLaw,
     id: NodeId,
     frame: u32,
     width: u32,
@@ -345,7 +367,7 @@ fn render_node(
     };
     let input = |slot: usize, visiting: &mut HashSet<NodeId>| -> Vec<f32> {
         match node.inputs.get(slot).copied().flatten() {
-            Some((src, _pin)) => render_node(cut, src, frame, width, height, visiting),
+            Some((src, _pin)) => render_node(cut, law, src, frame, width, height, visiting),
             None => empty(),
         }
     };
@@ -370,13 +392,8 @@ fn render_node(
             acc
         }
         NodeKind::Solid { rgba } => {
-            let a = rgba[3] as f32 / 255.0;
-            let px = [
-                srgb_to_linear(rgba[0]) * a,
-                srgb_to_linear(rgba[1]) * a,
-                srgb_to_linear(rgba[2]) * a,
-                a,
-            ];
+            // D8: the chip enters through the project's law, like paint.
+            let px = law.premultiplied(*rgba);
             let mut acc = empty();
             for chunk in acc.chunks_exact_mut(4) {
                 chunk.copy_from_slice(&px);
@@ -408,16 +425,35 @@ fn render_node(
 /// Execute `cut.graph` at `frame` into a premultiplied f32 frame.
 /// `None` when no output node is wired — the caller falls back to the
 /// column-stack composite.
-fn graph_composite(cut: &Cut, frame: u32, width: u32, height: u32) -> Option<Vec<f32>> {
+fn graph_composite(
+    cut: &Cut,
+    law: ColorLaw,
+    frame: u32,
+    width: u32,
+    height: u32,
+) -> Option<Vec<f32>> {
     let output = cut.graph.output?;
     let mut visiting = HashSet::new();
-    Some(render_node(cut, output, frame, width, height, &mut visiting))
+    Some(render_node(cut, law, output, frame, width, height, &mut visiting))
 }
 
 /// Graph-path render to straight RGBA8 over transparent (PNG-with-alpha).
-/// `None` = no wired graph output; use [`render_frame`] instead.
+/// `None` = no wired graph output; use [`render_frame`] instead. Legacy
+/// law; [`render_graph_frame_law`] takes the project's.
 pub fn render_graph_frame(cut: &Cut, frame: u32, width: u32, height: u32) -> Option<Vec<u8>> {
-    graph_composite(cut, frame, width, height).map(|acc| to_straight_rgba8(&acc))
+    render_graph_frame_law(cut, ColorLaw::Legacy, frame, width, height)
+}
+
+/// [`render_graph_frame`] under a colour law (D8). Stored values export
+/// the same under both laws; only a Solid node's chip differs.
+pub fn render_graph_frame_law(
+    cut: &Cut,
+    law: ColorLaw,
+    frame: u32,
+    width: u32,
+    height: u32,
+) -> Option<Vec<u8>> {
+    graph_composite(cut, law, frame, width, height).map(|acc| to_straight_rgba8(&acc))
 }
 
 /// Graph-path render over an opaque background (video).
@@ -429,5 +465,17 @@ pub fn render_graph_frame_over(
     height: u32,
     bg: [u8; 3],
 ) -> Option<Vec<u8>> {
-    graph_composite(cut, frame, width, height).map(|acc| to_rgba8_over(&acc, bg))
+    render_graph_frame_over_law(cut, ColorLaw::Legacy, frame, width, height, bg)
+}
+
+/// [`render_graph_frame_over`] under a colour law (D8).
+pub fn render_graph_frame_over_law(
+    cut: &Cut,
+    law: ColorLaw,
+    frame: u32,
+    width: u32,
+    height: u32,
+    bg: [u8; 3],
+) -> Option<Vec<u8>> {
+    graph_composite(cut, law, frame, width, height).map(|acc| to_rgba8_over(&acc, bg))
 }

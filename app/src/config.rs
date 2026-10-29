@@ -129,6 +129,9 @@ pub enum Action {
     PinToLightTable,
     ShiftTrace,
     ResetShift,
+    // GM7: ink and paint — the colour-law migration and the paint check.
+    ConvertColorsToSrgb,
+    ShowPaintCheck,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -341,6 +344,8 @@ impl Action {
         Action::PinToLightTable,
         Action::ShiftTrace,
         Action::ResetShift,
+        Action::ConvertColorsToSrgb,
+        Action::ShowPaintCheck,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -451,6 +456,8 @@ impl Action {
             Action::PinToLightTable => "Pin to light table",
             Action::ShiftTrace => "Shift & trace",
             Action::ResetShift => "Reset shift & trace",
+            Action::ConvertColorsToSrgb => "Convert colours to sRGB…",
+            Action::ShowPaintCheck => "Paint check",
         }
     }
 
@@ -567,6 +574,8 @@ impl Action {
             PinToLightTable => "Pin or unpin this frame's drawing on the light table: it shows on every frame.",
             ShiftTrace => "Shift & trace: drag moves the selected light-table ghost, Shift+drag turns it (view only).",
             ResetShift => "Put every shifted light-table ghost back where it belongs.",
+            ConvertColorsToSrgb => "Store this saved project's colours as exact sRGB chips (a backup is written first).",
+            ShowPaintCheck => "Open the Paint check pane: unpainted holes and off-palette colours, click to jump.",
         }
     }
 
@@ -574,7 +583,9 @@ impl Action {
     pub fn group(self) -> Group {
         use Action::*;
         match self {
-            NewProject | Open | Save | SaveAs | Settings | Quit => Group::File,
+            NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb => {
+                Group::File
+            }
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
@@ -597,7 +608,7 @@ impl Action {
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
             RoomLayout | RoomDrawing | RoomFinishing | RoomEdit => Group::Room,
-            ResetLayout | ShowCurves => Group::Window,
+            ResetLayout | ShowCurves | ShowPaintCheck => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
         }
     }
@@ -686,6 +697,8 @@ impl Action {
             ResetShift => "View/Light table/Reset shift",
             FrameCurves => "View/Frame curves",
             ShowCurves => "Window/Curves (graph editor)",
+            ShowPaintCheck => "Window/Paint check",
+            ConvertColorsToSrgb => "File/Convert colours to sRGB…",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             // Each item is its room detent's Stage::name (a test holds them
@@ -786,6 +799,9 @@ impl Action {
             PinToLightTable => &["light table", "pin", "ghost pin", "tracing"],
             ShiftTrace => &["shift and trace", "light table", "tracing"],
             ResetShift => &["shift and trace", "light table", "reset"],
+            // GM7: the ink-and-paint words.
+            ConvertColorsToSrgb => &["colour law", "color space", "srgb", "convert colours"],
+            ShowPaintCheck => &["paint check", "holes", "unpainted", "stray colours"],
             _ => &[],
         }
     }
@@ -1033,7 +1049,7 @@ impl Action {
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomEdit | ShowCurves | InterpHold | InterpLinear | InterpEase
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
-            | HandlesFlat | HandlesBroken => None,
+            | HandlesFlat | HandlesBroken | ConvertColorsToSrgb | ShowPaintCheck => None,
         }
     }
 }

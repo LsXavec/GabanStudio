@@ -170,6 +170,8 @@ pub fn save(project: &Project, path: &Path) -> Result<()> {
     put_meta.execute(("height", project.height.to_string()))?;
     put_meta.execute(("dpi", project.dpi.to_string()))?;
     put_meta.execute(("next_id", project.next_id.to_string()))?;
+    // D8: how chips are stored. A file without the key loads as Legacy.
+    put_meta.execute(("color_law", project.color_law.key()))?;
     // Opaque app-owned data (character palettes, etc.) under an `app.`
     // prefix — see the `app_meta` doc comment on Project. NOTE: an OLDER
     // build's save() doesn't know this prefix and only re-inserts the keys
@@ -464,6 +466,13 @@ pub fn load(path: &Path) -> Result<Project> {
     }
     if let Some(d) = get_meta_opt("dpi").and_then(|s| s.parse().ok()) {
         project.dpi = d;
+    }
+    // D8 colour law: absent = Legacy (every file before GM7). An unknown
+    // value is a newer law this build can't render faithfully — refuse it
+    // rather than show the wrong colours.
+    if let Some(key) = get_meta_opt("color_law") {
+        project.color_law = crate::color::ColorLaw::from_key(&key)
+            .ok_or_else(|| EngineError::Corrupt(format!("unknown colour law '{key}'")))?;
     }
     // Opaque app-owned data: every `app.`-prefixed meta row, prefix
     // stripped. Absent entirely in files saved before this existed — an

@@ -2411,3 +2411,20 @@ what was not verified.
   Left: a sheet-cell context menu for the kind, the chart glyph on the canvas itself, Copy / Paste through
   the system clipboard events. Not verified: the real window, the GPU light-table slot and its shifted tiles
   on screen.
+- 2026-10-29 — The ink and paint part (GM7). Engine: `color.rs` with `ColorLaw` (Legacy / Srgb) kept in
+  `meta.color_law` (a file without it loads Legacy; an unknown value is refused as corrupt), the CPU Solid
+  node and the GPU graph compositor's Solid both encoding by the law (`render_graph_frame_law`), the
+  Legacy-to-sRGB convert (exact Legacy chip channels snap to the Srgb chip, other texels go through the
+  float OETF, images untouched), `recolour` over a cut, scene or project (Color / Shadow / Highlight /
+  Custom roles, locked layers and columns skipped, one PaintTiles per layer), `refill` (bounded by the
+  cel's line layers, grown by the fill grow) and `replace_all`, and `paint_check` (holes and stray colours,
+  each drawing read once at its first frame in range). App: New Project makes Srgb projects (the engine and
+  `AppState::new_project` stay Legacy); the brush and fills ink through `CanvasView::ink`, the eyedropper
+  decodes by the law and arms the matching chip; Shift+click with Fill refills, Ctrl+Shift+click replaces
+  every match; a chip edit on the swatch board offers Recolour this cut / this scene / project / Keep
+  paint; File ▸ Convert colours to sRGB… (held DANGER; the backup `<stem>.pre-srgb.animproj` beside the
+  file, history cleared, the document dirty, the user's file untouched); Window ▸ Paint check (whole cut or
+  frames, hole size, chips of every character or one; a worker thread; a finding jumps to its frame, column
+  and box). 17 `color_tests`, 6 `inkpaint_*` app tests. Left: the "show unpainted" overlay and palette JSON
+  import / export (stretch). Not verified: the real window, the GPU Solid on screen, and the Shift /
+  Ctrl+Shift fill click through the harness (the engine side is tested).

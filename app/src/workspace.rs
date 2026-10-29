@@ -35,6 +35,8 @@ pub enum Pane {
     History,
     /// GM14: the param columns' values over frames, as editable curves.
     Curves,
+    /// GM7: holes and stray colours across a cut, found on a worker.
+    PaintCheck,
 }
 
 impl Pane {
@@ -51,6 +53,7 @@ impl Pane {
         Pane::NodeGraph,
         Pane::History,
         Pane::Curves,
+        Pane::PaintCheck,
     ];
 
     /// THE FORGE ROOM (PSD-brush-forge, owner amendment 2026-08-19:
@@ -79,6 +82,7 @@ impl Pane {
             Pane::NodeGraph => "Node Graph".into(),
             Pane::History => "History".into(),
             Pane::Curves => "Curves".into(),
+            Pane::PaintCheck => "Paint check".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }

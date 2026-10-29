@@ -964,6 +964,10 @@ pub struct Project {
     /// version bump is needed to add a new key (the table already accepts
     /// arbitrary rows) — see store.rs's save/load for the exact convention.
     pub app_meta: std::collections::BTreeMap<String, String>,
+    /// How chip colours are stored (D8, `meta.color_law`). Legacy for
+    /// every file that predates the key, so old projects render as they
+    /// always did; the New Project dialog makes Srgb projects.
+    pub color_law: crate::color::ColorLaw,
 }
 
 impl Project {
@@ -977,6 +981,7 @@ impl Project {
             scenes: Vec::new(),
             next_id: 1,
             app_meta: std::collections::BTreeMap::new(),
+            color_law: crate::color::ColorLaw::Legacy,
         }
     }
 

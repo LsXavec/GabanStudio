@@ -22,8 +22,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 
+use anim_core::color::ColorLaw;
 use anim_core::export::{
-    render_frame, render_frame_over, render_graph_frame, render_graph_frame_over,
+    render_frame, render_frame_over, render_graph_frame_law, render_graph_frame_over_law,
     vector_stroke_cels,
 };
 use anim_core::model::Cut;
@@ -53,9 +54,11 @@ pub const CANCELLED: &str = "cancelled";
 /// background) on a worker thread. Output files are named by SOURCE frame
 /// number (`frame_0011.png` for source frame 10), so exporting a sub-range
 /// stays self-documenting and re-exporting a different range never clobbers
-/// unrelated files.
+/// unrelated files. `law` is the project's colour law (D8: Solid chips).
+#[allow(clippy::too_many_arguments)] // one call site; a params struct would be noise
 pub fn spawn_png_sequence(
     cut: Cut,
+    law: ColorLaw,
     width: u32,
     height: u32,
     dir: PathBuf,
@@ -72,7 +75,7 @@ pub fn spawn_png_sequence(
                 if cancel.load(Ordering::Relaxed) {
                     return Err(CANCELLED.into());
                 }
-                let rgba = render_graph_frame(&cut, f, width, height)
+                let rgba = render_graph_frame_law(&cut, law, f, width, height)
                     .unwrap_or_else(|| render_frame(&cut, f, width, height));
                 write_png(
                     &dir.join(format!("frame_{:04}.png", f + 1)),
@@ -100,6 +103,7 @@ pub fn spawn_png_sequence(
 #[allow(clippy::too_many_arguments)] // one call site; a params struct would be noise
 pub fn spawn_mp4(
     cut: Cut,
+    law: ColorLaw,
     width: u32,
     height: u32,
     fps: u32,
@@ -122,7 +126,7 @@ pub fn spawn_mp4(
                     let _ = std::fs::remove_dir_all(&tmp);
                     return Err(CANCELLED.into());
                 }
-                let rgba = render_graph_frame_over(&cut, f, width, height, [255, 255, 255])
+                let rgba = render_graph_frame_over_law(&cut, law, f, width, height, [255, 255, 255])
                     .unwrap_or_else(|| render_frame_over(&cut, f, width, height, [255, 255, 255]));
                 write_png(
                     &tmp.join(format!("frame_{:04}.png", n + 1)),

@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anim_core::color::ColorLaw;
 use anim_core::edit::{self, FloatingPatch};
 use anim_core::ids::{ColumnId, CutId, DrawingId, LayerId, SceneId};
 use anim_core::model::{DrawingKind, Stroke, StrokePoint};
@@ -453,6 +454,9 @@ pub struct CanvasView {
     pan: egui::Vec2,
     pub brush_width: f32,
     pub brush_color: [u8; 4],
+    /// GM7 (D8): the open project's colour law, synced each frame — every
+    /// chip → stored value on the canvas goes through it ([`Self::ink`]).
+    pub(crate) color_law: ColorLaw,
     current: Vec<StrokePoint>,
     touch_active: bool,
     /// Start point still holds the provisional seed (no real Move yet).
@@ -821,6 +825,7 @@ impl CanvasView {
             pan: egui::Vec2::ZERO,
             brush_width: 3.0,
             brush_color: SWATCHES[0],
+            color_law: ColorLaw::Legacy,
             current: Vec::new(),
             touch_active: false,
             seed_pending: false,
@@ -1030,6 +1035,26 @@ impl CanvasView {
     pub fn fit_view(&mut self) {
         self.zoom = self.turned_fit();
         self.pan = egui::Vec2::ZERO;
+        self.sync_xf();
+    }
+
+    /// GM7: frame a paper box `[x0, y0, x1, y1)` — the paint check's jump.
+    /// The box fills about half the pane (within the zoom ladder) and its
+    /// centre comes to the pane's centre; turn and mirror are kept.
+    pub fn look_at_paper(&mut self, bbox: [u32; 4]) {
+        let pane = self.dbg_rect.size();
+        let bw = bbox[2].saturating_sub(bbox[0]).max(1) as f32;
+        let bh = bbox[3].saturating_sub(bbox[1]).max(1) as f32;
+        if pane.x > 0.0 && pane.y > 0.0 {
+            let z = (pane.x / bw).min(pane.y / bh) * 0.5;
+            self.set_abs_zoom(z.clamp(ZOOM_LADDER[0], ZOOM_LADDER[ZOOM_LADDER.len() - 1]));
+        }
+        let q = pos2((bbox[0] + bbox[2]) as f32 * 0.5, (bbox[1] + bbox[3]) as f32 * 0.5);
+        let mut v = (q - self.xf.paper * 0.5).to_vec2() * self.xf.zoom;
+        if self.mirror {
+            v.x = -v.x;
+        }
+        self.pan = -rotate_vec(v, self.rotation_deg);
         self.sync_xf();
     }
 
@@ -2173,12 +2198,21 @@ impl CanvasView {
                             let sh = crate::palette::derive_shadow(norm);
                             // GM2: through palettes_mut — unsaved work.
                             let ch = &mut state.palettes_mut().characters[ci];
+                            let prev = ch
+                                .roles
+                                .iter()
+                                .position(|r| r.name == "shadow")
+                                .map(|ri| (ri, ch.roles[ri].color));
                             match ch.roles.iter_mut().find(|r| r.name == "shadow") {
                                 Some(r) => r.color = sh,
                                 None => ch.roles.push(crate::palette::ColorRole {
                                     name: "shadow".into(),
                                     color: sh,
                                 }),
+                            }
+                            // GM7: a changed chip offers to recolour its paint.
+                            if let Some((ri, old)) = prev {
+                                state.offer_recolour(ci, ri, old, sh);
                             }
                             state.status =
                                 format!("{cname}: shadow derived from normal (edit in the eye)");
@@ -2381,7 +2415,10 @@ impl CanvasView {
                         // Writes the model — held DANGER (no undo there).
                         if plate::danger(ui, "set") {
                             // GM2: through palettes_mut — unsaved work.
+                            let old = state.palettes.characters[ci].roles[ri].color;
                             state.palettes_mut().characters[ci].roles[ri].color = self.brush_color;
+                            // GM7: a changed chip offers to recolour its paint.
+                            state.offer_recolour(ci, ri, old, self.brush_color);
                             state.status = format!("{l} updated");
                             self.eye_target = None;
                         }
@@ -3438,6 +3475,7 @@ impl CanvasView {
         native_pen: &[PenSample],
         presets: &[BrushPreset],
     ) {
+        self.color_law = state.engine.project.color_law;
         self.pen_curve = pen.pressure_curve.clone();
         self.stabilizer = pen.stabilizer.min(crate::stabilizer::MAX_LEVEL);
         // PSD-brush-engine: install the armed preset's tip/grain on the
@@ -5411,7 +5449,7 @@ impl CanvasView {
         if pts.is_empty() {
             return (dabs, held0);
         }
-        let base = linear_rgba(self.brush_color);
+        let base = self.ink();
         let flow = self.brush_flow.clamp(0.0, 1.0);
         // GM4: the brush's own edge; aliased rides the hardness sentinel.
         let hardness = if self.brush_aliased {
@@ -5913,7 +5951,7 @@ impl CanvasView {
         // 3) Alpha: signed distance shifted by grow, ramped over softness.
         //    softness 0 = crisp edge exactly at the loop (+grow).
         let soft = self.lasso_soft.max(0.0);
-        let c = linear_rgba(self.brush_color);
+        let c = self.ink();
         let premult = [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
         let target = state.active_layer_tiles().cloned().unwrap_or_default();
         let mut diff: anim_core::raster::TileDiff = Vec::new();
@@ -6032,6 +6070,16 @@ impl CanvasView {
             state.status = "composite view — press C to edit".into();
             return;
         }
+        // GM7 REFILL: Shift+click recolours the clicked flat (bounded by the
+        // line), Ctrl+Shift+click every texel of its colour on the layer.
+        // Exact texel work on the CPU, so it needs no GPU.
+        let m = ui.input(|i| i.modifiers);
+        if m.shift {
+            let p = to_paper(pos);
+            let seed = (p.x.floor() as i32, p.y.floor() as i32);
+            state.refill_at(seed, self.brush_color, m.command, self.fill_grow);
+            return;
+        }
         if !self.raster {
             state.refuse(
                 "refused — the fill tool needs the GPU brush engine \
@@ -6109,7 +6157,7 @@ impl CanvasView {
         };
         // Fill colour = the brush colour through the same conversion the dab
         // path uses, premultiplied.
-        let c = linear_rgba(self.brush_color);
+        let c = self.ink();
         let premult = [c[0] * c[3], c[1] * c[3], c[2] * c[3], c[3]];
         let target = state.active_layer_tiles().cloned().unwrap_or_default();
         let diff = anim_core::fill::fill_diff(&target, &mask, premult);
@@ -6320,7 +6368,15 @@ impl CanvasView {
         match pick_chip(state, p.x, p.y, self.composite_view) {
             Some([r, g, b]) => {
                 self.brush_color = [r, g, b, self.brush_color[3]];
-                state.status = format!("picked #{r:02x}{g:02x}{b:02x}");
+                // GM7 CHIP PICK: an exact chip of the active palette becomes
+                // the active chip (its pot rings); any other colour, none.
+                state.active_chip = state.chip_of([r, g, b]);
+                let chip = state
+                    .active_chip
+                    .and_then(|ri| state.palettes.characters.get(state.active_character)?.roles.get(ri))
+                    .map(|role| format!(" — chip '{}'", role.name))
+                    .unwrap_or_default();
+                state.status = format!("picked #{r:02x}{g:02x}{b:02x}{chip}");
             }
             None => state.refuse("nothing to pick — the paper is bare there"),
         }
@@ -7091,8 +7147,9 @@ fn pick_sample(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[f32
     let (xi, yi) = (xi as u32, yi as u32);
     let cut = state.cut();
     let frame = state.view.frame;
+    let law = state.engine.project.color_law;
     let px = composite
-        .then(|| anim_core::export::graph_composite_pixel(cut, frame, w, h, xi, yi))
+        .then(|| anim_core::export::graph_composite_pixel_law(cut, law, frame, w, h, xi, yi))
         .flatten()
         .unwrap_or_else(|| anim_core::export::composite_pixel(cut, frame, xi, yi));
     (anim_core::export::straight_rgba8(&px)[3] > 0).then_some(px)
@@ -7107,22 +7164,30 @@ pub fn pick_color(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[
 }
 
 /// GM4 EYEDROPPER: the brush chip that paints the pixel at (x, y) — the
-/// stored colour is linear, so it goes back through the curve
-/// `linear_rgba` takes it out by (until GM7's colour law decodes it).
+/// stored colour goes back through the project's colour law (GM7), the
+/// exact inverse of the [`CanvasView::ink`] that put it there.
 pub fn pick_chip(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[u8; 3]> {
     let px = pick_sample(state, x, y, composite)?;
     let a = px[3].clamp(0.0, 1.0);
-    let enc = anim_core::export::linear_to_srgb;
-    Some([enc(px[0] / a), enc(px[1] / a), enc(px[2] / a)])
+    let law = state.engine.project.color_law;
+    Some([law.decode(px[0] / a), law.decode(px[1] / a), law.decode(px[2] / a)])
 }
 
+impl CanvasView {
+    /// The brush colour as the stored (straight) value. ONE encode for the
+    /// whole app: [`ColorLaw::encode`] is the same function Solid nodes
+    /// render with (the CPU and GPU graph compositors), so "a Solid matches
+    /// painting that colour" is a structural law, not two copies that
+    /// could drift (GM7 D8).
+    pub(crate) fn ink(&self) -> [f32; 4] {
+        self.color_law.encode_rgba(self.brush_color)
+    }
+}
+
+/// The v0.3 brush conversion, for the tests that pin Legacy pixels.
+#[cfg(test)]
 fn linear_rgba(c: [u8; 4]) -> [f32; 4] {
-    // ONE EOTF for the whole app: the engine's srgb_to_linear is the same
-    // function Solid nodes render with (and the CPU/GPU graph compositors
-    // pin) — sharing it makes "a Solid matches painting that colour" a
-    // structural law instead of two copies that could drift.
-    let lin = anim_core::export::srgb_to_linear;
-    [lin(c[0]), lin(c[1]), lin(c[2]), c[3] as f32 / 255.0]
+    ColorLaw::Legacy.encode_rgba(c)
 }
 
 // ---- GM6: the onion's depth and modes, and the light table ---------------

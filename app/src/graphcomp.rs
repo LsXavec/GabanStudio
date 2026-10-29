@@ -19,7 +19,7 @@
 //! encoder+submit per node pass — the same uniform-aliasing law as opacity_buf,
 //! and graphs are tiny so submits only happen when the hash changes.
 
-use anim_core::export::srgb_to_linear;
+use anim_core::color::ColorLaw;
 use anim_core::graph::{BlendMode, NodeKind};
 use anim_core::ids::{ColumnId, NodeId};
 use anim_core::model::{Cut, Drawing};
@@ -164,6 +164,9 @@ pub struct GraphCompositor {
 
     /// Output Value hash of what `out_texture` currently holds.
     cached_hash: Option<u64>,
+    /// The colour law the cached output was rendered under (D8: a Solid
+    /// node's chip goes through it).
+    law: ColorLaw,
 }
 
 impl Drop for GraphCompositor {
@@ -342,6 +345,7 @@ impl GraphCompositor {
             blend_buf,
             sampler,
             cached_hash: None,
+            law: ColorLaw::Legacy,
         };
         this.clear_view_now(&this.out_view.clone());
         this
@@ -412,12 +416,14 @@ impl GraphCompositor {
         &mut self,
         output_hash: u64,
         cut: &Cut,
+        law: ColorLaw,
         frame: u32,
         paint: &mut PaintLayer,
     ) -> egui::TextureId {
-        if self.cached_hash == Some(output_hash) {
+        if self.cached_hash == Some(output_hash) && self.law == law {
             return self.out_id;
         }
+        self.law = law;
         for p in &mut self.pool {
             p.free = true;
         }
@@ -487,14 +493,17 @@ impl GraphCompositor {
                 }
                 slot
             }
-            NodeKind::Solid { rgba } => self.acquire_cleared_to(wgpu::Color {
-                // Premultiplied linear — the same srgb_to_linear the CPU
-                // reference and the brush dab path use.
-                r: (srgb_to_linear(rgba[0]) * (rgba[3] as f32 / 255.0)) as f64,
-                g: (srgb_to_linear(rgba[1]) * (rgba[3] as f32 / 255.0)) as f64,
-                b: (srgb_to_linear(rgba[2]) * (rgba[3] as f32 / 255.0)) as f64,
-                a: rgba[3] as f64 / 255.0,
-            }),
+            NodeKind::Solid { rgba } => {
+                // Premultiplied, through the project's colour law — the
+                // same ColorLaw::encode the CPU reference and the brush use.
+                let px = self.law.premultiplied(*rgba);
+                self.acquire_cleared_to(wgpu::Color {
+                    r: px[0] as f64,
+                    g: px[1] as f64,
+                    b: px[2] as f64,
+                    a: rgba[3] as f64 / 255.0,
+                })
+            }
             NodeKind::Transform {
                 translate,
                 scale,
