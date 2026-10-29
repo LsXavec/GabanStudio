@@ -1392,6 +1392,12 @@ impl CanvasView {
         let armed = self.tool == CanvasTool::Paint
             && !self.erasing
             && self.armed_preset.as_deref() == Some(p.name.as_str());
+        plate::speak(
+            &resp,
+            egui::WidgetType::SelectableLabel,
+            Some(armed),
+            &format!("{} pencil ({digit})", p.name),
+        );
         if resp.clicked() && !self.stroke_active() {
             if self.tool != CanvasTool::Paint {
                 self.set_tool(CanvasTool::Paint, state);
@@ -1502,6 +1508,7 @@ impl CanvasView {
     fn eraser_slot(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         let (rect, resp) = ui.allocate_exact_size(vec2(56.0, 44.0), Sense::click());
         let armed = self.tool == CanvasTool::Paint && self.erasing;
+        plate::speak(&resp, egui::WidgetType::SelectableLabel, Some(armed), "eraser");
         if resp.clicked() {
             if self.tool != CanvasTool::Paint {
                 self.set_tool(CanvasTool::Paint, state);
@@ -1967,6 +1974,7 @@ impl CanvasView {
                 (Icon::ChevR, true, "next cel (W)"),
             ] {
                 let (cr, cresp) = ui.allocate_exact_size(vec2(44.0, 40.0), Sense::click());
+                plate::speak(&cresp, egui::WidgetType::Button, None, hover);
                 let p = ui.painter();
                 p.rect_filled(cr, 0.0, plate::WELL);
                 p.rect_stroke(
@@ -2000,7 +2008,7 @@ impl CanvasView {
             }
         });
         let mut mc = self.miss_check;
-        plate::tool_latch(ui, &mut mc, Icon::Hole, "miss check").on_hover_text(
+        plate::tool_latch(ui, &mut mc, Icon::Hole, "miss check", "").on_hover_text(
             "hole-hunt (M): the ground goes dark; every unpainted pixel reads as a pit",
         );
         self.miss_check = mc;
@@ -2382,6 +2390,9 @@ impl CanvasView {
                 // pencils + the eraser, one XL detent group with specimen
                 // strokes. Arming a pencil arms the brush; the Tally ring
                 // breaks when the live brush drifts off the preset.
+                // Compact drops the painted caption only: every control keeps
+                // its full spoken name (a caption-less "lasso" would collide
+                // with the lasso selection shape).
                 let lbl = |s: &'static str| if compact { "" } else { s };
                 for (i, p) in presets.iter().enumerate() {
                     if matches!(p.name.as_str(), "atari" | "genga" | "shusei") {
@@ -2394,7 +2405,7 @@ impl CanvasView {
                 // Select commits any floating transform. A detent: clicking
                 // the armed position does nothing.
                 let sel_on = self.tool == CanvasTool::Select;
-                if plate::tool_button(ui, sel_on, Icon::Select, lbl("select"))
+                if plate::tool_button(ui, sel_on, Icon::Select, lbl("select"), "select")
                     .on_hover_text(
                         "select / move / scale / rotate (V) — drag = select, drag \
                     inside = move, corners = scale, just outside = rotate; \
@@ -2409,7 +2420,7 @@ impl CanvasView {
                 // arming a tool must never move the strip. Spec defect 4.)
                 // Fill / bucket tool (G): the shiage verb.
                 let fill_on = self.tool == CanvasTool::Fill;
-                if plate::tool_button(ui, fill_on, Icon::Fill, lbl("fill"))
+                if plate::tool_button(ui, fill_on, Icon::Fill, lbl("fill"), "fill")
                     .on_hover_text(
                         "flood fill (G) — click a region; line art bounds it. \
                     gap closes line breaks; under tucks the flat beneath \
@@ -2422,7 +2433,7 @@ impl CanvasView {
                 }
                 // Lasso fill: loop a region, it fills feathered.
                 let lf_on = self.tool == CanvasTool::LassoFill;
-                if plate::tool_button(ui, lf_on, Icon::Lasso, lbl("lasso fill"))
+                if plate::tool_button(ui, lf_on, Icon::Lasso, lbl("lasso fill"), "lasso fill")
                     .on_hover_text(
                         "lasso fill — draw a loop and it fills with the brush \
                     colour; softness feathers the edge inward, grow shifts \
@@ -2440,19 +2451,21 @@ impl CanvasView {
                 // layer already has coverage on — never paint outside its
                 // silhouette. Combines with brush or eraser.
                 let mut lock = self.alpha_lock;
-                plate::tool_latch(ui, &mut lock, Icon::Lock, lbl("lock")).on_hover_text(
-                    "alpha lock (L) — ink only recolors pixels this layer \
+                plate::tool_latch(ui, &mut lock, Icon::Lock, lbl("lock"), "alpha lock")
+                    .on_hover_text(
+                        "alpha lock (L) — ink only recolors pixels this layer \
                 already has coverage on; the silhouette can't grow",
-                );
+                    );
                 self.alpha_lock = lock;
                 // Composite view: the node graph's rendered output (review
                 // mode — painting pauses). Blocked mid-stroke: swapping the
                 // view under a live stroke would orphan its display.
                 let mut comp = self.composite_view;
-                plate::tool_latch(ui, &mut comp, Icon::Comp, lbl("comp")).on_hover_text(
-                    "composite view — what the node graph renders \
-                (playback/export truth). C toggles; painting pauses here.",
-                );
+                plate::tool_latch(ui, &mut comp, Icon::Comp, lbl("comp"), "composite view")
+                    .on_hover_text(
+                        "composite view — what the node graph renders \
+                    (playback/export truth). C toggles; painting pauses here.",
+                    );
                 if comp != self.composite_view && !self.stroke_active() {
                     self.composite_view = comp;
                 }
@@ -2480,6 +2493,7 @@ impl CanvasView {
                 // Well slot, same material as every other control.
                 let (crect, cresp) =
                     ui.allocate_exact_size(vec2(96.0, plate::CTRL_H + 4.0), Sense::click());
+                plate::speak(&cresp, egui::WidgetType::Button, None, &format!("layer: {lname}"));
                 if cresp.clicked() {
                     state.cycle_layer(false);
                 }
@@ -2554,6 +2568,7 @@ impl CanvasView {
                     ui,
                     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
                     selected,
+                    hover,
                 )
                 .on_hover_text(hover)
                 .clicked()
@@ -2587,6 +2602,7 @@ impl CanvasView {
                                 self.sel_shape == SelShape::Lasso,
                                 Icon::Lasso,
                                 "lasso",
+                                "lasso selection",
                             )
                             .on_hover_text("lasso selection")
                             .clicked()
@@ -2598,6 +2614,7 @@ impl CanvasView {
                                 self.sel_shape == SelShape::Rect,
                                 Icon::Marquee,
                                 "rect",
+                                "rect selection",
                             )
                             .on_hover_text("rectangle selection")
                             .clicked()

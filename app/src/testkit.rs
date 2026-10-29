@@ -19,7 +19,7 @@ use crate::canvas::CanvasTool;
 use crate::config::{self, Action, Config};
 use crate::doc::AppState;
 use crate::workspace::{Stage, Workspace, Workspaces};
-use crate::{AppRequest, Editor, Performed, shortcuts};
+use crate::{AppRequest, Editor, Notes, Performed, shortcuts};
 
 /// Ctrl as the platform reports it on Windows/Linux (the chord matcher
 /// reads `command`).
@@ -29,11 +29,15 @@ pub const CTRL: egui::Modifiers = egui::Modifiers {
     ..egui::Modifiers::NONE
 };
 
-/// What the harness drives each frame: the editor, the shell's config, and
-/// the log of every shortcut dispatched with what perform returned.
+/// What the harness drives each frame: the editor, the shell's config, the
+/// shell's notes, and the log of every shortcut dispatched with what
+/// perform returned.
 pub struct Rig {
     pub editor: Editor,
     pub config: Config,
+    /// The shell's once-per-session notes (the config load's included),
+    /// said on the editor's Aka lane the way the app says them.
+    pub notes: Notes,
     pub performed: Vec<(Action, Performed)>,
     dressed: bool,
 }
@@ -49,6 +53,7 @@ impl Rig {
             ui.ctx().request_repaint();
             return;
         }
+        self.notes.say(&mut self.editor);
         let Rig { editor, config, .. } = self;
         let mut presets_dirty = false;
         editor.ui(
@@ -86,12 +91,22 @@ impl EditorHarness {
     }
 
     pub fn with_state(state: AppState) -> Self {
-        let dir = tempfile::tempdir().expect("temp data dir");
-        let (config, _) = Config::load_from(dir.path());
+        Self::with_dir(state, tempfile::tempdir().expect("temp data dir"))
+    }
+
+    /// Over a data dir the test prepared (a bad config.json, say): config
+    /// and workspaces load from it exactly as the app loads them.
+    pub fn with_dir(state: AppState, dir: tempfile::TempDir) -> Self {
+        let (config, config_notes) = Config::load_from(dir.path());
         let editor = Editor::from_state(state, None, Some(dir.path()));
+        let mut notes = Notes::default();
+        for n in config_notes {
+            notes.push(n);
+        }
         let rig = Rig {
             editor,
             config,
+            notes,
             performed: Vec::new(),
             dressed: false,
         };
@@ -120,6 +135,17 @@ impl EditorHarness {
 
     pub fn run_frames(&mut self, n: usize) {
         self.h.run_steps(n);
+    }
+
+    /// Let `secs` pass on the egui clock in one frame — dwell timers and
+    /// fades without stepping through every frame between.
+    pub fn wait(&mut self, secs: f64) {
+        let now = self.h.ctx.input(|i| i.time);
+        self.h.input_mut().time = Some(now + secs);
+        self.h.step();
+        // The raw input keeps an explicit time: hand the clock back.
+        self.h.input_mut().time = None;
+        self.run();
     }
 
     /// Click the ONE widget with this accessible name; none or several is
@@ -264,11 +290,21 @@ impl EditorHarness {
         describe_tree(&self.h)
     }
 
-    pub fn state(&self) -> &Rig {
+    /// The document state (the editor's AppState).
+    pub fn state(&self) -> &AppState {
+        &self.h.state().editor.state
+    }
+
+    pub fn state_mut(&mut self) -> &mut AppState {
+        &mut self.h.state_mut().editor.state
+    }
+
+    /// The whole rig: the shell's config, notes and the performed log.
+    pub fn rig(&self) -> &Rig {
         self.h.state()
     }
 
-    pub fn state_mut(&mut self) -> &mut Rig {
+    pub fn rig_mut(&mut self) -> &mut Rig {
         self.h.state_mut()
     }
 
@@ -399,7 +435,12 @@ mod tests {
         assert!(ed.paint.is_none() && ed.graph.is_none(), "a GPU resource was created");
         assert!(ed.audio_out.is_none() && !ed.audio_tried, "an audio device was opened");
         let tree = h.describe();
-        for room in ["room layout", "room genga", "room shiage", "room henshū"] {
+        for room in [
+            "room layout",
+            "room genga (drawing)",
+            "room shiage (paint)",
+            "room henshū (edit)",
+        ] {
             assert!(h.has(room), "room switcher lacks {room:?}:\n{tree}");
         }
         for tool in ["select", "fill", "lasso fill"] {
@@ -416,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "room genga")]
+    #[should_panic(expected = "room genga (drawing)")]
     fn testkit_click_missing_label_shows_the_tree() {
         let mut h = EditorHarness::new();
         h.click("no such widget");
@@ -424,14 +465,49 @@ mod tests {
 
     #[test]
     fn testkit_icon_only_controls_answer_to_names() {
+        use crate::icons::Icon;
         let p = PanelHarness::new(egui::vec2(400.0, 80.0), (), |ui, _| {
             ui.horizontal(|ui| {
-                crate::plate::icon_button(ui, crate::icons::Icon::SkipBack, "", "first frame");
-                crate::plate::tool_button(ui, false, crate::icons::Icon::Fill, "");
+                crate::plate::icon_button(ui, Icon::SkipBack, "", "first frame");
+                crate::plate::tool_button(ui, false, Icon::Fill, "", "");
+                // Compact: no caption, the full name all the same.
+                crate::plate::tool_button(ui, false, Icon::Lasso, "", "lasso fill");
+                crate::plate::swatch(ui, crate::plate::PAPER, false, "skin shadow");
+                crate::plate::swatch(ui, crate::plate::AKA, false, "");
             });
         });
-        assert!(p.has("first frame"), "{}", p.describe());
-        assert!(p.has("fill"), "{}", p.describe());
+        let tree = p.describe();
+        assert!(p.has("first frame"), "{tree}");
+        assert!(p.has("fill"), "{tree}");
+        assert!(p.has("lasso fill") && !p.has("lasso"), "{tree}");
+        assert!(p.has("colour well: skin shadow"), "{tree}");
+        let hex = format!("colour well: {}", crate::plate::AKA.to_hex());
+        assert!(p.has(&hex), "{tree}");
+    }
+
+    /// The pencil box, the cel queue's neighbours and the layer strip's
+    /// painted controls answer to studio names, and clicking by name works.
+    #[test]
+    fn testkit_pencil_box_answers_to_names() {
+        let mut h = EditorHarness::new();
+        let digit = 1 + h
+            .rig()
+            .config
+            .presets
+            .iter()
+            .position(|p| p.name == "genga")
+            .expect("the pencil box has a genga pencil");
+        h.click(&format!("genga pencil ({digit})"));
+        assert_eq!(h.editor().canvas.arming_pencil(), "genga");
+        assert!(!h.editor().canvas.erasing);
+        h.click("eraser");
+        assert!(h.editor().canvas.erasing, "the eraser slot did not arm");
+        assert_eq!(h.editor().canvas.arming_pencil(), "eraser");
+        let tree = h.describe();
+        let layer = h.state().active_layer_name();
+        assert!(h.has(&format!("layer: {layer}")), "no layer chip {layer:?}\n{tree}");
+        assert!(h.has(&format!("lock layer {layer}")), "no lock for {layer:?}\n{tree}");
+        assert!(h.has(&format!("layer colour {layer}")), "no colour dot for {layer:?}\n{tree}");
     }
 
     // ---- shortcuts: the text-focus rule ----
@@ -571,6 +647,13 @@ mod tests {
 
         let (got, notes) = Config::load_from(dir.path());
         assert_eq!(notes.len(), 1, "{notes:?}");
+        // In the artist's words, not the file's keys.
+        assert!(
+            notes[0].contains("interface reset to defaults")
+                && notes[0].contains("1 shortcut dropped")
+                && notes[0].contains("config.json.bad"),
+            "{notes:?}"
+        );
         assert_eq!(got.update_repo, "someone/else");
         assert_eq!(got.perf.vsync, cfg.perf.vsync);
         assert_eq!(got.keybinds.len(), Action::ALL.len());
@@ -634,12 +717,68 @@ mod tests {
         let names: Vec<&str> = got.list.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, ["a", "b"]);
         assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].starts_with("1 saved workspace could not be read"), "{notes:?}");
         assert_eq!(std::fs::read(dir.path().join("workspaces.json.bad")).unwrap(), bytes);
         got.save_to(dir.path()).unwrap();
         assert!(!dir.path().join("workspaces.json.tmp").exists());
         let (again, notes) = Workspaces::load_from(dir.path());
         assert_eq!(again.list.len(), 2);
         assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// A bad config.json and a bad workspaces.json in the data dir: ONE
+    /// notice on the editor's Aka lane names both, it waits for the artist
+    /// instead of fading, and a rebuilt editor (new project, open, join)
+    /// does not say it again.
+    #[test]
+    fn testkit_load_notes_show_once_on_the_aka_lane() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&config::config_path_in(dir.path()), br#"{ "ui": "not a section" }"#);
+        write(
+            &Workspaces::path_in(dir.path()),
+            br#"{ "list": [ { "name": "broken", "dock": 7 } ] }"#,
+        );
+        let mut state = AppState::new_project("testkit", 1920, 1080, 24, 300.0);
+        state.new_drawing_at_frame();
+        let mut h = EditorHarness::with_dir(state, dir);
+        let said = h.state().refusal.clone();
+        assert!(
+            said.contains("interface reset to defaults") && said.contains("saved workspace"),
+            "{said:?}"
+        );
+        assert!(h.has(&said), "the notice is not on screen\n{}", h.describe());
+        let seq = h.state().refusal_seq;
+        // A minute with no input: a plain refusal fades after 4 s.
+        h.wait(60.0);
+        assert!(h.has(&said), "the notice faded before the artist acted");
+        assert_eq!(h.state().refusal_seq, seq, "said twice");
+        // The artist acts; then it dwells and goes.
+        h.key(egui::Key::Escape);
+        h.wait(5.0);
+        assert!(!h.has(&said), "the notice never left");
+        // A rebuilt editor re-reads workspaces.json; the note is not new.
+        let dir = h.data_dir().to_path_buf();
+        let mut state = AppState::new_project("again", 1920, 1080, 24, 300.0);
+        state.new_drawing_at_frame();
+        h.rig_mut().editor = Editor::from_state(state, None, Some(&dir));
+        h.run();
+        assert!(h.state().refusal.is_empty(), "said again: {:?}", h.state().refusal);
+    }
+
+    /// The native tablet thread dying leaves the artist a reason on the Aka
+    /// lane (a release build has no console).
+    #[test]
+    fn testkit_lost_tablet_is_said() {
+        let (tx, rx) = std::sync::mpsc::channel::<crate::PenSample>();
+        drop(tx);
+        let mut rx = Some(rx);
+        let mut h = EditorHarness::new();
+        let got = crate::pump_tablet(&mut rx, &mut h.rig_mut().notes);
+        assert!(got.is_empty() && rx.is_none(), "the dead backend is dropped");
+        h.run();
+        let said = h.state().refusal.clone();
+        assert!(said.contains("tablet") && said.contains("standard pen input"), "{said:?}");
+        assert!(h.has(&said), "{}", h.describe());
     }
 
     #[test]
@@ -661,14 +800,17 @@ mod tests {
 
     fn probe_room(stage: Stage) {
         for ppp in crate::PROBE_SCALES {
-            let (lines, moved) = crate::probe_run(stage, ppp);
+            let run = crate::probe_run(stage, ppp);
+            let lines = run.lines.join("\n");
+            println!("---- {} · pixels_per_point {ppp} ----\n{lines}", stage.name());
+            // A probe that measured nothing must not pass.
             assert_eq!(
-                moved,
+                run.unmeasured,
                 0,
-                "{} at {ppp}: the canvas moved\n{}",
-                stage.name(),
-                lines.join("\n")
+                "{} at {ppp}: no canvas rect\n{lines}",
+                stage.name()
             );
+            assert_eq!(run.moved, 0, "{} at {ppp}: the canvas moved\n{lines}", stage.name());
         }
     }
 

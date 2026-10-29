@@ -71,8 +71,9 @@ pub fn exact() -> bool {
 
 /// The accessible name and state of a painted control (AccessKit, D7):
 /// icon-only controls answer to their hover text or icon name instead of
-/// an empty label, so screen readers and the testkit can find them.
-fn speak(resp: &Response, typ: egui::WidgetType, selected: Option<bool>, name: &str) {
+/// an empty label, so screen readers and the testkit can find them. Every
+/// control painted outside this file speaks through here too.
+pub(crate) fn speak(resp: &Response, typ: egui::WidgetType, selected: Option<bool>, name: &str) {
     let enabled = resp.enabled();
     resp.widget_info(|| match selected {
         Some(on) => egui::WidgetInfo::selected(typ, enabled, on, name),
@@ -83,6 +84,16 @@ fn speak(resp: &Response, typ: egui::WidgetType, selected: Option<bool>, name: &
 /// An icon's spoken name, for controls drawn without a label.
 fn icon_name(icon: crate::icons::Icon) -> String {
     format!("{icon:?}").to_lowercase()
+}
+
+/// What a tool control answers to: its own name, else its caption, else
+/// its icon — so a compact (caption-less) deck keeps the full names.
+fn tool_name(name: &str, label: &str, icon: crate::icons::Icon) -> String {
+    match (name.is_empty(), label.is_empty()) {
+        (false, _) => name.to_string(),
+        (true, false) => label.to_string(),
+        (true, true) => icon_name(icon),
+    }
 }
 
 /// Append the exact identity line to a response's hover, when enabled.
@@ -383,8 +394,16 @@ pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
 /// DETENT with a painted icon — a tool position. The armed position carries
 /// a Tally bar seated under the control (the lamp lit under a pressed key);
 /// icon and label step from Legend to Struck. Larger targets than bare text
-/// (owner's amendment: sparse space is spent on bigger controls).
-pub fn tool_button(ui: &mut Ui, armed: bool, icon: crate::icons::Icon, label: &str) -> Response {
+/// (owner's amendment: sparse space is spent on bigger controls). `label`
+/// is the painted caption (empty = icon only); `name` is what the control
+/// answers to (empty = the caption).
+pub fn tool_button(
+    ui: &mut Ui,
+    armed: bool,
+    icon: crate::icons::Icon,
+    label: &str,
+    name: &str,
+) -> Response {
     let text_w = if label.is_empty() {
         0.0
     } else {
@@ -441,14 +460,21 @@ pub fn tool_button(ui: &mut Ui, armed: bool, icon: crate::icons::Icon, label: &s
             p.rect_filled(bar, CornerRadius::ZERO, TALLY);
         }
     }
-    let name = if label.is_empty() { icon_name(icon) } else { label.to_string() };
+    let name = tool_name(name, label, icon);
     speak(&resp, egui::WidgetType::SelectableLabel, Some(armed), &name);
     describe(resp, "DETENT tool_button", label)
 }
 
 /// LATCH with a painted icon — independent on/off; Tally bar on the LEFT
 /// edge while latched (never confusable with the detent's bottom lamp).
-pub fn tool_latch(ui: &mut Ui, on: &mut bool, icon: crate::icons::Icon, label: &str) -> Response {
+/// `label` and `name` as for [`tool_button`].
+pub fn tool_latch(
+    ui: &mut Ui,
+    on: &mut bool,
+    icon: crate::icons::Icon,
+    label: &str,
+    name: &str,
+) -> Response {
     let text_w = if label.is_empty() {
         0.0
     } else {
@@ -508,7 +534,7 @@ pub fn tool_latch(ui: &mut Ui, on: &mut bool, icon: crate::icons::Icon, label: &
             );
         }
     }
-    let name = if label.is_empty() { icon_name(icon) } else { label.to_string() };
+    let name = tool_name(name, label, icon);
     speak(&resp, egui::WidgetType::Checkbox, Some(*on), &name);
     describe(resp, "LATCH tool_latch", label)
 }
@@ -565,8 +591,10 @@ pub fn icon_button(ui: &mut Ui, icon: crate::icons::Icon, label: &str, hover: &s
 
 /// A colour swatch seated in a Well recess (§6 defect 5): an 18×18 painted
 /// fill with a 1px Legend edge; the armed swatch is ringed in Tally. The hit
-/// target is larger than the well (the owner's amendment).
-pub fn swatch(ui: &mut Ui, color: Color32, armed: bool) -> Response {
+/// target is larger than the well (the owner's amendment). It answers to
+/// "colour well: <name>" (the role or colour name; empty = the hex value),
+/// so a palette's wells are told apart by name, not position.
+pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(CTRL_H + 4.0), Sense::click());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
@@ -595,7 +623,12 @@ pub fn swatch(ui: &mut Ui, color: Color32, armed: bool) -> Response {
             );
         }
     }
-    speak(&resp, egui::WidgetType::Button, Some(armed), "colour well");
+    let name = if name.is_empty() {
+        format!("colour well: {}", color.to_hex())
+    } else {
+        format!("colour well: {name}")
+    };
+    speak(&resp, egui::WidgetType::Button, Some(armed), &name);
     describe(resp, "SWATCH swatch", "colour well")
 }
 

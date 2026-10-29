@@ -160,8 +160,15 @@ fn attach_console() {
 fn attach_console() {}
 
 /// A slate room tab (spec §4.2): kanji over romaji caps, framed, all four
-/// identical in structure; the active room is lit by the Tally lamp.
-fn slate_tab(ui: &mut egui::Ui, active: bool, kanji: &str, romaji: &str) -> egui::Response {
+/// identical in structure; the active room is lit by the Tally lamp. `name`
+/// is the room's house label (romaji + English, D7) — what it answers to.
+fn slate_tab(
+    ui: &mut egui::Ui,
+    active: bool,
+    kanji: &str,
+    romaji: &str,
+    name: &str,
+) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(84.0, 34.0), egui::Sense::click());
     // The painted tab still answers to a name (AccessKit, D7).
     resp.widget_info(|| {
@@ -169,7 +176,7 @@ fn slate_tab(ui: &mut egui::Ui, active: bool, kanji: &str, romaji: &str) -> egui
             egui::WidgetType::SelectableLabel,
             ui.is_enabled(),
             active,
-            format!("room {romaji}"),
+            format!("room {name}"),
         )
     });
     if ui.is_rect_visible(rect) {
@@ -309,6 +316,9 @@ struct App {
     tablet_rx: Option<std::sync::mpsc::Receiver<PenSample>>,
     /// The spawn ran (attempted once, on the first frame).
     tablet_boot_tried: bool,
+    /// What the artist must hear once (load resets, the tablet fallback),
+    /// said on the first editor that can show it.
+    notes: Notes,
     /// Dev loop: restart-on-rebuild (see devloop.rs and the ratified stanza in
     /// research/PSD-devloop-uihook.md). Inert without ANIMSTUDIO_DEVLOOP=1.
     devloop: devloop::DevLoop,
@@ -2421,6 +2431,7 @@ impl App {
             backend,
             tablet_rx: None,
             tablet_boot_tried: false,
+            notes: Notes::default(),
             devloop: {
                 let mut d = devloop::DevLoop::new(staging_failed);
                 if let Some(n) = restore_note {
@@ -2586,25 +2597,8 @@ impl App {
     }
 
     /// Collect this frame's native pen samples from the tablet thread.
-    /// A disconnected channel (thread failed/panicked) drops the backend for
-    /// the session — egui Touch keeps working.
     fn pump_tablet(&mut self) -> Vec<PenSample> {
-        let Some(rx) = &self.tablet_rx else {
-            return Vec::new();
-        };
-        let mut out = Vec::new();
-        loop {
-            match rx.try_recv() {
-                Ok(s) => out.push(s),
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    eprintln!("native tablet thread ended — falling back to standard pen input");
-                    self.tablet_rx = None;
-                    break;
-                }
-            }
-        }
-        out
+        pump_tablet(&mut self.tablet_rx, &mut self.notes)
     }
 
     /// Run an action bound to a keyboard shortcut: the editor performs it
@@ -2645,9 +2639,10 @@ impl App {
 /// What [`Editor::perform`] did with an action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Performed {
-    /// The editor carried it out (a refusal it says aloud counts as done).
+    /// The editor carried it out.
     Done,
-    /// Nothing happened: refused mid-stroke, the host owns it, an empty slot.
+    /// Nothing changed: refused (the reason is said on the Aka lane — mid-
+    /// stroke, the host owns the file), blocked mid-stroke, or an empty slot.
     Ignored,
     /// Only the shell can do this (dialogs, the window).
     App(AppRequest),
@@ -2673,8 +2668,14 @@ impl Editor {
     /// file dialogs and the window belong to the shell, so those come back
     /// as [`Performed::App`].
     pub fn perform(&mut self, action: Action) -> Performed {
+        let seq = self.state.refusal_seq;
         let mut out = Performed::Done;
         self.perform_into(action, &mut out);
+        // A refusal anywhere down the verb (set_tool mid-stroke, a locked
+        // layer) means it was not done.
+        if out == Performed::Done && self.state.refusal_seq != seq {
+            out = Performed::Ignored;
+        }
         out
     }
 
@@ -2740,6 +2741,8 @@ impl Editor {
                 } else {
                     "edit view".into()
                 };
+            } else {
+                *out = Performed::Ignored;
             }
             return;
         }
@@ -2763,6 +2766,7 @@ impl Editor {
             // everywhere else. The Slate names what got armed.
             if ed.canvas.arming_pencil() == "fill" && !ed.canvas.stroke_active() {
                 let nchars = ed.state.palettes.characters.len();
+                *out = Performed::Ignored; // until a pot is armed
                 if nchars > 0 {
                     let ci = ed.state.active_character.min(nchars - 1);
                     if let Some(role) = ed.state.palettes.characters[ci].roles.get(i).cloned() {
@@ -2771,6 +2775,7 @@ impl Editor {
                             "pot: {} · {}",
                             ed.state.palettes.characters[ci].name, role.name
                         );
+                        *out = Performed::Done;
                     }
                 }
                 return;
@@ -2908,6 +2913,71 @@ impl Editor {
     }
 }
 
+/// The pen line the artist hears when the native tablet backend drops out.
+const TABLET_LOST: &str = "tablet: native pen input failed — using standard pen input";
+
+/// Drain the tablet thread's samples. A disconnected channel (the backend
+/// failed to attach, panicked or ended) drops the backend for the session —
+/// egui Touch keeps working — and the artist is told once, on the Aka lane:
+/// a release build has no console to read.
+fn pump_tablet(
+    rx: &mut Option<std::sync::mpsc::Receiver<PenSample>>,
+    notes: &mut Notes,
+) -> Vec<PenSample> {
+    let Some(r) = rx.as_ref() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    loop {
+        match r.try_recv() {
+            Ok(s) => out.push(s),
+            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                if cfg!(debug_assertions) {
+                    eprintln!("native tablet thread ended — falling back to standard pen input");
+                }
+                notes.push(TABLET_LOST.to_string());
+                *rx = None;
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// What the artist must hear once, said on the editor's Aka lane (D7) as
+/// one NOTICE that waits for the artist: the tolerant loads' resets
+/// (config.json, workspaces.json) and the tablet fallback. Pending notes
+/// join into one line; a note said once this session is not said again —
+/// every new project, open or join rebuilds the editor, which re-reads
+/// workspaces.json.
+#[derive(Default)]
+struct Notes {
+    pending: Vec<String>,
+    said: std::collections::HashSet<String>,
+}
+
+impl Notes {
+    fn push(&mut self, note: String) {
+        if !self.said.contains(&note) && !self.pending.contains(&note) {
+            self.pending.push(note);
+        }
+    }
+
+    /// Say everything pending, the editor's own load notes included.
+    fn say(&mut self, ed: &mut Editor) {
+        for n in std::mem::take(&mut ed.load_notes) {
+            self.push(n);
+        }
+        if self.pending.is_empty() {
+            return;
+        }
+        ed.state.refuse(self.pending.join(" · "));
+        ed.notice_seq = Some(ed.state.refusal_seq);
+        self.said.extend(self.pending.drain(..));
+    }
+}
+
 /// Spawn the dedicated tablet thread. The octotablet Manager is built AND
 /// pumped there: RealTimeStylus initialization can block on window messages,
 /// which froze the app when done on the UI thread (Event Log: AppHangB1) —
@@ -2975,8 +3045,12 @@ fn spawn_tablet_thread(
             let built = std::panic::catch_unwind(|| unsafe {
                 octotablet::Builder::new().build_raw(&handles)
             });
+            // The artist hears of a failure from pump_tablet (the Aka
+            // lane); these lines are the developer's detail.
             let Ok(Ok(mut mgr)) = built else {
-                eprintln!("native tablet backend failed to attach — using fallback pen input");
+                if cfg!(debug_assertions) {
+                    eprintln!("native tablet backend failed to attach — using fallback pen input");
+                }
                 return; // rx disconnects; the app falls back
             };
             let mut down = false;
@@ -2988,7 +3062,9 @@ fn spawn_tablet_thread(
                     drain_tablet(&mut mgr, ppp, down, last, last_tilt)
                 }));
                 let Ok((samples, d2, l2, t2)) = step else {
-                    eprintln!("native tablet backend panicked — disabled for this session");
+                    if cfg!(debug_assertions) {
+                        eprintln!("native tablet backend panicked — disabled for this session");
+                    }
                     return;
                 };
                 down = d2;
@@ -3120,6 +3196,12 @@ struct Editor {
     /// REFUSAL lane bookkeeping (Aka, dwells 4s; repeats re-flash by seq).
     refusal_seen_seq: u32,
     refusal_since: f64,
+    /// The refusal seq of a NOTICE ([`Notes::say`]): it holds the Aka lane
+    /// until the artist's first key or click, then dwells as usual.
+    notice_seq: Option<u32>,
+    /// What this editor's workspaces.json load dropped, not yet said (the
+    /// shell's [`Notes`] takes it on the next frame).
+    load_notes: Vec<String>,
     /// Which spine stage the current layout came from (highlight only) —
     /// None after applying a custom saved workspace. Deliberately NOT
     /// cleared when panes are rearranged: the highlight means "this is the
@@ -3291,6 +3373,9 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                     // Owner (2026-08-17): the Layout room's blank canvas is
                     // the cut's PREVIEW — the animation plays here, composed
                     // by the node graph, while drawing stays in genga.
+                    // The preview fills the pane: its rect is the drawing
+                    // area the layout probe measures here.
+                    self.canvas.dbg_rect = ui.available_rect_before_wrap();
                     let vs = self.viewers.entry(u8::MAX).or_default();
                     viewer::ui(ui, self.state, self.graph, vs);
                 } else {
@@ -3387,23 +3472,35 @@ impl EditorTabs<'_> {
 }
 
 impl Editor {
-    /// The user's saved workspaces from the data dir (none without one);
-    /// a dropped entry is said on the status lane.
-    fn load_workspaces(state: &mut AppState, data_dir: Option<&std::path::Path>) -> Workspaces {
+    /// The user's saved workspaces from the data dir (none without one),
+    /// with what the tolerant load dropped — the shell says that once
+    /// ([`Notes`]), so a rebuilt editor never repeats it.
+    fn load_workspaces(data_dir: Option<&std::path::Path>) -> (Workspaces, Vec<String>) {
         let Some(dir) = data_dir else {
-            return Workspaces { list: Vec::new() };
+            return (Workspaces { list: Vec::new() }, Vec::new());
         };
-        let (ws, notes) = Workspaces::load_from(dir);
-        if !notes.is_empty() {
-            state.status = notes.join(" · ");
-        }
-        ws
+        Workspaces::load_from(dir)
     }
 
     /// Persist the workspace list into the data dir (none = not persisted).
     fn save_workspaces(&self) {
         if let Some(dir) = &self.data_dir {
             let _ = self.workspaces.save_to(dir);
+        }
+    }
+
+    /// Enter a spine room — the room switcher, the layout probe and the
+    /// room verbs all come through here. The layout always swaps; the
+    /// tool/view restore is all-or-nothing, so a live stroke keeps the old
+    /// tool state (same law as saved workspaces).
+    fn enter_room(&mut self, st: Stage) {
+        self.dock = st.dock();
+        if self.canvas.apply_view(&st.view(), &mut self.state) {
+            self.stage = Some(st);
+            // LINE GUARD defaults ON in the Finishing room (shiage charter)
+            // and OFF elsewhere.
+            self.state.view.line_guard = matches!(st, Stage::Finishing);
+            self.state.status = format!("room: {}", st.name());
         }
     }
 
@@ -3419,7 +3516,7 @@ impl Editor {
             "" => "Untitled".to_string(),
             n => n.to_string(),
         };
-        let mut state = AppState::new_project(
+        let state = AppState::new_project(
             name,
             form.width,
             form.height,
@@ -3428,7 +3525,7 @@ impl Editor {
         );
         let paint = rs.map(|rs| PaintLayer::new(rs, form.width, form.height));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, form.width, form.height));
-        let workspaces = Self::load_workspaces(&mut state, data_dir);
+        let (workspaces, load_notes) = Self::load_workspaces(data_dir);
         Self {
             data_dir: data_dir.map(|d| d.to_path_buf()),
             presets: Vec::new(),
@@ -3449,6 +3546,8 @@ impl Editor {
             status_since: 0.0,
             refusal_seen_seq: 0,
             refusal_since: -10.0,
+            notice_seq: None,
+            load_notes,
             workspaces,
             ws_name: String::new(),
             rename_buf: String::new(),
@@ -3467,14 +3566,14 @@ impl Editor {
         }
     }
     fn from_state(
-        mut state: AppState,
+        state: AppState,
         rs: Option<&RenderState>,
         data_dir: Option<&std::path::Path>,
     ) -> Self {
         let (w, h) = (state.engine.project.width, state.engine.project.height);
         let paint = rs.map(|rs| PaintLayer::new(rs, w, h));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, w, h));
-        let workspaces = Self::load_workspaces(&mut state, data_dir);
+        let (workspaces, load_notes) = Self::load_workspaces(data_dir);
         Self {
             data_dir: data_dir.map(|d| d.to_path_buf()),
             presets: Vec::new(),
@@ -3493,6 +3592,8 @@ impl Editor {
             status_since: 0.0,
             refusal_seen_seq: 0,
             refusal_since: -10.0,
+            notice_seq: None,
+            load_notes,
             workspaces,
             ws_name: String::new(),
             rename_buf: String::new(),
@@ -3573,6 +3674,13 @@ impl eframe::App for App {
 
         // Editor (if any) renders first as the base layer.
         if let Some(editor) = &mut self.editor {
+            // What the tolerant loads reset (config.json at startup, this
+            // editor's workspaces.json) and a lost tablet: one notice on
+            // the Aka lane, each said once per session.
+            for n in self.config.load_notes.drain(..) {
+                self.notes.push(n);
+            }
+            self.notes.say(editor);
             editor.state.engine.set_undo_limit(undo_limit);
             if let Some(p) = &mut editor.paint {
                 p.set_filter(canvas_filter);
@@ -3699,14 +3807,6 @@ impl eframe::App for App {
             let ctx = ui.ctx().clone();
             for action in fired {
                 self.perform(&ctx, action);
-            }
-            // What the tolerant config load reset is said once, on the
-            // status lane of the first editor.
-            if !self.config.load_notes.is_empty()
-                && let Some(ed) = &mut self.editor
-            {
-                ed.state.status = self.config.load_notes.join(" · ");
-                self.config.load_notes.clear();
             }
         }
 
@@ -4049,32 +4149,47 @@ impl App {
 fn probe() {
     // Every room, at each display scale (fractional scales can add
     // pixel-rounding jitter that 1.0 never shows).
-    let mut moved = 0usize;
+    let (mut moved, mut blind) = (0usize, 0usize);
     for &stage in Stage::ALL {
         for ppp in PROBE_SCALES {
             println!("---- {} · pixels_per_point {ppp} ----", stage.name());
-            let (lines, m) = probe_run(stage, ppp);
-            for line in lines {
+            let run = probe_run(stage, ppp);
+            for line in &run.lines {
                 println!("{line}");
             }
-            moved += m;
+            moved += run.moved;
+            blind += run.unmeasured;
         }
     }
     println!();
-    if moved == 0 {
+    if moved == 0 && blind == 0 {
         println!("PROBE PASS: canvas rect never moved");
     } else {
-        println!("PROBE FAIL: canvas rect moved {moved} time(s)");
+        println!("PROBE FAIL: canvas rect moved {moved} time(s), unmeasured {blind} time(s)");
     }
 }
 
 /// The display scales the probe walks (the testkit runs the same set).
 const PROBE_SCALES: [f32; 3] = [1.0, 1.25, 1.5];
 
+/// What one probe pass saw.
+struct ProbeRun {
+    /// One line per step: the rect, and any MOVED / UNMEASURED note.
+    lines: Vec<String>,
+    /// Scripted steps (after settle) where the rect moved.
+    moved: usize,
+    /// Scripted steps where the canvas pane recorded no rect at all — a
+    /// probe that measured nothing must fail, never pass.
+    unmeasured: usize,
+}
+
 /// One probe pass in one room at one scale — THE scenario, shared by the
-/// CLI probe and the testkit test. Returns the printed lines and the
-/// number of MOVED steps after settle.
-fn probe_run(stage: Stage, ppp: f32) -> (Vec<String>, usize) {
+/// CLI probe and the testkit test. The room is entered the way the room
+/// switcher enters it, and the Canvas tab is brought to the front (the
+/// Edit room keeps it behind the viewer, where the artist reaches it for a
+/// quick fix); the Layout room's canvas pane is the cut's preview, which
+/// is measured in its place.
+fn probe_run(stage: Stage, ppp: f32) -> ProbeRun {
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(ppp);
     dress(&ctx);
@@ -4084,13 +4199,12 @@ fn probe_run(stage: Stage, ppp: f32) -> (Vec<String>, usize) {
     let mut state = AppState::new_project("probe", 1920, 1080, 24, 300.0);
     state.new_drawing_at_frame(); // cel at frame 0; frame 1 stays empty
     let mut editor = Editor::from_state(state, None, None);
-    // Enter the room the way the room switcher does.
-    editor.dock = stage.dock();
-    if editor.canvas.apply_view(&stage.view(), &mut editor.state) {
-        editor.stage = Some(stage);
-        editor.state.view.line_guard = matches!(stage, Stage::Finishing);
+    editor.enter_room(stage);
+    if let Some(tab) = editor.dock.find_tab(&Pane::Canvas) {
+        let _ = editor.dock.set_active_tab(tab);
     }
     let mut lines: Vec<String> = Vec::new();
+    let mut unmeasured = 0usize;
     let raw = || egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
             egui::pos2(0.0, 0.0),
@@ -4102,6 +4216,9 @@ fn probe_run(stage: Stage, ppp: f32) -> (Vec<String>, usize) {
     let mut moved = 0usize;
     let mut run =
         |editor: &mut Editor, label: &str, last: &mut Option<egui::Rect>, moved: &mut usize| {
+            // Each pass must record its own rect: a stale one would hide a
+            // pane that stopped drawing.
+            editor.canvas.dbg_rect = egui::Rect::NOTHING;
             ctx.begin_pass(raw());
             let mut root = egui::Ui::new(
                 ctx.clone(),
@@ -4125,6 +4242,13 @@ fn probe_run(stage: Stage, ppp: f32) -> (Vec<String>, usize) {
             );
             let _ = ctx.end_pass();
             let r = editor.canvas.dbg_rect;
+            if !(r.is_finite() && r.is_positive()) {
+                if label != "settle" {
+                    unmeasured += 1;
+                }
+                lines.push(format!("{label:26} UNMEASURED — the canvas pane recorded no rect"));
+                return;
+            }
             let note = match *last {
                 Some(p)
                     if (r.left() - p.left()).abs() > 0.01
@@ -4191,7 +4315,11 @@ fn probe_run(stage: Stage, ppp: f32) -> (Vec<String>, usize) {
         editor.state.redo();
         run(&mut editor, "after redo", &mut last, &mut moved);
     }
-    (lines, moved)
+    ProbeRun {
+        lines,
+        moved,
+        unmeasured,
+    }
 }
 
 impl Editor {
@@ -4825,18 +4953,11 @@ impl Editor {
                         Stage::Finishing => ("仕上げ", "shiage"),
                         Stage::Edit => ("編集", "henshū"),
                     };
-                    if slate_tab(ui, self.stage == Some(*st), kanji, romaji)
+                    if slate_tab(ui, self.stage == Some(*st), kanji, romaji, st.name())
                         .on_hover_text(st.describes())
                         .clicked()
                     {
-                        self.dock = st.dock();
-                        if self.canvas.apply_view(&st.view(), &mut self.state) {
-                            self.stage = Some(*st);
-                            // LINE GUARD defaults ON in the Finishing room
-                            // (shiage charter) and OFF elsewhere.
-                            self.state.view.line_guard = matches!(st, Stage::Finishing);
-                            self.state.status = format!("room: {}", st.name());
-                        }
+                        self.enter_room(*st);
                     }
                 }
                 ui.menu_button("ws", |ui| {
@@ -5285,6 +5406,24 @@ impl Editor {
                         if self.state.refusal_seq != self.refusal_seen_seq {
                             self.refusal_seen_seq = self.state.refusal_seq;
                             self.refusal_since = ui.input(|i| i.time);
+                        }
+                        // A NOTICE (a reset config, a lost tablet) waits for
+                        // the artist: the dwell starts at the first key or
+                        // click after it shows, so it is never missed. (Raw
+                        // events: a widget that consumed the key still saw
+                        // the artist act.)
+                        if self.notice_seq == Some(self.state.refusal_seq) {
+                            let acted = ui.input(|i| {
+                                i.pointer.any_pressed()
+                                    || i.raw.events.iter().any(|e| {
+                                        matches!(e, egui::Event::Key { pressed: true, .. })
+                                    })
+                            });
+                            if acted {
+                                self.notice_seq = None;
+                            } else {
+                                self.refusal_since = ui.input(|i| i.time);
+                            }
                         }
                         let rage = ui.input(|i| i.time) - self.refusal_since;
                         if rage < 4.0 && !self.state.refusal.is_empty() {

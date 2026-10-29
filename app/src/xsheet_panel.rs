@@ -1219,6 +1219,12 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 plate::legend_dim()
             };
             let (lock_rect, lock_resp) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::click());
+            plate::speak(
+                &lock_resp,
+                egui::WidgetType::Checkbox,
+                Some(props.locked),
+                &format!("lock layer {name}"),
+            );
             crate::icons::paint(
                 ui.painter(),
                 Rect::from_center_size(lock_rect.center(), vec2(11.0, 11.0)),
@@ -1244,6 +1250,12 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // RETAS colour dot — the layer's identity ink. Click or
             // right-click: the layer card.
             let (dot_rect, dot_resp) = ui.allocate_exact_size(vec2(12.0, 18.0), Sense::click());
+            plate::speak(
+                &dot_resp,
+                egui::WidgetType::Button,
+                None,
+                &format!("layer colour {name}"),
+            );
             ui.painter()
                 .circle_filled(dot_rect.center(), 4.0, props_chip_color(&props));
             let dot_resp = dot_resp.on_hover_text(format!(

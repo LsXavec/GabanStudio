@@ -260,30 +260,33 @@ impl Workspaces {
         let mut list = Vec::new();
         let mut notes = Vec::new();
         if let Ok(bytes) = std::fs::read(&path) {
-            let mut dropped = 0usize;
+            // None = the file itself is unreadable (not JSON, no list).
+            let mut dropped = Some(0usize);
             match serde_json::from_slice::<serde_json::Value>(&bytes) {
                 Ok(v) => match v.get("list").and_then(|l| l.as_array()) {
                     Some(items) => {
                         for it in items {
                             match serde_json::from_value::<Workspace>(it.clone()) {
                                 Ok(w) => list.push(w),
-                                Err(_) => dropped += 1,
+                                Err(_) => dropped = dropped.map(|n| n + 1),
                             }
                         }
                     }
-                    None => dropped += 1,
+                    None => dropped = None,
                 },
-                Err(_) => dropped += 1,
+                Err(_) => dropped = None,
             }
-            if dropped > 0 {
+            let said = match dropped {
+                Some(0) => None,
+                Some(1) => Some("1 saved workspace could not be read and was skipped".to_string()),
+                Some(n) => Some(format!("{n} saved workspaces could not be read and were skipped")),
+                None => Some("your saved workspaces could not be read".to_string()),
+            };
+            if let Some(said) = said {
                 let mut bad = path.as_os_str().to_owned();
                 bad.push(".bad");
                 let _ = std::fs::write(PathBuf::from(bad), &bytes);
-                notes.push(format!(
-                    "workspaces.json: dropped {dropped} unreadable entr{} — the original is \
-                     kept as workspaces.json.bad",
-                    if dropped == 1 { "y" } else { "ies" }
-                ));
+                notes.push(format!("{said} — the original is kept as workspaces.json.bad"));
             }
         }
         (Self { list }, notes)

@@ -1087,29 +1087,55 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Read one section of a config/workspaces object: absent keeps the
-/// default silently; present but of the wrong shape keeps the default and
-/// names the section in `dropped`.
+/// What a tolerant config load gave up: whole sections back at their
+/// defaults, and single list entries skipped — in the artist's words.
+#[derive(Default)]
+struct Dropped {
+    /// Sections reset to defaults ("interface", "shortcuts", ...).
+    reset: Vec<&'static str>,
+    /// Entries skipped ("1 shortcut", "2 brush presets").
+    skipped: Vec<String>,
+}
+
+/// A config section's name as the artist knows it (the Settings pages).
+fn section_name(key: &str) -> &'static str {
+    match key {
+        "keybinds" => "shortcuts",
+        "perf" => "performance",
+        "ui" => "interface",
+        "session" => "session",
+        "update_repo" => "update source",
+        "pen" => "pen",
+        "layers" => "layer settings",
+        "presets" => "brush presets",
+        _ => "settings",
+    }
+}
+
+/// Read one section of a config object: absent keeps the default
+/// silently; present but of the wrong shape keeps the default and names
+/// the section in `dropped`.
 fn read_section<T: serde::de::DeserializeOwned>(
     map: &serde_json::Map<String, serde_json::Value>,
     key: &str,
     slot: &mut T,
-    dropped: &mut Vec<String>,
+    dropped: &mut Dropped,
 ) {
     if let Some(v) = map.get(key) {
         match serde_json::from_value::<T>(v.clone()) {
             Ok(t) => *slot = t,
-            Err(_) => dropped.push(key.to_string()),
+            Err(_) => dropped.reset.push(section_name(key)),
         }
     }
 }
 
-/// Read a list element by element: one bad entry is dropped (and counted
-/// in `dropped`), every readable entry survives. None = not a list.
+/// Read a list element by element: one bad entry is skipped (and counted
+/// in `dropped` as `what`, singular and plural), every readable entry
+/// survives. None = not a list.
 fn read_list<T: serde::de::DeserializeOwned>(
     v: &serde_json::Value,
-    what: &str,
-    dropped: &mut Vec<String>,
+    what: (&str, &str),
+    dropped: &mut Dropped,
 ) -> Option<Vec<T>> {
     let items = v.as_array()?;
     let mut out = Vec::with_capacity(items.len());
@@ -1121,15 +1147,23 @@ fn read_list<T: serde::de::DeserializeOwned>(
         }
     }
     if bad > 0 {
-        dropped.push(format!("{bad} {what}"));
+        let noun = if bad == 1 { what.0 } else { what.1 };
+        dropped.skipped.push(format!("{bad} {noun}"));
     }
     Some(out)
 }
 
 /// Keep the unreadable original beside the file (`<file>.bad`) and say,
 /// in ONE note, what was reset. Nothing dropped = no note, no copy.
-fn note_dropped(path: &Path, bytes: &[u8], dropped: &[String], notes: &mut Vec<String>) {
-    if dropped.is_empty() {
+fn note_dropped(path: &Path, bytes: &[u8], dropped: &Dropped, notes: &mut Vec<String>) {
+    let mut said = Vec::new();
+    if !dropped.reset.is_empty() {
+        said.push(format!("{} reset to defaults", dropped.reset.join(", ")));
+    }
+    if !dropped.skipped.is_empty() {
+        said.push(format!("{} dropped", dropped.skipped.join(", ")));
+    }
+    if said.is_empty() {
         return;
     }
     let mut bad = path.as_os_str().to_owned();
@@ -1140,8 +1174,8 @@ fn note_dropped(path: &Path, bytes: &[u8], dropped: &[String], notes: &mut Vec<S
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     notes.push(format!(
-        "{name}: reset {} to defaults — the original is kept as {name}.bad",
-        dropped.join(", ")
+        "Settings: {} — your old file is kept as {name}.bad",
+        said.join(", ")
     ));
 }
 
@@ -1171,10 +1205,10 @@ impl Config {
         let mut cfg = Self::default();
         let mut notes = Vec::new();
         if let Ok(bytes) = std::fs::read(&path) {
-            let mut dropped = Vec::new();
+            let mut dropped = Dropped::default();
             match serde_json::from_slice::<serde_json::Value>(&bytes) {
                 Ok(serde_json::Value::Object(map)) => cfg.read_sections(&map, &mut dropped),
-                _ => dropped.push("the whole file".to_string()),
+                _ => dropped.reset.push("everything"),
             }
             note_dropped(&path, &bytes, &dropped, &mut notes);
         }
@@ -1185,12 +1219,12 @@ impl Config {
     fn read_sections(
         &mut self,
         map: &serde_json::Map<String, serde_json::Value>,
-        dropped: &mut Vec<String>,
+        dropped: &mut Dropped,
     ) {
         if let Some(v) = map.get("keybinds") {
-            match read_list::<Binding>(v, "keybind(s)", dropped) {
+            match read_list::<Binding>(v, ("shortcut", "shortcuts"), dropped) {
                 Some(list) => self.keybinds = list,
-                None => dropped.push("keybinds".to_string()),
+                None => dropped.reset.push(section_name("keybinds")),
             }
         }
         read_section(map, "perf", &mut self.perf, dropped);
@@ -1200,9 +1234,9 @@ impl Config {
         read_section(map, "pen", &mut self.pen, dropped);
         read_section(map, "layers", &mut self.layers, dropped);
         if let Some(v) = map.get("presets") {
-            match read_list::<BrushPreset>(v, "preset(s)", dropped) {
+            match read_list::<BrushPreset>(v, ("brush preset", "brush presets"), dropped) {
                 Some(list) => self.presets = list,
-                None => dropped.push("presets".to_string()),
+                None => dropped.reset.push(section_name("presets")),
             }
         }
     }

@@ -53,6 +53,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                             let (pr, presp) =
                                 ui.allocate_exact_size(vec2(44.0, 30.0), Sense::click());
                             let armed = canvas.brush_color[..3] == role.color[..3];
+                            plate::speak(
+                                &presp,
+                                egui::WidgetType::Button,
+                                Some(armed),
+                                &format!("paint pot: {}", role.name),
+                            );
                             let p = ui.painter();
                             let well = pr.shrink(2.0);
                             p.rect_filled(well.expand(2.0), 0.0, plate::WELL);
