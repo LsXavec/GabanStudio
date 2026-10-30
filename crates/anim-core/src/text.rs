@@ -22,7 +22,10 @@
 //! the line has one).
 //!
 //! **Outlines** are the coverage dilated by a disc of the outline's width
-//! (soft-edged), composited under the fill.
+//! (soft-edged, through a distance transform: linear in the pixels at any
+//! width), composited under the fill. A block is rasterised only over the
+//! window it is drawn into ([`raster_block_in`]), so the cost follows the
+//! target, not the size of the type.
 
 use ab_glyph::{Font, FontRef, GlyphId, PxScale, ScaleFont, point};
 
@@ -304,18 +307,22 @@ fn wrap_units(units: Vec<Unit>, limit: f32) -> Vec<Vec<Unit>> {
         return vec![units];
     }
     let mut lines: Vec<Vec<Unit>> = vec![Vec::new()];
+    // The last line's run, kept as units join and leave it (summed in the
+    // same order a fresh sum would be).
+    let mut run = 0.0f32;
     let first = |u: &Unit| u.text.chars().next().unwrap_or(' ');
     for u in units {
         let line = lines.last_mut().expect("a line");
-        let run: f32 = line.iter().map(|x| x.size).sum();
         let c = first(&u);
         if line.is_empty() || run + u.size <= limit + 1e-3 || NO_LINE_START.contains(c) {
+            run += u.size;
             line.push(u);
             continue;
         }
         if c == ' ' {
             // The break itself: the space goes.
             lines.push(Vec::new());
+            run = 0.0;
             continue;
         }
         let mut carry = Vec::new();
@@ -327,6 +334,7 @@ fn wrap_units(units: Vec<Unit>, limit: f32) -> Vec<Vec<Unit>> {
             line.pop();
         }
         carry.push(u);
+        run = carry.iter().map(|x| x.size).sum();
         lines.push(carry);
     }
     lines
@@ -346,10 +354,7 @@ fn piece_ink(p: &Piece) -> Option<[f32; 4]> {
     let glyph = p.glyph.with_scale_and_position(p.scale, point(p.at.0, p.at.1));
     let b = p.face.font().outline_glyph(glyph)?.px_bounds();
     let r = [b.min.x, b.min.y, b.max.x, b.max.y];
-    Some(match p.turn {
-        None => r,
-        Some((cx, cy)) => [cx - (r[3] - cy), cy + (r[0] - cx), cx - (r[1] - cy), cy + (r[2] - cx)],
-    })
+    Some(p.turn.map_or(r, |c| turn_rect(r, c)))
 }
 
 fn union(a: Option<[f32; 4]>, b: Option<[f32; 4]>) -> Option<[f32; 4]> {
@@ -569,68 +574,124 @@ fn layout_vertical(text: &str, st: &Style) -> Block {
     Block { cells, w, h, pieces }
 }
 
-/// GM16: the block's coverage (0–1, `w × h`, row-major) with `pad` px of
-/// clear margin on every side. Overlapping glyphs union.
-pub fn block_coverage(block: &Block, pad: u32) -> (u32, u32, Vec<f32>) {
-    let w = block.w.ceil().max(1.0) as u32 + 2 * pad;
-    let h = block.h.ceil().max(1.0) as u32 + 2 * pad;
-    let mut cov = vec![0.0f32; w as usize * h as usize];
-    let off = pad as f32;
+/// GM16: a rectangle of a block's px, `w × h` from (x, y) — the origin is
+/// the block's top-left, so a window may start left of or above it (in the
+/// clear margin). What [`raster_block_in`] draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub x: i64,
+    pub y: i64,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// The clear margin a block is given for an outline of `outline` px.
+fn outline_pad(outline: f32) -> u32 {
+    if outline > 0.0 { outline.ceil() as u32 + 1 } else { 0 }
+}
+
+/// The block's padded raster as a window: `pad` px of margin on every side.
+fn padded(block: &Block, pad: u32) -> Window {
+    Window {
+        x: -(pad as i64),
+        y: -(pad as i64),
+        w: block.w.ceil().max(1.0) as u32 + 2 * pad,
+        h: block.h.ceil().max(1.0) as u32 + 2 * pad,
+    }
+}
+
+/// The block's coverage over `win` (0–1, `win.w × win.h`, row-major).
+/// Overlapping glyphs union. Only the glyphs whose ink reaches the window
+/// are rasterised: the cost is the window's and theirs, never the block's.
+fn coverage_in(block: &Block, win: Window) -> Vec<f32> {
+    let (w, h) = (win.w as usize, win.h as usize);
+    let mut cov = vec![0.0f32; w * h];
+    let (wx0, wy0) = (win.x as f32, win.y as f32);
+    let (wx1, wy1) = (wx0 + win.w as f32, wy0 + win.h as f32);
     for p in &block.pieces {
         let font = p.face.font();
-        let glyph = p
-            .glyph
-            .with_scale_and_position(p.scale, point(p.at.0 + off, p.at.1 + off));
+        let glyph = p.glyph.with_scale_and_position(p.scale, point(p.at.0, p.at.1));
         let Some(outline) = font.outline_glyph(glyph) else {
             continue; // a space
         };
         let b = outline.px_bounds();
-        let turn = p.turn.map(|(cx, cy)| (cx + off, cy + off));
+        let r = [b.min.x, b.min.y, b.max.x, b.max.y];
+        let ink = p.turn.map_or(r, |c| turn_rect(r, c));
+        // A pixel of slack for the turned forms' rounding.
+        if ink[2] < wx0 - 1.0 || ink[0] > wx1 + 1.0 || ink[3] < wy0 - 1.0 || ink[1] > wy1 + 1.0 {
+            continue;
+        }
         outline.draw(|gx, gy, c| {
             let (x, y) = (b.min.x + gx as f32, b.min.y + gy as f32);
             // A turned form: the pixel's centre turned 90° clockwise about
             // the cell's centre (exact when the centre sits on the grid).
-            let (x, y) = match turn {
+            let (x, y) = match p.turn {
                 None => (x, y),
                 Some((cx, cy)) => (cx - (y + 0.5 - cy) - 0.5, cy + (x + 0.5 - cx) - 0.5),
             };
-            let (ix, iy) = (x.round() as i64, y.round() as i64);
+            let (ix, iy) = (x.round() as i64 - win.x, y.round() as i64 - win.y);
             if ix < 0 || iy < 0 || ix >= w as i64 || iy >= h as i64 {
                 return;
             }
-            let i = iy as usize * w as usize + ix as usize;
+            let i = iy as usize * w + ix as usize;
             let c = c.clamp(0.0, 1.0);
             cov[i] = cov[i] + c - cov[i] * c;
         });
     }
-    (w, h, cov)
+    cov
 }
 
-/// Coverage dilated by a disc of radius `r` px, soft-edged: each pixel takes
-/// the most coverage within reach, weighted by `clamp(r + 0.5 − d, 0, 1)`.
+/// A rect (x0, y0, x1, y1) turned 90° clockwise about `c`.
+fn turn_rect(r: [f32; 4], (cx, cy): (f32, f32)) -> [f32; 4] {
+    [cx - (r[3] - cy), cy + (r[0] - cx), cx - (r[1] - cy), cy + (r[2] - cx)]
+}
+
+/// GM16: the block's coverage (0–1, `w × h`, row-major) with `pad` px of
+/// clear margin on every side. Overlapping glyphs union.
+pub fn block_coverage(block: &Block, pad: u32) -> (u32, u32, Vec<f32>) {
+    let win = padded(block, pad);
+    (win.w, win.h, coverage_in(block, win))
+}
+
+/// Coverage dilated by a disc of radius `r` px, soft-edged: a pixel takes
+/// `clamp(r + c − ½ − d, 0, 1)` from the nearest pixel at least half covered
+/// (`c` its coverage, `d` its distance; a fully covered one gives the disc's
+/// own `r + ½ − d`), or its own coverage, whichever is more. The nearest
+/// pixel comes from an exact Euclidean distance transform, so the cost is
+/// linear in the pixels whatever the radius.
 fn dilate(cov: &[f32], w: u32, h: u32, r: f32) -> Vec<f32> {
     use rayon::prelude::*;
-    let reach = r.ceil() as i64 + 1;
-    let offsets: Vec<(i64, i64, f32)> = (-reach..=reach)
-        .flat_map(|dy| (-reach..=reach).map(move |dx| (dx, dy)))
-        .filter_map(|(dx, dy)| {
-            let d = ((dx * dx + dy * dy) as f32).sqrt();
-            let k = (r + 0.5 - d).clamp(0.0, 1.0);
-            (k > 0.0).then_some((dx, dy, k))
-        })
-        .collect();
-    let (wi, hi) = (w as i64, h as i64);
-    let mut out = vec![0.0f32; cov.len()];
-    out.par_chunks_mut(w as usize).enumerate().for_each(|(y, row)| {
-        let y = y as i64;
+    let (w, h) = (w as usize, h as usize);
+    // A pixel farther than this down its column can lend nothing.
+    let far = (r + 1.5) * (r + 1.5);
+    // Down each column (column-major): the squared distance to the nearest
+    // half-covered pixel in it, and that pixel's row.
+    let mut col_d = vec![f32::INFINITY; w * h];
+    let mut col_y = vec![0u32; w * h];
+    col_d
+        .par_chunks_mut(h)
+        .zip(col_y.par_chunks_mut(h))
+        .enumerate()
+        .for_each(|(x, (d, at))| {
+            let f: Vec<f32> = (0..h)
+                .map(|y| if cov[y * w + x] >= 0.5 { 0.0 } else { f32::INFINITY })
+                .collect();
+            distance_1d(&f, d, at);
+            d.iter_mut().filter(|v| **v > far).for_each(|v| *v = f32::INFINITY);
+        });
+    let own = (r + 0.5).clamp(0.0, 1.0);
+    let mut out = vec![0.0f32; w * h];
+    out.par_chunks_mut(w).enumerate().for_each(|(y, row)| {
+        // Then across each row: the nearest such pixel in the plane.
+        let f: Vec<f32> = (0..w).map(|x| col_d[x * h + y]).collect();
+        let (mut d, mut at) = (vec![0.0f32; w], vec![0u32; w]);
+        distance_1d(&f, &mut d, &mut at);
         for (x, o) in row.iter_mut().enumerate() {
-            let x = x as i64;
-            let mut m = 0.0f32;
-            for &(dx, dy, k) in &offsets {
-                let (sx, sy) = (x + dx, y + dy);
-                if sx >= 0 && sy >= 0 && sx < wi && sy < hi {
-                    m = m.max(cov[(sy * wi + sx) as usize] * k);
-                }
+            let mut m = cov[y * w + x] * own;
+            if d[x].is_finite() {
+                let qx = at[x] as usize;
+                let qy = col_y[qx * h + y] as usize;
+                m = m.max((r + cov[qy * w + qx] - 0.5 - d[x].sqrt()).clamp(0.0, 1.0));
             }
             *o = m;
         }
@@ -638,22 +699,89 @@ fn dilate(cov: &[f32], w: u32, h: u32, r: f32) -> Vec<f32> {
     out
 }
 
+/// The 1-D squared distance transform (Felzenszwalb–Huttenlocher): `d[i] =
+/// min over j of (i − j)² + f[j]`, the finite `f[j]` only, with the winning
+/// j in `at` (`d` is infinite where no `f` is finite).
+fn distance_1d(f: &[f32], d: &mut [f32], at: &mut [u32]) {
+    // The lower envelope: its parabolas' sites and where each starts to win.
+    let (mut sites, mut starts): (Vec<usize>, Vec<f64>) = (Vec::new(), Vec::new());
+    let lift = |q: usize| f[q] as f64 + (q * q) as f64;
+    for q in (0..f.len()).filter(|&q| f[q].is_finite()) {
+        let mut s = f64::NEG_INFINITY;
+        while let (Some(&p), Some(&z)) = (sites.last(), starts.last()) {
+            s = (lift(q) - lift(p)) / (2.0 * (q - p) as f64);
+            if s > z {
+                break;
+            }
+            sites.pop();
+            starts.pop();
+            s = f64::NEG_INFINITY;
+        }
+        sites.push(q);
+        starts.push(s);
+    }
+    if sites.is_empty() {
+        d.fill(f32::INFINITY);
+        return;
+    }
+    let mut k = 0;
+    for i in 0..f.len() {
+        while k + 1 < sites.len() && starts[k + 1] < i as f64 {
+            k += 1;
+        }
+        let p = sites[k];
+        d[i] = ((i as f64 - p as f64).powi(2) + f[p] as f64) as f32;
+        at[i] = p as u32;
+    }
+}
+
 /// GM16: a block rasterised: `fill` (premultiplied) over an outline of
 /// `outline` px in `outline_px` (premultiplied; 0 px = none). Returns the
 /// image and the clear margin it was given on every side (room for the
 /// outline): the block's own origin sits at (pad, pad).
 pub fn raster_block(block: &Block, fill: [f32; 4], outline: f32, outline_px: [f32; 4]) -> (Image, u32) {
+    let pad = outline_pad(outline);
+    (raster_block_in(block, fill, outline, outline_px, padded(block, pad)), pad)
+}
+
+/// GM16: [`raster_block`] cut to `win` (block px): an image of exactly the
+/// window, the block's padded raster where the two meet and clear elsewhere.
+/// Only the window, the outline's reach around it and the glyphs that reach
+/// it are worked, so a block far bigger than its target (type at 2000 px, a
+/// long line) costs about what the target does.
+pub fn raster_block_in(block: &Block, fill: [f32; 4], outline: f32, outline_px: [f32; 4], win: Window) -> Image {
+    let mut img = Image::new(win.w, win.h);
     let ring = outline > 0.0;
-    let pad = if ring { outline.ceil() as u32 + 1 } else { 0 };
-    let (w, h, cov) = block_coverage(block, pad);
-    let halo = if ring { dilate(&cov, w, h, outline) } else { Vec::new() };
-    let mut img = Image::new(w, h);
-    for (i, c) in cov.iter().enumerate() {
-        let o = if ring { halo[i] } else { 0.0 };
-        let keep = 1.0 - fill[3] * c;
-        for k in 0..4 {
-            img.px[i * 4 + k] = fill[k] * c + outline_px[k] * o * keep;
+    let pad = outline_pad(outline);
+    let full = padded(block, pad);
+    // What the window's pixels can see: the window and the outline's reach
+    // around it, within the padded raster.
+    let reach = pad as i64;
+    let x0 = (win.x - reach).max(full.x);
+    let y0 = (win.y - reach).max(full.y);
+    let x1 = (win.x + win.w as i64 + reach).min(full.x + full.w as i64);
+    let y1 = (win.y + win.h as i64 + reach).min(full.y + full.h as i64);
+    if x1 <= x0 || y1 <= y0 {
+        return img;
+    }
+    let seen = Window {
+        x: x0,
+        y: y0,
+        w: (x1 - x0) as u32,
+        h: (y1 - y0) as u32,
+    };
+    let cov = coverage_in(block, seen);
+    let halo = if ring { dilate(&cov, seen.w, seen.h, outline) } else { Vec::new() };
+    for y in y0.max(win.y)..y1.min(win.y + win.h as i64) {
+        for x in x0.max(win.x)..x1.min(win.x + win.w as i64) {
+            let i = (y - y0) as usize * seen.w as usize + (x - x0) as usize;
+            let (c, o) = (cov[i], if ring { halo[i] } else { 0.0 });
+            let keep = 1.0 - fill[3] * c;
+            let j = ((y - win.y) as usize * win.w as usize + (x - win.x) as usize) * 4;
+            for k in 0..4 {
+                img.px[j + k] = fill[k] * c + outline_px[k] * o * keep;
+            }
         }
     }
-    (img, pad)
+    img
 }

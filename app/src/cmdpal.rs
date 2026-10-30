@@ -404,6 +404,29 @@ mod tests {
         assert!(h.has("Toggle onion skin"), "{}", h.describe());
     }
 
+    #[test]
+    fn genui_the_palette_finds_add_node_by_the_generators_words() {
+        // GM16: a manga artist types the trade word, not "add node".
+        for q in ["fukidashi", "speed lines", "ryūsen", "focus lines", "shuchusen", "tategaki", "serifu", "balloon"] {
+            assert_eq!(ranked(q, &[]).first(), Some(&Action::AddNode), "{q:?} finds Add node first");
+        }
+        for q in ["particles", "snow", "sakura", "text", "lettering"] {
+            assert!(ranked(q, &[]).contains(&Action::AddNode), "{q:?} finds Add node");
+        }
+        assert!(Action::AddNode.help().contains("generators"), "{}", Action::AddNode.help());
+        // In the palette itself: the word lists Add node…, and Enter opens
+        // the node graph's add menu.
+        let mut h = EditorHarness::new();
+        h.perform(Action::CommandPalette);
+        h.type_text("fukidashi");
+        assert_eq!(ranked(&h.editor().palette.query, &[]).first(), Some(&Action::AddNode));
+        assert!(h.has("Add node…"), "{}", h.describe());
+        h.key(egui::Key::Enter);
+        h.run();
+        assert!(!h.editor().palette.open, "Enter runs and closes");
+        assert!(h.state().graph_ui.add_menu.is_some(), "the add menu is open\n{}", h.describe());
+    }
+
     // ---- history, help, chords ----
 
     #[test]

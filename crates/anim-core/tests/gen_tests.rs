@@ -347,6 +347,16 @@ fn a_new_seed_moves_the_lines_and_on_twos_holds_frame_pairs() {
         }
         let every = vals(kind, &[("motion", pick("every frame"))]);
         assert_ne!(draw(&every, 4, w, h), draw(&every, 5, w, h));
+        // On threes (the satsuei look of a shūchūsen held on 3s): frames
+        // 3k to 3k + 2 are one drawing.
+        let threes = vals(kind, &[("motion", pick("on threes"))]);
+        for k in 0..3 {
+            let first = draw(&threes, 3 * k, w, h);
+            for f in 3 * k + 1..3 * k + 3 {
+                assert_eq!(draw(&threes, f, w, h), first, "{}: frame {f} holds frame {}", kind.name(), 3 * k);
+            }
+            assert_ne!(draw(&threes, 3 * k + 3, w, h), first, "{}: frame {} is new", kind.name(), 3 * k + 3);
+        }
     }
 }
 
@@ -484,6 +494,42 @@ fn vertical_forms_turn_dashes_lift_commas_and_set_two_digits_in_one_cell() {
 }
 
 #[test]
+fn vertical_brackets_and_the_ellipsis_turn_and_the_full_stop_sits_top_right() {
+    let em = 40.0;
+    let column = Style::new(Face::SansJp, em, Direction::Vertical);
+    let line = Style::new(Face::SansJp, em, Direction::Horizontal);
+    let size = |r: [f32; 4]| (r[2] - r[0], r[3] - r[1]);
+    // The brackets a letterer sees first in every line of dialogue: turned
+    // a quarter, so a column's ink is a line's on its side (「 becomes ﹁).
+    for mark in ["「", "」", "『", "』", "（", "）"] {
+        let set = text::layout(&format!("あ{mark}"), &column);
+        assert_eq!(set.cells[1].form, Form::Rotated, "{mark}");
+        let (vw, vh) = size(set.cells[1].ink.unwrap());
+        let (lw, lh) = size(text::layout(mark, &line).cells[0].ink.unwrap());
+        assert!(lh > lw, "{mark} stands taller than wide in a line: {lw}×{lh}");
+        assert!(vw > vh, "{mark} lies wider than tall in a column: {vw}×{vh}");
+        assert!((vw - lh).abs() <= 1.5 && (vh - lw).abs() <= 1.5, "{mark}: {vw}×{vh} turned from {lw}×{lh}");
+    }
+    // A bracketed line keeps one column, the brackets at its two ends.
+    let said = text::layout("「セリフ」", &column);
+    assert!(said.cells.windows(2).all(|p| p[0].centre().0 == p[1].centre().0), "one column");
+    assert!(said.cells.windows(2).all(|p| p[1].centre().1 > p[0].centre().1), "down it");
+    // … and ― run down the column.
+    for mark in ["…", "―"] {
+        let set = text::layout(&format!("あ{mark}"), &column);
+        assert_eq!(set.cells[1].form, Form::Rotated, "{mark}");
+        let (w, h) = size(set.cells[1].ink.unwrap());
+        assert!(h > 2.0 * w, "{mark} runs down the column: {w}×{h}");
+    }
+    // 。 sits in the cell's top-right quadrant, as 、 does.
+    let stop = &text::layout("あ。", &column).cells[1];
+    assert_eq!(stop.form, Form::Corner);
+    let (ink, (cx, cy)) = (stop.ink.unwrap(), stop.centre());
+    let (ix, iy) = ((ink[0] + ink[2]) / 2.0, (ink[1] + ink[3]) / 2.0);
+    assert!(ix > cx && iy < cy, "。 in the top-right quadrant: ink ({ix}, {iy}) in a cell centred ({cx}, {cy})");
+}
+
+#[test]
 fn an_outline_rings_the_letters_in_its_own_colour() {
     let b = text::layout("Gaban", &Style::new(Face::Sans, 32.0, Direction::Horizontal));
     let (black, white) = ([0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]);
@@ -502,6 +548,43 @@ fn an_outline_rings_the_letters_in_its_own_colour() {
     // The letters stay black over it.
     let cores = ringed.px.chunks_exact(4).filter(|p| p[3] > 0.99 && p[0] < 0.01).count();
     assert!(cores > 100, "{cores}");
+}
+
+#[test]
+fn lettering_works_only_its_target_however_big_the_type() {
+    // A window of a block is that crop of the whole block's raster, outline
+    // and all (the outline reaches in from ink outside the window).
+    let b = text::layout("Gaban セリフ\n縦書き", &Style::new(Face::SansJp, 40.0, Direction::Horizontal));
+    let (black, white) = ([0.0, 0.0, 0.0, 1.0], [1.0, 1.0, 1.0, 1.0]);
+    let (whole, pad) = text::raster_block(&b, black, 5.0, white);
+    let win = text::Window { x: 37, y: -4, w: 90, h: 60 };
+    let part = text::raster_block_in(&b, black, 5.0, white, win);
+    assert_eq!((part.w, part.h), (win.w, win.h));
+    assert!(inked(&part) > 500, "the window holds ink and ring");
+    for y in 0..win.h {
+        for x in 0..win.w {
+            let (sx, sy) = (x as i64 + win.x + pad as i64, y as i64 + win.y + pad as i64);
+            let want = if sx >= 0 && sy >= 0 && sx < whole.w as i64 && sy < whole.h as i64 {
+                whole.pixel(sx as u32, sy as u32)
+            } else {
+                [0.0; 4]
+            };
+            assert_eq!(part.pixel(x, y), want, "({x}, {y}) of the window");
+        }
+    }
+    // A window wholly past the block and its outline is clear.
+    let away = text::Window { x: whole.w as i64 + 10, y: 0, w: 32, h: 32 };
+    assert_eq!(inked(&text::raster_block_in(&b, black, 5.0, white, away)), 0);
+    // A long line at the largest size with the widest outline (about
+    // 200000 × 2900 px of type) into a small target: only the target is
+    // worked, so this costs a 256 × 144 render, not gigabytes. The middle
+    // of the 51st square fills it.
+    assert!(Face::SansJp.covers('■'));
+    let long = "■".repeat(101);
+    let v = vals(GenKind::Text, &[("text", words(&long)), ("size", n(2000.0)), ("outline", n(100.0))]);
+    let img = draw(&v, 0, 256, 144);
+    assert_eq!((img.w, img.h), (256, 144));
+    assert!(img.px.chunks_exact(4).all(|p| p[3] > 0.999 && p[0] < 0.001), "the square's middle is solid ink");
 }
 
 // ---- Balloons -------------------------------------------------------------------
@@ -563,6 +646,72 @@ fn cloud_and_burst_balloons_draw_their_own_outlines() {
         })
         .count();
     assert!(past > 50, "{past}");
+}
+
+/// The first solid pixel (alpha above 0.99) walking from `at` by `step`.
+fn first_solid(img: &Image, mut at: (i32, i32), step: (i32, i32)) -> Option<(u32, u32)> {
+    while at.0 >= 0 && at.1 >= 0 && at.0 < img.w as i32 && at.1 < img.h as i32 {
+        if img.pixel(at.0 as u32, at.1 as u32)[3] > 0.99 {
+            return Some((at.0 as u32, at.1 as u32));
+        }
+        at = (at.0 + step.0, at.1 + step.1);
+    }
+    None
+}
+
+#[test]
+fn every_balloon_shape_keeps_its_whole_outline_at_hd_proportions() {
+    // 256 × 144 is 1920 × 1080 scaled: the default balloon, and a 0.3 × 0.3
+    // one with 8 bumps, whose bumps reach farthest past the body (a cloud
+    // whose box was its radii drew them cut flat at the top and bottom).
+    let (w, h) = (256u32, 144u32);
+    let tip = (200u32, 128u32);
+    for (width, height, bumps) in [(0.4, 0.3, 14.0), (0.3, 0.3, 8.0)] {
+        for shape in generator::BALLOONS {
+            let v = vals(
+                GenKind::Balloon,
+                &[
+                    ("shape", pick(shape)),
+                    ("width", n(width)),
+                    ("height", n(height)),
+                    ("spikes", n(bumps)),
+                    ("tail_x", n((tip.0 as f32 + 0.5) / w as f32)),
+                    ("tail_y", n((tip.1 as f32 + 0.5) / h as f32)),
+                    ("stroke", FxValue::Color([255, 0, 0, 255])),
+                    ("stroke_width", n(3.0)),
+                ],
+            );
+            let img = draw(&v, 0, w, h);
+            let what = format!("{shape} {width} × {height}, {bumps} bumps");
+            let (cx, cy) = (w / 2, h / 2);
+            assert_eq!(rgba8(&img, cx, cy), [255, 255, 255, 255], "{what}: the fill inside");
+            // The stroke on the outline: the first solid pixel in from the
+            // top and from either side is the stroke's.
+            for (from, step) in [((cx as i32, 0), (0, 1)), ((0, cy as i32), (1, 0)), ((w as i32 - 1, cy as i32), (-1, 0))] {
+                let (x, y) = first_solid(&img, from, step).unwrap_or_else(|| panic!("{what}: no outline from {from:?}"));
+                assert_eq!(rgba8(&img, x, y), [255, 0, 0, 255], "{what}: the stroke at ({x}, {y})");
+            }
+            // The tail's tip pixel is the point, and nothing lies past it.
+            assert!(img.pixel(tip.0, tip.1)[3] >= 0.4, "{what}: the tip {:?}", img.pixel(tip.0, tip.1));
+            for (x, y) in [(tip.0 + 1, tip.1 + 1), (tip.0 + 2, tip.1 + 2), (tip.0 + 1, tip.1)] {
+                assert_eq!(img.pixel(x, y)[3], 0.0, "{what}: past the tip at ({x}, {y})");
+            }
+            // Every outermost row and column of ink is the outline's soft
+            // edge: a shape cut short by its box ends in solid ink.
+            let (x0, y0, x1, y1) = ink_box(&img).unwrap();
+            assert!(x0 > 0 && y0 > 0 && x1 < w - 1 && y1 < h - 1, "{what}: inside the frame");
+            let edges = [
+                ("top", (x0..=x1).map(|x| img.pixel(x, y0)[3]).collect::<Vec<_>>()),
+                ("bottom", (x0..=x1).map(|x| img.pixel(x, y1)[3]).collect()),
+                ("left", (y0..=y1).map(|y| img.pixel(x0, y)[3]).collect()),
+                ("right", (y0..=y1).map(|y| img.pixel(x1, y)[3]).collect()),
+            ];
+            for (side, alphas) in edges {
+                let solid = alphas.iter().filter(|a| **a > 0.999).count();
+                assert_eq!(solid, 0, "{what}: the {side} edge is cut ({solid} solid px)");
+            }
+        }
+    }
 }
 
 // ---- Nodes, the store and the eval hash -----------------------------------------

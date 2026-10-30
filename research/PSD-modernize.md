@@ -2732,3 +2732,17 @@ what was not verified.
   the workspace brush menu "brush: …". Vertical Latin stays upright one per cell (no rotated runs;
   ab_glyph has no `vert` feature, so vertical forms are turned or shifted horizontal glyphs). 19
   `gen_tests`, 3 `genui_*`.
+- 2026-10-29 — GM16 review fixes. A balloon's box comes from its geometry (every cloud bump's disc,
+  every burst tip, the tail): a cloud at HD proportions had its top cut flat. Lettering draws only the
+  target's window and the outline's reach (glyphs outside it skipped), the outline an exact Euclidean
+  distance transform in two separable passes, so 101 ■ at 2000 px with a 100 px outline into 256×144
+  is cheap; wrapping keeps a running line length. Add node finds the generators by the artists' words
+  (fukidashi, ryūsen, shūchūsen, tategaki, serifu …) and its help names them. The Text kind's term is
+  shashoku (set type; kakimoji is the hand-drawn kind). A new balloon centres where a new Text block
+  does (y 0.5). The text field commits on a click away or Ctrl+Enter (its hover says so); an edit
+  whose field let go while its pane was hidden commits when it shows again. A Text node is titled by
+  its first words on the graph. Speed and focus lines also move on threes. The glyph test reads the
+  engine's UI strings; the test minimums and the headless rule are read from the source. Left for a
+  later part: on-canvas handles for a balloon's tail, the focus-line centre and the clear ellipse
+  (typed as frame fractions today); presets stay in px tuned at 1920×1080 (every px parameter's help
+  says px). 22 `gen_tests`, 6 `genui_*`.

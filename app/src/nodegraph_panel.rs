@@ -435,6 +435,24 @@ fn kind_color(kind: &NodeKind) -> Color32 {
     }
 }
 
+/// A node's title on the graph: its kind's name, and after it a Text
+/// node's first words (GM16), so lettering nodes tell apart.
+fn node_title(kind: &NodeKind) -> String {
+    if let NodeKind::Generator { generator: GenKind::Text, params, .. } = kind
+        && let Some(anim_core::fx::FxValue::Text { text }) =
+            GenKind::Text.spec("text").map(|s| s.read(params.get("text")))
+    {
+        // As much of the first line as the title bar holds.
+        let line = text.lines().next().unwrap_or_default();
+        let mut words: String = line.chars().take(7).collect();
+        if words.len() < text.trim_end().len() {
+            words.push('…');
+        }
+        return format!("{}: {words}", kind.name());
+    }
+    kind.name().to_string()
+}
+
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     state.ensure_node_layout();
     toolbar(ui, state);
@@ -593,9 +611,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             nv.rect.left_top() + vec2(8.0, TITLE_H * 0.5),
             egui::Align2::LEFT_CENTER,
             if is_output {
-                format!("▶ {}", nv.kind.name())
+                format!("▶ {}", node_title(&nv.kind))
             } else {
-                nv.kind.name().to_string()
+                node_title(&nv.kind)
             },
             egui::FontId::proportional(12.0),
             Color32::from_rgb(228, 225, 214),
@@ -1130,6 +1148,84 @@ mod tests {
         }
         h.perform(Action::Undo);
         assert_eq!(h.state().cut().graph.nodes().count(), count);
+    }
+
+    #[test]
+    fn genui_the_text_field_commits_once_on_a_click_away_or_ctrl_enter() {
+        let mut h = graph_pane();
+        // A second node to click, right of the sample cut's nodes.
+        h.state_mut()
+            .graph_add_node(NodeKind::generator(GenKind::Balloon), (900.0, 40.0));
+        let other = h.state().selected_node.unwrap();
+        h.state_mut()
+            .graph_add_node(NodeKind::generator(GenKind::Text), (700.0, 40.0));
+        let id = h.state().selected_node.unwrap();
+        h.run();
+        let words = |h: &EditorHarness| {
+            let NodeKind::Generator { params, .. } = &h.state().cut().graph.node(id).unwrap().kind else {
+                panic!("still a Generator");
+            };
+            match GenKind::Text.spec("text").unwrap().read(params.get("text")) {
+                FxValue::Text { text } => text,
+                v => panic!("the words are text: {v:?}"),
+            }
+        };
+        let field = |h: &EditorHarness| {
+            let fields = &h.state().graph_ui.fx.fields;
+            fields
+                .iter()
+                .find(|(k, _)| *k == "text")
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("no 'text' field\n{}", h.describe()))
+        };
+        // Empty graph: under every node (and so every wire) and the inspector.
+        let rects = h.state().graph_ui.node_rects.clone();
+        let low = rects.iter().map(|(_, r)| r.bottom()).fold(field(&h).bottom(), f32::max);
+        let empty = pos2(field(&h).left() + 40.0, low + 40.0);
+        assert!(empty.y < 760.0 && !rects.iter().any(|(_, r)| r.contains(empty)), "{empty:?} {rects:?}");
+        let depth = h.state().engine.history_len();
+        // Into the field, everything selected, new words typed: not stored yet.
+        h.click_pos(field(&h).center());
+        assert!(h.typing(), "the click gives the field the keys\n{}", h.describe());
+        h.key_mods(crate::testkit::CTRL, egui::Key::A);
+        h.type_text("ドン");
+        assert_eq!(words(&h), "セリフ", "typing alone stores nothing");
+        assert_eq!(h.state().engine.history_len(), depth);
+        // A click on empty graph lets go of the keys and stores the words once.
+        h.click_pos(empty);
+        assert!(!h.typing(), "the click away takes the keys");
+        assert_eq!(h.state().engine.history_len(), depth + 1, "one history entry");
+        assert_eq!(words(&h), "ドン");
+        assert_eq!(h.state().selected_node, Some(id), "a background click keeps the node");
+        // A bare Enter is the field's new line; Ctrl+Enter stores and lets go.
+        h.click_pos(field(&h).center());
+        h.key_mods(crate::testkit::CTRL, egui::Key::A);
+        h.type_text("ドン");
+        h.key(egui::Key::Enter);
+        h.type_text("バン");
+        assert_eq!(h.state().engine.history_len(), depth + 1, "Enter stores nothing");
+        h.key_mods(crate::testkit::CTRL, egui::Key::Enter);
+        assert!(!h.typing(), "Ctrl+Enter lets go of the keys");
+        assert_eq!(h.state().engine.history_len(), depth + 2, "one history entry");
+        assert_eq!(words(&h), "ドン\nバン");
+        // A click on another node stores the words in the node they were
+        // typed for, then selects the other.
+        h.click_pos(field(&h).center());
+        h.key_mods(crate::testkit::CTRL, egui::Key::A);
+        h.type_text("ズキューン");
+        h.click_pos(node_rect(&h, other).center());
+        assert_eq!(h.state().selected_node, Some(other), "the click selects the other node");
+        assert_eq!(h.state().engine.history_len(), depth + 3, "one history entry");
+        assert_eq!(words(&h), "ズキューン");
+        // Every edit is one undo step, and none of it touched a GPU.
+        h.perform(Action::Undo);
+        assert_eq!(words(&h), "ドン\nバン");
+        // The graph titles the node by its first words.
+        let kind = &h.state().cut().graph.node(id).unwrap().kind;
+        assert_eq!(node_title(kind), "Text: ドン…");
+        assert_eq!(node_title(&NodeKind::generator(GenKind::Text)), "Text: セリフ");
+        assert_eq!(node_title(&NodeKind::generator(GenKind::Balloon)), "Balloon");
+        assert!(h.editor().paint.is_none() && h.editor().graph.is_none(), "a GPU resource was created");
     }
 
     #[test]
@@ -1759,5 +1855,68 @@ mod tests {
         assert_eq!(count(core), (0, 0, 0), "the core holds no shader");
         let (modules, stages, wgsl) = count(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
         assert!(modules <= 4 && stages <= 8 && wgsl == 0, "{modules} modules, {stages} entry points, {wgsl} .wgsl");
+    }
+}
+
+/// GM16's test minimums and its headless rule, read from the source (the
+/// gate's name filter also counts any test whose path merely holds the
+/// word): 14 tests in anim-core's gen_tests.rs and 2 genui_* app tests,
+/// none of which opens a window or a device, and whose files are written
+/// only under the temp dir.
+#[cfg(test)]
+mod gm16_minimums {
+    const GEN_TESTS: &str = include_str!("../../crates/anim-core/tests/gen_tests.rs");
+    /// The app files holding genui_* tests.
+    const APP: [&str; 3] = [include_str!("cmdpal.rs"), include_str!("nodegraph_panel.rs"), include_str!("plate.rs")];
+
+    /// The test fns named `prefix…` (each right under its #[test] line),
+    /// each as its source up to the next test.
+    fn tests_named<'a>(src: &'a str, prefix: &str) -> Vec<&'a str> {
+        let head = format!("fn {prefix}");
+        src.split("#[test]").skip(1).filter(|t| t.trim_start().starts_with(&head)).collect()
+    }
+
+    #[test]
+    fn test_counts_hold_in_source() {
+        let core = tests_named(GEN_TESTS, "").len();
+        assert!(core >= 14, "gen_tests.rs holds {core} tests");
+        let app: usize = APP.iter().map(|src| tests_named(src, "genui_").len()).sum();
+        assert!(app >= 2, "{app} genui_* tests");
+    }
+
+    #[test]
+    fn genui_tests_stay_headless_and_write_only_under_the_temp_dir() {
+        // A window, the GPU, a process, the network, the clock, a sleep or
+        // an audio device (spelled in halves so this file never matches).
+        let never = [
+            concat!("run_", "native"),
+            concat!("winit", "::"),
+            concat!("wgpu", "::"),
+            concat!("std::", "process"),
+            concat!("std::", "net"),
+            concat!("Instant::", "now"),
+            concat!("SystemTime::", "now"),
+            concat!("thread::", "sleep"),
+            concat!("cpal", "::"),
+            concat!("rodio", "::"),
+        ];
+        let writes = [concat!(".save", "("), concat!("fs::", "write("), concat!("File::", "create("), concat!("create_dir", "_all(")];
+        let app = APP.iter().flat_map(|src| tests_named(src, "genui_"));
+        let tests: Vec<&str> = tests_named(GEN_TESTS, "").into_iter().chain(app).collect();
+        assert!(tests.len() >= 16, "{} tests read", tests.len());
+        for t in tests {
+            let name = t.trim_start().split('(').next().unwrap_or(t);
+            for n in never {
+                assert!(!t.contains(n), "{name} reaches for {n}");
+            }
+            if writes.iter().any(|w| t.contains(w)) {
+                assert!(t.contains("std::env::temp_dir()"), "{name} writes outside the temp dir");
+            }
+        }
+        // gen_tests' helpers sit between its tests, so the whole file is read.
+        for n in never {
+            assert!(!GEN_TESTS.contains(n), "gen_tests.rs reaches for {n}");
+        }
+        assert!(GEN_TESTS.contains(writes[0]), "the round trip writes a file");
     }
 }

@@ -1,6 +1,6 @@
 //! GM16: generators — pictures made from parameters, for anime FX and for
 //! manga: deterministic particles, speed lines (ryūsen), focus lines
-//! (shūchūsen), lettering (kakimoji, with tategaki) and speech balloons
+//! (shūchūsen), set lettering (shashoku, with tategaki) and speech balloons
 //! (fukidashi). Like the FX (D9) they are drawn once, here, on the CPU on
 //! premultiplied f32 frames: the CPU golden renderer's Generator arm calls
 //! [`render`], and the GPU compositor shows its upload (NEVER-DO 2).
@@ -33,8 +33,9 @@
 //!   wobble, from beyond the frame's farthest corner toward the centre, each
 //!   stopping at the clear ellipse times `1 + jitter·u`, tapered to a point
 //!   at the inner end (`w(s) = t·(1 − s)`). Nothing inks inside the ellipse.
-//! - Lines held, re-seeded every frame, or every second frame ("on twos":
-//!   frames 2k and 2k + 1 are one layout).
+//! - Lines held, re-seeded every frame, or every second or third frame
+//!   ("on twos": frames 2k and 2k + 1 are one layout; "on threes": 3k to
+//!   3k + 2).
 //! - **Balloons** are signed distances: the body (ellipse, rounded rect,
 //!   cloud = ellipse ∪ bumps on it, burst = a spiked polygon) united with
 //!   the tail triangle (its base across the body's centre, its tip at the
@@ -100,8 +101,10 @@ pub const EMITTERS: &[&str] = &["point", "line", "rect", "matte"];
 /// The particle shapes.
 pub const SHAPES: &[&str] = &["dot", "streak", "soft disc", "petal", "snowflake"];
 const BLENDS: &[&str] = &["normal", "add"];
-/// How lines move: one layout, a new one every frame, or every second frame.
-pub const MOTIONS: &[&str] = &["held", "every frame", "on twos"];
+/// How lines move: one layout, a new one every frame, or every second or
+/// third frame (on twos, on threes).
+pub const MOTIONS: &[&str] = &["held", "every frame", "on twos", "on threes"];
+const MOTION_HELP: &str = "Held keeps one layout; every frame, on twos or on threes draws a new one every 1, 2 or 3 frames.";
 const DIRECTIONS: &[&str] = &["horizontal", "vertical"];
 const FONTS: &[&str] = &["plex sans jp", "plex sans"];
 /// The balloon bodies.
@@ -146,7 +149,7 @@ const SPEED_LINE_SPECS: &[ParamSpec] = &[
     float("thickness_max", "thickness max", "The thickest line at its middle, in px.", 0.0, 200.0, 4.0, 0.05),
     float("band", "clear band", "A band kept clear of lines, as a fraction of the frame across the lines (0 = none).", 0.0, 1.0, 0.0, 0.005),
     float("band_offset", "band offset", "Where the clear band sits across the lines: 0 is the middle, -1 and 1 the edges.", -1.0, 1.0, 0.0, 0.005),
-    choice_at("motion", "motion", "Held keeps one layout; every frame or on twos re-draws it (on twos: every second frame).", MOTIONS, 0),
+    choice_at("motion", "motion", MOTION_HELP, MOTIONS, 0),
     color("color", "colour", "The lines' colour.", [0, 0, 0, 255]),
     float("seed", "seed", SEED_HELP, 0.0, 65535.0, 1.0, 1.0),
 ];
@@ -160,7 +163,7 @@ const FOCUS_LINE_SPECS: &[ParamSpec] = &[
     float("thickness_min", "thickness min", "The thinnest line at the frame's edge, in px.", 0.0, 200.0, 2.0, 0.05),
     float("thickness_max", "thickness max", "The thickest line at the frame's edge, in px.", 0.0, 200.0, 8.0, 0.05),
     float("jitter", "jitter", "How far past the ellipse a line may stop: 0.3 stops up to 30% farther out.", 0.0, 4.0, 0.15, 0.005),
-    choice_at("motion", "motion", "Held keeps one layout; every frame or on twos re-draws it (on twos: every second frame).", MOTIONS, 0),
+    choice_at("motion", "motion", MOTION_HELP, MOTIONS, 0),
     color("color", "colour", "The lines' colour.", [0, 0, 0, 255]),
     float("seed", "seed", SEED_HELP, 0.0, 65535.0, 1.0, 1.0),
 ];
@@ -183,7 +186,9 @@ const TEXT_SPECS: &[ParamSpec] = &[
 const BALLOON_SPECS: &[ParamSpec] = &[
     choice_at("shape", "shape", "Ellipse, rounded rect, cloud (thought) or burst (shout).", BALLOONS, 0),
     float("x", "x", "The balloon's centre across the frame: 0 left, 1 right.", -2.0, 3.0, 0.5, 0.005),
-    float("y", "y", "The balloon's centre down the frame: 0 top, 1 bottom.", -2.0, 3.0, 0.45, 0.005),
+    // Centred where a new Text node's block is, so the first lettering sits
+    // in its balloon.
+    float("y", "y", "The balloon's centre down the frame: 0 top, 1 bottom.", -2.0, 3.0, 0.5, 0.005),
     float("width", "width", "The balloon's width, as a fraction of the frame width.", 0.0, 4.0, 0.4, 0.005),
     float("height", "height", "The balloon's height, as a fraction of the frame height.", 0.0, 4.0, 0.3, 0.005),
     flag("tail", "tail", "Draw a tail from the balloon to the tail point.", true),
@@ -223,7 +228,8 @@ impl GenKind {
             Self::Particles => None,
             Self::SpeedLines => Some("ryūsen"),
             Self::FocusLines => Some("shūchūsen"),
-            Self::Text => Some("kakimoji"),
+            // Set type for dialogue (kakimoji is the hand-drawn kind).
+            Self::Text => Some("shashoku"),
             Self::Balloon => Some("fukidashi"),
         }
     }
@@ -234,7 +240,7 @@ impl GenKind {
             Self::Particles => "Particles from an emitter: sparks, snow, rain, dust, petals, embers. The same on every render, frame by frame.",
             Self::SpeedLines => "Speed lines (ryūsen) along one direction, tapered at both ends, with an optional clear band.",
             Self::FocusLines => "Focus lines (shūchūsen) from beyond the frame toward a centre, stopping at a clear ellipse.",
-            Self::Text => "Lettering, horizontal or vertical (tategaki), with an outline; put it over a balloon to letter it.",
+            Self::Text => "Set lettering (shashoku) for dialogue and captions, horizontal or vertical (tategaki), with an outline; put it over a balloon to letter it.",
             Self::Balloon => "A speech balloon (fukidashi): ellipse, rounded rect, cloud or burst, with a tail to a point.",
         }
     }
@@ -245,7 +251,10 @@ impl GenKind {
             Self::Particles => &["particle", "emitter", "sparks", "snow", "rain", "dust", "sakura", "petals", "embers", "generator"],
             Self::SpeedLines => &["speed", "ryusen", "ryūsen", "motion lines", "action lines", "manga", "generator"],
             Self::FocusLines => &["focus", "shuchusen", "shūchūsen", "radial", "concentration lines", "zoom lines", "manga", "generator"],
-            Self::Text => &["lettering", "kakimoji", "type", "title", "tategaki", "vertical", "words", "generator"],
+            Self::Text => &[
+                "lettering", "shashoku", "serifu", "dialogue", "telop", "caption", "subtitle", "type", "title",
+                "tategaki", "vertical", "words", "kakimoji", "generator",
+            ],
             Self::Balloon => &["fukidashi", "speech", "bubble", "word balloon", "shout", "thought", "manga", "generator"],
         }
     }
@@ -381,15 +390,16 @@ impl GenValues {
     }
 
     /// The frame the picture changes with: every frame for particles, the
-    /// motion's frame for lines (None held; on twos, f/2), None for text
-    /// and balloons — the eval recipe spells it, so a still generator
-    /// cache-hits across frames.
+    /// motion's frame for lines (None held; on twos, f/2; on threes, f/3),
+    /// None for text and balloons — the eval recipe spells it, so a still
+    /// generator cache-hits across frames.
     pub fn motion(&self, frame: u32) -> Option<u32> {
         match self.kind {
             GenKind::Particles => Some(frame),
             GenKind::SpeedLines | GenKind::FocusLines => match self.choice("motion") {
                 1 => Some(frame),
                 2 => Some(frame / 2),
+                3 => Some(frame / 3),
                 _ => None,
             },
             GenKind::Text | GenKind::Balloon => None,
@@ -1202,11 +1212,17 @@ impl BalloonShape {
         }
     }
 
-    /// The frame-px box that holds the whole shape.
+    /// The frame-px box that holds the whole shape: the body's radii, every
+    /// cloud bump's disc and burst spike's tip (both reach past the radii,
+    /// the bumps by up to their own radius), and the tail.
     fn bounds(&self) -> (f32, f32, f32, f32) {
-        let k = if self.shape == 3 { 1.4 } else { 1.05 };
-        let (mut x0, mut y0) = (self.c.0 - self.rx * k, self.c.1 - self.ry * k);
-        let (mut x1, mut y1) = (self.c.0 + self.rx * k, self.c.1 + self.ry * k);
+        let (mut x0, mut y0) = (self.c.0 - self.rx, self.c.1 - self.ry);
+        let (mut x1, mut y1) = (self.c.0 + self.rx, self.c.1 + self.ry);
+        // A burst's vertices have no radius (bump_r is 0).
+        let r = self.bump_r;
+        for b in &self.bumps {
+            (x0, y0, x1, y1) = (x0.min(b.0 - r), y0.min(b.1 - r), x1.max(b.0 + r), y1.max(b.1 + r));
+        }
         if let Some(tri) = &self.tail {
             for p in tri {
                 (x0, y0, x1, y1) = (x0.min(p.0), y0.min(p.1), x1.max(p.0), y1.max(p.1));
@@ -1275,31 +1291,25 @@ pub fn text_style(v: &GenValues, fw: u32, fh: u32) -> Style {
 }
 
 /// The lettering drawn into `t`: the block centred on (x, y), its top-left
-/// on whole pixels.
+/// on whole pixels. Only the target's own pixels are rasterised (and the
+/// outline's reach around them), so type far bigger than the target costs
+/// no more than the target.
 fn lettering(v: &GenValues, law: ColorLaw, t: Target) -> Image {
-    let mut img = Image::new(t.w, t.h);
     let words = v.text("text");
     if words.trim().is_empty() {
-        return img;
+        return Image::new(t.w, t.h);
     }
     let block = text::layout(words, &text_style(v, t.fw, t.fh));
     let fill = law.premultiplied(v.color("color"));
     let ring = law.premultiplied(v.color("outline_color"));
-    let (src, pad) = text::raster_block(&block, fill, v.float("outline"), ring);
-    let left = (v.float("x") * t.fw as f32 - block.w / 2.0).round() as i64 - pad as i64 - t.x as i64;
-    let top = (v.float("y") * t.fh as f32 - block.h / 2.0).round() as i64 - pad as i64 - t.y as i64;
-    for sy in 0..src.h as i64 {
-        let y = top + sy;
-        if y < 0 || y >= t.h as i64 {
-            continue;
-        }
-        for sx in 0..src.w as i64 {
-            let x = left + sx;
-            if x < 0 || x >= t.w as i64 {
-                continue;
-            }
-            img.set_pixel(x as u32, y as u32, src.pixel(sx as u32, sy as u32));
-        }
-    }
-    img
+    // The block's top-left in the target's px.
+    let left = (v.float("x") * t.fw as f32 - block.w / 2.0).round() as i64 - t.x as i64;
+    let top = (v.float("y") * t.fh as f32 - block.h / 2.0).round() as i64 - t.y as i64;
+    let win = text::Window {
+        x: -left,
+        y: -top,
+        w: t.w,
+        h: t.h,
+    };
+    text::raster_block_in(&block, fill, v.float("outline"), ring, win)
 }

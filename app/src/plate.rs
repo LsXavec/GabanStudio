@@ -1150,9 +1150,10 @@ mod tests {
         assert_eq!(got, "仕上撮影…\u{2014}セ");
     }
 
-    /// Every non-ASCII character in the app's string literals draws in
-    /// every family of the embedded stack (D7: no tofu; GM16: the JP face is
-    /// the whole Bold, so kanji in labels and lettering defaults render).
+    /// Every non-ASCII character in the app's string literals, and in the
+    /// engine's that the app draws, draws in every family of the embedded
+    /// stack (D7: no tofu; GM16: the JP face is the whole Bold, so kanji in
+    /// labels and lettering defaults render).
     #[test]
     fn genui_glyph_coverage() {
         fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -1168,9 +1169,20 @@ mod tests {
         let mut files = Vec::new();
         rs_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
         assert!(files.len() > 20, "the app's sources: {}", files.len());
+        // The engine's words the app draws too: node and generator names,
+        // romaji terms, labels, help, options and default text.
+        let core = [
+            include_str!("../../crates/anim-core/src/generator.rs"),
+            include_str!("../../crates/anim-core/src/fx.rs"),
+            include_str!("../../crates/anim-core/src/camera.rs"),
+            include_str!("../../crates/anim-core/src/graph.rs"),
+        ];
+        let core_chars: Vec<char> = core.iter().flat_map(|src| literal_chars(src)).collect();
+        assert!(core_chars.contains(&'ū') && core_chars.contains(&'セ'), "the scan reads ryūsen and セリフ");
         let mut chars: Vec<char> = files
             .iter()
             .flat_map(|f| literal_chars(&std::fs::read_to_string(f).unwrap()))
+            .chain(core_chars)
             .filter(|c| !c.is_ascii() && !c.is_whitespace())
             .collect();
         chars.sort_unstable();
