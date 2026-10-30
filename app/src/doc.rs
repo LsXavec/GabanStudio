@@ -3392,12 +3392,21 @@ impl AppState {
         }
     }
 
-    /// Rename the cut being edited (scaffolding, like scene/cut creation).
+    /// Rename the cut being edited: one undo step (GM21, `Command::RenameCut`
+    /// carries its exact inverse); the same name adds none.
     pub fn rename_current_cut(&mut self, name: &str) {
+        if self.cut().name == name {
+            return;
+        }
         let at = self.at();
-        self.meta_dirty = true;
-        match self.engine.rename_cut(at, name) {
-            Ok(()) => self.status = format!("cut renamed to {name}"),
+        match self.engine.apply(
+            "rename cut",
+            vec![Command::RenameCut {
+                at,
+                name: name.to_string(),
+            }],
+        ) {
+            Ok(_) => self.status = format!("cut renamed to {name}"),
             Err(e) => self.status = format!("error: {e}"),
         }
     }

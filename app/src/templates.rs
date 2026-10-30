@@ -109,7 +109,26 @@ pub const ALL: &[Template] = &[
     },
 ];
 
+/// GM21: the sizes the New Project dialog offers — every template's under
+/// its name, then two no template has. The dialog keeps no table of its own.
+pub const SIZES: &[(&str, u32, u32)] = &{
+    let mut out = [("", 0, 0); ALL.len() + 2];
+    let mut i = 0;
+    while i < ALL.len() {
+        out[i] = (ALL[i].name, ALL[i].width, ALL[i].height);
+        i += 1;
+    }
+    out[ALL.len()] = ("Square 1080", 1080, 1080);
+    out[ALL.len() + 1] = ("Vertical 1080×1920", 1080, 1920);
+    out
+};
+
 impl Template {
+    /// GM21: the print resolution — the page's (D15), else 300 dpi.
+    pub fn dpi(&self) -> f32 {
+        self.page.map_or(300.0, |p| p().dpi)
+    }
+
     /// The card's second line: size, fps and cut length.
     pub fn summary(&self) -> String {
         if let Some(page) = self.page.map(|p| p()) {
@@ -133,7 +152,7 @@ impl Template {
 
     /// A fresh untitled project to this template (history empty).
     pub fn build(&self) -> AppState {
-        let mut s = AppState::new_project("untitled", self.width, self.height, self.fps, 300.0);
+        let mut s = AppState::new_project("untitled", self.width, self.height, self.fps, self.dpi());
         s.engine.project.color_law = ColorLaw::Srgb;
         s.engine.project.default_cut_frames = Some(self.cut_frames);
         let at = s.at();

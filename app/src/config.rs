@@ -142,6 +142,8 @@ pub enum Action {
     ProjectSettings,
     /// GM8: the Welcome screen again (templates, recent, the sample).
     WelcomeScreen,
+    /// GM21: File ▸ Open the sample cut — the Welcome's sample as a verb.
+    OpenSample,
     /// GM10: Cut ▸ Paper size… — the sheet the camera pans over.
     PaperSize,
     /// GM11: Window ▸ Render Queue — the delivery jobs, on a worker.
@@ -437,6 +439,7 @@ impl Action {
         Action::AddNode,
         Action::ProjectSettings,
         Action::WelcomeScreen,
+        Action::OpenSample,
         Action::PaperSize,
         Action::ShowRenderQueue,
         Action::ToggleFinalLook,
@@ -593,6 +596,7 @@ impl Action {
             Action::AddNode => "Add node…",
             Action::ProjectSettings => "Project settings…",
             Action::WelcomeScreen => "Welcome screen…",
+            Action::OpenSample => "Open the sample cut",
             Action::PaperSize => "Paper size…",
             Action::ShowRenderQueue => "Render Queue (delivery)",
             Action::ToggleFinalLook => "Final look (delivery)",
@@ -755,6 +759,7 @@ impl Action {
             AddNode => "Open the add-node menu at the pointer: sources, blends, FX, generators (particles, speed lines, text, balloons), output.",
             ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
             WelcomeScreen => "Show the Welcome screen: templates, recent files and the sample cut (unsaved work is asked about first).",
+            OpenSample => "Open the sample cut to learn on (unsaved work is asked about first).",
             PaperSize => "Set the cut's paper: the sheet the camera pans over, larger than the frame for BG pans and hiki slides.",
             ShowRenderQueue => "Open the render queue: delivery jobs (PNG16, TIFF16, EXR, ProRes, line test) rendered on a worker.",
             ToggleFinalLook => "Show the composite as the master delivers it: no rough, reference or correction layers, rendered on a worker.",
@@ -802,7 +807,7 @@ impl Action {
         use Action::*;
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings | WelcomeScreen | ImportSound | AddSoundTrack
+            | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | ImportSound | AddSoundTrack
             | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel | ExportPages => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
@@ -947,6 +952,7 @@ impl Action {
             BuildSatsuei => "Project/Build satsuei graph",
             ProjectSettings => "Project/Project settings…",
             WelcomeScreen => "File/Welcome screen…",
+            OpenSample => "File/Open the sample cut",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             PaperSize => "Cut/Paper size…",
@@ -1073,6 +1079,7 @@ impl Action {
             ],
             ProjectSettings => &["project properties", "resolution", "frame rate", "canvas size"],
             WelcomeScreen => &["templates", "new from template", "start page", "welcome"],
+            OpenSample => &["sample", "demo", "example", "tutorial"],
             PaperSize => &["paper", "hiki", "BG pan", "pan paper", "kami", "BG sheet"],
             // GM5: the sheet verbs by the words a timing sheet uses.
             InsertFrames => &["insert frames", "add frame", "open a frame"],
@@ -1558,7 +1565,7 @@ impl Action {
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize | LipFlap
+            | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
             | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels => None,
         }
     }
@@ -1668,15 +1675,20 @@ impl Chord {
         if self.is_space_tap() {
             return i.key_released(egui::Key::Space);
         }
+        // GM21: on Windows egui-winit turns Shift+Delete into a Cut event and
+        // sends no key event, so a Cut with Shift held and Ctrl not held is a
+        // press of Delete. Ctrl+X's Cut has Ctrl held and never counts.
+        let cut_delete = m.shift && !m.command && i.events.iter().any(|e| matches!(e, egui::Event::Cut));
         let mut any_pressed = false;
         for name in &self.keys {
             let Some(k) = egui::Key::from_name(name) else {
                 return false;
             };
-            if !i.keys_down.contains(&k) {
+            let via_cut = cut_delete && k == egui::Key::Delete;
+            if !via_cut && !i.keys_down.contains(&k) {
                 return false;
             }
-            if i.key_pressed(k) {
+            if via_cut || i.key_pressed(k) {
                 any_pressed = true;
             }
         }
@@ -2933,6 +2945,7 @@ pub fn settings_window(
     layout_act: &mut Option<LayoutAct>,
     autosave_dir: Option<&Path>,
     show_autosaves: &mut bool,
+    ffmpeg_queue: Option<&mut crate::render_queue::RenderQueue>,
 ) {
     if !*open {
         *capturing = None;
@@ -3020,7 +3033,7 @@ pub fn settings_window(
                 ui.vertical(|ui| match category {
                     SettingsCategory::Shortcuts => shortcuts_page(ui, config, capturing),
                     SettingsCategory::General => {
-                        general_page(ui, config, autosave_dir, show_autosaves)
+                        general_page(ui, config, autosave_dir, show_autosaves, ffmpeg_queue)
                     }
                     SettingsCategory::Performance => performance_page(ui, config, backend, raster),
                     SettingsCategory::Pen => pen_page(ui, config),
@@ -3713,6 +3726,7 @@ pub(crate) fn general_page(
     config: &mut Config,
     autosave_dir: Option<&Path>,
     show_autosaves: &mut bool,
+    ffmpeg_queue: Option<&mut crate::render_queue::RenderQueue>,
 ) {
     crate::plate::legend(ui, "general");
     ui.separator();
@@ -3752,6 +3766,7 @@ pub(crate) fn general_page(
     // GM11: where the render queue finds ffmpeg (tried before the search)
     // and where its jobs write by default; saved when the field is left.
     ui.add_space(6.0);
+    let mut typing = false;
     ui.horizontal(|ui| {
         ui.label("ffmpeg location");
         let r = ui.add(
@@ -3759,10 +3774,47 @@ pub(crate) fn general_page(
                 .hint_text("empty: beside the app, PATH, winget")
                 .desired_width(240.0),
         );
+        typing = r.has_focus();
         if r.lost_focus() {
             changed = true;
         }
     });
+    // GM21: whether it was found — the render queue's own cached answer, so
+    // this page and the pane agree. The search (files only) runs once per
+    // location, never while the location is being typed.
+    if let Some(q) = ffmpeg_queue {
+        q.configure(&config.render, &config.session.username);
+        let found = if typing {
+            q.ffmpeg.as_ref().map(|(_, p)| p.clone())
+        } else {
+            Some(q.ffmpeg_path())
+        };
+        match found {
+            Some(Some(path)) => {
+                ui.label(
+                    egui::RichText::new(format!("found: {}", path.display()))
+                        .size(10.0)
+                        .color(crate::plate::legend_dim()),
+                );
+            }
+            Some(None) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(crate::render_queue::NEEDS_FFMPEG)
+                            .color(crate::plate::legend_dim()),
+                    );
+                    if ui
+                        .small_button("look again")
+                        .on_hover_text("search for ffmpeg again (files only, nothing runs to look)")
+                        .clicked()
+                    {
+                        q.ffmpeg = None;
+                    }
+                });
+            }
+            None => {}
+        }
+    }
     ui.horizontal(|ui| {
         ui.label("render output folder");
         let r = ui.add(

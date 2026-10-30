@@ -556,6 +556,9 @@ pub struct RenderQueue {
     /// The search's answer for the configured location: (that location,
     /// the ffmpeg found). None = not searched yet.
     pub ffmpeg: Option<(String, Option<PathBuf>)>,
+    /// GM21: how many times the search ran (the pane and Settings ▸ General
+    /// share the answer above, so a frame never searches).
+    pub searches: u32,
     /// "show folder" asks the shell to open this.
     pub show_folder: Option<PathBuf>,
 }
@@ -585,6 +588,7 @@ impl RenderQueue {
         if self.ffmpeg.as_ref().is_none_or(|(k, _)| *k != key) {
             let found = crate::export::find_ffmpeg(self.configured_ffmpeg().as_deref());
             self.ffmpeg = Some((key, found));
+            self.searches += 1;
         }
         self.ffmpeg.as_ref().and_then(|(_, p)| p.clone())
     }

@@ -45,6 +45,8 @@ mod stabilizer;
 mod templates;
 #[cfg(test)]
 mod testkit;
+#[cfg(test)]
+mod tidy_tests;
 mod uidump;
 mod update;
 mod view3d;
@@ -2935,6 +2937,11 @@ impl App {
                     _ => ed.leave(Leave::Open, ctx),
                 }
             }
+            // GM21: asked about unsaved work first, like Open.
+            AppRequest::OpenSample => {
+                let Some(ed) = &mut self.editor else { return };
+                ed.leave(Leave::Sample, ctx);
+            }
             AppRequest::ImportSound | AppRequest::AddSoundTrack => {
                 let Some(ed) = &mut self.editor else { return };
                 if let Some(path) = rfd::FileDialog::new()
@@ -3015,6 +3022,8 @@ pub enum Performed {
 pub enum AppRequest {
     NewProject,
     Open,
+    /// GM21: File ▸ Open the sample cut.
+    OpenSample,
     Save,
     SaveAs,
     /// GM3: raised by the menus, the palette and their chords.
@@ -3338,7 +3347,10 @@ impl Editor {
         // Save/Open land any in-flight gesture FIRST: the saved file must
         // contain what the screen shows, and an Open's commit must not cross
         // into the newly loaded project.
-        if matches!(action, Action::Save | Action::SaveAs | Action::Open) {
+        if matches!(
+            action,
+            Action::Save | Action::SaveAs | Action::Open | Action::OpenSample
+        ) {
             ed.canvas.finish_gesture(&mut ed.state);
         }
         // GM3: with a selection, Delete (ClearCel) clears only inside it.
@@ -3576,10 +3588,12 @@ impl Editor {
                 s.refuse("refused — the host owns the file; your strokes already live there");
                 *out = Performed::Ignored;
             }
-            Action::Open if ed.canvas.is_guest => {
+            Action::Open | Action::OpenSample if ed.canvas.is_guest => {
                 s.refuse("refused — leave the room first (Settings › Session) to open your own file");
                 *out = Performed::Ignored;
             }
+            // GM21: the sample replaces the document, through the guard.
+            Action::OpenSample => *out = Performed::App(AppRequest::OpenSample),
             // The file dialogs block the window: the shell runs them.
             Action::Save => *out = Performed::App(AppRequest::Save),
             Action::SaveAs => *out = Performed::App(AppRequest::SaveAs),
@@ -4353,6 +4367,8 @@ pub enum Leave {
     Recover(worksafe::Recovered),
     /// GM8: File ▸ Welcome screen… — its cards open other documents.
     Welcome,
+    /// GM21: File ▸ Open the sample cut.
+    Sample,
 }
 
 /// GM2: an edit to the recent list from the Open Recent menu.
@@ -4705,10 +4721,12 @@ impl Editor {
         rs: Option<&RenderState>,
         data_dir: Option<&std::path::Path>,
     ) -> Self {
-        // GM7: the form's project is an Srgb one (newproject.rs).
+        // GM7: the form's project is an Srgb one (newproject.rs). GM21: the
+        // layers take the project's paper (a page template's is its page's).
         let state = form.new_state();
-        let paint = rs.map(|rs| PaintLayer::new(rs, form.width, form.height));
-        let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, form.width, form.height));
+        let (w, h) = (state.engine.project.width, state.engine.project.height);
+        let paint = rs.map(|rs| PaintLayer::new(rs, w, h));
+        let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, w, h));
         // GM20: the room's side limit — every peer caps and replays alike.
         let max_dim = paint::room_limit(
             rs.map_or(paint::DEFAULT_MAX_DIM, |rs| rs.device.limits().max_texture_dimension_2d),
@@ -5169,7 +5187,9 @@ impl Editor {
                 Err("nothing to redo — undo something first")
             }
             Action::Save | Action::SaveAs if guest => Err("the host owns the file"),
-            Action::Open if guest => Err("leave the room first to open your own file"),
+            Action::Open | Action::OpenSample if guest => {
+                Err("leave the room first to open your own file")
+            }
             // GM7: the migration rewrites every texel and clears history.
             Action::ConvertColorsToSrgb if shared => Err("leave the room first — it rewrites every cel"),
             Action::ConvertColorsToSrgb if s.engine.project.color_law == ColorLaw::Srgb => {
@@ -5368,6 +5388,7 @@ impl Editor {
         match r {
             Performed::App(AppRequest::NewProject) => self.leave(Leave::New, ctx),
             Performed::App(AppRequest::Open) => self.leave(Leave::Open, ctx),
+            Performed::App(AppRequest::OpenSample) => self.leave(Leave::Sample, ctx),
             Performed::App(req) => self.requests.push(req),
             Performed::Done | Performed::Ignored => {}
         }
@@ -5436,6 +5457,11 @@ impl Editor {
             Leave::Open => {
                 self.canvas.finish_gesture(&mut self.state);
                 self.state.open();
+            }
+            // GM21: the sample is a fresh document; the check below resyncs.
+            Leave::Sample => {
+                self.canvas.finish_gesture(&mut self.state);
+                self.state = sample::build_sample();
             }
             Leave::OpenPath(p) => {
                 self.canvas.finish_gesture(&mut self.state);
@@ -6061,11 +6087,14 @@ impl eframe::App for App {
             .as_ref()
             .map(|ed| ed.workspaces.list.iter().map(|w| w.name.clone()).collect())
             .unwrap_or_default();
-        let raster_toggle = self
-            .editor
-            .as_mut()
-            .filter(|ed| ed.paint.is_some())
-            .map(|ed| &mut ed.canvas.raster);
+        // GM21: the General page shares the render queue's ffmpeg answer.
+        let (raster_toggle, ffmpeg_queue) = match self.editor.as_mut() {
+            Some(ed) => (
+                ed.paint.is_some().then_some(&mut ed.canvas.raster),
+                Some(&mut ed.state.render_queue),
+            ),
+            None => (None, None),
+        };
         let mut session_action: Option<config::SessionAction> = None;
         let peer_names: Vec<String> = self
             .session_peers
@@ -6114,6 +6143,7 @@ impl eframe::App for App {
             &mut layout_act,
             autosave_dir.as_deref(),
             &mut show_autosaves,
+            ffmpeg_queue,
         );
         if show_autosaves && let Some(dir) = &autosave_dir {
             // Before the first autosave lands the folder may not exist yet.
@@ -7230,6 +7260,7 @@ impl Editor {
                     self.menu_item(ui, Action::NewProject);
                     // GM8: templates, recent files and the sample again.
                     self.menu_item(ui, Action::WelcomeScreen);
+                    self.menu_item(ui, Action::OpenSample);
                     self.menu_item(ui, Action::Open);
                     ui.menu_button("Open Recent", |ui| {
                         if self.recent_shown.is_empty() {
@@ -7415,8 +7446,8 @@ impl Editor {
                         egui::RichText::new(format!("now editing: {}", self.state.cut().name))
                             .color(plate::legend_dim()),
                     );
-                    // Rename the current cut/scene (scaffolding, like
-                    // creation — not undoable). Empty-buffer pattern: type
+                    // Rename the current cut (one undo step, GM21) or scene
+                    // (scaffolding, not undoable). Empty-buffer pattern: type
                     // a new name and confirm; no pre-seeding to fight.
                     ui.horizontal(|ui| {
                         ui.add(

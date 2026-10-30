@@ -3206,3 +3206,16 @@ what was not verified.
   columns are still drawn frame-sized (their Stretch to paper size). Not verified: painting beyond the frame
   on a real GPU (dabs, readback, the composite window and the layer-sized display quads have no headless
   check beyond the CPU mirror and naga validation).
+- 2026-10-30 — GM21 Menus, dialogs and Shift+Delete: `Chord::matches` counts a Cut event with Shift held and
+  Ctrl not held as a Delete press (egui-winit's Windows Shift+Delete), so Delete frames fires over the sheet
+  and Industry's Clear cel all over the canvas, once; Ctrl+X still only cuts cells, and nothing fires over a
+  focused field. `rename_current_cut` applies `Command::RenameCut` (one undo step; the same name adds none).
+  `templates::SIZES` (every template's size, then Square 1080 and Vertical 1080×1920) and `Template::dpi`;
+  newproject.rs loses `PRESETS`, `pick_template` sets size, rate and dpi, a page template greys the paper,
+  size and dpi ("set by the page template") and `new_state` keeps the page's paper and dpi; the editor's
+  layers take the project's size. Action `OpenSample` (File ▸ Open the sample cut, no chord) through
+  `Leave::Sample` (asked first over unsaved work, refused to a guest). Settings ▸ General shows "found:
+  <path>" or the queue's NEEDS_FFMPEG with "look again", from `RenderQueue.ffmpeg` (searches counted). 14
+  `tidy_` tests. Left: the stretch list (palette JSON, Revert to saved, the Polys inspector arm, the
+  Shortcuts page and pass-picker harness tests). Not verified: a real Windows Shift+Delete keypress in the
+  running app (egui-winit's Cut is reproduced as an event in the harness), and the field's own text cut.

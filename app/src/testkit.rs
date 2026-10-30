@@ -738,6 +738,14 @@ impl<S: 'static> PanelHarness<S> {
         let _ = self.h.try_run();
     }
 
+    /// GM21: `n` more frames with no input (a cached answer must not be
+    /// worked out again each frame).
+    pub fn frames(&mut self, n: usize) {
+        for _ in 0..n {
+            self.h.step();
+        }
+    }
+
     pub fn describe(&self) -> String {
         describe_tree(&self.h)
     }
@@ -934,6 +942,8 @@ mod tests {
                 Action::Save => Some(AppRequest::Save),
                 Action::SaveAs => Some(AppRequest::SaveAs),
                 Action::Open => Some(AppRequest::Open),
+                // GM21: through the unsaved guard, like Open.
+                Action::OpenSample => Some(AppRequest::OpenSample),
                 Action::NewProject => Some(AppRequest::NewProject),
                 // GM3: the menus' and palette's shell verbs.
                 Action::Settings => Some(AppRequest::Settings),

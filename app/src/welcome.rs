@@ -1065,7 +1065,7 @@ mod tests {
                     ui.ctx().request_repaint();
                     return;
                 }
-                crate::config::general_page(ui, &mut config, None, &mut flag);
+                crate::config::general_page(ui, &mut config, None, &mut flag, None);
             });
         h.run();
         assert!(

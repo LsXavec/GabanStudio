@@ -1518,7 +1518,7 @@ mod tests {
             egui::vec2(420.0, 320.0),
             (crate::config::Config::default(), false),
             move |ui, (cfg, show): &mut Page| {
-                crate::config::general_page(ui, cfg, Some(folder.as_path()), show)
+                crate::config::general_page(ui, cfg, Some(folder.as_path()), show, None)
             },
         );
         assert!(p.has(&shown), "{}", p.describe());
@@ -1529,7 +1529,7 @@ mod tests {
         let p = PanelHarness::new(
             egui::vec2(420.0, 320.0),
             (crate::config::Config::default(), false),
-            |ui, (cfg, show): &mut Page| crate::config::general_page(ui, cfg, None, show),
+            |ui, (cfg, show): &mut Page| crate::config::general_page(ui, cfg, None, show, None),
         );
         assert!(!p.has("show autosave folder"), "{}", p.describe());
     }

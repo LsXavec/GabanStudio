@@ -1,8 +1,9 @@
 //! The New Project dialog — sets the project's resolution and frame rate before
 //! anything is created (Krita's "New Document" flow, minus its UI layout).
 //!
-//! Presets here are a minimal starter set of standard resolutions; the full
-//! Krita-style saved/custom preset library is a later feature.
+//! GM21: the paper sizes are `templates::SIZES` (every template's, then two
+//! extras); the full Krita-style saved/custom preset library is a later
+//! feature.
 
 use anim_core::color::ColorLaw;
 use eframe::egui;
@@ -11,16 +12,6 @@ use crate::canvas::{DEFAULT_PAPER_H, DEFAULT_PAPER_W};
 use crate::doc::AppState;
 use crate::plate;
 use crate::templates;
-
-/// (label, width, height). Width 0 = "Custom" (leave the fields as the user set).
-const PRESETS: &[(&str, u32, u32)] = &[
-    ("Custom", 0, 0),
-    ("HD 720p", 1280, 720),
-    ("Full HD 1080p", 1920, 1080),
-    ("4K UHD", 3840, 2160),
-    ("Square 1080", 1080, 1080),
-    ("Vertical 1080×1920", 1080, 1920),
-];
 
 pub enum FormAction {
     Create,
@@ -38,10 +29,12 @@ pub struct NewProjectForm {
     pub height: u32,
     pub fps: u32,
     pub dpi: u32,
-    pub preset: usize,
+    /// GM21: the paper picked from `templates::SIZES`; None: custom.
+    pub preset: Option<usize>,
     /// GM8: the Welcome template this cut starts from (`templates::ALL`):
     /// its columns, cut length and first room, at this form's size and
-    /// rate. None: a blank cut with one column.
+    /// rate (GM21: a page template's paper and dpi are its page's). None: a
+    /// blank cut with one column.
     pub template: Option<usize>,
 }
 
@@ -55,7 +48,9 @@ impl Default for NewProjectForm {
             height: DEFAULT_PAPER_H,
             fps: 24,
             dpi: 300,
-            preset: 2, // Full HD 1080p
+            preset: templates::SIZES
+                .iter()
+                .position(|s| (s.1, s.2) == (DEFAULT_PAPER_W, DEFAULT_PAPER_H)),
             template: None,
         }
     }
@@ -76,14 +71,18 @@ impl NewProjectForm {
         let mut state = match self.template() {
             // GM8: the template's sheet, cut length and graph; the paper
             // and rate are this form's (the same clamps as new_project).
+            // GM21: a page template keeps its page's paper and dpi — the
+            // page geometry in the cut meta is drawn for them.
             Some(t) => {
                 let mut s = t.build();
                 let p = &mut s.engine.project;
                 p.name = name;
-                p.width = self.width.max(1);
-                p.height = self.height.max(1);
                 p.fps = self.fps.clamp(1, 240);
-                p.dpi = (self.dpi as f32).max(1.0);
+                if t.page.is_none() {
+                    p.width = self.width.max(1);
+                    p.height = self.height.max(1);
+                    p.dpi = (self.dpi as f32).max(1.0);
+                }
                 s
             }
             None => AppState::new_project(name, self.width, self.height, self.fps, self.dpi as f32),
@@ -95,6 +94,25 @@ impl NewProjectForm {
     /// GM8: the template chosen, if any.
     pub fn template(&self) -> Option<&'static templates::Template> {
         self.template.and_then(|i| templates::ALL.get(i))
+    }
+
+    /// GM21: start from template `i` (None: blank) — a template sets the
+    /// paper, rate and dpi from itself (a page template's are its page's).
+    pub fn pick_template(&mut self, i: Option<usize>) {
+        self.template = i;
+        if let Some(t) = self.template() {
+            self.width = t.width;
+            self.height = t.height;
+            self.fps = t.fps;
+            self.dpi = t.dpi().round() as u32;
+            // SIZES lists the templates first, in order.
+            self.preset = i;
+        }
+    }
+
+    /// GM21: a page template fixes the paper and dpi.
+    pub fn page_template(&self) -> bool {
+        self.template().is_some_and(|t| t.page.is_some())
     }
 }
 
@@ -132,7 +150,8 @@ pub fn form_ui(
             );
             ui.end_row();
             // GM8: the Welcome's templates — picking one sets the paper and
-            // rate; its columns, cut length and room come with it.
+            // rate; its columns, cut length and room come with it (GM21:
+            // and its dpi).
             plate::legend(ui, "start from");
             egui::ComboBox::from_id_salt("np_template")
                 .selected_text(form.template().map_or("blank (one column)", |t| t.name))
@@ -144,60 +163,68 @@ pub fn form_ui(
                             .on_hover_text(format!("{} · {}", t.summary(), t.tooltip()))
                             .clicked()
                         {
-                            form.width = t.width;
-                            form.height = t.height;
-                            form.fps = t.fps;
-                            form.preset = PRESETS
-                                .iter()
-                                .position(|p| (p.1, p.2) == (t.width, t.height))
-                                .unwrap_or(0);
+                            form.pick_template(Some(i));
                         }
                     }
                 });
             ui.end_row();
+            // GM21: a page template's paper and dpi are its page's.
+            let paged = form.page_template();
             plate::legend(ui, "paper");
-            egui::ComboBox::from_id_salt("np_preset")
-                .selected_text(PRESETS[form.preset].0)
-                .show_ui(ui, |ui| {
-                    for (i, (label, w, h)) in PRESETS.iter().enumerate() {
-                        if ui.selectable_value(&mut form.preset, i, *label).clicked() && *w > 0 {
-                            form.width = *w;
-                            form.height = *h;
+            ui.add_enabled_ui(!paged, |ui| {
+                egui::ComboBox::from_id_salt("np_preset")
+                    .selected_text(form.preset.map_or("Custom", |i| templates::SIZES[i].0))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut form.preset, None, "Custom");
+                        for (i, (label, w, h)) in templates::SIZES.iter().enumerate() {
+                            if ui.selectable_value(&mut form.preset, Some(i), *label).clicked() {
+                                form.width = *w;
+                                form.height = *h;
+                            }
                         }
-                    }
-                });
+                    });
+            });
             ui.end_row();
             plate::legend(ui, "size");
             ui.horizontal(|ui| {
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut form.width)
-                            .range(1..=16384)
-                            .suffix(" px"),
-                    )
-                    .changed()
-                {
-                    form.preset = 0;
-                }
-                ui.label(egui::RichText::new("×").color(plate::LEGEND));
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut form.height)
-                            .range(1..=16384)
-                            .suffix(" px"),
-                    )
-                    .changed()
-                {
-                    form.preset = 0;
-                }
-                // AUDIT [32]: this wore Icon::Fit — the fit-view mark.
-                if ui
-                    .button("swap")
-                    .on_hover_text("swap width and height")
-                    .clicked()
-                {
-                    std::mem::swap(&mut form.width, &mut form.height);
-                    form.preset = 0;
+                ui.add_enabled_ui(!paged, |ui| {
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut form.width)
+                                .range(1..=16384)
+                                .suffix(" px"),
+                        )
+                        .changed()
+                    {
+                        form.preset = None;
+                    }
+                    ui.label(egui::RichText::new("×").color(plate::LEGEND));
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut form.height)
+                                .range(1..=16384)
+                                .suffix(" px"),
+                        )
+                        .changed()
+                    {
+                        form.preset = None;
+                    }
+                    // AUDIT [32]: this wore Icon::Fit — the fit-view mark.
+                    if ui
+                        .button("swap")
+                        .on_hover_text("swap width and height")
+                        .clicked()
+                    {
+                        std::mem::swap(&mut form.width, &mut form.height);
+                        form.preset = None;
+                    }
+                });
+                if paged {
+                    ui.label(
+                        egui::RichText::new("set by the page template")
+                            .size(10.5)
+                            .color(plate::LEGEND),
+                    );
                 }
             });
             ui.end_row();
@@ -235,7 +262,8 @@ pub fn form_ui(
             ui.end_row();
             plate::legend(ui, "print");
             ui.horizontal(|ui| {
-                ui.add(
+                ui.add_enabled(
+                    !paged,
                     egui::DragValue::new(&mut form.dpi)
                         .range(1..=1200)
                         .suffix(" dpi"),
@@ -243,9 +271,13 @@ pub fn form_ui(
                 ui.label(
                     // AUDIT [30]: dpi is stored in the project and read by
                     // nothing yet — say that rather than implying it acts.
-                    egui::RichText::new("recorded with the project; nothing uses it yet")
-                        .size(10.5)
-                        .color(plate::LEGEND),
+                    egui::RichText::new(if paged {
+                        "set by the page template"
+                    } else {
+                        "recorded with the project; nothing uses it yet"
+                    })
+                    .size(10.5)
+                    .color(plate::LEGEND),
                 );
             });
             ui.end_row();
