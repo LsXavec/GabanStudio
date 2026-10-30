@@ -584,13 +584,29 @@ impl RenderQueue {
     /// The ffmpeg video presets use, searched once per configured location
     /// (files only — nothing is spawned).
     pub fn ffmpeg_path(&mut self) -> Option<PathBuf> {
-        let key = self.config.ffmpeg.trim().to_string();
-        if self.ffmpeg.as_ref().is_none_or(|(k, _)| *k != key) {
+        self.search_ffmpeg();
+        self.ffmpeg.as_ref().and_then(|(_, p)| p.clone())
+    }
+
+    /// GM21: search for the configured location unless its answer is
+    /// cached (a hit allocates nothing — the pages call this each frame).
+    pub fn search_ffmpeg(&mut self) {
+        if self.ffmpeg_cached().is_none() {
+            let key = self.config.ffmpeg.trim().to_string();
             let found = crate::export::find_ffmpeg(self.configured_ffmpeg().as_deref());
             self.ffmpeg = Some((key, found));
             self.searches += 1;
         }
-        self.ffmpeg.as_ref().and_then(|(_, p)| p.clone())
+    }
+
+    /// GM21: the cached answer for the location as configured now (None:
+    /// not searched for it yet) — never a search.
+    pub fn ffmpeg_cached(&self) -> Option<Option<&Path>> {
+        let key = self.config.ffmpeg.trim();
+        self.ffmpeg
+            .as_ref()
+            .filter(|(k, _)| k == key)
+            .map(|(_, p)| p.as_deref())
     }
 
     pub fn busy(&self) -> bool {

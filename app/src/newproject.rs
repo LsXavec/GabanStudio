@@ -98,7 +98,10 @@ impl NewProjectForm {
 
     /// GM21: start from template `i` (None: blank) — a template sets the
     /// paper, rate and dpi from itself (a page template's are its page's).
+    /// Leaving a template for blank goes back to the form's defaults, so a
+    /// page's paper and dpi do not stay behind on a cut with no page.
     pub fn pick_template(&mut self, i: Option<usize>) {
+        let left = self.template.is_some() && i.is_none();
         self.template = i;
         if let Some(t) = self.template() {
             self.width = t.width;
@@ -107,12 +110,37 @@ impl NewProjectForm {
             self.dpi = t.dpi().round() as u32;
             // SIZES lists the templates first, in order.
             self.preset = i;
+        } else if left {
+            let d = Self::default();
+            (self.width, self.height, self.fps) = (d.width, d.height, d.fps);
+            (self.dpi, self.preset) = (d.dpi, d.preset);
+        }
+    }
+
+    /// GM21: pick paper `i` of `templates::SIZES` — a page template's paper
+    /// comes with its print dpi (D15), so the page is at print size.
+    pub fn pick_paper(&mut self, i: usize) {
+        let (_, w, h) = templates::SIZES[i];
+        (self.width, self.height) = (w, h);
+        if let Some(t) = templates::ALL.get(i).filter(|t| t.page.is_some()) {
+            self.dpi = t.dpi().round() as u32;
         }
     }
 
     /// GM21: a page template fixes the paper and dpi.
     pub fn page_template(&self) -> bool {
         self.template().is_some_and(|t| t.page.is_some())
+    }
+}
+
+/// GM21: paper `i`'s row in the combo — its name and its size (Manga B5 —
+/// 2591×3624), the size said once when the name already says it.
+fn paper_label(i: usize) -> String {
+    let (name, w, h) = templates::SIZES[i];
+    if name.contains('×') {
+        name.to_string()
+    } else {
+        format!("{name} — {w}×{h}")
     }
 }
 
@@ -156,7 +184,14 @@ pub fn form_ui(
             egui::ComboBox::from_id_salt("np_template")
                 .selected_text(form.template().map_or("blank (one column)", |t| t.name))
                 .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut form.template, None, "blank (one column)");
+                    // GM21: through pick_template, so a template's paper
+                    // does not stay behind on a blank cut.
+                    if ui
+                        .selectable_label(form.template.is_none(), "blank (one column)")
+                        .clicked()
+                    {
+                        form.pick_template(None);
+                    }
                     for (i, t) in templates::ALL.iter().enumerate() {
                         if ui
                             .selectable_value(&mut form.template, Some(i), t.name)
@@ -173,13 +208,20 @@ pub fn form_ui(
             plate::legend(ui, "paper");
             ui.add_enabled_ui(!paged, |ui| {
                 egui::ComboBox::from_id_salt("np_preset")
-                    .selected_text(form.preset.map_or("Custom", |i| templates::SIZES[i].0))
+                    .selected_text(form.preset.map_or_else(|| "Custom".to_string(), paper_label))
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut form.preset, None, "Custom");
-                        for (i, (label, w, h)) in templates::SIZES.iter().enumerate() {
-                            if ui.selectable_value(&mut form.preset, Some(i), *label).clicked() {
-                                form.width = *w;
-                                form.height = *h;
+                        for (i, (_, w, h)) in templates::SIZES.iter().enumerate() {
+                            // One row per size: a later template with the
+                            // same paper would be the same pick again.
+                            if templates::SIZES[..i].iter().any(|s| (s.1, s.2) == (*w, *h)) {
+                                continue;
+                            }
+                            if ui
+                                .selectable_value(&mut form.preset, Some(i), paper_label(i))
+                                .clicked()
+                            {
+                                form.pick_paper(i);
                             }
                         }
                     });

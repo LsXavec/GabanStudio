@@ -37,6 +37,10 @@ fn windows_shift_delete(h: &mut EditorHarness) {
 #[test]
 fn tidy_shift_delete_cut_event_deletes_a_frame_over_the_sheet() {
     let mut h = EditorHarness::new();
+    // A selected cell: Shift+Delete's Cut must not also cut it (only
+    // Ctrl+X's Cut, with Ctrl held, cuts cells).
+    let col = h.state().view.active_column;
+    h.state_mut().select_cells((col, 0), col, 0);
     let frames = h.state().frame_count();
     h.point_at(sheet_centre(&h));
     let from = h.performed().len();
@@ -44,6 +48,7 @@ fn tidy_shift_delete_cut_event_deletes_a_frame_over_the_sheet() {
     assert_eq!(fired_since(&h, from), [Action::DeleteFrames], "once per press");
     assert_eq!(h.performed().last().map(|p| p.1), Some(Performed::Done));
     assert_eq!(h.state().frame_count(), frames - 1);
+    assert!(h.state().sheet_ui.clipboard.is_none(), "no cells were cut");
 }
 
 #[test]
@@ -99,12 +104,20 @@ fn tidy_ctrl_x_cut_event_cuts_cells_and_fires_neither() {
 fn tidy_cut_event_does_nothing_while_typing() {
     let mut h = EditorHarness::new();
     let frames = h.state().frame_count();
-    h.point_at(sheet_centre(&h));
+    // The room menu's name field, typed into and its text selected
+    // (Shift+Home), with the pointer resting over the sheet.
+    h.click("room");
     h.focus_text_field(0);
+    h.type_text("gb");
+    assert_eq!(h.editor().ws_name, "gb", "{}", h.describe());
+    h.point_at(sheet_centre(&h));
+    h.key_mods(SHIFT, egui::Key::Home);
+    assert!(h.typing(), "the field kept focus\n{}", h.describe());
     let from = h.performed().len();
     windows_shift_delete(&mut h);
     assert_eq!(fired_since(&h, from), [], "a text field has focus");
     assert_eq!(h.state().frame_count(), frames);
+    assert_eq!(h.editor().ws_name, "", "the field cut its own text, as before");
 }
 
 #[test]
@@ -124,9 +137,10 @@ fn tidy_rename_cut_is_one_undo_step() {
     s.redo();
     assert_eq!(s.cut().name, "CUT02");
     assert_eq!(hashes(&s), before);
-    // The same name again adds no step.
+    // The same name again adds no step, and the status lane says so.
     s.rename_current_cut("CUT02");
     assert_eq!(s.engine.position(), steps + 1);
+    assert!(s.status.contains("already named CUT02"), "{}", s.status);
 }
 
 #[test]
@@ -313,4 +327,63 @@ fn tidy_general_page_says_whether_ffmpeg_was_found() {
     assert!(p.has(&found), "{}", p.describe());
     p.frames(30);
     assert_eq!(p.state().2.searches, 1, "thirty frames search at most once");
+}
+
+#[test]
+fn tidy_ffmpeg_answer_is_for_the_location_as_typed() {
+    let exe = std::path::Path::new("C:/tools/ffmpeg.exe");
+    let mut cfg = config::Config::default();
+    cfg.render.ffmpeg = exe.display().to_string();
+    let mut q = RenderQueue::default();
+    q.configure(&cfg.render, "");
+    q.ffmpeg = Some((cfg.render.ffmpeg.clone(), Some(exe.to_path_buf())));
+    assert_eq!(q.ffmpeg_cached(), Some(Some(exe)));
+    q.search_ffmpeg();
+    assert_eq!(q.searches, 0, "a cached answer is not searched again");
+    // Mid-typing a new location, the old location's answer is not this one's.
+    cfg.render.ffmpeg = "C:/tools/ff".into();
+    q.configure(&cfg.render, "");
+    assert_eq!(q.ffmpeg_cached(), None);
+    // Spaces around it name the same location.
+    cfg.render.ffmpeg = format!("  {} ", exe.display());
+    q.configure(&cfg.render, "");
+    assert_eq!(q.ffmpeg_cached(), Some(Some(exe)));
+}
+
+#[test]
+fn tidy_paper_rows_name_their_size_once_and_a_page_brings_its_dpi() {
+    let b5 = templates::ALL.iter().position(|t| t.name == "Manga B5").expect("B5");
+    // Picked as the paper of a blank cut, a page size comes at print size.
+    let mut form = NewProjectForm::default();
+    form.pick_paper(b5);
+    assert_eq!((form.width, form.height, form.dpi), (2591, 3624, 350));
+    // Blank after a page template: the defaults again, no page paper left.
+    form.pick_template(Some(b5));
+    form.pick_template(None);
+    let d = NewProjectForm::default();
+    assert_eq!(
+        (form.width, form.height, form.fps, form.dpi, form.preset),
+        (d.width, d.height, d.fps, d.dpi, d.preset)
+    );
+    // The paper combo, open: each row says its size, and a size shows once.
+    let mut dressed = false;
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(700.0, 700.0))
+        .build_ui(|ui| {
+            if !std::mem::replace(&mut dressed, true) {
+                crate::dress(ui.ctx());
+                ui.ctx().request_repaint();
+                return;
+            }
+            form_ui(ui, &mut form, true);
+        });
+    h.run();
+    h.query_all_by_role(egui::accesskit::Role::ComboBox)
+        .nth(1)
+        .expect("the paper combo")
+        .click();
+    h.run();
+    assert!(h.query_by_label("Manga B5 — 2591×3624").is_some());
+    assert_eq!(h.query_all_by_label_contains("1920×1080").count(), 1, "one 1920×1080 row");
+    assert!(h.query_by_label("Vertical 1080×1920").is_some(), "its name says its size");
 }

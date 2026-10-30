@@ -3219,3 +3219,13 @@ what was not verified.
   `tidy_` tests. Left: the stretch list (palette JSON, Revert to saved, the Polys inspector arm, the
   Shortcuts page and pass-picker harness tests). Not verified: a real Windows Shift+Delete keypress in the
   running app (egui-winit's Cut is reproduced as an event in the harness), and the field's own text cut.
+- 2026-10-30 — GM21 review fixes: Shift+Delete's Cut over the sheet leaves a selected cell uncut (the
+  clipboard stays empty), and over a focused field nothing fires while the field cuts its own selected
+  text (the room name field, now tested). Renaming a cut to its own name says so on the status lane.
+  Settings ▸ General: with no editor open (the Welcome screen) the shell's own render queue answers;
+  mid-typing only an answer for the text as typed shows; the cached answer is read without allocating
+  (`RenderQueue::ffmpeg_cached`, `search_ffmpeg`, which the pane's `ffmpeg_path` shares). New Project:
+  each paper row reads "<name> — <w>×<h>" and a size shows once; a page's size picked as paper brings
+  its print dpi; blank after a template goes back to the form's defaults. 16 `tidy_` tests. Left: the
+  whole stretch list as above (the part reached its cap first). Not verified: a real Windows
+  Shift+Delete keypress, and Settings opened from the Welcome screen, in the running app.

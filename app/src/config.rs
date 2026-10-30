@@ -3781,15 +3781,15 @@ pub(crate) fn general_page(
     });
     // GM21: whether it was found — the render queue's own cached answer, so
     // this page and the pane agree. The search (files only) runs once per
-    // location, never while the location is being typed.
+    // location, never while the location is being typed; mid-typing only an
+    // answer for the text as typed shows (an older location's says nothing).
     if let Some(q) = ffmpeg_queue {
         q.configure(&config.render, &config.session.username);
-        let found = if typing {
-            q.ffmpeg.as_ref().map(|(_, p)| p.clone())
-        } else {
-            Some(q.ffmpeg_path())
-        };
-        match found {
+        if !typing {
+            q.search_ffmpeg();
+        }
+        let mut look_again = false;
+        match q.ffmpeg_cached() {
             Some(Some(path)) => {
                 ui.label(
                     egui::RichText::new(format!("found: {}", path.display()))
@@ -3803,16 +3803,16 @@ pub(crate) fn general_page(
                         egui::RichText::new(crate::render_queue::NEEDS_FFMPEG)
                             .color(crate::plate::legend_dim()),
                     );
-                    if ui
+                    look_again = ui
                         .small_button("look again")
                         .on_hover_text("search for ffmpeg again (files only, nothing runs to look)")
-                        .clicked()
-                    {
-                        q.ffmpeg = None;
-                    }
+                        .clicked();
                 });
             }
             None => {}
+        }
+        if look_again {
+            q.ffmpeg = None;
         }
     }
     ui.horizontal(|ui| {

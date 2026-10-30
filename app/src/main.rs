@@ -474,6 +474,9 @@ struct App {
     recovery_clock: (u64, i32),
     /// GM2: the document path last seen (the recent list follows it).
     doc_seen: Option<std::path::PathBuf>,
+    /// GM21: Settings ▸ General's ffmpeg answer while no editor is open
+    /// (Welcome); an open editor's render queue answers instead.
+    ffmpeg_queue: render_queue::RenderQueue,
 }
 
 /// Scratch-track playback (C4): a rodio output stream + sink, created
@@ -2612,6 +2615,7 @@ impl App {
             recovery: Vec::new(),
             recovery_clock: (0, 0),
             doc_seen: None,
+            ffmpeg_queue: render_queue::RenderQueue::default(),
         }
     }
 
@@ -6087,13 +6091,14 @@ impl eframe::App for App {
             .as_ref()
             .map(|ed| ed.workspaces.list.iter().map(|w| w.name.clone()).collect())
             .unwrap_or_default();
-        // GM21: the General page shares the render queue's ffmpeg answer.
+        // GM21: the General page shares the render queue's ffmpeg answer
+        // (with no editor open, the shell's own queue answers).
         let (raster_toggle, ffmpeg_queue) = match self.editor.as_mut() {
             Some(ed) => (
                 ed.paint.is_some().then_some(&mut ed.canvas.raster),
                 Some(&mut ed.state.render_queue),
             ),
-            None => (None, None),
+            None => (None, Some(&mut self.ffmpeg_queue)),
         };
         let mut session_action: Option<config::SessionAction> = None;
         let peer_names: Vec<String> = self

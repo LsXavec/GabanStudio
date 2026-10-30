@@ -3396,6 +3396,8 @@ impl AppState {
     /// carries its exact inverse); the same name adds none.
     pub fn rename_current_cut(&mut self, name: &str) {
         if self.cut().name == name {
+            // Said on the status lane, so the click is not taken as lost.
+            self.status = format!("the cut is already named {name}");
             return;
         }
         let at = self.at();
