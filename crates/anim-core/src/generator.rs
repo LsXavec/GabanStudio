@@ -64,6 +64,8 @@ pub enum GenKind {
     FocusLines,
     Text,
     Balloon,
+    // GM18: a manga page's panels (drawing in `crate::manga`).
+    Panels,
 }
 
 // ---- Parameter specs ---------------------------------------------------------------
@@ -202,6 +204,18 @@ const BALLOON_SPECS: &[ParamSpec] = &[
     float("seed", "seed", "Picks the burst's spike lengths; one seed draws the same way every render.", 0.0, 65535.0, 1.0, 1.0),
 ];
 
+const PANEL_SPECS: &[ParamSpec] = &[
+    ParamSpec {
+        key: "panels",
+        label: "panels",
+        help: "The page's panels (koma) in page px: drawn and split with the manga room's panel tool.",
+        kind: ParamKind::Polys,
+    },
+    float("border", "border", "The border's width in px, inside each panel's edge (0.5 mm at 350 dpi is 7).", 0.0, 200.0, 7.0, 0.5),
+    color("fill", "inside", "A panel's inside: white leaves the art under it as it is.", [255, 255, 255, 255]),
+    color("color", "border colour", "The border's ink.", [0, 0, 0, 255]),
+];
+
 impl GenKind {
     pub const ALL: &'static [GenKind] = &[
         GenKind::Particles,
@@ -209,6 +223,7 @@ impl GenKind {
         GenKind::FocusLines,
         GenKind::Text,
         GenKind::Balloon,
+        GenKind::Panels,
     ];
 
     /// The node's name in the graph and the add-node menu.
@@ -219,6 +234,7 @@ impl GenKind {
             Self::FocusLines => "Focus lines",
             Self::Text => "Text",
             Self::Balloon => "Balloon",
+            Self::Panels => "Panels",
         }
     }
 
@@ -231,6 +247,7 @@ impl GenKind {
             // Set type for dialogue (kakimoji is the hand-drawn kind).
             Self::Text => Some("shashoku"),
             Self::Balloon => Some("fukidashi"),
+            Self::Panels => Some("koma"),
         }
     }
 
@@ -242,6 +259,7 @@ impl GenKind {
             Self::FocusLines => "Focus lines (shūchūsen) from beyond the frame toward a centre, stopping at a clear ellipse.",
             Self::Text => "Set lettering (shashoku) for dialogue and captions, horizontal or vertical (tategaki), with an outline; put it over a balloon to letter it.",
             Self::Balloon => "A speech balloon (fukidashi): ellipse, rounded rect, cloud or burst, with a tail to a point.",
+            Self::Panels => "A manga page's panels (koma): white insides with a border, clear in the gutters.",
         }
     }
 
@@ -256,6 +274,7 @@ impl GenKind {
                 "tategaki", "vertical", "words", "kakimoji", "generator",
             ],
             Self::Balloon => &["fukidashi", "speech", "bubble", "word balloon", "shout", "thought", "manga", "generator"],
+            Self::Panels => &["koma", "panel", "frame", "gutter", "page", "manga", "generator"],
         }
     }
 
@@ -286,6 +305,7 @@ impl GenKind {
             Self::FocusLines => FOCUS_LINE_SPECS,
             Self::Text => TEXT_SPECS,
             Self::Balloon => BALLOON_SPECS,
+            Self::Panels => PANEL_SPECS,
         }
     }
 
@@ -385,6 +405,14 @@ impl GenValues {
         }
     }
 
+    /// GM18: a polygons parameter's panels.
+    pub fn polys(&self, key: &str) -> &[Vec<[f32; 2]>] {
+        match self.value(key) {
+            FxValue::Polys { polys } => polys,
+            v => panic!("'{key}' is not polygons: {v:?}"),
+        }
+    }
+
     fn seed(&self) -> u32 {
         self.float("seed").round().max(0.0) as u32
     }
@@ -402,7 +430,7 @@ impl GenValues {
                 3 => Some(frame / 3),
                 _ => None,
             },
-            GenKind::Text | GenKind::Balloon => None,
+            GenKind::Text | GenKind::Balloon | GenKind::Panels => None,
         }
     }
 
@@ -462,6 +490,7 @@ pub fn render(v: &GenValues, law: ColorLaw, matte: Option<&Image>, frame: u32, t
         }
         GenKind::Text => lettering(v, law, t),
         GenKind::Balloon => balloon(v, law, t),
+        GenKind::Panels => crate::manga::draw_panels(v, law, t),
     }
 }
 

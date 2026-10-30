@@ -852,6 +852,11 @@ pub struct CanvasView {
     stabilizer: u8,
     stab: Option<crate::stabilizer::Stabilizer>,
     stab_raw: Pos2,
+    /// GM18: the page's perspective rulers while their snap is on (read
+    /// each frame), and the live stroke's hold on them — the tap feeds it
+    /// before the stabilizer.
+    pub(crate) snap_rulers: Option<anim_core::manga::Rulers>,
+    ruler_snap: Option<anim_core::manga::Snap>,
     /// GM4: an OPTIONS-row stabilizer change for the app to save.
     pub(crate) stabilizer_request: Option<u8>,
     /// GM4: the dab edge (MyPaint hardness) and the aliased toggle.
@@ -1018,6 +1023,8 @@ impl CanvasView {
             stabilizer: 0,
             stab: None,
             stab_raw: Pos2::ZERO,
+            snap_rulers: None,
+            ruler_snap: None,
             stabilizer_request: None,
             brush_hardness: crate::config::default_hardness(),
             brush_aliased: false,
@@ -3542,6 +3549,8 @@ impl CanvasView {
         self.color_law = state.engine.project.color_law;
         self.pen_curve = pen.pressure_curve.clone();
         self.stabilizer = pen.stabilizer.min(crate::stabilizer::MAX_LEVEL);
+        // GM18: never mid-stroke — a live stroke keeps the hold it began with.
+        self.snap_rulers = state.manga.snap_rulers(state.cut());
         // PSD-brush-engine: install the armed preset's tip/grain on the
         // paint layer — once per arm, never mid-stroke (stroke_active
         // can't be true on the frame an arm click happened).
@@ -6399,6 +6408,32 @@ impl CanvasView {
         s.feed([p.x, p.y]);
         self.stab = Some(s);
         self.stab_raw = p;
+        // GM18: the rulers pick the stroke's line once the pen has moved
+        // SNAP_PICK_PX screen px.
+        self.ruler_snap = self.snap_rulers.clone().map(|r| {
+            let mut snap = anim_core::manga::Snap::new(r, anim_core::manga::SNAP_PICK_PX / self.xf.zoom.max(1e-6));
+            snap.feed([p.x, p.y]);
+            snap
+        });
+    }
+
+    /// GM18: a raw paper point held to the rulers' line (as it is when
+    /// their snap is off).
+    pub(crate) fn ruler_feed(&mut self, p: Pos2) -> Pos2 {
+        match self.ruler_snap.as_mut() {
+            Some(s) => {
+                let q = s.feed([p.x, p.y]);
+                pos2(q[0], q[1])
+            }
+            None => p,
+        }
+    }
+
+    /// GM18: one raw paper point held to the rulers, then through the
+    /// stabilizer — the pen's path and the mouse's alike.
+    fn held_feed(&mut self, p: Pos2) -> Option<Pos2> {
+        let held = self.ruler_feed(p);
+        self.stab_feed(held)
     }
 
     /// GM4: one raw paper point through the stabilizer — the ink point to
@@ -6744,7 +6779,7 @@ impl CanvasView {
                 // raster_stroke_done with the flush section skipped =
                 // composite-view softlock).
                 if let Some(p) = response.interact_pointer_pos()
-                    && let Some(p) = self.stab_feed(to_paper(p))
+                    && let Some(p) = self.held_feed(to_paper(p))
                 {
                     self.push_point(StrokePoint {
                         x: p.x,
@@ -6789,7 +6824,8 @@ impl CanvasView {
     ) {
         // GM4: through the stabilizer's string; inside its slack the point
         // banks like a stationary sample (pressure and tilt still track).
-        let fed = self.stab_feed(to_paper(pos));
+        // GM18: held to the perspective rulers first, when their snap is on.
+        let fed = self.held_feed(to_paper(pos));
         let p = fed
             .or_else(|| self.current.last().map(|l| pos2(l.x, l.y)))
             .unwrap_or(self.stab_raw);

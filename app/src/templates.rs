@@ -4,6 +4,7 @@
 //! the room's cel-stack preset arms when the editor enters it.
 
 use anim_core::color::ColorLaw;
+use anim_core::manga::Page;
 use anim_core::xsheet::{ColumnDef, ColumnKind};
 
 use crate::doc::AppState;
@@ -18,7 +19,13 @@ pub struct Template {
     pub room: Stage,
     /// Sheet order, left to right, with each column's kind.
     pub columns: &'static [(&'static str, ColumnKind)],
+    /// GM18: a manga template's page (its geometry in the cut meta, the
+    /// page graph instead of the auto-comp); None for an animation.
+    pub page: Option<fn() -> Page>,
 }
+
+/// GM18: a page's columns — the ink, and the tone painted in greys.
+const PAGE_COLUMNS: &[(&str, ColumnKind)] = &[("INK", ColumnKind::Cel), ("TONE", ColumnKind::Cel)];
 
 const BG: (&str, ColumnKind) = ("BG", ColumnKind::Bg);
 const A: (&str, ColumnKind) = ("A", ColumnKind::Cel);
@@ -35,6 +42,7 @@ pub const ALL: &[Template] = &[
         cut_frames: 72,
         room: Stage::Layout,
         columns: &[BG, A, B, C],
+        page: None,
     },
     Template {
         name: "Web 720p",
@@ -44,6 +52,7 @@ pub const ALL: &[Template] = &[
         cut_frames: 72,
         room: Stage::Drawing,
         columns: &[BG, A, B],
+        page: None,
     },
     Template {
         name: "Feature UHD",
@@ -53,6 +62,7 @@ pub const ALL: &[Template] = &[
         cut_frames: 72,
         room: Stage::Layout,
         columns: &[BG, A, B, C, D],
+        page: None,
     },
     Template {
         name: "Animatic / storyboard",
@@ -64,12 +74,47 @@ pub const ALL: &[Template] = &[
         // The boards are the picture (a BG-band column, so they render and
         // export), the A column draws over them.
         columns: &[("BOARD", ColumnKind::Bg), A],
+        page: None,
+    },
+    // GM18 (D15): a book of one-frame pages at 350 dpi, in the manga room.
+    Template {
+        name: "Manga B5",
+        width: 2591,
+        height: 3624,
+        fps: 24,
+        cut_frames: 1,
+        room: Stage::Manga,
+        columns: PAGE_COLUMNS,
+        page: Some(Page::b5),
+    },
+    Template {
+        name: "Manga A4",
+        width: 2976,
+        height: 4175,
+        fps: 24,
+        cut_frames: 1,
+        room: Stage::Manga,
+        columns: PAGE_COLUMNS,
+        page: Some(Page::a4),
+    },
+    Template {
+        name: "Webtoon",
+        width: 800,
+        height: 6400,
+        fps: 24,
+        cut_frames: 1,
+        room: Stage::Manga,
+        columns: PAGE_COLUMNS,
+        page: Some(Page::webtoon),
     },
 ];
 
 impl Template {
     /// The card's second line: size, fps and cut length.
     pub fn summary(&self) -> String {
+        if let Some(page) = self.page.map(|p| p()) {
+            return format!("{}×{} · {} at {} dpi", self.width, self.height, page.format, page.dpi);
+        }
         format!(
             "{}×{} · {} fps · {} frames",
             self.width, self.height, self.fps, self.cut_frames
@@ -123,7 +168,18 @@ impl Template {
             }
         }
         s.view.active_column = active;
-        s.auto_comp();
+        match self.page.map(|p| p()) {
+            Some(page) => {
+                s.engine.project.dpi = page.dpi;
+                if let Some(cut) = s.engine.project.cut_mut(at.scene, at.cut) {
+                    cut.name = "P01".into();
+                }
+                s.make_page(&page);
+            }
+            None => {
+                s.auto_comp();
+            }
+        }
         s.engine.clear_history();
         s
     }

@@ -192,6 +192,12 @@ pub enum Action {
     View3dCamera,
     View3dOrtho,
     View3dFrameAll,
+    /// GM18: the manga room — the page, panels, tones and rulers.
+    MangaRoom,
+    /// GM18: a page after the book's last (one undo step).
+    NewPage,
+    /// GM18: the page's graph rebuilt: each column cut to the panels.
+    ClipToPanels,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -458,6 +464,9 @@ impl Action {
         Action::View3dCamera,
         Action::View3dOrtho,
         Action::View3dFrameAll,
+        Action::MangaRoom,
+        Action::NewPage,
+        Action::ClipToPanels,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -608,6 +617,9 @@ impl Action {
             Action::View3dCamera => "Camera view",
             Action::View3dOrtho => "Ortho / perspective",
             Action::View3dFrameAll => "Frame all",
+            Action::MangaRoom => "Manga (pages) room",
+            Action::NewPage => "New page",
+            Action::ClipToPanels => "Clip to panels",
         }
     }
 
@@ -764,6 +776,9 @@ impl Action {
             View3dCamera => "View3D: look through the cut camera (numpad 0 in Blender).",
             View3dOrtho => "View3D: orthographic, or perspective again (numpad 5 in Blender).",
             View3dFrameAll => "View3D: frame the whole model, keeping the view's direction (Home in Blender).",
+            MangaRoom => "Manga (pages) room: the page large, the Manga pane (pages, panels, tones, rulers) and the layers.",
+            NewPage => "Add a one-frame page after the book's last, with INK and TONE columns and one panel, as one undo step.",
+            ClipToPanels => "Rebuild the page's graph: each column's art cut to the panels over white paper, the borders on top; one undo step.",
         }
     }
 
@@ -795,14 +810,13 @@ impl Action {
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
             | HandlesFlat | HandlesBroken => Group::Sheet,
             FrameCurves => Group::View,
-            PrevCut | NextCut | PaperSize | MakeCutsFromPanels | AddRetakeNote => Group::Cut,
-            AddNode | BuildSatsuei => Group::Composite,
+            PrevCut | NextCut | PaperSize | MakeCutsFromPanels | AddRetakeNote | NewPage => Group::Cut,
+            AddNode | BuildSatsuei | ClipToPanels => Group::Composite,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
-            RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit | Layout3dRoom => {
-                Group::Room
-            }
+            RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit | Layout3dRoom
+            | MangaRoom => Group::Room,
             ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue | ShowCutBoard
             | ShowEpisode | RenderEpisode => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
@@ -943,6 +957,10 @@ impl Action {
             // GM17: the 3D layout room (off the spine, like the forge's),
             // the cut camera keyed from View3D, and View3D's numpad verbs.
             Layout3dRoom => "Room/3D layout (LO)",
+            // GM18: the manga room (off the spine) and its page verbs.
+            MangaRoom => "Room/manga (pages)",
+            NewPage => "Cut/New page",
+            ClipToPanels => "Cut/Clip to panels",
             SetCutCameraFromView => "Cut/Set cut camera from view",
             View3dFront => "View/3D view/Front",
             View3dBack => "View/3D view/Back",
@@ -1130,6 +1148,9 @@ impl Action {
             Import3DModel => &["3d", "gltf", "glb", "obj", "model", "layout", "blender"],
             SetCutCameraFromView => &["align camera to view", "kamera", "LO camera"],
             Layout3dRoom => &["3d", "layout", "LO"],
+            MangaRoom => &["manga", "comic", "pages", "koma", "tone", "webtoon", "book"],
+            NewPage => &["page", "manga", "add page", "pēji"],
+            ClipToPanels => &["koma", "panels", "clip", "mask to panels", "manga"],
             View3dFront => &["numpad 1", "3d front"],
             View3dBack => &["ctrl numpad 1", "3d back"],
             View3dRight => &["numpad 3", "3d right", "side view"],
@@ -1506,7 +1527,7 @@ impl Action {
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize | LipFlap
-            | BuildSatsuei | Import3DModel | Layout3dRoom => None,
+            | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | NewPage | ClipToPanels => None,
         }
     }
 }

@@ -2767,3 +2767,26 @@ what was not verified.
   stretch items (turntable, 2× supersampling, glTF textures and animation, shadow mapping). Not
   verified: the real window, the rfd pickers, the toon look by eye, models beyond the test cube,
   triangle and sphere.
+- 2026-10-30 — GM18 Manga pages, tones and perspective rulers: new `manga.rs` — `Page` (B5 2591×3624
+  and A4 2976×4175 at 350 dpi with 3 mm bleed, trim and inner frame in px; a webtoon 800 px wide,
+  6400 down, exported in 1280 px segments) in the cut meta `manga.page`, `Rulers` (1–3 vanishing
+  points and the horizon) in `manga.rulers`; panels are the new `ParamKind::Polys` of a new
+  `GenKind::Panels` (white insides, the 0.5 mm border inside the outline, clear gutters);
+  `split_panel` cuts on whole px with the 5 mm row / 2 mm side gutter (69 / 28 px); `page_graph` is
+  white Solid paper, each column through a Matte of the Panels (a TONE column through a Tone first),
+  the Panels multiplied on top — one step, and a rebuild keeps the panels and the tone's values.
+  `FxKind::Tone`: an AM halftone (lpi, angle, round/square/line dots, the page's dpi as a parameter,
+  1-bit mono). `Snap` picks a stroke's line once it has moved 6 screen px (the lines to each VP, the
+  horizontal and the vertical, a third VP standing in for the vertical; the nearest angle wins) and
+  projects every later point; the canvas feeds it before the stabilizer on the pen's and the mouse's
+  paths. Export (`deliver::write_page`, `export_pages`): PNG with pHYs 13780 px/m, TIFF at 350 an
+  inch, colour, grey (Rec.709 luma) or 1-bit mono, trim marks, webtoon segments `<cut>_NN`. App: the
+  Manga B5, Manga A4 and Webtoon templates (first page P01); the off-spine "manga (pages)" room with
+  the Manga pane (pages, New page, the page thumbnail and panel list, Split across / Split down, Add /
+  Delete panel, gutter mm, Clip to panels, tone presets 42.5/60/85 lpi, 0°/45°, dot shapes, rulers
+  none/1/2/3-point and the snap latch); verbs New page, Clip to panels and the Manga room; the add
+  menu's Manga category. 20 `manga_tests`, 6 `mangaui_*`; colour literals unchanged. Left: PDF export
+  and slanted freehand panels (stretch); panel gestures on the canvas (drag a rect, draw a split
+  line); dragging the VPs and drawing the ruler lines and page guides over the canvas; the app's
+  page-export command and worker (core `export_pages` is done); proxy scaling of the Tone's and the
+  Panels' px parameters. Not verified: the real window, the tone by eye, a print at a printer.

@@ -46,6 +46,8 @@ pub enum Pane {
     /// GM17: the cut's 3D layout through a free view camera (Blender's
     /// navigation); "Set cut camera from view" keys a Model3D's camera.
     View3D,
+    /// GM18: the book's pages, the panel tool, tones and perspective rulers.
+    Manga,
 }
 
 impl Pane {
@@ -67,6 +69,7 @@ impl Pane {
         Pane::Board,
         Pane::Episode,
         Pane::View3D,
+        Pane::Manga,
     ];
 
     /// THE FORGE ROOM (PSD-brush-forge, owner amendment 2026-08-19:
@@ -113,6 +116,7 @@ impl Pane {
             Pane::Board => "Shinkō board (cut board)".into(),
             Pane::Episode => "Henshū timeline (episode)".into(),
             Pane::View3D => "View3D — 3D LO (layout)".into(),
+            Pane::Manga => "Manga (pages)".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }
@@ -142,6 +146,9 @@ pub enum Stage {
     /// Timing + review: the X-sheet is the master artifact (camera columns
     /// will land HERE too, per the C1 decision), viewer + graph beside it.
     Edit,
+    /// GM18 (D12): the manga room, OFF the spine (never in [`Stage::ALL`]):
+    /// the page large, the Manga pane and the layers beside it.
+    Manga,
 }
 
 impl Stage {
@@ -164,6 +171,7 @@ impl Stage {
             Stage::InkPaint => "shiage (ink & paint)",
             Stage::Composite => "satsuei (composite)",
             Stage::Edit => "henshū (edit)",
+            Stage::Manga => "manga (pages)",
         }
     }
 
@@ -175,6 +183,7 @@ impl Stage {
             Stage::InkPaint => "shiage — ink & paint with the result live beside you",
             Stage::Composite => "satsuei — compositing: the node graph, curves and the result",
             Stage::Edit => "henshū — timing and review; the sheet is the master",
+            Stage::Manga => "manga — pages, panels (koma), screen tone and perspective rulers",
         }
     }
 
@@ -186,6 +195,7 @@ impl Stage {
             Stage::InkPaint => ("仕上げ", "fill and check the colour", "fill · line guard"),
             Stage::Composite => ("撮影", "build the composite in the graph", "composite view"),
             Stage::Edit => ("編集", "time and review the cut", "select"),
+            Stage::Manga => ("漫画", "draw the book's pages", "brush · panels · rulers"),
         }
     }
 
@@ -254,6 +264,16 @@ impl Stage {
                 );
                 ds
             }
+            Stage::Manga => {
+                // The page large; the Manga pane (pages, panels, tones,
+                // rulers) on the left over the layers, the brush on top.
+                let mut ds = DockState::new(vec![Pane::Canvas]);
+                let tree = ds.main_surface_mut();
+                let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.26, vec![Pane::Manga]);
+                tree.split_below(rail, 0.7, vec![Pane::Layers, Pane::NodeGraph]);
+                tree.split_above(canvas, 0.11, vec![Pane::Brush]);
+                ds
+            }
         }
     }
 
@@ -287,6 +307,7 @@ impl Stage {
                 tool: CanvasTool::Select,
                 ..base
             },
+            Stage::Manga => base,
         }
     }
 }

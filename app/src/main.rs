@@ -25,6 +25,7 @@ mod icons;
 mod kpp;
 mod brushbank;
 mod kritares;
+mod manga_tools;
 mod menus;
 mod net;
 mod newproject;
@@ -83,6 +84,7 @@ fn stage_key(stage: Option<Stage>) -> &'static str {
         Some(Stage::InkPaint) => "finishing",
         Some(Stage::Composite) => "composite",
         Some(Stage::Edit) => "edit",
+        Some(Stage::Manga) => "manga",
         None => "custom",
     }
 }
@@ -3157,6 +3159,8 @@ impl Editor {
                 self.stage = None;
                 self.state.status = "the 3D layout room".into();
             }
+            // GM18: the manga room, off the spine (D12).
+            Action::MangaRoom => self.enter_room(Stage::Manga),
             Action::View3dFrameAll => view3d::frame_all(&mut self.state),
             a => {
                 if let Some(nav) = view3d::nav_of(a) {
@@ -3449,6 +3453,14 @@ impl Editor {
                 s.export_cut_project(at);
             }
             Action::MakeCutsFromPanels => s.make_cuts_from_panels(),
+            // GM18: a page after the book's last; the page graph rebuilt.
+            Action::NewPage => {
+                let scene = s.at().scene;
+                s.new_page(scene);
+            }
+            Action::ClipToPanels => {
+                s.clip_to_panels();
+            }
             Action::KindKey
             | Action::KindBreakdown
             | Action::KindInbetween
@@ -3570,6 +3582,7 @@ impl Editor {
             | Action::RenderEpisode
             | Action::AddRetakeNote
             | Action::Layout3dRoom
+            | Action::MangaRoom
             | Action::View3dFront
             | Action::View3dBack
             | Action::View3dRight
@@ -3630,6 +3643,8 @@ fn is_chrome(action: Action) -> bool {
             // GM17: the 3D layout room, and View3D's view (a view: the
             // document is untouched).
             | Action::Layout3dRoom
+            // GM18: the manga room (a view).
+            | Action::MangaRoom
             | Action::View3dFront
             | Action::View3dBack
             | Action::View3dRight
@@ -3733,6 +3748,11 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::Import3DModel
             | Action::SetCutCameraFromView
             | Action::Layout3dRoom
+            // GM18: no page made, graph rebuilt or room swapped under a
+            // live stroke.
+            | Action::MangaRoom
+            | Action::NewPage
+            | Action::ClipToPanels
     )
 }
 
@@ -4488,6 +4508,10 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             }
             Pane::Episode => board_panel::ui_episode(ui, self.state),
             Pane::View3D => view3d::ui(ui, self.state),
+            Pane::Manga => {
+                let gesture_safe = !self.canvas.stroke_active();
+                manga_tools::ui(ui, self.state, gesture_safe)
+            }
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -7531,6 +7555,8 @@ impl Editor {
                         Stage::InkPaint => ("仕上げ", "shiage"),
                         Stage::Composite => ("撮影", "satsuei"),
                         Stage::Edit => ("編集", "henshū"),
+                        // Off the spine: never in `Stage::ALL`.
+                        Stage::Manga => ("漫画", "manga"),
                     };
                     // GM8 room card: term, purpose and the tools it arms.
                     let (term, purpose, arms) = st.card();
@@ -8174,6 +8200,10 @@ impl Editor {
         // GM17: and View3D's toolbar (its numpad views, Frame all, the cut
         // camera from the view).
         for action in std::mem::take(&mut self.state.view3d.asked) {
+            self.invoke(action, ui.ctx());
+        }
+        // GM18: and the Manga pane's New page and Clip to panels.
+        for action in std::mem::take(&mut self.state.manga.asked) {
             self.invoke(action, ui.ctx());
         }
 

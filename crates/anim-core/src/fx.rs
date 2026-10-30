@@ -125,6 +125,9 @@ pub enum ParamKind {
     /// GM16: a string (a Text generator's lines), typed in the inspector,
     /// never driven by a column.
     Text { default: &'static str },
+    /// GM18: polygons in frame px (a Panels generator's panels), drawn with
+    /// the manga room's panel tool, never driven by a column.
+    Polys,
 }
 
 /// One parameter of an FX kind: the inspector, the defaults and the binds
@@ -158,6 +161,7 @@ impl ParamSpec {
             ParamKind::Text { default } => FxValue::Text {
                 text: default.to_string(),
             },
+            ParamKind::Polys => FxValue::Polys { polys: Vec::new() },
         }
     }
 
@@ -171,7 +175,7 @@ impl ParamSpec {
             | ParamKind::Color { .. }
             | ParamKind::Bool { .. }
             | ParamKind::Choice { .. } => true,
-            ParamKind::Blob | ParamKind::ColorMap | ParamKind::Text { .. } => false,
+            ParamKind::Blob | ParamKind::ColorMap | ParamKind::Text { .. } | ParamKind::Polys => false,
         }
     }
 
@@ -203,6 +207,15 @@ impl ParamSpec {
             (ParamKind::Blob, Some(v @ FxValue::Blob { .. }))
             | (ParamKind::ColorMap, Some(v @ FxValue::Map { .. }))
             | (ParamKind::Text { .. }, Some(v @ FxValue::Text { .. })) => v.clone(),
+            // GM18: a point that is not a number is dropped, and a polygon
+            // left with fewer than three points with it.
+            (ParamKind::Polys, Some(FxValue::Polys { polys })) => FxValue::Polys {
+                polys: polys
+                    .iter()
+                    .map(|p| p.iter().copied().filter(|q| q.iter().all(|v| v.is_finite())).collect::<Vec<_>>())
+                    .filter(|p| p.len() >= 3)
+                    .collect(),
+            },
             _ => self.default_value(),
         }
     }
@@ -234,15 +247,15 @@ impl ParamSpec {
                 let mix = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8;
                 Some(FxValue::Color([mix(0), mix(1), mix(2), mix(3)]))
             }
-            ParamKind::Blob | ParamKind::ColorMap | ParamKind::Text { .. } => None,
+            ParamKind::Blob | ParamKind::ColorMap | ParamKind::Text { .. } | ParamKind::Polys => None,
         }
     }
 }
 
 /// One stored parameter value (untagged JSON: a number, a bool, an RGBA
 /// array, a choice name, GM13's `{"blob": key}` and
-/// `{"map": [[chip, chip], ...], "from": variant}` objects, and GM16's
-/// `{"text": string}`).
+/// `{"map": [[chip, chip], ...], "from": variant}` objects, GM16's
+/// `{"text": string}` and GM18's `{"polys": [[[x, y], ...], ...]}`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum FxValue {
@@ -262,6 +275,9 @@ pub enum FxValue {
     /// GM16: a text parameter's string, as `{"text": "..."}` (a bare string
     /// is a choice name).
     Text { text: String },
+    /// GM18: polygons in frame px, each a list of `[x, y]` points (a Panels
+    /// generator's panels).
+    Polys { polys: Vec<Vec<[f32; 2]>> },
 }
 
 impl std::fmt::Display for FxValue {
@@ -284,6 +300,18 @@ impl std::fmt::Display for FxValue {
                 write!(f, ")")
             }
             Self::Text { text } => write!(f, "text:{text:?}"),
+            // Every point exactly (plain `{}` floats), polygon by polygon.
+            Self::Polys { polys } => {
+                write!(f, "polys(")?;
+                for p in polys {
+                    write!(f, "[")?;
+                    for q in p {
+                        write!(f, "{},{};", q[0], q[1])?;
+                    }
+                    write!(f, "]")?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -478,6 +506,8 @@ pub enum FxKind {
     Lut,
     Matte,
     PaletteMap,
+    // GM18: the manga screen tone (maths in `crate::manga`).
+    Tone,
 }
 
 /// GM13: what an effect reads beyond its inputs and values — the frame
@@ -666,6 +696,15 @@ const PALETTE_MAP_SPECS: &[ParamSpec] = &[ParamSpec {
     kind: ParamKind::ColorMap,
 }];
 
+const TONE_SPECS: &[ParamSpec] = &[
+    float("lpi", "lines per inch", "The screen's line count along its angle; 60 is the common manga tone.", 10.0, 200.0, 60.0, 1.0),
+    float("angle", "angle", "The dot rows' angle in degrees; 45 is the common screen angle.", -360.0, 360.0, 45.0, 0.5),
+    choice("shape", "dot shape", "Round dots, square dots, or lines along the angle.", &["round", "square", "line"]),
+    float("dpi", "page dpi", "The page's dots per inch, so the line count is true on paper; 350 is the manga standard.", 72.0, 1200.0, 350.0, 1.0),
+    color("color", "ink", "The tone's ink.", [0, 0, 0, 255]),
+    flag("mono", "1-bit", "On: every pixel is ink or nothing, as the print plate is. Off: the dots' edges are smoothed.", true),
+];
+
 impl FxKind {
     /// GM9's kinds: the add menu's FX category.
     pub const CORE: &'static [FxKind] = &[FxKind::Blur, FxKind::Glow, FxKind::Diffusion, FxKind::Grade];
@@ -683,6 +722,9 @@ impl FxKind {
         FxKind::PaletteMap,
     ];
 
+    /// GM18's kinds: the add menu's Manga category.
+    pub const MANGA: &'static [FxKind] = &[FxKind::Tone];
+
     pub const ALL: &'static [FxKind] = &[
         FxKind::Blur,
         FxKind::Glow,
@@ -697,6 +739,7 @@ impl FxKind {
         FxKind::Lut,
         FxKind::Matte,
         FxKind::PaletteMap,
+        FxKind::Tone,
     ];
 
     /// The node's name in the graph and the add-node menu.
@@ -715,6 +758,7 @@ impl FxKind {
             Self::Lut => "LUT",
             Self::Matte => "Matte",
             Self::PaletteMap => "Palette map",
+            Self::Tone => "Tone",
         }
     }
 
@@ -734,6 +778,7 @@ impl FxKind {
             Self::Lut => "Grades through a .cube 3D LUT stored in the project.",
             Self::Matte => "Cuts the image by a matte from alpha or luma, with invert and choke / spread.",
             Self::PaletteMap => "Swaps the palette's chip colours for a variant's: day, evening, night.",
+            Self::Tone => "Screen tone: the image's grey as a halftone of dots at a line count and angle.",
         }
     }
 
@@ -749,6 +794,7 @@ impl FxKind {
             Self::Rim => Some("rimu raito"),
             Self::Grain => Some("noizu"),
             Self::MotionBlur => Some("nagashi (bure)"),
+            Self::Tone => Some("tōn (amiten)"),
             Self::Grade
             | Self::Para
             | Self::Vignette
@@ -793,6 +839,7 @@ impl FxKind {
             Self::Lut => &["cube", ".cube", "look", "grade", "colour", "color"],
             Self::Matte => &["mask", "key", "choke", "spread", "cut out"],
             Self::PaletteMap => &["variant", "time of day", "evening", "night", "recolour", "recolor"],
+            Self::Tone => &["screentone", "screen tone", "tōn", "ton", "amiten", "halftone", "dots", "manga"],
         }
     }
 
@@ -854,6 +901,7 @@ impl FxKind {
             Self::Lut => LUT_SPECS,
             Self::Matte => MATTE_SPECS,
             Self::PaletteMap => PALETTE_MAP_SPECS,
+            Self::Tone => TONE_SPECS,
         }
     }
 
@@ -917,6 +965,7 @@ impl FxKind {
             }
             Self::Matte => look::matte(v, src, pin(1)),
             Self::PaletteMap => look::palette_map(src, law, v.map("map")),
+            Self::Tone => crate::manga::tone(v, law, src),
         }
     }
 }

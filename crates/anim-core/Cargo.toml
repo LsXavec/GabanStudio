@@ -32,6 +32,9 @@ symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm
 # and sequences ride image's `jpeg` feature above.
 gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
 tobj = { version = "4", default-features = false }
+# GM18 (D16): page export — TIFF with its resolution tags and 1-bit mono,
+# which image does not write (tiff 0.11 is already locked under image).
+tiff = "0.11"
 
 [dev-dependencies]
 # Tests forge legacy (schema v4/v5) project files directly to prove migration.

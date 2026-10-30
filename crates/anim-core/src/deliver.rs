@@ -248,6 +248,266 @@ pub fn write_png8(path: &Path, img: &Image) -> Result<(), String> {
         .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
+// ---- GM18: manga pages -------------------------------------------------------------
+
+/// A page file's format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageFormat {
+    Png,
+    Tiff,
+}
+
+/// A page's ink: full colour, grey (Rec.709 luma), or mono (1-bit, black
+/// below the threshold of the grey).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageMode {
+    Color,
+    Grey,
+    Mono,
+}
+
+/// How pages export.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageOpts {
+    pub format: PageFormat,
+    pub mode: PageMode,
+    /// Mono: the grey (0..1) below which a pixel prints black.
+    pub threshold: f32,
+    /// Trim marks (tombo) in a margin round the page.
+    pub trim_marks: bool,
+}
+
+impl Default for PageOpts {
+    fn default() -> Self {
+        Self {
+            format: PageFormat::Png,
+            mode: PageMode::Color,
+            threshold: 0.5,
+            trim_marks: false,
+        }
+    }
+}
+
+/// Pixels a metre at `dpi` (PNG's pHYs): 350 dpi is 13780.
+pub fn px_per_metre(dpi: f32) -> u32 {
+    (dpi as f64 / 0.0254).round() as u32
+}
+
+/// The page over white as `mode`'s bytes, row by row: RGB, a Rec.709 grey
+/// (`0.2126 R + 0.7152 G + 0.0722 B` of the 8-bit values), or mono 0 / 255.
+pub fn page_samples(img: &Image, mode: PageMode, threshold: f32) -> Vec<u8> {
+    let flat = over(img, [255, 255, 255]);
+    let grey = |p: &[f32]| {
+        let c = crate::export::straight_rgba8(p);
+        (0.2126 * c[0] as f32 + 0.7152 * c[1] as f32 + 0.0722 * c[2] as f32).round().min(255.0) as u8
+    };
+    let cut = (threshold.clamp(0.0, 1.0) * 255.0).max(0.0);
+    let mut out = Vec::with_capacity(flat.px.len() / 4 * if mode == PageMode::Color { 3 } else { 1 });
+    for p in flat.px.chunks_exact(4) {
+        match mode {
+            PageMode::Color => out.extend_from_slice(&crate::export::straight_rgba8(p)[..3]),
+            PageMode::Grey => out.push(grey(p)),
+            PageMode::Mono => out.push(if (grey(p) as f32) < cut { 0 } else { 255 }),
+        }
+    }
+    out
+}
+
+/// Mono bytes (0 / 255, `w` a row) packed eight to a byte, the first pixel
+/// in the high bit, each row padded to a byte: 1 is white (PNG grey and
+/// TIFF BlackIsZero both read it so).
+fn pack_bits(mono: &[u8], w: u32) -> Vec<u8> {
+    let w = w.max(1) as usize;
+    let mut out = Vec::with_capacity(mono.len() / 8 + mono.len() / w + 1);
+    for row in mono.chunks(w) {
+        for byte in row.chunks(8) {
+            let mut b = 0u8;
+            for (i, &v) in byte.iter().enumerate() {
+                if v >= 128 {
+                    b |= 0x80 >> i;
+                }
+            }
+            out.push(b);
+        }
+    }
+    out
+}
+
+/// `img` on white with trim marks: a `pad` px margin round it and, at each
+/// corner of `trim` (page px), 2 px marks out along the trim lines.
+pub fn with_trim_marks(img: &Image, trim: crate::manga::PxRect, pad: u32) -> Image {
+    let flat = over(img, [255, 255, 255]);
+    let (w, h) = (img.w + 2 * pad, img.h + 2 * pad);
+    let mut out = Image::from_px(w, h, vec![1.0; w as usize * h as usize * 4]);
+    for y in 0..img.h {
+        for x in 0..img.w {
+            out.set_pixel(x + pad, y + pad, flat.pixel(x, y));
+        }
+    }
+    let ink = [0.0, 0.0, 0.0, 1.0];
+    for x in [trim.x, trim.right()] {
+        for y in (0..pad).chain(pad + img.h..h) {
+            for dx in 0..2 {
+                out.set_pixel((pad + x + dx).saturating_sub(1).min(w - 1), y, ink);
+            }
+        }
+    }
+    for y in [trim.y, trim.bottom()] {
+        for x in (0..pad).chain(pad + img.w..w) {
+            for dy in 0..2 {
+                out.set_pixel(x, (pad + y + dy).saturating_sub(1).min(h - 1), ink);
+            }
+        }
+    }
+    out
+}
+
+/// GM18: one page file at `dpi` — PNG with its pHYs (px a metre), TIFF
+/// with its resolution (px an inch); colour RGB, grey 8-bit, mono 1-bit.
+pub fn write_page(path: &Path, img: &Image, opts: &PageOpts, dpi: f32) -> Result<(), String> {
+    use tiff::encoder::{Rational, TiffEncoder, colortype};
+    use tiff::tags::{ResolutionUnit, Tag};
+    let err = |e: &dyn std::fmt::Display| format!("write {}: {e}", path.display());
+    let (w, h) = (img.w, img.h);
+    let samples = page_samples(img, opts.mode, opts.threshold);
+    let file = std::fs::File::create(path).map_err(|e| err(&e))?;
+    let mut out = std::io::BufWriter::new(file);
+    match opts.format {
+        PageFormat::Png => {
+            let mut enc = png::Encoder::new(&mut out, w, h);
+            let data = match opts.mode {
+                PageMode::Color => {
+                    enc.set_color(png::ColorType::Rgb);
+                    samples
+                }
+                PageMode::Grey => {
+                    enc.set_color(png::ColorType::Grayscale);
+                    samples
+                }
+                PageMode::Mono => {
+                    enc.set_color(png::ColorType::Grayscale);
+                    enc.set_depth(png::BitDepth::One);
+                    pack_bits(&samples, w)
+                }
+            };
+            if opts.mode != PageMode::Mono {
+                enc.set_depth(png::BitDepth::Eight);
+            }
+            let ppm = px_per_metre(dpi);
+            enc.set_pixel_dims(Some(png::PixelDimensions {
+                xppu: ppm,
+                yppu: ppm,
+                unit: png::Unit::Meter,
+            }));
+            let mut writer = enc.write_header().map_err(|e| err(&e))?;
+            writer.write_image_data(&data).map_err(|e| err(&e))?;
+            writer.finish().map_err(|e| err(&e))?;
+        }
+        PageFormat::Tiff => {
+            let mut enc = TiffEncoder::new(&mut out).map_err(|e| err(&e))?;
+            let res = Rational {
+                n: dpi.round().max(1.0) as u32,
+                d: 1,
+            };
+            match opts.mode {
+                PageMode::Color => {
+                    let mut image = enc.new_image::<colortype::RGB8>(w, h).map_err(|e| err(&e))?;
+                    image.resolution(ResolutionUnit::Inch, res);
+                    image.write_data(&samples).map_err(|e| err(&e))?;
+                }
+                PageMode::Grey => {
+                    let mut image = enc.new_image::<colortype::Gray8>(w, h).map_err(|e| err(&e))?;
+                    image.resolution(ResolutionUnit::Inch, res);
+                    image.write_data(&samples).map_err(|e| err(&e))?;
+                }
+                PageMode::Mono => {
+                    // 1-bit has no colour type of its own: the directory by hand.
+                    let packed = pack_bits(&samples, w);
+                    let mut dir = enc.image_directory().map_err(|e| err(&e))?;
+                    let offset = dir.write_data(&packed[..]).map_err(|e| err(&e))?;
+                    let tags: [(Tag, u32); 9] = [
+                        (Tag::ImageWidth, w),
+                        (Tag::ImageLength, h),
+                        (Tag::BitsPerSample, 1),
+                        (Tag::Compression, 1),
+                        (Tag::PhotometricInterpretation, 1),
+                        (Tag::StripOffsets, offset as u32),
+                        (Tag::SamplesPerPixel, 1),
+                        (Tag::RowsPerStrip, h),
+                        (Tag::StripByteCounts, packed.len() as u32),
+                    ];
+                    for (tag, v) in tags {
+                        match tag {
+                            Tag::BitsPerSample | Tag::Compression | Tag::PhotometricInterpretation | Tag::SamplesPerPixel => {
+                                dir.write_tag(tag, v as u16)
+                            }
+                            _ => dir.write_tag(tag, v),
+                        }
+                        .map_err(|e| err(&e))?;
+                    }
+                    dir.write_tag(Tag::XResolution, res.clone()).map_err(|e| err(&e))?;
+                    dir.write_tag(Tag::YResolution, res).map_err(|e| err(&e))?;
+                    dir.write_tag(Tag::ResolutionUnit, 2u16).map_err(|e| err(&e))?;
+                    dir.finish().map_err(|e| err(&e))?;
+                }
+            }
+        }
+    }
+    use std::io::Write;
+    out.flush().map_err(|e| err(&e))
+}
+
+/// GM18: every page of `scene` (each cut's first frame at the project's
+/// size, Final) into `dir` as `<cut>.<png|tif>` at the page's dpi (else the
+/// project's) — a webtoon page sliced into its segments, `<cut>_01`, ... —
+/// with trim marks when asked and the page knows its trim. The paths
+/// written, in page order.
+pub fn export_pages(project: &Project, scene: crate::ids::SceneId, dir: &Path, opts: &PageOpts) -> Result<Vec<PathBuf>, String> {
+    let scene = project.scene(scene).ok_or("that book (scene) is gone")?;
+    let ext = match opts.format {
+        PageFormat::Png => "png",
+        PageFormat::Tiff => "tif",
+    };
+    let render_opts = RenderOpts {
+        purpose: Purpose::Final,
+        scale: 1.0,
+    };
+    let mut written = Vec::new();
+    for cut in &scene.cuts {
+        let page = crate::manga::Page::of(cut);
+        let dpi = page.as_ref().map_or(project.dpi, |p| p.dpi);
+        let img = render(cut, project.color_law, 0, project.width, project.height, &render_opts);
+        let name = sanitize(&cut.name);
+        let segment = page.as_ref().and_then(|p| p.segment);
+        match segment {
+            Some(seg) => {
+                for (i, (y0, sh)) in crate::manga::slice_webtoon(img.h, seg).into_iter().enumerate() {
+                    let start = (y0 * img.w * 4) as usize;
+                    let px = img.px[start..start + (sh * img.w * 4) as usize].to_vec();
+                    let path = dir.join(format!("{name}_{:02}.{ext}", i + 1));
+                    write_page(&path, &Image::from_px(img.w, sh, px), opts, dpi)?;
+                    written.push(path);
+                }
+            }
+            None => {
+                let img = match (&page, opts.trim_marks) {
+                    (Some(p), true) => with_trim_marks(&img, p.trim, mm_margin(dpi)),
+                    _ => img,
+                };
+                let path = dir.join(format!("{name}.{ext}"));
+                write_page(&path, &img, opts, dpi)?;
+                written.push(path);
+            }
+        }
+    }
+    Ok(written)
+}
+
+/// The trim marks' margin: 10 mm.
+fn mm_margin(dpi: f32) -> u32 {
+    crate::manga::mm_px(10.0, dpi)
+}
+
 /// sRGB EOTF on one straight channel (0..1).
 fn srgb_eotf(s: f32) -> f32 {
     if s <= 0.04045 {

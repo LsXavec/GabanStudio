@@ -27,6 +27,7 @@ pub mod generator;
 pub mod graph;
 pub mod ids;
 pub mod look;
+pub mod manga;
 pub mod model;
 pub mod r3d;
 pub mod raster;

@@ -139,6 +139,7 @@ dependencies = [
  "symphonia",
  "tempfile",
  "thiserror 2.0.18",
+ "tiff",
  "tobj",
 ]
 

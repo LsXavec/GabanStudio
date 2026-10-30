@@ -532,6 +532,9 @@ pub struct AppState {
     /// GM17: the View3D pane's view camera and its last render —
     /// session-only view state.
     pub view3d: crate::view3d::View3dState,
+    /// GM18: the manga room's tools (selected panel, gutters, ruler snap) —
+    /// session-only view state.
+    pub manga: crate::manga_tools::MangaState,
     /// X-sheet pane: the selected PARAMETER column (its keying strip shows
     /// under the toolbar) — session-only view state.
     pub param_sel: Option<anim_core::ids::ParamId>,
@@ -686,6 +689,7 @@ impl AppState {
             graph_pan: (0.0, 0.0),
             graph_ui: Default::default(),
             view3d: Default::default(),
+            manga: Default::default(),
             param_sel: None,
             param_buf: 0.0,
             param_buf_at: None,
@@ -784,6 +788,7 @@ impl AppState {
             graph_pan: (0.0, 0.0),
             graph_ui: Default::default(),
             view3d: Default::default(),
+            manga: Default::default(),
             param_sel: None,
             param_buf: 0.0,
             param_buf_at: None,
@@ -3666,6 +3671,106 @@ impl AppState {
             }
             Err(e) => self.refuse(format!("refused — the cut could not be created ({e})")),
         }
+    }
+
+    // ---- GM18: manga pages ----------------------------------------------
+
+    /// GM18: the open cut becomes `page` — its geometry in the cut meta,
+    /// its graph the page graph with the page's first panel — one undo step.
+    pub fn make_page(&mut self, page: &anim_core::manga::Page) -> bool {
+        use anim_core::manga;
+        let at = self.at();
+        let cut = self.cut().clone();
+        let mut cmds = vec![Command::SetCutMeta {
+            at,
+            key: manga::PAGE_KEY.into(),
+            before: cut.meta.get(manga::PAGE_KEY).cloned(),
+            after: Some(page.to_meta()),
+        }];
+        let border = page.px(manga::BORDER_MM);
+        cmds.extend(manga::page_graph(&cut, at, || self.engine.alloc_node_id(), vec![page.first_panel()], border));
+        match self.engine.apply("make page", cmds) {
+            Ok(()) => true,
+            Err(e) => {
+                self.refuse(format!("refused — the page could not be made ({e})"));
+                false
+            }
+        }
+    }
+
+    /// GM18 "New page": a one-frame cut after the book's last, with INK and
+    /// TONE columns, the open page's geometry (else B5) and the page graph
+    /// with one panel, the inner frame — one undo step (AddCut and its
+    /// graph in one batch), the view on it.
+    pub fn new_page(&mut self, scene: SceneId) {
+        use anim_core::manga::{self, Page};
+        let index = self
+            .engine
+            .project
+            .scenes
+            .iter()
+            .find(|s| s.id == scene)
+            .map(|s| s.cuts.len())
+            .unwrap_or(0);
+        let page = Page::of(self.cut()).unwrap_or_else(Page::b5);
+        let id = self.engine.alloc_cut_id();
+        let mut cut = Cut::new(id, format!("P{:02}", index + 1), 1);
+        for name in ["INK", "TONE"] {
+            let column = self.engine.alloc_column_id();
+            cut.xsheet.columns.push(Column::new(column, name));
+        }
+        cut.meta.insert(manga::PAGE_KEY.into(), page.to_meta());
+        let at = CutRef { scene, cut: id };
+        let border = page.px(manga::BORDER_MM);
+        let graph = manga::page_graph(&cut, at, || self.engine.alloc_node_id(), vec![page.first_panel()], border);
+        let mut cmds = vec![Command::AddCut {
+            scene,
+            index,
+            cut: Box::new(cut),
+        }];
+        cmds.extend(graph);
+        match self.engine.apply("new page", cmds) {
+            Ok(()) => {
+                self.doc_gen = self.doc_gen.wrapping_add(1);
+                self.goto_cut(scene, id);
+            }
+            Err(e) => self.refuse(format!("refused — the page could not be created ({e})")),
+        }
+    }
+
+    /// GM18: one manga edit of the open page (`cmds` of it) as one undo
+    /// step; false when refused or there was nothing to change.
+    pub fn manga_edit(&mut self, label: &str, cmds: impl FnOnce(&Cut, CutRef) -> Vec<Command>) -> bool {
+        let at = self.at();
+        let cmds = cmds(self.cut(), at);
+        if cmds.is_empty() {
+            return false;
+        }
+        match self.engine.apply(label, cmds) {
+            Ok(()) => true,
+            Err(e) => {
+                self.refuse(format!("refused — {label} ({e})"));
+                false
+            }
+        }
+    }
+
+    /// GM18 "Clip to panels": the open page's graph becomes the page graph
+    /// (its panels and tones kept) — one undo step. A cut that is no page
+    /// and has no panels is refused (its art would clip to nothing).
+    pub fn clip_to_panels(&mut self) -> bool {
+        use anim_core::manga::{self, Page};
+        let page = Page::of(self.cut());
+        if page.is_none() && manga::panels_of(self.cut()).is_none() {
+            self.refuse("refused — this cut is no page (New page makes one)");
+            return false;
+        }
+        let border = page.as_ref().map_or(7.0, |p| p.px(manga::BORDER_MM));
+        let first = page.map(|p| vec![p.first_panel()]).unwrap_or_default();
+        let at = self.at();
+        let cut = self.cut().clone();
+        let cmds = manga::page_graph(&cut, at, || self.engine.alloc_node_id(), first, border);
+        self.manga_edit("clip to panels", |_, _| cmds)
     }
 
     // ---- GM15: editorial ------------------------------------------------

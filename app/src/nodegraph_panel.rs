@@ -238,6 +238,17 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
             make: Make::Node(NodeKind::effect(fx)),
         });
     }
+    // GM18: the screen tone, its own Manga category.
+    for &fx in FxKind::MANGA {
+        v.push(Entry {
+            category: "Manga",
+            name: fx.name().into(),
+            term: fx.term(),
+            aliases: fx.aliases(),
+            help: fx.help(),
+            make: Make::Node(NodeKind::effect(fx)),
+        });
+    }
     for &generator in GenKind::ALL {
         v.push(Entry {
             category: "Generators",

@@ -790,24 +790,25 @@ pub fn effect_with(fx: FxKind, values: &[(&str, FxValue)]) -> NodeKind {
     kind
 }
 
-/// The template's batch as it is built: commands, ids and places.
-struct Build<'a, F: FnMut() -> NodeId> {
-    cut: &'a Cut,
-    at: CutRef,
-    alloc: F,
-    cmds: Vec<Command>,
+/// The template's batch as it is built: commands, ids and places (GM18's
+/// page graph builds with it too).
+pub(crate) struct Build<'a, F: FnMut() -> NodeId> {
+    pub(crate) cut: &'a Cut,
+    pub(crate) at: CutRef,
+    pub(crate) alloc: F,
+    pub(crate) cmds: Vec<Command>,
 }
 
 impl<F: FnMut() -> NodeId> Build<'_, F> {
     /// A node at a place in the graph pane.
-    fn add(&mut self, kind: NodeKind, pos: (f32, f32)) -> NodeId {
+    pub(crate) fn add(&mut self, kind: NodeKind, pos: (f32, f32)) -> NodeId {
         let id = (self.alloc)();
         self.cmds.push(Command::AddNode { at: self.at, id, kind });
         self.cmds.extend(place_node(self.cut, self.at, id, Some(pos)));
         id
     }
 
-    fn wire(&mut self, from: NodeId, to: NodeId, to_pin: u16) {
+    pub(crate) fn wire(&mut self, from: NodeId, to: NodeId, to_pin: u16) {
         self.cmds.push(Command::Connect {
             at: self.at,
             from,
@@ -818,7 +819,7 @@ impl<F: FnMut() -> NodeId> Build<'_, F> {
     }
 
     /// `over` blended onto `under` (None: `over` alone).
-    fn stack(&mut self, under: Option<NodeId>, over: NodeId, mode: BlendMode, pos: (f32, f32)) -> NodeId {
+    pub(crate) fn stack(&mut self, under: Option<NodeId>, over: NodeId, mode: BlendMode, pos: (f32, f32)) -> NodeId {
         let Some(under) = under else {
             return over;
         };
@@ -829,7 +830,7 @@ impl<F: FnMut() -> NodeId> Build<'_, F> {
     }
 
     /// A node fed by `input` on its first pin.
-    fn then(&mut self, input: NodeId, kind: NodeKind, pos: (f32, f32)) -> NodeId {
+    pub(crate) fn then(&mut self, input: NodeId, kind: NodeKind, pos: (f32, f32)) -> NodeId {
         let id = self.add(kind, pos);
         self.wire(input, id, 0);
         id
