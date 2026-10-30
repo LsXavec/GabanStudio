@@ -2791,6 +2791,7 @@ impl App {
                     canvas::CanvasTool::Select => "select",
                     canvas::CanvasTool::Fill => "fill",
                     canvas::CanvasTool::LassoFill => "lasso fill",
+                    canvas::CanvasTool::Panel => "panel (koma)",
                 }
             },
             brush: "-",
@@ -2981,6 +2982,18 @@ impl App {
                     }
                 }
             }
+            // GM18: the pages' folder is the shell's; the Manga pane's
+            // options say how they are written.
+            AppRequest::ExportPages => {
+                let Some(ed) = &mut self.editor else { return };
+                let mut dialog = rfd::FileDialog::new().set_title("Export the pages into a folder");
+                if let Some(dir) = ed.state.project_dir() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(dir) = dialog.pick_folder() {
+                    ed.state.begin_page_export(&dir, Some(ctx.clone()));
+                }
+            }
         }
     }
 }
@@ -3022,6 +3035,9 @@ pub enum AppRequest {
     /// GM17: an ImageSequence's "pick a frame…" — the image picker is the
     /// shell's; the file names the node's run.
     PickSequenceFrame { node: anim_core::ids::NodeId },
+    /// GM18: File ▸ Export ▸ Manga pages… — the folder picker is the
+    /// shell's; the pages then render and write on a worker.
+    ExportPages,
 }
 
 impl Editor {
@@ -3219,6 +3235,17 @@ impl Editor {
                 canvas::CanvasTool::Paint
             } else {
                 canvas::CanvasTool::LassoFill
+            };
+            ed.canvas.set_tool(next, &mut ed.state);
+            return;
+        }
+        // GM18: the panel (koma) tool, a toggle like the fills; it works on
+        // a page only (set_tool says so elsewhere).
+        if action == Action::PanelTool {
+            let next = if ed.canvas.tool == canvas::CanvasTool::Panel {
+                canvas::CanvasTool::Paint
+            } else {
+                canvas::CanvasTool::Panel
             };
             ed.canvas.set_tool(next, &mut ed.state);
             return;
@@ -3461,6 +3488,22 @@ impl Editor {
             Action::ClipToPanels => {
                 s.clip_to_panels();
             }
+            // GM18: the folder picker is the shell's; one export at a time,
+            // and a book with no page has nothing to write.
+            Action::ExportPages => match s.page_export_refusal() {
+                Some(why) => s.refuse(format!("refused — {why}")),
+                None => *out = Performed::App(AppRequest::ExportPages),
+            },
+            // The stroke latches its rulers at pen-down: a flip mid-stroke
+            // holds from the next one.
+            Action::ToggleRulerSnap => {
+                s.manga.snap = !s.manga.snap;
+                s.status = match (s.manga.snap, s.manga.snap_rulers(s.cut()).is_some()) {
+                    (false, _) => "snap to rulers off — the pen draws free".into(),
+                    (true, true) => "snap to rulers on — a stroke runs to a vanishing point, or level".into(),
+                    (true, false) => "snap to rulers on — this page has no rulers yet (the Manga pane sets them)".into(),
+                };
+            }
             Action::KindKey
             | Action::KindBreakdown
             | Action::KindInbetween
@@ -3494,6 +3537,7 @@ impl Editor {
             | Action::BrushTool
             | Action::FillTool
             | Action::LassoFillTool
+            | Action::PanelTool
             | Action::SelectAll => {} // handled above
             Action::Preset1
             | Action::Preset2
@@ -3748,11 +3792,12 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::Import3DModel
             | Action::SetCutCameraFromView
             | Action::Layout3dRoom
-            // GM18: no page made, graph rebuilt or room swapped under a
-            // live stroke.
+            // GM18: no page made, graph rebuilt, room swapped, folder
+            // picker opened or export worker started under a live stroke.
             | Action::MangaRoom
             | Action::NewPage
             | Action::ClipToPanels
+            | Action::ExportPages
     )
 }
 
@@ -4510,7 +4555,8 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             Pane::View3D => view3d::ui(ui, self.state),
             Pane::Manga => {
                 let gesture_safe = !self.canvas.stroke_active();
-                manga_tools::ui(ui, self.state, gesture_safe)
+                let koma_armed = self.canvas.tool == canvas::CanvasTool::Panel;
+                manga_tools::ui(ui, self.state, gesture_safe, koma_armed)
             }
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
@@ -5128,6 +5174,14 @@ impl Editor {
             a if stroke_guarded(a) && self.canvas.stroke_active() => {
                 Err("finish the stroke first")
             }
+            // GM18: a project that is no book has no page to copy; one
+            // export at a time, of a book with a page.
+            Action::NewPage if s.new_page_refusal().is_some() => {
+                Err(s.new_page_refusal().unwrap_or("this project is not a manga book"))
+            }
+            Action::ExportPages if s.page_export_refusal().is_some() => {
+                Err(s.page_export_refusal().unwrap_or("this book has no page"))
+            }
             // The cheap state checks: the verb would refuse or do nothing.
             Action::PrevCut | Action::NextCut
                 if s.engine.project.scenes.iter().map(|sc| sc.cuts.len()).sum::<usize>() < 2 =>
@@ -5277,6 +5331,9 @@ impl Editor {
             Action::PlayEpisode => Some(self.state.board.episode_play && self.state.view.playing),
             // GM17: View3D's ortho latch.
             Action::View3dOrtho => Some(self.state.view3d.orbit.is_some_and(|o| o.ortho)),
+            // GM18: the pen's ruler snap, and the panel tool armed.
+            Action::ToggleRulerSnap => Some(self.state.manga.snap),
+            Action::PanelTool => Some(self.canvas.tool == canvas::CanvasTool::Panel),
             _ => None,
         }
     }
@@ -7094,6 +7151,8 @@ impl Editor {
         // RAM preview keeps its frames true to the document (an edit drops
         // just the frames it changed) before playback reads them.
         self.state.poll_sound_import();
+        // GM18: and the pages written on theirs say so.
+        self.state.poll_page_export();
         let p = &self.state.engine.project;
         let look = playback::RamLook {
             at: self.state.at(),
@@ -7308,6 +7367,9 @@ impl Editor {
                         self.menu_item(ui, Action::ExportEdl);
                         self.menu_item(ui, Action::ExportColorSheet);
                         self.menu_item(ui, Action::ExportCutAsProject);
+                        // GM18: the book's pages, into a folder the shell
+                        // asks for (the Manga pane's options).
+                        self.menu_item(ui, Action::ExportPages);
                     });
                     ui.separator();
                     // GM12: the sound verbs (WAV, MP3, OGG Vorbis or FLAC,
@@ -8202,7 +8264,8 @@ impl Editor {
         for action in std::mem::take(&mut self.state.view3d.asked) {
             self.invoke(action, ui.ctx());
         }
-        // GM18: and the Manga pane's New page and Clip to panels.
+        // GM18: and the Manga pane's New page, Clip to panels, panel tool,
+        // ruler snap and Export pages.
         for action in std::mem::take(&mut self.state.manga.asked) {
             self.invoke(action, ui.ctx());
         }

@@ -17,7 +17,7 @@ use crate::color::ColorLaw;
 use crate::command::{Command, CutRef};
 use crate::fx::{FxKind, FxValue, FxValues, Image, LUMA};
 use crate::generator::{GenKind, GenValues, Target};
-use crate::graph::{BlendMode, NodeKind, place_node};
+use crate::graph::{BlendMode, Node, NodeKind, place_node};
 use crate::ids::{ColumnId, NodeId};
 use crate::look::{self, Build};
 use crate::model::Cut;
@@ -148,6 +148,12 @@ impl Page {
         }
     }
 
+    /// The page a `w` × `h` px project is laid out for (None: not a
+    /// book size, so a new page has nothing to copy).
+    pub fn for_size(w: u32, h: u32) -> Option<Self> {
+        [Self::b5(), Self::a4(), Self::webtoon()].into_iter().find(|p| (p.width, p.height) == (w, h))
+    }
+
     /// `mm` on this page, px.
     pub fn px(&self, mm: f32) -> f32 {
         mm_px(mm, self.dpi) as f32
@@ -167,6 +173,20 @@ impl Page {
     pub fn first_panel(&self) -> Poly {
         rect_poly(self.inner)
     }
+}
+
+/// The name a new page takes after pages named `names`: P and one past
+/// the highest P number, two digits at least ("P01", "P02"; a page
+/// removed from the middle frees no number, so no two pages share one).
+pub fn next_page_name<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let n = names
+        .into_iter()
+        .filter_map(|s| s.strip_prefix(['P', 'p']))
+        .filter(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+        .filter_map(|d| d.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("P{:02}", n + 1)
 }
 
 // ---- Panels --------------------------------------------------------------------------
@@ -411,13 +431,21 @@ fn tone_of(cut: &Cut, column: ColumnId) -> Option<NodeKind> {
     })
 }
 
+/// A generator nothing feeds, other than the Panels — a balloon, a line of
+/// text, speed lines added by hand: the page graph keeps it, on top.
+fn is_free_generator(n: &Node) -> bool {
+    matches!(&n.kind, NodeKind::Generator { generator, .. } if !matches!(generator, GenKind::Panels))
+        && n.inputs.iter().all(Option::is_none)
+}
+
 /// GM18 "Clip to panels": the page graph — white paper; each column's art
 /// (a tone column through a Tone) cut to the panels by a Matte, stacked in
 /// band order; the Panels multiplied over the top, so the art inside a
 /// panel shows as it is, the gutters stay paper and the borders print.
 /// One batch (the old nodes and their places go first, as the satsuei
 /// template's do): one undo step. The graph's Panels keep their panels
-/// (else `polys`), a column's Tone its values.
+/// (else `polys`), a column's Tone its values, and a generator added by
+/// hand (a balloon, text) stays, stacked over the borders.
 pub fn page_graph(cut: &Cut, at: CutRef, alloc: impl FnMut() -> NodeId, polys: Vec<Poly>, border: f32) -> Vec<Command> {
     let panels_kind = match cut.graph.nodes().find(|n| matches!(n.kind, NodeKind::Generator { generator: GenKind::Panels, .. })) {
         Some(n) => n.kind.clone(),
@@ -454,10 +482,123 @@ pub fn page_graph(cut: &Cut, at: CutRef, alloc: impl FnMut() -> NodeId, polys: V
         b.wire(panels, clip, 1);
         page = b.stack(Some(page), clip, BlendMode::Normal, (3.0 * COL, y));
     }
-    let top = b.stack(Some(page), panels, BlendMode::Multiply, (4.0 * COL, y));
+    let mut top = b.stack(Some(page), panels, BlendMode::Multiply, (4.0 * COL, y));
+    for n in cut.graph.nodes().filter(|n| is_free_generator(n)) {
+        y += ROW;
+        let over = b.add(n.kind.clone(), (3.0 * COL, y));
+        top = b.stack(Some(top), over, BlendMode::Normal, (4.0 * COL, y));
+    }
     let out = b.then(top, NodeKind::Output, (5.0 * COL, y));
     b.cmds.push(Command::SetOutput { at, node: Some(out) });
     b.cmds
+}
+
+/// GM18: the node count when "Clip to panels" would remove nodes a hand
+/// added to the cut's graph or undo its rewiring (None: the graph is empty
+/// or already the page graph — a free generator on top or unwired is kept,
+/// a column added since only joins — so the rebuild loses nothing).
+pub fn page_graph_hand_built(cut: &Cut) -> Option<usize> {
+    let n = cut.graph.nodes().count();
+    (n > 0 && !is_page_stack(cut)).then_some(n)
+}
+
+/// Is the cut's graph what [`page_graph`] builds: the Output over free
+/// generators stacked Normal, over the Panels' Multiply, over the page —
+/// each column's default source (a tone column's through a Tone) clipped
+/// by a default Matte to those Panels and stacked Normal, bottom up in
+/// band order, on white paper — and no other node but free generators?
+fn is_page_stack(cut: &Cut) -> bool {
+    let g = &cut.graph;
+    let node = |id: Option<NodeId>| id.and_then(|id| g.node(id).ok());
+    let input = |n: &Node, pin: usize| n.inputs.get(pin).copied().flatten().filter(|(_, p)| *p == 0).map(|(id, _)| id);
+    // Its first `fed` pins wired and the rest bare.
+    let exact = |n: &Node, fed: usize| {
+        n.inputs.len() >= fed && n.inputs[..fed].iter().all(Option::is_some) && n.inputs[fed..].iter().all(Option::is_none)
+    };
+    let normal = |n: &Node| n.kind == NodeKind::Blend { mode: BlendMode::Normal } && exact(n, 2);
+    let mut seen = std::collections::BTreeSet::new();
+    let Some(out) = node(g.output).filter(|o| o.kind == NodeKind::Output && exact(o, 1)) else {
+        return false;
+    };
+    seen.insert(out.id);
+    // The free generators on top, down to the Panels' Multiply.
+    let mut at = node(input(out, 0));
+    let top = loop {
+        let Some(n) = at else {
+            return false;
+        };
+        match node(input(n, 1)) {
+            Some(over) if normal(n) && is_free_generator(over) => {
+                if !seen.insert(n.id) {
+                    return false;
+                }
+                seen.insert(over.id);
+                at = node(input(n, 0));
+            }
+            _ => break n,
+        }
+    };
+    let Some(panels) = node(input(top, 1)) else {
+        return false;
+    };
+    if top.kind != (NodeKind::Blend { mode: BlendMode::Multiply })
+        || !exact(top, 2)
+        || !matches!(panels.kind, NodeKind::Generator { generator: GenKind::Panels, .. })
+        || !exact(panels, 0)
+    {
+        return false;
+    }
+    seen.extend([top.id, panels.id]);
+    // The page, top down: Normal blends of clipped art, then the paper.
+    let mut columns = Vec::new();
+    let mut at = node(input(top, 0));
+    let paper = loop {
+        let Some(n) = at else {
+            return false;
+        };
+        if !matches!(n.kind, NodeKind::Blend { .. }) {
+            break n;
+        }
+        let clip = node(input(n, 1)).filter(|c| {
+            c.kind == NodeKind::effect(FxKind::Matte) && exact(c, 2) && input(c, 1) == Some(panels.id)
+        });
+        let (Some(clip), true) = (clip, normal(n)) else {
+            return false;
+        };
+        let Some(mut art) = node(input(clip, 0)) else {
+            return false;
+        };
+        if !seen.insert(n.id) {
+            return false;
+        }
+        seen.insert(clip.id);
+        if matches!(art.kind, NodeKind::Effect { fx: FxKind::Tone, .. }) && exact(art, 1) {
+            seen.insert(art.id);
+            match node(input(art, 0)) {
+                // A Tone over a column that is no tone column is a hand's.
+                Some(src) if matches!(src.kind, NodeKind::DrawingSource { column, .. } if is_tone_column(cut, column)) => {
+                    art = src
+                }
+                _ => return false,
+            }
+        }
+        let NodeKind::DrawingSource { column, .. } = art.kind else {
+            return false;
+        };
+        if art.kind != NodeKind::source(column) || !exact(art, 0) {
+            return false;
+        }
+        seen.insert(art.id);
+        columns.push(column);
+        at = node(input(n, 0));
+    };
+    if paper.kind != (NodeKind::Solid { rgba: [255; 4] }) || !exact(paper, 0) {
+        return false;
+    }
+    seen.insert(paper.id);
+    columns.reverse();
+    let mut order = look::template_columns(cut).into_iter();
+    columns.iter().all(|c| order.any(|o| o == *c)) && g.nodes().all(|n| seen.contains(&n.id) || is_free_generator(n))
 }
 
 // ---- Screen tone ---------------------------------------------------------------------
@@ -642,6 +783,60 @@ impl Rulers {
             after,
         })
     }
+
+    /// The handle within `reach` px of `p` (None: none): the nearest
+    /// vanishing point, else the horizon line.
+    pub fn handle_at(&self, p: [f32; 2], reach: f32) -> Option<RulerHandle> {
+        let near = self
+            .vps
+            .iter()
+            .enumerate()
+            .map(|(k, v)| (k, (v[0] - p[0]).hypot(v[1] - p[1])))
+            .filter(|(_, d)| *d <= reach)
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        match near {
+            Some((k, _)) => Some(RulerHandle::Vp(k)),
+            None => self.horizon.filter(|h| (p[1] - h).abs() <= reach).map(|_| RulerHandle::Horizon),
+        }
+    }
+
+    /// These rulers with `handle` dragged to `to`. The horizon carries the
+    /// vanishing points on it (a 1- or 2-point view stays level); a point
+    /// on the horizon carries the horizon and the other points on it; the
+    /// third point of a 3-point view, below, moves alone.
+    pub fn moved(&self, handle: RulerHandle, to: [f32; 2]) -> Self {
+        let on = |v: &[f32; 2]| self.horizon.is_some_and(|h| (v[1] - h).abs() <= 0.5);
+        let mut r = self.clone();
+        let level = match handle {
+            RulerHandle::Vp(k) => {
+                let Some(v) = self.vps.get(k) else {
+                    return r;
+                };
+                let level = on(v);
+                r.vps[k] = to;
+                level
+            }
+            RulerHandle::Horizon => self.horizon.is_some(),
+        };
+        if level {
+            for (k, v) in self.vps.iter().enumerate() {
+                if on(v) && handle != RulerHandle::Vp(k) {
+                    r.vps[k][1] = to[1];
+                }
+            }
+            r.horizon = Some(to[1]);
+        }
+        r
+    }
+}
+
+/// GM18: what a canvas drag holds of a page's rulers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulerHandle {
+    /// Vanishing point `k` (0 is VP1).
+    Vp(usize),
+    /// The horizon line (it moves up and down).
+    Horizon,
 }
 
 /// A line the pen is held to: through `origin` along the unit `dir`.

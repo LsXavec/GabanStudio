@@ -2790,3 +2790,19 @@ what was not verified.
   line); dragging the VPs and drawing the ruler lines and page guides over the canvas; the app's
   page-export command and worker (core `export_pages` is done); proxy scaling of the Tone's and the
   Panels' px parameters. Not verified: the real window, the tone by eye, a print at a printer.
+- 2026-10-30 — GM18 review fixes: the canvas draws a page's guides whenever the cut is a page (the
+  "page guides" latch, on): the bleed edge, trim and inner frame, the panels, the horizon and a fan
+  of rays from each VP, named "VP1"… and "horizon". The panel (koma) tool (K): a drag on bare paper
+  draws a panel, one across a panel splits it at the gutter (held level or upright within 4°), one
+  from a VP or the horizon moves it (a point on the horizon carries it) — one undo step each, the
+  drag drawn as it would land. The Manga pane lists one row a page (thumbnail, number, name), places
+  each VP and the horizon by number, sets the panels' border (mm) and the tone's lpi (20–120) and
+  angle (0–180), and exports: verb Export pages (Ctrl+E; File ▸ Export ▸ Manga pages…) asks the
+  shell for a folder and writes on a worker (PNG/TIFF; colour, grey or mono and its threshold; trim
+  marks). Snap to rulers is a verb (View ▸ Snap to rulers, Ctrl+2 over the canvas) that the pane's
+  latch runs. New page (Ctrl+Shift+N) is named one past the book's highest P number and is refused
+  in a project that is no book; export refuses two pages that would write one file; Clip to panels
+  keeps free generators and shows DANGER (the Aka edge and its note, button and menu) over a graph
+  shaped by hand. 26 `manga_tests`, 15 `mangaui_*`; colour literals unchanged. Left: PDF export and
+  slanted freehand panels (stretch); proxy scaling of the Tone's and the Panels' px parameters. Not
+  verified: the real window and its folder picker, the guides and the tone by eye, a print.

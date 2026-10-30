@@ -457,34 +457,55 @@ pub fn write_page(path: &Path, img: &Image, opts: &PageOpts, dpi: f32) -> Result
     out.flush().map_err(|e| err(&e))
 }
 
-/// GM18: every page of `scene` (each cut's first frame at the project's
-/// size, Final) into `dir` as `<cut>.<png|tif>` at the page's dpi (else the
-/// project's) — a webtoon page sliced into its segments, `<cut>_01`, ... —
-/// with trim marks when asked and the page knows its trim. The paths
-/// written, in page order.
+/// GM18: every page of `scene` (each cut's first frame at its page's size,
+/// else the project's, Final) into `dir` as `<cut>.<png|tif>` at the page's
+/// dpi (else the project's) — a webtoon page sliced into its segments,
+/// `<cut>_01`, ... — with trim marks when asked and the page knows its
+/// trim. Every file is named before one is written: two pages that would
+/// write one file (names that sanitise alike, or differ only in case, as a
+/// Windows disk sees them) refuse the export, naming both, and nothing is
+/// written. The paths written, in page order.
 pub fn export_pages(project: &Project, scene: crate::ids::SceneId, dir: &Path, opts: &PageOpts) -> Result<Vec<PathBuf>, String> {
+    use crate::manga::{Page, slice_webtoon};
     let scene = project.scene(scene).ok_or("that book (scene) is gone")?;
     let ext = match opts.format {
         PageFormat::Png => "png",
         PageFormat::Tiff => "tif",
     };
+    let mut taken = std::collections::HashMap::new();
+    let mut files = Vec::new();
+    for cut in &scene.cuts {
+        let name = sanitize(&cut.name);
+        let names: Vec<String> = match Page::of(cut).and_then(|p| p.segment.map(|seg| (p.height, seg))) {
+            Some((h, seg)) => (1..=slice_webtoon(h, seg).len()).map(|i| format!("{name}_{i:02}.{ext}")).collect(),
+            None => vec![format!("{name}.{ext}")],
+        };
+        for file in &names {
+            if let Some(other) = taken.insert(file.to_lowercase(), cut.name.as_str()) {
+                return Err(format!(
+                    "pages “{other}” and “{}” would both write {file} — rename one",
+                    cut.name
+                ));
+            }
+        }
+        files.push(names);
+    }
     let render_opts = RenderOpts {
         purpose: Purpose::Final,
         scale: 1.0,
     };
     let mut written = Vec::new();
-    for cut in &scene.cuts {
-        let page = crate::manga::Page::of(cut);
+    for (cut, names) in scene.cuts.iter().zip(files) {
+        let page = Page::of(cut);
         let dpi = page.as_ref().map_or(project.dpi, |p| p.dpi);
-        let img = render(cut, project.color_law, 0, project.width, project.height, &render_opts);
-        let name = sanitize(&cut.name);
-        let segment = page.as_ref().and_then(|p| p.segment);
-        match segment {
+        let (w, h) = page.as_ref().map_or((project.width, project.height), |p| (p.width, p.height));
+        let img = render(cut, project.color_law, 0, w, h, &render_opts);
+        match page.as_ref().and_then(|p| p.segment) {
             Some(seg) => {
-                for (i, (y0, sh)) in crate::manga::slice_webtoon(img.h, seg).into_iter().enumerate() {
+                for ((y0, sh), file) in slice_webtoon(img.h, seg).into_iter().zip(&names) {
                     let start = (y0 * img.w * 4) as usize;
                     let px = img.px[start..start + (sh * img.w * 4) as usize].to_vec();
-                    let path = dir.join(format!("{name}_{:02}.{ext}", i + 1));
+                    let path = dir.join(file);
                     write_page(&path, &Image::from_px(img.w, sh, px), opts, dpi)?;
                     written.push(path);
                 }
@@ -494,7 +515,7 @@ pub fn export_pages(project: &Project, scene: crate::ids::SceneId, dir: &Path, o
                     (Some(p), true) => with_trim_marks(&img, p.trim, mm_margin(dpi)),
                     _ => img,
                 };
-                let path = dir.join(format!("{name}.{ext}"));
+                let path = dir.join(&names[0]);
                 write_page(&path, &img, opts, dpi)?;
                 written.push(path);
             }

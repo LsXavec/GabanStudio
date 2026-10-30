@@ -12,7 +12,7 @@ use anim_core::fx::{FxBinds, FxKind, FxParams, FxValue, FxValues, Image};
 use anim_core::generator::{GenKind, GenValues, Target};
 use anim_core::graph::NodeKind;
 use anim_core::ids::*;
-use anim_core::manga::{self, DotShape, Page, Poly, PxRect, Rulers, Screen, Snap};
+use anim_core::manga::{self, DotShape, Page, Poly, PxRect, RulerHandle, Rulers, Screen, Snap};
 use anim_core::model::{CelLayer, Cut, LayerRole};
 use anim_core::raster::{TILE, TILE_LEN, TileData, f16_bits_to_f32, f32_to_f16_bits};
 use anim_core::xsheet::Exposure;
@@ -561,4 +561,150 @@ fn manga_print_page_exports_with_trim_marks_round_it() {
     // A mark in the top margin on the trim's left line; bare paper beside it.
     assert_eq!(marked.get_pixel(pad + page.trim.x, 1).0, [0, 0, 0]);
     assert_eq!(marked.get_pixel(pad + page.trim.x + 6, 1).0, [255, 255, 255]);
+}
+
+#[test]
+fn manga_mono_tiff_strip_is_packed_high_bit_first_and_rows_padded() {
+    use tiff::decoder::Decoder;
+    use tiff::tags::Tag;
+    // 10 px a row: the ramp's left five are dark, its right five light.
+    let img = ramp(10, 2);
+    let row = [0, 0, 0, 0, 0, 255, 255, 255, 255, 255];
+    assert_eq!(deliver::page_samples(&img, PageMode::Mono, 0.5), [row, row].concat());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("mono.tif");
+    let opts = PageOpts { format: PageFormat::Tiff, mode: PageMode::Mono, ..Default::default() };
+    deliver::write_page(&path, &img, &opts, 350.0).unwrap();
+    let mut dec = Decoder::new(std::fs::File::open(&path).unwrap()).unwrap();
+    assert_eq!(dec.get_tag_unsigned::<u16>(Tag::PhotometricInterpretation).unwrap(), 1, "BlackIsZero");
+    assert_eq!(dec.get_tag_unsigned::<u32>(Tag::RowsPerStrip).unwrap(), 2);
+    let offset = dec.get_tag_unsigned::<u32>(Tag::StripOffsets).unwrap() as usize;
+    let count = dec.get_tag_unsigned::<u32>(Tag::StripByteCounts).unwrap() as usize;
+    let bytes = std::fs::read(&path).unwrap();
+    // Each row two bytes: 00000111, then 11 and six bits of padding.
+    assert_eq!(&bytes[offset..offset + count], &[0b0000_0111, 0b1100_0000, 0b0000_0111, 0b1100_0000]);
+}
+
+/// A book of one-frame pages named `names`, each a 16 × 20 px print page.
+fn book(names: &[&str]) -> (Engine, SceneId) {
+    let mut e = Engine::new("book");
+    let page = Page::print("test", [4.0, 5.0], 0.0, [4.0, 5.0], 101.6);
+    (e.project.width, e.project.height) = (page.width, page.height);
+    let scene = e.add_scene("book");
+    for &name in names {
+        let c = e.add_cut(scene, name, 1).unwrap();
+        let at = CutRef { scene, cut: c };
+        let meta = Command::SetCutMeta { at, key: manga::PAGE_KEY.into(), before: None, after: Some(page.to_meta()) };
+        e.apply("page", vec![meta]).unwrap();
+    }
+    (e, scene)
+}
+
+#[test]
+fn manga_export_refuses_two_pages_that_would_write_one_file() {
+    // Names that differ only in case (one file on Windows) or sanitise
+    // alike refuse before a file is written, naming both pages.
+    for (a, b) in [("P01", "p01"), ("P:1", "P_1"), ("P01", "P01")] {
+        let (e, scene) = book(&[a, "P02", b]);
+        let dir = tempfile::tempdir().unwrap();
+        let why = deliver::export_pages(&e.project, scene, dir.path(), &PageOpts::default()).unwrap_err();
+        assert!(why.contains(&format!("“{a}”")) && why.contains(&format!("“{b}”")), "{why}");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "nothing written: {why}");
+    }
+    // Distinct names write one file a page, each at the page's size.
+    let (e, scene) = book(&["P01", "P02"]);
+    let dir = tempfile::tempdir().unwrap();
+    let files = deliver::export_pages(&e.project, scene, dir.path(), &PageOpts::default()).unwrap();
+    assert_eq!(files.len(), 2);
+    assert!(files[1].ends_with("P02.png"), "{files:?}");
+    assert_eq!(image::image_dimensions(&files[0]).unwrap(), (16, 20));
+}
+
+#[test]
+fn manga_new_page_takes_one_past_the_highest_page_number() {
+    assert_eq!(manga::next_page_name([] as [&str; 0]), "P01");
+    assert_eq!(manga::next_page_name(["P01", "P02"]), "P03");
+    // P02 removed: the next is still past P03, so no two pages share a name.
+    assert_eq!(manga::next_page_name(["P01", "P03"]), "P04");
+    assert_eq!(manga::next_page_name(["cover", "p09", "P1x", "P"]), "P10");
+    assert_eq!(manga::next_page_name(["P120"]), "P121");
+}
+
+#[test]
+fn manga_ruler_handles_move_the_horizon_with_its_points() {
+    let three = Rulers::preset(3, 1000.0, 2000.0);
+    let h = three.horizon.unwrap();
+    assert_eq!(three.handle_at([505.0, 4996.0], 10.0), Some(RulerHandle::Vp(2)));
+    assert_eq!(three.handle_at([400.0, h + 8.0], 10.0), Some(RulerHandle::Horizon));
+    assert_eq!(three.handle_at([400.0, h + 30.0], 10.0), None);
+    // The horizon carries VP1 and VP2 (on it), not VP3 (below).
+    let r = three.moved(RulerHandle::Horizon, [400.0, 700.0]);
+    assert_eq!(r.horizon, Some(700.0));
+    assert_eq!((r.vps[0][1], r.vps[1][1]), (700.0, 700.0));
+    assert_eq!(r.vps[2], three.vps[2]);
+    assert_eq!((r.vps[0][0], r.vps[1][0]), (three.vps[0][0], three.vps[1][0]), "the points keep their x");
+    // VP1 carries the horizon and VP2; VP3 alone moves alone.
+    let r = three.moved(RulerHandle::Vp(0), [-300.0, 900.0]);
+    assert_eq!((r.vps[0], r.vps[1][1], r.horizon), ([-300.0, 900.0], 900.0, Some(900.0)));
+    let r = three.moved(RulerHandle::Vp(2), [600.0, 3000.0]);
+    assert_eq!((r.vps[2], r.horizon, r.vps[0]), ([600.0, 3000.0], three.horizon, three.vps[0]));
+    // A point gone (a stale handle) changes nothing.
+    assert_eq!(Rulers::preset(1, 1000.0, 2000.0).moved(RulerHandle::Vp(2), [0.0, 0.0]), Rulers::preset(1, 1000.0, 2000.0));
+}
+
+#[test]
+fn manga_clip_to_panels_keeps_a_generator_added_by_hand() {
+    let (mut e, at, _) = page_rig(vec![manga::rect_poly(PxRect { x: 0, y: 0, w: 64, h: 64 })], 2.0);
+    let cut = |e: &Engine| e.project.cut(at.scene, at.cut).unwrap().clone();
+    assert_eq!(manga::page_graph_hand_built(&cut(&e)), None, "the page graph is no hand's");
+    // A line of text added and not yet wired: Clip to panels keeps it.
+    let text = e.alloc_node_id();
+    e.apply("text", vec![Command::AddNode { at, id: text, kind: NodeKind::generator(GenKind::Text) }]).unwrap();
+    assert_eq!(manga::page_graph_hand_built(&cut(&e)), None, "a free generator is kept");
+    let c = cut(&e);
+    let cmds = manga::page_graph(&c, at, || e.alloc_node_id(), Vec::new(), 2.0);
+    e.apply("clip", cmds).unwrap();
+    let c = cut(&e);
+    let texts = c.graph.nodes().filter(|n| matches!(n.kind, NodeKind::Generator { generator: GenKind::Text, .. }));
+    assert_eq!(texts.count(), 1, "the text survives the rebuild");
+    assert_eq!(manga::page_graph_hand_built(&c), None, "and is stacked over the page");
+    // A column added since only joins the page; a Glow added is a hand's.
+    e.add_column(at, "INK2").unwrap();
+    assert_eq!(manga::page_graph_hand_built(&cut(&e)), None);
+    let glow = e.alloc_node_id();
+    e.apply("glow", vec![Command::AddNode { at, id: glow, kind: NodeKind::effect(FxKind::Glow) }]).unwrap();
+    let n = cut(&e).graph.nodes().count();
+    assert_eq!(manga::page_graph_hand_built(&cut(&e)), Some(n));
+}
+
+#[test]
+fn manga_old_files_read_without_the_new_fields() {
+    // A page saved before webtoon segments, rulers before the horizon.
+    let mut old = serde_json::to_value(Page::b5()).unwrap();
+    old.as_object_mut().unwrap().remove("segment");
+    assert_eq!(serde_json::from_value::<Page>(old).unwrap(), Page::b5());
+    let r: Rulers = serde_json::from_str(r#"{"vps":[[1.0,2.0]]}"#).unwrap();
+    assert_eq!((r.vps, r.horizon), (vec![[1.0, 2.0]], None));
+    // Every older parameter value reads as itself, never as panels.
+    for v in [
+        FxValue::Bool(true),
+        FxValue::Float(0.5),
+        FxValue::Color([1, 2, 3, 4]),
+        FxValue::Choice("round".into()),
+        FxValue::Blob { blob: "k".into() },
+        FxValue::Map { map: vec![([1; 4], [2; 4])], from: "p/v".into() },
+        FxValue::Text { text: "hi".into() },
+    ] {
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(serde_json::from_str::<FxValue>(&json).unwrap(), v, "{json}");
+    }
+    let polys = FxValue::Polys { polys: vec![vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0]]] };
+    let json = serde_json::to_string(&polys).unwrap();
+    assert_eq!(serde_json::from_str::<FxValue>(&json).unwrap(), polys);
+    // The new kinds come last, by name, so every older node reads as it did.
+    assert_eq!(GenKind::ALL.last(), Some(&GenKind::Panels));
+    assert_eq!(FxKind::ALL.last(), Some(&FxKind::Tone));
+    assert_eq!(serde_json::to_string(&GenKind::Panels).unwrap(), r#""Panels""#);
+    let old: NodeKind = serde_json::from_str(&serde_json::to_string(&NodeKind::generator(GenKind::Balloon)).unwrap()).unwrap();
+    assert_eq!(old, NodeKind::generator(GenKind::Balloon));
 }

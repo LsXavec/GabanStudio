@@ -145,6 +145,16 @@ impl crate::Editor {
             button = button.shortcut_text(c.as_str());
         }
         let resp = ui.add_enabled(can.is_ok(), button);
+        // GM18: over a graph shaped by hand, Clip to panels is DANGER (the
+        // Aka edge; its note says what goes).
+        if action == Action::ClipToPanels && self.state.page_hand_built().is_some() {
+            ui.painter().rect_stroke(
+                resp.rect,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.0, plate::AKA),
+                egui::StrokeKind::Inside,
+            );
+        }
         // The chord is drawn, not spoken: the item answers to its name.
         plate::speak(&resp, egui::WidgetType::Button, on, name);
         let mut tip = tip_with(action, chord);
@@ -199,6 +209,11 @@ impl crate::Editor {
                 "this project: {}",
                 self.state.engine.project.color_law.label()
             )),
+            // GM18: what Clip to panels takes from a graph shaped by hand.
+            Action::ClipToPanels => self
+                .state
+                .page_hand_built()
+                .map(|n| format!("DANGER: it {} ({n} nodes now)", crate::manga_tools::CLIP_DANGER)),
             _ => None,
         }
     }

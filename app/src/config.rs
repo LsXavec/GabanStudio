@@ -198,6 +198,12 @@ pub enum Action {
     NewPage,
     /// GM18: the page's graph rebuilt: each column cut to the panels.
     ClipToPanels,
+    /// GM18: the book's pages to PNG or TIFF files in a folder.
+    ExportPages,
+    /// GM18: the pen held to the page's perspective rulers, or free.
+    ToggleRulerSnap,
+    /// GM18: the canvas tool that draws, splits and moves panels and rulers.
+    PanelTool,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -467,6 +473,9 @@ impl Action {
         Action::MangaRoom,
         Action::NewPage,
         Action::ClipToPanels,
+        Action::ExportPages,
+        Action::ToggleRulerSnap,
+        Action::PanelTool,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -620,6 +629,9 @@ impl Action {
             Action::MangaRoom => "Manga (pages) room",
             Action::NewPage => "New page",
             Action::ClipToPanels => "Clip to panels",
+            Action::ExportPages => "Export pages",
+            Action::ToggleRulerSnap => "Snap to rulers",
+            Action::PanelTool => "Panel (koma) tool",
         }
     }
 
@@ -779,6 +791,9 @@ impl Action {
             MangaRoom => "Manga (pages) room: the page large, the Manga pane (pages, panels, tones, rulers) and the layers.",
             NewPage => "Add a one-frame page after the book's last, with INK and TONE columns and one panel, as one undo step.",
             ClipToPanels => "Rebuild the page's graph: each column's art cut to the panels over white paper, the borders on top; one undo step.",
+            ExportPages => "Write the book's pages to a folder as PNG or TIFF at the page's dpi, in colour, grey or 1-bit mono, with trim marks.",
+            ToggleRulerSnap => "Hold the pen to the page's perspective rulers (a line toward a vanishing point, or level), or draw free again.",
+            PanelTool => "Drag on paper: a panel; across a panel: a split at the gutter; a VP or the horizon: moved. One undo step each.",
         }
     }
 
@@ -788,12 +803,12 @@ impl Action {
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | ImportSound | AddSoundTrack
-            | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel => Group::File,
+            | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel | ExportPages => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
             | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView | PinToLightTable
-            | ShiftTrace | ResetShift | ToggleFinalLook => Group::View,
+            | ShiftTrace | ResetShift | ToggleFinalLook | ToggleRulerSnap => Group::View,
             View3dFront | View3dBack | View3dRight | View3dLeft | View3dTop | View3dBottom
             | View3dCamera | View3dOrtho | View3dFrameAll => Group::View,
             SetCutCameraFromView => Group::Cut,
@@ -814,7 +829,7 @@ impl Action {
             AddNode | BuildSatsuei | ClipToPanels => Group::Composite,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
-            | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
+            | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger | PanelTool => Group::Tool,
             RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit | Layout3dRoom
             | MangaRoom => Group::Room,
             ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue | ShowCutBoard
@@ -961,6 +976,8 @@ impl Action {
             MangaRoom => "Room/manga (pages)",
             NewPage => "Cut/New page",
             ClipToPanels => "Cut/Clip to panels",
+            ExportPages => "File/Export/Manga pages (PNG, TIFF)…",
+            ToggleRulerSnap => "View/Snap to rulers",
             SetCutCameraFromView => "Cut/Set cut camera from view",
             View3dFront => "View/3D view/Front",
             View3dBack => "View/3D view/Back",
@@ -978,7 +995,7 @@ impl Action {
             About => "Help/About",
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
-            | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => return None,
+            | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger | PanelTool => return None,
         })
     }
 
@@ -1151,6 +1168,9 @@ impl Action {
             MangaRoom => &["manga", "comic", "pages", "koma", "tone", "webtoon", "book"],
             NewPage => &["page", "manga", "add page", "pēji"],
             ClipToPanels => &["koma", "panels", "clip", "mask to panels", "manga"],
+            ExportPages => &["print", "tiff", "png", "genkō", "webtoon", "nyūkō", "pages to files"],
+            ToggleRulerSnap => &["perspective snap", "pāsu", "vanishing point", "ruler snap"],
+            PanelTool => &["koma", "panel tool", "split panel", "frame border", "koma wari"],
             View3dFront => &["numpad 1", "3d front"],
             View3dBack => &["ctrl numpad 1", "3d back"],
             View3dRight => &["numpad 3", "3d right", "side view"],
@@ -1172,7 +1192,7 @@ impl Action {
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll
             | BrushSmaller | BrushBigger | CopyPixels | PastePixels | KindKey | KindBreakdown
-            | KindInbetween | KindUnset => Ctx::Canvas,
+            | KindInbetween | KindUnset | ToggleRulerSnap | PanelTool => Ctx::Canvas,
             NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames | DeleteFrames | HoldPlus
             | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees | Reverse | ColumnKindCel
             | ColumnKindBg | ColumnKindBook | ColumnKindRef | ToggleColumnHidden
@@ -1522,12 +1542,24 @@ impl Action {
                 alt: true,
                 ..ctrl("0")
             }),
+            // GM18: the same in both presets — a page after the last on
+            // Ctrl+Shift+N (New project's key with Shift), the pages out on
+            // Ctrl+E (the export key Ctrl+Shift+E's queue sits beside), the
+            // ruler snap on Ctrl+2 (Clip Studio's snap to special ruler) and
+            // the panel tool on K (koma) over the canvas.
+            NewPage => Some(Chord {
+                shift: true,
+                ..ctrl("N")
+            }),
+            ExportPages => Some(ctrl("E")),
+            ToggleRulerSnap => Some(ctrl("2")),
+            PanelTool => Some(k("K")),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize | LipFlap
-            | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | NewPage | ClipToPanels => None,
+            | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels => None,
         }
     }
 }

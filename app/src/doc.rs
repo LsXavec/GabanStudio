@@ -233,6 +233,10 @@ pub const CHART_PRESETS: &[(&str, &[f32], &str)] = &[
 /// GM6: the most marks the chart editor makes (inbetweens between two keys).
 pub const CHART_MAX_MARKS: usize = 15;
 
+/// GM18: why a project that is no book makes no page.
+const NOT_A_BOOK: &str =
+    "this project is not a manga book — start from the Manga B5, Manga A4 or Webtoon template";
+
 /// GM6: how the chart editor lays `n` marks between the keys — evenly, or
 /// closing up (tsume) toward one key on a quadratic ease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3698,23 +3702,45 @@ impl AppState {
         }
     }
 
-    /// GM18 "New page": a one-frame cut after the book's last, with INK and
-    /// TONE columns, the open page's geometry (else B5) and the page graph
-    /// with one panel, the inner frame — one undo step (AddCut and its
-    /// graph in one batch), the view on it.
+    /// GM18: the page a new page copies — the open cut's, else the book's
+    /// first, else any in the project, else the page the project's size is
+    /// laid out for (None: this project is no book).
+    fn page_to_copy(&self, scene: SceneId) -> Option<anim_core::manga::Page> {
+        use anim_core::manga::Page;
+        let p = &self.engine.project;
+        Page::of(self.cut())
+            .or_else(|| p.scenes.iter().filter(|s| s.id == scene).flat_map(|s| s.cuts.iter()).find_map(Page::of))
+            .or_else(|| p.scenes.iter().flat_map(|s| s.cuts.iter()).find_map(Page::of))
+            .or_else(|| Page::for_size(p.width, p.height))
+    }
+
+    /// GM18: why New page cannot run here (None: it can).
+    pub fn new_page_refusal(&self) -> Option<&'static str> {
+        self.page_to_copy(self.at().scene).is_none().then_some(NOT_A_BOOK)
+    }
+
+    /// GM18 "New page": a one-frame cut after the book's last, named one
+    /// past its highest P number, with INK and TONE columns, the open
+    /// page's geometry (else the book's, else the page the project's size
+    /// is laid out for) and the page graph with one panel, the inner frame
+    /// — one undo step (AddCut and its graph in one batch), the view on it.
+    /// A project that is no book is refused.
     pub fn new_page(&mut self, scene: SceneId) {
-        use anim_core::manga::{self, Page};
-        let index = self
+        use anim_core::manga;
+        let Some(page) = self.page_to_copy(scene) else {
+            self.refuse(format!("refused — {NOT_A_BOOK}"));
+            return;
+        };
+        let (index, name) = self
             .engine
             .project
             .scenes
             .iter()
             .find(|s| s.id == scene)
-            .map(|s| s.cuts.len())
-            .unwrap_or(0);
-        let page = Page::of(self.cut()).unwrap_or_else(Page::b5);
+            .map(|s| (s.cuts.len(), manga::next_page_name(s.cuts.iter().map(|c| c.name.as_str()))))
+            .unwrap_or_else(|| (0, "P01".into()));
         let id = self.engine.alloc_cut_id();
-        let mut cut = Cut::new(id, format!("P{:02}", index + 1), 1);
+        let mut cut = Cut::new(id, name, 1);
         for name in ["INK", "TONE"] {
             let column = self.engine.alloc_column_id();
             cut.xsheet.columns.push(Column::new(column, name));
@@ -3771,6 +3797,89 @@ impl AppState {
         let cut = self.cut().clone();
         let cmds = manga::page_graph(&cut, at, || self.engine.alloc_node_id(), first, border);
         self.manga_edit("clip to panels", |_, _| cmds)
+    }
+
+    /// GM18: the node count when Clip to panels would remove nodes a hand
+    /// added to the open cut's graph (None: the graph is empty, an
+    /// auto-comp, or already the page graph — the rebuild loses nothing).
+    /// Its button and menu item then show DANGER.
+    pub fn page_hand_built(&self) -> Option<usize> {
+        let cut = self.cut();
+        anim_core::manga::page_graph_hand_built(cut).filter(|_| auto_chain(&cut.graph).is_none())
+    }
+
+    /// GM18: why Export pages cannot run now (None: it can) — one export
+    /// at a time, and a book with no page has nothing to write.
+    pub fn page_export_refusal(&self) -> Option<&'static str> {
+        if self.manga.export_job.is_some() {
+            return Some("the pages are still being written");
+        }
+        let scene = self.at().scene;
+        let page = self
+            .engine
+            .project
+            .scenes
+            .iter()
+            .filter(|s| s.id == scene)
+            .flat_map(|s| s.cuts.iter())
+            .any(|c| anim_core::manga::Page::of(c).is_some());
+        (!page).then_some("this book has no page — New page, or a Manga or Webtoon template, makes one")
+    }
+
+    /// GM18 "Export pages": the open book's pages into `dir` as the Manga
+    /// pane's options say, rendered and written on a worker (NEVER-DO 6: a
+    /// B5 book at 350 dpi never stalls the pen); [`Self::poll_page_export`]
+    /// says what was written. One export at a time.
+    pub fn begin_page_export(&mut self, dir: &std::path::Path, repaint: Option<eframe::egui::Context>) {
+        if let Some(why) = self.page_export_refusal() {
+            self.refuse(format!("refused — {why}"));
+            return;
+        }
+        let project = self.engine.project.clone();
+        let (scene, opts, out) = (self.at().scene, self.manga.export, dir.to_path_buf());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(anim_core::deliver::export_pages(&project, scene, &out, &opts));
+            if let Some(ctx) = repaint {
+                ctx.request_repaint();
+            }
+        });
+        self.status = format!("writing the pages into {}…", dir.display());
+        self.manga.export_job = Some(crate::manga_tools::PageExport {
+            dir: dir.to_path_buf(),
+            rx,
+        });
+    }
+
+    /// GM18: take the export's outcome when it is in (each UI frame).
+    pub fn poll_page_export(&mut self) {
+        let Some(job) = &self.manga.export_job else {
+            return;
+        };
+        let got = match job.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err("the writer stopped".to_string()),
+        };
+        let job = self.manga.export_job.take().expect("checked above");
+        self.pages_written(&job.dir, got);
+    }
+
+    /// Tests: block until the pages on the worker are written (no sleep,
+    /// no clock).
+    #[cfg(test)]
+    pub fn wait_page_export(&mut self) {
+        if let Some(job) = self.manga.export_job.take() {
+            let got = job.rx.recv().unwrap_or_else(|_| Err("the writer stopped".to_string()));
+            self.pages_written(&job.dir, got);
+        }
+    }
+
+    fn pages_written(&mut self, dir: &std::path::Path, got: Result<Vec<PathBuf>, String>) {
+        match got {
+            Ok(files) => self.status = format!("{} page file(s) written into {}", files.len(), dir.display()),
+            Err(e) => self.refuse(format!("refused — the pages were not written ({e})")),
+        }
     }
 
     // ---- GM15: editorial ------------------------------------------------

@@ -257,6 +257,9 @@ pub enum CanvasTool {
     /// LASSO FILL (PSD-lasso-fill): loop a region freehand; it fills
     /// with the brush colour, feathered INWARD by `lasso_soft`.
     LassoFill,
+    /// GM18: the panel (koma) tool — a drag on a page draws a panel, splits
+    /// one, or moves a vanishing point or the horizon.
+    Panel,
 }
 
 /// Selection drawing shape (a rect is a 4-point polygon through the same
@@ -857,6 +860,8 @@ pub struct CanvasView {
     /// before the stabilizer.
     pub(crate) snap_rulers: Option<anim_core::manga::Rulers>,
     ruler_snap: Option<anim_core::manga::Snap>,
+    /// GM18: the panel tool's live drag (paper px), committed at its end.
+    pub(crate) koma: Option<crate::manga_tools::KomaDrag>,
     /// GM4: an OPTIONS-row stabilizer change for the app to save.
     pub(crate) stabilizer_request: Option<u8>,
     /// GM4: the dab edge (MyPaint hardness) and the aliased toggle.
@@ -1025,6 +1030,7 @@ impl CanvasView {
             stab_raw: Pos2::ZERO,
             snap_rulers: None,
             ruler_snap: None,
+            koma: None,
             stabilizer_request: None,
             brush_hardness: crate::config::default_hardness(),
             brush_aliased: false,
@@ -1241,17 +1247,20 @@ impl CanvasView {
 
     /// GM4: the pen is mid-gesture — a stroke (down, or its pen-up commit
     /// pending), a selection outline being drawn, or a transform handle
-    /// being dragged. A Space hold that starts here never takes the hand.
+    /// being dragged (GM18: or a panel-tool drag). A Space hold that starts
+    /// here never takes the hand.
     fn pen_busy(&self) -> bool {
         self.touch_active
             || !self.current.is_empty()
             || self.raster_stroke_done
             || self.sel_draft.is_some()
             || self.floating.as_ref().is_some_and(|f| f.drag.is_some())
+            || self.koma.is_some()
     }
 
     /// An edit gesture is live: a stroke (pen down or its pen-up commit
-    /// pending), a selection being drawn, or a lifted transform in flight.
+    /// pending), a selection being drawn, a lifted transform in flight, or
+    /// (GM18) a panel-tool drag that lands on the page at its release.
     /// Gesture-unsafe actions (frame nav, undo, layer cycle, clears) must not
     /// dispatch while this holds — they would retarget or orphan the commit.
     pub fn stroke_active(&self) -> bool {
@@ -1260,6 +1269,7 @@ impl CanvasView {
             || self.raster_stroke_done
             || self.sel_draft.is_some()
             || self.floating.is_some()
+            || self.koma.is_some()
     }
 
     /// Switch to the Select tool (V) / back to Paint (B). A live stroke
@@ -1296,7 +1306,14 @@ impl CanvasView {
             CanvasTool::Paint => "paint: Alt+click picks a colour, Shift+click rules on from \
             the last stroke, Space+drag pans (Shift+drag turns)"
                 .into(),
+            CanvasTool::Panel if anim_core::manga::Page::of(state.cut()).is_none() => {
+                "panel (koma): this cut is no page — New page makes one".into()
+            }
+            CanvasTool::Panel => "panel (koma): drag on bare paper draws a panel, across a panel \
+            splits it at the gutter, from a VP or the horizon moves it — one undo step each"
+                .into(),
         };
+        self.koma = None;
     }
 
     /// Capture the tool/view state a workspace restores (LENS-DOCK: a
@@ -1884,6 +1901,7 @@ impl CanvasView {
             CanvasTool::Select => "select".into(),
             CanvasTool::Fill => "fill".into(),
             CanvasTool::LassoFill => "lasso fill".into(),
+            CanvasTool::Panel => "panel (koma)".into(),
             _ if self.erasing => "eraser".into(),
             _ => self.armed_preset.clone().unwrap_or_else(|| "brush".into()),
         }
@@ -3474,6 +3492,19 @@ impl CanvasView {
                             );
                             self.lasso_grow = grow;
                         }
+                        // GM18: the panel tool's gestures, said where its
+                        // options would sit (the gutters are the Manga pane's).
+                        CanvasTool::Panel => {
+                            plate::legend(ui, "panel (koma)");
+                            ui.label(
+                                egui::RichText::new(
+                                    "drag on paper: a panel · across a panel: a split · \
+                                     from a VP or the horizon: moved",
+                                )
+                                .small()
+                                .color(plate::legend_dim()),
+                            );
+                        }
                         _ => {
                             // GM4: the pen aids sit here — the dab's edge,
                             // aliased, and the stabilizer.
@@ -3913,10 +3944,15 @@ impl CanvasView {
                 CanvasTool::Fill => {
                     self.fill_input(ui, &response, rect, &to_paper, state);
                 }
+                CanvasTool::Panel => {
+                    self.koma_input(ui, &response, &to_paper, state);
+                }
             }
         } else {
             self.current.clear();
             self.touch_active = false;
+            // GM18: a panel-tool drag under playback lands nowhere.
+            self.koma = None;
             // Playback started under a live gesture (e.g. the top-bar play
             // button): commit the floating transform to its LATCHED target
             // rather than leaving a lifted patch over a moving frame.
@@ -4573,6 +4609,14 @@ impl CanvasView {
         // invisible constraint would read as a broken bucket.
         if edit_view && matches!(self.tool, CanvasTool::Select | CanvasTool::Fill) {
             self.select_overlay(&painter, &to_screen);
+        }
+
+        // GM18: a manga page's guides — its bleed edge, trim and inner
+        // frame, its panels and rulers — and the panel tool's drag, over
+        // the art in either view.
+        if let Some(page) = anim_core::manga::Page::of(state.cut()) {
+            let armed = self.tool == CanvasTool::Panel;
+            crate::manga_tools::paint_page(ui, &painter, state, &page, &to_screen, armed, self.koma.as_ref());
         }
 
         // Empty-cell hint (vector mode only).
@@ -5956,6 +6000,73 @@ impl CanvasView {
         {
             let pts = std::mem::take(&mut self.lasso_pts);
             self.commit_lasso_fill(&pts, state);
+        }
+    }
+
+    /// GM18: the panel (koma) tool's input — a click selects the panel
+    /// under it; a drag from a vanishing point or the horizon (within
+    /// [`crate::manga_tools::HANDLE_REACH`] of it on screen) moves it, else
+    /// draws a panel on bare paper or splits the one it crosses. The page
+    /// changes once, when the drag lands (one undo step,
+    /// [`crate::manga_tools::koma_gesture`]); Esc drops it.
+    fn koma_input(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        state: &mut AppState,
+    ) {
+        use anim_core::manga::{self, Page, Rulers};
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        }
+        if self.koma.is_some()
+            && !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.koma = None;
+            state.status = "panel drag dropped".into();
+            return;
+        }
+        if response.clicked_by(egui::PointerButton::Primary)
+            && let Some(pos) = response.interact_pointer_pos()
+            && let Some((_, polys)) = manga::panels_of(state.cut())
+        {
+            let p = to_paper(pos);
+            if let Some(i) = manga::panel_at(&polys, [p.x, p.y]) {
+                state.manga.selected = i;
+                state.status = format!("panel {} selected", i + 1);
+            }
+        }
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if Page::of(state.cut()).is_none() {
+                state.refuse("refused — this cut is no page (New page makes one)");
+                return;
+            }
+            // From where the press landed, not where the drag was seen.
+            let Some(origin) = ui.input(|i| i.pointer.press_origin()).or(response.interact_pointer_pos()) else {
+                return;
+            };
+            let from = to_paper(origin);
+            let reach = crate::manga_tools::HANDLE_REACH / self.xf.zoom.max(1e-6);
+            self.koma = Some(crate::manga_tools::KomaDrag {
+                from: [from.x, from.y],
+                to: [from.x, from.y],
+                handle: Rulers::of(state.cut()).handle_at([from.x, from.y], reach),
+                reach,
+            });
+        }
+        let Some(k) = &mut self.koma else {
+            return;
+        };
+        if let Some(pos) = response.interact_pointer_pos().or(ui.input(|i| i.pointer.latest_pos())) {
+            let p = to_paper(pos);
+            k.to = [p.x, p.y];
+        }
+        if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+            let k = *k;
+            self.koma = None;
+            crate::manga_tools::koma_gesture(state, k);
         }
     }
 
