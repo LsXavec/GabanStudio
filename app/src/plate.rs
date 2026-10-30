@@ -167,6 +167,9 @@ pub fn legend_muted() -> Color32 {
 
 /// A texture drawn as it is (egui's white tint).
 pub const UNTINTED: Color32 = Color32::WHITE;
+/// The colour picker's square fades every hue to these two ends.
+pub const PICK_WHITE: Color32 = Color32::WHITE;
+pub const PICK_BLACK: Color32 = Color32::BLACK;
 /// A texture drawn at `a` of 255 ([`faded`]'s byte form).
 #[inline]
 pub fn tint(a: u8) -> Color32 {

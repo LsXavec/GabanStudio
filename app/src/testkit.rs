@@ -1341,6 +1341,44 @@ mod tests {
         assert_eq!(COLOUR_LITERALS_PINNED, 0);
     }
 
+    /// A file's shipped part: everything before its first test module.
+    fn shipped(text: &str) -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        let end = lines
+            .windows(2)
+            .position(|w| w[0].trim() == "#[cfg(test)]" && w[1].trim_start().starts_with("mod "))
+            .unwrap_or(lines.len());
+        lines[..end].join("\n")
+    }
+
+    /// Chips made of numbers in a file's shipped part: a UI colour slipping
+    /// past the count above as if the animator had picked it.
+    fn literal_chips(text: &str) -> usize {
+        let text = shipped(text);
+        let call = concat!("chip", "([");
+        text.match_indices(call)
+            .filter(|(at, _)| text[at + call.len()..].starts_with(|c: char| c.is_ascii_digit()))
+            .count()
+    }
+
+    /// `plate::chip` shows a colour the animator made, exactly as stored;
+    /// outside plate.rs and the tests none is made of numbers (the picker's
+    /// ends are plate::PICK_WHITE and PICK_BLACK) — and the counter counts.
+    #[test]
+    fn ship_no_numeric_chip_outside_the_plate() {
+        let planted = concat!("plate::chip", "([1, 2, 3, 4]); plate::chip", "([c[0], c[1], c[2], 255])");
+        assert_eq!(literal_chips(planted), 1, "only the chip of numbers counts");
+        let in_tests = concat!("fn a() {}\n#[cfg(test)]\nmod tests {\n", "chip", "([9, 9, 9, 9])\n}");
+        assert_eq!(literal_chips(in_tests), 0, "a test may build one");
+        let left: Vec<(String, usize)> = sources()
+            .into_iter()
+            .filter(|(name, _)| name != "plate.rs")
+            .map(|(name, text)| (name, literal_chips(&text)))
+            .filter(|&(_, n)| n > 0)
+            .collect();
+        assert_eq!(left, vec![], "a UI colour is a plate token");
+    }
+
     /// Every Action is described in one plain sentence, has a group and a
     /// place (a menu path, or the palette for a deck tool), and neither
     /// keymap binds one chord twice in one context.
@@ -1391,18 +1429,76 @@ mod tests {
         assert!(h.has("version 0.5.0"), "{}", h.describe());
     }
 
-    /// The refreshed sample renders every frame through the CPU golden
-    /// renderer, and carries its generated serifu line: a Dialogue track
-    /// exactly as long as the cut, sounding in the mixdown a delivery muxes.
+    /// The refreshed sample shows off the release — a camera pan over a BG
+    /// wider than the frame, glow and diffusion on the ball, particles over
+    /// the comp, keys and inbetweens — renders every frame through the CPU
+    /// golden renderer, and carries its generated serifu line: a Dialogue
+    /// track exactly as long as the cut, sounding in the mixdown a delivery
+    /// muxes.
     #[test]
     fn ship_sample_renders_every_frame_and_speaks() {
-        let s = crate::sample::build_sample();
+        use anim_core::fx::FxKind;
+        use anim_core::graph::NodeKind;
+        let (s, parts) = crate::sample::build_showcase();
         let at = s.at();
         let cut = s.engine.project.cut(at.scene, at.cut).unwrap();
+        let law = s.engine.project.color_law;
         let (w, h) = crate::sample::SIZE;
+        let last = crate::sample::FRAMES - 1;
         assert_eq!(cut.frame_count, crate::sample::FRAMES);
+        // Each showcase node is in the graph and feeds the output.
+        let node = |id| cut.graph.node(id).unwrap();
+        let out = cut.graph.output.expect("the output is wired");
+        for (part, id) in [
+            ("camera", parts.camera),
+            ("glow", parts.glow),
+            ("diffusion", parts.diffusion),
+            ("particles", parts.particles),
+        ] {
+            assert!(cut.graph.downstream_closure(&[id]).contains(&out), "the {part} feeds nothing");
+        }
+        assert!(matches!(node(parts.camera).kind, NodeKind::Camera { .. }));
+        assert!(matches!(
+            node(parts.particles).kind,
+            NodeKind::Generator { generator: anim_core::generator::GenKind::Particles, .. }
+        ));
+        // Glow, then diffusion, on the ball's column A.
+        let ball = cut.xsheet.columns.iter().find(|c| c.name == "A").unwrap().id;
+        assert!(matches!(node(parts.glow).kind, NodeKind::Effect { fx: FxKind::Glow, .. }));
+        let glow_in = node(parts.glow).inputs[0].expect("the glow is fed").0;
+        assert!(matches!(node(glow_in).kind, NodeKind::DrawingSource { column, .. } if column == ball));
+        assert!(matches!(node(parts.diffusion).kind, NodeKind::Effect { fx: FxKind::Diffusion, .. }));
+        assert_eq!(node(parts.diffusion).inputs[0].map(|(src, _)| src), Some(parts.glow));
+        // Keys and inbetweens on the ball.
+        let kinds: Vec<_> = cut.drawings.iter().map(|d| cut.drawing_def(d.id).kind).collect();
+        let count = |k| kinds.iter().filter(|&&x| x == k).count();
+        assert_eq!(count(anim_core::model::DrawingKind::Key), crate::sample::KEYS.len());
+        assert_eq!(count(anim_core::model::DrawingKind::Inbetween), 12 - crate::sample::KEYS.len());
+        // The BG is wider than the frame, and the camera pans across it:
+        // PAN px from the paper's left end on frame 0 onto the frame on the
+        // last, so its picture slides by exactly that.
+        let paper = anim_core::camera::paper(cut, w, h);
+        assert_eq!((paper.x, paper.w), (-(crate::sample::PAN as i32), w + crate::sample::PAN));
+        let NodeKind::Camera { params, binds, .. } = &node(parts.camera).kind else {
+            unreachable!()
+        };
+        let pan = |f| anim_core::camera::CameraState::resolve(cut, params, binds, f).pan_x;
+        assert_eq!((pan(0), pan(last)), (-(crate::sample::PAN as f32), 0.0));
+        let first = anim_core::export::render_node_px(cut, law, parts.camera, 0, w, h);
+        let end = anim_core::export::render_node_px(cut, law, parts.camera, last, w, h);
+        assert!(first != end, "the camera did not move");
+        let at_px = |px: &[f32], x: u32, y: u32| px[((y * w + x) * 4) as usize..][..4].to_vec();
+        for y in (0..h).step_by(7) {
+            for x in (0..w - crate::sample::PAN).step_by(5) {
+                let (a, b) = (at_px(&end, x, y), at_px(&first, x + crate::sample::PAN, y));
+                assert!(a.iter().zip(&b).all(|(a, b)| (a - b).abs() < 1e-4), "({x}, {y}): {a:?} vs {b:?}");
+            }
+        }
+        // The petals draw.
+        let petals = anim_core::export::render_node_px(cut, law, parts.particles, 0, w, h);
+        assert!(petals.chunks_exact(4).any(|p| p[3] > 0.0), "no particle on frame 0");
         for f in 0..cut.frame_count {
-            let px = anim_core::export::render_graph_frame_law(cut, s.engine.project.color_law, f, w, h)
+            let px = anim_core::export::render_graph_frame_law(cut, law, f, w, h)
                 .unwrap_or_else(|| panic!("frame {f}: the sample's output is not wired"));
             assert_eq!(px.len(), (w * h * 4) as usize, "frame {f}");
             assert!(px.chunks_exact(4).all(|p| p[3] == 255), "frame {f}: the plate leaves a hole");
@@ -1447,6 +1543,151 @@ mod tests {
         h.click("Start");
         assert!(h.has("New from template"), "{}", h.describe());
         assert!(!h.has("What's New in 0.5.0"));
+    }
+
+    /// The start-up route (Startup::Welcome) through
+    /// `welcome::open_at_startup`: a config that never saw this version opens
+    /// What's New and records it (the caller saves); the next launch opens on
+    /// Start and leaves the config alone.
+    #[test]
+    fn ship_startup_opens_whats_new_once() {
+        use crate::welcome::{VERSION, WelcomeTab, open_at_startup};
+        for seen in ["", "0.3.0"] {
+            let mut ui = Config::default().ui;
+            ui.whats_new_seen = seen.into();
+            let (w, changed) = open_at_startup(&mut ui, &[]);
+            assert_eq!((w.tab, changed), (WelcomeTab::WhatsNew, true), "seen {seen:?}");
+            assert_eq!(ui.whats_new_seen, VERSION, "the version is recorded");
+            let (w, changed) = open_at_startup(&mut ui, &[]);
+            assert_eq!((w.tab, changed), (WelcomeTab::Start, false), "the next launch");
+            assert_eq!(ui.whats_new_seen, VERSION);
+        }
+    }
+
+    /// A config 0.3.0 wrote (no keymap, no UI scale, no `whats_new_seen`)
+    /// loads whole: nothing reset, the artist's settings kept, the newer ones
+    /// at their defaults, and What's New due on the first 0.5 launch. No
+    /// config at all (a fresh install) opens on Start, and a config this
+    /// build saved reads its version back.
+    #[test]
+    fn ship_older_configs_still_load() {
+        use crate::welcome::{VERSION, WelcomeTab, open_at_startup};
+        let dir = tempfile::tempdir().unwrap();
+        // The sections and fields 0.3.0's Config wrote (v0.3.0 config.rs).
+        let chord = |key: &str, ctrl: bool| {
+            serde_json::json!({ "keys": [key], "ctrl": ctrl, "shift": false, "alt": false })
+        };
+        let old = serde_json::json!({
+            "keybinds": [
+                { "action": "BrushTool", "chord": chord("N", false) },
+                { "action": "Save", "chord": chord("S", true) }
+            ],
+            "perf": {
+                "vsync": true, "frame_latency": "Throughput", "canvas_filter": "Nearest",
+                "fps_cap": 60, "show_fps": true, "undo_limit": 200
+            },
+            "ui": { "lock_positions": true, "exact_descriptions": false },
+            "session": {
+                "username": "lancer", "api_key": "", "totp_secret": "", "host_port": 7878,
+                "last_addr": "", "require_key": false
+            },
+            "update_repo": "someone/else"
+        });
+        write(&config::config_path_in(dir.path()), &serde_json::to_vec_pretty(&old).unwrap());
+        let (got, notes) = Config::load_from(dir.path());
+        assert!(notes.is_empty(), "nothing reset: {notes:?}");
+        assert!(!dir.path().join("config.json.bad").exists());
+        assert!(got.ui.lock_positions && got.perf.vsync && got.perf.show_fps);
+        let perf = (got.perf.frame_latency, got.perf.fps_cap, got.perf.undo_limit);
+        assert_eq!(perf, (config::FrameLatency::Throughput, 60, 200));
+        assert_eq!((got.session.username.as_str(), got.session.host_port), ("lancer", 7878));
+        assert_eq!(got.update_repo, "someone/else");
+        let brush = got.chord_for(Action::BrushTool).map(|c| c.keys.clone());
+        assert_eq!(brush, Some(vec!["N".to_string()]), "the artist's chord stays");
+        assert_eq!(got.keybinds.len(), Action::ALL.len(), "the newer verbs are filled in");
+        let fresh = Config::default();
+        assert_eq!((got.ui.scale, got.ui.show_welcome), (fresh.ui.scale, fresh.ui.show_welcome));
+        assert_eq!(got.ui.whats_new_seen, "", "0.3 never showed a What's New");
+        let mut ui = got.ui.clone();
+        assert_eq!(open_at_startup(&mut ui, &[]).0.tab, WelcomeTab::WhatsNew);
+        // Saved after that launch: not due again.
+        let mut seen = got;
+        seen.ui = ui;
+        seen.save_to(dir.path()).unwrap();
+        let (back, _) = Config::load_from(dir.path());
+        assert_eq!(back.ui.whats_new_seen, VERSION);
+        // A fresh install: no file, nothing older to compare with.
+        let empty = tempfile::tempdir().unwrap();
+        let (cfg, notes) = Config::load_from(empty.path());
+        assert!(notes.is_empty(), "{notes:?}");
+        let mut ui = cfg.ui.clone();
+        assert_eq!(open_at_startup(&mut ui, &[]).0.tab, WelcomeTab::Start);
+    }
+
+    /// The README a newcomer reads first covers the release: what it does by
+    /// who reaches for it, a quick start, keyboard basics that match the
+    /// Gaban keymap, the building steps the release gate runs, and where the
+    /// research lives (every path it names is there), at this version.
+    #[test]
+    fn ship_readme_covers_the_release() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let readme = std::fs::read_to_string(root.join("README.md")).expect("the README");
+        let section = |heading: &str| -> String {
+            let (_, body) = readme
+                .split_once(&format!("\n{heading}"))
+                .unwrap_or_else(|| panic!("the README has no {heading:?}"));
+            body.split("\n## ").next().unwrap_or_default().to_string()
+        };
+        assert!(readme.contains(&format!("Version {}.", crate::welcome::VERSION)));
+        let features = section("## What it does, by who reaches for it");
+        for persona in ["Animator", "Painter", "Compositor", "3D artist", "Manga artist", "Editor"] {
+            assert!(features.contains(&format!("**{persona}")), "no {persona} in the features");
+        }
+        let quick = section("## Quick start");
+        for step in ["Welcome screen", "sample", "What's New", "Quick start checklist"] {
+            assert!(quick.contains(step), "no {step:?} in the quick start");
+        }
+        let keys = section("## Keyboard basics");
+        let cfg = Config::default();
+        let rows: [(&str, &[Action]); 8] = [
+            ("the command palette", &[Action::CommandPalette]),
+            ("the shortcut sheet", &[Action::ShortcutSheet]),
+            ("play / stop", &[Action::PlayPause]),
+            ("next / previous frame", &[Action::NextFrame, Action::PrevFrame]),
+            ("next / previous key", &[Action::NextKey, Action::PrevKey]),
+            ("new drawing", &[Action::NewDrawing]),
+            ("eraser", &[Action::ToggleEraser]),
+            ("undo, redo", &[Action::Undo, Action::Redo]),
+        ];
+        for (does, actions) in rows {
+            let (cell, _) = keys
+                .lines()
+                .filter_map(|l| l.strip_prefix("| ")?.split_once(" | "))
+                .find(|(_, d)| d.starts_with(does))
+                .unwrap_or_else(|| panic!("no keyboard row for {does:?}"));
+            let named: Vec<&str> = cell.split([' ', ',', '(', ')', '/']).filter(|t| !t.is_empty()).collect();
+            for a in actions {
+                for c in cfg.binding(*a).expect("bound").chords() {
+                    assert!(named.contains(&c.label().as_str()), "{does}: {} not in {cell:?}", c.label());
+                }
+            }
+        }
+        let building = section("## Building");
+        for step in [
+            "cargo test -p animstudio -p anim-core",
+            "cargo build --release -p animstudio ",
+            "bash tools/smoke_render.sh",
+            "cargo build --release -p animstudio-installer",
+        ] {
+            assert!(building.contains(step), "no {step:?} under Building");
+        }
+        let places = section("## Where things live");
+        assert!(places.contains("`research/`") && places.contains("`PSD-modernize.md`"));
+        // The research files are named bare, under research/.
+        for name in places.split('`').skip(1).step_by(2).filter(|n| n.contains(['/', '.'])) {
+            let here = root.join(name).exists() || root.join("research").join(name).exists();
+            assert!(here, "the README names {name}, which is not there");
+        }
     }
 
     // Every pane alone in the dock, 30 headless frames at each probe scale,
@@ -1529,15 +1770,15 @@ mod tests {
         assert_eq!(SMOKED_PANES.len(), Pane::ALL.len() + 1);
     }
 
-    /// The probe walks every room with a canvas — the spine, the manga
-    /// room and the forge — and no room is left out of it.
+    /// The probe walks every room — the spine, the manga room, the forge
+    /// and the 3D layout room — and no room is left out of it.
     #[test]
     fn ship_probe_walks_every_room() {
         let stages: Vec<Stage> = crate::PROBE_ROOMS
             .iter()
             .filter_map(|r| match r {
                 crate::ProbeRoom::Stage(st) => Some(*st),
-                crate::ProbeRoom::Forge => None,
+                crate::ProbeRoom::Forge | crate::ProbeRoom::Layout3d => None,
             })
             .collect();
         for st in [
@@ -1559,20 +1800,36 @@ mod tests {
             }
         }
         assert!(crate::PROBE_ROOMS.iter().any(|r| matches!(r, crate::ProbeRoom::Forge)));
+        assert!(crate::PROBE_ROOMS.iter().any(|r| matches!(r, crate::ProbeRoom::Layout3d)));
     }
 
     fn probe_holds_still(room: crate::ProbeRoom) {
         for ppp in crate::PROBE_SCALES {
             let run = room.probe(ppp);
             let lines = run.lines.join("\n");
-            assert_eq!(run.unmeasured, 0, "{} at {ppp}: no canvas rect\n{lines}", room.name());
-            assert_eq!(run.moved, 0, "{} at {ppp}: the canvas moved\n{lines}", room.name());
+            assert_eq!(run.unmeasured, 0, "{} at {ppp}: no pane rect\n{lines}", room.name());
+            assert_eq!(run.moved, 0, "{} at {ppp}: the held pane moved\n{lines}", room.name());
         }
     }
 
     #[test]
     fn ship_probe_manga_room() {
         probe_holds_still(crate::ProbeRoom::Stage(Stage::Manga));
+    }
+
+    /// The 3D layout room, entered by its verb: its View3D (the surface
+    /// under the pointer there) holds still through the probe's scenarios,
+    /// and it is the room the verb builds.
+    #[test]
+    fn ship_probe_layout3d_room() {
+        probe_holds_still(crate::ProbeRoom::Layout3d);
+        let mut h = EditorHarness::new();
+        h.perform(Action::Layout3dRoom);
+        h.run();
+        use crate::workspace::Pane;
+        for pane in [Pane::View3D, Pane::NodeGraph, Pane::Viewer(0)] {
+            assert!(h.editor().dock.find_tab(&pane).is_some(), "{pane:?}");
+        }
     }
 
     #[test]

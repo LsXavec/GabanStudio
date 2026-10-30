@@ -1516,21 +1516,22 @@ mod tests {
         if ins.is_empty() { name } else { format!("{name}({})", ins.join(", ")) }
     }
 
-    /// The sample cut (BG, the ball column A, the empty column B) in the
-    /// graph pane alone.
+    /// The sample cut (BG, the ball column A, the empty column B) under its
+    /// auto-comp (GM8's graph; GM19's showcase is hand-built) in the graph
+    /// pane alone.
     fn sample_graph_pane() -> EditorHarness {
-        let mut h = EditorHarness::with_state(crate::sample::build_sample());
+        let mut h = EditorHarness::with_state(crate::sample::build_auto_comp());
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::NodeGraph]);
         h.run();
         h.run();
         h
     }
 
-    /// The sample in the satsuei (composite) room, its node graph brought
-    /// forward as a click on its tab would (egui_dock's tab titles are not
-    /// in the tree).
+    /// The sample under its auto-comp in the satsuei (composite) room, its
+    /// node graph brought forward as a click on its tab would (egui_dock's
+    /// tab titles are not in the tree).
     fn sample_in_the_composite_room() -> EditorHarness {
-        let mut h = EditorHarness::with_state(crate::sample::build_sample());
+        let mut h = EditorHarness::with_state(crate::sample::build_auto_comp());
         h.perform(Action::RoomComposite);
         h.run_frames(3);
         let tab = h

@@ -3263,3 +3263,18 @@ what was not verified.
   failed, 1 ignored; smoke render passed; no v0.5 tag; installer built. Left: the sample's FX showcase
   (camera pan over a wide BG, glow, diffusion, particles). Not verified: the What's New first-launch
   route and the About window in the running app.
+  Review fixes: the sample is the release's showcase. Its BG plate runs 320 px past the frame's left
+  edge (the cut's paper, 960×360) and a Camera node pans across it (pan x −320 → 0, eased, over the 24
+  frames); the ball goes through Glow and Diffusion, held to the frame off the camera; Sakura petals
+  drift over the comp. The tests premised on the plain auto-comp start from `sample::build_auto_comp`.
+  The probe walks the 3D layout room too (`ProbeRoom::Layout3d` holds its View3D still: `probe_run_in`
+  takes the pane). Start-up opens the Welcome screen through `welcome::open_at_startup` (What's New
+  while due, recording the version; Start after). A fresh install (no config.json) starts seen and
+  opens on Start; a config an earlier version wrote reads "" and is due. Tooltips on the Start and
+  What's New detents. The picker's ends are `plate::PICK_WHITE`/`PICK_BLACK`, and a chip made of
+  numbers outside the tests is counted (0). Decided: with "Show at startup" off the app opens the New
+  Project form and What's New waits one click away on File ▸ Welcome screen…; a Help ▸ What's New verb
+  is left. 31 `ship_` tests (README coverage, a 0.3.0 config loading whole, the start-up route, the 3D
+  layout probe, numeric chips). Gate: 828 passed, 0 failed, 1 ignored; smoke render passed; no v0.5
+  tag; installer built. Not verified: the What's New first launch and the About window in the running
+  app; the showcase was looked at in two rendered frames (1 and 24) only.

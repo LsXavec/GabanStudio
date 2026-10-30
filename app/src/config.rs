@@ -2797,16 +2797,25 @@ impl Config {
         // GM3: a file with no keymap was saved before the presets (and
         // their extra chords) existed.
         let mut before_keymaps = false;
-        if let Ok(bytes) = std::fs::read(&path) {
-            let mut dropped = Dropped::default();
-            match serde_json::from_slice::<serde_json::Value>(&bytes) {
-                Ok(serde_json::Value::Object(map)) => {
-                    before_keymaps = !map.contains_key("keymap");
-                    cfg.read_sections(&map, &mut dropped);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let mut dropped = Dropped::default();
+                match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    Ok(serde_json::Value::Object(map)) => {
+                        before_keymaps = !map.contains_key("keymap");
+                        cfg.read_sections(&map, &mut dropped);
+                    }
+                    _ => dropped.reset.push("everything"),
                 }
-                _ => dropped.reset.push("everything"),
+                note_dropped(&path, &bytes, &dropped, &mut notes);
             }
-            note_dropped(&path, &bytes, &dropped, &mut notes);
+            // GM19: no file at all is a fresh install — nothing older to
+            // compare with, so its first screen is Start, not What's New
+            // (a config an earlier version wrote reads "" and is due).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                cfg.ui.whats_new_seen = crate::welcome::VERSION.into();
+            }
+            Err(_) => {}
         }
         cfg.fill_missing(before_keymaps);
         (cfg, notes)

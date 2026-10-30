@@ -2586,16 +2586,16 @@ impl CanvasView {
             let (svr, svresp) = ui.allocate_exact_size(vec2(120.0, 78.0), Sense::click_and_drag());
             let pnt = ui.painter();
             let (hr_, hg, hb) = crate::palette::hsv_to_rgb(self.eye_hsv[0], 1.0, 1.0);
-            // The picker's own colours are picked colours (chips), not UI:
-            // the hue at full value, and the square's white and black ends.
+            // The hue at full value is a picked colour (a chip); the
+            // square's white and black ends are the plate's.
             let hue_col = plate::chip([hr_, hg, hb, 255]);
             let mut mesh = egui::Mesh::default();
             let idx = mesh.vertices.len() as u32;
             for (pt, col) in [
-                (svr.left_top(), plate::chip([255, 255, 255, 255])),
+                (svr.left_top(), plate::PICK_WHITE),
                 (svr.right_top(), hue_col),
-                (svr.right_bottom(), plate::chip([0, 0, 0, 255])),
-                (svr.left_bottom(), plate::chip([0, 0, 0, 255])),
+                (svr.right_bottom(), plate::PICK_BLACK),
+                (svr.left_bottom(), plate::PICK_BLACK),
             ] {
                 mesh.vertices.push(egui::epaint::Vertex {
                     pos: pt,

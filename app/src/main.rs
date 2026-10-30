@@ -5908,11 +5908,9 @@ impl eframe::App for App {
             &self.config,
         ) {
             Startup::Welcome => {
-                let mut w = welcome::Welcome::new(&self.config.session.recent);
                 // GM19: a new version's first launch opens on What's New.
-                if welcome::whats_new_due(&self.config.ui.whats_new_seen) {
-                    w.tab = welcome::WelcomeTab::WhatsNew;
-                    self.config.ui.whats_new_seen = welcome::VERSION.into();
+                let (w, seen) = welcome::open_at_startup(&mut self.config.ui, &self.config.session.recent);
+                if seen {
                     self.config.save();
                 }
                 self.welcome = Some(w);
@@ -6625,17 +6623,19 @@ fn probe() {
 const PROBE_SCALES: [f32; 3] = [1.0, 1.25, 1.5];
 
 /// GM19: a room the probe walks — a stage (the spine, and the manga room
-/// off it), or the forge's arrangement, entered as its button enters it.
-/// The 3D layout room has no canvas pane to hold still; its panes are
-/// smoke-tested at every scale instead (testkit `ship_pane_*`).
+/// off it), or a built-in arrangement off the spine, entered as its button
+/// or verb enters it: the forge's, and the 3D layout room, whose View3D is
+/// the surface under the pointer there (it holds still where the other
+/// rooms' canvas does).
 #[derive(Clone, Copy, Debug)]
 enum ProbeRoom {
     Stage(Stage),
     Forge,
+    Layout3d,
 }
 
-/// Every room with a canvas: the CLI probe and the ship tests walk these.
-const PROBE_ROOMS: [ProbeRoom; 7] = [
+/// Every room: the CLI probe and the ship tests walk these.
+const PROBE_ROOMS: [ProbeRoom; 8] = [
     ProbeRoom::Stage(Stage::Layout),
     ProbeRoom::Stage(Stage::Drawing),
     ProbeRoom::Stage(Stage::InkPaint),
@@ -6643,6 +6643,7 @@ const PROBE_ROOMS: [ProbeRoom; 7] = [
     ProbeRoom::Stage(Stage::Edit),
     ProbeRoom::Stage(Stage::Manga),
     ProbeRoom::Forge,
+    ProbeRoom::Layout3d,
 ];
 
 impl ProbeRoom {
@@ -6650,15 +6651,19 @@ impl ProbeRoom {
         match self {
             ProbeRoom::Stage(st) => st.name(),
             ProbeRoom::Forge => "forge",
+            ProbeRoom::Layout3d => "3D layout (LO)",
         }
     }
 
     fn probe(self, ppp: f32) -> ProbeRun {
         match self {
             ProbeRoom::Stage(st) => probe_run(st, ppp),
-            ProbeRoom::Forge => probe_run_in(ppp, 100, |editor| {
+            ProbeRoom::Forge => probe_run_in(ppp, 100, Pane::Canvas, |editor| {
                 editor.dock = Pane::forge_dock();
                 editor.stage = None;
+            }),
+            ProbeRoom::Layout3d => probe_run_in(ppp, 100, Pane::View3D, |editor| {
+                editor.perform(Action::Layout3dRoom);
             }),
         }
     }
@@ -6688,11 +6693,12 @@ fn probe_run(stage: Stage, ppp: f32) -> ProbeRun {
 /// GM8: the same pass under a UI scale (percent), applied the way the App
 /// applies it — egui's zoom factor over the display's scale.
 fn probe_run_zoom(stage: Stage, ppp: f32, ui_scale: u32) -> ProbeRun {
-    probe_run_in(ppp, ui_scale, |editor| editor.enter_room(stage))
+    probe_run_in(ppp, ui_scale, Pane::Canvas, |editor| editor.enter_room(stage))
 }
 
-/// GM19: the pass itself, in the room `enter` sets up.
-fn probe_run_in(ppp: f32, ui_scale: u32, enter: impl FnOnce(&mut Editor)) -> ProbeRun {
+/// GM19: the pass itself, in the room `enter` sets up, holding `still`
+/// still: the canvas by its own rect, any other pane by its tab's.
+fn probe_run_in(ppp: f32, ui_scale: u32, still: Pane, enter: impl FnOnce(&mut Editor)) -> ProbeRun {
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(ppp);
     dress(&ctx);
@@ -6709,7 +6715,7 @@ fn probe_run_in(ppp: f32, ui_scale: u32, enter: impl FnOnce(&mut Editor)) -> Pro
     state.new_drawing_at_frame(); // cel at frame 0; frame 1 stays empty
     let mut editor = Editor::from_state(state, None, None);
     enter(&mut editor);
-    if let Some(tab) = editor.dock.find_tab(&Pane::Canvas) {
+    if let Some(tab) = editor.dock.find_tab(&still) {
         let _ = editor.dock.set_active_tab(tab);
     }
     let mut lines: Vec<String> = Vec::new();
@@ -6728,6 +6734,7 @@ fn probe_run_in(ppp: f32, ui_scale: u32, enter: impl FnOnce(&mut Editor)) -> Pro
             // Each pass must record its own rect: a stale one would hide a
             // pane that stopped drawing.
             editor.canvas.dbg_rect = egui::Rect::NOTHING;
+            editor.pane_rects.clear();
             ctx.begin_pass(raw());
             let mut root = egui::Ui::new(
                 ctx.clone(),
@@ -6751,12 +6758,21 @@ fn probe_run_in(ppp: f32, ui_scale: u32, enter: impl FnOnce(&mut Editor)) -> Pro
                 &config.keybinds,
             );
             let _ = ctx.end_pass();
-            let r = editor.canvas.dbg_rect;
+            let r = if still == Pane::Canvas {
+                editor.canvas.dbg_rect
+            } else {
+                editor
+                    .pane_rects
+                    .iter()
+                    .find(|(p, _)| *p == still)
+                    .map_or(egui::Rect::NOTHING, |(_, r)| *r)
+            };
             if !(r.is_finite() && r.is_positive()) {
                 if label != "settle" {
                     unmeasured += 1;
                 }
-                lines.push(format!("{label:26} UNMEASURED — the canvas pane recorded no rect"));
+                let pane = still.title().to_lowercase();
+                lines.push(format!("{label:26} UNMEASURED — the {pane} pane recorded no rect"));
                 return;
             }
             let note = match *last {

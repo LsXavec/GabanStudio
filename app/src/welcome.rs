@@ -314,6 +314,21 @@ pub fn whats_new_due(seen: &str) -> bool {
     seen != VERSION
 }
 
+/// GM19: the Welcome screen the start-up route opens — on What's New while
+/// it is due (a config an earlier version wrote; a fresh install's starts
+/// seen, see `Config::load_from`), recording this version as seen; on Start
+/// after that. True when `ui` changed: the caller saves the config, or the
+/// tab would open on every launch.
+pub fn open_at_startup(ui: &mut crate::config::UiConfig, recent: &[PathBuf]) -> (Welcome, bool) {
+    let mut w = Welcome::new(recent);
+    let due = whats_new_due(&ui.whats_new_seen);
+    if due {
+        w.tab = WelcomeTab::WhatsNew;
+        ui.whats_new_seen = VERSION.into();
+    }
+    (w, due)
+}
+
 /// GM19: what 0.5 brings, by persona — the What's New tab's groups.
 pub const WHATS_NEW: [(&str, &[&str]); 6] = [
     (
@@ -454,10 +469,19 @@ pub fn ui(
             ui.heading("Gaban Studio");
             // GM19: the tabs sit in the heading's row, so the Start tab's
             // cards stay where they were.
-            if plate::detent(ui, w.tab == WelcomeTab::Start, "Start").clicked() {
+            if plate::detent(ui, w.tab == WelcomeTab::Start, "Start")
+                .on_hover_text("templates, recent cuts and the sample")
+                .clicked()
+            {
                 w.tab = WelcomeTab::Start;
             }
-            if plate::detent(ui, w.tab == WelcomeTab::WhatsNew, "What's New").clicked() {
+            if plate::detent(ui, w.tab == WelcomeTab::WhatsNew, "What's New")
+                .on_hover_text(
+                    "What this release brings, by who reaches for it: animator, painter, \
+                     compositor, 3D, manga, editor",
+                )
+                .clicked()
+            {
                 w.tab = WelcomeTab::WhatsNew;
             }
             if w.over_editor
@@ -637,7 +661,7 @@ mod tests {
 
     #[test]
     fn welcome_auto_comp_matches_the_column_render() {
-        let s = crate::sample::build_sample();
+        let s = crate::sample::build_auto_comp();
         let cut = s.engine.project.cut(s.at().scene, s.at().cut).unwrap();
         let (w, h) = crate::sample::SIZE;
         for frame in [0, 7, 23] {
@@ -1092,7 +1116,7 @@ mod tests {
 
     #[test]
     fn welcome_build_composite_asks_over_a_hand_graph() {
-        let mut h = crate::testkit::EditorHarness::with_state(crate::sample::build_sample());
+        let mut h = crate::testkit::EditorHarness::with_state(crate::sample::build_auto_comp());
         // Over the auto-comp it runs at once, one step.
         let n0 = h.state().engine.history_len();
         assert_eq!(h.perform(Action::BuildComposite), crate::Performed::Done);
@@ -1216,9 +1240,18 @@ mod tests {
                 assert!(ed.quick_start[i], "step {} ({a:?}) ticked", i + 1);
             }
         }
-        // The sample still renders as before: B is empty.
-        let s = crate::sample::build_practice();
+        // The sample still renders as before: B is empty. GM19: the
+        // showcase draws the practice cut as it draws the sample, and under
+        // the auto-comp its graph is its sheet.
+        let mut s = crate::sample::build_practice();
         let (w, h) = crate::sample::SIZE;
+        let law = s.engine.project.color_law;
+        let sample = crate::sample::build_sample();
+        assert!(
+            render_graph_frame_law(s.cut(), law, 0, w, h)
+                == render_graph_frame_law(sample.cut(), law, 0, w, h)
+        );
+        assert!(s.auto_comp());
         let cut = s.cut();
         assert!(
             render_graph_frame_law(cut, s.engine.project.color_law, 0, w, h)

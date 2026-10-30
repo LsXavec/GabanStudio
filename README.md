@@ -75,8 +75,9 @@ Presets include "Master PNG 16-bit", "ProRes 422 HQ" and "H.264 review".
 ## Quick start
 
 1. Open the app. The Welcome screen offers templates, recent files and the
-   sample cut (a ball bounce on twos over a BG plate, with a serifu line).
-   After an update it opens on **What's New**.
+   sample cut (a glowing ball bounce on twos, a camera pan across a wide BG
+   plate, sakura petals and a serifu line). After an update it opens on
+   **What's New**; a fresh install opens on Start.
 2. Pick a template (or Custom size…), or open the sample.
 3. Follow the Quick start checklist on the Welcome screen (also Help ▸ Quick
    start): make a drawing, mark it Key, time it on the sheet, paint it,

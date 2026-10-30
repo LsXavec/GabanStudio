@@ -1,19 +1,29 @@
 //! GM8: the sample cut, built procedurally (no binary assets): a BG plate
 //! (sky gradient over ground), a ball bounce over 24 frames on twos — 12
 //! drawings, the keys marked Key and the rest Inbetween — an empty column B
-//! above it for practice, and a palette with line and paint roles. GM19: a
-//! short serifu (dialogue) line generated in code rides the first track, so
-//! the lip flap has beats and a delivery has sound to mux. It opens
-//! untitled; Save As keeps it.
+//! above it for practice, and a palette with line and paint roles. GM19:
+//! the release's showcase on top. The BG plate runs past the frame's left
+//! edge (the cut's paper) and a Camera node pans across it, easing onto the
+//! frame by the last frame; the ball glows and diffuses, held to the frame
+//! off the camera; sakura petals drift over the comp; and a short serifu
+//! (dialogue) line generated in code rides the first track, so a delivery
+//! has sound to mux and the sheet a waveform to read. It opens untitled;
+//! Save As keeps it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use anim_core::audio::{TrackKind, TrackProps};
+use anim_core::camera::{IRect, PAPER_KEY, paper_to_json};
 use anim_core::color::ColorLaw;
+use anim_core::command::Command;
+use anim_core::fx::{FxKind, FxValue};
+use anim_core::generator::Preset;
+use anim_core::graph::{BlendMode, NodeKind, layout_key, pos_to_json};
+use anim_core::look::effect_with;
 use anim_core::model::{AudioClip, CelLayer, Drawing, DrawingDef, DrawingKind};
 use anim_core::raster::{RasterLayer, TILE, TILE_LEN, TileCoord, TileData};
-use anim_core::xsheet::{ColumnDef, ColumnKind, Exposure};
+use anim_core::xsheet::{ColumnDef, ColumnKind, Exposure, ParamInterp, ParamKey};
 
 use crate::doc::AppState;
 use crate::palette::{CharacterPalette, ColorRole, Palettes};
@@ -21,6 +31,9 @@ use crate::palette::{CharacterPalette, ColorRole, Palettes};
 /// Small enough to render in a blink on the CPU (the D0 test limit).
 pub const SIZE: (u32, u32) = (640, 360);
 pub const FRAMES: u32 = 24;
+/// GM19: how far the BG plate — the cut's paper — runs left of the frame:
+/// the camera pans this far, from the paper's left end onto the frame.
+pub const PAN: u32 = 320;
 const GROUND: u32 = 290;
 const RADIUS: f32 = 26.0;
 const LINE: [u8; 4] = [26, 26, 26, 255];
@@ -118,8 +131,44 @@ pub fn ball_centre(i: usize) -> (f32, f32) {
     (x, floor - (floor - top) * k * k)
 }
 
+/// GM19: the BG plate at paper point (x, y): sky over far hills over a
+/// furrowed ground — the hills and furrows change along x, so the pan
+/// shows.
+fn bg_texel(x: i32, y: i32) -> [u8; 4] {
+    let (xf, yf) = (x as f32, y as f32);
+    let hills = GROUND as f32 - 50.0 - 16.0 * (xf / 83.0).sin() - 9.0 * (xf / 31.0 + 1.0).sin();
+    if y as u32 >= GROUND {
+        if x.rem_euclid(40) < 3 {
+            [92, 118, 78, 255]
+        } else {
+            [104, 132, 88, 255]
+        }
+    } else if yf >= hills {
+        [128, 158, 136, 255]
+    } else {
+        let k = yf / GROUND as f32;
+        let mix = |a: f32, b: f32| (a + (b - a) * k).round() as u8;
+        [mix(120.0, 236.0), mix(170.0, 226.0), mix(232.0, 206.0), 255]
+    }
+}
+
+/// GM19: the showcase graph's nodes, by part (the ship tests read them).
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct Showcase {
+    pub camera: anim_core::ids::NodeId,
+    pub glow: anim_core::ids::NodeId,
+    pub diffusion: anim_core::ids::NodeId,
+    pub particles: anim_core::ids::NodeId,
+}
+
 /// The sample cut, untitled, history empty.
 pub fn build_sample() -> AppState {
+    build_showcase().0
+}
+
+/// [`build_sample`], with the nodes its showcase graph placed.
+pub fn build_showcase() -> (AppState, Showcase) {
     let (w, h) = SIZE;
     let mut s = AppState::new_project("sample cut", w, h, 24, 300.0);
     s.engine.project.color_law = ColorLaw::Srgb;
@@ -127,7 +176,11 @@ pub fn build_sample() -> AppState {
     let ball_col = s.view.active_column;
     let bg_col = s.engine.add_column(at, "BG").expect("fresh cut");
     // Empty: Quick start's first steps draw here, not over the ball.
-    s.engine.add_column(at, "B").expect("fresh cut");
+    let b_col = s.engine.add_column(at, "B").expect("fresh cut");
+    // GM19: the camera's pan rides a param column on the sheet.
+    let pan = s.engine.add_param_column(at, "Camera pan x").expect("fresh cut");
+    let [bg_src, camera, ball_src, glow, diffusion, over_bg, b_src, over_b, petals, over_petals, out] =
+        std::array::from_fn(|_| s.engine.alloc_node_id());
     let mut ids = Vec::new();
     for _ in 0..13 {
         ids.push((
@@ -145,19 +198,12 @@ pub fn build_sample() -> AppState {
     if let Some(c) = cut.xsheet.column_mut(ball_col) {
         c.name = "A".into();
     }
-    // BG: a sky gradient over a flat ground.
+    // BG: sky, hills and ground over the whole paper — PAN px left of the
+    // frame to its right edge (GM19).
     let (bg, bg_layer, _) = ids[0];
     let mut plate = Drawing::new(bg, "BG");
     let mut layer = CelLayer::new(bg_layer, "color");
-    layer.raster = raster((0, 0, w as i32, h as i32), |_, y| {
-        Some(if y as u32 >= GROUND {
-            [104, 132, 88, 255]
-        } else {
-            let k = y as f32 / GROUND as f32;
-            let mix = |a: f32, b: f32| (a + (b - a) * k).round() as u8;
-            [mix(120.0, 236.0), mix(170.0, 226.0), mix(232.0, 206.0), 255]
-        })
-    });
+    layer.raster = raster((-(PAN as i32), 0, w as i32, h as i32), |x, y| Some(bg_texel(x, y)));
     plate.layers.push(layer);
     cut.drawings.push(plate);
     cut.column_defs.insert(
@@ -216,6 +262,108 @@ pub fn build_sample() -> AppState {
     // GM19: the serifu line on the first track, from frame 0.
     cut.audio = Some(AudioClip::from_wav("serifu.wav", dialogue_wav()).expect("the WAV made above reads"));
     cut.audio_props = TrackProps::new("serifu", TrackKind::Dialogue);
+    // GM19: the satsuei showcase, one batch of ordinary, editable nodes,
+    // each placed in the graph pane. The BG plate is the paper; the camera
+    // films it (plane 0) and pans from its left end onto the frame, eased;
+    // the ball — glow, then diffusion — and B ride over it, held to the
+    // frame; the petals fall over everything.
+    let paper = IRect {
+        x: -(PAN as i32),
+        y: 0,
+        w: w + PAN,
+        h,
+    };
+    let mut camera_kind = NodeKind::camera();
+    if let NodeKind::Camera { binds, .. } = &mut camera_kind {
+        binds.set("pan_x", Some(pan));
+    }
+    let mut petal_kind = NodeKind::particles(Preset::Sakura);
+    if let NodeKind::Generator { params, .. } = &mut petal_kind {
+        // The preset is tuned at 1080 lines; this frame has 360.
+        params.set("size", FxValue::Float(7.0));
+        params.set("size_end", FxValue::Float(6.0));
+    }
+    const COL: f32 = 220.0;
+    const ROW: f32 = 90.0;
+    let nodes = [
+        (bg_src, NodeKind::source(bg_col), (0.0, 0.0)),
+        (camera, camera_kind, (COL, 0.0)),
+        (ball_src, NodeKind::source(ball_col), (0.0, ROW)),
+        (
+            glow,
+            effect_with(
+                FxKind::Glow,
+                &[
+                    ("threshold", FxValue::Float(0.25)),
+                    ("radius", FxValue::Float(10.0)),
+                    ("intensity", FxValue::Float(0.8)),
+                ],
+            ),
+            (COL, ROW),
+        ),
+        (
+            diffusion,
+            effect_with(FxKind::Diffusion, &[("radius", FxValue::Float(8.0))]),
+            (2.0 * COL, ROW),
+        ),
+        (over_bg, NodeKind::Blend { mode: BlendMode::Normal }, (3.0 * COL, ROW)),
+        (b_src, NodeKind::source(b_col), (0.0, 2.0 * ROW)),
+        (over_b, NodeKind::Blend { mode: BlendMode::Normal }, (4.0 * COL, 2.0 * ROW)),
+        (petals, petal_kind, (0.0, 3.0 * ROW)),
+        (over_petals, NodeKind::Blend { mode: BlendMode::Normal }, (5.0 * COL, 3.0 * ROW)),
+        (out, NodeKind::Output, (6.0 * COL, 3.0 * ROW)),
+    ];
+    let wires = [
+        (bg_src, camera, 0),
+        (ball_src, glow, 0),
+        (glow, diffusion, 0),
+        (camera, over_bg, 0),
+        (diffusion, over_bg, 1),
+        (over_bg, over_b, 0),
+        (b_src, over_b, 1),
+        (over_b, over_petals, 0),
+        (petals, over_petals, 1),
+        (over_petals, out, 0),
+    ];
+    let key = |frame: u32, value: f32| Command::SetParamKey {
+        at,
+        column: pan,
+        frame,
+        key: Some(ParamKey {
+            value,
+            interp: ParamInterp::Ease,
+            handles: None,
+        }),
+    };
+    let mut cmds = vec![
+        Command::SetCutMeta {
+            at,
+            key: PAPER_KEY.into(),
+            before: None,
+            after: Some(paper_to_json(paper)),
+        },
+        key(0, -(PAN as f32)),
+        key(FRAMES - 1, 0.0),
+    ];
+    for (id, kind, pos) in nodes {
+        cmds.push(Command::AddNode { at, id, kind });
+        cmds.push(Command::SetCutMeta {
+            at,
+            key: layout_key(id),
+            before: None,
+            after: Some(pos_to_json(pos)),
+        });
+    }
+    for (from, to, to_pin) in wires {
+        cmds.push(Command::Connect {
+            at,
+            from,
+            from_pin: 0,
+            to,
+            to_pin,
+        });
+    }
+    cmds.push(Command::SetOutput { at, node: Some(out) });
     s.palettes = Palettes {
         characters: vec![CharacterPalette {
             name: "Ball".into(),
@@ -240,7 +388,24 @@ pub fn build_sample() -> AppState {
             variants: Vec::new(),
         }],
     };
-    s.auto_comp();
+    s.engine.apply("sample showcase", cmds).expect("the showcase graph wires");
+    s.engine.clear_history();
+    let parts = Showcase {
+        camera,
+        glow,
+        diffusion,
+        particles: petals,
+    };
+    (s, parts)
+}
+
+/// The sample's sheet under GM8's plain graph — the auto-comp of its
+/// columns, no camera or FX — history empty: where the tests of the
+/// auto-comp, and of the satsuei template built over one, start.
+#[cfg(test)]
+pub fn build_auto_comp() -> AppState {
+    let mut s = build_sample();
+    assert!(s.auto_comp());
     s.engine.clear_history();
     s
 }
