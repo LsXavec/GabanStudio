@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anim_core::camera::IRect;
 use anim_core::color::ColorLaw;
 use anim_core::edit::{self, FloatingPatch};
 use anim_core::ids::{ColumnId, CutId, DrawingId, LayerId, SceneId};
@@ -483,6 +484,42 @@ pub struct ReplayDone {
     pub changed: Vec<(i32, i32)>,
     pub ok: bool,
     pub why: String,
+}
+
+/// GM20: the strips of the paper sheet `area` the paint layer `layer` does
+/// not cover — past a capped paper's window, or around a rect held while a
+/// stroke lands — which the canvas veils. Frame px; none when the layer
+/// covers the sheet.
+pub(crate) fn unpainted_strips(area: IRect, layer: &paint::LayerRect) -> Vec<IRect> {
+    let (ax0, ay0) = (area.x as i64, area.y as i64);
+    let (ax1, ay1) = (ax0 + area.w as i64, ay0 + area.h as i64);
+    let (ox, oy) = (layer.origin.0 as i64, layer.origin.1 as i64);
+    let (lx0, ly0) = (ox.clamp(ax0, ax1), oy.clamp(ay0, ay1));
+    let (lx1, ly1) = (
+        (ox + layer.size.0 as i64).clamp(ax0, ax1),
+        (oy + layer.size.1 as i64).clamp(ay0, ay1),
+    );
+    if lx1 <= lx0 || ly1 <= ly0 {
+        return vec![area]; // the layer is off the sheet
+    }
+    let strip = |x0: i64, y0: i64, x1: i64, y1: i64| {
+        (x1 > x0 && y1 > y0).then(|| IRect {
+            x: x0 as i32,
+            y: y0 as i32,
+            w: (x1 - x0) as u32,
+            h: (y1 - y0) as u32,
+        })
+    };
+    // Left and right the sheet's full height; above and below between them.
+    [
+        strip(ax0, ay0, lx0, ay1),
+        strip(lx1, ay0, ax1, ay1),
+        strip(lx0, ay0, lx1, ly0),
+        strip(lx0, ly1, lx1, ay1),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 /// GM10: the camera furniture the canvas puts on the sheet, in paper
@@ -1300,33 +1337,49 @@ impl CanvasView {
             || self.koma.is_some()
     }
 
-    /// An edit gesture is live: a stroke (pen down or its pen-up commit
-    /// pending), a selection being drawn, a lifted transform in flight, or
-    /// (GM18) a panel-tool drag that lands on the page at its release.
-    /// Gesture-unsafe actions (frame nav, undo, layer cycle, clears) must not
-    /// dispatch while this holds — they would retarget or orphan the commit.
-    /// GM20: the device's texture side limit (`max_texture_dimension_2d`).
+    /// GM20: the side the paint layer paints at most — the room's limit
+    /// (`paint::room_limit` of the device's `max_texture_dimension_2d`).
     pub fn with_layer_limit(mut self, max_dim: u32) -> Self {
         self.max_layer_dim = max_dim;
         self
     }
 
-    /// GM20: THE layer rect, the one helper every `ensure_size` caller
-    /// asks: the cut's paper (when it holds the frame) capped by the GPU's
-    /// side limit. Held while a stroke is in progress — a paper set
-    /// mid-stroke takes effect after the stroke lands.
+    /// GM20: THE layer rect of a paint area at this canvas's side limit —
+    /// the one helper behind every rect the paint layer is sized to (the
+    /// canvas's own and a replay's).
+    fn rect_of(&self, state: &AppState, area: IRect) -> paint::LayerRect {
+        let frame = (state.engine.project.width, state.engine.project.height);
+        paint::layer_rect(area, frame, self.max_layer_dim)
+    }
+
+    /// GM20: the canvas's layer rect: the cut's paper (when it holds the
+    /// frame) capped by the side limit. Held while a stroke is in progress —
+    /// a paper set mid-stroke takes effect after the stroke lands.
     pub fn sync_layer_rect(&mut self, state: &AppState) -> paint::LayerRect {
         if !self.stroke_active() {
-            let frame = (state.engine.project.width, state.engine.project.height);
-            self.layer_rect = paint::layer_rect(state.paper_area(), frame, self.max_layer_dim);
+            self.layer_rect = self.rect_of(state, state.paper_area());
         }
         self.layer_rect
     }
 
-    /// Bring the paint layer onto the layer rect; a rebuild (by this canvas
-    /// or the viewer) cleared the targets, so every synced key goes stale.
-    fn ensure_layer(&mut self, state: &AppState, p: &mut PaintLayer) {
+    /// GM20: the rect a replayed stroke paints in: its OWN cut's paper
+    /// (found project-wide) at the room's side limit — never the viewer's
+    /// cut nor a rect held under the local pen, so every peer replays a
+    /// stroke into the same rect and reads back the same tiles.
+    pub(crate) fn replay_rect(&self, state: &AppState, drawing: DrawingId) -> paint::LayerRect {
+        self.rect_of(state, state.paper_area_of(drawing))
+    }
+
+    /// Bring the paint layer onto the canvas's layer rect (the viewer asks
+    /// here too).
+    pub(crate) fn ensure_layer(&mut self, state: &AppState, p: &mut PaintLayer) {
         let rect = self.sync_layer_rect(state);
+        self.layer_onto(p, rect);
+    }
+
+    /// The paint layer's one resize: a rebuild cleared the targets, so every
+    /// synced key goes stale.
+    fn layer_onto(&mut self, p: &mut PaintLayer, rect: paint::LayerRect) {
         p.ensure_size(rect);
         if p.generation() != self.synced_generation {
             self.synced_generation = p.generation();
@@ -1336,6 +1389,11 @@ impl CanvasView {
         }
     }
 
+    /// An edit gesture is live: a stroke (pen down or its pen-up commit
+    /// pending), a selection being drawn, a lifted transform in flight, or
+    /// (GM18) a panel-tool drag that lands on the page at its release.
+    /// Gesture-unsafe actions (frame nav, undo, layer cycle, clears) must not
+    /// dispatch while this holds — they would retarget or orphan the commit.
     pub fn stroke_active(&self) -> bool {
         self.touch_active
             || !self.current.is_empty()
@@ -1434,13 +1492,14 @@ impl CanvasView {
     }
 
     /// Ctrl+A: select the whole paper (switches to the Select tool) — GM20:
-    /// the paper beyond the frame too.
+    /// the paper beyond the frame too, as far as the GPU paints it (the
+    /// layer rect: a capped paper's window).
     pub fn select_all(&mut self, state: &mut AppState) {
         self.set_tool(CanvasTool::Select, state);
         if self.tool != CanvasTool::Select {
             return; // switch refused mid-stroke
         }
-        let a = state.paper_area();
+        let a = self.sync_layer_rect(state).irect();
         let (x0, y0) = (a.x as f32, a.y as f32);
         let (x1, y1) = (x0 + a.w as f32, y0 + a.h as f32);
         self.selection = Some(vec![pos2(x0, y0), pos2(x1, y0), pos2(x1, y1), pos2(x0, y1)]);
@@ -3857,7 +3916,10 @@ impl CanvasView {
         // ---- Paper --------------------------------------------------------
         // Upright (unturned) the paper is the old axis-aligned rect; turned,
         // it is the corners' polygon and `paper_rect` its screen box (text
-        // labels anchor to the box).
+        // labels anchor to the box). GM20: the sheet is the paper the tools
+        // paint on (`pa`) — the frame when paper = frame, as before; a wider
+        // sheet is laid down whole, the frame outlined on it, and paper the
+        // paint layer does not reach (past a capped window) veiled.
         let upright = self.rotation_deg == 0.0;
         let paper_rect = xf.paper_bounds();
         let paper_fill = if self.miss_check {
@@ -3865,20 +3927,49 @@ impl CanvasView {
         } else {
             crate::plate::PAPER
         };
-        if upright {
-            painter.rect_filled(paper_rect, 2, paper_fill);
-            painter.rect_stroke(
-                paper_rect,
-                2,
-                egui::Stroke::new(1.0, crate::plate::legend_dim()),
-                egui::StrokeKind::Outside,
-            );
+        let edge = egui::Stroke::new(1.0, crate::plate::legend_dim());
+        if pa == IRect::frame(paper_w as u32, paper_h as u32) {
+            if upright {
+                painter.rect_filled(paper_rect, 2, paper_fill);
+                painter.rect_stroke(paper_rect, 2, edge, egui::StrokeKind::Outside);
+            } else {
+                painter.add(egui::Shape::convex_polygon(
+                    xf.paper_corners().to_vec(),
+                    paper_fill,
+                    edge,
+                ));
+            }
         } else {
-            painter.add(egui::Shape::convex_polygon(
-                xf.paper_corners().to_vec(),
-                paper_fill,
-                egui::Stroke::new(1.0, crate::plate::legend_dim()),
-            ));
+            let quad = |r: IRect| -> Vec<Pos2> {
+                let (x0, y0) = (r.x as f32, r.y as f32);
+                let (x1, y1) = (x0 + r.w as f32, y0 + r.h as f32);
+                [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+                    .iter()
+                    .map(|&(x, y)| to_screen(pos2(x, y)))
+                    .collect()
+            };
+            let veil = if self.miss_check {
+                crate::plate::WELL
+            } else {
+                crate::plate::paper_veil()
+            };
+            let strips = unpainted_strips(pa, &self.layer_rect);
+            let frame_edge = egui::Stroke::new(1.0, crate::plate::LEGEND);
+            if upright {
+                let sheet = Rect::from_points(&quad(pa));
+                painter.rect_filled(sheet, 2, paper_fill);
+                painter.rect_stroke(sheet, 2, edge, egui::StrokeKind::Outside);
+                for s in strips {
+                    painter.rect_filled(Rect::from_points(&quad(s)), 0, veil);
+                }
+                painter.rect_stroke(paper_rect, 0, frame_edge, egui::StrokeKind::Inside);
+            } else {
+                painter.add(egui::Shape::convex_polygon(quad(pa), paper_fill, edge));
+                for s in strips {
+                    painter.add(egui::Shape::convex_polygon(quad(s), veil, egui::Stroke::NONE));
+                }
+                painter.add(egui::Shape::closed_line(xf.paper_corners().to_vec(), frame_edge));
+            }
         }
         // Paper furniture (Phase 4): field / safe / peg guides in Ao — the
         // scaffold ink, printed under the drawing like a real layout sheet.
@@ -4210,8 +4301,9 @@ impl CanvasView {
                         self.wet_dirty = false;
                     }
                     // GM20: the readback covers the layer rect; art outside
-                    // a capped or shrunk layer stays as the engine holds it.
-                    let before = state.active_layer_tiles().cloned().unwrap_or_default();
+                    // a capped or shrunk layer stays as the engine holds it
+                    // — on the LATCHED layer the commit lands on.
+                    let before = state.commit_target_tiles(self.stroke_layer_slot);
                     let tiles = paint::merge_outside(&before, p.read_tiles(), &p.rect());
                     // STAGE 1/3 (PSD-multiplayer-rescope): a STREAMED
                     // guest stroke never commits here — the dab stream
@@ -5480,6 +5572,15 @@ impl CanvasView {
             {
                 break;
             }
+            // GM20: a stroke on another rect than the layer's rebuilds the
+            // layer (clearing the wet target) — it waits for the local pen
+            // stroke to land too.
+            if let Some(SeqTask::Stroke(rs)) = self.replay_inbox.front()
+                && (!self.current.is_empty() || self.raster_stroke_done)
+                && self.replay_rect(state, DrawingId(rs.drawing)) != p.rect()
+            {
+                break;
+            }
             let Some(task) = self.replay_inbox.pop_front() else {
                 break;
             };
@@ -5566,6 +5667,9 @@ impl CanvasView {
             self.brush_res_dirty = true;
         }
         if did_any {
+            // GM20: back onto the canvas's own rect (a replay paints on its
+            // stroke's cut's paper; a peer's edit may have moved the paper).
+            self.ensure_layer(state, p);
             // Engine truth moved (strokes, timeline edits, undos alike)
             // — restore every viewer texture from it.
             self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
@@ -5591,6 +5695,10 @@ impl CanvasView {
             Some(l) => l.raster.tiles.clone(),
             None => return mk(false, Vec::new(), "the drawing/layer is gone"),
         };
+        // GM20: on the stroke's own cut's paper (run_replays puts the
+        // canvas's rect back afterwards).
+        let rect = self.replay_rect(state, did);
+        self.layer_onto(p, rect);
         p.sync_active(&base);
         p.set_brush_resources(
             rs.tip.as_ref().map(|(w, h, b, _)| (*w, *h, b.as_ref().clone())),
@@ -6168,10 +6276,6 @@ impl CanvasView {
             state.status = "no raster layer here to fill".into();
             return;
         }
-        // GM20: the paper's edges, beyond the frame when it is wider.
-        let area = state.paper_area();
-        let (ax0, ay0) = (area.x, area.y);
-        let (ax1, ay1) = (area.x + area.w as i32 - 1, area.y + area.h as i32 - 1);
         // The working grid: the loop's bbox, clipped to paper, padded by
         // the feather band.
         let pad = (self.lasso_soft + self.lasso_grow.abs()).ceil() as i32 + 2;
@@ -6182,14 +6286,23 @@ impl CanvasView {
             x1 = x1.max(p.x.ceil() as i32);
             y1 = y1.max(p.y.ceil() as i32);
         }
-        x0 = (x0 - pad).max(ax0);
-        y0 = (y0 - pad).max(ay0);
-        x1 = (x1 + pad).min(ax1);
-        y1 = (y1 + pad).min(ay1);
-        if x0 > x1 || y0 > y1 {
-            state.status = "the loop was outside the paper".into();
+        let (bx0, by0, bx1, by1) = (x0 - pad, y0 - pad, x1 + pad, y1 + pad);
+        let clip_to = |a: IRect| {
+            let (x0, y0) = (bx0.max(a.x), by0.max(a.y));
+            let (x1, y1) = (bx1.min(a.x + a.w as i32 - 1), by1.min(a.y + a.h as i32 - 1));
+            (x0 <= x1 && y0 <= y1).then_some((x0, y0, x1, y1))
+        };
+        // GM20: the paper's edges, beyond the frame when it is wider — the
+        // GPU's window of a capped paper. A loop wholly off it is refused on
+        // the Aka lane, as a fill click there is.
+        let Some((x0, y0, x1, y1)) = clip_to(self.sync_layer_rect(state).irect()) else {
+            state.refuse(if clip_to(state.paper_area()).is_some() {
+                crate::doc::PAST_WINDOW
+            } else {
+                crate::doc::OUTSIDE_PAPER
+            });
             return;
-        }
+        };
         let (gw, gh) = ((x1 - x0 + 1) as usize, (y1 - y0 + 1) as usize);
         // 1) Scanline even-odd rasterization into a hard mask.
         let mut inside = vec![false; gw * gh];
@@ -6398,11 +6511,21 @@ impl CanvasView {
         // inside the active selection, like every fill. Exact texel work on
         // the CPU, so it needs no GPU.
         let m = ui.input(|i| i.modifiers);
+        // GM20: every fill stays where the canvas paints — the paper, or the
+        // GPU's window of a capped one (what lies past it is not shown).
+        let area = self.sync_layer_rect(state).irect();
         if m.shift {
             let p = to_paper(pos);
             let seed = (p.x.floor() as i32, p.y.floor() as i32);
             let clip = self.selection_poly();
-            state.refill_at(seed, self.brush_color, m.command, self.fill_grow, clip.as_deref());
+            state.refill_at(
+                seed,
+                self.brush_color,
+                m.command,
+                self.fill_grow,
+                area,
+                clip.as_deref(),
+            );
             return;
         }
         if !self.raster {
@@ -6458,7 +6581,7 @@ impl CanvasView {
         let mask = match anim_core::fill::flood_fill_mask_in(
             &reference,
             seed,
-            state.paper_area(),
+            area,
             &opts,
             clip.as_deref(),
         ) {
@@ -6467,7 +6590,7 @@ impl CanvasView {
                 use anim_core::fill::FillRefusal as FR;
                 state.status = match r {
                     FR::OffPaper => {
-                        state.refuse(crate::doc::OUTSIDE_PAPER);
+                        state.refuse_off_area(seed);
                         return;
                     }
                     FR::OnInk => "clicked on inked pixels — fills flow into EMPTY \
@@ -9477,8 +9600,16 @@ mod extpaper_tests {
     /// The canvas's fill input alone, the GPU gate set by hand (the plain
     /// fill's own path), the whole wide paper in view at 25 %.
     fn fill_rig(state: AppState) -> (egui_kittest::Harness<'static, (CanvasView, AppState)>, ViewXform) {
+        fill_rig_at(state, 0.25)
+    }
+
+    /// The fill rig at `zoom`, the frame centred in its 800×600 pane.
+    fn fill_rig_at(
+        state: AppState,
+        zoom: f32,
+    ) -> (egui_kittest::Harness<'static, (CanvasView, AppState)>, ViewXform) {
         let xf = ViewXform {
-            zoom: 0.25,
+            zoom,
             pan: vec2(0.0, 0.0),
             rotation_deg: 0.0,
             mirror: false,
@@ -9552,7 +9683,7 @@ mod extpaper_tests {
             s.active_layer_tiles().map(|m| m.iter().map(|(c, t)| (*c, t.hash)).collect()).unwrap_or_default()
         };
         let before = keys(&h.state().1);
-        for mods in [Modifiers::NONE, Modifiers::SHIFT] {
+        for mods in [Modifiers::NONE, Modifiers::SHIFT, all] {
             h.state_mut().1.refusal.clear();
             click(&mut h, off, mods);
             let (_, s) = h.state();
@@ -9596,6 +9727,18 @@ mod extpaper_tests {
             vec![pos2(0.0, 0.0), pos2(1920.0, 0.0), pos2(1920.0, 1080.0), pos2(0.0, 1080.0)]
         );
         assert_eq!(pick_sample(&state, -99.5, 500.5, false), None);
+        // A lasso across the frame's left edge stops at it, as before; one
+        // wholly left of it is refused on the Aka lane.
+        let pts = [pos2(-300.0, 700.0), pos2(100.0, 700.0), pos2(100.0, 900.0), pos2(-300.0, 900.0)];
+        canvas.commit_lasso_fill(&pts, &mut state);
+        assert!(texel(&state, 10, 800)[3] > 0.5, "filled: {}", state.status);
+        assert_eq!(texel(&state, -10, 800)[3], 0.0, "nothing left of the frame");
+        let n = state.engine.history_len();
+        state.refusal.clear();
+        let pts = [pos2(-300.0, 700.0), pos2(-100.0, 700.0), pos2(-100.0, 900.0), pos2(-300.0, 900.0)];
+        canvas.commit_lasso_fill(&pts, &mut state);
+        assert_eq!(state.refusal, crate::doc::OUTSIDE_PAPER);
+        assert_eq!(state.engine.history_len(), n);
     }
 
     #[test]
@@ -9662,5 +9805,302 @@ mod extpaper_tests {
         let text = memory_text(&layer_rect(WIDE, (1920, 1080), 8192), cols);
         assert!(h.has_text_containing(&text), "{text}");
         assert!(!h.has_text_containing("this GPU paints at most"), "3000 px fits");
+        assert!(!h.has_text_containing("does not cover the whole frame"), "it holds the frame");
+        // A paper off the frame says painting stays on the frame.
+        h.state_mut().set_cut_paper(IRect { x: 100, y: 0, w: 3000, h: 1080 });
+        h.perform(Action::PaperSize);
+        h.run();
+        assert!(h.has_text_containing(
+            "this paper does not cover the whole frame: painting stays on the frame"
+        ));
+    }
+
+    /// fnv1a, as the engine hashes tile bytes.
+    fn fnv(bytes: impl Iterator<Item = u8>) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h
+    }
+
+    /// The armed layer's tiles as (count, fnv over each coord and hash).
+    fn tile_set(state: &AppState) -> (usize, u64) {
+        let tiles = state.active_layer_tiles().cloned().unwrap_or_default();
+        let mut bytes = Vec::new();
+        for ((x, y), t) in &tiles {
+            bytes.extend(x.to_le_bytes());
+            bytes.extend(y.to_le_bytes());
+            bytes.extend(t.hash.to_le_bytes());
+        }
+        (tiles.len(), fnv(bytes.into_iter()))
+    }
+
+    #[test]
+    fn extpaper_paper_equal_frame_commits_the_pre_gm20_tiles() {
+        // Criterion 6: on paper = frame the fill, refill and replace commit
+        // the very tiles the pre-GM20 build (64df613) committed — its values,
+        // pinned as literals.
+        let mut state = AppState::new_project("pin", 1920, 1080, 24, 300.0);
+        state.new_drawing_at_frame();
+        paint_texels(&mut state, &ring(100, 100, 300, 300), [0.1, 0.1, 0.1, 1.0]);
+        assert_eq!(tile_set(&state), (12, 17_910_685_424_988_270_061), "the inked ring");
+        let (mut h, xf) = fill_rig(state);
+        let at = xf.paper_to_screen(pos2(200.5, 200.5));
+        let n0 = h.state().1.engine.history_len();
+        click(&mut h, at, Modifiers::NONE);
+        assert_eq!(h.state().1.engine.history_len(), n0 + 1, "{}", h.state().1.status);
+        assert_eq!(tile_set(&h.state().1), (16, 17_019_425_477_342_794_235), "the fill");
+        h.state_mut().0.brush_color = [200, 40, 30, 255];
+        click(&mut h, at, Modifiers::SHIFT);
+        assert_eq!(h.state().1.engine.history_len(), n0 + 2, "{}", h.state().1.status);
+        assert_eq!(tile_set(&h.state().1), (16, 2_941_027_151_995_740_320), "the refill");
+        h.state_mut().1.undo();
+        let all = Modifiers { shift: true, ctrl: true, command: true, ..Modifiers::NONE };
+        click(&mut h, at, all);
+        assert_eq!(h.state().1.engine.history_len(), n0 + 2, "{}", h.state().1.status);
+        assert_eq!(tile_set(&h.state().1), (16, 2_941_027_151_995_740_320), "the replace");
+    }
+
+    /// Two screen rects within half a point.
+    fn near(a: Rect, b: Rect) -> bool {
+        (a.min - b.min).length() < 0.5 && (a.max - b.max).length() < 0.5
+    }
+
+    #[test]
+    fn extpaper_the_sheet_is_the_whole_paper_with_the_frame_on_it() {
+        let mut h = EditorHarness::new();
+        h.run();
+        h.state_mut().set_cut_paper(WIDE);
+        h.editor_mut().canvas.set_abs_zoom(0.25);
+        h.run();
+        let xf = h.editor().canvas.view_xform();
+        let screen = |x0: f32, y0: f32, x1: f32, y1: f32| {
+            Rect::from_two_pos(xf.paper_to_screen(pos2(x0, y0)), xf.paper_to_screen(pos2(x1, y1)))
+        };
+        let (sheet, frame) = (screen(-540.0, 0.0, 2460.0, 1080.0), screen(0.0, 0.0, 1920.0, 1080.0));
+        let papers = h.filled_rects(plate::PAPER);
+        assert!(papers.iter().any(|r| near(*r, sheet)), "the whole paper laid down: {papers:?}");
+        assert!(!papers.iter().any(|r| near(*r, frame)), "not the frame alone");
+        let outlines = h.outlined_rects(plate::LEGEND);
+        assert!(outlines.iter().any(|r| near(*r, frame)), "the frame drawn on it: {outlines:?}");
+        assert!(h.filled_rects(plate::paper_veil()).is_empty(), "3000 px: nothing veiled");
+        // Capped (10000 px at 8192): the paper past the window is veiled.
+        h.state_mut().set_cut_paper(IRect { x: -4040, y: 0, w: 10000, h: 1080 });
+        h.editor_mut().canvas.set_abs_zoom(0.05);
+        h.run();
+        let xf = h.editor().canvas.view_xform();
+        let screen = |x0: f32, x1: f32| {
+            Rect::from_two_pos(xf.paper_to_screen(pos2(x0, 0.0)), xf.paper_to_screen(pos2(x1, 1080.0)))
+        };
+        let veils = h.filled_rects(plate::paper_veil());
+        assert_eq!(veils.len(), 2, "{veils:?}");
+        assert!(veils.iter().any(|r| near(*r, screen(-4040.0, -3136.0))), "{veils:?}");
+        assert!(veils.iter().any(|r| near(*r, screen(5056.0, 5960.0))), "{veils:?}");
+        assert!(h.filled_rects(plate::PAPER).iter().any(|r| near(*r, screen(-4040.0, 5960.0))));
+        // Paper = frame: the sheet is the frame, as before.
+        h.state_mut().set_cut_paper(IRect::frame(1920, 1080));
+        h.editor_mut().canvas.set_abs_zoom(0.25);
+        h.run();
+        let xf = h.editor().canvas.view_xform();
+        let frame = Rect::from_two_pos(xf.paper_to_screen(pos2(0.0, 0.0)), xf.paper_to_screen(pos2(1920.0, 1080.0)));
+        assert!(near(frame, xf.paper_bounds()));
+        let papers = h.filled_rects(plate::PAPER);
+        assert!(papers.iter().any(|r| near(*r, frame)), "{papers:?}");
+        let wide = Rect::from_two_pos(xf.paper_to_screen(pos2(-540.0, 0.0)), xf.paper_to_screen(pos2(2460.0, 1080.0)));
+        assert!(!papers.iter().any(|r| near(*r, wide)));
+        assert!(h.filled_rects(plate::paper_veil()).is_empty());
+    }
+
+    #[test]
+    fn extpaper_a_capped_paper_paints_only_its_window() {
+        // 10000 px wide at the 8192 side limit: the window is x −3136 to 5056.
+        let huge = IRect { x: -4040, y: 0, w: 10000, h: 1080 };
+        let mut state = AppState::new_project("cap", 1920, 1080, 24, 300.0);
+        state.new_drawing_at_frame();
+        state.set_cut_paper(huge);
+        let window = layer_rect(huge, (1920, 1080), 8192);
+        assert_eq!((window.origin, window.size, window.capped), ((-3136, 0), (8192, 1080), true));
+        assert_eq!(
+            unpainted_strips(state.paper_area(), &window),
+            vec![IRect { x: -4040, y: 0, w: 904, h: 1080 }, IRect { x: 5056, y: 0, w: 904, h: 1080 }],
+            "the paper either side of the window is veiled"
+        );
+        assert_eq!(unpainted_strips(WIDE, &layer_rect(WIDE, (1920, 1080), 8192)), Vec::new());
+        // A ring across the window's left edge, and one grey flat on each side.
+        let grey = [0.5, 0.5, 0.5, 1.0];
+        paint_texels(&mut state, &ring(-3300, 400, -3000, 600), [0.1, 0.1, 0.1, 1.0]);
+        paint_texels(&mut state, &[(-3500, 300), (-3050, 300)], grey);
+        let (mut h, xf) = fill_rig_at(state, 0.05);
+        assert_eq!(h.state().0.max_layer_dim, 8192);
+        // A fill inside the window stops at its edge, inside the ring too.
+        let n = h.state().1.engine.history_len();
+        click(&mut h, xf.paper_to_screen(pos2(-3049.5, 500.5)), Modifiers::NONE);
+        {
+            let s = &h.state().1;
+            assert_eq!(s.engine.history_len(), n + 1, "{}", s.status);
+            assert!(texel(s, -3136, 500)[3] > 0.99 && texel(s, -3010, 500)[3] > 0.99, "filled");
+            assert!(texel(s, -3137, 500)[3] < 0.01, "not past the window");
+        }
+        // Past the window on the paper, and off the paper: every fill is
+        // refused on the Aka lane, the layer untouched.
+        let all = Modifiers { shift: true, ctrl: true, command: true, ..Modifiers::NONE };
+        let keys = |s: &AppState| -> Vec<((i32, i32), u64)> {
+            s.active_layer_tiles().map(|m| m.iter().map(|(c, t)| (*c, t.hash)).collect()).unwrap_or_default()
+        };
+        let before = keys(&h.state().1);
+        let past = xf.paper_to_screen(pos2(-3499.5, 300.5));
+        let off = xf.paper_to_screen(pos2(-5999.5, 300.5));
+        for (at, why) in [(past, crate::doc::PAST_WINDOW), (off, crate::doc::OUTSIDE_PAPER)] {
+            for mods in [Modifiers::NONE, Modifiers::SHIFT, all] {
+                h.state_mut().1.refusal.clear();
+                click(&mut h, at, mods);
+                let s = &h.state().1;
+                assert_eq!(s.refusal, why, "{mods:?}");
+                assert_eq!(s.engine.history_len(), n + 1, "{mods:?}: no change");
+                assert_eq!(keys(s), before, "{mods:?}: the layer is untouched");
+            }
+        }
+        // A replace in the window leaves the same grey past it.
+        h.state_mut().0.brush_color = [200, 40, 30, 255];
+        click(&mut h, xf.paper_to_screen(pos2(-3049.5, 300.5)), all);
+        {
+            let s = &h.state().1;
+            assert_eq!(s.engine.history_len(), n + 2, "replace: {}", s.status);
+            assert_ne!(texel(s, -3050, 300), grey, "replaced in the window");
+            assert_eq!(texel(s, -3500, 300), grey, "kept past it");
+        }
+        // The lasso fill and select-all keep to the window too.
+        let (canvas, state) = h.state_mut();
+        let n = state.engine.history_len();
+        let lasso = |x0: f32, x1: f32| [pos2(x0, 700.0), pos2(x1, 700.0), pos2(x1, 900.0), pos2(x0, 900.0)];
+        for (pts, why) in [
+            (lasso(-3600.0, -3300.0), crate::doc::PAST_WINDOW),
+            (lasso(-6000.0, -5000.0), crate::doc::OUTSIDE_PAPER),
+        ] {
+            state.refusal.clear();
+            canvas.commit_lasso_fill(&pts, state);
+            assert_eq!(state.refusal, why);
+            assert_eq!(state.engine.history_len(), n, "nothing filled");
+        }
+        canvas.commit_lasso_fill(&lasso(-3300.0, -3000.0), state);
+        assert!(texel(state, -3126, 800)[3] > 0.5, "filled in the window: {}", state.status);
+        assert_eq!(texel(state, -3140, 800)[3], 0.0, "not past it");
+        canvas.select_all(state);
+        assert_eq!(
+            canvas.selection.clone().expect("selected"),
+            vec![pos2(-3136.0, 0.0), pos2(5056.0, 0.0), pos2(5056.0, 1080.0), pos2(-3136.0, 1080.0)]
+        );
+    }
+
+    #[test]
+    fn extpaper_a_pen_up_keeps_the_art_of_the_layer_it_lands_on() {
+        // The readback's beyond-the-layer merge reads the LATCHED layer of
+        // the frame's own cel (`commit_raster`'s target), never the armed
+        // or the displayed one.
+        let keys = |m: &BTreeMap<TileCoord, Arc<TileData>>| -> Vec<((i32, i32), u64)> {
+            m.iter().map(|(c, t)| (*c, t.hash)).collect()
+        };
+        let mut state = wide_state();
+        paint_texels(&mut state, &[(-500, 500)], [0.5, 0.5, 0.5, 1.0]);
+        let slot = state.active_slot_resolved().expect("armed");
+        let armed = keys(state.active_layer_tiles().expect("painted"));
+        assert_eq!(keys(&state.commit_target_tiles(slot)), armed);
+        assert!(state.commit_target_tiles(1 - slot.min(1)).is_empty(), "the cel's other layer");
+        // A held frame shows the held drawing; a stroke there makes a fresh
+        // cel, whose before is empty.
+        state.view.onion = false;
+        state.goto(1);
+        assert_eq!(state.own_key_drawing(), None);
+        assert_eq!(state.active_layer_tiles().map(keys), Some(armed), "the held drawing shows");
+        assert!(state.commit_target_tiles(slot).is_empty());
+    }
+
+    #[test]
+    fn extpaper_a_replay_paints_on_its_own_cuts_paper() {
+        // Cut A on the frame, cut B on the wide paper: a stroke on B's
+        // drawing replays into B's rect whichever cut this viewer shows and
+        // whatever rect its canvas holds — every peer, the same tiles.
+        let mut state = AppState::new_project("rp", 1920, 1080, 24, 300.0);
+        state.new_drawing_at_frame();
+        let on_a = state.own_key_drawing().expect("A's drawing");
+        let (scene, cut_a) = (state.view.scene, state.view.cut);
+        state.new_cut(scene);
+        let cut_b = state.view.cut;
+        state.set_cut_paper(WIDE);
+        state.new_drawing_at_frame();
+        let on_b = state.own_key_drawing().expect("B's drawing");
+        state.goto_cut(scene, cut_a);
+        assert_eq!(state.view.cut, cut_a);
+        let mut canvas = CanvasView::new();
+        let (frame, wide) = (LayerRect::frame(1920, 1080), layer_rect(WIDE, (1920, 1080), 8192));
+        assert_eq!(canvas.sync_layer_rect(&state), frame, "the viewer is on A");
+        assert_eq!(canvas.replay_rect(&state, on_b), wide);
+        assert_eq!(canvas.replay_rect(&state, on_a), frame);
+        // A rect held under the local pen does not leak into a replay.
+        canvas.layer_rect = layer_rect(IRect { x: -100, y: 0, w: 2100, h: 1080 }, (1920, 1080), 8192);
+        assert_eq!(canvas.replay_rect(&state, on_b), wide);
+        // A peer whose GPU paints 16384 a side replays at the room's limit.
+        state.goto_cut(scene, cut_b);
+        state.set_cut_paper(IRect { x: -4040, y: 0, w: 10000, h: 1080 });
+        state.goto_cut(scene, cut_a);
+        let big = CanvasView::new().with_layer_limit(paint::room_limit(16384));
+        assert_eq!(big.replay_rect(&state, on_b), canvas.replay_rect(&state, on_b));
+        assert_eq!(canvas.replay_rect(&state, on_b).origin, (-3136, 0));
+        // A drawing no cut holds replays (and fails) on the frame.
+        assert_eq!(canvas.replay_rect(&state, DrawingId(u64::MAX - 1)), frame);
+    }
+
+    #[test]
+    fn extpaper_every_paint_layer_resize_goes_through_the_one_helper() {
+        // Criterion 7: the paint layer is resized in ONE place (the canvas's
+        // `layer_onto`), onto a rect from THE layer-rect helper (`rect_of`);
+        // the viewer asks the canvas. The graph's pool (`g`) is frame-sized
+        // and no paint layer.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let owner = |text: &str, at: usize| -> String {
+            let head = &text[..at];
+            let start = head.rfind(" fn ").map_or(0, |i| i + 4);
+            head[start..].chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect()
+        };
+        let receiver = |text: &str, at: usize| -> String {
+            let r: String =
+                text[..at].chars().rev().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            r.chars().rev().collect()
+        };
+        let (mut resizes, mut rects, mut ontos) = (Vec::new(), Vec::new(), Vec::new());
+        let mut viewer = 0;
+        for entry in std::fs::read_dir(dir).expect("src") {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_none_or(|e| e != "rs") {
+                continue;
+            }
+            let name = path.file_name().expect("a name").to_string_lossy().into_owned();
+            let text = std::fs::read_to_string(&path).expect("readable");
+            for (at, _) in text.match_indices(concat!(".ensure", "_size(")) {
+                if receiver(&text, at) != "g" {
+                    resizes.push((name.clone(), owner(&text, at), receiver(&text, at)));
+                }
+            }
+            for (at, _) in text.match_indices(concat!("paint::layer", "_rect(")) {
+                rects.push((name.clone(), owner(&text, at)));
+            }
+            for (at, _) in text.match_indices(concat!("self.layer", "_onto(")) {
+                ontos.push((name.clone(), owner(&text, at)));
+            }
+            viewer += text.matches(concat!("self.canvas.ensure", "_layer(&self.state, p)")).count();
+        }
+        resizes.sort();
+        rects.sort();
+        ontos.sort();
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        let (file, f) = s("canvas.rs", "layer_onto");
+        assert_eq!(resizes, vec![(file, f, "p".to_string())], "one resize, in the canvas");
+        assert_eq!(ontos, vec![s("canvas.rs", "ensure_layer"), s("canvas.rs", "replay_one")]);
+        // The canvas's one helper, and the Paper size window's preview of a
+        // rect it has not set yet.
+        assert_eq!(rects, vec![s("canvas.rs", "rect_of"), s("main.rs", "paper_size_window")]);
+        assert_eq!(viewer, 1, "the viewer sizes the layer through the canvas");
     }
 }

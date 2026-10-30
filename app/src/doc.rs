@@ -236,6 +236,10 @@ pub const CHART_MAX_MARKS: usize = 15;
 /// GM20: a fill, refill or replace clicked off the paper (the Aka lane).
 pub const OUTSIDE_PAPER: &str = "outside the paper: Cut ▸ Paper size… extends it";
 
+/// GM20: a tool used on the paper past a capped painting window (a paper
+/// wider or taller than the GPU paints) — the Aka lane.
+pub const PAST_WINDOW: &str = "past this GPU's painting window: Cut ▸ Paper size… shows it";
+
 /// GM18: why a project that is no book makes no page.
 const NOT_A_BOOK: &str =
     "this project is not a manga book — start from the Manga B5, Manga A4 or Webtoon template";
@@ -1303,6 +1307,17 @@ impl AppState {
         }
         let slot = slot.min(d.layers.len() - 1);
         d.layers.get(d.layers.len() - 1 - slot)
+    }
+
+    /// GM20: the tiles a pen-up commit at `slot` lands on — the latched
+    /// layer of this frame's OWN cel, as `commit_raster` resolves it; empty
+    /// for a fresh cel (a held drawing's art is never its before).
+    pub fn commit_target_tiles(&self, slot: usize) -> BTreeMap<TileCoord, Arc<TileData>> {
+        self.own_key_drawing()
+            .and_then(|id| self.cut().drawing(id))
+            .and_then(|d| Self::layer_at_slot(d, slot))
+            .map(|l| l.raster.tiles.clone())
+            .unwrap_or_default()
     }
 
     /// The live active layer of `d` — by NAME (defect 16), then by ROLE
@@ -4588,6 +4603,36 @@ impl AppState {
         crate::paint::paint_area(anim_core::camera::paper(self.cut(), w, h), (w, h))
     }
 
+    /// GM20: the paper area of the cut holding `drawing`, found PROJECT-WIDE
+    /// (as `locate_layer` finds its layer): a replayed stroke paints on its
+    /// own cut's paper, whichever cut the viewer browses. The frame when no
+    /// cut holds it.
+    pub fn paper_area_of(&self, drawing: DrawingId) -> anim_core::camera::IRect {
+        let (w, h) = (self.engine.project.width, self.engine.project.height);
+        let paper = self
+            .engine
+            .project
+            .scenes
+            .iter()
+            .flat_map(|s| s.cuts.iter())
+            .find(|c| c.drawings.iter().any(|d| d.id == drawing))
+            .map_or(anim_core::camera::IRect::frame(w, h), |c| {
+                anim_core::camera::paper(c, w, h)
+            });
+        crate::paint::paint_area(paper, (w, h))
+    }
+
+    /// GM20: refuse a tool used at frame pixel `at` off the canvas's painting
+    /// area, on the Aka lane: on the paper past a capped window, or off the
+    /// paper.
+    pub fn refuse_off_area(&mut self, at: (i32, i32)) {
+        if crate::paint::holds(self.paper_area(), at) {
+            self.refuse(PAST_WINDOW);
+        } else {
+            self.refuse(OUTSIDE_PAPER);
+        }
+    }
+
     /// GM10: Cut ▸ Paper size — the cut's paper in frame pixels (the frame
     /// itself clears the key), one undo step. A rect past the side or area
     /// cap, or without area, is refused, and says so.
@@ -4941,13 +4986,16 @@ impl AppState {
     /// (Ctrl+Shift+click), every texel of the clicked colour on the layer.
     /// `under_px` takes the same colour tucked under the line along. `clip`
     /// (the select tool's active selection) confines both, as it does a
-    /// plain fill.
+    /// plain fill. GM20: `area` is where the canvas paints (the paper, or
+    /// the GPU's window of a capped one) — the click and the region stay in
+    /// it.
     pub fn refill_at(
         &mut self,
         seed: (i32, i32),
         chip: [u8; 4],
         all: bool,
         under_px: u32,
+        area: anim_core::camera::IRect,
         clip: Option<&[(f32, f32)]>,
     ) {
         if self.active_layer_props().is_some_and(|p| !p.visible) {
@@ -4965,13 +5013,21 @@ impl AppState {
                 "held/blank frame — a refill edits a frame's OWN cel (draw here first)".into();
             return;
         };
-        // GM20: the click and the region range over the paper, beyond the
+        // GM20: the click and the region range over `area`, beyond the
         // frame too (the frame forms when paper = frame).
-        let area = self.paper_area();
         let color = self.engine.project.color_law.premultiplied(chip);
         let target = self.active_layer_tiles().cloned().unwrap_or_default();
         let result = if all {
-            anim_core::color::replace_all_in(&target, seed, area, color, clip).map(|(d, _)| d)
+            // GM20: past a capped painting window the swap stops too — an
+            // unclipped replace reaches the whole layer, art the canvas
+            // cannot show included.
+            let window = (clip.is_none() && area != self.paper_area()).then(|| {
+                let (x0, y0) = (area.x as f32, area.y as f32);
+                let (x1, y1) = (x0 + area.w as f32, y0 + area.h as f32);
+                vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            });
+            anim_core::color::replace_all_in(&target, seed, area, color, clip.or(window.as_deref()))
+                .map(|(d, _)| d)
         } else {
             let bound = self
                 .cut()
@@ -4990,7 +5046,7 @@ impl AppState {
                 let label = if all { "replace colour" } else { "refill" };
                 self.commit_region_edit(label, did, layer, diff);
             }
-            Err(RR::OffPaper) => self.refuse(OUTSIDE_PAPER),
+            Err(RR::OffPaper) => self.refuse_off_area(seed),
             Err(RR::Bare) => self.refuse("nothing to refill — no paint there (a plain fill paints bare paper)"),
             Err(RR::OnLine) => self.refuse("clicked on the line art — refill the paint beside it"),
             Err(RR::Unchanged) => self.status = "that paint already is the brush colour".into(),

@@ -4709,7 +4709,10 @@ impl Editor {
         let state = form.new_state();
         let paint = rs.map(|rs| PaintLayer::new(rs, form.width, form.height));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, form.width, form.height));
-        let max_dim = rs.map_or(paint::DEFAULT_MAX_DIM, |rs| rs.device.limits().max_texture_dimension_2d);
+        // GM20: the room's side limit — every peer caps and replays alike.
+        let max_dim = paint::room_limit(
+            rs.map_or(paint::DEFAULT_MAX_DIM, |rs| rs.device.limits().max_texture_dimension_2d),
+        );
         let (workspaces, load_notes) = Self::load_workspaces(data_dir);
         Self {
             data_dir: data_dir.map(|d| d.to_path_buf()),
@@ -4789,7 +4792,10 @@ impl Editor {
         let (w, h) = (state.engine.project.width, state.engine.project.height);
         let paint = rs.map(|rs| PaintLayer::new(rs, w, h));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, w, h));
-        let max_dim = rs.map_or(paint::DEFAULT_MAX_DIM, |rs| rs.device.limits().max_texture_dimension_2d);
+        // GM20: the room's side limit — every peer caps and replays alike.
+        let max_dim = paint::room_limit(
+            rs.map_or(paint::DEFAULT_MAX_DIM, |rs| rs.device.limits().max_texture_dimension_2d),
+        );
         let (workspaces, load_notes) = Self::load_workspaces(data_dir);
         Self {
             data_dir: data_dir.map(|d| d.to_path_buf()),
@@ -5059,6 +5065,9 @@ impl Editor {
                 let lr = paint::layer_rect(form.rect, (fw, fh), max_dim);
                 if let Some(cap) = paint::cap_text(form.rect, &lr, max_dim) {
                     ui.label(egui::RichText::new(cap).color(plate::AKA));
+                }
+                if let Some(note) = paint::coverage_text(form.rect, (fw, fh)) {
+                    ui.label(egui::RichText::new(note).color(plate::legend_dim()));
                 }
                 ui.label(
                     egui::RichText::new(paint::memory_text(&lr, other_cols)).color(plate::legend_dim()),
@@ -8144,8 +8153,8 @@ impl Editor {
                     self.state.engine.project.height,
                 );
                 // GM20: the paint layer on the paper's rect (the canvas's
-                // helper); the graph's pool stays frame-sized.
-                p.ensure_size(self.canvas.sync_layer_rect(&self.state));
+                // one resize); the graph's pool stays frame-sized.
+                self.canvas.ensure_layer(&self.state, p);
                 g.ensure_size(w, h);
                 let (scene, cutid, frame) = (
                     self.state.view.scene,

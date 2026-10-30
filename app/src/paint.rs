@@ -1591,60 +1591,171 @@ impl PaintLayer {
     /// Read the whole layer back into tiles (called once at pen-up). Blocking
     /// map (a small hitch at commit — the async staging ring is a later
     /// optimization). Fully-transparent tiles are dropped so blank areas cost
-    /// nothing.
+    /// nothing. GM20: a paper-sized layer can outgrow one staging buffer
+    /// (`max_buffer_size`), so it reads back in row bands ([`readback_bands`]),
+    /// each gathered into tiles as it lands — one band when it fits.
     pub fn read_tiles(&self) -> Vec<(TileCoord, Arc<TileData>)> {
-        let unpadded_bpr = self.width * BPP;
-        let padded_bpr = unpadded_bpr.div_ceil(256) * 256;
-        let buf_size = padded_bpr as u64 * self.height as u64;
-        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("readback"),
-            size: buf_size,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        let padded_bpr = padded_bpr(self.width);
+        let max_buffer = self.device.limits().max_buffer_size;
+        let mut gather = TileGather::new(&self.rect);
+        for (y0, rows) in readback_bands(&self.rect, padded_bpr as u64, max_buffer) {
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("readback"),
+                size: padded_bpr as u64 * rows as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
             });
-        enc.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.active.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &staging,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bpr),
-                    rows_per_image: Some(self.height),
+            let mut enc = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("readback"),
+                });
+            enc.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.active.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: y0, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
                 },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit(Some(enc.finish()));
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &staging,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bpr),
+                        rows_per_image: Some(rows),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: rows,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.queue.submit(Some(enc.finish()));
 
-        // Block until the copy completes and the buffer is mapped.
-        let (tx, rx) = std::sync::mpsc::channel();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
-        let _ = rx.recv();
-        let data = staging.slice(..).get_mapped_range();
-        let out = layer_tiles(&data, padded_bpr as usize, &self.rect);
-        drop(data);
-        staging.unmap();
-        out
+            // Block until the copy completes and the buffer is mapped.
+            let (tx, rx) = std::sync::mpsc::channel();
+            staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r);
+            });
+            let _ = self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            });
+            let _ = rx.recv();
+            let data = staging.slice(..).get_mapped_range();
+            gather.band(&data, padded_bpr as usize, y0, rows);
+            drop(data);
+            staging.unmap();
+        }
+        gather.finish()
+    }
+}
+
+/// A readback row of a `width`-texel layer, padded to wgpu's 256-byte copy
+/// alignment.
+pub fn padded_bpr(width: u32) -> u32 {
+    (width * BPP).div_ceil(256) * 256
+}
+
+/// GM20: the row bands a readback of `rect` copies, as (first layer row,
+/// rows). Each band's staging buffer holds at most `max_buffer` bytes (the
+/// device's `max_buffer_size`: a whole 8190×4097 layer needs 268,500,992,
+/// past wgpu's default 256 MiB, and an over-size buffer is a validation
+/// panic), and a band is cut on a tile row when it holds one, so its tiles
+/// come out whole. One band when the layer fits.
+pub fn readback_bands(rect: &LayerRect, padded_bpr: u64, max_buffer: u64) -> Vec<(u32, u32)> {
+    let h = rect.size.1;
+    let fit = (max_buffer / padded_bpr.max(1)).clamp(1, h.max(1) as u64) as u32;
+    let t = TILE as u32;
+    // The layer rows where a tile row starts: first_edge, first_edge + 64, …
+    let first_edge = (t - rect.origin.1.rem_euclid(TILE as i32) as u32) % t;
+    let mut bands = Vec::new();
+    let mut y = 0;
+    while y < h {
+        let mut end = y + fit.min(h - y);
+        if end < h && end >= first_edge {
+            let edge = first_edge + (end - first_edge) / t * t;
+            if edge > y {
+                end = edge;
+            }
+        }
+        bands.push((y, end - y));
+        y = end;
+    }
+    bands
+}
+
+/// GM20: a layer readback gathered into engine tiles through [`tile_span`],
+/// band by band (rows of `padded_bpr` bytes from the layer's left edge):
+/// every tile the layer touches, negative coords included; fully-transparent
+/// tiles dropped. A tile is done when its last row on the layer has landed.
+pub struct TileGather {
+    rect: LayerRect,
+    open: BTreeMap<TileCoord, Vec<u16>>,
+    out: Vec<(TileCoord, Arc<TileData>)>,
+}
+
+impl TileGather {
+    pub fn new(rect: &LayerRect) -> Self {
+        Self {
+            rect: *rect,
+            open: BTreeMap::new(),
+            out: Vec::new(),
+        }
+    }
+
+    /// Take layer rows `y0..y0 + rows` (`data` holds those rows).
+    pub fn band(&mut self, data: &[u8], padded_bpr: usize, y0: u32, rows: u32) {
+        let r = self.rect;
+        if r.size.0 == 0 || r.size.1 == 0 || rows == 0 {
+            return;
+        }
+        let t = TILE as i32;
+        let (ox, oy) = r.origin;
+        let (b0, b1) = (y0, y0 + rows);
+        for ty in (oy + b0 as i32).div_euclid(t)..=(oy + b1 as i32 - 1).div_euclid(t) {
+            for tx in ox.div_euclid(t)..=(ox + r.size.0 as i32 - 1).div_euclid(t) {
+                let Some(s) = tile_span((tx, ty), &r) else {
+                    continue;
+                };
+                // The tile's layer rows inside this band.
+                let (r0, r1) = (s.dst.1.max(b0), (s.dst.1 + s.size.1).min(b1));
+                if r0 >= r1 {
+                    continue;
+                }
+                let tile = self
+                    .open
+                    .entry((tx, ty))
+                    .or_insert_with(|| vec![0u16; anim_core::raster::TILE_LEN]);
+                for ly in r0..r1 {
+                    let src_row =
+                        (ly - b0) as usize * padded_bpr + s.dst.0 as usize * BPP as usize;
+                    let dst_row =
+                        ((ly - s.dst.1 + s.src.1) as usize * TILE + s.src.0 as usize) * 4;
+                    for px in 0..s.size.0 as usize {
+                        let sb = src_row + px * BPP as usize;
+                        for c in 0..4 {
+                            let lo = data[sb + c * 2] as u16;
+                            let hi = data[sb + c * 2 + 1] as u16;
+                            tile[dst_row + px * 4 + c] = lo | (hi << 8);
+                        }
+                    }
+                }
+                if s.dst.1 + s.size.1 <= b1 {
+                    let px = self.open.remove(&(tx, ty)).unwrap_or_default();
+                    let td = TileData::from_vec(px);
+                    if !td.is_empty() {
+                        self.out.push(((tx, ty), Arc::new(td)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// The tiles, in tile-row order (every band landed).
+    pub fn finish(self) -> Vec<(TileCoord, Arc<TileData>)> {
+        self.out
     }
 }
 
@@ -1667,6 +1778,14 @@ pub struct LayerRect {
 /// default `max_texture_dimension_2d`).
 pub const DEFAULT_MAX_DIM: u32 = 8192;
 
+/// GM20: the side a canvas paints at most: its device's own limit, never
+/// past [`DEFAULT_MAX_DIM`]. egui-wgpu asks every device for exactly that,
+/// so every peer in a room caps a paper to the same window and replays a
+/// stroke into the same rect (the same tiles for the hash audit).
+pub fn room_limit(device_max: u32) -> u32 {
+    device_max.min(DEFAULT_MAX_DIM)
+}
+
 impl LayerRect {
     /// The pre-GM20 layer: exactly the frame.
     pub fn frame(width: u32, height: u32) -> Self {
@@ -1687,6 +1806,23 @@ impl LayerRect {
     pub fn frame_window(&self) -> (u32, u32) {
         (self.origin.0.unsigned_abs(), self.origin.1.unsigned_abs())
     }
+
+    /// The rect in frame pixels: where the canvas paints, so where the
+    /// tools edit (the whole paper unless the GPU caps it).
+    pub fn irect(&self) -> IRect {
+        IRect {
+            x: self.origin.0,
+            y: self.origin.1,
+            w: self.size.0,
+            h: self.size.1,
+        }
+    }
+}
+
+/// Is frame pixel `p` inside `area`?
+pub fn holds(area: IRect, p: (i32, i32)) -> bool {
+    let (x, y) = (p.0 as i64 - area.x as i64, p.1 as i64 - area.y as i64);
+    x >= 0 && y >= 0 && x < area.w as i64 && y < area.h as i64
 }
 
 /// The paper the tools and the layer cover: the cut's paper when it holds
@@ -1759,43 +1895,15 @@ pub fn tile_span(tile: TileCoord, rect: &LayerRect) -> Option<TileSpan> {
 /// Assemble a layer readback (`data`: rows of `padded_bpr` bytes from layer
 /// texel (0, 0)) into engine tiles through [`tile_span`]: every tile the
 /// layer touches, negative coords included; fully-transparent tiles dropped.
+/// One band of a [`TileGather`].
 pub fn layer_tiles(
     data: &[u8],
     padded_bpr: usize,
     rect: &LayerRect,
 ) -> Vec<(TileCoord, Arc<TileData>)> {
-    let t = TILE as i32;
-    let mut out = Vec::new();
-    if rect.size.0 == 0 || rect.size.1 == 0 {
-        return out;
-    }
-    let (x0, y0) = rect.origin;
-    for ty in y0.div_euclid(t)..=(y0 + rect.size.1 as i32 - 1).div_euclid(t) {
-        for tx in x0.div_euclid(t)..=(x0 + rect.size.0 as i32 - 1).div_euclid(t) {
-            let Some(s) = tile_span((tx, ty), rect) else {
-                continue;
-            };
-            let mut tile = vec![0u16; anim_core::raster::TILE_LEN];
-            for row in 0..s.size.1 as usize {
-                let src_row =
-                    (s.dst.1 as usize + row) * padded_bpr + s.dst.0 as usize * BPP as usize;
-                let dst_row = ((s.src.1 as usize + row) * TILE + s.src.0 as usize) * 4;
-                for px in 0..s.size.0 as usize {
-                    let sb = src_row + px * BPP as usize;
-                    for c in 0..4 {
-                        let lo = data[sb + c * 2] as u16;
-                        let hi = data[sb + c * 2 + 1] as u16;
-                        tile[dst_row + px * 4 + c] = lo | (hi << 8);
-                    }
-                }
-            }
-            let td = TileData::from_vec(tile);
-            if !td.is_empty() {
-                out.push(((tx, ty), Arc::new(td)));
-            }
-        }
-    }
-    out
+    let mut gather = TileGather::new(rect);
+    gather.band(data, padded_bpr, 0, rect.size.1);
+    gather.finish()
 }
 
 /// Keep `before`'s texels outside the layer rect in a readback `read` (the
@@ -1808,26 +1916,35 @@ pub fn merge_outside(
     rect: &LayerRect,
 ) -> Vec<(TileCoord, Arc<TileData>)> {
     let mut out: BTreeMap<TileCoord, Arc<TileData>> = read.into_iter().collect();
+    let row_len = TILE * 4;
     for (coord, tile) in before {
-        let full = tile_span(*coord, rect).is_some_and(|s| s.size == (TILE as u32, TILE as u32));
-        if full {
+        let Some(s) = tile_span(*coord, rect) else {
+            // Wholly off the layer (the readback never holds it): the
+            // engine's tile stands as it is.
+            if tile.is_empty() {
+                out.remove(coord);
+            } else {
+                out.insert(*coord, tile.clone());
+            }
+            continue;
+        };
+        if s.size == (TILE as u32, TILE as u32) {
             continue; // wholly on the layer: the readback is the truth
         }
+        // Across the layer's edge: the readback inside the span, the
+        // engine's texels around it, a row slice at a time.
         let mut px = match out.get(coord) {
             Some(t) => t.rgba.to_vec(),
             None => vec![0u16; anim_core::raster::TILE_LEN],
         };
-        let span = tile_span(*coord, rect);
-        for row in 0..TILE as u32 {
-            for cx in 0..TILE as u32 {
-                let on = span.is_some_and(|s| {
-                    (s.src.0..s.src.0 + s.size.0).contains(&cx)
-                        && (s.src.1..s.src.1 + s.size.1).contains(&row)
-                });
-                if !on {
-                    let i = ((row * TILE as u32 + cx) * 4) as usize;
-                    px[i..i + 4].copy_from_slice(&tile.rgba[i..i + 4]);
-                }
+        let (a, b) = (s.src.0 as usize * 4, (s.src.0 + s.size.0) as usize * 4);
+        for row in 0..TILE {
+            let at = row * row_len;
+            if (s.src.1..s.src.1 + s.size.1).contains(&(row as u32)) {
+                px[at..at + a].copy_from_slice(&tile.rgba[at..at + a]);
+                px[at + b..at + row_len].copy_from_slice(&tile.rgba[at + b..at + row_len]);
+            } else {
+                px[at..at + row_len].copy_from_slice(&tile.rgba[at..at + row_len]);
             }
         }
         let td = TileData::from_vec(px);
@@ -1851,14 +1968,45 @@ pub fn layer_memory(rect: &LayerRect, other_columns: usize) -> u64 {
 }
 
 /// The Paper size window's line for a capped layer, None when the GPU
-/// paints the whole paper.
+/// paints the whole paper. It names the covered span on each cut axis, in
+/// frame px, so a long pan can be planned on the part that paints.
 pub fn cap_text(paper: IRect, rect: &LayerRect, max_dim: u32) -> Option<String> {
-    rect.capped.then(|| {
+    let px = |v: i64| if v < 0 { format!("−{}", -v) } else { v.to_string() };
+    let span = |axis: &str, p0: i32, plen: u32, r0: i32, rlen: u32| {
+        let (p0, r0) = (p0 as i64, r0 as i64);
         format!(
-            "this GPU paints at most {max_dim} px a side: painting covers {}×{} of the {}×{} paper",
-            rect.size.0, rect.size.1, paper.w, paper.h
+            "{axis} {} to {} of {} to {}",
+            px(r0),
+            px(r0 + rlen as i64),
+            px(p0),
+            px(p0 + plen as i64)
+        )
+    };
+    rect.capped.then(|| {
+        let mut spans = Vec::new();
+        if rect.size.0 < paper.w {
+            spans.push(span("x", paper.x, paper.w, rect.origin.0, rect.size.0));
+        }
+        if rect.size.1 < paper.h {
+            spans.push(span("y", paper.y, paper.h, rect.origin.1, rect.size.1));
+        }
+        format!(
+            "this GPU paints at most {max_dim} px a side: painting covers {}×{} of the {}×{} \
+             paper — {}",
+            rect.size.0,
+            rect.size.1,
+            paper.w,
+            paper.h,
+            spans.join(", ")
         )
     })
+}
+
+/// The Paper size window's note for a paper that does not hold the whole
+/// frame: [`paint_area`] keeps painting on the frame. None when it holds it.
+pub fn coverage_text(paper: IRect, frame: (u32, u32)) -> Option<&'static str> {
+    (paint_area(paper, frame) != paper)
+        .then_some("this paper does not cover the whole frame: painting stays on the frame")
 }
 
 /// The Paper size window's memory line: the layer's GPU memory in MiB.
@@ -2073,10 +2221,27 @@ mod extpaper_tests {
         assert_eq!(a.count(), 203 * 203, "the pinned pre-GM20 frame fill");
     }
 
+    /// fnv1a, as the engine hashes tile bytes.
+    fn fnv(bytes: impl Iterator<Item = u8>) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in bytes {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h
+    }
+
     #[test]
     fn extpaper_paper_equal_frame_is_the_old_layer() {
         let f = layer_rect(IRect::frame(1920, 1080), FRAME, DEFAULT_MAX_DIM);
         assert!(f.is_frame());
+        // The pinned fill mask: the frame fill (gap + grow on) of an inked
+        // ring, bit for bit as the pre-GM20 build (64df613) made it.
+        let r = ink(&ring(100, 100, 300, 300));
+        let m = flood_fill_mask(&r, (200, 200), 1920, 1080, &FillOpts::default(), None).expect("frame");
+        let bits = fnv(m.bits.iter().map(|b| *b as u8));
+        assert_eq!((m.x0, m.y0, m.w, m.h, m.count()), (0, 0, 1920, 1080, 41_209));
+        assert_eq!(bits, 0x11c7_2ae7_6398_6440, "the mask's bits as 64df613 filled them");
         // The old upload rule: tiles at px/py >= 0 inside the frame, cut at
         // its right/bottom edge.
         let s = tile_span((29, 16), &f).expect("the corner tile");
@@ -2123,8 +2288,89 @@ mod extpaper_tests {
         let c = layer_rect(huge, FRAME, 8192);
         assert_eq!(
             cap_text(huge, &c, 8192).as_deref(),
-            Some("this GPU paints at most 8192 px a side: painting covers 8192×1080 of the 10000×1080 paper")
+            Some(
+                "this GPU paints at most 8192 px a side: painting covers 8192×1080 of the \
+                 10000×1080 paper — x −3136 to 5056 of −4040 to 5960"
+            )
         );
+        // A paper that does not hold the frame paints the frame, and says so.
+        let off = IRect { x: 100, y: 0, w: 3000, h: 1080 };
+        assert_eq!(
+            coverage_text(off, FRAME),
+            Some("this paper does not cover the whole frame: painting stays on the frame")
+        );
+        assert_eq!(coverage_text(WIDE, FRAME), None);
+        assert_eq!(coverage_text(IRect::frame(1920, 1080), FRAME), None);
+    }
+
+    #[test]
+    fn extpaper_readback_bands_fit_the_device_buffer_limit() {
+        // A valid paper whose whole-layer readback is past wgpu's default
+        // max_buffer_size: it holds the frame and is not capped (both sides
+        // within 8192), but one staging buffer would be 65536 × 4097 bytes.
+        let paper = IRect { x: -3000, y: -1500, w: 8190, h: 4097 };
+        assert!(paper.is_valid_paper());
+        let r = layer_rect(paper, FRAME, DEFAULT_MAX_DIM);
+        assert_eq!((r.origin, r.size, r.capped), ((-3000, -1500), (8190, 4097), false));
+        const LIMIT: u64 = 256 << 20; // wgpu's Limits::default().max_buffer_size
+        let bpr = padded_bpr(r.size.0) as u64;
+        assert_eq!(bpr * r.size.1 as u64, 268_500_992, "past the limit as one buffer");
+        let bands = readback_bands(&r, bpr, LIMIT);
+        assert!(bands.len() > 1, "{bands:?}");
+        let mut y = 0;
+        for &(y0, rows) in &bands {
+            assert_eq!(y0, y, "bands run on without a gap");
+            assert!(rows > 0 && bpr * rows as u64 <= LIMIT, "{rows} rows fit one buffer");
+            y += rows;
+            if y < r.size.1 {
+                assert_eq!((r.origin.1 + y as i32).rem_euclid(TILE as i32), 0, "cut on a tile row");
+            }
+        }
+        assert_eq!(y, r.size.1, "every row read back");
+        // A layer that fits reads back in one band, as before.
+        let w = layer_rect(WIDE, FRAME, DEFAULT_MAX_DIM);
+        assert_eq!(readback_bands(&w, padded_bpr(3000) as u64, LIMIT), vec![(0, 1080)]);
+    }
+
+    #[test]
+    fn extpaper_banded_gather_equals_the_one_band_readback() {
+        // A small layer off the tile grid, its readback cut into bands on
+        // tile rows and (a tiny limit) through the middle of tile rows.
+        let rect = LayerRect { origin: (-100, -36), size: (230, 200), capped: false, frame: (128, 128) };
+        let bpr = padded_bpr(rect.size.0) as usize;
+        let mut layer = vec![0u8; bpr * rect.size.1 as usize];
+        for (i, b) in layer.iter_mut().enumerate() {
+            let (row, col) = (i / bpr, i % bpr);
+            if col < rect.size.0 as usize * BPP as usize && (row * 7 + col / 8) % 5 != 0 {
+                *b = (i % 251) as u8 | 1;
+            }
+        }
+        let whole = layer_tiles(&layer, bpr, &rect);
+        assert!(!whole.is_empty());
+        for limit in [bpr as u64 * 100, bpr as u64 * 10, bpr as u64] {
+            let mut gather = TileGather::new(&rect);
+            for (y0, rows) in readback_bands(&rect, bpr as u64, limit) {
+                let band = &layer[y0 as usize * bpr..(y0 + rows) as usize * bpr];
+                gather.band(band, bpr, y0, rows);
+            }
+            let banded = gather.finish();
+            assert_eq!(banded.len(), whole.len(), "limit {limit}");
+            for ((a, ta), (b, tb)) in banded.iter().zip(&whole) {
+                assert_eq!((a, &ta.rgba), (b, &tb.rgba), "limit {limit}");
+            }
+        }
+    }
+
+    #[test]
+    fn extpaper_room_limit_is_one_side_for_every_peer() {
+        // Every peer paints at most DEFAULT_MAX_DIM a side, whatever its
+        // GPU allows, so a capped paper's window (and a replay's rect) is the
+        // same on every peer.
+        assert_eq!(room_limit(16384), DEFAULT_MAX_DIM);
+        assert_eq!(room_limit(8192), 8192);
+        assert_eq!(room_limit(4096), 4096);
+        let huge = IRect { x: -4040, y: 0, w: 10000, h: 1080 };
+        assert_eq!(layer_rect(huge, FRAME, room_limit(16384)), layer_rect(huge, FRAME, room_limit(8192)));
     }
 
     #[test]

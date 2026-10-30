@@ -494,6 +494,40 @@ impl EditorHarness {
         cmds
     }
 
+    /// GM20: the screen rects the last frame filled with `fill` (the
+    /// canvas's paper sheet and veils among them), nested shapes included.
+    pub fn filled_rects(&self, fill: egui::Color32) -> Vec<egui::Rect> {
+        fn walk(s: &egui::Shape, fill: egui::Color32, out: &mut Vec<egui::Rect>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, out)),
+                egui::Shape::Rect(r) if r.fill == fill => out.push(r.rect),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for c in &self.h.output().shapes {
+            walk(&c.shape, fill, &mut out);
+        }
+        out
+    }
+
+    /// GM20: the screen rects the last frame outlined in `color` (fill-less
+    /// rects: the frame drawn on a wider paper sheet).
+    pub fn outlined_rects(&self, color: egui::Color32) -> Vec<egui::Rect> {
+        fn walk(s: &egui::Shape, color: egui::Color32, out: &mut Vec<egui::Rect>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, color, out)),
+                egui::Shape::Rect(r) if r.stroke.color == color && r.fill.a() == 0 => out.push(r.rect),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for c in &self.h.output().shapes {
+            walk(&c.shape, color, &mut out);
+        }
+        out
+    }
+
     /// The viewport commands the last frame sent to the root window.
     pub fn root_commands(&self) -> Vec<egui::ViewportCommand> {
         self.h

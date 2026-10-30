@@ -135,6 +135,13 @@ pub fn rule_sec() -> Color32 {
 pub fn tally_well() -> Color32 {
     Color32::from_rgba_unmultiplied(239, 194, 74, 36)
 }
+/// GM20: the veil over paper the GPU does not paint (past a capped
+/// painting window): Graphite through the sheet, so the strip reads as
+/// paper out of reach — not desk, and not a warning.
+#[inline]
+pub fn paper_veil() -> Color32 {
+    Color32::from_rgba_unmultiplied(26, 27, 24, 110)
+}
 
 // ---------------------------------------------------------------------------
 // Structure (§2.3). The spacing scale is 2·4·6·8·12·16·24 — nothing else.
