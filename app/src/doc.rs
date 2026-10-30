@@ -561,6 +561,8 @@ pub struct AppState {
     pub paintcheck: crate::paintcheck::PaintCheck,
     /// GM11: the render queue — its jobs, form and worker.
     pub render_queue: crate::render_queue::RenderQueue,
+    /// GM15: the cut board and episode timeline — filters, thumbnails, drag.
+    pub board: crate::board_panel::BoardUi,
     /// GM7: the Convert colours to sRGB DANGER confirm is open.
     pub convert_confirm: bool,
     /// GM8: the Build composite DANGER confirm is open — the graph shaped
@@ -692,6 +694,7 @@ impl AppState {
             recolour_offer: None,
             paintcheck: Default::default(),
             render_queue: Default::default(),
+            board: Default::default(),
             convert_confirm: false,
             auto_comp_confirm: None,
             satsuei_confirm: None,
@@ -788,6 +791,7 @@ impl AppState {
             recolour_offer: None,
             paintcheck: Default::default(),
             render_queue: Default::default(),
+            board: Default::default(),
             convert_confirm: false,
             auto_comp_confirm: None,
             satsuei_confirm: None,
@@ -1848,6 +1852,7 @@ impl AppState {
             } else {
                 before.chart.clone()
             },
+            cut: before.cut,
         };
         self.apply_drawing_def(id, before, after, &format!("mark {}", kind.label()));
     }
@@ -1883,6 +1888,7 @@ impl AppState {
         let after = DrawingDef {
             kind: DrawingKind::Key,
             chart,
+            cut: before.cut,
         };
         self.apply_drawing_def(id, before, after, "spacing chart");
     }
@@ -2022,6 +2028,7 @@ impl AppState {
                 after: DrawingDef {
                     kind: DrawingKind::Inbetween,
                     chart: None,
+                    cut: None,
                 },
             });
             cmds.push(Command::SetCell {
@@ -3637,6 +3644,198 @@ impl AppState {
             Err(e) => self.refuse(format!("refused — the cut could not be created ({e})")),
         }
     }
+
+    // ---- GM15: editorial ------------------------------------------------
+
+    fn prod_edit(&mut self, at: CutRef, label: &str, cmds: impl FnOnce(&Cut) -> Vec<Command>) {
+        let Some(cut) = self.engine.project.cut(at.scene, at.cut) else {
+            self.refuse(format!("refused — {label}: that cut is gone"));
+            return;
+        };
+        let cmds = cmds(cut);
+        if cmds.is_empty() {
+            return;
+        }
+        let r = self.engine.apply(label, cmds);
+        self.report(r, label);
+    }
+
+    /// A cut's production status (None clears it) — one undo step.
+    pub fn set_cut_status(&mut self, at: CutRef, status: Option<anim_core::board::CutStatus>) {
+        self.prod_edit(at, "cut status", |c| anim_core::board::set_status(c, at, status));
+    }
+
+    /// Who has the cut (empty = nobody) — one undo step.
+    pub fn set_cut_assignee(&mut self, at: CutRef, who: &str) {
+        self.prod_edit(at, "cut assignee", |c| anim_core::board::set_assignee(c, at, who));
+    }
+
+    /// A retake note on `frame`; with `retake` the cut goes to Retake in
+    /// the same undo step.
+    pub fn add_retake_note(&mut self, at: CutRef, frame: u32, text: &str, retake: bool) {
+        let note = anim_core::board::RetakeNote {
+            frame,
+            text: text.trim().to_string(),
+            author: self.render_queue.artist.clone(),
+            resolved: false,
+        };
+        self.prod_edit(at, "retake note", |c| anim_core::board::add_note(c, at, note, retake));
+    }
+
+    /// Move the cut at `from` to `to` in the scene's order — one undo step.
+    pub fn move_cut(&mut self, scene: SceneId, from: usize, to: usize) {
+        if from == to {
+            return;
+        }
+        let r = self
+            .engine
+            .apply("move cut", vec![Command::MoveCut { scene, from, to }]);
+        if r.is_ok() {
+            self.meta_dirty = true;
+        }
+        self.report(r, "cut moved");
+    }
+
+    /// A storyboard panel's cut number (None = its order on the column).
+    pub fn set_panel_cut(&mut self, drawing: DrawingId, number: Option<u32>) {
+        let at = self.at();
+        let before = self.cut().drawing_def(drawing);
+        let after = anim_core::model::DrawingDef {
+            cut: number,
+            ..before.clone()
+        };
+        if before == after {
+            return;
+        }
+        let r = self.engine.apply(
+            "panel cut number",
+            vec![Command::SetDrawingDef {
+                at,
+                drawing,
+                before,
+                after,
+            }],
+        );
+        self.report(r, "panel cut number");
+    }
+
+    /// The column whose exposures are the animatic's panels: BOARD when
+    /// the cut has one, else the active column.
+    pub fn panel_column(&self) -> ColumnId {
+        self.cut()
+            .xsheet
+            .columns
+            .iter()
+            .find(|c| c.name == "BOARD")
+            .map_or(self.view.active_column, |c| c.id)
+    }
+
+    /// "Make cuts from panels": one new cut per panel cut number, after
+    /// this one — one undo step.
+    pub fn make_cuts_from_panels(&mut self) {
+        let at = self.at();
+        let column = self.panel_column();
+        match anim_core::board::cuts_from_panels(&mut self.engine.project, at, column) {
+            Ok(cmds) => {
+                let n = cmds.len();
+                let r = self.engine.apply("make cuts from panels", cmds);
+                if r.is_ok() {
+                    self.meta_dirty = true;
+                }
+                self.report(r, &format!("made {n} cut(s) from the panels"));
+            }
+            Err(e) => self.refuse(format!("refused — no cuts made: {e}")),
+        }
+    }
+
+    /// The episode's target running time (None clears it); project data
+    /// beside the palettes, outside undo.
+    pub fn set_episode_target(&mut self, frames: Option<u64>) {
+        let key = anim_core::board::TARGET_KEY;
+        match frames {
+            Some(f) => self.engine.project.app_meta.insert(key.into(), f.to_string()),
+            None => self.engine.project.app_meta.remove(key),
+        };
+        self.meta_dirty = true;
+    }
+
+    /// "Export EDL": the scene's episode as a CMX3600 EDL at `path`, each
+    /// event naming the render the queue's pattern gives its cut.
+    pub fn export_edl(&mut self, scene: SceneId, path: &std::path::Path) -> bool {
+        let Some(s) = self.engine.project.scene(scene) else {
+            self.refuse("refused — no EDL: the scene is gone");
+            return false;
+        };
+        let preset = self.render_queue.draft.preset;
+        let ext = anim_core::deliver::PRESETS
+            .get(preset)
+            .map_or("png", |p| p.format.ext());
+        let edl = anim_core::board::edl_cmx3600(
+            &self.engine.project.name,
+            s,
+            self.engine.project.fps,
+            &self.render_queue.draft.pattern,
+            ext,
+        );
+        match std::fs::write(path, edl) {
+            Ok(()) => {
+                self.status = format!("EDL written: {}", path.display());
+                true
+            }
+            Err(e) => {
+                self.refuse(format!("refused — the EDL was not written ({e})"));
+                false
+            }
+        }
+    }
+
+    /// "Export colour sheet": one PNG per character palette in `dir`
+    /// (`iro_<name>.png`). The number written.
+    pub fn export_color_sheets(&mut self, dir: &std::path::Path) -> usize {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            self.refuse(format!("refused — no colour sheet: {e}"));
+            return 0;
+        }
+        let mut n = 0;
+        for p in &self.palettes.characters {
+            let sheet = crate::palette::sheet_palette(p);
+            let img = anim_core::board::render_color_sheet(&sheet);
+            let name = format!("iro_{}.png", anim_core::deliver::sanitize(&p.name));
+            let path = dir.join(name);
+            match anim_core::deliver::write_frame(
+                &path,
+                &img,
+                anim_core::deliver::Format::Png8,
+                self.engine.project.color_law,
+            ) {
+                Ok(()) => n += 1,
+                Err(e) => {
+                    self.refuse(format!("refused — colour sheet {}: {e}", p.name));
+                    return n;
+                }
+            }
+        }
+        self.status = format!("{n} colour sheet(s) written to {}", dir.display());
+        n
+    }
+
+    /// "Export cut as project": a new project file holding cut `at`, its
+    /// palettes and the project's settings. This project is untouched.
+    pub fn export_cut_as_project(&mut self, at: CutRef, path: &std::path::Path) -> bool {
+        // The palettes ride in app meta, as a save writes them.
+        self.palettes.save_into(&mut self.engine.project);
+        match anim_core::store::export_cut(&self.engine.project, at.scene, at.cut, path) {
+            Ok(()) => {
+                self.status = format!("cut exported: {}", path.display());
+                true
+            }
+            Err(e) => {
+                self.refuse(format!("refused — the cut was not exported ({e})"));
+                false
+            }
+        }
+    }
+
     pub fn tick(&mut self, dt: f32) {
         if !self.view.playing {
             return;

@@ -1106,6 +1106,7 @@ fn key_with_chart(to: DrawingId) -> anim_core::model::DrawingDef {
             to,
             marks: vec![0.25, 0.5, 0.75],
         }),
+        cut: None,
     }
 }
 
@@ -1203,6 +1204,7 @@ fn drawing_defs_survive_save_and_files_without_the_table_load_empty() {
                     after: DrawingDef {
                         kind: DrawingKind::Breakdown,
                         chart: None,
+                        cut: None,
                     },
                 },
             ],

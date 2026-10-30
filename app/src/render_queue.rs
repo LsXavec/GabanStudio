@@ -65,6 +65,9 @@ pub struct Job {
     pub state: JobState,
     /// Frames rendered so far.
     pub done: usize,
+    /// GM15: an Episode job — every cut of `at.scene` back to back, one
+    /// sequence or one video (`at.cut` is the scene's first cut).
+    pub episode: bool,
 }
 
 impl Job {
@@ -180,9 +183,46 @@ pub struct JobSpec {
     /// An image sequence also writes the range's mixdown WAV (on unless
     /// the queue's form turns it off).
     pub mixdown: bool,
+    /// GM15: an Episode job's cuts; `cut` is then the first of them and
+    /// `frames` spans the whole episode.
+    pub episode: Option<deliver::Episode>,
 }
 
 impl JobSpec {
+    /// GM15: the Episode job for `scene` of `project`: every cut in order,
+    /// named as the episode ("episode" in the pattern's cut field). None
+    /// when the scene is gone or has no cut.
+    pub fn episode(
+        project: &Project,
+        scene: anim_core::ids::SceneId,
+        preset: &Preset,
+        burn_ins: BurnIns,
+        out: PathBuf,
+        pattern: String,
+        artist: String,
+    ) -> Option<JobSpec> {
+        let ep = deliver::Episode::of(project, scene, preset.purpose)?;
+        let total = ep.frame_count();
+        Some(JobSpec {
+            cut: ep.cuts[0].clone(),
+            law: project.color_law,
+            size: (project.width, project.height),
+            fps: project.fps,
+            frames: (0, total.max(1) - 1),
+            preset: *preset,
+            burn_ins,
+            slate: Slate {
+                names: ep.names.clone(),
+                fps: project.fps,
+                date: today(),
+                artist,
+            },
+            out,
+            pattern,
+            mixdown: true,
+            episode: Some(ep),
+        })
+    }
     /// The job for cut `at` of `project` over `frames` (None = the whole
     /// cut; a range is kept inside the cut). None when the cut is gone.
     #[allow(clippy::too_many_arguments)]
@@ -224,10 +264,32 @@ impl JobSpec {
             out,
             pattern,
             mixdown: true,
+            episode: None,
         })
     }
 
     fn frame(&self, f: u32) -> Image {
+        // GM15: an episode frame is its own cut's frame, burnt in with
+        // that cut's names (the files carry the episode's).
+        if let Some((i, local)) = self.episode.as_ref().and_then(|ep| ep.locate(f)) {
+            let ep = self.episode.as_ref().expect("located above");
+            let slate = Slate {
+                names: Names {
+                    cut: ep.cuts[i].name.clone(),
+                    ..self.slate.names.clone()
+                },
+                ..self.slate.clone()
+            };
+            return deliver::deliver_frame(
+                &ep.cuts[i],
+                self.law,
+                local,
+                self.size,
+                &self.preset,
+                self.burn_ins,
+                &slate,
+            );
+        }
         deliver::deliver_frame(
             &self.cut,
             self.law,
@@ -237,6 +299,22 @@ impl JobSpec {
             self.burn_ins,
             &self.slate,
         )
+    }
+
+    /// Write the mixdown of the job's frames to `path` (the episode's cuts
+    /// end to end for an Episode job); Ok(false) when nothing sounds.
+    fn write_mixdown(&self, path: &Path, from: u32, to: u32) -> Result<bool, String> {
+        match &self.episode {
+            Some(ep) => ep.write_mixdown(path, self.fps.max(1)),
+            None => deliver::write_mixdown(path, &self.cut, self.fps.max(1), from, to),
+        }
+    }
+
+    fn has_sound(&self) -> bool {
+        match &self.episode {
+            Some(ep) => ep.cuts.iter().any(anim_core::audio::has_sound),
+            None => anim_core::audio::has_sound(&self.cut),
+        }
     }
 }
 
@@ -274,13 +352,7 @@ pub fn render_job(
     // "mixdown WAV" latch is off).
     if spec.mixdown {
         let wav = deliver::video_name(&spec.pattern, &spec.slate.names, "wav");
-        deliver::write_mixdown(
-            &spec.out.join(wav),
-            &spec.cut,
-            spec.fps.max(1),
-            spec.frames.0,
-            spec.frames.1,
-        )?;
+        spec.write_mixdown(&spec.out.join(wav), spec.frames.0, spec.frames.1)?;
     }
     Ok(n)
 }
@@ -307,10 +379,10 @@ fn render_video(
     let audio_path = tmp.join("audio.wav");
     // GM12: every sounding track mixed down over the whole cut — the same
     // seek and length pick the range out of it as out of the clip before.
-    let audio = if anim_core::audio::has_sound(&spec.cut) {
+    let audio = if spec.has_sound() {
         std::fs::create_dir_all(&tmp).map_err(|e| format!("temp dir: {e}"))?;
         let last = spec.cut.frame_count.max(1) - 1;
-        deliver::write_mixdown(&audio_path, &spec.cut, fps, 0, last)
+        spec.write_mixdown(&audio_path, 0, last)
             .map_err(|e| format!("audio temp: {e}"))?;
         Some(AudioIn {
             path: &audio_path,
@@ -598,8 +670,54 @@ fn push_job(
         pattern,
         state: JobState::Queued,
         done: 0,
+        episode: false,
     });
     Some(q.jobs.len() - 1)
+}
+
+/// GM15: "+ episode" — one job over every cut of `scene` in order, from
+/// the form (its preset, burn-ins, folder and pattern). Refuses as
+/// [`add_job`] does without a folder, and on a scene with no cut.
+pub fn add_episode_job(state: &mut AppState, scene: anim_core::ids::SceneId) -> bool {
+    let Some(first) = state
+        .engine
+        .project
+        .scene(scene)
+        .and_then(|s| s.cuts.first())
+        .map(|c| c.id)
+    else {
+        state.refuse("refused — the scene has no cut to render");
+        return false;
+    };
+    let Some(out) = state.render_queue.out_dir(state.file_path.as_deref()) else {
+        state
+            .refuse("the render queue needs an output folder: type one, or save the project first");
+        return false;
+    };
+    let total = anim_core::board::trt_frames(state.engine.project.scene(scene).expect("found above"));
+    let d = state.render_queue.draft.clone();
+    let label = format!(
+        "episode {} · {} frames",
+        state.engine.project.scene(scene).map_or("", |s| s.name.as_str()),
+        total
+    );
+    let q = &mut state.render_queue.queue;
+    q.push(Job {
+        at: CutRef { scene, cut: first },
+        label,
+        frames: None,
+        span: (0, (total.max(1) - 1) as u32),
+        preset: d.preset,
+        burn_ins: d.burn_ins,
+        half: d.half,
+        mixdown: d.mixdown,
+        out,
+        pattern: d.pattern,
+        state: JobState::Queued,
+        done: 0,
+        episode: true,
+    });
+    true
 }
 
 /// "+ selected cuts": one job per picked cut, in the project's order.
@@ -704,17 +822,30 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
         let job = state.render_queue.queue.jobs[i].clone();
         let artist = state.render_queue.artist.clone();
         // The ask is read now: a whole-cut job renders the cut's length at
-        // its start, not when it was added.
-        let spec = JobSpec::new(
-            &state.engine.project,
-            job.at,
-            job.frames,
-            job.preset(),
-            job.burn_ins,
-            job.out.clone(),
-            job.pattern.clone(),
-            artist,
-        );
+        // its start, not when it was added (an Episode job, the scene's
+        // cuts as they are then).
+        let spec = if job.episode {
+            JobSpec::episode(
+                &state.engine.project,
+                job.at.scene,
+                job.preset(),
+                job.burn_ins,
+                job.out.clone(),
+                job.pattern.clone(),
+                artist,
+            )
+        } else {
+            JobSpec::new(
+                &state.engine.project,
+                job.at,
+                job.frames,
+                job.preset(),
+                job.burn_ins,
+                job.out.clone(),
+                job.pattern.clone(),
+                artist,
+            )
+        };
         let Some(mut spec) = spec else {
             match state
                 .render_queue
@@ -970,6 +1101,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 {
                     add_picked(state);
                 }
+                // GM15: the scene's cuts back to back as ONE job.
+                if ui
+                    .button("+ episode")
+                    .on_hover_text(
+                        "every cut of this scene in order as one sequence or one video, \
+                         their sound end to end",
+                    )
+                    .clicked()
+                {
+                    add_episode_job(state, at.scene);
+                }
             });
             // The cuts to queue together: this scene's, as latches (picks
             // in other scenes are kept while this one shows).
@@ -1204,6 +1346,7 @@ mod tests {
             pattern: deliver::DEFAULT_PATTERN.into(),
             state: JobState::Queued,
             done: 0,
+            episode: false,
         }
     }
 

@@ -271,6 +271,13 @@ pub enum Command {
         cut: Box<Cut>,
     },
     RemoveCut { at: CutRef },
+    /// GM15: move the cut at index `from` of `scene` to index `to` (the
+    /// episode's order); the inverse moves it back.
+    MoveCut {
+        scene: SceneId,
+        from: usize,
+        to: usize,
+    },
     RenameCut { at: CutRef, name: String },
     /// The cut's length. Keys past the new end are kept (hidden), never
     /// deleted, so shortening and lengthening again loses nothing.
@@ -408,6 +415,11 @@ impl Command {
             Command::AddCut { scene, cut, .. } => CutRef {
                 scene: *scene,
                 cut: cut.id,
+            },
+            // The order of a scene's cuts changes no cut's pictures.
+            Command::MoveCut { scene, .. } => CutRef {
+                scene: *scene,
+                cut: CutId(0),
             },
         }
     }
@@ -1454,6 +1466,28 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             })
         }
 
+        Command::MoveCut { scene, from, to } => {
+            let s = project
+                .scene_mut(*scene)
+                .ok_or(EngineError::UnknownScene(*scene))?;
+            let n = s.cuts.len();
+            if *from >= n || *to >= n {
+                return Err(EngineError::InvalidCommand(format!(
+                    "cut move {from} -> {to} out of range (scene has {n})"
+                )));
+            }
+            let cut = s.cuts.remove(*from);
+            s.cuts.insert(*to, cut);
+            Ok(AppliedEffect {
+                inverse: vec![Command::MoveCut {
+                    scene: *scene,
+                    from: *to,
+                    to: *from,
+                }],
+                invalidation_roots: vec![],
+            })
+        }
+
         Command::RenameCut { at, name } => {
             let cut = cut_mut(project, *at)?;
             let prev = std::mem::replace(&mut cut.name, name.clone());
@@ -1508,6 +1542,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 || !cut.xsheet.columns.iter().all(|c| fits(c.last_key()))
                 || !cut.xsheet.params.iter().all(|p| fits(p.keys().last().map(|k| k.0)))
                 || !fits(cut.memos.keys().next_back().copied())
+                || !fits(crate::board::last_note_frame(cut))
                 || !offsets_fit
             {
                 return Err(EngineError::InvalidCommand(
@@ -1526,13 +1561,17 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 let props = track_props_mut(cut, i).expect("listed above");
                 props.offset += *count as i32;
             }
+            // GM15: retake notes ride the ripple too (D4).
+            let notes = crate::board::ripple_notes_insert(cut, *at, *frame, *count);
             cut.frame_count = grown.expect("checked above");
+            let mut inverse = vec![Command::DeleteFrames {
+                at: *at,
+                frame: *frame,
+                count: *count,
+            }];
+            inverse.extend(notes);
             Ok(AppliedEffect {
-                inverse: vec![Command::DeleteFrames {
-                    at: *at,
-                    frame: *frame,
-                    count: *count,
-                }],
+                inverse,
                 invalidation_roots: all_nodes(cut),
             })
         }
@@ -1632,6 +1671,9 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     });
                 }
             }
+            // GM15: retake notes ride the ripple too (D4); the restore runs
+            // after the inverse's InsertFrames.
+            inverse.extend(crate::board::ripple_notes_delete(cut, *at, *frame, *count));
             cut.frame_count -= *count;
             Ok(AppliedEffect {
                 inverse,

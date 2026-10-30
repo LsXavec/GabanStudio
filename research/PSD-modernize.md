@@ -2674,3 +2674,23 @@ what was not verified.
   19 `look_tests`, 3 `comproom_*`. Not verified: the real window, the file dialog, GPU display of the
   look at size and its speed at 1920×1080. Left: chromatic aberration, light rays, colour Curves; a
   registered verb (menu / palette entry) for Build satsuei graph.
+- 2026-10-29 — GM15 Cut board, episode timeline and EDL (core and panes). Engine: `board.rs` — `CutStatus`
+  (8, stable keys) and `ProdInfo` in cut meta `prod.status` / `prod.assignee` / `prod.notes` (one
+  SetCutMeta per changed field; a key this build cannot read is left alone), `filter_cuts`, `trt_frames`,
+  `format_trt` (30,972 at 24 = "21:30+12"), target difference and `parse_trt` (`app.episode.target`),
+  `episode_frame_map` / `cut_starts` / `locate`, the pinned CMX3600 `edl_cmx3600` (non-drop, record
+  01:00:00:00, V per cut plus AA when it sounds, `* FROM CLIP NAME:` from the queue's pattern), the
+  colour designation sheet (`color_sheet_layout` pinned at 604×332 for 6 chips + 1 variant;
+  `render_color_sheet`, swatches the stored chip exactly, text via `text`), `panels` / `cuts_from_panels`
+  (panel cut number in `DrawingDef.cut`, written only when set; new cuts after the animatic with the
+  pictures copied on a Ref column, one batch), retake notes in the frame ripple (D4; kept as JSON values
+  so unknown fields ride along, the inverse restores the bytes); `Command::MoveCut` (exact inverse, the
+  order saves through `ord`); `store::export_cut`; `deliver::Episode` (frame source over the cuts, the
+  mixdowns laid end to end slot by slot). App: `Pane::Board` (cards: frame-0 picture, number, s+k, status
+  combo, assignee, open notes; filters; open; make cuts from panels, colour sheets, export cut as project)
+  and `Pane::Episode` (blocks by length, drag = MoveCut, TRT against the target over/under, Play episode
+  runs on into the next cut, Export EDL, render episode), both tabbed in the Edit room; the render
+  queue's Episode job (`+ episode`, one sequence or video, the episode's mixdown). 12 `board_tests`, 8
+  `cutboard_*`. Not verified: the real window, a video Episode job through ffmpeg. Left: note markers on
+  the sheet rows and the panel cut-number cell menu, registered verbs (menu / palette) for the exports,
+  the storyboard pane, conte pages, slate frames in the episode render.

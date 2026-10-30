@@ -175,6 +175,47 @@ pub fn derive_shadow(normal: [u8; 4]) -> [u8; 4] {
     [r, g, b, normal[3]]
 }
 
+/// GM15: which cel layer a role paints, read from its name the way the
+/// paint team names chips (kage = shadow, hairaito = highlight, sen =
+/// line); anything else is the base colour.
+pub fn chip_layer(name: &str) -> &'static str {
+    let n = name.to_lowercase();
+    if n.contains("shadow") || n.contains("kage") {
+        "kage (shadow)"
+    } else if n.contains("high") || n.contains("hairaito") {
+        "hairaito (highlight)"
+    } else if n.contains("line") || n.contains("sen") {
+        "sen (line)"
+    } else {
+        "base"
+    }
+}
+
+/// GM15: a character palette as the colour designation sheet lists it —
+/// its roles as chips (stored bytes, untouched) and its variants.
+pub fn sheet_palette(p: &CharacterPalette) -> anim_core::board::SheetPalette {
+    anim_core::board::SheetPalette {
+        name: p.name.clone(),
+        chips: p
+            .roles
+            .iter()
+            .map(|r| anim_core::board::SheetChip {
+                name: r.name.clone(),
+                role: chip_layer(&r.name).into(),
+                color: r.color,
+            })
+            .collect(),
+        variants: p
+            .variants
+            .iter()
+            .map(|v| anim_core::board::SheetVariant {
+                name: v.name.clone(),
+                colors: v.colors.clone(),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod dish_tests {
     use super::*;

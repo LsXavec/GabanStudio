@@ -348,6 +348,117 @@ pub fn write_mixdown(path: &Path, cut: &Cut, fps: u32, from: u32, to: u32) -> Re
     }
 }
 
+// ---- GM15: the episode -------------------------------------------------------
+
+/// GM15: the episode — every cut of a scene back to back, in the scene's
+/// order ([`crate::board::episode_frame_map`]) — as the render queue's
+/// Episode job renders it: one frame source over all the cuts, and their
+/// mixdowns laid end to end. The cuts are snapshots (Arc'd tiles, cheap),
+/// so a render thread owns them.
+#[derive(Clone)]
+pub struct Episode {
+    /// The scene's cuts, in order (a Final job's filtered once, here).
+    pub cuts: Vec<Cut>,
+    /// Each cut's first frame in the episode.
+    pub starts: Vec<u32>,
+    /// The episode's names for files: the cut field is "episode".
+    pub names: Names,
+}
+
+impl Episode {
+    /// The episode of `scene` (None when the scene is gone or has no cut).
+    pub fn of(project: &Project, scene: crate::ids::SceneId, purpose: Purpose) -> Option<Episode> {
+        let s = project.scene(scene)?;
+        if s.cuts.is_empty() {
+            return None;
+        }
+        let mut at = 0u32;
+        let mut starts = Vec::with_capacity(s.cuts.len());
+        let cuts = s
+            .cuts
+            .iter()
+            .map(|c| {
+                starts.push(at);
+                at = at.saturating_add(c.frame_count);
+                let mut snapshot = c.clone();
+                if purpose == Purpose::Final {
+                    retain_purpose(&mut snapshot, Purpose::Final);
+                }
+                snapshot
+            })
+            .collect();
+        Some(Episode {
+            cuts,
+            starts,
+            names: Names {
+                project: project.name.clone(),
+                scene: s.name.clone(),
+                cut: "episode".into(),
+            },
+        })
+    }
+
+    /// Frames in the whole episode.
+    pub fn frame_count(&self) -> u32 {
+        self.cuts.iter().fold(0u32, |n, c| n.saturating_add(c.frame_count))
+    }
+
+    /// Episode frame `frame` as (cut index, frame within that cut).
+    pub fn locate(&self, frame: u32) -> Option<(usize, u32)> {
+        let i = self.starts.partition_point(|s| *s <= frame).checked_sub(1)?;
+        let local = frame - self.starts[i];
+        (local < self.cuts[i].frame_count).then_some((i, local))
+    }
+
+    /// Episode frame `frame`, rendered as its own cut renders it.
+    pub fn render(
+        &self,
+        frame: u32,
+        law: ColorLaw,
+        width: u32,
+        height: u32,
+        opts: &RenderOpts,
+    ) -> Option<Image> {
+        let (i, f) = self.locate(frame)?;
+        Some(render(&self.cuts[i], law, f, width, height, opts))
+    }
+
+    /// The cuts' mixdowns laid end to end, interleaved stereo at
+    /// [`crate::audio::MIX_RATE`]: each cut fills exactly its frames' slot
+    /// (cut to it, or silence after a short clip; a silent cut is silence),
+    /// so sound stays on its pictures. None when no cut sounds.
+    pub fn mixdown(&self, fps: u32) -> Option<Vec<f32>> {
+        if !self.cuts.iter().any(crate::audio::has_sound) {
+            return None;
+        }
+        let rate = crate::audio::MIX_RATE as u64;
+        let fps = fps.max(1) as u64;
+        let at = |frame: u64| (frame * rate / fps) as usize * 2;
+        let mut out = Vec::with_capacity(at(self.frame_count() as u64));
+        for (c, start) in self.cuts.iter().zip(&self.starts) {
+            let start = *start as u64;
+            let slot = at(start + c.frame_count as u64) - at(start);
+            match mixdown(c, fps as u32, 0, c.frame_count.saturating_sub(1)) {
+                Some(mut mix) => {
+                    mix.resize(slot, 0.0);
+                    out.extend(mix);
+                }
+                None => out.resize(out.len() + slot, 0.0),
+            }
+        }
+        Some(out)
+    }
+
+    /// Write [`Episode::mixdown`] to `path` (24-bit stereo WAV); Ok(false),
+    /// and no file, when no cut sounds.
+    pub fn write_mixdown(&self, path: &Path, fps: u32) -> Result<bool, String> {
+        match self.mixdown(fps) {
+            Some(mix) => crate::audio::write_wav(path, &mix, crate::audio::MIX_RATE).map(|_| true),
+            None => Ok(false),
+        }
+    }
+}
+
 /// Crop odd sizes by a pixel: 4:2:0 and 4:2:2 need even dimensions.
 const EVEN: &str = "crop=trunc(iw/2)*2:trunc(ih/2)*2";
 

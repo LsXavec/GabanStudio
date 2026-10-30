@@ -502,6 +502,10 @@ impl SpacingChart {
 pub struct DrawingDef {
     pub kind: DrawingKind,
     pub chart: Option<SpacingChart>,
+    /// GM15: on a storyboard panel, the cut number it belongs to (None =
+    /// the panel's order on the BOARD column).
+    #[serde(default)]
+    pub cut: Option<u32>,
 }
 
 impl DrawingDef {
@@ -510,7 +514,11 @@ impl DrawingDef {
         let chart = self.chart.as_ref().map(|c| {
             serde_json::json!({ "to": c.to.0, "marks": c.marks })
         });
-        serde_json::json!({ "kind": self.kind.key(), "chart": chart }).to_string()
+        let mut v = serde_json::json!({ "kind": self.kind.key(), "chart": chart });
+        if let Some(n) = self.cut {
+            v["cut"] = serde_json::json!(n);
+        }
+        v.to_string()
     }
 
     /// Read a store row. None = not a JSON object (the caller reports the
@@ -535,7 +543,11 @@ impl DrawingDef {
             let chart = SpacingChart { to, marks };
             chart.is_valid().then_some(chart)
         });
-        Some(DrawingDef { kind, chart })
+        let cut = o
+            .get("cut")
+            .and_then(|n| n.as_u64())
+            .and_then(|n| u32::try_from(n).ok());
+        Some(DrawingDef { kind, chart, cut })
     }
 }
 

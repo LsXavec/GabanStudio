@@ -12,6 +12,7 @@
 //! No I/O besides `save`/`load`, no rendering, no UI types. Fully testable.
 
 pub mod audio;
+pub mod board;
 pub mod camera;
 pub mod color;
 pub mod command;

@@ -149,7 +149,14 @@ pub fn build_sample() -> AppState {
         } else {
             DrawingKind::Inbetween
         };
-        cut.set_drawing_def(id, DrawingDef { kind, chart: None });
+        cut.set_drawing_def(
+            id,
+            DrawingDef {
+                kind,
+                chart: None,
+                cut: None,
+            },
+        );
         if let Some(c) = cut.xsheet.column_mut(ball_col) {
             c.set_key(2 * i as u32, Exposure::Drawing(id));
         }

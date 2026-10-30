@@ -39,6 +39,10 @@ pub enum Pane {
     PaintCheck,
     /// GM11: delivery jobs (presets, folders, patterns) rendered on a worker.
     RenderQueue,
+    /// GM15: the scene's cuts as cards — status, assignee, notes.
+    Board,
+    /// GM15: the episode's cuts in order, TRT against the target.
+    Episode,
 }
 
 impl Pane {
@@ -57,6 +61,8 @@ impl Pane {
         Pane::Curves,
         Pane::PaintCheck,
         Pane::RenderQueue,
+        Pane::Board,
+        Pane::Episode,
     ];
 
     /// THE FORGE ROOM (PSD-brush-forge, owner amendment 2026-08-19:
@@ -87,6 +93,8 @@ impl Pane {
             Pane::Curves => "Curves".into(),
             Pane::PaintCheck => "Nuri check (paint check)".into(),
             Pane::RenderQueue => "Render Queue".into(),
+            Pane::Board => "Cut board".into(),
+            Pane::Episode => "Episode timeline".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }
@@ -215,12 +223,17 @@ impl Stage {
             Stage::Edit => {
                 // Sheet takes the left half; result viewer (canvas tabbed
                 // behind it for quick fixes) over the node graph, the render
-                // queue (GM11) tabbed behind it.
+                // queue (GM11), the cut board and the episode timeline
+                // (GM15) tabbed behind it.
                 let mut ds = DockState::new(vec![Pane::Viewer(0), Pane::Canvas]);
                 let tree = ds.main_surface_mut();
                 let [view, sheet] = tree.split_left(NodeIndex::root(), 0.45, vec![Pane::XSheet]);
                 tree.split_below(sheet, 0.72, vec![Pane::Layers]);
-                tree.split_below(view, 0.62, vec![Pane::NodeGraph, Pane::RenderQueue]);
+                tree.split_below(
+                    view,
+                    0.62,
+                    vec![Pane::NodeGraph, Pane::RenderQueue, Pane::Board, Pane::Episode],
+                );
                 ds
             }
         }

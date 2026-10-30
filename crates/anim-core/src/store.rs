@@ -150,6 +150,36 @@ pub fn save_atomic_from(
     Ok(())
 }
 
+/// GM15: "Export cut as project" — a new file holding just that cut (in a
+/// scene of the same name), with the project's settings, its app meta
+/// (palettes and the like) and its id counter, so every id and hash in
+/// the cut stays what it was. `project` is only read.
+pub fn export_cut(project: &Project, scene: SceneId, cut: CutId, path: &Path) -> Result<()> {
+    let s = project.scene(scene).ok_or(EngineError::UnknownScene(scene))?;
+    let c = s
+        .cuts
+        .iter()
+        .find(|c| c.id == cut)
+        .ok_or(EngineError::UnknownCut(cut))?;
+    let sub = Project {
+        name: project.name.clone(),
+        fps: project.fps,
+        width: project.width,
+        height: project.height,
+        dpi: project.dpi,
+        scenes: vec![Scene {
+            id: s.id,
+            name: s.name.clone(),
+            cuts: vec![c.clone()],
+        }],
+        next_id: project.next_id,
+        app_meta: project.app_meta.clone(),
+        color_law: project.color_law,
+        default_cut_frames: project.default_cut_frames,
+    };
+    save_atomic_from(&sub, path, None, false)
+}
+
 /// `<path><suffix>` — beside the file, same name plus a suffix.
 fn sibling(path: &Path, suffix: &str) -> std::path::PathBuf {
     let mut s = path.as_os_str().to_os_string();

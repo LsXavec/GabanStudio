@@ -7,6 +7,7 @@
 // CLI paths (the layout probe) re-attach to the launching terminal.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod board_panel;
 mod canvas;
 mod cmdpal;
 mod config;
@@ -4344,6 +4345,8 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             }
             Pane::PaintCheck => paintcheck::ui(ui, self.state, self.canvas),
             Pane::RenderQueue => render_queue::ui(ui, self.state),
+            Pane::Board => board_panel::ui_board(ui, self.state),
+            Pane::Episode => board_panel::ui_episode(ui, self.state),
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -6618,13 +6621,18 @@ impl Editor {
             self.play_whole = prev > self.state.play_range().1;
         }
         self.play_running = playing;
+        // GM15: Play episode plays each cut whole, then on into the next.
+        let episode = playing && self.state.board.episode_play;
+        if !playing {
+            self.state.board.episode_play = false;
+        }
         let whole = (0, self.state.frame_count() - 1);
-        let range = if self.play_whole {
+        let range = if self.play_whole || episode {
             whole
         } else {
             self.state.play_range()
         };
-        let looping = self.state.view.loop_playback;
+        let looping = self.state.view.loop_playback && !episode;
         let reached = match &mut self.audio_clock {
             Some((clock, cursor, start)) if playing && self.audio_playing => {
                 let pos = cursor.load(std::sync::atomic::Ordering::Relaxed);
@@ -6648,12 +6656,35 @@ impl Editor {
                 }
                 // The UI clock knows only the cut's ends: past the loop
                 // range's end (or wrapped at the cut's) is the range's end.
-                let past = now > range.1 || (now < prev && prev <= range.1);
-                (playing && (range != whole || self.play_whole) && past)
+                let past = now > range.1
+                    || (now < prev && prev <= range.1)
+                    || (episode && !self.state.view.playing);
+                (playing && (range != whole || self.play_whole || episode) && past)
                     .then(|| playback::place(range.1 + 1, range, looping))
             }
         };
         match step {
+            // GM15: the episode runs on into the scene's next cut (its
+            // sound restarts with it); after the last one it stops.
+            Some(playback::Step::Wrap(f)) | Some(playback::Step::End(f)) if episode => {
+                let at = self.state.at();
+                let next = self.state.engine.project.scene(at.scene).and_then(|s| {
+                    let i = s.cuts.iter().position(|c| c.id == at.cut)?;
+                    s.cuts.get(i + 1).map(|c| c.id)
+                });
+                match next {
+                    Some(cut) => {
+                        self.state.goto_cut(at.scene, cut);
+                        self.state.view.playing = true;
+                        self.play_whole = false;
+                    }
+                    None => {
+                        self.state.view.frame = f;
+                        self.state.view.playing = false;
+                        self.state.board.episode_play = false;
+                    }
+                }
+            }
             // A run that played on past the loop range loops the range
             // once it wraps at the cut's end.
             Some(playback::Step::Wrap(_)) if self.play_whole => {
