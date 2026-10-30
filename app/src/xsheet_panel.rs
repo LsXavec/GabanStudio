@@ -24,6 +24,8 @@ const PARAM_COL_W: f32 = 58.0;
 const AUDIO_COL_W: f32 = 46.0;
 /// GM14: the memo/dialogue column (serifu and action notes per frame).
 const MEMO_COL_W: f32 = 96.0;
+/// GM15: a retake note's tick at the memo cell's right edge.
+const NOTE_TICK_W: f32 = 4.0;
 
 /// GM14: the typed entry on the cursor's cell, and the toolbar fields.
 const ENTRY_ID: &str = "gaban_sheet_cell_entry";
@@ -61,8 +63,12 @@ pub struct SheetUi {
     /// scrolled into view, so the entry stays laid out under the keys.
     followed: Option<(anim_core::ids::CutId, u32)>,
     /// GM6: the cell (column, frame) whose context menu is open — its
-    /// drawing's kind is marked from there.
-    menu_cell: Option<(ColumnId, u32)>,
+    /// drawing's kind is marked from there. GM15: no column outside the
+    /// drawing columns (the frame's retake notes still are).
+    menu_cell: Option<(Option<ColumnId>, u32)>,
+    /// GM15: a panel cut number being dragged: (the panel's drawing, the
+    /// live number) — set once, on release (one undo step).
+    panel_edit: Option<(anim_core::ids::DrawingId, u32)>,
     /// GM12: the sound track the header row shows (0 = the first track).
     pub track: usize,
     /// GM12: the shown track's level per frame, under its envelope key —
@@ -371,12 +377,8 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
         );
     // GM6: the cursor's own cell answers a right-click like every other
     // cell — its drawing's kind (the entry sits over the cells' own menu).
-    resp.context_menu(|ui| match state.resolve_at(state.view.active_column, state.view.frame) {
-        Some(drawing) => kind_menu(ui, state, drawing),
-        None => {
-            ui.label(egui::RichText::new("a blank cell: no drawing to mark").color(plate::LEGEND));
-        }
-    });
+    let (column, frame) = (state.view.active_column, state.view.frame);
+    cell_popup(&resp).show(|ui| cell_menu(ui, state, Some(column), frame));
     let (enter, tab) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Tab)));
     let tabbed = tab && resp.has_focus();
     if !(resp.lost_focus() || tabbed) {
@@ -978,7 +980,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                         pos2(row_rect.left() + memo_x, row_rect.top()),
                         vec2(MEMO_COL_W, ROW_H),
                     );
-                    painter.with_clip_rect(cell).text(
+                    // Clipped short of a retake note's tick (GM15).
+                    let text_cell = cell.with_max_x(cell.right() - NOTE_TICK_W - 4.0);
+                    painter.with_clip_rect(text_cell).text(
                         pos2(cell.left() + 4.0, cell.center().y),
                         egui::Align2::LEFT_CENTER,
                         memo,
@@ -1082,25 +1086,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     state.select_cells(anchor, col, f);
                 }
                 // GM6: a right-click on a cell opens its drawing's kind —
-                // the drawing exposed or held there.
+                // the drawing exposed or held there. GM15: anywhere on a
+                // row, the frame's retake notes.
                 if cresp.secondary_clicked()
                     && let Some(p) = cresp.interact_pointer_pos().or(cresp.hover_pos())
                 {
-                    state.sheet_ui.menu_cell = match cell_at(p) {
-                        (Some(col), f, _) => Some((col, f)),
-                        _ => None,
-                    };
+                    let (col, f, _) = cell_at(p);
+                    state.sheet_ui.menu_cell = Some((col, f));
                 }
-                cresp.context_menu(|ui| match state.sheet_ui.menu_cell {
-                    Some((col, f)) => match state.resolve_at(col, f) {
-                        Some(drawing) => kind_menu(ui, state, drawing),
-                        None => {
-                            ui.label(
-                                egui::RichText::new("a blank cell: no drawing to mark")
-                                    .color(plate::LEGEND),
-                            );
-                        }
-                    },
+                cell_popup(&cresp).show(|ui| match state.sheet_ui.menu_cell {
+                    Some((col, f)) => cell_menu(ui, state, col, f),
                     None => ui.close(),
                 });
             }
@@ -1296,6 +1291,67 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                             egui::Stroke::new(1.0, plate::LEGEND),
                         );
                     }
+                    // GM15: a storyboard panel's cut number at its head, on
+                    // the cell's right edge — Tally when set from the
+                    // cell's menu, dim when it is the panel's order.
+                    if state.is_panel_column(col.id) {
+                        let right = cleft + GUTTER_W + (ci + 1) as f32 * COL_W - 4.0;
+                        for p in anim_core::board::panels(cut, col.id) {
+                            if !rows.contains(&(p.start as usize)) {
+                                continue;
+                            }
+                            let set = cut.drawing_def(p.drawing).cut.is_some();
+                            let ink = if set { plate::TALLY } else { plate::legend_dim() };
+                            let r = sheet_painter.text(
+                                pos2(right, ctop + p.start as f32 * ROW_H + ROW_H * 0.5),
+                                egui::Align2::RIGHT_CENTER,
+                                format!("C{}", p.cut),
+                                egui::FontId::monospace(10.0),
+                                ink,
+                            );
+                            let name = cut.drawing(p.drawing).map_or(String::new(), |d| d.name.clone());
+                            let resp = ui.interact(r, ui.id().with(("panel_cut", col.id, p.start)), Sense::hover());
+                            plate::speak(
+                                &resp,
+                                egui::WidgetType::Label,
+                                None,
+                                &format!("panel {name} at frame {}: cut {}", p.start + 1, p.cut),
+                            );
+                        }
+                    }
+                }
+                // GM15: a retake note's frame carries an Aka tick at the
+                // memo cell's right edge (dim once every note there is
+                // resolved); hovered, it reads each note.
+                let mut noted: std::collections::BTreeMap<u32, Vec<anim_core::board::RetakeNote>> =
+                    std::collections::BTreeMap::new();
+                for n in anim_core::board::notes_of(cut) {
+                    noted.entry(n.frame).or_default().push(n);
+                }
+                let x = cleft + memo_x + MEMO_COL_W - NOTE_TICK_W - 2.0;
+                for (f, notes) in noted.range(rows.start as u32..(rows.end as u32).min(frame_count)) {
+                    let open = notes.iter().any(|n| !n.resolved);
+                    let tick = Rect::from_min_size(
+                        pos2(x, ctop + *f as f32 * ROW_H + 2.0),
+                        vec2(NOTE_TICK_W, ROW_H - 4.0),
+                    );
+                    sheet_painter.rect_filled(tick, 0.0, if open { plate::AKA } else { plate::legend_dim() });
+                    let resp = ui.interact(tick.expand(2.0), ui.id().with(("note_tick", *f)), Sense::hover());
+                    plate::speak(
+                        &resp,
+                        egui::WidgetType::Label,
+                        None,
+                        &format!("retake note at frame {}", f + 1),
+                    );
+                    resp.on_hover_ui(|ui| {
+                        plate::legend(ui, &format!("retake notes, frame {}", f + 1));
+                        for n in notes {
+                            let who = if n.author.is_empty() { "?" } else { &n.author };
+                            let how = if n.resolved { "resolved" } else { "open" };
+                            let ink = if n.resolved { plate::LEGEND } else { plate::AKA };
+                            ui.label(egui::RichText::new(format!("{} — {who} · {how}", n.text)).color(ink));
+                        }
+                    });
                 }
             }
 
@@ -1825,6 +1881,98 @@ pub fn cell_mark(kind: anim_core::model::DrawingKind) -> CellMark {
         DrawingKind::Key => CellMark::Circle,
         DrawingKind::Breakdown => CellMark::Underline,
         DrawingKind::Inbetween | DrawingKind::Unset => CellMark::None,
+    }
+}
+
+/// GM15: a sheet cell's context menu, open until a pick or a click off it
+/// (a panel's cut number steps, or is typed, without closing it).
+fn cell_popup(resp: &egui::Response) -> egui::Popup<'_> {
+    egui::Popup::context_menu(resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+}
+
+/// GM6 / GM15: a sheet cell's menu — its drawing's kind; on a BOARD or
+/// Bg / Ref column the storyboard panel's cut number; and, on any row,
+/// the frame's retake notes (each resolved from here) and "add retake
+/// note…".
+fn cell_menu(ui: &mut egui::Ui, state: &mut AppState, column: Option<ColumnId>, frame: u32) {
+    if let Some(col) = column {
+        match state.resolve_at(col, frame) {
+            Some(drawing) => kind_menu(ui, state, drawing),
+            None => {
+                ui.label(egui::RichText::new("a blank cell: no drawing to mark").color(plate::LEGEND));
+            }
+        }
+        if state.is_panel_column(col) {
+            ui.separator();
+            panel_menu(ui, state, col, frame);
+        }
+        ui.separator();
+    }
+    plate::legend(ui, &format!("retake notes, frame {}", frame + 1));
+    let at = state.at();
+    crate::board_panel::note_latches(ui, state, at, Some(frame));
+    if ui
+        .button("add retake note…")
+        .on_hover_text(crate::config::Action::AddRetakeNote.help())
+        .clicked()
+    {
+        state.board.open_note(at, frame);
+        ui.close();
+    }
+}
+
+/// GM15: the cut number of the storyboard panel on `column` at `frame`:
+/// − and + step it, the field takes a typed number or a drag (set on
+/// release), "clear" goes back to the panel's order — each one undo step.
+fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: u32) {
+    let cut = state.cut();
+    let Some(panel) = anim_core::board::panels(cut, column)
+        .into_iter()
+        .find(|p| (p.start..p.start + p.frames).contains(&frame))
+    else {
+        ui.label(egui::RichText::new("no panel on this frame").color(plate::LEGEND));
+        return;
+    };
+    let set = cut.drawing_def(panel.drawing).cut.is_some();
+    plate::legend(ui, "panel cut number");
+    ui.horizontal(|ui| {
+        let down = ui.add_enabled(panel.cut > 1, egui::Button::new("−"));
+        plate::speak(&down, egui::WidgetType::Button, None, "panel cut number down");
+        if down.on_hover_text("this panel goes to the cut before").clicked() {
+            state.set_panel_cut(panel.drawing, Some(panel.cut - 1));
+        }
+        let mut n = match state.sheet_ui.panel_edit {
+            Some((d, live)) if d == panel.drawing => live,
+            _ => panel.cut,
+        };
+        let r = ui
+            .add(egui::DragValue::new(&mut n).range(1..=999).update_while_editing(false))
+            .on_hover_text("the cut this panel belongs to: drag, or click and type");
+        if r.drag_stopped() {
+            if let Some((_, live)) = state.sheet_ui.panel_edit.take() {
+                state.set_panel_cut(panel.drawing, Some(live));
+            }
+        } else if r.dragged() {
+            if r.changed() {
+                state.sheet_ui.panel_edit = Some((panel.drawing, n));
+            }
+        } else if r.changed() {
+            state.set_panel_cut(panel.drawing, Some(n));
+        }
+        let up = ui.button("+");
+        plate::speak(&up, egui::WidgetType::Button, None, "panel cut number up");
+        if up.on_hover_text("this panel goes to the next cut").clicked() {
+            state.set_panel_cut(panel.drawing, Some(panel.cut + 1));
+        }
+    });
+    let how = if set { "set here" } else { "its order on the column" };
+    ui.label(egui::RichText::new(format!("cut {} — {how}", panel.cut)).color(plate::legend_dim()));
+    if ui
+        .add_enabled(set, egui::Button::new("clear (use panel order)"))
+        .on_hover_text("the panel's cut number is its order on the column again")
+        .clicked()
+    {
+        state.set_panel_cut(panel.drawing, None);
     }
 }
 
@@ -2765,6 +2913,141 @@ mod sheetui_tests {
         assert_ne!(k3, k2);
         assert_eq!(&w3[6..], &w2[..42]);
         assert!(w3[..6].iter().all(|v| *v == 0.0));
+    }
+
+    /// The sheet row a widget named `label` sits on.
+    fn row_of(h: &EditorHarness, label: &str) -> u32 {
+        let origin = h.state().sheet_ui.origin.expect("the sheet drew its rows");
+        ((h.rect(label).center().y - origin.y) / super::ROW_H).floor() as u32
+    }
+
+    #[test]
+    fn cutboard_note_markers_sit_on_their_rows_and_ride_insert_frames() {
+        let mut h = sheet();
+        let at = h.state().at();
+        h.state_mut().render_queue.artist = "Mika".into();
+        assert!(h.state_mut().add_retake_note(at, 5, "cheek line breaks", true));
+        assert!(h.state_mut().add_retake_note(at, 20, "hair colour", false));
+        h.run();
+        let rows = h.state().sheet_ui.rows_shown.clone();
+        assert!(rows.contains(&22), "{rows:?}");
+        assert_eq!(row_of(&h, "retake note at frame 6"), 5);
+        assert_eq!(row_of(&h, "retake note at frame 21"), 20);
+        // Past the drawing columns, in the memo cell; one row tall.
+        let origin = h.state().sheet_ui.origin.unwrap();
+        let tick = h.rect("retake note at frame 6");
+        assert!(tick.left() > origin.x + super::GUTTER_W + super::COL_W, "{tick:?}");
+        assert!(tick.height() <= super::ROW_H, "{tick:?}");
+        // Hovered, it reads the note.
+        h.hover("retake note at frame 6");
+        h.wait(1.0);
+        assert!(h.has_text_containing("cheek line breaks — Mika · open"), "{}", h.describe());
+        // A frame inserted above both moves them down a row (D4).
+        h.state_mut().goto(2);
+        h.perform(Action::InsertFrames);
+        h.run();
+        assert!(!h.has("retake note at frame 6"));
+        assert_eq!(row_of(&h, "retake note at frame 7"), 6);
+        assert_eq!(row_of(&h, "retake note at frame 22"), 21);
+    }
+
+    #[test]
+    fn cutboard_a_cells_menu_adds_a_retake_note_in_one_step_and_resolves_it() {
+        use anim_core::board::{self, CutStatus, ProdInfo};
+        let mut h = sheet();
+        // The author is the session's user name (the shell hands it on
+        // each frame).
+        h.rig_mut().config.session.username = "Mika".into();
+        let steps = h.state().engine.position();
+        h.right_click_pos(cell(&h, 0, 6));
+        h.click("add retake note…");
+        let at = h.state().at();
+        let form = h.state().board.note.as_ref().expect("the note window");
+        assert_eq!((form.at, form.frame, form.retake), (at, 6, true));
+        h.type_text("cheek line breaks");
+        h.click("add note");
+        assert!(h.state().board.note.is_none(), "added: the window closes");
+        let notes = |h: &EditorHarness| board::notes_of(h.state().cut());
+        assert_eq!(notes(&h).len(), 1);
+        assert_eq!((notes(&h)[0].frame, notes(&h)[0].author.as_str()), (6, "Mika"));
+        assert_eq!(ProdInfo::of(h.state().cut()).status, Some(CutStatus::Retake));
+        assert_eq!(h.state().engine.position(), steps + 1, "the note and the Retake: one step");
+        assert!(h.has("retake note at frame 7"), "the sheet marks its row");
+        // The row's menu resolves it.
+        h.right_click_pos(cell(&h, 0, 6));
+        assert_eq!(h.node_toggled("f7 cheek line breaks — Mika"), Some(false));
+        h.click("f7 cheek line breaks — Mika");
+        assert!(notes(&h)[0].resolved);
+        // One undo opens it again; one more takes the note and the Retake.
+        h.perform(Action::Undo);
+        assert!(!notes(&h)[0].resolved);
+        h.perform(Action::Undo);
+        assert!(notes(&h).is_empty());
+        assert_eq!(ProdInfo::of(h.state().cut()).status, None);
+    }
+
+    #[test]
+    fn cutboard_panel_cut_numbers_set_from_the_cell_menu_make_cuts_of_60_and_48() {
+        use anim_core::board;
+        use anim_core::command::Command;
+        let mut h = sheet();
+        // Column B is the animatic's BOARD (a Ref column): panels keyed at
+        // frames 0, 36 and 60 of 108.
+        let a = column(&h, 0);
+        let s = h.state_mut();
+        let at = s.at();
+        s.engine
+            .apply("len", vec![Command::SetFrameCount { at, frames: 108 }])
+            .unwrap();
+        let board_col = s.engine.add_column(at, "BOARD").unwrap();
+        s.view.active_column = board_col;
+        s.set_column_kind(anim_core::xsheet::ColumnKind::Ref);
+        for f in [0, 36, 60] {
+            s.goto(f);
+            s.new_drawing_at_frame();
+        }
+        s.view.active_column = a;
+        h.run();
+        assert_eq!(column(&h, 1), board_col);
+        let numbers = |h: &EditorHarness| {
+            board::panels(h.state().cut(), board_col)
+                .iter()
+                .map(|p| p.cut)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(numbers(&h), [1, 2, 3], "each panel's order");
+        // The cell's menu steps a panel's number; the cell shows it.
+        let step_down = |h: &mut EditorHarness, f: u32| {
+            h.state_mut().goto(f);
+            h.run();
+            h.right_click_pos(cell(h, 1, f));
+            h.click("panel cut number down");
+            h.key(egui::Key::Escape);
+        };
+        step_down(&mut h, 36);
+        step_down(&mut h, 60);
+        assert_eq!(numbers(&h), [1, 1, 2]);
+        assert!(h.has_text_containing("at frame 61: cut 2"), "{}", h.describe());
+        // "clear" goes back to the order, and the menu stays open to set
+        // it again.
+        h.state_mut().goto(36);
+        h.run();
+        assert!(h.has_text_containing("at frame 37: cut 1"), "{}", h.describe());
+        h.right_click_pos(cell(&h, 1, 36));
+        h.click("clear (use panel order)");
+        assert_eq!(numbers(&h), [1, 2, 2]);
+        h.click("panel cut number down");
+        assert_eq!(numbers(&h), [1, 1, 2]);
+        h.key(egui::Key::Escape);
+        // Make cuts from panels: cut 1 is panels 1 and 2, cut 2 panel 3.
+        let source = h.state().cut().name.clone();
+        let steps = h.state().engine.position();
+        h.perform(Action::MakeCutsFromPanels);
+        assert_eq!(h.state().status, format!("made 2 cut(s) from {source}'s panels"));
+        let scene = h.state().engine.project.scene(at.scene).unwrap();
+        let made: Vec<(&str, u32)> = scene.cuts[1..].iter().map(|c| (c.name.as_str(), c.frame_count)).collect();
+        assert_eq!(made, [("CUT02", 60), ("CUT03", 48)]);
+        assert_eq!(h.state().engine.position(), steps + 1, "one undo step");
     }
 }
 

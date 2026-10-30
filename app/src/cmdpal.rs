@@ -42,20 +42,22 @@ impl Palette {
 /// Every word of the query must match somewhere. A word in the NAME (or the
 /// menu path) outranks one in an ALIAS, which outranks one in the HELP line;
 /// within each, a prefix beats a word start beats anywhere, and a name also
-/// matches its letters in order ("ndr" finds "New drawing"). Pure.
+/// matches its letters in order ("ndr" finds "New drawing"). Case and the
+/// romaji macrons fold away ("shinko" finds "Shinkō board"). Pure.
 pub fn score(query: &str, action: Action) -> Option<i32> {
-    let name = action.label().to_lowercase();
-    let menu = action.menu().unwrap_or("").to_lowercase();
-    let help = action.help().to_lowercase();
+    let name = fold(action.label());
+    let menu = fold(action.menu().unwrap_or(""));
+    let help = fold(action.help());
+    let query = fold(query);
     let mut total = 0;
-    for word in query.to_lowercase().split_whitespace() {
+    for word in query.split_whitespace() {
         let best = [
             text_score(&name, word, true).map(|s| s + 2000),
             text_score(&menu, word, false).map(|s| s + 1500),
             action
                 .aliases()
                 .iter()
-                .filter_map(|al| text_score(&al.to_lowercase(), word, false))
+                .filter_map(|al| text_score(&fold(al), word, false))
                 .max()
                 .map(|s| s + 1000),
             help.contains(word).then_some(0),
@@ -66,6 +68,21 @@ pub fn score(query: &str, action: Action) -> Option<i32> {
         total += best;
     }
     Some(total)
+}
+
+/// Lower case, with ā ī ū ē ō read as the plain vowel (typed romaji).
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'ā' => 'a',
+            'ī' => 'i',
+            'ū' => 'u',
+            'ē' => 'e',
+            'ō' => 'o',
+            c => c,
+        })
+        .collect()
 }
 
 fn text_score(text: &str, word: &str, fuzzy: bool) -> Option<i32> {

@@ -93,8 +93,10 @@ impl Pane {
             Pane::Curves => "Curves".into(),
             Pane::PaintCheck => "Nuri check (paint check)".into(),
             Pane::RenderQueue => "Render Queue".into(),
-            Pane::Board => "Cut board".into(),
-            Pane::Episode => "Episode timeline".into(),
+            // GM15: the studio's words first (D7), as the Window menu says
+            // them.
+            Pane::Board => "Shinkō board (cut board)".into(),
+            Pane::Episode => "Henshū timeline (episode)".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }

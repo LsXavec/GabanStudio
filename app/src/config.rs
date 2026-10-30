@@ -162,6 +162,19 @@ pub enum Action {
     /// GM13: the satsuei look graph, in one undo step (a graph shaped by
     /// hand is asked about first, DANGER).
     BuildSatsuei,
+    // GM15: editorial — the shinkō board and the henshū timeline, Play
+    // episode, the EDL / colour sheet / cut-as-project exports (into the
+    // render folder), cuts made from an animatic's panels, the Episode
+    // render and the retake note window.
+    ShowCutBoard,
+    ShowEpisode,
+    PlayEpisode,
+    ExportEdl,
+    ExportColorSheet,
+    ExportCutAsProject,
+    MakeCutsFromPanels,
+    RenderEpisode,
+    AddRetakeNote,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -397,6 +410,15 @@ impl Action {
         Action::RamPreview,
         Action::LipFlap,
         Action::BuildSatsuei,
+        Action::ShowCutBoard,
+        Action::ShowEpisode,
+        Action::PlayEpisode,
+        Action::ExportEdl,
+        Action::ExportColorSheet,
+        Action::ExportCutAsProject,
+        Action::MakeCutsFromPanels,
+        Action::RenderEpisode,
+        Action::AddRetakeNote,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -526,6 +548,15 @@ impl Action {
             Action::RamPreview => "Render RAM preview",
             Action::LipFlap => "kuchipaku (lip flap)…",
             Action::BuildSatsuei => "Build satsuei graph",
+            Action::ShowCutBoard => "Shinkō board (cut board)",
+            Action::ShowEpisode => "Henshū timeline (episode)",
+            Action::PlayEpisode => "Play episode",
+            Action::ExportEdl => "Export EDL (CMX3600)",
+            Action::ExportColorSheet => "Export colour sheet (iro shitei)",
+            Action::ExportCutAsProject => "Export cut as project",
+            Action::MakeCutsFromPanels => "Make cuts from panels",
+            Action::RenderEpisode => "Render episode",
+            Action::AddRetakeNote => "Add retake note…",
         }
     }
 
@@ -661,6 +692,15 @@ impl Action {
             RamPreview => "Render the play range's composites into RAM on a worker; playback shows them (Ao on the sheet).",
             LipFlap => "Write 3-mouth kuchipaku on a column from a dialogue track's level, as one undo step.",
             BuildSatsuei => "Build the satsuei (composite) look graph: passes, diffusion, para, light wrap, grade, grain, vignette.",
+            ShowCutBoard => "Open the shinkō board: a card per cut with its picture, length, status, assignee and open notes.",
+            ShowEpisode => "Open the henshū timeline: the scene's cuts as blocks in order (drag one to move it), the TRT and its target.",
+            PlayEpisode => "Play every cut of the scene back to back with its sound; again, it stops.",
+            ExportEdl => "Write the scene as a CMX3600 EDL into the render folder, one event per cut naming its render.",
+            ExportColorSheet => "Write the iro shitei (colour designation sheet): a PNG per character palette, into the render folder.",
+            ExportCutAsProject => "Write the open cut, its palettes and the project settings as a new .animproj for a freelancer.",
+            MakeCutsFromPanels => "Turn the open animatic's BOARD panels into cuts, one per panel cut number, as one undo step.",
+            RenderEpisode => "Queue the scene's cuts as one Episode job in the render queue, frame for frame, sound end to end.",
+            AddRetakeNote => "Note what to fix on this frame of the open cut (it can set the cut to Retake); the sheet shows it.",
         }
     }
 
@@ -669,9 +709,8 @@ impl Action {
         use Action::*;
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
-            | BuildComposite | ProjectSettings | WelcomeScreen | ImportSound | AddSoundTrack => {
-                Group::File
-            }
+            | BuildComposite | ProjectSettings | WelcomeScreen | ImportSound | AddSoundTrack
+            | ExportEdl | ExportColorSheet | ExportCutAsProject => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
@@ -681,7 +720,7 @@ impl Action {
                 Group::Sheet
             }
             PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop | LoopIn
-            | LoopOut | ClearLoop | ToggleScrub | RamPreview => Group::Playback,
+            | LoopOut | ClearLoop | ToggleScrub | RamPreview | PlayEpisode => Group::Playback,
             PrevKey | NextKey | NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames
             | DeleteFrames | HoldPlus | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees
             | Reverse | ColumnKindCel | ColumnKindBg | ColumnKindBook | ColumnKindRef
@@ -690,13 +729,14 @@ impl Action {
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
             | HandlesFlat | HandlesBroken => Group::Sheet,
             FrameCurves => Group::View,
-            PrevCut | NextCut | PaperSize => Group::Cut,
+            PrevCut | NextCut | PaperSize | MakeCutsFromPanels | AddRetakeNote => Group::Cut,
             AddNode | BuildSatsuei => Group::Composite,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
             RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit => Group::Room,
-            ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue => Group::Window,
+            ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue | ShowCutBoard
+            | ShowEpisode | RenderEpisode => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
         }
     }
@@ -812,6 +852,18 @@ impl Action {
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             PaperSize => "Cut/Paper size…",
+            // GM15: the editorial's verbs. The exports write into the
+            // render folder (no dialog, so no "…"); the Episode render sits
+            // under the queue's own entry, as its "+ episode" button.
+            ShowCutBoard => "Window/Shinkō board (cut board)",
+            ShowEpisode => "Window/Henshū timeline (episode)",
+            PlayEpisode => "Sheet/Play/Play episode",
+            ExportEdl => "File/Export/EDL (CMX3600)",
+            ExportColorSheet => "File/Export/Colour designation sheet (iro shitei)",
+            ExportCutAsProject => "File/Export/Cut as project (for a freelancer)",
+            MakeCutsFromPanels => "Cut/Make cuts from panels",
+            RenderEpisode => "Window/Render Queue/+ episode",
+            AddRetakeNote => "Cut/Add retake note…",
             // Each item is its room detent's Stage::name (a test holds them
             // together).
             RoomLayout => "Room/layout",
@@ -969,6 +1021,15 @@ impl Action {
             RamPreview => &["ram preview", "cache frames", "preview render"],
             LipFlap => &["lip sync", "kuchipaku", "mouth"],
             BuildSatsuei => &["satsuei", "look", "satsuei template", "satsuei graph"],
+            ShowCutBoard => &["shinko", "cut board", "production status", "progress", "assignee"],
+            ShowEpisode => &["henshu", "episode", "timeline", "trt", "running time", "cut order"],
+            PlayEpisode => &["animatic", "play all cuts", "play scene", "conte"],
+            ExportEdl => &["edl", "cmx3600", "online edit", "conform", "edit decision list"],
+            ExportColorSheet => &["iro shitei", "colour sheet", "color sheet", "designation"],
+            ExportCutAsProject => &["freelancer", "send cut", "package cut", "outsource"],
+            MakeCutsFromPanels => &["conte", "animatic", "storyboard", "panels", "split cuts"],
+            RenderEpisode => &["episode render", "render all cuts", "export episode"],
+            AddRetakeNote => &["retake", "note", "fix note", "kantoku", "correction"],
             _ => &[],
         }
     }
@@ -1262,6 +1323,41 @@ impl Action {
                 ..ctrl("I")
             }),
             RamPreview => Some(k("0")),
+            // GM15: the editorial's verbs, the same in both presets — on
+            // Ctrl+Shift (the panes, the play, the exports) and Alt (the
+            // Episode job, a note), never Shift+Space (the canvas's turn) or
+            // Ctrl+Space (the hand's snap), and never Ctrl+Shift+C (the
+            // system sends Copy for it).
+            ShowCutBoard => Some(Chord {
+                shift: true,
+                ..ctrl("B")
+            }),
+            ShowEpisode => Some(Chord {
+                shift: true,
+                ..ctrl("T")
+            }),
+            PlayEpisode => Some(Chord {
+                shift: true,
+                ..ctrl("P")
+            }),
+            ExportEdl => Some(Chord {
+                shift: true,
+                ..ctrl("L")
+            }),
+            ExportColorSheet => Some(Chord {
+                shift: true,
+                ..ctrl("H")
+            }),
+            ExportCutAsProject => Some(Chord {
+                shift: true,
+                ..ctrl("F")
+            }),
+            MakeCutsFromPanels => Some(Chord {
+                shift: true,
+                ..ctrl("M")
+            }),
+            RenderEpisode => Some(alt("E")),
+            AddRetakeNote => Some(alt("N")),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto

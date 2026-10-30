@@ -2694,3 +2694,21 @@ what was not verified.
   `cutboard_*`. Not verified: the real window, a video Episode job through ffmpeg. Left: note markers on
   the sheet rows and the panel cut-number cell menu, registered verbs (menu / palette) for the exports,
   the storyboard pane, conte pages, slate frames in the episode render.
+- 2026-10-29 — GM15 review fixes. The sheet: an Aka tick per noted row at the memo cell's edge (dim once
+  resolved; hovered, each note with its author and state), riding Insert frames; every row's menu lists
+  the frame's notes as latches (resolved) and "add retake note…"; a BOARD or Bg / Ref cell's menu sets
+  the panel's cut number (−, +, typed or dragged, "clear (use panel order)"; the cell shows C1, C2 …),
+  the cells' menu staying open until a pick or a click off it. The retake note window (frame, what to
+  fix, "set Retake" latched; refused with no text or unreadable notes, kept open). Nine registered verbs
+  (D6: help, aliases, a chord in both keymaps, menus): Shinkō board, Henshū timeline, Play episode, the
+  three exports (File ▸ Export), Make cuts from panels, Render episode (the queue comes forward), Add
+  retake note…; every pane button asks the editor for its verb. Card pictures keyed on their own cut's
+  frame-0 eval (`playback::frame_hash`), drawn on a worker, never started mid-stroke, gone with their
+  cut; no scene cloned per frame; the status on the card's edge, open notes in Aka; make cuts on the
+  animatic's card, refused off an animatic, named `CUTnn` past every name the scene has; export as
+  project never over a file (`_2` …); Play episode passes a cut with no columns and stops; the D7
+  labels and pane titles; the timeline scrolls and zooms, names clipped, a playhead. Notes read
+  leniently (a note missing a field still shows; unreadable notes are refused, never overwritten).
+  A card stacks top-down at one size (the board's wrapped, centred row flow had pushed a card's combo
+  and notes menu below the visible board, where no click lands). The command palette reads ā ī ū ē ō as
+  the plain vowel ("shinko" finds the Shinkō board). 14 `board_tests`, 18 `cutboard_*`.

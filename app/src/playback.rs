@@ -430,8 +430,9 @@ impl RamLook {
 /// recipe, when the cut has an output) and what the column stack shows on
 /// it — each column's place in the stack and the drawing it exposes (its
 /// content and layer roles) — with the look. An edit moves the key of
-/// exactly the frames it changes.
-fn frame_hash(
+/// exactly the frames it changes. GM15: a board card's picture is keyed
+/// the same way, on its cut's frame 0.
+pub(crate) fn frame_hash(
     cut: &Cut,
     eval: Option<u64>,
     frame: u32,

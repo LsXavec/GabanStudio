@@ -72,17 +72,17 @@ impl CutStatus {
         CutStatus::ALL.into_iter().find(|s| s.key() == key)
     }
 
-    /// The board's word for it.
+    /// The board's word for it: the studio's term plus English (D7).
     pub fn label(self) -> &'static str {
         match self {
-            CutStatus::Lo => "LO",
-            CutStatus::Genga => "Genga",
-            CutStatus::Sakkan => "Sakkan",
-            CutStatus::Douga => "Douga",
-            CutStatus::Paint => "Paint",
-            CutStatus::Composite => "Composite",
-            CutStatus::Done => "Done",
-            CutStatus::Retake => "Retake",
+            CutStatus::Lo => "LO (layout)",
+            CutStatus::Genga => "genga (key)",
+            CutStatus::Sakkan => "sakkan (AD check)",
+            CutStatus::Douga => "douga (inbetween)",
+            CutStatus::Paint => "shiage (paint)",
+            CutStatus::Composite => "satsuei (composite)",
+            CutStatus::Done => "done",
+            CutStatus::Retake => "retake",
         }
     }
 }
@@ -105,7 +105,8 @@ pub struct ProdInfo {
     pub status: Option<CutStatus>,
     /// Empty = nobody yet.
     pub assignee: String,
-    /// In frame order.
+    /// In stored order ([`add_note`] keeps it in frame order); read only —
+    /// [`ProdInfo::commands`] leaves the notes key alone.
     pub notes: Vec<RetakeNote>,
 }
 
@@ -119,12 +120,43 @@ fn json_text(s: &str) -> String {
     serde_json::to_string(s).expect("a string serialises")
 }
 
-/// The cut's retake notes (none when the key is missing or does not read).
+/// One stored note as this build reads it: an object with a frame; a
+/// missing text, author or resolved reads as empty.
+fn note_of(v: &serde_json::Value) -> Option<RetakeNote> {
+    let text = |key: &str| v.get(key).and_then(|t| t.as_str()).unwrap_or_default().to_string();
+    Some(RetakeNote {
+        frame: note_frame(v)?,
+        text: text("text"),
+        author: text("author"),
+        resolved: v.get("resolved").and_then(|r| r.as_bool()).unwrap_or(false),
+    })
+}
+
+/// The cut's notes list as stored, as JSON values so a field a newer build
+/// added survives an edit (D3): empty when the key is unset, None when the
+/// text is not a list — an edit then refuses rather than overwrite it.
+pub fn stored_notes(cut: &Cut) -> Option<Vec<serde_json::Value>> {
+    match cut.meta.get(NOTES_KEY) {
+        None => Some(Vec::new()),
+        Some(text) => note_values(text),
+    }
+}
+
+/// The cut's retake notes in stored order (none when the key is missing or
+/// is not a list; an entry without a frame is skipped, the rest still read).
 pub fn notes_of(cut: &Cut) -> Vec<RetakeNote> {
-    cut.meta
-        .get(NOTES_KEY)
-        .and_then(|v| serde_json::from_str(v).ok())
-        .unwrap_or_default()
+    stored_notes(cut).unwrap_or_default().iter().filter_map(note_of).collect()
+}
+
+/// The one SetCutMeta that stores `list` as the cut's notes (an empty list
+/// removes the key).
+fn notes_command(cut: &Cut, at: CutRef, list: &[serde_json::Value]) -> Command {
+    Command::SetCutMeta {
+        at,
+        key: NOTES_KEY.into(),
+        before: cut.meta.get(NOTES_KEY).cloned(),
+        after: (!list.is_empty()).then(|| serde_json::to_string(list).expect("notes serialise")),
+    }
 }
 
 impl ProdInfo {
@@ -137,10 +169,12 @@ impl ProdInfo {
         }
     }
 
-    /// The SetCutMeta commands that make the cut say this: one per field
-    /// that differs from what the cut says now (no status, an empty
-    /// assignee or no notes removes its key). A key whose value this build
-    /// cannot read is left alone unless its field changes. Empty when
+    /// The SetCutMeta commands that make the cut's status and assignee say
+    /// this: one per field that differs from what the cut says now (no
+    /// status or an empty assignee removes its key). A key whose value this
+    /// build cannot read is left alone unless its field changes. The notes
+    /// are not written here: [`add_note`] and [`set_note_resolved`] edit
+    /// them in place, keeping fields this build does not know. Empty when
     /// nothing changes; apply them together as one undo step.
     pub fn commands(&self, cut: &Cut, at: CutRef) -> Vec<Command> {
         let now = ProdInfo::of(cut);
@@ -160,13 +194,6 @@ impl ProdInfo {
             set(
                 ASSIGNEE_KEY,
                 (!self.assignee.is_empty()).then(|| json_text(&self.assignee)),
-            );
-        }
-        if self.notes != now.notes {
-            set(
-                NOTES_KEY,
-                (!self.notes.is_empty())
-                    .then(|| serde_json::to_string(&self.notes).expect("notes serialise")),
             );
         }
         out
@@ -196,16 +223,42 @@ pub fn set_assignee(cut: &Cut, at: CutRef, assignee: &str) -> Vec<Command> {
     .commands(cut, at)
 }
 
-/// The commands that add `note` (kept in frame order) and, with `retake`,
-/// set the cut's status to Retake — one undo step together.
+/// The commands that add `note` (before the first note on a later frame,
+/// so the list stays in frame order) and, with `retake`, set the cut's
+/// status to Retake — one undo step together. The other notes keep every
+/// field they have (D3). Empty when the stored notes are not a list, so
+/// nothing overwrites what this build cannot read.
 pub fn add_note(cut: &Cut, at: CutRef, note: RetakeNote, retake: bool) -> Vec<Command> {
-    let mut p = ProdInfo::of(cut);
-    let i = p.notes.partition_point(|n| n.frame <= note.frame);
-    p.notes.insert(i, note);
+    let Some(mut list) = stored_notes(cut) else {
+        return Vec::new();
+    };
+    let i = list
+        .iter()
+        .position(|v| note_frame(v).is_some_and(|f| f > note.frame))
+        .unwrap_or(list.len());
+    list.insert(i, serde_json::to_value(&note).expect("a note serialises"));
+    let mut out = vec![notes_command(cut, at, &list)];
     if retake {
-        p.status = Some(CutStatus::Retake);
+        out.extend(set_status(cut, at, Some(CutStatus::Retake)));
     }
-    p.commands(cut, at)
+    out
+}
+
+/// The command that marks the cut's `nth` note (in [`notes_of`] order)
+/// resolved or open again, keeping its other fields; empty when there is
+/// no such note, it already says so, or the stored notes do not read.
+pub fn set_note_resolved(cut: &Cut, at: CutRef, nth: usize, resolved: bool) -> Vec<Command> {
+    let Some(mut list) = stored_notes(cut) else {
+        return Vec::new();
+    };
+    let Some(v) = list.iter_mut().filter(|v| note_of(v).is_some()).nth(nth) else {
+        return Vec::new();
+    };
+    if note_of(v).is_some_and(|n| n.resolved == resolved) {
+        return Vec::new();
+    }
+    v["resolved"] = serde_json::Value::Bool(resolved);
+    vec![notes_command(cut, at, &list)]
 }
 
 /// The cuts of `scene` the board shows under a filter, as indices in
@@ -796,12 +849,14 @@ pub fn panels(cut: &Cut, column: ColumnId) -> Vec<Panel> {
 }
 
 /// "Make cuts from panels": for each distinct cut number of `column`'s
-/// panels, in ascending order, a new cut right after the animatic's (named
-/// `C001`, ...), as long as its panels together, with the panel pictures
-/// exposed in order on a Ref column (BOARD) and an empty cel column A
-/// beside it. The pictures are copies with fresh ids (ids are
-/// project-wide); the counter is the only thing this touches. The AddCut
-/// commands go to `Engine::apply` together: one undo step.
+/// panels, in ascending order, a new cut right after the animatic's, as
+/// long as its panels together, with the panel pictures exposed in order
+/// on a Ref column (BOARD) and an empty cel column A beside it. Each is
+/// named the app's way, `CUT{number:02}`, moved on past any name the scene
+/// already has (a second run makes CUT03, CUT04 ...), so names never
+/// repeat. The pictures are copies with fresh ids (ids are project-wide);
+/// the counter is the only thing this touches. The AddCut commands go to
+/// `Engine::apply` together: one undo step.
 pub fn cuts_from_panels(
     project: &mut Project,
     at: CutRef,
@@ -813,6 +868,8 @@ pub fn cuts_from_panels(
         .iter()
         .position(|c| c.id == at.cut)
         .ok_or("the cut is gone")?;
+    let mut used: std::collections::BTreeSet<String> =
+        scene.cuts.iter().map(|c| c.name.clone()).collect();
     let source = scene.cuts[index].clone();
     let panels = panels(&source, column);
     if panels.is_empty() {
@@ -823,9 +880,18 @@ pub fn cuts_from_panels(
         groups.entry(p.cut).or_default().push(*p);
     }
     let mut cmds = Vec::new();
+    // The lowest number the next name may take: names rise with the groups.
+    let mut next = 1;
     for (k, (number, group)) in groups.into_iter().enumerate() {
         let frames: u32 = group.iter().map(|p| p.frames).sum();
-        let mut cut = Cut::new(CutId(project.alloc_id()), format!("C{number:03}"), frames);
+        let mut n = number.max(next);
+        while used.contains(&format!("CUT{n:02}")) {
+            n += 1;
+        }
+        next = n + 1;
+        let name = format!("CUT{n:02}");
+        used.insert(name.clone());
+        let mut cut = Cut::new(CutId(project.alloc_id()), name, frames);
         let mut board = Column::new(ColumnId(project.alloc_id()), "BOARD");
         let mut copies: BTreeMap<DrawingId, DrawingId> = BTreeMap::new();
         let mut t = 0;

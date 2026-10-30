@@ -304,7 +304,7 @@ fn cuts_from_panels_make_two_cuts_of_60_and_48_frames_as_one_undo_step() {
     let s = e.project.scene(scene).unwrap();
     assert_eq!(
         s.cuts.iter().map(|c| (c.name.as_str(), c.frame_count)).collect::<Vec<_>>(),
-        [("animatic", 108), ("C001", 60), ("C002", 48)]
+        [("animatic", 108), ("CUT01", 60), ("CUT02", 48)]
     );
     // The pictures, in order, on a Ref column: copies with fresh ids.
     let exposed = |c: &anim_core::model::Cut| {
@@ -327,6 +327,82 @@ fn cuts_from_panels_make_two_cuts_of_60_and_48_frames_as_one_undo_step() {
     assert!(s.cuts[1].drawings.iter().all(|d| !panels.contains(&d.id)));
     e.undo().unwrap();
     assert_eq!(e.project.scene(scene).unwrap(), &before, "one undo restores the scene exactly");
+}
+
+#[test]
+fn cuts_from_panels_run_twice_never_repeat_a_cut_name() {
+    let mut e = Engine::new("animatic");
+    let scene = e.add_scene("s01");
+    let cut = e.add_cut(scene, "animatic", 48).unwrap();
+    let at = CutRef { scene, cut };
+    let board_col = e.add_column(at, "BOARD").unwrap();
+    ink(&mut e, at, board_col, 0, 4, [1.0, 0.0, 0.0, 1.0]);
+    ink(&mut e, at, board_col, 24, 12, [0.0, 0.0, 1.0, 1.0]);
+    let names = |e: &Engine| {
+        let s = e.project.scene(scene).unwrap();
+        s.cuts.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
+    };
+    for _ in 0..2 {
+        let cmds = board::cuts_from_panels(&mut e.project, at, board_col).unwrap();
+        e.apply("make cuts from panels", cmds).unwrap();
+    }
+    // The second run moves on past CUT01 and CUT02 (it lands right after
+    // the animatic again).
+    assert_eq!(names(&e), ["animatic", "CUT03", "CUT04", "CUT01", "CUT02"]);
+}
+
+#[test]
+fn a_note_this_build_cannot_fully_read_neither_hides_the_others_nor_is_overwritten() {
+    let (mut e, _, cuts) = episode();
+    let at = cuts[0];
+    let cut = |e: &Engine| e.project.cut(at.scene, at.cut).unwrap().clone();
+    let set = |e: &mut Engine, text: &str| {
+        let before = e.project.cut(at.scene, at.cut).unwrap().meta.get(board::NOTES_KEY).cloned();
+        e.apply(
+            "notes",
+            vec![Command::SetCutMeta {
+                at,
+                key: board::NOTES_KEY.into(),
+                before,
+                after: Some(text.into()),
+            }],
+        )
+        .unwrap();
+    };
+    // A note with no text, a field from a newer build: both still read.
+    set(&mut e, "[{\"frame\": 3, \"text\": \"a\", \"pen\": \"red\"}, {\"frame\": 9}]");
+    let frames = |e: &Engine| board::notes_of(&cut(e)).iter().map(|n| n.frame).collect::<Vec<_>>();
+    assert_eq!(frames(&e), [3, 9]);
+    assert_eq!(board::notes_of(&cut(&e))[1].text, "");
+    let note = RetakeNote {
+        frame: 5,
+        text: "b".into(),
+        ..RetakeNote::default()
+    };
+    e.apply("note", board::add_note(&cut(&e), at, note, false)).unwrap();
+    assert_eq!(frames(&e), [3, 5, 9], "added in frame order, the others kept");
+    let text = |e: &Engine| cut(e).meta.get(board::NOTES_KEY).cloned().unwrap();
+    assert!(text(&e).contains("\"pen\":\"red\""), "{}", text(&e));
+    e.apply("resolve", board::set_note_resolved(&cut(&e), at, 0, true)).unwrap();
+    let notes = board::notes_of(&cut(&e));
+    assert_eq!(notes.iter().map(|n| n.resolved).collect::<Vec<_>>(), [true, false, false]);
+    assert!(text(&e).contains("\"pen\":\"red\""), "resolving keeps the newer field");
+    assert!(board::set_note_resolved(&cut(&e), at, 0, true).is_empty(), "already resolved");
+    assert!(board::set_note_resolved(&cut(&e), at, 3, true).is_empty(), "no fourth note");
+    e.undo().unwrap();
+    assert!(!board::notes_of(&cut(&e))[0].resolved, "one undo step");
+
+    // Text that is not a list: nothing reads, and nothing overwrites it.
+    set(&mut e, "{\"notes\": \"kept\"}");
+    assert!(board::notes_of(&cut(&e)).is_empty());
+    let note = RetakeNote {
+        frame: 1,
+        text: "c".into(),
+        ..RetakeNote::default()
+    };
+    assert!(board::add_note(&cut(&e), at, note, true).is_empty());
+    assert!(board::set_note_resolved(&cut(&e), at, 0, true).is_empty());
+    assert!(board::stored_notes(&cut(&e)).is_none());
 }
 
 #[test]

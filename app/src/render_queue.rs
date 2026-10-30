@@ -696,11 +696,10 @@ pub fn add_episode_job(state: &mut AppState, scene: anim_core::ids::SceneId) -> 
     };
     let total = anim_core::board::trt_frames(state.engine.project.scene(scene).expect("found above"));
     let d = state.render_queue.draft.clone();
-    let label = format!(
-        "episode {} · {} frames",
-        state.engine.project.scene(scene).map_or("", |s| s.name.as_str()),
-        total
-    );
+    let name = state.engine.project.scene(scene).map_or("", |s| s.name.as_str());
+    let label = format!("episode {name} · {total} frames");
+    // Said where it went (Render episode brings the queue forward).
+    state.status = format!("episode {name} queued: {total} frames — see the Render Queue");
     let q = &mut state.render_queue.queue;
     q.push(Job {
         at: CutRef { scene, cut: first },

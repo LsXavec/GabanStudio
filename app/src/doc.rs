@@ -3647,17 +3647,21 @@ impl AppState {
 
     // ---- GM15: editorial ------------------------------------------------
 
-    fn prod_edit(&mut self, at: CutRef, label: &str, cmds: impl FnOnce(&Cut) -> Vec<Command>) {
+    /// One `prod.*` edit of cut `at` as one undo step; false when it was
+    /// refused or there was nothing to change.
+    fn prod_edit(&mut self, at: CutRef, label: &str, cmds: impl FnOnce(&Cut) -> Vec<Command>) -> bool {
         let Some(cut) = self.engine.project.cut(at.scene, at.cut) else {
             self.refuse(format!("refused — {label}: that cut is gone"));
-            return;
+            return false;
         };
         let cmds = cmds(cut);
         if cmds.is_empty() {
-            return;
+            return false;
         }
         let r = self.engine.apply(label, cmds);
+        let ok = r.is_ok();
         self.report(r, label);
+        ok
     }
 
     /// A cut's production status (None clears it) — one undo step.
@@ -3671,15 +3675,37 @@ impl AppState {
     }
 
     /// A retake note on `frame`; with `retake` the cut goes to Retake in
-    /// the same undo step.
-    pub fn add_retake_note(&mut self, at: CutRef, frame: u32, text: &str, retake: bool) {
+    /// the same undo step. Refused with no text, or when the cut's stored
+    /// notes do not read in this build (they are left as they are). True
+    /// when it was added.
+    pub fn add_retake_note(&mut self, at: CutRef, frame: u32, text: &str, retake: bool) -> bool {
+        let text = text.trim();
+        if text.is_empty() {
+            self.refuse("refused — no note: type what to fix first");
+            return false;
+        }
+        let unreadable = self
+            .engine
+            .project
+            .cut(at.scene, at.cut)
+            .is_some_and(|c| anim_core::board::stored_notes(c).is_none());
+        if unreadable {
+            self.refuse("refused — this cut's notes do not read in this build (left as they are)");
+            return false;
+        }
         let note = anim_core::board::RetakeNote {
             frame,
-            text: text.trim().to_string(),
+            text: text.to_string(),
             author: self.render_queue.artist.clone(),
             resolved: false,
         };
-        self.prod_edit(at, "retake note", |c| anim_core::board::add_note(c, at, note, retake));
+        self.prod_edit(at, "retake note", |c| anim_core::board::add_note(c, at, note, retake))
+    }
+
+    /// Mark cut `at`'s `nth` note resolved (or open again) — one undo step.
+    pub fn set_note_resolved(&mut self, at: CutRef, nth: usize, resolved: bool) {
+        let label = if resolved { "note resolved" } else { "note open again" };
+        self.prod_edit(at, label, |c| anim_core::board::set_note_resolved(c, at, nth, resolved));
     }
 
     /// Move the cut at `from` to `to` in the scene's order — one undo step.
@@ -3719,22 +3745,38 @@ impl AppState {
         self.report(r, "panel cut number");
     }
 
-    /// The column whose exposures are the animatic's panels: BOARD when
-    /// the cut has one, else the active column.
-    pub fn panel_column(&self) -> ColumnId {
-        self.cut()
-            .xsheet
-            .columns
-            .iter()
-            .find(|c| c.name == "BOARD")
-            .map_or(self.view.active_column, |c| c.id)
+    /// A column whose drawings are storyboard panels: one named BOARD, or
+    /// a Bg / Ref column (its cells' menu sets a panel's cut number).
+    pub fn is_panel_column(&self, column: ColumnId) -> bool {
+        let cut = self.cut();
+        cut.xsheet.column(column).is_some_and(|c| {
+            c.name == "BOARD"
+                || matches!(cut.column_def(column).kind, ColumnKind::Bg | ColumnKind::Ref)
+        })
     }
 
-    /// "Make cuts from panels": one new cut per panel cut number, after
-    /// this one — one undo step.
+    /// The column whose exposures are the open cut's storyboard panels:
+    /// BOARD when the cut has one, else the active column when it is a
+    /// Bg / Ref panel column. None when it has neither — the cut is not an
+    /// animatic, so a genga column is never split into cuts.
+    pub fn panel_column(&self) -> Option<ColumnId> {
+        let board = self.cut().xsheet.columns.iter().find(|c| c.name == "BOARD").map(|c| c.id);
+        board.or_else(|| {
+            let active = self.view.active_column;
+            self.is_panel_column(active).then_some(active)
+        })
+    }
+
+    /// "Make cuts from panels": one new cut per panel cut number of the
+    /// open cut's panel column, after it — one undo step. Refused when the
+    /// open cut is not an animatic (see [`Self::panel_column`]).
     pub fn make_cuts_from_panels(&mut self) {
+        let Some(column) = self.panel_column() else {
+            self.refuse("refused — open the animatic (a cut with a BOARD column) first");
+            return;
+        };
         let at = self.at();
-        let column = self.panel_column();
+        let source = self.cut().name.clone();
         match anim_core::board::cuts_from_panels(&mut self.engine.project, at, column) {
             Ok(cmds) => {
                 let n = cmds.len();
@@ -3742,10 +3784,108 @@ impl AppState {
                 if r.is_ok() {
                     self.meta_dirty = true;
                 }
-                self.report(r, &format!("made {n} cut(s) from the panels"));
+                self.report(r, &format!("made {n} cut(s) from {source}'s panels"));
             }
-            Err(e) => self.refuse(format!("refused — no cuts made: {e}")),
+            Err(e) => self.refuse(format!("refused — no cuts made from {source}'s panels: {e}")),
         }
+    }
+
+    /// GM15: "Play episode" — from the scene's first cut with columns, each
+    /// cut whole and on into the next (the editor's play tick runs it on);
+    /// again, it stops.
+    pub fn toggle_episode_play(&mut self) {
+        if self.board.episode_play && self.view.playing {
+            self.view.playing = false;
+            self.board.episode_play = false;
+            self.status = "episode stopped".into();
+            return;
+        }
+        let scene = self.at().scene;
+        let first = self
+            .engine
+            .project
+            .scene(scene)
+            .and_then(|s| s.cuts.iter().find(|c| !c.xsheet.columns.is_empty()))
+            .map(|c| c.id);
+        let Some(first) = first else {
+            self.refuse("refused — the scene has no cut to play");
+            return;
+        };
+        self.goto_cut(scene, first);
+        self.board.episode_play = true;
+        self.view.playing = true;
+        self.status = "playing the episode: every cut back to back".into();
+    }
+
+    /// The render folder the editorial's exports land in (refused when
+    /// there is none yet).
+    fn export_dir(&mut self) -> Option<std::path::PathBuf> {
+        let dir = self.render_queue.out_dir(self.file_path.as_deref());
+        match &dir {
+            Some(d) => {
+                let _ = std::fs::create_dir_all(d);
+            }
+            None => self.refuse("refused — type a render folder first, or save the project"),
+        }
+        dir
+    }
+
+    /// The extension an EDL event names each cut's render with: the draft
+    /// preset's video container, else `mov` — an EDL event is one clip,
+    /// so a frame-sequence preset is conformed to the cut's video render.
+    pub fn edl_ext(&self) -> &'static str {
+        match anim_core::deliver::PRESETS.get(self.render_queue.draft.preset) {
+            Some(p) if p.format.is_video() => p.format.ext(),
+            _ => "mov",
+        }
+    }
+
+    /// "Export EDL" (File ▸ Export): the open scene's EDL into the render
+    /// folder as `<project>_<scene>.edl`.
+    pub fn export_scene_edl(&mut self) -> bool {
+        let scene = self.at().scene;
+        let Some(name) = self.engine.project.scene(scene).map(|s| s.name.clone()) else {
+            self.refuse("refused — no EDL: the scene is gone");
+            return false;
+        };
+        let Some(dir) = self.export_dir() else {
+            return false;
+        };
+        let sanitize = anim_core::deliver::sanitize;
+        let file = format!("{}_{}.edl", sanitize(&self.engine.project.name), sanitize(&name));
+        self.export_edl(scene, &dir.join(file))
+    }
+
+    /// "Export colour sheet" (File ▸ Export): the iro shitei into the
+    /// render folder.
+    pub fn export_color_sheets_here(&mut self) -> usize {
+        match self.export_dir() {
+            Some(dir) => self.export_color_sheets(&dir),
+            None => 0,
+        }
+    }
+
+    /// "Export cut as project" for cut `at`: into the render folder as
+    /// `<project>_<cut>.animproj`, never over a file already there (the
+    /// next free `_2`, `_3` … name instead).
+    pub fn export_cut_project(&mut self, at: CutRef) -> bool {
+        let Some(name) = self.engine.project.cut(at.scene, at.cut).map(|c| c.name.clone()) else {
+            self.refuse("refused — the cut was not exported: it is gone");
+            return false;
+        };
+        let Some(dir) = self.export_dir() else {
+            return false;
+        };
+        let sanitize = anim_core::deliver::sanitize;
+        let stem = format!("{}_{}", sanitize(&self.engine.project.name), sanitize(&name));
+        let path = (1..)
+            .map(|n| match n {
+                1 => dir.join(format!("{stem}.animproj")),
+                n => dir.join(format!("{stem}_{n}.animproj")),
+            })
+            .find(|p| !p.exists())
+            .expect("a free name");
+        self.export_cut_as_project(at, &path)
     }
 
     /// The episode's target running time (None clears it); project data
@@ -3760,16 +3900,14 @@ impl AppState {
     }
 
     /// "Export EDL": the scene's episode as a CMX3600 EDL at `path`, each
-    /// event naming the render the queue's pattern gives its cut.
+    /// event naming the render the queue's pattern gives its cut (with
+    /// [`Self::edl_ext`]).
     pub fn export_edl(&mut self, scene: SceneId, path: &std::path::Path) -> bool {
+        let ext = self.edl_ext();
         let Some(s) = self.engine.project.scene(scene) else {
             self.refuse("refused — no EDL: the scene is gone");
             return false;
         };
-        let preset = self.render_queue.draft.preset;
-        let ext = anim_core::deliver::PRESETS
-            .get(preset)
-            .map_or("png", |p| p.format.ext());
         let edl = anim_core::board::edl_cmx3600(
             &self.engine.project.name,
             s,

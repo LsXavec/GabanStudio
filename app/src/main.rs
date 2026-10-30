@@ -3049,6 +3049,20 @@ impl Editor {
             // GM11: the delivery jobs' pane, and the composite viewers'
             // final look (a view: the document is untouched).
             Action::ShowRenderQueue => self.open_pane(Pane::RenderQueue),
+            // GM15: the editorial's panes; the Episode job (the queue comes
+            // forward with it); the retake note window on this frame.
+            Action::ShowCutBoard => self.open_pane(Pane::Board),
+            Action::ShowEpisode => self.open_pane(Pane::Episode),
+            Action::RenderEpisode => {
+                let scene = self.state.at().scene;
+                if render_queue::add_episode_job(&mut self.state, scene) {
+                    self.open_pane(Pane::RenderQueue);
+                }
+            }
+            Action::AddRetakeNote => {
+                let (at, frame) = (self.state.at(), self.state.view.frame);
+                self.state.board.open_note(at, frame);
+            }
             Action::ToggleFinalLook => {
                 self.final_look.on = !self.final_look.on;
                 self.state.status = if self.final_look.on {
@@ -3358,6 +3372,20 @@ impl Editor {
             Action::BuildComposite => s.request_auto_comp(),
             // GM13: and the satsuei look's chain, asked the same way.
             Action::BuildSatsuei => s.request_satsuei(),
+            // GM15: the editorial's verbs on the open scene and cut (the
+            // exports land in the render folder).
+            Action::PlayEpisode => s.toggle_episode_play(),
+            Action::ExportEdl => {
+                s.export_scene_edl();
+            }
+            Action::ExportColorSheet => {
+                s.export_color_sheets_here();
+            }
+            Action::ExportCutAsProject => {
+                let at = s.at();
+                s.export_cut_project(at);
+            }
+            Action::MakeCutsFromPanels => s.make_cuts_from_panels(),
             Action::KindKey
             | Action::KindBreakdown
             | Action::KindInbetween
@@ -3473,7 +3501,11 @@ impl Editor {
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
             | Action::TypeIntoCell
-            | Action::AddNode => {} // the chrome's, handled above
+            | Action::AddNode
+            | Action::ShowCutBoard
+            | Action::ShowEpisode
+            | Action::RenderEpisode
+            | Action::AddRetakeNote => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
     }
@@ -3516,6 +3548,12 @@ fn is_chrome(action: Action) -> bool {
             | Action::ToggleFinalLook
             | Action::TypeIntoCell
             | Action::AddNode
+            // GM15: the editorial's panes, the queue's Episode job and the
+            // note window — the document is untouched until its "add note".
+            | Action::ShowCutBoard
+            | Action::ShowEpisode
+            | Action::RenderEpisode
+            | Action::AddRetakeNote
     )
 }
 
@@ -3596,6 +3634,15 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::LipFlap
             // GM13: the satsuei graph replaces nodes the stroke may feed.
             | Action::BuildSatsuei
+            // GM15: no cut switch, file write, cuts made, job queued or
+            // note window opened under a live stroke (D7).
+            | Action::PlayEpisode
+            | Action::ExportEdl
+            | Action::ExportColorSheet
+            | Action::ExportCutAsProject
+            | Action::MakeCutsFromPanels
+            | Action::RenderEpisode
+            | Action::AddRetakeNote
     )
 }
 
@@ -4345,7 +4392,10 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             }
             Pane::PaintCheck => paintcheck::ui(ui, self.state, self.canvas),
             Pane::RenderQueue => render_queue::ui(ui, self.state),
-            Pane::Board => board_panel::ui_board(ui, self.state),
+            Pane::Board => {
+                let gesture_safe = !self.canvas.stroke_active();
+                board_panel::ui_board(ui, self.state, gesture_safe)
+            }
             Pane::Episode => board_panel::ui_episode(ui, self.state),
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
@@ -5052,6 +5102,21 @@ impl Editor {
             Action::LipFlap if anim_core::audio::tracks_iter(s.cut()).next().is_none() => {
                 Err("import a dialogue track first")
             }
+            // GM15: the editorial's verbs need what they act on.
+            Action::MakeCutsFromPanels if s.panel_column().is_none() => {
+                Err("open the animatic (a cut with a BOARD column) first")
+            }
+            Action::ExportEdl
+            | Action::ExportColorSheet
+            | Action::ExportCutAsProject
+            | Action::RenderEpisode
+                if s.render_queue.out_dir(s.file_path.as_deref()).is_none() =>
+            {
+                Err("type a render folder first, or save the project")
+            }
+            Action::ExportColorSheet if s.palettes.characters.is_empty() => {
+                Err("no character palette yet")
+            }
             _ => Ok(()),
         }
     }
@@ -5082,6 +5147,8 @@ impl Editor {
             // GM12: audio scrub, and a RAM preview pass running.
             Action::ToggleScrub => Some(self.scrub_audio),
             Action::RamPreview => Some(self.state.ram.busy()),
+            // GM15: the episode playing on through the scene's cuts.
+            Action::PlayEpisode => Some(self.state.board.episode_play && self.state.view.playing),
             _ => None,
         }
     }
@@ -6665,24 +6732,28 @@ impl Editor {
         };
         match step {
             // GM15: the episode runs on into the scene's next cut (its
-            // sound restarts with it); after the last one it stops.
+            // sound restarts with it), passing over a cut with no columns
+            // yet (nothing to show); after the last one — or when the next
+            // will not open — it stops, never refusing again every frame.
             Some(playback::Step::Wrap(f)) | Some(playback::Step::End(f)) if episode => {
                 let at = self.state.at();
                 let next = self.state.engine.project.scene(at.scene).and_then(|s| {
                     let i = s.cuts.iter().position(|c| c.id == at.cut)?;
-                    s.cuts.get(i + 1).map(|c| c.id)
+                    s.cuts[i + 1..]
+                        .iter()
+                        .find(|c| !c.xsheet.columns.is_empty())
+                        .map(|c| c.id)
                 });
-                match next {
-                    Some(cut) => {
-                        self.state.goto_cut(at.scene, cut);
-                        self.state.view.playing = true;
-                        self.play_whole = false;
-                    }
-                    None => {
-                        self.state.view.frame = f;
-                        self.state.view.playing = false;
-                        self.state.board.episode_play = false;
-                    }
+                if let Some(cut) = next {
+                    self.state.goto_cut(at.scene, cut);
+                }
+                if next.is_some() && self.state.at().cut != at.cut {
+                    self.state.view.playing = true;
+                    self.play_whole = false;
+                } else {
+                    self.state.view.frame = f;
+                    self.state.view.playing = false;
+                    self.state.board.episode_play = false;
                 }
             }
             // A run that played on past the loop range loops the range
@@ -7097,6 +7168,13 @@ impl Editor {
                                 self.queue_export(&ctx, render_queue::ExportKind::Mp4, &path);
                             }
                         }
+                        // GM15: the editorial's exports, written into the
+                        // render folder: the EDL, the iro shitei and the
+                        // open cut as a project for a freelancer.
+                        ui.separator();
+                        self.menu_item(ui, Action::ExportEdl);
+                        self.menu_item(ui, Action::ExportColorSheet);
+                        self.menu_item(ui, Action::ExportCutAsProject);
                     });
                     ui.separator();
                     // GM12: the sound verbs (WAV, MP3, OGG Vorbis or FLAC,
@@ -7485,10 +7563,16 @@ impl Editor {
                         // GM14: the Curves pane is the registry's own item
                         // (Window ▸ Curves (graph editor), listed below);
                         // GM7: so is Window ▸ Nuri check (paint check), and
-                        // GM11: Window ▸ Render Queue (delivery).
+                        // GM11: Window ▸ Render Queue (delivery), and GM15:
+                        // the shinkō board and the henshū timeline.
                         if matches!(
                             *pane,
-                            Pane::Brush | Pane::Curves | Pane::PaintCheck | Pane::RenderQueue
+                            Pane::Brush
+                                | Pane::Curves
+                                | Pane::PaintCheck
+                                | Pane::RenderQueue
+                                | Pane::Board
+                                | Pane::Episode
                         ) {
                             continue;
                         }
@@ -7947,6 +8031,10 @@ impl Editor {
         // GM14: the verbs a pane asked for (the curves pane's F and its
         // key menu) run through the one dispatch, as a menu item does (D6).
         for action in std::mem::take(&mut self.state.curves.asked) {
+            self.invoke(action, ui.ctx());
+        }
+        // GM15: and the shinkō board's and the henshū timeline's buttons.
+        for action in std::mem::take(&mut self.state.board.asked) {
             self.invoke(action, ui.ctx());
         }
         // GM6: and the canvas's (the system Copy / Paste events over it).

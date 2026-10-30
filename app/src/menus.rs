@@ -337,5 +337,7 @@ impl crate::Editor {
         self.paper_size_window(ctx);
         // GM12: the lip-flap window, while open.
         self.lip_flap_window(ctx);
+        // GM15: the retake note window, while open.
+        crate::board_panel::note_window(ctx, &mut self.state);
     }
 }
