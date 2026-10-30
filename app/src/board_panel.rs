@@ -114,13 +114,16 @@ pub fn length_sk(frames: u32, fps: u32) -> String {
 }
 
 /// Frame 0 of `cut`, small, laid on paper for the card — on the worker
-/// (a full-size CPU render, sampled down).
-fn thumbnail(cut: &Cut, law: ColorLaw, width: u32, height: u32) -> egui::ColorImage {
+/// (a full-size CPU render, sampled down), relative frames read from the
+/// project's folder `dir` (a card has no room for what it could not read:
+/// the viewer says it).
+fn thumbnail(cut: &Cut, law: ColorLaw, width: u32, height: u32, dir: Option<std::path::PathBuf>) -> egui::ColorImage {
     let opts = RenderOpts {
         purpose: Purpose::View,
         scale: 0.5,
     };
-    let img = deliver::render(cut, law, 0, width, height, &opts);
+    let env = anim_core::export::RenderEnv::new(dir);
+    let img = deliver::render_env(cut, law, 0, width, height, &opts, &env);
     let tw = THUMB_W;
     let th = ((tw as u64 * img.h as u64) / img.w.max(1) as u64).max(1) as usize;
     let paper = [plate::PAPER.r(), plate::PAPER.g(), plate::PAPER.b()].map(|v| v as f32 / 255.0);
@@ -214,10 +217,11 @@ fn refresh_thumbs(ctx: &egui::Context, state: &mut AppState, scene: SceneId, sho
     let Some(cut) = p.cut(scene, id).cloned() else {
         return;
     };
+    let dir = state.project_dir();
     let (tx, rx) = channel();
     let repaint = ctx.clone();
     std::thread::spawn(move || {
-        let _ = tx.send(thumbnail(&cut, law, width, height));
+        let _ = tx.send(thumbnail(&cut, law, width, height, dir));
         repaint.request_repaint();
     });
     state.board.job = Some(ThumbJob { cut: id, key, rx });

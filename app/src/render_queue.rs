@@ -186,9 +186,19 @@ pub struct JobSpec {
     /// GM15: an Episode job's cuts; `cut` is then the first of them and
     /// `frames` spans the whole episode.
     pub episode: Option<deliver::Episode>,
+    /// GM17: the project's folder (relative ImageSequence frames) and what
+    /// the job could not read, reported once when it ends.
+    pub env: Arc<anim_core::export::RenderEnv>,
 }
 
 impl JobSpec {
+    /// GM17: the job reading relative frames from `dir`, the project's
+    /// folder (None for an unsaved project).
+    pub fn with_base_dir(mut self, dir: Option<PathBuf>) -> Self {
+        self.env = Arc::new(anim_core::export::RenderEnv::new(dir));
+        self
+    }
+
     /// GM15: the Episode job for `scene` of `project`: every cut in order,
     /// named as the episode ("episode" in the pattern's cut field). None
     /// when the scene is gone or has no cut.
@@ -221,6 +231,7 @@ impl JobSpec {
             pattern,
             mixdown: true,
             episode: Some(ep),
+            env: Arc::default(),
         })
     }
     /// The job for cut `at` of `project` over `frames` (None = the whole
@@ -265,6 +276,7 @@ impl JobSpec {
             pattern,
             mixdown: true,
             episode: None,
+            env: Arc::default(),
         })
     }
 
@@ -280,7 +292,7 @@ impl JobSpec {
                 },
                 ..self.slate.clone()
             };
-            return deliver::deliver_frame(
+            return deliver::deliver_frame_env(
                 &ep.cuts[i],
                 self.law,
                 local,
@@ -288,9 +300,10 @@ impl JobSpec {
                 &self.preset,
                 self.burn_ins,
                 &slate,
+                &self.env,
             );
         }
-        deliver::deliver_frame(
+        deliver::deliver_frame_env(
             &self.cut,
             self.law,
             f,
@@ -298,6 +311,7 @@ impl JobSpec {
             &self.preset,
             self.burn_ins,
             &self.slate,
+            &self.env,
         )
     }
 
@@ -437,9 +451,11 @@ fn render_video(
     }
 }
 
-/// The worker's messages: a frame is out, or the job ended.
+/// The worker's messages: a frame is out, what the job could not read (just
+/// before it ends, when anything), or the job ended.
 pub enum Progress {
     Frame,
+    Warnings(Vec<String>),
     Done(Result<usize, String>),
 }
 
@@ -460,6 +476,10 @@ pub fn spawn(
                 c.request_repaint();
             }
         });
+        let warnings = spec.env.warnings();
+        if !warnings.is_empty() {
+            let _ = tx.send(Progress::Warnings(warnings));
+        }
         let _ = tx.send(Progress::Done(result));
         if let Some(c) = &ctx {
             c.request_repaint();
@@ -845,7 +865,7 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
                 artist,
             )
         };
-        let Some(mut spec) = spec else {
+        let Some(mut spec) = spec.map(|s| s.with_base_dir(state.project_dir())) else {
             match state
                 .render_queue
                 .queue
@@ -890,9 +910,11 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
     let note = w.note.clone();
     let mut finished = None;
     let mut frames = 0;
+    let mut warnings = Vec::new();
     loop {
         match w.rx.try_recv() {
             Ok(Progress::Frame) => frames += 1,
+            Ok(Progress::Warnings(w)) => warnings = w,
             Ok(Progress::Done(r)) => {
                 finished = Some(r);
                 break;
@@ -921,6 +943,14 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
         Err(e) if e == CANCELLED => state.status = format!("render of {label} stopped"),
         Err(e) => state.refuse(format!("the render of {label} did not finish — {e}")),
     }
+    // GM17: what the job could not read (a missing frame), once per job.
+    if let Some(first) = warnings.first() {
+        let more = match warnings.len() {
+            1 => String::new(),
+            n => format!(" (and {} more)", n - 1),
+        };
+        state.status = format!("{} — {first}{more}", state.status);
+    }
     if let Some(next) = state.render_queue.queue.finish(job, result) {
         launch(state, next, ctx);
     }
@@ -937,6 +967,7 @@ pub fn wait(state: &mut AppState, ctx: &egui::Context) {
         let job = w.job;
         match msg {
             Progress::Frame => state.render_queue.queue.frame_done(job),
+            Progress::Warnings(w) => state.note_render_warnings(w),
             Progress::Done(r) => {
                 state.render_queue.worker = None;
                 if let Some(next) = state.render_queue.queue.finish(job, r) {
@@ -1464,6 +1495,7 @@ mod tests {
         let result = loop {
             match rx.recv().unwrap() {
                 Progress::Frame => frames += 1,
+                Progress::Warnings(w) => panic!("nothing to warn of: {w:?}"),
                 Progress::Done(r) => break r,
             }
         };

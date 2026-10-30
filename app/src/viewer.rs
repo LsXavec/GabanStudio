@@ -52,18 +52,30 @@ pub struct FinalLook {
     shown: Option<LookKey>,
     /// The last finished frame, as uploaded (straight sRGB bytes).
     pub image: Option<Arc<egui::ColorImage>>,
-    /// The frame on the worker, and where its answer comes.
-    pending: Option<(LookKey, Receiver<Arc<egui::ColorImage>>)>,
+    /// The frame on the worker, and where its answer comes (with what it
+    /// could not read).
+    pending: Option<(LookKey, Receiver<(Arc<egui::ColorImage>, Vec<String>)>)>,
+    /// GM17: what finished renders reported, waiting for the status lane.
+    warnings: Vec<String>,
 }
 
-/// What a final-look frame shows: another cut, frame or size, or any edit
-/// (a new revision), renders again.
+/// What a final-look frame shows: another cut, frame or size, any edit (a
+/// new revision), or the project saved to another folder, renders again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LookKey {
     at: CutRef,
     frame: u32,
     revision: u64,
     size: (u32, u32),
+    folder: u64,
+}
+
+/// A hash of the project's folder (part of [`LookKey`]).
+fn folder_key(dir: Option<&std::path::Path>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    dir.hash(&mut h);
+    h.finish()
 }
 
 impl FinalLook {
@@ -72,17 +84,20 @@ impl FinalLook {
     /// (Rendering). Never waits; the snapshot is the one clone made here.
     pub fn view(&mut self, state: &AppState, ctx: &egui::Context) -> GraphView {
         let p = &state.engine.project;
+        let dir = state.project_dir();
         let key = LookKey {
             at: state.at(),
             frame: state.view.frame,
             revision: state.engine.revision(),
             size: (p.width, p.height),
+            folder: folder_key(dir.as_deref()),
         };
         if let Some((k, rx)) = &self.pending {
             match rx.try_recv() {
-                Ok(img) => {
+                Ok((img, warnings)) => {
                     let k = *k;
                     self.pending = None;
+                    self.note(warnings);
                     self.show(k, img);
                 }
                 Err(TryRecvError::Empty) => {}
@@ -121,21 +136,35 @@ impl FinalLook {
                     purpose: Purpose::Final,
                     scale,
                 };
-                let img = deliver::render(&cut, law, key.frame, key.size.0, key.size.1, &opts);
+                let env = anim_core::export::RenderEnv::new(dir);
+                let img = deliver::render_env(&cut, law, key.frame, key.size.0, key.size.1, &opts, &env);
                 let bytes: Vec<u8> = img
                     .px
                     .chunks_exact(4)
                     .flat_map(anim_core::export::straight_rgba8)
                     .collect();
                 let size = [img.w as usize, img.h as usize];
-                let _ = tx.send(Arc::new(egui::ColorImage::from_rgba_unmultiplied(
-                    size, &bytes,
-                )));
+                let image = Arc::new(egui::ColorImage::from_rgba_unmultiplied(size, &bytes));
+                let _ = tx.send((image, env.warnings()));
                 repaint.request_repaint();
             });
             self.pending = Some((key, rx));
         }
         GraphView::Rendering(tex)
+    }
+
+    /// GM17: what the renders could not read since the last call (each
+    /// frame's warnings once).
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
+    }
+
+    fn note(&mut self, warnings: Vec<String>) {
+        for w in warnings {
+            if !self.warnings.contains(&w) {
+                self.warnings.push(w);
+            }
+        }
     }
 
     fn show(&mut self, key: LookKey, img: Arc<egui::ColorImage>) {
@@ -151,8 +180,9 @@ impl FinalLook {
     #[cfg(test)]
     pub fn wait(&mut self) {
         if let Some((k, rx)) = self.pending.take()
-            && let Ok(img) = rx.recv()
+            && let Ok((img, warnings)) = rx.recv()
         {
+            self.note(warnings);
             self.show(k, img);
         }
     }

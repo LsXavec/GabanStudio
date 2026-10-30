@@ -663,7 +663,8 @@ fn render_node(
             match cut.models.get(model).map(crate::r3d::model_of) {
                 Some(Ok(m)) => {
                     let v = cut.model_at(params, binds, frame);
-                    let px = crate::r3d::render(&m, &v, law, area.fw, area.fh).px;
+                    let first = crate::r3d::first_object_id(cut, id);
+                    let px = crate::r3d::render_as(&m, &v, law, area.fw, area.fh, first).px;
                     if area.is_frame() {
                         px
                     } else {
@@ -682,6 +683,7 @@ fn render_node(
             first,
             offset,
             hold_last,
+            fit,
         } => {
             // GM17 (D15): another app's render, read at render time from
             // the project's folder; a missing frame is transparent and
@@ -692,9 +694,11 @@ fn render_node(
                 *first,
                 *offset,
                 *hold_last,
+                *fit,
                 frame,
                 env.base_dir.as_deref(),
                 law,
+                (area.fw, area.fh),
                 (r.x, r.y, r.w, r.h),
                 &mut |msg| env.warn(msg),
             )

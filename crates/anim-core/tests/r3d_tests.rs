@@ -4,6 +4,7 @@
 //! view", image sequences and JPEG/TIFF stills. Headless: every model and
 //! image is built here; frames stay at or under 64 × 64.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use anim_core::Engine;
@@ -144,18 +145,25 @@ fn an_obj_cube_loads_as_twelve_triangles_inside_plus_minus_one() {
 
 /// A .glb holding one triangle with a base colour, placed by its node.
 fn triangle_glb() -> Vec<u8> {
+    glb_with_nodes(r#"[{"mesh":0,"translation":[0,0,2]}]"#)
+}
+
+/// A .glb whose scene is node 0 of `nodes` (a JSON array), over one green
+/// triangle as mesh 0.
+fn glb_with_nodes(nodes: &str) -> Vec<u8> {
     let mut bin = Vec::new();
     for v in [0.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
         bin.extend_from_slice(&v.to_le_bytes());
     }
     let json = r#"{"asset":{"version":"2.0"},"scene":0,"scenes":[{"nodes":[0]}],
-        "nodes":[{"mesh":0,"translation":[0,0,2]}],
+        "nodes":NODES,
         "meshes":[{"primitives":[{"attributes":{"POSITION":0},"material":0}]}],
         "materials":[{"pbrMetallicRoughness":{"baseColorFactor":[0,1,0,1]}}],
         "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3","min":[0,0,0],"max":[1,1,0]}],
         "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36}],
-        "buffers":[{"byteLength":36}]}"#;
-    let mut json = json.as_bytes().to_vec();
+        "buffers":[{"byteLength":36}]}"#
+        .replace("NODES", nodes);
+    let mut json = json.into_bytes();
     while json.len() % 4 != 0 {
         json.push(b' ');
     }
@@ -182,6 +190,33 @@ fn a_minimal_glb_built_here_loads_placed_and_coloured() {
     assert!(r3d::load("glb", b"not a model").is_err());
     assert_eq!(r3d::format_for_extension("GLB"), Some("glb"));
     assert_eq!(r3d::format_for_extension("fbx"), None);
+}
+
+#[test]
+fn a_gltf_whose_nodes_loop_or_nest_deep_loads_without_overflowing_the_stack() {
+    // Node 0 lists itself as its child: a malformed file, read (once) or
+    // refused, never followed round forever.
+    match r3d::load("glb", &glb_with_nodes(r#"[{"mesh":0,"children":[0]}]"#)) {
+        Ok(m) => assert_eq!(m.triangle_count(), 1, "a node under itself is entered once"),
+        Err(e) => assert!(!e.is_empty()),
+    }
+    // Two nodes under each other.
+    let pair = r3d::load("glb", &glb_with_nodes(r#"[{"mesh":0,"children":[1]},{"children":[0]}]"#));
+    if let Ok(m) = pair {
+        assert_eq!(m.triangle_count(), 1);
+    }
+    // A chain 20 000 nodes deep, the mesh at its foot, each a step up.
+    let depth = 20_000;
+    let nodes: Vec<String> = (0..depth)
+        .map(|i| match i + 1 < depth {
+            true => format!(r#"{{"children":[{}],"translation":[0,0.001,0]}}"#, i + 1),
+            false => r#"{"mesh":0}"#.to_string(),
+        })
+        .collect();
+    let m = r3d::load("glb", &glb_with_nodes(&format!("[{}]", nodes.join(",")))).unwrap();
+    assert_eq!(m.triangle_count(), 1);
+    let (lo, _) = m.bbox().unwrap();
+    assert!((lo[1] - 0.001 * (depth - 1) as f32).abs() < 0.05, "every parent's transform applies: {lo:?}");
 }
 
 // ---- Camera ------------------------------------------------------------------------
@@ -292,7 +327,7 @@ fn a_sphere_shows_exactly_steps_bands_and_the_shadow_chip_multiplies() {
 fn a_cube_outline_is_the_outline_colour_at_its_width_and_width_zero_draws_none() {
     let model = cube();
     let ink = [10, 200, 30, 255];
-    for width in [1.0f32, 3.0, 5.0] {
+    for width in [1.0f32, 2.0, 3.0, 4.0, 5.0] {
         let mut set = front(5.0);
         set.extend([
             ("outline", n(width)),
@@ -307,29 +342,41 @@ fn a_cube_outline_is_the_outline_colour_at_its_width_and_width_zero_draws_none()
         let first = row.iter().position(|o| *o).expect("an outline");
         let run = row[first..].iter().take_while(|o| **o).count();
         assert_eq!(run, width as usize, "width {width}");
-        // Every line pixel is within its reach of the silhouette.
+        // Every line pixel is within (width − 1)/2 px of the silhouette: of
+        // an edge pixel's centre for an odd width, of the crack between it
+        // and its empty neighbour for an even one (in doubled px, where a
+        // crack is a whole number).
         let mut scene = Scene3::default();
         scene.add_model(&model, &v.xform(), 1);
         let b = r3d::rasterize(&scene, &v.camera(), 64, 64);
-        let edge: Vec<(i32, i32)> = (0..64 * 64)
-            .filter(|&i| {
-                let (x, y) = (i % 64, i / 64);
-                b.id[i as usize] != 0
-                    && [(1, 0), (-1, 0), (0, 1), (0, -1)].iter().any(|(dx, dy)| {
-                        let (nx, ny) = (x + dx, y + dy);
-                        (0..64).contains(&nx) && (0..64).contains(&ny) && b.id[(ny * 64 + nx) as usize] == 0
-                    })
-            })
-            .map(|i| (i % 64, i / 64))
-            .collect();
-        let reach = (width - 1.0) / 2.0;
+        let odd = width as i32 % 2 == 1;
+        let mut seeds = Vec::new();
+        for y in 0..64i32 {
+            for x in 0..64i32 {
+                if b.id[(y * 64 + x) as usize] == 0 {
+                    continue;
+                }
+                for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if (0..64).contains(&nx) && (0..64).contains(&ny) && b.id[(ny * 64 + nx) as usize] == 0 {
+                        seeds.push(if odd { (2 * x, 2 * y) } else { (2 * x + dx, 2 * y + dy) });
+                    }
+                }
+            }
+        }
+        let reach2 = (width as i32 - 1).pow(2);
         let lines = r3d::outline(&b, width, 180.0);
         for (i, on) in lines.iter().enumerate() {
             let (x, y) = ((i % 64) as i32, (i / 64) as i32);
-            let near = edge
-                .iter()
-                .any(|(ex, ey)| (((ex - x).pow(2) + (ey - y).pow(2)) as f32).sqrt() <= reach + 1e-3);
+            let near = seeds.iter().any(|(sx, sy)| (2 * x - sx).pow(2) + (2 * y - sy).pow(2) <= reach2);
             assert_eq!(*on, near, "width {width} at ({x}, {y})");
+        }
+        // A fractional width rounds to whole px, and a hairline is one px.
+        if width == 2.0 {
+            assert_eq!(r3d::outline(&b, 2.4, 180.0), lines, "2.4 px draws as 2");
+        }
+        if width == 1.0 {
+            assert_eq!(r3d::outline(&b, 0.3, 180.0), lines, "0.3 px draws as 1");
         }
         // The lines pass is the outline alone.
         let lines_pass = r3d::render(&model, &values(&[set.clone(), vec![("pass", FxValue::Choice("lines".into()))]].concat()), ColorLaw::Srgb, 64, 64);
@@ -578,6 +625,43 @@ fn numpad_views_set_exact_orientations() {
 }
 
 #[test]
+fn framing_a_model_shows_all_of_it_at_any_size_and_frame_all_keeps_the_view_direction() {
+    for (scale, offset) in [(1.0f32, [0.0f32, 0.0, 0.0]), (40.0, [120.0, -30.0, 9.0]), (0.01, [0.0, 0.02, 0.0])] {
+        let placed = Xform { translate: offset, rotate_deg: [0.0, 25.0, 0.0], scale };
+        let bbox = r3d::placed_bbox(&cube(), &placed).unwrap();
+        for (w, h) in [(64u32, 36u32), (36, 64)] {
+            let cam = r3d::frame_box(bbox, 35.0, w as f32 / h as f32);
+            let d = r3d::length(r3d::sub(cam.eye, cam.target));
+            assert!(close(cam.target, r3d::mul(r3d::add(bbox.0, bbox.1), 0.5)), "aimed at the middle");
+            assert!((cam.near - d / 1000.0).abs() <= d * 1e-6, "near is a thousandth of the distance");
+            let radius = r3d::length(r3d::sub(bbox.1, bbox.0)) * 0.5;
+            assert!((cam.far - (d + 4.0 * radius)).abs() <= cam.far * 1e-5);
+            for i in 0..8 {
+                let (lo, hi) = bbox;
+                let corner = [
+                    if i & 1 == 0 { lo[0] } else { hi[0] },
+                    if i & 2 == 0 { lo[1] } else { hi[1] },
+                    if i & 4 == 0 { lo[2] } else { hi[2] },
+                ];
+                let (x, y, z) = cam.project(corner, w, h).expect("in front of the camera");
+                assert!(x > 0.0 && x < w as f32 && y > 0.0 && y < h as f32, "scale {scale} {w}×{h}: {corner:?} at ({x}, {y})");
+                assert!(z > cam.near && z < cam.far);
+            }
+        }
+    }
+    // Frame all: the view turns no way, it closes on the box.
+    let mut o = Orbit::default();
+    o.orbit(70.0, -20.0);
+    let (yaw, pitch) = (o.yaw_deg, o.pitch_deg);
+    let bbox = ([100.0, 100.0, 100.0], [102.0, 101.0, 100.5]);
+    o.frame(bbox, 16.0 / 9.0);
+    assert_eq!((o.yaw_deg, o.pitch_deg), (yaw, pitch));
+    assert!(close(o.target, [101.0, 100.5, 100.25]));
+    let cam = r3d::frame_box(bbox, o.focal_mm, 16.0 / 9.0);
+    assert!((o.distance - r3d::length(r3d::sub(cam.eye, cam.target))).abs() < 1e-3);
+}
+
+#[test]
 fn set_cut_camera_from_view_keys_every_camera_parameter_in_one_undo_step() {
     let mut r = rig();
     let (at, node, frame) = (r.at, r.node, 6);
@@ -607,6 +691,66 @@ fn set_cut_camera_from_view_keys_every_camera_parameter_in_one_undo_step() {
     assert!(r.cut().xsheet.params.is_empty(), "undone in one step each");
     let NodeKind::Model3D { binds, .. } = r.kind() else { unreachable!() };
     assert!(binds.0.is_empty());
+}
+
+#[test]
+fn every_model3d_node_shoots_through_the_one_cut_camera_with_id_chips_of_its_own() {
+    let mut r = rig();
+    let (at, first, frame) = (r.at, r.node, 3);
+    let model2 = r.engine.alloc_model_id();
+    let second = r.engine.alloc_node_id();
+    let asset = ModelAsset::new("cube2.obj", "obj", r3d::embed_mtl(CUBE_OBJ.as_bytes(), RED_MTL));
+    let add = vec![
+        Command::SetCutModel { at, id: model2, before: None, after: Some(asset) },
+        Command::AddNode { at, id: second, kind: NodeKind::model3d(model2) },
+    ];
+    r.engine.apply("second model", add).unwrap();
+    let mut view = Orbit::default();
+    view.orbit(-30.0, 10.0);
+    let cam = view.camera();
+    // Keyed from the second node: one batch binds both.
+    let need = r3d::camera_columns_needed(r.cut(), second);
+    assert_eq!(need, r3d::CAMERA_KEYS.len(), "no camera column yet");
+    let ids: Vec<ParamId> = (0..need).map(|_| r.engine.alloc_param_id()).collect();
+    let cmds = r3d::key_camera(r.cut(), at, second, &cam, frame, &mut ids.into_iter()).unwrap();
+    let before = r.engine.history_len();
+    r.engine.apply("Set cut camera from view", cmds).unwrap();
+    assert_eq!(r.engine.history_len(), before + 1, "one undo step");
+    let of = |r: &Rig, id: NodeId| match &r.cut().graph.node(id).unwrap().kind {
+        NodeKind::Model3D { params, binds, .. } => (params.clone(), binds.clone()),
+        _ => unreachable!(),
+    };
+    let ((p1, b1), (p2, b2)) = (of(&r, first), of(&r, second));
+    assert_eq!(b1, b2, "both bound to the same columns");
+    for (p, b) in [(&p1, &b1), (&p2, &b2)] {
+        let got = r.cut().model_at(p, b, frame).camera();
+        assert!(close(got.eye, cam.eye) && close(got.target, cam.target), "{got:?} vs {cam:?}");
+    }
+    let names: Vec<&str> = r.cut().xsheet.params.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names.len(), r3d::CAMERA_KEYS.len());
+    assert!(names.contains(&"cut camera x") && names.contains(&"cut camera target y"), "{names:?}");
+    assert!(names.contains(&"cut camera focal length"), "{names:?}");
+    assert_eq!(r3d::camera_columns_needed(r.cut(), first), 0, "the first node keys the same columns");
+    let cmds = r3d::key_camera(r.cut(), at, first, &cam, 9, &mut std::iter::empty()).unwrap();
+    assert!(cmds.iter().all(|c| matches!(c, Command::SetParamKey { .. })), "keys only");
+    // The ID matte: the two nodes' objects get different chips.
+    let (id1, id2) = (r3d::first_object_id(r.cut(), first), r3d::first_object_id(r.cut(), second));
+    assert_eq!((id1, id2), (1, 1 + r3d::OBJECTS_PER_NODE));
+    let mut set_pass = Vec::new();
+    for (id, (mut params, binds), model) in [(first, (p1, b1), r.model), (second, (p2, b2), model2)] {
+        params.set("pass", FxValue::Choice("id matte".into()));
+        set_pass.push(Command::SetNodeKind { at, id, kind: NodeKind::Model3D { model, params, binds } });
+    }
+    r.engine.apply("id matte", set_pass).unwrap();
+    let centre = |id: NodeId| {
+        let px = render_node_px(r.cut(), ColorLaw::Srgb, id, frame, 32, 32);
+        let i = (16 * 32 + 16) * 4;
+        [px[i], px[i + 1], px[i + 2], px[i + 3]]
+    };
+    let (c1, c2) = (centre(first), centre(second));
+    assert!(c1[3] == 1.0 && c2[3] == 1.0, "both cubes cover the centre: {c1:?} {c2:?}");
+    assert_ne!(c1, c2, "two nodes, two chips");
+    assert_ne!(r3d::id_chip(id1), r3d::id_chip(id2));
 }
 
 // ---- Image sequences and stills -------------------------------------------------------------
@@ -640,7 +784,7 @@ fn seq_rig(pattern: &str, first: u32, hold_last: bool) -> (Engine, CutRef) {
     let cut = engine.add_cut(scene, "cut", 24).unwrap();
     let at = CutRef { scene, cut };
     let (node, out) = (engine.alloc_node_id(), engine.alloc_node_id());
-    let kind = NodeKind::ImageSequence { pattern: pattern.into(), first, offset: 0, hold_last };
+    let kind = NodeKind::ImageSequence { pattern: pattern.into(), first, offset: 0, hold_last, fit: false };
     engine
         .apply(
             "rig",
@@ -685,6 +829,123 @@ fn relative_frames_resolve_against_the_project_folder_and_a_missing_one_warns_on
     let img = deliver::render_env(cut, ColorLaw::Srgb, 9, 32, 18, &opts, &env);
     assert_eq!(rgba8(&img, 1, 1), [255, 0, 0, 255]);
     assert!(env.warnings().is_empty());
+    // No project folder (an unsaved project): a relative pattern reads
+    // nothing — not the app's working folder — and says why, once.
+    let env = RenderEnv::default();
+    for _ in 0..2 {
+        let img = deliver::render_env(cut, ColorLaw::Srgb, 3, 32, 18, &opts, &env);
+        assert!(img.px.iter().all(|v| *v == 0.0));
+    }
+    assert_eq!(env.warnings(), vec![r3d::NO_FOLDER.to_string()]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_new_sequence_counts_from_one_and_a_picked_file_names_its_pattern() {
+    let NodeKind::ImageSequence { first, offset, hold_last, fit, .. } = NodeKind::image_sequence("shot_####.png")
+    else {
+        unreachable!()
+    };
+    assert_eq!((first, offset, hold_last, fit), (1, 0, false, true), "file 1 at the first frame, fitted");
+    // The sheet's frame 7 (index 6) shows shot_0007.png.
+    let file = r3d::sequence_file("shot_####.png", first, offset, false, 6, None).unwrap();
+    assert_eq!(file.to_string_lossy(), "shot_0007.png");
+    // Picking one file of a render names the run.
+    let base = std::env::temp_dir().join("gaban_project");
+    let picked = base.join("renders").join("shot_0001.png");
+    assert_eq!(r3d::pattern_from_file(&picked, Some(&base)), ("renders/shot_####.png".to_string(), 1));
+    let (outside, n) = r3d::pattern_from_file(&std::env::temp_dir().join("elsewhere").join("bg_120.exr"), Some(&base));
+    assert!(outside.ends_with("bg_###.exr") && Path::new(&outside).is_absolute(), "{outside}");
+    assert_eq!(n, 120);
+    assert_eq!(r3d::pattern_from_file(&base.join("0042.png"), Some(&base)), ("####.png".to_string(), 42));
+    assert_eq!(r3d::pattern_from_file(&base.join("plate.png"), Some(&base)), ("plate.png".to_string(), 1));
+}
+
+#[test]
+fn fit_scales_a_file_of_another_size_into_the_frame_centred() {
+    let dir = std::env::temp_dir().join("anim_core_tests").join("r3d_fit");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("half_0001.png"), png_bytes(16, 9, [0, 0, 255, 255])).unwrap();
+    std::fs::write(dir.join("square_0001.png"), png_bytes(8, 8, [0, 255, 0, 255])).unwrap();
+    std::fs::write(dir.join("same_0001.png"), png_bytes(32, 18, [255, 0, 0, 128])).unwrap();
+    let frame = |pattern: &str, fit: bool| {
+        let mut warns = Vec::new();
+        let px = r3d::sequence_frame(
+            pattern,
+            1,
+            0,
+            false,
+            fit,
+            0,
+            Some(&dir),
+            ColorLaw::Srgb,
+            (32, 18),
+            (0, 0, 32, 18),
+            &mut |w| warns.push(w),
+        );
+        assert!(warns.is_empty(), "{warns:?}");
+        Image { w: 32, h: 18, px }
+    };
+    // Half the frame's size: scaled 2×, the frame filled edge to edge.
+    let img = frame("half_####.png", true);
+    for (x, y) in [(0, 0), (31, 17), (16, 9)] {
+        assert_eq!(rgba8(&img, x, y), [0, 0, 255, 255], "({x}, {y})");
+    }
+    // Without fit it sits at its own size from the top-left.
+    let img = frame("half_####.png", false);
+    assert_eq!(rgba8(&img, 15, 8), [0, 0, 255, 255]);
+    assert_eq!(rgba8(&img, 16, 9), [0, 0, 0, 0]);
+    // A square: as tall as the frame, centred, clear either side.
+    let img = frame("square_####.png", true);
+    assert_eq!(rgba8(&img, 16, 0), [0, 255, 0, 255]);
+    assert_eq!(rgba8(&img, 16, 17), [0, 255, 0, 255]);
+    assert_eq!(rgba8(&img, 2, 9), [0, 0, 0, 0]);
+    assert_eq!(rgba8(&img, 29, 9), [0, 0, 0, 0]);
+    // The frame's own size is native either way, its alpha kept.
+    assert_eq!(frame("same_####.png", true).px, frame("same_####.png", false).px);
+    assert_eq!(rgba8(&frame("same_####.png", true), 5, 5), [255, 0, 0, 128]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_project_from_before_gm17_still_loads_and_old_node_json_reads_with_defaults() {
+    // Node JSON without the optional fields reads with their defaults (a
+    // sequence saved before `fit` is native-size).
+    let full = NodeKind::ImageSequence { pattern: "a_##.png".into(), first: 3, offset: 2, hold_last: true, fit: true };
+    let mut json = serde_json::to_value(&full).unwrap();
+    let inner = json.get_mut("ImageSequence").and_then(|v| v.as_object_mut()).expect("externally tagged");
+    for key in ["first", "offset", "hold_last", "fit"] {
+        inner.remove(key);
+    }
+    let old: NodeKind = serde_json::from_value(json).unwrap();
+    assert_eq!(old, NodeKind::ImageSequence { pattern: "a_##.png".into(), first: 0, offset: 0, hold_last: false, fit: false });
+    let mut json = serde_json::to_value(NodeKind::model3d(ModelId(7))).unwrap();
+    let inner = json.get_mut("Model3D").and_then(|v| v.as_object_mut()).unwrap();
+    inner.remove("params");
+    inner.remove("binds");
+    let NodeKind::Model3D { model, params, binds } = serde_json::from_value(json).unwrap() else { unreachable!() };
+    assert_eq!(model, ModelId(7));
+    assert!(params.0.is_empty() && binds.0.is_empty());
+    assert_eq!(ModelValues::of(&params), ModelValues::of(&r3d::default_params()), "missing values read as defaults");
+    // A v10 file: no cut_models table and no 3D nodes. It loads, with no
+    // models.
+    let r = rig();
+    let dir = std::env::temp_dir().join(format!("animstudio_r3d_old_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("old.animproj");
+    r.engine.save(&path).unwrap();
+    assert_eq!(Engine::load(&path).unwrap().project, r.engine.project, "v11 round-trips");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute("UPDATE meta SET value = '10' WHERE key = 'schema_version'", ()).unwrap();
+        conn.execute("DROP TABLE cut_models", ()).unwrap();
+        conn.execute("DELETE FROM links WHERE from_node = ?1", (r.node.0 as i64,)).unwrap();
+        conn.execute("DELETE FROM nodes WHERE id = ?1", (r.node.0 as i64,)).unwrap();
+    }
+    let old = Engine::load(&path).unwrap();
+    let cut = old.project.cut(r.at.scene, r.at.cut).unwrap();
+    assert!(cut.models.is_empty(), "pre-v11: no models, and the load succeeds");
+    assert!(cut.graph.node(r.node).is_err());
     std::fs::remove_dir_all(&dir).ok();
 }
 

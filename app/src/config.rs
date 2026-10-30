@@ -178,6 +178,20 @@ pub enum Action {
     /// GM17: File ▸ Import 3D model… (glTF or OBJ, embedded in the cut with
     /// its Model3D node).
     Import3DModel,
+    /// GM17: key the cut camera to what View3D sees (one undo step).
+    SetCutCameraFromView,
+    /// GM17: the 3D layout (LO) room — View3D beside the composite.
+    Layout3dRoom,
+    // GM17: View3D's numpad verbs (Blender's keys, over the pane).
+    View3dFront,
+    View3dBack,
+    View3dRight,
+    View3dLeft,
+    View3dTop,
+    View3dBottom,
+    View3dCamera,
+    View3dOrtho,
+    View3dFrameAll,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -239,12 +253,22 @@ pub enum Ctx {
     NodeGraph,
     /// GM14: the curves pane (graph editor).
     Curves,
+    /// GM17: the View3D pane. Its numpad verbs sit on the digits as in
+    /// Blender, and over the pane they shadow a Global verb's chord (0 is
+    /// RAM preview elsewhere, Home the first frame), as one editor's
+    /// keymap shadows the window's there.
+    View3D,
 }
 
 impl Ctx {
     /// May two actions in these contexts share a chord? Never when either
-    /// is Global or both are the same pane.
+    /// is Global or both are the same pane — except View3D and Global: over
+    /// View3D its own verb fires, elsewhere the Global one.
     pub fn overlaps(self, other: Ctx) -> bool {
+        let pair = |a, b| (self == a && other == b) || (self == b && other == a);
+        if pair(Ctx::View3D, Ctx::Global) {
+            return false;
+        }
         self == Ctx::Global || other == Ctx::Global || self == other
     }
 }
@@ -423,6 +447,17 @@ impl Action {
         Action::RenderEpisode,
         Action::AddRetakeNote,
         Action::Import3DModel,
+        Action::SetCutCameraFromView,
+        Action::Layout3dRoom,
+        Action::View3dFront,
+        Action::View3dBack,
+        Action::View3dRight,
+        Action::View3dLeft,
+        Action::View3dTop,
+        Action::View3dBottom,
+        Action::View3dCamera,
+        Action::View3dOrtho,
+        Action::View3dFrameAll,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -562,6 +597,17 @@ impl Action {
             Action::RenderEpisode => "Render episode",
             Action::AddRetakeNote => "Add retake note…",
             Action::Import3DModel => "Import 3D model…",
+            Action::SetCutCameraFromView => "Set cut camera from view",
+            Action::Layout3dRoom => "3D layout (LO) room",
+            Action::View3dFront => "Front view",
+            Action::View3dBack => "Back view",
+            Action::View3dRight => "Right view",
+            Action::View3dLeft => "Left view",
+            Action::View3dTop => "Top view",
+            Action::View3dBottom => "Bottom view",
+            Action::View3dCamera => "Camera view",
+            Action::View3dOrtho => "Ortho / perspective",
+            Action::View3dFrameAll => "Frame all",
         }
     }
 
@@ -707,6 +753,17 @@ impl Action {
             RenderEpisode => "Queue the scene's cuts as one Episode job in the render queue, frame for frame, sound end to end.",
             AddRetakeNote => "Note what to fix on this frame of the open cut (it can set the cut to Retake); the sheet shows it.",
             Import3DModel => "Embed a glTF (.glb, .gltf) or OBJ model in the cut and add its Model3D node, as one undo step; View3D shows it.",
+            SetCutCameraFromView => "Key the cut camera to what View3D sees at this frame, as one undo step.",
+            Layout3dRoom => "3D layout (LO) room: View3D, a composite viewer and the node graph. The canvas 3D underlay is not in this build.",
+            View3dFront => "View3D: look from the front (numpad 1 in Blender).",
+            View3dBack => "View3D: look from the back (Ctrl+numpad 1 in Blender).",
+            View3dRight => "View3D: look from the right (numpad 3 in Blender).",
+            View3dLeft => "View3D: look from the left (Ctrl+numpad 3 in Blender).",
+            View3dTop => "View3D: look from the top (numpad 7 in Blender).",
+            View3dBottom => "View3D: look from the bottom (Ctrl+numpad 7 in Blender).",
+            View3dCamera => "View3D: look through the cut camera (numpad 0 in Blender).",
+            View3dOrtho => "View3D: orthographic, or perspective again (numpad 5 in Blender).",
+            View3dFrameAll => "View3D: frame the whole model, keeping the view's direction (Home in Blender).",
         }
     }
 
@@ -722,6 +779,9 @@ impl Action {
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
             | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView | PinToLightTable
             | ShiftTrace | ResetShift | ToggleFinalLook => Group::View,
+            View3dFront | View3dBack | View3dRight | View3dLeft | View3dTop | View3dBottom
+            | View3dCamera | View3dOrtho | View3dFrameAll => Group::View,
+            SetCutCameraFromView => Group::Cut,
             MakeInbetweens | KindKey | KindBreakdown | KindInbetween | KindUnset | LipFlap => {
                 Group::Sheet
             }
@@ -740,7 +800,9 @@ impl Action {
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger => Group::Tool,
-            RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit => Group::Room,
+            RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit | Layout3dRoom => {
+                Group::Room
+            }
             ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue | ShowCutBoard
             | ShowEpisode | RenderEpisode => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
@@ -878,6 +940,19 @@ impl Action {
             RoomFinishing => "Room/shiage (ink & paint)",
             RoomComposite => "Room/satsuei (composite)",
             RoomEdit => "Room/henshū (edit)",
+            // GM17: the 3D layout room (off the spine, like the forge's),
+            // the cut camera keyed from View3D, and View3D's numpad verbs.
+            Layout3dRoom => "Room/3D layout (LO)",
+            SetCutCameraFromView => "Cut/Set cut camera from view",
+            View3dFront => "View/3D view/Front",
+            View3dBack => "View/3D view/Back",
+            View3dRight => "View/3D view/Right",
+            View3dLeft => "View/3D view/Left",
+            View3dTop => "View/3D view/Top",
+            View3dBottom => "View/3D view/Bottom",
+            View3dCamera => "View/3D view/Camera",
+            View3dOrtho => "View/3D view/Ortho or perspective",
+            View3dFrameAll => "View/3D view/Frame all",
             ResetLayout => "Window/Reset layout",
             QuickStart => "Help/Quick start",
             ShortcutSheet => "Help/Keyboard shortcuts",
@@ -1053,6 +1128,17 @@ impl Action {
             RenderEpisode => &["episode render", "render all cuts", "export episode"],
             AddRetakeNote => &["retake", "note", "fix note", "kantoku", "correction"],
             Import3DModel => &["3d", "gltf", "glb", "obj", "model", "layout", "blender"],
+            SetCutCameraFromView => &["align camera to view", "kamera", "LO camera"],
+            Layout3dRoom => &["3d", "layout", "LO"],
+            View3dFront => &["numpad 1", "3d front"],
+            View3dBack => &["ctrl numpad 1", "3d back"],
+            View3dRight => &["numpad 3", "3d right", "side view"],
+            View3dLeft => &["ctrl numpad 3", "3d left"],
+            View3dTop => &["numpad 7", "3d top", "plan view"],
+            View3dBottom => &["ctrl numpad 7", "3d bottom"],
+            View3dCamera => &["numpad 0", "look through camera", "cut camera"],
+            View3dOrtho => &["numpad 5", "orthographic", "perspective"],
+            View3dFrameAll => &["home", "view all", "frame model"],
             _ => &[],
         }
     }
@@ -1076,6 +1162,8 @@ impl Action {
                 Ctx::Curves
             }
             AddNode | BuildSatsuei => Ctx::NodeGraph,
+            SetCutCameraFromView | View3dFront | View3dBack | View3dRight | View3dLeft
+            | View3dTop | View3dBottom | View3dCamera | View3dOrtho | View3dFrameAll => Ctx::View3D,
             _ => Ctx::Global,
         }
     }
@@ -1107,6 +1195,18 @@ impl Action {
                 // GM9: Tab adds a node only over the graph (elsewhere it
                 // stays egui's focus key).
                 | Action::AddNode
+                // GM17: View3D's keys only over View3D — the digits stay the
+                // pencil box's over the canvas, 0 the RAM preview elsewhere.
+                | Action::SetCutCameraFromView
+                | Action::View3dFront
+                | Action::View3dBack
+                | Action::View3dRight
+                | Action::View3dLeft
+                | Action::View3dTop
+                | Action::View3dBottom
+                | Action::View3dCamera
+                | Action::View3dOrtho
+                | Action::View3dFrameAll
         )
     }
 
@@ -1381,12 +1481,32 @@ impl Action {
             }),
             RenderEpisode => Some(alt("E")),
             AddRetakeNote => Some(alt("N")),
+            // GM17: View3D's numpad keys as in Blender, the same in both
+            // presets — over View3D only (egui reads the keypad's digits as
+            // the row's): 1 / 3 / 7 front, right, top and Ctrl the opposite,
+            // 0 the cut camera, 5 ortho, Home frames all. Over View3D they
+            // shadow the pencil box's 1 / 3 / 5 / 7, the RAM preview's 0, the
+            // first frame's Home and Ctrl+1's actual size.
+            View3dFront => Some(k("1")),
+            View3dBack => Some(ctrl("1")),
+            View3dRight => Some(k("3")),
+            View3dLeft => Some(ctrl("3")),
+            View3dTop => Some(k("7")),
+            View3dBottom => Some(ctrl("7")),
+            View3dCamera => Some(k("0")),
+            View3dOrtho => Some(k("5")),
+            View3dFrameAll => Some(k("Home")),
+            // Ctrl+Alt+numpad 0 is Blender's "align camera to view".
+            SetCutCameraFromView => Some(Chord {
+                alt: true,
+                ..ctrl("0")
+            }),
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize | LipFlap
-            | BuildSatsuei | Import3DModel => None,
+            | BuildSatsuei | Import3DModel | Layout3dRoom => None,
         }
     }
 }

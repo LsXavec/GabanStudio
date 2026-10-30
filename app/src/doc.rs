@@ -936,6 +936,24 @@ impl AppState {
         self.refusal = msg.into();
         self.refusal_seq = self.refusal_seq.wrapping_add(1);
     }
+
+    /// GM17: the project's folder — where an ImageSequence's relative
+    /// frames are read — once the project is saved.
+    pub fn project_dir(&self) -> Option<PathBuf> {
+        self.file_path.as_deref().and_then(|p| p.parent()).map(|d| d.to_path_buf())
+    }
+
+    /// GM17: what a render could not read (a missing frame, a relative
+    /// pattern in an unsaved project), said once on the status lane.
+    pub fn note_render_warnings(&mut self, warnings: Vec<String>) {
+        let Some(first) = warnings.first() else {
+            return;
+        };
+        self.status = match warnings.len() {
+            1 => first.clone(),
+            n => format!("{first} (and {} more)", n - 1),
+        };
+    }
     fn next_drawing_name(&self) -> String {
         let taken: std::collections::HashSet<&str> = self
             .cut()
@@ -4048,9 +4066,11 @@ impl AppState {
     }
 
     /// GM17 (D15): embed a glTF or OBJ model in the cut and add its Model3D
-    /// node at `pos` — one batch, one undo step (undo removes both). An
-    /// OBJ's material library beside it is embedded inside it. A file that
-    /// does not read is refused with the reason, and nothing changes.
+    /// node at `pos`, its camera framing the whole model, wired under the
+    /// composite (see [`Self::wire_under_composite`]) — one batch, one undo
+    /// step (undo removes it all). An OBJ's material libraries beside it are
+    /// embedded inside it (a missing one is said). A file that does not
+    /// read is refused with the reason, and nothing changes.
     pub fn import_model(&mut self, path: &std::path::Path, pos: (f32, f32)) -> Option<NodeId> {
         let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
         let Some(format) = anim_core::r3d::format_for_extension(&ext) else {
@@ -4064,22 +4084,35 @@ impl AppState {
                 return None;
             }
         };
+        let mut missing = Vec::new();
         if format == "obj" {
             let text = String::from_utf8_lossy(&bytes).into_owned();
             let dir = path.parent().unwrap_or(std::path::Path::new("."));
-            let mtl: Vec<String> = text
-                .lines()
-                .filter_map(|l| l.trim().strip_prefix("mtllib "))
-                .filter_map(|name| std::fs::read_to_string(dir.join(name.trim())).ok())
-                .collect();
+            let mut mtl = Vec::new();
+            // `mtllib a.mtl b.mtl`: every library the line names.
+            for line in text.lines() {
+                let mut words = line.split_whitespace();
+                if words.next() != Some("mtllib") {
+                    continue;
+                }
+                for name in words {
+                    match std::fs::read_to_string(dir.join(name)) {
+                        Ok(lib) => mtl.push(lib),
+                        Err(_) => missing.push(name.to_string()),
+                    }
+                }
+            }
             if !mtl.is_empty() && !text.contains(anim_core::r3d::EMBEDDED_MTL) {
                 bytes = anim_core::r3d::embed_mtl(&bytes, &mtl.join("\n"));
             }
         }
-        if let Err(e) = anim_core::r3d::load(format, &bytes) {
-            self.refuse(format!("{} does not import: {e}", path.display()));
-            return None;
-        }
+        let loaded = match anim_core::r3d::load(format, &bytes) {
+            Ok(m) => m,
+            Err(e) => {
+                self.refuse(format!("{} does not import: {e}", path.display()));
+                return None;
+            }
+        };
         let name = path
             .file_name()
             .map(|s| s.to_string_lossy().into_owned())
@@ -4088,6 +4121,18 @@ impl AppState {
         let model = self.engine.alloc_model_id();
         let node = self.engine.alloc_node_id();
         let asset = anim_core::model::ModelAsset::new(name, format, bytes);
+        // The node's camera frames the whole model (its default
+        // placement), whatever its size.
+        let mut kind = anim_core::graph::NodeKind::model3d(model);
+        if let anim_core::graph::NodeKind::Model3D { params, .. } = &mut kind {
+            let v = anim_core::r3d::ModelValues::of(params);
+            if let Some(bbox) = anim_core::r3d::placed_bbox(&loaded, &v.xform()) {
+                let p = &self.engine.project;
+                let aspect = p.width.max(1) as f32 / p.height.max(1) as f32;
+                let cam = anim_core::r3d::frame_box(bbox, v.camera().focal_mm, aspect);
+                anim_core::r3d::set_camera_params(params, &cam);
+            }
+        }
         let mut cmds = vec![
             Command::SetCutModel {
                 at,
@@ -4095,21 +4140,86 @@ impl AppState {
                 before: None,
                 after: Some(asset),
             },
-            Command::AddNode {
-                at,
-                id: node,
-                kind: anim_core::graph::NodeKind::model3d(model),
-            },
+            Command::AddNode { at, id: node, kind },
         ];
         cmds.extend(self.layout_edit(node, Some(pos)));
+        let wired = self.wire_under_composite(node, pos, &mut cmds);
         let r = self.engine.apply("import 3D model", cmds);
         let ok = r.is_ok();
         if ok {
             self.node_positions.insert(node.0, pos);
             self.selected_node = Some(node);
+            // View3D looks through the new camera when it next shows.
+            self.view3d.orbit = None;
         }
-        self.report(r, "3D model imported");
+        let mut said = if wired {
+            "3D model imported under the composite".to_string()
+        } else {
+            "3D model imported — connect it to the Output in the node graph".to_string()
+        };
+        if !missing.is_empty() {
+            said = format!("{said} (no material library {}: grey)", missing.join(", "));
+        }
+        self.report(r, &said);
         ok.then_some(node)
+    }
+
+    /// GM17: the edits (appended to `cmds`, the import's batch) that wire
+    /// new node `node` (at `pos`) under the cut's composite: with an Output
+    /// fed by a node, a Normal Blend takes the new node below (input 0) and
+    /// the old feed above (input 1) into the Output; with a bare Output, the
+    /// node feeds it; with no graph at all, the sheet's composite is built
+    /// (as "Build composite from sheet") with the node under it. A graph a
+    /// hand built without an Output is left as it is: false.
+    fn wire_under_composite(&mut self, node: NodeId, pos: (f32, f32), cmds: &mut Vec<Command>) -> bool {
+        use anim_core::graph::{BlendMode, NodeKind};
+        let at = self.at();
+        let output = self.cut().graph.output;
+        let empty = self.cut().graph.nodes().next().is_none();
+        let (out, feed, mut built) = match output {
+            Some(out) => {
+                let feed = self.cut().graph.node(out).ok().and_then(|n| n.inputs.first().copied().flatten());
+                (out, feed.map(|(from, _)| from), Vec::new())
+            }
+            None if empty => {
+                // A source per column, a blend between each two, the Output.
+                let n = self.cut().render_order().len();
+                let ids: Vec<NodeId> = (0..2 * n + 1).map(|_| self.engine.alloc_node_id()).collect();
+                let mut ids = ids.into_iter();
+                let mut built = build_auto_comp(self.cut(), at, || ids.next().expect("ids for every node"));
+                let Some(out) = built.iter().find_map(|c| match c {
+                    Command::SetOutput { node: Some(o), .. } => Some(*o),
+                    _ => None,
+                }) else {
+                    return false;
+                };
+                // The chain's top feeds the Output: take that edge out, so
+                // the node can go under it.
+                let feed = built.iter().find_map(|c| match c {
+                    Command::Connect { from, to, to_pin: 0, .. } if *to == out => Some(*from),
+                    _ => None,
+                });
+                built.retain(|c| !matches!(c, Command::Connect { to, .. } if *to == out));
+                (out, feed, built)
+            }
+            None => return false,
+        };
+        cmds.append(&mut built);
+        let into_output = |from| Command::Connect { at, from, from_pin: 0, to: out, to_pin: 0 };
+        match feed {
+            Some(top) => {
+                let blend = self.engine.alloc_node_id();
+                cmds.push(Command::AddNode { at, id: blend, kind: NodeKind::Blend { mode: BlendMode::Normal } });
+                cmds.push(Command::Connect { at, from: node, from_pin: 0, to: blend, to_pin: 0 });
+                cmds.push(Command::Connect { at, from: top, from_pin: 0, to: blend, to_pin: 1 });
+                cmds.push(into_output(blend));
+                let at_blend = (pos.0 + 180.0, pos.1);
+                cmds.extend(self.layout_edit(blend, Some(at_blend)));
+                self.node_positions.insert(blend.0, at_blend);
+            }
+            None => cmds.push(into_output(node)),
+        }
+        true
     }
 
     /// GM17: "Set cut camera from view" — key Model3D node `node`'s camera
@@ -4238,6 +4348,20 @@ impl AppState {
             vec![Command::SetNodeKind { at, id, kind }],
         );
         self.report(r, "node updated");
+    }
+
+    /// GM17: an ImageSequence's "pick a frame…" — the run `path` belongs to
+    /// (shot_0001.png is shot_####.png from 1), named relative to the
+    /// project's folder when it is inside it; one undo step.
+    pub fn set_sequence_from_file(&mut self, id: NodeId, path: &std::path::Path) {
+        use anim_core::graph::NodeKind;
+        let Ok(NodeKind::ImageSequence { offset, hold_last, fit, .. }) = self.cut().graph.node(id).map(|n| n.kind.clone())
+        else {
+            self.refuse("refused — that node is no longer an image sequence");
+            return;
+        };
+        let (pattern, first) = anim_core::r3d::pattern_from_file(path, self.project_dir().as_deref());
+        self.graph_set_kind(id, NodeKind::ImageSequence { pattern, first, offset, hold_last, fit });
     }
 
     /// GM10: Cut ▸ Paper size — the cut's paper in frame pixels (the frame

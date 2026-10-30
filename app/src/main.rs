@@ -260,14 +260,23 @@ fn run_cli_job(
         config.session.username.clone(),
     )
     .ok_or("the cut is gone")?;
+    // GM17: relative ImageSequence frames read from the file's folder.
+    let spec = match &job.source {
+        anim_core::deliver::CliSource::File(path) => spec.with_base_dir(path.parent().map(|d| d.to_path_buf())),
+        anim_core::deliver::CliSource::Sample => spec,
+    };
     let typed = config.render.ffmpeg.trim();
     let configured = (!typed.is_empty()).then(|| std::path::PathBuf::from(typed));
     let ffmpeg = export::find_ffmpeg(configured.as_deref());
     let total = spec.frames.1 - spec.frames.0 + 1;
     let never = std::sync::atomic::AtomicBool::new(false);
-    render_queue::render_job(&spec, ffmpeg.as_deref(), &never, &mut |f| {
+    let result = render_queue::render_job(&spec, ffmpeg.as_deref(), &never, &mut |f| {
         println!("frame {}/{total}", f - spec.frames.0 + 1);
-    })
+    });
+    for w in spec.env.warnings() {
+        println!("warning: {w}");
+    }
+    result
 }
 
 /// A slate room tab (spec §4.2): kanji over romaji caps, framed, all four
@@ -2939,6 +2948,17 @@ impl App {
                     ed.state.set_lut_file(node, key, &path);
                 }
             }
+            AppRequest::PickSequenceFrame { node } => {
+                let Some(ed) = &mut self.editor else { return };
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("A frame (PNG, EXR, TIFF, JPEG)", &["png", "exr", "tif", "tiff", "jpg", "jpeg"]);
+                if let Some(dir) = ed.state.project_dir() {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(path) = dialog.pick_file() {
+                    ed.state.set_sequence_from_file(node, &path);
+                }
+            }
             // GM17: the model picker is the shell's; the import is one undo
             // step, and View3D comes forward to show it.
             AppRequest::Import3DModel => {
@@ -2949,7 +2969,13 @@ impl App {
                 {
                     let pos = (40.0, 40.0 + 90.0 * ed.state.cut().graph.nodes().count() as f32);
                     if ed.state.import_model(&path, pos).is_some() {
-                        ed.open_pane(Pane::View3D);
+                        // Unwired (a hand-built graph with no Output): the
+                        // graph comes forward, the node selected in it.
+                        if ed.state.cut().graph.output.is_none() {
+                            ed.open_pane(Pane::NodeGraph);
+                        } else {
+                            ed.open_pane(Pane::View3D);
+                        }
                     }
                 }
             }
@@ -2991,6 +3017,9 @@ pub enum AppRequest {
         node: anim_core::ids::NodeId,
         key: &'static str,
     },
+    /// GM17: an ImageSequence's "pick a frame…" — the image picker is the
+    /// shell's; the file names the node's run.
+    PickSequenceFrame { node: anim_core::ids::NodeId },
 }
 
 impl Editor {
@@ -3121,7 +3150,19 @@ impl Editor {
             Action::RoomFinishing => self.enter_room(Stage::InkPaint),
             Action::RoomComposite => self.enter_room(Stage::Composite),
             Action::RoomEdit => self.enter_room(Stage::Edit),
-            _ => {}
+            // GM17: the 3D layout room, built in and off the spine like the
+            // forge's; View3D's numpad verbs move its view only.
+            Action::Layout3dRoom => {
+                self.dock = Pane::layout3d_dock();
+                self.stage = None;
+                self.state.status = "the 3D layout room".into();
+            }
+            Action::View3dFrameAll => view3d::frame_all(&mut self.state),
+            a => {
+                if let Some(nav) = view3d::nav_of(a) {
+                    view3d::perform_nav(&mut self.state, nav);
+                }
+            }
         }
         if is_chrome(action) {
             return;
@@ -3337,8 +3378,10 @@ impl Editor {
                     });
                 }
             },
-            // GM17: the model picker is the shell's.
+            // GM17: the model picker is the shell's; the cut camera keyed
+            // from View3D's view is the document's (one undo step).
             Action::Import3DModel => *out = Performed::App(AppRequest::Import3DModel),
+            Action::SetCutCameraFromView => view3d::set_camera_from_view(s),
             Action::NewDrawing => s.new_drawing_at_frame(),
             Action::ClearCel => match &selection {
                 Some(poly) => s.clear_current_region(poly),
@@ -3525,7 +3568,17 @@ impl Editor {
             | Action::ShowCutBoard
             | Action::ShowEpisode
             | Action::RenderEpisode
-            | Action::AddRetakeNote => {} // the chrome's, handled above
+            | Action::AddRetakeNote
+            | Action::Layout3dRoom
+            | Action::View3dFront
+            | Action::View3dBack
+            | Action::View3dRight
+            | Action::View3dLeft
+            | Action::View3dTop
+            | Action::View3dBottom
+            | Action::View3dCamera
+            | Action::View3dOrtho
+            | Action::View3dFrameAll => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
     }
@@ -3574,6 +3627,18 @@ fn is_chrome(action: Action) -> bool {
             | Action::ShowEpisode
             | Action::RenderEpisode
             | Action::AddRetakeNote
+            // GM17: the 3D layout room, and View3D's view (a view: the
+            // document is untouched).
+            | Action::Layout3dRoom
+            | Action::View3dFront
+            | Action::View3dBack
+            | Action::View3dRight
+            | Action::View3dLeft
+            | Action::View3dTop
+            | Action::View3dBottom
+            | Action::View3dCamera
+            | Action::View3dOrtho
+            | Action::View3dFrameAll
     )
 }
 
@@ -3663,8 +3728,11 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::MakeCutsFromPanels
             | Action::RenderEpisode
             | Action::AddRetakeNote
-            // GM17: no model or node added under a live stroke.
+            // GM17: no model or node added, no camera keyed and no room
+            // rebuilt under a live stroke.
             | Action::Import3DModel
+            | Action::SetCutCameraFromView
+            | Action::Layout3dRoom
     )
 }
 
@@ -4954,6 +5022,7 @@ impl Editor {
             Some(Pane::XSheet) => config::Ctx::Sheet,
             Some(Pane::NodeGraph) => config::Ctx::NodeGraph,
             Some(Pane::Curves) => config::Ctx::Curves,
+            Some(Pane::View3D) => config::Ctx::View3D,
             _ => config::Ctx::Global,
         }
     }
@@ -5140,6 +5209,16 @@ impl Editor {
             Action::ExportColorSheet if s.palettes.characters.is_empty() => {
                 Err("no character palette yet")
             }
+            // GM17: View3D's verbs need a model to act on, and the cut
+            // camera is perspective.
+            Action::SetCutCameraFromView | Action::View3dFrameAll
+                if view3d::model_node(s.cut(), s.selected_node).is_none() =>
+            {
+                Err(view3d::NO_MODEL)
+            }
+            Action::SetCutCameraFromView if s.view3d.orbit.is_some_and(|o| o.ortho) => {
+                Err(view3d::ORTHO_REFUSAL)
+            }
             _ => Ok(()),
         }
     }
@@ -5172,6 +5251,8 @@ impl Editor {
             Action::RamPreview => Some(self.state.ram.busy()),
             // GM15: the episode playing on through the scene's cuts.
             Action::PlayEpisode => Some(self.state.board.episode_play && self.state.view.playing),
+            // GM17: View3D's ortho latch.
+            Action::View3dOrtho => Some(self.state.view3d.orbit.is_some_and(|o| o.ortho)),
             _ => None,
         }
     }
@@ -6920,6 +7001,9 @@ impl Editor {
         if let Some((node, key)) = self.state.graph_ui.lut_pick.take() {
             self.requests.push(AppRequest::LoadLut { node, key });
         }
+        if let Some(node) = self.state.graph_ui.sequence_pick.take() {
+            self.requests.push(AppRequest::PickSequenceFrame { node });
+        }
         // GM3: the chords every tooltip names; the palette (its keys taken
         // before anything else reads them) and the help windows.
         menus::publish(ui.ctx(), binds);
@@ -6995,6 +7079,8 @@ impl Editor {
         };
         let range = self.state.play_range();
         let s = &mut self.state;
+        let dir = s.project_dir();
+        s.ram.set_base_dir(dir);
         match s.ram.sync(&mut s.engine, look, range, Some(ui.ctx())) {
             Some(Ok(msg)) => s.status = msg,
             Some(Err(msg)) => s.refuse(msg),
@@ -7514,22 +7600,17 @@ impl Editor {
                         ui.close();
                     }
                     // GM17: THE 3D LAYOUT ROOM, built in beside the forge's
-                    // and off the spine like it.
+                    // and off the spine like it — the Room menu's verb (D6).
                     if ui
                         .button("3D layout room")
                         .on_hover_text(
                             "View3D beside a composite viewer, the node graph under them — \
-                             set the cut camera from the view",
+                             set the cut camera from the view. The canvas's 3D underlay \
+                             (drawing over the model on the canvas) is not in this build",
                         )
                         .clicked()
                     {
-                        if self.canvas.stroke_active() {
-                            self.state.refuse("refused — finish the stroke first");
-                        } else {
-                            self.dock = Pane::layout3d_dock();
-                            self.stage = None;
-                            self.state.status = "the 3D layout room".into();
-                        }
+                        self.invoke(Action::Layout3dRoom, ui.ctx());
                         ui.close();
                     }
                     ui.separator();
@@ -7956,7 +8037,9 @@ impl Editor {
             } else if self.final_look.on {
                 // GM11: the master's look, rendered by the CPU on a worker
                 // (D9) — no GPU needed; the last frame stays up meanwhile.
-                self.final_look.view(&self.state, ui.ctx())
+                let look = self.final_look.view(&self.state, ui.ctx());
+                self.state.note_render_warnings(self.final_look.take_warnings());
+                look
             } else if self.state.cut().graph.output.is_none() {
                 viewer::GraphView::NoOutput
             } else if let (Some(g), Some(p)) = (&mut self.graph, &mut self.paint) {
@@ -7984,9 +8067,11 @@ impl Editor {
                                 Some((n, v.hash()))
                             })
                             .collect();
+                        g.set_base_dir(self.state.project_dir());
                         let cut = self.state.cut();
                         let law = self.state.engine.project.color_law;
                         let id = g.execute(hash, fx, cut, law, frame, p);
+                        self.state.note_render_warnings(g.take_warnings());
                         if g.rendering() {
                             // Poll for the worker's result; the pen never waits.
                             ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
@@ -8084,6 +8169,11 @@ impl Editor {
         }
         // GM6: and the canvas's (the system Copy / Paste events over it).
         for action in std::mem::take(&mut self.canvas.asked) {
+            self.invoke(action, ui.ctx());
+        }
+        // GM17: and View3D's toolbar (its numpad views, Frame all, the cut
+        // camera from the view).
+        for action in std::mem::take(&mut self.state.view3d.asked) {
             self.invoke(action, ui.ctx());
         }
 

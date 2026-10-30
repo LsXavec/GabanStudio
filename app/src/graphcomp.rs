@@ -181,6 +181,11 @@ pub struct GraphCompositor {
     fx_hashes: HashMap<NodeId, u64>,
     /// An upload landed since `out_texture` was composed.
     fx_fresh: bool,
+    /// GM17: the project's folder, where an ImageSequence's relative frames
+    /// are read, and what the worker's renders reported (a missing frame),
+    /// waiting for the shell to show.
+    base_dir: Option<std::path::PathBuf>,
+    fx_warnings: Vec<String>,
 }
 
 impl Drop for GraphCompositor {
@@ -364,6 +369,8 @@ impl GraphCompositor {
             fx_worker: None,
             fx_hashes: HashMap::new(),
             fx_fresh: false,
+            base_dir: None,
+            fx_warnings: Vec::new(),
         };
         this.clear_view_now(&this.out_view.clone());
         this
@@ -481,6 +488,23 @@ impl GraphCompositor {
         self.fx.rendering()
     }
 
+    /// GM17: read relative frames from `dir` (the project's folder; None for
+    /// an unsaved project). A new folder drops the renders made from the
+    /// old one.
+    pub fn set_base_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        if self.base_dir != dir {
+            self.base_dir = dir;
+            self.fx.clear();
+            self.cached_hash = None;
+        }
+    }
+
+    /// GM17: what the CPU renders reported since the last call (each job's
+    /// warnings once).
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.fx_warnings)
+    }
+
     /// Upload every CPU render the worker has finished (no CPU work here).
     fn land_fx(&mut self) {
         let Some(worker) = &self.fx_worker else {
@@ -495,6 +519,11 @@ impl GraphCompositor {
     /// Upload one finished render (a size or law change since its job
     /// drops it).
     fn land_one(&mut self, d: FxDone) {
+        for w in d.warnings {
+            if !self.fx_warnings.contains(&w) {
+                self.fx_warnings.push(w);
+            }
+        }
         let Some(texels) = d.texels else {
             // The render panicked: stop waiting (the lamp goes out) and
             // keep the last result.
@@ -659,6 +688,7 @@ impl GraphCompositor {
                             law: self.law,
                             width: self.width,
                             height: self.height,
+                            base_dir: self.base_dir.clone(),
                         };
                         let unsent = match &self.fx_worker {
                             Some(w) => w.jobs.send(job).err().map(|e| e.0),
@@ -1140,30 +1170,37 @@ pub struct FxJob {
     pub law: ColorLaw,
     pub width: u32,
     pub height: u32,
+    /// GM17: the project's folder (relative ImageSequence frames).
+    pub base_dir: Option<std::path::PathBuf>,
 }
 
 /// A finished render: Rgba16Float texels (premultiplied), ready to upload;
-/// None when the render panicked.
+/// None when the render panicked. `warnings`: what it could not read.
 pub struct FxDone {
     pub key: FxKey,
     pub generation: u64,
     pub texels: Option<Vec<u16>>,
+    pub warnings: Vec<String>,
 }
 
-/// The worker's whole job — the export's own `render_node`, as f16 bits.
+/// The worker's whole job — the export's own `render_node`, as f16 bits,
+/// reading the project's folder and reporting what it could not read.
 pub fn render_job(job: &FxJob) -> FxDone {
-    let px = anim_core::export::render_node_px(
+    let env = anim_core::export::RenderEnv::new(job.base_dir.clone());
+    let px = anim_core::export::render_node_px_env(
         &job.cut,
         job.law,
         job.key.node,
         job.key.frame,
         job.width,
         job.height,
+        &env,
     );
     FxDone {
         key: job.key,
         generation: job.generation,
         texels: Some(px.into_iter().map(anim_core::raster::f32_to_f16_bits).collect()),
+        warnings: env.warnings(),
     }
 }
 
@@ -1174,6 +1211,7 @@ pub fn render_job_guarded(job: &FxJob, render: impl FnOnce(&FxJob) -> FxDone) ->
         key: job.key,
         generation: job.generation,
         texels: None,
+        warnings: Vec::new(),
     })
 }
 
@@ -1325,6 +1363,7 @@ mod fx_tests {
             law,
             width: 8,
             height: 8,
+            base_dir: None,
         };
         let done = render_job(&job);
         // A neutral grade is the export's own pixels of its input.
@@ -1427,6 +1466,7 @@ mod fx_tests {
             law: ColorLaw::default(),
             width: 1,
             height: 1,
+            base_dir: None,
         };
         // The worker survives it (this panic is the test's own).
         let done = render_job_guarded(&job, |_| panic!("deliberate test panic: a broken FX"));

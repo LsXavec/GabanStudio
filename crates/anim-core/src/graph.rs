@@ -159,7 +159,10 @@ pub enum NodeKind {
     /// the run's length (`renders/shot_####.png`); a relative pattern is
     /// read from the project's folder. Cut frame `offset` shows file
     /// `first`; a missing file renders transparent (and is reported), or
-    /// with `hold_last` the nearest earlier file holds.
+    /// with `hold_last` the nearest earlier file holds. With `fit` a file
+    /// whose size differs from the frame is scaled to fit it, centred;
+    /// without, it sits at its own size from the frame's top-left (a node
+    /// saved before `fit` existed reads as without).
     ImageSequence {
         pattern: String,
         #[serde(default)]
@@ -168,6 +171,8 @@ pub enum NodeKind {
         offset: i32,
         #[serde(default)]
         hold_last: bool,
+        #[serde(default)]
+        fit: bool,
     },
 }
 
@@ -257,14 +262,15 @@ impl NodeKind {
         }
     }
 
-    /// GM17: a new ImageSequence node reading `pattern` from file 0 at
-    /// frame 0.
+    /// GM17: a new ImageSequence node reading `pattern` from file 1 (where
+    /// renderers start counting) at frame 0, fitted to the frame.
     pub fn image_sequence(pattern: impl Into<String>) -> Self {
         Self::ImageSequence {
             pattern: pattern.into(),
-            first: 0,
+            first: 1,
             offset: 0,
             hold_last: false,
+            fit: true,
         }
     }
 

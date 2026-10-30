@@ -30,8 +30,11 @@
 //! - **Outline.** An edge pixel is a covered pixel beside empty space or a
 //!   farther object (silhouette), beside its own surface more than 10% of
 //!   its depth farther (a fold), or across a crease sharper than the crease
-//!   angle (its right or lower neighbour). The line is every pixel within
-//!   `(width − 1)/2` px of an edge pixel; width 0 draws none.
+//!   angle (its right or lower neighbour). The width rounds to whole px (at
+//!   least one); the line is every pixel within `(width − 1)/2` px of the
+//!   edge — of an edge pixel's centre for an odd width, of the crack
+//!   between it and the neighbour that made it an edge for an even one —
+//!   so it is `width` px across either way; width 0 draws none.
 //! - **Passes.** Beauty (toon + outline), Lines (the outline alone), Shadow
 //!   matte (white where any band below the lit one shows), Depth (grey
 //!   `(d − near)/(far − near)`, so it grows with distance), ID matte (one
@@ -196,11 +199,7 @@ pub fn load_gltf(bytes: &[u8]) -> Result<Model, String> {
     let doc = &gltf.document;
     let mut model = Model::default();
     match doc.default_scene().or_else(|| doc.scenes().next()) {
-        Some(scene) => {
-            for node in scene.nodes() {
-                gltf_node(&node, &M4_IDENTITY, &buffers, &mut model);
-            }
-        }
+        Some(scene) => gltf_nodes(scene.nodes(), &buffers, &mut model),
         None => {
             for mesh in doc.meshes() {
                 let name = mesh.name().unwrap_or("mesh").to_string();
@@ -214,14 +213,30 @@ pub fn load_gltf(bytes: &[u8]) -> Result<Model, String> {
     Ok(model)
 }
 
-fn gltf_node(node: &gltf::Node, parent: &M4, buffers: &[gltf::buffer::Data], model: &mut Model) {
-    let m = m4_mul(parent, &node.transform().matrix());
-    if let Some(mesh) = node.mesh() {
-        let name = node.name().or(mesh.name()).unwrap_or("mesh").to_string();
-        gltf_mesh(&mesh, &m, name, buffers, model);
-    }
-    for child in node.children() {
-        gltf_node(&child, &m, buffers, model);
+/// Every node under `roots`, depth first in file order, each placed by its
+/// parents' transforms. The reader checks only that `children` name nodes,
+/// not that they form a tree, so a node listed under itself or an ancestor
+/// (a malformed file) is entered once; and the walk keeps its own stack, so
+/// no depth of nesting can overflow the call stack.
+fn gltf_nodes<'a>(
+    roots: impl Iterator<Item = gltf::Node<'a>>,
+    buffers: &[gltf::buffer::Data],
+    model: &mut Model,
+) {
+    let mut entered = std::collections::HashSet::new();
+    let mut stack: Vec<(gltf::Node<'a>, M4)> = roots.map(|n| (n, M4_IDENTITY)).collect();
+    stack.reverse();
+    while let Some((node, parent)) = stack.pop() {
+        if !entered.insert(node.index()) {
+            continue;
+        }
+        let m = m4_mul(&parent, &node.transform().matrix());
+        if let Some(mesh) = node.mesh() {
+            let name = node.name().or(mesh.name()).unwrap_or("mesh").to_string();
+            gltf_mesh(&mesh, &m, name, buffers, model);
+        }
+        let children: Vec<gltf::Node<'a>> = node.children().collect();
+        stack.extend(children.into_iter().rev().map(|c| (c, m)));
     }
 }
 
@@ -741,7 +756,8 @@ pub fn toon_shade(b: &Buffers, t: &Toon) -> (Vec<[u8; 4]>, Vec<u32>) {
 pub const DEPTH_JUMP: f32 = 0.1;
 
 /// The outline mask (see the module laws): edge pixels from silhouettes,
-/// folds and creases, dilated to `width` px. Width 0 draws none.
+/// folds and creases, dilated to `width` px (whole px, at least one).
+/// Width 0 draws none.
 pub fn outline(b: &Buffers, width: f32, crease_deg: f32) -> Vec<bool> {
     let (w, h) = (b.w as i64, b.h as i64);
     let n = b.id.len();
@@ -749,15 +765,19 @@ pub fn outline(b: &Buffers, width: f32, crease_deg: f32) -> Vec<bool> {
     if !(width > 0.0) || n == 0 {
         return out;
     }
+    let px = width.min(1024.0).round().max(1.0) as i64;
     let cos_crease = crease_deg.clamp(0.0, 180.0).to_radians().cos();
-    let mut edges = Vec::new();
+    // Seeds in doubled px, so the crack between two pixels is a whole
+    // number: an odd width centres the line on the edge pixel, an even one
+    // on the crack toward each neighbour that made it an edge.
+    let mut seeds = Vec::new();
     for y in 0..h {
         for x in 0..w {
             let i = (y * w + x) as usize;
             if b.id[i] == 0 {
                 continue;
             }
-            let hit = [(1, 0), (0, 1), (-1, 0), (0, -1)].iter().any(|&(dx, dy)| {
+            let hit = |dx: i64, dy: i64| {
                 let (nx, ny) = (x + dx, y + dy);
                 if nx < 0 || ny < 0 || nx >= w || ny >= h {
                     return false;
@@ -771,21 +791,29 @@ pub fn outline(b: &Buffers, width: f32, crease_deg: f32) -> Vec<bool> {
                 }
                 // A crease marks one side only (the left or upper pixel).
                 dx + dy > 0 && dot(b.normal[i], b.normal[j]) < cos_crease
-            });
-            if hit {
-                edges.push((x, y));
+            };
+            for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+                if !hit(dx, dy) {
+                    continue;
+                }
+                if px % 2 == 1 {
+                    seeds.push((2 * x, 2 * y));
+                    break;
+                }
+                seeds.push((2 * x + dx, 2 * y + dy));
             }
         }
     }
-    let r = ((width - 1.0) * 0.5).max(0.0);
-    let reach = r.floor() as i64;
-    let r2 = r * r + 1e-3;
-    for (x, y) in edges {
-        for dy in -reach..=reach {
-            for dx in -reach..=reach {
-                let (nx, ny) = (x + dx, y + dy);
-                if ((dx * dx + dy * dy) as f32) <= r2 && nx >= 0 && ny >= 0 && nx < w && ny < h {
-                    out[(ny * w + nx) as usize] = true;
+    // Within (px − 1)/2 px of a seed: (2X − sx)² + (2Y − sy)² ≤ (px − 1)².
+    let r2 = (px - 1) * (px - 1);
+    let reach = px / 2 + 1;
+    for (sx, sy) in seeds {
+        let (cx, cy) = (sx.div_euclid(2), sy.div_euclid(2));
+        for y in (cy - reach).max(0)..=(cy + reach).min(h - 1) {
+            for x in (cx - reach).max(0)..=(cx + reach).min(w - 1) {
+                let (ex, ey) = (2 * x - sx, 2 * y - sy);
+                if ex * ex + ey * ey <= r2 {
+                    out[(y * w + x) as usize] = true;
                 }
             }
         }
@@ -852,12 +880,106 @@ pub fn shade(b: &Buffers, v: &ModelValues, law: ColorLaw) -> Image {
 }
 
 /// A Model3D node's picture: `model` placed and shot as `v` says, in a
-/// `w × h` frame.
+/// `w × h` frame, its objects numbered from 1.
 pub fn render(model: &Model, v: &ModelValues, law: ColorLaw, w: u32, h: u32) -> Image {
+    render_as(model, v, law, w, h, 1)
+}
+
+/// [`render`] with the model's objects numbered from `first_id` (see
+/// [`first_object_id`]), so two nodes' ID mattes never share a chip.
+pub fn render_as(model: &Model, v: &ModelValues, law: ColorLaw, w: u32, h: u32, first_id: u32) -> Image {
     let mut scene = Scene3::default();
-    scene.add_model(model, &v.xform(), 1);
+    scene.add_model(model, &v.xform(), first_id.max(1));
     let b = rasterize(&scene, &v.camera(), w, h);
     shade(&b, v, law)
+}
+
+/// Object ids a Model3D node reserves in the ID matte.
+pub const OBJECTS_PER_NODE: u32 = 4096;
+
+/// The first object id of Model3D node `node`: 1 + [`OBJECTS_PER_NODE`] ×
+/// its place among the cut's Model3D nodes (in id order), so every node's
+/// objects get chips of their own.
+pub fn first_object_id(cut: &Cut, node: NodeId) -> u32 {
+    let place = cut
+        .graph
+        .nodes()
+        .filter(|n| matches!(n.kind, NodeKind::Model3D { .. }))
+        .position(|n| n.id == node)
+        .unwrap_or(0) as u32;
+    1 + OBJECTS_PER_NODE * place
+}
+
+/// The box around `model` placed by `xf` (its eight corners moved); None
+/// when it is empty.
+pub fn placed_bbox(model: &Model, xf: &Xform) -> Option<(V3, V3)> {
+    let (lo, hi) = model.bbox()?;
+    let corner = |i: usize| {
+        xf.apply([
+            if i & 1 == 0 { lo[0] } else { hi[0] },
+            if i & 2 == 0 { lo[1] } else { hi[1] },
+            if i & 4 == 0 { lo[2] } else { hi[2] },
+        ])
+    };
+    let mut out = (corner(0), corner(0));
+    for i in 1..8 {
+        let p = corner(i);
+        for k in 0..3 {
+            out.0[k] = out.0[k].min(p[k]);
+            out.1[k] = out.1[k].max(p[k]);
+        }
+    }
+    Some(out)
+}
+
+/// The way the default camera looks from (its eye less its target).
+const FRAME_FROM: V3 = [3.5, 2.0, 5.0];
+
+/// A camera that frames `bbox` (min, max) whole in a frame `aspect` wide
+/// per tall through a `focal_mm` lens: aimed at its centre from the default
+/// camera's direction, `radius / tan(half the narrower angle of view) ×
+/// 1.2` away (`radius` the box's bounding sphere's), near a thousandth of
+/// that distance and far four radii past the centre.
+pub fn frame_box(bbox: (V3, V3), focal_mm: f32, aspect: f32) -> Camera3 {
+    let (lo, hi) = bbox;
+    let target = mul(add(lo, hi), 0.5);
+    let radius = (length(sub(hi, lo)) * 0.5).max(1e-3);
+    let tx = (focal_to_fov(focal_mm) * 0.5).tan();
+    let half = tx.min(tx / aspect.max(1e-3)).max(1e-6);
+    let distance = radius / half * 1.2;
+    Camera3 {
+        eye: add(target, mul(normalize(FRAME_FROM), distance)),
+        target,
+        roll_deg: 0.0,
+        focal_mm,
+        near: distance / 1000.0,
+        far: distance + 4.0 * radius,
+        ortho: false,
+    }
+}
+
+/// `params` with the camera written as `cam` — eye, target, roll, lens,
+/// near and far — each held to its spec's range.
+pub fn set_camera_params(params: &mut FxParams, cam: &Camera3) {
+    let values = [
+        ("cam_x", cam.eye[0]),
+        ("cam_y", cam.eye[1]),
+        ("cam_z", cam.eye[2]),
+        ("target_x", cam.target[0]),
+        ("target_y", cam.target[1]),
+        ("target_z", cam.target[2]),
+        ("roll", cam.roll_deg),
+        ("focal", cam.focal_mm),
+        ("near", cam.near),
+        ("far", cam.far),
+    ];
+    for (key, value) in values {
+        let value = match spec(key).map(|s| &s.kind) {
+            Some(ParamKind::Float { min, max, .. }) => value.clamp(*min, *max),
+            _ => value,
+        };
+        params.set(key, FxValue::Float(value));
+    }
 }
 
 // ---- The Model3D node's parameters -------------------------------------------------
@@ -871,23 +993,23 @@ pub const CAMERA_KEYS: &[&str] = &[
 ];
 
 pub const MODEL_SPECS: &[ParamSpec] = &[
-    float("tx", "move x", "Moves the model along X (right). In the model's units.", -10000.0, 10000.0, 0.0, 0.01),
-    float("ty", "move y", "Moves the model along Y (up). In the model's units.", -10000.0, 10000.0, 0.0, 0.01),
-    float("tz", "move z", "Moves the model along Z (toward the front view). In the model's units.", -10000.0, 10000.0, 0.0, 0.01),
+    float("tx", "move x", "Moves the model along X (right). In the model's units.", -1.0e6, 1.0e6, 0.0, 0.01),
+    float("ty", "move y", "Moves the model along Y (up). In the model's units.", -1.0e6, 1.0e6, 0.0, 0.01),
+    float("tz", "move z", "Moves the model along Z (toward the front view). In the model's units.", -1.0e6, 1.0e6, 0.0, 0.01),
     float("rx", "rotate x", "Turns the model about X, in degrees (applied first).", -36000.0, 36000.0, 0.0, 0.1),
     float("ry", "rotate y", "Turns the model about Y, in degrees (a turntable turns this).", -36000.0, 36000.0, 0.0, 0.1),
     float("rz", "rotate z", "Turns the model about Z, in degrees (applied last).", -36000.0, 36000.0, 0.0, 0.1),
     float("scale", "scale", "Scales the model evenly: 2 is twice its size.", 0.0001, 10000.0, 1.0, 0.01),
-    float("cam_x", "camera x", POS_HELP, -10000.0, 10000.0, 3.5, 0.01),
-    float("cam_y", "camera y", POS_HELP, -10000.0, 10000.0, 2.5, 0.01),
-    float("cam_z", "camera z", POS_HELP, -10000.0, 10000.0, 5.0, 0.01),
-    float("target_x", "target x", "Where the camera looks, along X; it lands at the frame's centre.", -10000.0, 10000.0, 0.0, 0.01),
-    float("target_y", "target y", "Where the camera looks, along Y; it lands at the frame's centre.", -10000.0, 10000.0, 0.5, 0.01),
-    float("target_z", "target z", "Where the camera looks, along Z; it lands at the frame's centre.", -10000.0, 10000.0, 0.0, 0.01),
+    float("cam_x", "camera x", POS_HELP, -1.0e6, 1.0e6, 3.5, 0.01),
+    float("cam_y", "camera y", POS_HELP, -1.0e6, 1.0e6, 2.5, 0.01),
+    float("cam_z", "camera z", POS_HELP, -1.0e6, 1.0e6, 5.0, 0.01),
+    float("target_x", "target x", "Where the camera looks, along X; it lands at the frame's centre.", -1.0e6, 1.0e6, 0.0, 0.01),
+    float("target_y", "target y", "Where the camera looks, along Y; it lands at the frame's centre.", -1.0e6, 1.0e6, 0.5, 0.01),
+    float("target_z", "target z", "Where the camera looks, along Z; it lands at the frame's centre.", -1.0e6, 1.0e6, 0.0, 0.01),
     float("roll", "roll", "Turns the camera about its view axis, in degrees (a dutch angle).", -360.0, 360.0, 0.0, 0.1),
     float("focal", "focal length (mm)", "The lens on a 36 mm film back: 50 mm sees 39.6° across, longer lenses less.", 1.0, 2000.0, 35.0, 0.1),
-    float("near", "near", "Nothing nearer the camera than this is drawn. In the model's units.", 0.0001, 10000.0, 0.05, 0.001),
-    float("far", "far", "Nothing farther than this is drawn; the depth pass reaches white here.", 0.001, 1000000.0, 100.0, 0.1),
+    float("near", "near", "Nothing nearer the camera than this is drawn. In the model's units.", 0.0001, 1.0e6, 0.05, 0.001),
+    float("far", "far", "Nothing farther than this is drawn; the depth pass reaches white here.", 0.001, 1.0e7, 100.0, 0.1),
     float("light_x", "light x", "The direction toward the light, along X (it is normalised).", -1.0, 1.0, -0.4, 0.01),
     float("light_y", "light y", "The direction toward the light, along Y.", -1.0, 1.0, 0.8, 0.01),
     float("light_z", "light z", "The direction toward the light, along Z.", -1.0, 1.0, 0.45, 0.01),
@@ -946,6 +1068,19 @@ impl ModelValues {
     pub fn float(&self, key: &str) -> f32 {
         match self.value(key) {
             FxValue::Float(x) => *x,
+            v => panic!("'{key}' is not a number: {v:?}"),
+        }
+    }
+
+    /// Set number `key` for this one picture (View3D draws the outline at
+    /// its own render's scale); the node is untouched.
+    pub fn set_float(&mut self, key: &str, x: f32) {
+        let i = MODEL_SPECS
+            .iter()
+            .position(|s| s.key == key)
+            .unwrap_or_else(|| panic!("Model3D has no parameter '{key}'"));
+        match &mut self.values[i] {
+            FxValue::Float(v) => *v = x,
             v => panic!("'{key}' is not a number: {v:?}"),
         }
     }
@@ -1017,23 +1152,50 @@ fn camera_column(cut: &Cut, binds: &FxBinds, key: &str) -> Option<ParamId> {
     binds.get(key).filter(|p| cut.xsheet.param(*p).is_some())
 }
 
+/// The cut camera's column for camera parameter `key`: the first live bind
+/// among the cut's Model3D nodes (in id order).
+fn cut_camera_column(cut: &Cut, key: &str) -> Option<ParamId> {
+    cut.graph.nodes().find_map(|n| match &n.kind {
+        NodeKind::Model3D { binds, .. } => camera_column(cut, binds, key),
+        _ => None,
+    })
+}
+
+/// The column a camera parameter keys into from Model3D node `binds`: its
+/// own live bind, else the cut camera's.
+fn shared_camera_column(cut: &Cut, binds: &FxBinds, key: &str) -> Option<ParamId> {
+    camera_column(cut, binds, key).or_else(|| cut_camera_column(cut, key))
+}
+
 /// How many new param columns [`key_camera`] needs for Model3D node `node`:
-/// one per camera parameter not bound to a column.
+/// one per camera parameter neither it nor any other Model3D node binds to
+/// a column.
 pub fn camera_columns_needed(cut: &Cut, node: NodeId) -> usize {
     match cut.graph.node(node).map(|n| &n.kind) {
         Ok(NodeKind::Model3D { binds, .. }) => CAMERA_KEYS
             .iter()
-            .filter(|k| camera_column(cut, binds, k).is_none())
+            .filter(|k| shared_camera_column(cut, binds, k).is_none())
             .count(),
         _ => 0,
     }
 }
 
-/// "Set cut camera from view": the edits that key Model3D node `node`'s
-/// camera to `cam` at `frame` — each camera parameter's bound column gets a
-/// key there (Linear); an unbound one first gets a new param column, named
-/// for it and bound (ids from `fresh`, [`camera_columns_needed`] of them).
-/// Apply them as one batch: one undo step.
+/// A cut camera column's name: "cut camera x", "cut camera target x", …
+fn cut_camera_name(spec: &ParamSpec) -> String {
+    let label = spec.label.split(" (").next().unwrap_or(spec.label);
+    match label.strip_prefix("camera ") {
+        Some(axis) => format!("cut camera {axis}"),
+        None => format!("cut camera {label}"),
+    }
+}
+
+/// "Set cut camera from view": the edits that key the cut's one camera to
+/// `cam` at `frame`, seen from Model3D node `node` — each camera parameter
+/// keys (Linear) the column `node` binds it to, else the one another
+/// Model3D node binds, else a new param column named for it ("cut camera
+/// x"; ids from `fresh`, [`camera_columns_needed`] of them); and every
+/// Model3D node in the cut is bound to those columns, so all of them shoot
+/// through the same camera. Apply them as one batch: one undo step.
 pub fn key_camera(
     cut: &Cut,
     at: CutRef,
@@ -1043,12 +1205,7 @@ pub fn key_camera(
     fresh: &mut impl Iterator<Item = ParamId>,
 ) -> Result<Vec<Command>, String> {
     let n = cut.graph.node(node).map_err(|e| e.to_string())?;
-    let NodeKind::Model3D {
-        model,
-        params,
-        binds: bound,
-    } = &n.kind
-    else {
+    let NodeKind::Model3D { binds: bound, .. } = &n.kind else {
         return Err("not a Model3D node".into());
     };
     let values = [
@@ -1061,7 +1218,7 @@ pub fn key_camera(
         cam.roll_deg,
         cam.focal_mm,
     ];
-    let mut binds = bound.clone();
+    let mut columns = Vec::with_capacity(CAMERA_KEYS.len());
     let mut cmds = Vec::new();
     let mut index = cut.xsheet.params.len();
     for (key, value) in CAMERA_KEYS.iter().zip(values) {
@@ -1070,21 +1227,20 @@ pub fn key_camera(
             ParamKind::Float { min, max, .. } => value.clamp(min, max),
             _ => value,
         };
-        let column = match camera_column(cut, &binds, key) {
+        let column = match shared_camera_column(cut, bound, key) {
             Some(p) => p,
             None => {
                 let id = fresh.next().ok_or("no param column id left")?;
-                let label = spec.label.split(" (").next().unwrap_or(spec.label);
                 cmds.push(Command::AddParamColumn {
                     at,
                     index,
-                    column: ParamColumn::new(id, format!("Model3D {label}")),
+                    column: ParamColumn::new(id, cut_camera_name(spec)),
                 });
                 index += 1;
-                binds.set(key, Some(id));
                 id
             }
         };
+        columns.push((*key, column));
         cmds.push(Command::SetParamKey {
             at,
             column,
@@ -1096,16 +1252,25 @@ pub fn key_camera(
             }),
         });
     }
-    if binds != *bound {
-        cmds.push(Command::SetNodeKind {
-            at,
-            id: node,
-            kind: NodeKind::Model3D {
-                model: *model,
-                params: params.clone(),
-                binds,
-            },
-        });
+    for n in cut.graph.nodes() {
+        let NodeKind::Model3D { model, params, binds: bound } = &n.kind else {
+            continue;
+        };
+        let mut binds = bound.clone();
+        for (key, column) in &columns {
+            binds.set(key, Some(*column));
+        }
+        if binds != *bound {
+            cmds.push(Command::SetNodeKind {
+                at,
+                id: n.id,
+                kind: NodeKind::Model3D {
+                    model: *model,
+                    params: params.clone(),
+                    binds,
+                },
+            });
+        }
     }
     Ok(cmds)
 }
@@ -1211,6 +1376,15 @@ impl Orbit {
     /// The wheel or Ctrl+middle-drag: each step in comes 10% closer.
     pub fn zoom(&mut self, steps: f32) {
         self.distance = (self.distance * 0.9f32.powf(steps)).clamp(1e-3, 1e6);
+    }
+
+    /// "Frame all" (Blender's Home): the view keeps its direction and lens
+    /// and closes on `bbox` (min, max) in a frame `aspect` wide per tall,
+    /// as [`frame_box`] places a camera.
+    pub fn frame(&mut self, bbox: (V3, V3), aspect: f32) {
+        let cam = frame_box(bbox, self.focal_mm, aspect);
+        self.target = cam.target;
+        self.distance = length(sub(cam.eye, cam.target));
     }
 
     /// A numpad view: exact yaw and pitch, the target and distance kept.
@@ -1326,11 +1500,50 @@ pub fn sequence_file(
         .or(Some(path))
 }
 
+/// The pattern and first number for a sequence picked by one of its files:
+/// the last run of digits in the file's name becomes as many `#`
+/// (`shot_0001.png` is `shot_####.png` from 1), and a file under `base`
+/// (the project's folder) is named relative to it, with `/`. A name with
+/// no digits is one still, from 1.
+pub fn pattern_from_file(path: &Path, base: Option<&Path>) -> (String, u32) {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem_len = match name.rfind('.') {
+        Some(dot) if dot > 0 => dot,
+        _ => name.len(),
+    };
+    let stem = &name[..stem_len];
+    let (pattern_name, first) = match stem.rfind(|c: char| c.is_ascii_digit()) {
+        Some(last) => {
+            let start = stem[..=last]
+                .rfind(|c: char| !c.is_ascii_digit())
+                .map_or(0, |i| i + 1);
+            let digits = &stem[start..=last];
+            let first = digits.parse::<u64>().unwrap_or(1).min(u32::MAX as u64) as u32;
+            let hashes = "#".repeat(digits.len());
+            (format!("{}{hashes}{}", &name[..start], &name[last + 1..]), first)
+        }
+        None => (name.clone(), 1),
+    };
+    let folder = path.parent().unwrap_or(Path::new(""));
+    let full = folder.join(&pattern_name);
+    let shown = match base.and_then(|b| full.strip_prefix(b).ok()) {
+        Some(rel) => rel.to_string_lossy().replace('\\', "/"),
+        None => full.to_string_lossy().into_owned(),
+    };
+    (shown, first)
+}
+
+/// What a relative pattern with no project folder reports.
+pub const NO_FOLDER: &str = "save the project first: relative frames read from its folder";
+
 /// An ImageSequence's picture at `frame` over `rect` (x, y, w, h in the
-/// frame's px), premultiplied stored values (D8): the file at its native
-/// size from the frame's top-left, its values as the file holds them (an
-/// imported PNG's law); an EXR's scene-linear values encoded for an sRGB
-/// project. A missing or unreadable file is transparent and reported
+/// frame's px), premultiplied stored values (D8), its values as the file
+/// holds them (an imported PNG's law); an EXR's scene-linear values
+/// encoded for an sRGB project. A file the size of the frame (`frame_size`)
+/// — or any file without `fit` — sits at its native size from the frame's
+/// top-left; with `fit` one of another size is scaled to fit the frame,
+/// centred, sampled bilinearly. A missing or unreadable file, or a relative
+/// pattern with no project folder (`base`), is transparent and reported
 /// through `warn`.
 #[allow(clippy::too_many_arguments)]
 pub fn sequence_frame(
@@ -1338,15 +1551,21 @@ pub fn sequence_frame(
     first: u32,
     offset: i32,
     hold_last: bool,
+    fit: bool,
     frame: u32,
     base: Option<&Path>,
     law: ColorLaw,
+    frame_size: (u32, u32),
     rect: (i32, i32, u32, u32),
     warn: &mut dyn FnMut(String),
 ) -> Vec<f32> {
     let (rx, ry, rw, rh) = rect;
     let mut out = vec![0.0f32; rw as usize * rh as usize * 4];
     if pattern.trim().is_empty() {
+        return out;
+    }
+    if base.is_none() && Path::new(pattern).is_relative() {
+        warn(NO_FOLDER.to_string());
         return out;
     }
     let Some(path) = sequence_file(pattern, first, offset, hold_last, frame, base) else {
@@ -1372,6 +1591,46 @@ pub fn sequence_frame(
             v
         }
     };
+    let (fw, fh) = frame_size;
+    if fit && (still.w, still.h) != (fw, fh) && still.w > 0 && still.h > 0 && fw > 0 && fh > 0 {
+        // Contain: the whole file, as large as fits, centred.
+        let s = (fw as f32 / still.w as f32).min(fh as f32 / still.h as f32);
+        let (bw, bh) = (still.w as f32 * s, still.h as f32 * s);
+        let (ox, oy) = ((fw as f32 - bw) * 0.5, (fh as f32 - bh) * 0.5);
+        // One texel premultiplied, its coordinates held to the file.
+        let texel = |tx: i64, ty: i64| -> [f32; 4] {
+            let tx = tx.clamp(0, still.w as i64 - 1);
+            let ty = ty.clamp(0, still.h as i64 - 1);
+            let i = ((ty * still.w as i64 + tx) * 4) as usize;
+            let a = still.px[i + 3].clamp(0.0, 1.0);
+            [encode(still.px[i]) * a, encode(still.px[i + 1]) * a, encode(still.px[i + 2]) * a, a]
+        };
+        for y in 0..rh as i64 {
+            let fy = (y + ry as i64) as f32 + 0.5;
+            if fy < oy || fy >= oy + bh {
+                continue;
+            }
+            let v = (fy - oy) / s - 0.5;
+            let (ty, wy) = (v.floor() as i64, v - v.floor());
+            for x in 0..rw as i64 {
+                let fx = (x + rx as i64) as f32 + 0.5;
+                if fx < ox || fx >= ox + bw {
+                    continue;
+                }
+                let u = (fx - ox) / s - 0.5;
+                let (tx, wx) = (u.floor() as i64, u - u.floor());
+                let (p00, p10) = (texel(tx, ty), texel(tx + 1, ty));
+                let (p01, p11) = (texel(tx, ty + 1), texel(tx + 1, ty + 1));
+                let d = ((y * rw as i64 + x) * 4) as usize;
+                for c in 0..4 {
+                    let top = p00[c] + (p10[c] - p00[c]) * wx;
+                    let bottom = p01[c] + (p11[c] - p01[c]) * wx;
+                    out[d + c] = top + (bottom - top) * wy;
+                }
+            }
+        }
+        return out;
+    }
     for y in 0..rh as i64 {
         let sy = y + ry as i64;
         if sy < 0 || sy >= still.h as i64 {

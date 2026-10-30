@@ -112,7 +112,7 @@ impl Pane {
             // them.
             Pane::Board => "Shinkō board (cut board)".into(),
             Pane::Episode => "Henshū timeline (episode)".into(),
-            Pane::View3D => "View3D (3D layout)".into(),
+            Pane::View3D => "View3D — 3D LO (layout)".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }

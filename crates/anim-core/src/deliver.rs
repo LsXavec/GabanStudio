@@ -1076,12 +1076,28 @@ pub fn deliver_frame(
     cut: &Cut,
     law: ColorLaw,
     frame: u32,
-    (width, height): (u32, u32),
+    size: (u32, u32),
     preset: &Preset,
     burn_ins: BurnIns,
     slate: &Slate,
 ) -> Image {
-    let mut img = render(cut, law, frame, width, height, &preset.opts());
+    deliver_frame_env(cut, law, frame, size, preset, burn_ins, slate, &RenderEnv::default())
+}
+
+/// GM17: [`deliver_frame`] reading the project's folder and reporting
+/// through `env` (see [`render_env`]).
+#[allow(clippy::too_many_arguments)]
+pub fn deliver_frame_env(
+    cut: &Cut,
+    law: ColorLaw,
+    frame: u32,
+    (width, height): (u32, u32),
+    preset: &Preset,
+    burn_ins: BurnIns,
+    slate: &Slate,
+    env: &RenderEnv,
+) -> Image {
+    let mut img = render_env(cut, law, frame, width, height, &preset.opts(), env);
     if !preset.alpha {
         img = over(&img, [255, 255, 255]);
     }

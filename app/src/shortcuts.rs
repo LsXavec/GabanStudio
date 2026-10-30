@@ -94,10 +94,21 @@ fn aimed_here(a: Action, c: &Chord, binds: &[Binding], here: Ctx) -> bool {
     if a.pane_only() {
         return a.context() == here;
     }
-    let shared = binds
-        .iter()
-        .any(|b| b.action != a && b.chords().any(|d| d == c));
-    !shared || a.context() == Ctx::Global || a.context() == here
+    // GM17: View3D's verbs fire over View3D only (pane-only), so elsewhere
+    // they are no rival; over View3D they shadow any verb on their chord
+    // (0 is the cut camera there, RAM preview elsewhere).
+    let rivals = |ctx: Option<Ctx>| {
+        binds.iter().any(|b| {
+            b.action != a
+                && (b.action.context() != Ctx::View3D || here == Ctx::View3D)
+                && ctx.is_none_or(|x| b.action.context() == x)
+                && b.chords().any(|d| d == c)
+        })
+    };
+    if here == Ctx::View3D && rivals(Some(Ctx::View3D)) {
+        return false;
+    }
+    !rivals(None) || a.context() == Ctx::Global || a.context() == here
 }
 
 /// May this chord fire while a text field has keyboard focus?

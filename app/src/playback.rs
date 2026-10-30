@@ -472,6 +472,9 @@ struct RamPass {
     total: usize,
     done: usize,
     stop: Arc<AtomicBool>,
+    /// GM17: the project's folder for the worker, and what it could not
+    /// read.
+    env: Arc<anim_core::export::RenderEnv>,
 }
 
 impl Drop for RamPass {
@@ -499,9 +502,22 @@ pub struct RamPreview {
     tex: Option<egui::TextureHandle>,
     /// What the texture holds.
     shown: Option<(CutId, u32, u64)>,
+    /// GM17: the project's folder (relative ImageSequence frames).
+    base_dir: Option<std::path::PathBuf>,
 }
 
 impl RamPreview {
+    /// GM17: read relative frames from `dir` (the project's folder; None
+    /// for an unsaved project). Another folder starts afresh, as another
+    /// look does.
+    pub fn set_base_dir(&mut self, dir: Option<std::path::PathBuf>) {
+        if self.base_dir != dir {
+            self.base_dir = dir;
+            self.cache.clear();
+            self.pass = None;
+        }
+    }
+
     /// The verb: a pass running stops; otherwise one is asked for.
     pub fn toggle(&mut self) -> &'static str {
         if self.pass.take().is_some() {
@@ -580,12 +596,13 @@ impl RamPreview {
             }
         }
         if finished {
-            self.pass = None;
+            let warnings = self.pass.take().map(|p| p.env.warnings()).unwrap_or_default();
             let (n, mb) = self.usage();
-            msg = Some(Ok(format!(
-                "RAM preview: {n} frames held ({mb} of {} MB)",
-                self.cache.cap_bytes() / MB
-            )));
+            let mut line = format!("RAM preview: {n} frames held ({mb} of {} MB)", self.cache.cap_bytes() / MB);
+            if let Some(w) = warnings.first() {
+                line = format!("{line} — {w}");
+            }
+            msg = Some(Ok(line));
         }
         if std::mem::take(&mut self.requested) {
             msg = Some(self.start(engine, look, range, repaint));
@@ -673,6 +690,8 @@ impl RamPreview {
             Purpose::View
         };
         let (size, law, scale) = (look.size, look.law, look.scale());
+        let env = Arc::new(anim_core::export::RenderEnv::new(self.base_dir.clone()));
+        let worker_env = env.clone();
         std::thread::spawn(move || {
             let mut cut = snapshot;
             if purpose == Purpose::Final {
@@ -683,7 +702,7 @@ impl RamPreview {
                 if flag.load(Ordering::Relaxed) {
                     break;
                 }
-                let img = deliver::render(&cut, law, f, size.0, size.1, &opts);
+                let img = deliver::render_env(&cut, law, f, size.0, size.1, &opts, &worker_env);
                 let rgba: Vec<u8> = img
                     .px
                     .chunks_exact(4)
@@ -707,6 +726,7 @@ impl RamPreview {
             total,
             done: 0,
             stop,
+            env,
         });
         Ok(if total < missing {
             format!(

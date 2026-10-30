@@ -242,9 +242,10 @@ impl Evaluator {
             // the sentinel that renders transparent.
             NodeKind::Model3D { model, params, binds } => match cut.models.get(model) {
                 Some(m) => Value::image(format!(
-                    "model3d({model}:'{}'#{:016x}, {})",
+                    "model3d({model}:'{}'#{:016x}, first={}, {})",
                     m.name,
                     m.content_hash,
+                    crate::r3d::first_object_id(cut, id),
                     cut.model_at(params, binds, frame).recipe()
                 )),
                 None => Value::image(format!("missing-model({model})")),
@@ -258,10 +259,11 @@ impl Evaluator {
                 first,
                 offset,
                 hold_last,
+                fit,
             } => {
                 let n = crate::r3d::sequence_number(*first, *offset, frame)
                     .map_or_else(|| "-".to_string(), |n| n.to_string());
-                Value::image(format!("seq({pattern:?}, n={n}, hold={hold_last})"))
+                Value::image(format!("seq({pattern:?}, n={n}, hold={hold_last}, fit={fit})"))
             }
         };
 

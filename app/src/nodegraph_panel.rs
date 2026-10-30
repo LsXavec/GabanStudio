@@ -42,6 +42,9 @@ pub struct GraphUi {
     /// GM13: "load .cube…" was clicked for this node's file parameter —
     /// the editor hands it to the shell, which opens the file picker.
     pub lut_pick: Option<(NodeId, &'static str)>,
+    /// GM17: an ImageSequence's "pick a frame…" was clicked — the shell's
+    /// picker names the run from the file picked.
+    pub sequence_pick: Option<NodeId>,
 }
 
 impl GraphUi {
@@ -76,7 +79,7 @@ pub struct NodeDrag {
 /// What an add-menu entry makes.
 enum Make {
     Node(NodeKind),
-    /// "Image (PNG)…" asks for the file first.
+    /// "Image (PNG, JPEG, TIFF)…" asks for the file first.
     Image,
     /// GM17: "3D model from file…" asks for the glTF or OBJ first.
     Model,
@@ -127,12 +130,31 @@ fn entries(state: &AppState) -> Vec<Entry> {
     });
     v.push(Entry {
         category: "Source",
-        name: "Image (PNG)…".into(),
+        name: "Image (PNG, JPEG, TIFF)…".into(),
         term: None,
-        aliases: &["imagesource", "png", "background", "plate", "reference"],
+        aliases: &["imagesource", "png", "jpg", "jpeg", "tif", "tiff", "background", "plate", "reference"],
         help: "import a background plate / reference image into this cut — \
             stored inside the project file, wired as an ImageSource node",
         make: Make::Image,
+    });
+    // GM17: the frames another app rendered, read from disk at render.
+    v.push(Entry {
+        category: "Source",
+        name: "Image sequence".into(),
+        term: Some("renban"),
+        aliases: &[
+            "imagesequence",
+            "sequence",
+            "renban (sequence)",
+            "ae",
+            "blender render",
+            "render",
+            "frames",
+            "exr",
+            "shot",
+        ],
+        help: "frames another app rendered, one file per frame (renders/shot_####.png)",
+        make: Make::Node(NodeKind::image_sequence("")),
     });
     v.push(Entry {
         category: "Transform",
@@ -236,8 +258,8 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
             make: Make::Node(NodeKind::particles(preset)),
         });
     }
-    // GM17: a node per model the cut holds, a model from a file, and the
-    // frames another app rendered.
+    // GM17: a node per model the cut holds, and a model from a file (the
+    // frames another app rendered are a Source).
     for (id, m) in &state.cut().models {
         v.push(Entry {
             category: "3D",
@@ -255,14 +277,6 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
         aliases: &["model3d", "3d", "import", "gltf", "glb", "obj", "blender"],
         help: "embeds a glTF or OBJ model in the cut and adds its Model3D node",
         make: Make::Model,
-    });
-    v.push(Entry {
-        category: "3D",
-        name: "Image sequence".into(),
-        term: None,
-        aliases: &["imagesequence", "sequence", "render", "frames", "exr", "shot"],
-        help: "frames another app rendered, one file per frame (renders/shot_####.png)",
-        make: Make::Node(NodeKind::image_sequence("")),
     });
     v.extend(out);
     v
@@ -1090,6 +1104,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 first,
                 offset,
                 hold_last,
+                fit,
             } => {
                 // The name as typed lives in a draft and commits once, when
                 // the field lets go (Enter or a click away): one undo step.
@@ -1108,17 +1123,40 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                         changed = true;
                     }
                 }
+                if ui
+                    .button("pick a frame…")
+                    .on_hover_text(
+                        "pick one file of the render: shot_0001.png names the run shot_####.png from 1, \
+                         relative to the project's folder",
+                    )
+                    .clicked()
+                {
+                    state.graph_ui.sequence_pick = Some(id);
+                }
                 changed |= ui
                     .add(egui::DragValue::new(first).prefix("first file "))
-                    .on_hover_text("the number of the file shown at the offset frame")
+                    .on_hover_text("the number of the file shown at the 'at frame' frame")
                     .changed();
-                changed |= ui
-                    .add(egui::DragValue::new(offset).prefix("at frame "))
-                    .on_hover_text("the cut frame that shows the first file")
-                    .changed();
+                // The sheet counts frames from 1; the node stores from 0.
+                let mut at = *offset as i64 + 1;
+                if ui
+                    .add(egui::DragValue::new(&mut at).prefix("at frame ").range(-99_999..=99_999))
+                    .on_hover_text("the sheet frame (from 1) that shows the first file")
+                    .changed()
+                {
+                    *offset = (at - 1) as i32;
+                    changed = true;
+                }
                 changed |= ui
                     .checkbox(hold_last, "hold last")
                     .on_hover_text("a missing file shows the nearest earlier one (the last frame holds)")
+                    .changed();
+                changed |= ui
+                    .checkbox(fit, "fit to frame")
+                    .on_hover_text(
+                        "a file of another size than the frame is scaled to fit it, centred; off, it sits \
+                         at its own size from the top-left",
+                    )
                     .changed();
             }
         }
