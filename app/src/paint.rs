@@ -13,6 +13,7 @@
 //! is Phase 3). The texel bytes ARE the engine's tile bytes — opaque to the
 //! headless engine, round-tripped bit-for-bit.
 
+use anim_core::camera::IRect;
 use anim_core::ids::ColumnId;
 use anim_core::raster::{TILE, TileCoord, TileData};
 use eframe::egui;
@@ -143,7 +144,9 @@ pub fn dab_alpha(shape: f32, color_a: f32, grain_keep: f32, hardness: f32) -> f3
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     inv_size: [f32; 2],
-    _pad: [f32; 2],
+    /// GM20: the frame pixel of layer texel (0, 0) — dabs arrive in frame
+    /// pixels; [0, 0] for a frame layer.
+    origin: [f32; 2],
     /// [enabled, texel_u, texel_v, strength] — paper-grain sampling in
     /// PAPER space (uv = texel * position) so strokes never swim.
     grain: [f32; 4],
@@ -199,6 +202,12 @@ pub struct PaintLayer {
     grain_params: [f32; 4],
     width: u32,
     height: u32,
+    /// GM20: the layer's rect in frame pixels (`width`/`height` = its size);
+    /// the onion and column slots stay frame-sized.
+    rect: LayerRect,
+    /// Bumped by every rebuild — a canvas that synced the old targets
+    /// re-uploads (the viewer may rebuild them first).
+    generation: u64,
     /// Sampler filter used to display the layers (Canvas scaling filter setting).
     filter: wgpu::FilterMode,
     /// Onion ghosts: [0]=the ghosts behind, [1]=the ghosts ahead (each side's
@@ -251,7 +260,7 @@ pub struct PaintLayer {
 }
 
 const SHADER: &str = r#"
-struct U { inv_size: vec2<f32>, pad: vec2<f32>, grain: vec4<f32>, misc: vec4<f32> };
+struct U { inv_size: vec2<f32>, origin: vec2<f32>, grain: vec4<f32>, misc: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var tip_tex: texture_2d<f32>;
 @group(0) @binding(2) var tip_samp: sampler;
@@ -289,7 +298,8 @@ fn vs_main(
     // Quad covers the MAJOR extent (radius * aspect); aspect 1 = old size.
     let half_extent = radius * max(aspect, 1.0) + 1.5;   // +AA pad
     let local = corner * half_extent;
-    let texel = center + local;
+    // GM20: frame pixels to layer texels (origin 0 for a frame layer).
+    let texel = center + local - u.origin;
     let clip = vec2<f32>(
     texel.x * u.inv_size.x * 2.0 - 1.0,
         1.0 - texel.y * u.inv_size.y * 2.0,  // flip Y
@@ -369,7 +379,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 /// multiply of a premultiplied color = correct opacity in linear space), blend
 /// over the cel with premultiplied-over.
 const COMPOSITE_SHADER: &str = r#"
-struct CU { opacity: vec4<f32> };
+struct CU { opacity: vec4<f32>, window: vec4<f32> };
 @group(0) @binding(0) var wet_tex: texture_2d<f32>;
 @group(0) @binding(1) var wet_smp: sampler;
 @group(0) @binding(2) var<uniform> cu: CU;
@@ -394,7 +404,14 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    return textureSample(wet_tex, wet_smp, in.uv) * cu.opacity.x;
+    let sampled = textureSample(wet_tex, wet_smp, in.uv);
+    // GM20: a frame-sized target reads its window of a paper-sized layer
+    // texel for texel (window = [x, y, on, 0]); off = the stretched sample.
+    if (cu.window.z > 0.5) {
+        let at = vec2<i32>(floor(in.pos.xy)) + vec2<i32>(cu.window.xy);
+        return textureLoad(wet_tex, at, 0) * cu.opacity.x;
+    }
+    return sampled * cu.opacity.x;
 }
 "#;
 
@@ -495,60 +512,16 @@ impl PaintLayer {
         let alpha_lock_pipeline =
             Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ALPHA_LOCK_BLEND);
         let filter = wgpu::FilterMode::Linear;
-        let active = Self::make_target(
-            &device,
-            &renderer,
-            &queue,
-            &uniform_buf,
-            width,
-            height,
-            filter,
-        );
-        let wet = Self::make_target(
-            &device,
-            &renderer,
-            &queue,
-            &uniform_buf,
-            width,
-            height,
-            filter,
-        );
-        let remote = Self::make_target(
-            &device,
-            &renderer,
-            &queue,
-            &uniform_buf,
-            width,
-            height,
-            filter,
-        );
-        let below = Self::make_target(
-            &device,
-            &renderer,
-            &queue,
-            &uniform_buf,
-            width,
-            height,
-            filter,
-        );
-        let above = Self::make_target(
-            &device,
-            &renderer,
-            &queue,
-            &uniform_buf,
-            width,
-            height,
-            filter,
-        );
-        let scratch = Self::make_target(
-            &device,
-            &renderer,
-            &queue,
-            &uniform_buf,
-            width,
-            height,
-            filter,
-        );
+        // GM20: born frame-sized; the canvas's `ensure_size` moves it onto
+        // the paper's layer rect.
+        let rect = LayerRect::frame(width, height);
+        let mk = || Self::make_target(&device, &renderer, &queue, &uniform_buf, &rect, filter);
+        let active = mk();
+        let wet = mk();
+        let remote = mk();
+        let below = mk();
+        let above = mk();
+        let scratch = mk();
 
         // Wet→cel composite: sampled wet texture × opacity uniform, blended over.
         let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -626,7 +599,7 @@ impl PaintLayer {
         });
         let opacity_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("opacity_uniform"),
-            size: 16,
+            size: 32, // composite_uniform: opacity + GM20's window
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -661,6 +634,8 @@ impl PaintLayer {
             grain_params: [0.0; 4],
             width,
             height,
+            rect,
+            generation: 0,
             filter,
             onion: Default::default(),
             other_cols: std::collections::HashMap::new(),
@@ -816,7 +791,7 @@ impl PaintLayer {
             0,
             bytemuck::bytes_of(&Uniforms {
                 inv_size: [1.0 / self.width as f32, 1.0 / self.height as f32],
-                _pad: [0.0, 0.0],
+                origin: [self.rect.origin.0 as f32, self.rect.origin.1 as f32],
                 grain: self.grain_params,
                 misc: [tip_frames, 0.0, 0.0, 0.0],
             }),
@@ -930,10 +905,10 @@ impl PaintLayer {
         renderer: &Arc<RwLock<Renderer>>,
         queue: &wgpu::Queue,
         uniform_buf: &wgpu::Buffer,
-        width: u32,
-        height: u32,
+        rect: &LayerRect,
         filter: wgpu::FilterMode,
     ) -> Target {
+        let (width, height) = rect.size;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("paint_layer"),
             size: wgpu::Extent3d {
@@ -957,7 +932,7 @@ impl PaintLayer {
             0,
             bytemuck::bytes_of(&Uniforms {
                 inv_size: [1.0 / width as f32, 1.0 / height as f32],
-                _pad: [0.0, 0.0],
+                origin: [rect.origin.0 as f32, rect.origin.1 as f32],
                 grain: [0.0; 4],
                 misc: [1.0, 0.0, 0.0, 0.0],
             }),
@@ -994,9 +969,10 @@ impl PaintLayer {
         }
     }
 
-    /// Recreate every target if the project resolution changed (clears content).
-    pub fn ensure_size(&mut self, width: u32, height: u32) {
-        if width == self.width && height == self.height {
+    /// Recreate every target if the layer rect changed (clears content):
+    /// GM20 — the rect is the paper's ([`layer_rect`]), the frame by default.
+    pub fn ensure_size(&mut self, rect: LayerRect) {
+        if rect == self.rect {
             return;
         }
         // Free the old egui registrations first — they pin the old full-canvas
@@ -1028,8 +1004,7 @@ impl PaintLayer {
                 &s.renderer,
                 &s.queue,
                 &s.uniform_buf,
-                width,
-                height,
+                &rect,
                 s.filter,
             )
         };
@@ -1039,8 +1014,9 @@ impl PaintLayer {
         self.below = mk(self);
         self.above = mk(self);
         self.scratch = mk(self);
-        self.width = width;
-        self.height = height;
+        (self.width, self.height) = rect.size;
+        self.rect = rect;
+        self.generation += 1;
         self.onion = Default::default(); // stale size
         self.other_cols.clear(); // stale size
         self.composite_bind_wet = Self::make_composite_bind(
@@ -1057,6 +1033,16 @@ impl PaintLayer {
             &self.composite_sampler,
             &self.opacity_buf,
         );
+    }
+
+    /// GM20: the rect the targets cover now.
+    pub fn rect(&self) -> LayerRect {
+        self.rect
+    }
+
+    /// GM20: how many times the targets were rebuilt (content cleared).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Switch the display sampler filter (Canvas scaling filter setting), live.
@@ -1143,12 +1129,27 @@ impl PaintLayer {
         } else {
             self.below.view.clone()
         };
-        self.composite_layers_into(&target, layers);
+        // Layer-sized projections: the whole layer, stretched 1:1.
+        self.composite_layers_window(&target, layers, None);
     }
+
+    /// Composite `layers` into a FRAME-sized target (the graph's pool, the
+    /// onion and column slots): GM20 — a paper-sized layer gives its frame
+    /// window, texel for texel; a frame layer composites as before.
     pub(crate) fn composite_layers_into(
         &mut self,
         target: &wgpu::TextureView,
         layers: &[LayerSlice<'_>],
+    ) {
+        let window = (!self.rect.is_frame()).then(|| self.rect.frame_window());
+        self.composite_layers_window(target, layers, window);
+    }
+
+    fn composite_layers_window(
+        &mut self,
+        target: &wgpu::TextureView,
+        layers: &[LayerSlice<'_>],
+        window: Option<(u32, u32)>,
     ) {
         self.clear_view(target, "clear_projection");
         let scratch_tex = self.scratch.texture.clone();
@@ -1160,7 +1161,7 @@ impl PaintLayer {
             self.queue.write_buffer(
                 &self.opacity_buf,
                 0,
-                bytemuck::bytes_of(&[opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0]),
+                bytemuck::cast_slice(&composite_uniform(opacity.clamp(0.0, 1.0), window)),
             );
             let mut enc = self
                 .device
@@ -1262,7 +1263,7 @@ impl PaintLayer {
         self.queue.write_buffer(
             &self.opacity_buf,
             0,
-            bytemuck::bytes_of(&[opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0]),
+            bytemuck::cast_slice(&composite_uniform(opacity.clamp(0.0, 1.0), None)),
         );
         let mut enc = self
             .device
@@ -1346,7 +1347,7 @@ impl PaintLayer {
         self.queue.write_buffer(
             &self.opacity_buf,
             0,
-            bytemuck::bytes_of(&[opacity.clamp(0.0, 1.0), 0.0, 0.0, 0.0]),
+            bytemuck::cast_slice(&composite_uniform(opacity.clamp(0.0, 1.0), None)),
         );
         let mut enc = self
             .device
@@ -1422,34 +1423,32 @@ impl PaintLayer {
             multiview_mask: None,
         });
         self.queue.submit(Some(enc.finish()));
-        for ((tx, ty), tile) in tiles {
-            let px = tx * TILE as i32;
-            let py = ty * TILE as i32;
-            if px < 0 || py < 0 || px as u32 >= self.width || py as u32 >= self.height {
+        for (coord, tile) in tiles {
+            // GM20: the tile's part on the layer rect (negative tiles too).
+            let Some(s) = tile_span(*coord, &self.rect) else {
                 continue;
-            }
-            let w = (self.width - px as u32).min(TILE as u32);
-            let h = (self.height - py as u32).min(TILE as u32);
+            };
+            let at = ((s.src.1 * TILE as u32 + s.src.0) * BPP) as usize;
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d {
-                        x: px as u32,
-                        y: py as u32,
+                        x: s.dst.0,
+                        y: s.dst.1,
                         z: 0,
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
-                tile.as_bytes(),
+                &tile.as_bytes()[at..],
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(TILE as u32 * BPP),
                     rows_per_image: Some(TILE as u32),
                 },
                 wgpu::Extent3d {
-                    width: w,
-                    height: h,
+                    width: s.size.0,
+                    height: s.size.1,
                     depth_or_array_layers: 1,
                 },
             );
@@ -1468,24 +1467,24 @@ impl PaintLayer {
             }
             return;
         };
-        // Reuse the existing slot texture if the content is unchanged.
+        // Reuse the existing slot texture if the content is unchanged. GM20:
+        // slots are frame-sized whatever the paper (the layer's frame window).
+        let (fw, fh) = self.rect.frame;
         if let Some(s) = &self.onion[slot]
             && s.hash == hash
-            && s.width == self.width
-            && s.height == self.height
+            && s.width == fw
+            && s.height == fh
         {
             return;
         }
         let (texture, view, tex_id) = match self.onion[slot].take() {
-            Some(s) if s.width == self.width && s.height == self.height => {
-                (s.texture, s.view, s.tex_id)
-            }
+            Some(s) if s.width == fw && s.height == fh => (s.texture, s.view, s.tex_id),
             old => {
                 // Size changed: free the stale registration before replacing.
                 if let Some(old) = old {
                     self.renderer.write().free_texture(&old.tex_id);
                 }
-                let texture = Self::create_layer_texture(&self.device, self.width, self.height);
+                let texture = Self::create_layer_texture(&self.device, fw, fh);
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let tex_id =
                     self.renderer
@@ -1500,8 +1499,8 @@ impl PaintLayer {
             view,
             tex_id,
             hash,
-            width: self.width,
-            height: self.height,
+            width: fw,
+            height: fh,
         });
     }
     pub fn onion_id(&self, slot: usize) -> Option<egui::TextureId> {
@@ -1531,22 +1530,21 @@ impl PaintLayer {
             }
             return;
         };
+        let (fw, fh) = self.rect.frame; // frame-sized, as the onion slots
         if let Some(s) = self.other_cols.get(&column)
             && s.hash == hash
-            && s.width == self.width
-            && s.height == self.height
+            && s.width == fw
+            && s.height == fh
         {
             return;
         }
         let (texture, view, tex_id) = match self.other_cols.remove(&column) {
-            Some(s) if s.width == self.width && s.height == self.height => {
-                (s.texture, s.view, s.tex_id)
-            }
+            Some(s) if s.width == fw && s.height == fh => (s.texture, s.view, s.tex_id),
             old => {
                 if let Some(old) = old {
                     self.renderer.write().free_texture(&old.tex_id);
                 }
-                let texture = Self::create_layer_texture(&self.device, self.width, self.height);
+                let texture = Self::create_layer_texture(&self.device, fw, fh);
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let tex_id =
                     self.renderer
@@ -1563,8 +1561,8 @@ impl PaintLayer {
                 view,
                 tex_id,
                 hash,
-                width: self.width,
-                height: self.height,
+                width: fw,
+                height: fh,
             },
         );
     }
@@ -1643,39 +1641,240 @@ impl PaintLayer {
         });
         let _ = rx.recv();
         let data = staging.slice(..).get_mapped_range();
-        let tiles_x = self.width.div_ceil(TILE as u32);
-        let tiles_y = self.height.div_ceil(TILE as u32);
-        let mut out = Vec::new();
-        for ty in 0..tiles_y {
-            for tx in 0..tiles_x {
-                let mut tile = vec![0u16; anim_core::raster::TILE_LEN];
-                for row in 0..TILE as u32 {
-                    let py = ty * TILE as u32 + row;
-                    if py >= self.height {
-                        break;
-                    }
-                    let copy_px = (self.width - tx * TILE as u32).min(TILE as u32);
-                    let src_row = py as usize * padded_bpr as usize
-                        + (tx * TILE as u32) as usize * BPP as usize;
-                    let dst_row = row as usize * TILE * 4;
-                    for px in 0..copy_px as usize {
-                        let sb = src_row + px * BPP as usize;
-                        for c in 0..4 {
-                            let lo = data[sb + c * 2] as u16;
-                            let hi = data[sb + c * 2 + 1] as u16;
-                            tile[dst_row + px * 4 + c] = lo | (hi << 8);
-                        }
-                    }
-                }
-                let td = TileData::from_vec(tile);
-                if !td.is_empty() {
-                    out.push(((tx as i32, ty as i32), Arc::new(td)));
-                }
-            }
-        }
+        let out = layer_tiles(&data, padded_bpr as usize, &self.rect);
         drop(data);
         staging.unmap();
         out
+    }
+}
+
+/// GM20: the paint layer's own rect in frame pixels: the paper when it
+/// holds the whole frame (else the frame), each side capped by the GPU's
+/// texture limit. Layer texel (0, 0) is frame pixel `origin`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LayerRect {
+    /// Frame pixel of layer texel (0, 0); negative left of / above the frame.
+    pub origin: (i32, i32),
+    pub size: (u32, u32),
+    /// The paper is wider or taller than the GPU paints: the rect is a
+    /// window of it that holds the frame.
+    pub capped: bool,
+    /// The frame (project) size the layer serves.
+    pub frame: (u32, u32),
+}
+
+/// The texture side assumed before a device reports its own (wgpu's
+/// default `max_texture_dimension_2d`).
+pub const DEFAULT_MAX_DIM: u32 = 8192;
+
+impl LayerRect {
+    /// The pre-GM20 layer: exactly the frame.
+    pub fn frame(width: u32, height: u32) -> Self {
+        Self {
+            origin: (0, 0),
+            size: (width, height),
+            capped: false,
+            frame: (width, height),
+        }
+    }
+
+    pub fn is_frame(&self) -> bool {
+        self.origin == (0, 0) && self.size == self.frame
+    }
+
+    /// The layer texel of frame pixel (0, 0): the frame window (frame-sized)
+    /// that the viewer, the graph and the onion read starts here.
+    pub fn frame_window(&self) -> (u32, u32) {
+        (self.origin.0.unsigned_abs(), self.origin.1.unsigned_abs())
+    }
+}
+
+/// The paper the tools and the layer cover: the cut's paper when it holds
+/// the whole frame, else the frame (a paper off the frame paints as before).
+pub fn paint_area(paper: IRect, frame: (u32, u32)) -> IRect {
+    let holds = paper.x <= 0
+        && paper.y <= 0
+        && paper.x as i64 + paper.w as i64 >= frame.0 as i64
+        && paper.y as i64 + paper.h as i64 >= frame.1 as i64;
+    if holds && paper.w > 0 && paper.h > 0 {
+        paper
+    } else {
+        IRect::frame(frame.0, frame.1)
+    }
+}
+
+/// THE layer rect of a paper (one helper for every `ensure_size` caller):
+/// the [`paint_area`], each side over `max_dim` cut to a `max_dim` window
+/// centred on the frame and kept inside the paper.
+pub fn layer_rect(paper: IRect, frame: (u32, u32), max_dim: u32) -> LayerRect {
+    let area = paint_area(paper, frame);
+    let axis = |p0: i32, plen: u32, flen: u32| -> (i32, u32, bool) {
+        if plen <= max_dim {
+            return (p0, plen, false);
+        }
+        let len = max_dim.max(flen);
+        let lo = p0 as i64;
+        let hi = p0 as i64 + plen as i64 - len as i64;
+        let start = ((flen as i64 - len as i64) / 2).clamp(lo, hi);
+        (start as i32, len, true)
+    };
+    let (x, w, cx) = axis(area.x, area.w, frame.0);
+    let (y, h, cy) = axis(area.y, area.h, frame.1);
+    LayerRect {
+        origin: (x, y),
+        size: (w, h),
+        capped: cx || cy,
+        frame,
+    }
+}
+
+/// The part of `tile` on the layer: `src` its texel offset inside the
+/// tile, `dst` the layer texel it lands on, `size` the overlap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TileSpan {
+    pub src: (u32, u32),
+    pub dst: (u32, u32),
+    pub size: (u32, u32),
+}
+
+/// Where engine tile `tile` (frame tile coords, negative legal) lies on the
+/// layer `rect`; None when it is off the layer. Upload and readback both go
+/// through it.
+pub fn tile_span(tile: TileCoord, rect: &LayerRect) -> Option<TileSpan> {
+    let t = TILE as i64;
+    let axis = |tc: i32, o: i32, n: u32| -> Option<(u32, u32, u32)> {
+        let lo = tc as i64 * t - o as i64; // layer texel of the tile's texel 0
+        let (a, b) = (lo.max(0), (lo + t).min(n as i64));
+        (a < b).then(|| ((a - lo) as u32, a as u32, (b - a) as u32))
+    };
+    let (sx, dx, w) = axis(tile.0, rect.origin.0, rect.size.0)?;
+    let (sy, dy, h) = axis(tile.1, rect.origin.1, rect.size.1)?;
+    Some(TileSpan {
+        src: (sx, sy),
+        dst: (dx, dy),
+        size: (w, h),
+    })
+}
+
+/// Assemble a layer readback (`data`: rows of `padded_bpr` bytes from layer
+/// texel (0, 0)) into engine tiles through [`tile_span`]: every tile the
+/// layer touches, negative coords included; fully-transparent tiles dropped.
+pub fn layer_tiles(
+    data: &[u8],
+    padded_bpr: usize,
+    rect: &LayerRect,
+) -> Vec<(TileCoord, Arc<TileData>)> {
+    let t = TILE as i32;
+    let mut out = Vec::new();
+    if rect.size.0 == 0 || rect.size.1 == 0 {
+        return out;
+    }
+    let (x0, y0) = rect.origin;
+    for ty in y0.div_euclid(t)..=(y0 + rect.size.1 as i32 - 1).div_euclid(t) {
+        for tx in x0.div_euclid(t)..=(x0 + rect.size.0 as i32 - 1).div_euclid(t) {
+            let Some(s) = tile_span((tx, ty), rect) else {
+                continue;
+            };
+            let mut tile = vec![0u16; anim_core::raster::TILE_LEN];
+            for row in 0..s.size.1 as usize {
+                let src_row =
+                    (s.dst.1 as usize + row) * padded_bpr + s.dst.0 as usize * BPP as usize;
+                let dst_row = ((s.src.1 as usize + row) * TILE + s.src.0 as usize) * 4;
+                for px in 0..s.size.0 as usize {
+                    let sb = src_row + px * BPP as usize;
+                    for c in 0..4 {
+                        let lo = data[sb + c * 2] as u16;
+                        let hi = data[sb + c * 2 + 1] as u16;
+                        tile[dst_row + px * 4 + c] = lo | (hi << 8);
+                    }
+                }
+            }
+            let td = TileData::from_vec(tile);
+            if !td.is_empty() {
+                out.push(((tx, ty), Arc::new(td)));
+            }
+        }
+    }
+    out
+}
+
+/// Keep `before`'s texels outside the layer rect in a readback `read` (the
+/// layer's tiles): a capped or shrunk layer never deletes art it cannot
+/// see. Paper = frame layers return `read` unchanged when nothing lies
+/// beyond the frame.
+pub fn merge_outside(
+    before: &BTreeMap<TileCoord, Arc<TileData>>,
+    read: Vec<(TileCoord, Arc<TileData>)>,
+    rect: &LayerRect,
+) -> Vec<(TileCoord, Arc<TileData>)> {
+    let mut out: BTreeMap<TileCoord, Arc<TileData>> = read.into_iter().collect();
+    for (coord, tile) in before {
+        let full = tile_span(*coord, rect).is_some_and(|s| s.size == (TILE as u32, TILE as u32));
+        if full {
+            continue; // wholly on the layer: the readback is the truth
+        }
+        let mut px = match out.get(coord) {
+            Some(t) => t.rgba.to_vec(),
+            None => vec![0u16; anim_core::raster::TILE_LEN],
+        };
+        let span = tile_span(*coord, rect);
+        for row in 0..TILE as u32 {
+            for cx in 0..TILE as u32 {
+                let on = span.is_some_and(|s| {
+                    (s.src.0..s.src.0 + s.size.0).contains(&cx)
+                        && (s.src.1..s.src.1 + s.size.1).contains(&row)
+                });
+                if !on {
+                    let i = ((row * TILE as u32 + cx) * 4) as usize;
+                    px[i..i + 4].copy_from_slice(&tile.rgba[i..i + 4]);
+                }
+            }
+        }
+        let td = TileData::from_vec(px);
+        if td.is_empty() {
+            out.remove(coord);
+        } else {
+            out.insert(*coord, Arc::new(td));
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// GPU memory the paint layer holds for `rect` with `other_columns` other
+/// columns shown: six layer-sized targets (active, wet, remote, below,
+/// above, scratch) and the frame-sized onion and column slots, 8 bytes a
+/// texel (Rgba16Float).
+pub fn layer_memory(rect: &LayerRect, other_columns: usize) -> u64 {
+    let layer = rect.size.0 as u64 * rect.size.1 as u64;
+    let frame = rect.frame.0 as u64 * rect.frame.1 as u64;
+    (6 * layer + (ONION_SLOTS + other_columns) as u64 * frame) * BPP as u64
+}
+
+/// The Paper size window's line for a capped layer, None when the GPU
+/// paints the whole paper.
+pub fn cap_text(paper: IRect, rect: &LayerRect, max_dim: u32) -> Option<String> {
+    rect.capped.then(|| {
+        format!(
+            "this GPU paints at most {max_dim} px a side: painting covers {}×{} of the {}×{} paper",
+            rect.size.0, rect.size.1, paper.w, paper.h
+        )
+    })
+}
+
+/// The Paper size window's memory line: the layer's GPU memory in MiB.
+pub fn memory_text(rect: &LayerRect, other_columns: usize) -> String {
+    let mib = layer_memory(rect, other_columns) as f64 / (1024.0 * 1024.0);
+    format!("painting uses {mib:.1} MiB of GPU memory (8 bytes a texel)")
+}
+
+/// The composite pass's uniform: [opacity, 0, 0, 0] then the window —
+/// [x, y, on, 0]. `window` Some reads the source texture from that texel
+/// at the target's own size (a layer-sized source into a frame-sized
+/// target); None samples it stretched, the pre-GM20 pass.
+pub fn composite_uniform(opacity: f32, window: Option<(u32, u32)>) -> [f32; 8] {
+    match window {
+        Some((x, y)) => [opacity, 0.0, 0.0, 0.0, x as f32, y as f32, 1.0, 0.0],
+        None => [opacity, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     }
 }
 
@@ -1733,5 +1932,212 @@ mod viewnav_tests {
         let tail = SHADER.find("a = select(0.0, 1.0, opa >= 0.5);").expect("aliased tail");
         let grain = SHADER.find("a = a * (1.0 - u.grain.w").expect("grain");
         assert!(tail > grain, "the aliased cut comes after every thinning");
+    }
+}
+
+/// GM20: painting on the extended paper — the layer rect, its tile spans,
+/// the readback, the memory and the composite window, all pure.
+#[cfg(test)]
+mod extpaper_tests {
+    use super::*;
+    use anim_core::fill::{FillOpts, FillRefusal, flood_fill_mask, flood_fill_mask_in};
+    use anim_core::raster::{TILE_LEN, f32_to_f16_bits};
+
+    const FRAME: (u32, u32) = (1920, 1080);
+    const WIDE: IRect = IRect { x: -540, y: 0, w: 3000, h: 1080 };
+
+    /// A tile whose texel (x, y) holds a value unique to the tile and texel.
+    fn marked_tile(seed: u16) -> Arc<TileData> {
+        let px = (0..TILE_LEN).map(|i| (i as u16).wrapping_mul(7).wrapping_add(seed) | 1).collect();
+        Arc::new(TileData::from_vec(px))
+    }
+
+    /// The CPU mirror of `fill_texture` + `read_tiles`: upload every tile
+    /// through `tile_span`, read the layer back through `layer_tiles`.
+    fn mirror(tiles: &BTreeMap<TileCoord, Arc<TileData>>, rect: &LayerRect) -> Vec<(TileCoord, Arc<TileData>)> {
+        let bpr = (rect.size.0 * BPP).div_ceil(256) as usize * 256;
+        let mut layer = vec![0u8; bpr * rect.size.1 as usize];
+        for (coord, tile) in tiles {
+            let Some(s) = tile_span(*coord, rect) else { continue };
+            let bytes = tile.as_bytes();
+            for row in 0..s.size.1 as usize {
+                let src = ((s.src.1 as usize + row) * TILE + s.src.0 as usize) * BPP as usize;
+                let dst = (s.dst.1 as usize + row) * bpr + s.dst.0 as usize * BPP as usize;
+                let n = s.size.0 as usize * BPP as usize;
+                layer[dst..dst + n].copy_from_slice(&bytes[src..src + n]);
+            }
+        }
+        layer_tiles(&layer, bpr, rect)
+    }
+
+    /// Reference tiles with opaque ink at the given frame pixels.
+    fn ink(texels: &[(i32, i32)]) -> BTreeMap<TileCoord, Arc<TileData>> {
+        let t = TILE as i32;
+        let mut map: BTreeMap<TileCoord, Vec<u16>> = BTreeMap::new();
+        for (x, y) in texels {
+            let tile = map.entry((x.div_euclid(t), y.div_euclid(t))).or_insert_with(|| vec![0; TILE_LEN]);
+            let i = ((y.rem_euclid(t) * t + x.rem_euclid(t)) * 4) as usize;
+            tile[i + 3] = f32_to_f16_bits(1.0);
+        }
+        map.into_iter().map(|(k, v)| (k, Arc::new(TileData::from_vec(v)))).collect()
+    }
+
+    fn ring(x0: i32, y0: i32, x1: i32, y1: i32) -> Vec<(i32, i32)> {
+        let mut v = Vec::new();
+        for x in x0..=x1 {
+            v.extend([(x, y0), (x, y1)]);
+        }
+        for y in y0..=y1 {
+            v.extend([(x0, y), (x1, y)]);
+        }
+        v
+    }
+
+    fn exact() -> FillOpts {
+        FillOpts { threshold: 0.1, gap_px: 0, grow_px: 0, protect_ink: false }
+    }
+
+    #[test]
+    fn extpaper_layer_rect_pins() {
+        let f = layer_rect(IRect::frame(1920, 1080), FRAME, DEFAULT_MAX_DIM);
+        assert_eq!((f.origin, f.size, f.capped), ((0, 0), (1920, 1080), false));
+        assert_eq!(f, LayerRect::frame(1920, 1080));
+        let w = layer_rect(WIDE, FRAME, DEFAULT_MAX_DIM);
+        assert_eq!((w.origin, w.size, w.capped), ((-540, 0), (3000, 1080), false));
+        // A paper wider than the GPU paints: an 8192 window holding the frame.
+        let huge = IRect { x: -4040, y: 0, w: 10000, h: 1080 };
+        let c = layer_rect(huge, FRAME, 8192);
+        assert_eq!((c.size, c.capped), ((8192, 1080), true));
+        assert!(c.origin.0 <= 0 && c.origin.0 + 8192 >= 1920, "holds the frame: {c:?}");
+        assert!(c.origin.0 >= -4040 && c.origin.0 + 8192 <= 10000 - 4040, "inside the paper");
+        // A paper off the frame paints the frame, as before.
+        let off = IRect { x: 100, y: 0, w: 3000, h: 1080 };
+        assert_eq!(layer_rect(off, FRAME, 8192), LayerRect::frame(1920, 1080));
+    }
+
+    #[test]
+    fn extpaper_tile_span_and_cpu_mirror_round_trip() {
+        let rect = LayerRect { origin: (-540, -64), size: (3000, 1208), capped: false, frame: FRAME };
+        // Inside: the whole tile. (-8, -1) starts at frame (-512, -64).
+        let s = tile_span((-8, -1), &rect).expect("on the layer");
+        assert_eq!((s.src, s.dst, s.size), ((0, 0), (28, 0), (64, 64)));
+        // Across the left edge (-540): only its right part.
+        let s = tile_span((-9, 0), &rect).expect("partly on");
+        assert_eq!((s.src, s.dst, s.size), ((36, 0), (0, 64), (28, 64)));
+        // Off the layer: nothing.
+        assert_eq!(tile_span((-10, 0), &rect), None);
+        assert_eq!(tile_span((0, -2), &rect), None);
+        // Upload -> readback returns the same tile map, negative tiles too.
+        let tiles: BTreeMap<TileCoord, Arc<TileData>> =
+            [(-8, -1), (0, 0), (5, 3), (-3, 10), (-1, -1)].into_iter().zip(1u16..).map(|(c, s)| (c, marked_tile(s))).collect();
+        let back: BTreeMap<_, _> = mirror(&tiles, &rect).into_iter().collect();
+        assert_eq!(back.keys().collect::<Vec<_>>(), tiles.keys().collect::<Vec<_>>());
+        for (c, t) in &tiles {
+            assert_eq!(back[c].rgba, t.rgba, "tile {c:?} round-trips bit for bit");
+        }
+        // A tile across the edge comes back as its on-layer part only.
+        let edge: BTreeMap<_, _> = [((-9, 0), marked_tile(9))].into_iter().collect();
+        let back = mirror(&edge, &rect);
+        assert_eq!(back.len(), 1);
+        let (_, t) = &back[0];
+        assert_eq!(&t.rgba[..36 * 4], &[0u16; 36 * 4][..], "left of the paper: bare");
+        assert_eq!(&t.rgba[36 * 4..64 * 4], &edge[&(-9, 0)].rgba[36 * 4..64 * 4]);
+        // The frame window: layer texel (540, 64), frame-sized.
+        assert_eq!(rect.frame_window(), (540, 64));
+        assert_eq!(rect.frame, FRAME);
+    }
+
+    #[test]
+    fn extpaper_flood_fill_over_the_paper() {
+        let area = WIDE;
+        // An inked ring left of the frame: the fill stays inside it.
+        let r = ink(&ring(-400, 400, -200, 600));
+        let m = flood_fill_mask_in(&r, (-300, 500), area, &exact(), None).expect("fills");
+        assert!(m.get(-300, 500) && m.get(-399, 401) && !m.get(-450, 500) && !m.get(-400, 500));
+        assert_eq!(m.count(), 199 * 199, "the ring's inside, beyond the frame");
+        // A ring cut by the paper's left edge fills only up to the edge.
+        let r = ink(&ring(-700, 400, -450, 600));
+        let m = flood_fill_mask_in(&r, (-500, 500), area, &exact(), None).expect("fills");
+        assert!(m.get(-540, 500) && !m.get(-541, 500), "the paper edge is a wall");
+        assert_eq!(m.count(), (540 - 451 + 1) * 199);
+        // Off the paper: refused.
+        let e = flood_fill_mask_in(&r, (-600, 500), area, &exact(), None).err();
+        assert_eq!(e, Some(FillRefusal::OffPaper));
+        // Over the frame rect: the frame fill bit for bit (gap + grow on).
+        let r = ink(&ring(100, 100, 300, 300));
+        let opts = FillOpts::default();
+        let a = flood_fill_mask(&r, (200, 200), 1920, 1080, &opts, None).expect("frame");
+        let b = flood_fill_mask_in(&r, (200, 200), IRect::frame(1920, 1080), &opts, None).expect("in");
+        assert_eq!((a.x0, a.y0, a.w, a.h), (b.x0, b.y0, b.w, b.h));
+        assert!(a.bits == b.bits);
+        assert_eq!(a.count(), 203 * 203, "the pinned pre-GM20 frame fill");
+    }
+
+    #[test]
+    fn extpaper_paper_equal_frame_is_the_old_layer() {
+        let f = layer_rect(IRect::frame(1920, 1080), FRAME, DEFAULT_MAX_DIM);
+        assert!(f.is_frame());
+        // The old upload rule: tiles at px/py >= 0 inside the frame, cut at
+        // its right/bottom edge.
+        let s = tile_span((29, 16), &f).expect("the corner tile");
+        assert_eq!((s.src, s.dst, s.size), ((0, 0), (1856, 1024), (64, 56)));
+        assert_eq!(tile_span((-1, 0), &f), None);
+        assert_eq!(tile_span((30, 0), &f), None);
+        assert_eq!(tile_span((0, 17), &f), None);
+        // The pinned committed tile set: a readback of in-frame art merges
+        // to itself, tile for tile.
+        let tiles: BTreeMap<TileCoord, Arc<TileData>> =
+            [(0, 0), (29, 15), (12, 7)].into_iter().zip(3u16..).map(|(c, s)| (c, marked_tile(s))).collect();
+        let read = mirror(&tiles, &f);
+        let merged = merge_outside(&tiles, read.clone(), &f);
+        assert_eq!(merged.len(), 3);
+        for ((a, ta), (b, tb)) in merged.iter().zip(&read) {
+            assert_eq!((a, &ta.rgba), (b, &tb.rgba));
+        }
+        // A frame layer composites as before (no window).
+        assert_eq!(composite_uniform(0.5, None), [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn extpaper_capped_layer_keeps_the_art_it_cannot_see() {
+        let huge = IRect { x: -4040, y: 0, w: 10000, h: 1080 };
+        let c = layer_rect(huge, FRAME, 8192);
+        let t = TILE as i32;
+        let far = (c.origin.0 - 1).div_euclid(t) - 1; // a tile wholly left of the window
+        let before: BTreeMap<TileCoord, Arc<TileData>> = [((far, 2), marked_tile(5))].into_iter().collect();
+        let merged = merge_outside(&before, Vec::new(), &c);
+        assert_eq!(merged.len(), 1, "the off-layer tile survives an empty readback");
+        assert_eq!(merged[0].1.rgba, before[&(far, 2)].rgba);
+    }
+
+    #[test]
+    fn extpaper_memory_and_cap_text() {
+        let w = layer_rect(WIDE, FRAME, DEFAULT_MAX_DIM);
+        // 6 layer targets of 3000×1080 + 3 onion slots (+ columns) of the frame, 8 B a texel.
+        assert_eq!(layer_memory(&w, 0), 205_286_400);
+        assert_eq!(layer_memory(&w, 1), 221_875_200);
+        assert_eq!(layer_memory(&LayerRect::frame(1920, 1080), 0), 9 * 1920 * 1080 * 8);
+        assert_eq!(memory_text(&w, 0), "painting uses 195.8 MiB of GPU memory (8 bytes a texel)");
+        assert_eq!(cap_text(WIDE, &w, 8192), None);
+        let huge = IRect { x: -4040, y: 0, w: 10000, h: 1080 };
+        let c = layer_rect(huge, FRAME, 8192);
+        assert_eq!(
+            cap_text(huge, &c, 8192).as_deref(),
+            Some("this GPU paints at most 8192 px a side: painting covers 8192×1080 of the 10000×1080 paper")
+        );
+    }
+
+    #[test]
+    fn extpaper_shaders_take_the_origin_and_the_window() {
+        for (name, src) in [("SHADER", SHADER), ("COMPOSITE_SHADER", COMPOSITE_SHADER)] {
+            let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {e}"));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name} validates: {e:?}"));
+        }
+        assert!(SHADER.contains("let texel = center + local - u.origin;"));
+        assert!(COMPOSITE_SHADER.contains("textureLoad(wet_tex, at, 0)"));
+        assert_eq!(composite_uniform(1.0, Some((540, 64))), [1.0, 0.0, 0.0, 0.0, 540.0, 64.0, 1.0, 0.0]);
+        assert_eq!(std::mem::size_of::<Uniforms>(), 48, "the dab uniform keeps its layout");
     }
 }

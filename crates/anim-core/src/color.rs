@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 
+use crate::camera::IRect;
 use crate::command::{Command, CutRef};
 use crate::export::{linear_to_srgb, linear_to_srgb_f, srgb_to_linear};
 use crate::ids::{ColumnId, DrawingId, LayerId, SceneId};
@@ -351,23 +352,27 @@ pub enum RefillRefusal {
 }
 
 /// The paper pixels inside `clip` (a paper-space polygon: the select tool's
-/// active selection), w×h row-major; None when there is no selection.
-fn clip_grid(clip: Option<&[(f32, f32)]>, w: usize, h: usize) -> Option<Vec<bool>> {
+/// active selection), a grid over `area` row-major; None when there is no
+/// selection.
+fn clip_grid(clip: Option<&[(f32, f32)]>, area: IRect) -> Option<Vec<bool>> {
     let poly = clip.filter(|p| p.len() >= 3)?;
+    let (w, h) = (area.w as usize, area.h as usize);
+    let (ax, ay) = (area.x as i64, area.y as i64);
     let mut grid = vec![false; w * h];
     // Only the polygon's bbox can hold inside pixels.
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for &(x, y) in poly {
         (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
     }
-    let span = |a: f32, b: f32, n: usize| {
-        let lo = (a.floor() as i64).clamp(0, n as i64) as usize;
-        let hi = (b.ceil() as i64).clamp(0, n as i64) as usize;
+    let span = |a: f32, b: f32, o: i64, n: usize| {
+        let lo = ((a.floor() as i64).clamp(o, o + n as i64) - o) as usize;
+        let hi = ((b.ceil() as i64).clamp(o, o + n as i64) - o) as usize;
         lo..hi
     };
-    for y in span(y0, y1, h) {
-        for x in span(x0, x1, w) {
-            grid[y * w + x] = crate::edit::contains(poly, x as f32 + 0.5, y as f32 + 0.5);
+    for y in span(y0, y1, ay, h) {
+        for x in span(x0, x1, ax, w) {
+            let (fx, fy) = ((x as i64 + ax) as f32, (y as i64 + ay) as f32);
+            grid[y * w + x] = crate::edit::contains(poly, fx + 0.5, fy + 0.5);
         }
     }
     Some(grid)
@@ -390,8 +395,18 @@ fn paper_grid(
     h: usize,
     pred: impl FnMut([u16; 4]) -> bool,
 ) -> Vec<bool> {
-    let mut grid = vec![false; w * h];
-    mark_grid(&mut grid, tiles, w, h, pred);
+    paper_grid_in(tiles, IRect::frame(w as u32, h as u32), pred)
+}
+
+/// [`paper_grid`] over any paper `area` (its grid starts at the area's
+/// top-left, which may lie left of or above the frame).
+fn paper_grid_in(
+    tiles: &BTreeMap<TileCoord, Arc<TileData>>,
+    area: IRect,
+    pred: impl FnMut([u16; 4]) -> bool,
+) -> Vec<bool> {
+    let mut grid = vec![false; area.w as usize * area.h as usize];
+    mark_grid_in(&mut grid, tiles, area, pred);
     grid
 }
 
@@ -402,16 +417,28 @@ fn mark_grid(
     tiles: &BTreeMap<TileCoord, Arc<TileData>>,
     w: usize,
     h: usize,
+    pred: impl FnMut([u16; 4]) -> bool,
+) {
+    mark_grid_in(grid, tiles, IRect::frame(w as u32, h as u32), pred);
+}
+
+/// [`mark_grid`] over a grid covering paper `area`.
+fn mark_grid_in(
+    grid: &mut [bool],
+    tiles: &BTreeMap<TileCoord, Arc<TileData>>,
+    area: IRect,
     mut pred: impl FnMut([u16; 4]) -> bool,
 ) {
+    let (w, h) = (area.w as usize, area.h as usize);
+    let (ax, ay) = (area.x as i64, area.y as i64);
     for ((tx, ty), tile) in tiles {
         for row in 0..TILE {
-            let y = *ty as i64 * TILE as i64 + row as i64;
+            let y = *ty as i64 * TILE as i64 + row as i64 - ay;
             if y < 0 || y >= h as i64 {
                 continue;
             }
             for cx in 0..TILE {
-                let x = *tx as i64 * TILE as i64 + cx as i64;
+                let x = *tx as i64 * TILE as i64 + cx as i64 - ax;
                 if x < 0 || x >= w as i64 {
                     continue;
                 }
@@ -455,30 +482,35 @@ fn flood4(open: &[bool], w: usize, h: usize, seed: usize) -> Vec<bool> {
     bits
 }
 
-/// Write `to` into every texel of `target` the paper `mask` selects.
+/// Write `to` into every texel of `target` the `mask` (a grid over paper
+/// `area`) selects.
 fn paint_mask(
     target: &BTreeMap<TileCoord, Arc<TileData>>,
     mask: &[bool],
-    w: usize,
-    h: usize,
+    area: IRect,
     to: [u16; 4],
 ) -> TileDiff {
     let t = TILE as i32;
+    let (w, h) = (area.w as i64, area.h as i64);
+    let (ax, ay) = (area.x as i64, area.y as i64);
     let mut diff = Vec::new();
-    for ty in 0..(h as i32 + t - 1) / t {
-        for tx in 0..(w as i32 + t - 1) / t {
+    if w == 0 || h == 0 {
+        return diff;
+    }
+    for ty in area.y.div_euclid(t)..=(area.y + area.h as i32 - 1).div_euclid(t) {
+        for tx in area.x.div_euclid(t)..=(area.x + area.w as i32 - 1).div_euclid(t) {
             let Some(before) = target.get(&(tx, ty)) else {
                 continue; // a refill only rewrites paint, which has a tile
             };
             let mut px: Option<Vec<u16>> = None;
             for row in 0..TILE {
-                let y = (ty * t) as usize + row;
-                if y >= h {
-                    break;
+                let y = (ty * t) as i64 + row as i64 - ay;
+                if y < 0 || y >= h {
+                    continue;
                 }
                 for cx in 0..TILE {
-                    let x = (tx * t) as usize + cx;
-                    if x >= w || !mask[y * w + x] {
+                    let x = (tx * t) as i64 + cx as i64 - ax;
+                    if x < 0 || x >= w || !mask[(y * w + x) as usize] {
                         continue;
                     }
                     let i = (row * TILE + cx) * 4;
@@ -498,10 +530,10 @@ fn paint_mask(
 fn seed_texel(
     target: &BTreeMap<TileCoord, Arc<TileData>>,
     seed: (i32, i32),
-    width: u32,
-    height: u32,
+    area: IRect,
 ) -> Result<[u16; 4], RefillRefusal> {
-    if seed.0 < 0 || seed.1 < 0 || seed.0 >= width as i32 || seed.1 >= height as i32 {
+    let (sx, sy) = (seed.0 as i64 - area.x as i64, seed.1 as i64 - area.y as i64);
+    if sx < 0 || sy < 0 || sx >= area.w as i64 || sy >= area.h as i64 {
         return Err(RefillRefusal::OffPaper);
     }
     let v = texel_of(target, seed.0, seed.1);
@@ -530,22 +562,38 @@ pub fn refill(
     color: [f32; 4],
     clip: Option<&[(f32, f32)]>,
 ) -> Result<TileDiff, RefillRefusal> {
-    let value = seed_texel(target, seed, width, height)?;
+    let area = IRect::frame(width, height);
+    refill_in(target, line, seed, area, under_px, color, clip)
+}
+
+/// [`refill`] over any paper `area` (frame pixels; its edges wall the
+/// region, a click outside it is `OffPaper`). Over the frame rect it is
+/// the frame refill bit for bit.
+pub fn refill_in(
+    target: &BTreeMap<TileCoord, Arc<TileData>>,
+    line: &BTreeMap<TileCoord, Arc<TileData>>,
+    seed: (i32, i32),
+    area: IRect,
+    under_px: u32,
+    color: [f32; 4],
+    clip: Option<&[(f32, f32)]>,
+) -> Result<TileDiff, RefillRefusal> {
+    let value = seed_texel(target, seed, area)?;
     let to = color.map(f32_to_f16_bits);
     if to == value {
         return Err(RefillRefusal::Unchanged);
     }
-    let (w, h) = (width as usize, height as usize);
-    let inside = clip_grid(clip, w, h);
-    let si = seed.1 as usize * w + seed.0 as usize;
+    let (w, h) = (area.w as usize, area.h as usize);
+    let inside = clip_grid(clip, area);
+    let si = (seed.1 - area.y) as usize * w + (seed.0 - area.x) as usize;
     if inside.as_ref().is_some_and(|g| !g[si]) {
         return Err(RefillRefusal::OutsideSelection);
     }
-    let mut same = paper_grid(target, w, h, |t| t == value);
+    let mut same = paper_grid_in(target, area, |t| t == value);
     if let Some(g) = &inside {
         same.iter_mut().zip(g).for_each(|(s, i)| *s &= *i);
     }
-    let ink = paper_grid(line, w, h, |t| f16_bits_to_f32(t[3]) >= 0.1);
+    let ink = paper_grid_in(line, area, |t| f16_bits_to_f32(t[3]) >= 0.1);
     if ink[si] {
         return Err(RefillRefusal::OnLine);
     }
@@ -557,7 +605,7 @@ pub fn refill(
     for i in 0..w * h {
         mask[i] |= grown[i] && same[i] && ink[i];
     }
-    Ok(paint_mask(target, &mask, w, h, to))
+    Ok(paint_mask(target, &mask, area, to))
 }
 
 /// REPLACE-ALL (Ctrl+Shift+click with Fill): every texel of `target`
@@ -572,22 +620,35 @@ pub fn replace_all(
     color: [f32; 4],
     clip: Option<&[(f32, f32)]>,
 ) -> Result<(TileDiff, usize), RefillRefusal> {
-    let value = seed_texel(target, seed, width, height)?;
+    replace_all_in(target, seed, IRect::frame(width, height), color, clip)
+}
+
+/// [`replace_all`] with the click checked against any paper `area`, and a
+/// selection read over it. Over the frame rect it is the frame form bit
+/// for bit.
+pub fn replace_all_in(
+    target: &BTreeMap<TileCoord, Arc<TileData>>,
+    seed: (i32, i32),
+    area: IRect,
+    color: [f32; 4],
+    clip: Option<&[(f32, f32)]>,
+) -> Result<(TileDiff, usize), RefillRefusal> {
+    let value = seed_texel(target, seed, area)?;
     let to = color.map(f32_to_f16_bits);
     if to == value {
         return Err(RefillRefusal::Unchanged);
     }
-    let (w, h) = (width as usize, height as usize);
-    let Some(inside) = clip_grid(clip, w, h) else {
+    let w = area.w as usize;
+    let Some(inside) = clip_grid(clip, area) else {
         return Ok(swap_texels(target, value, to));
     };
-    if !inside[seed.1 as usize * w + seed.0 as usize] {
+    if !inside[(seed.1 - area.y) as usize * w + (seed.0 - area.x) as usize] {
         return Err(RefillRefusal::OutsideSelection);
     }
-    let mut mask = paper_grid(target, w, h, |t| t == value);
+    let mut mask = paper_grid_in(target, area, |t| t == value);
     mask.iter_mut().zip(&inside).for_each(|(m, i)| *m &= *i);
     let n = mask.iter().filter(|m| **m).count();
-    Ok((paint_mask(target, &mask, w, h, to), n))
+    Ok((paint_mask(target, &mask, area, to), n))
 }
 
 /// Square (Chebyshev) dilation by `r`, in place — the fill's grow law.

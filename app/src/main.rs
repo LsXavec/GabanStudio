@@ -3251,11 +3251,7 @@ impl Editor {
             return;
         }
         if action == Action::SelectAll {
-            let (w, h) = (
-                ed.state.engine.project.width as f32,
-                ed.state.engine.project.height as f32,
-            );
-            ed.canvas.select_all(&mut ed.state, w, h);
+            ed.canvas.select_all(&mut ed.state); // GM20: the whole paper
             return;
         }
         // MISS CHECK (shiage): the hole-hunt ground flip — pure display.
@@ -4713,12 +4709,13 @@ impl Editor {
         let state = form.new_state();
         let paint = rs.map(|rs| PaintLayer::new(rs, form.width, form.height));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, form.width, form.height));
+        let max_dim = rs.map_or(paint::DEFAULT_MAX_DIM, |rs| rs.device.limits().max_texture_dimension_2d);
         let (workspaces, load_notes) = Self::load_workspaces(data_dir);
         Self {
             data_dir: data_dir.map(|d| d.to_path_buf()),
             presets: Vec::new(),
             state,
-            canvas: canvas::CanvasView::new(),
+            canvas: canvas::CanvasView::new().with_layer_limit(max_dim),
             paint,
             graph,
             request_new: false,
@@ -4792,12 +4789,13 @@ impl Editor {
         let (w, h) = (state.engine.project.width, state.engine.project.height);
         let paint = rs.map(|rs| PaintLayer::new(rs, w, h));
         let graph = rs.map(|rs| graphcomp::GraphCompositor::new(rs, w, h));
+        let max_dim = rs.map_or(paint::DEFAULT_MAX_DIM, |rs| rs.device.limits().max_texture_dimension_2d);
         let (workspaces, load_notes) = Self::load_workspaces(data_dir);
         Self {
             data_dir: data_dir.map(|d| d.to_path_buf()),
             presets: Vec::new(),
             state,
-            canvas: canvas::CanvasView::new(),
+            canvas: canvas::CanvasView::new().with_layer_limit(max_dim),
             paint,
             graph,
             request_new: false,
@@ -4992,6 +4990,8 @@ impl Editor {
         let (fw, fh) = (self.state.engine.project.width, self.state.engine.project.height);
         let frame = IRect::frame(fw, fh);
         let now = camera::paper(self.state.cut(), fw, fh);
+        let max_dim = self.canvas.max_layer_dim;
+        let other_cols = self.state.cut().render_order().len().saturating_sub(1);
         let mut open = true;
         let mut set = false;
         egui::Window::new("Paper size")
@@ -5054,6 +5054,14 @@ impl Editor {
                         camera::paper_limits()
                     ))
                     .color(plate::legend_dim()),
+                );
+                // GM20: what this GPU paints of the paper, and what it costs.
+                let lr = paint::layer_rect(form.rect, (fw, fh), max_dim);
+                if let Some(cap) = paint::cap_text(form.rect, &lr, max_dim) {
+                    ui.label(egui::RichText::new(cap).color(plate::AKA));
+                }
+                ui.label(
+                    egui::RichText::new(paint::memory_text(&lr, other_cols)).color(plate::legend_dim()),
                 );
                 ui.separator();
                 if ui
@@ -8135,7 +8143,9 @@ impl Editor {
                     self.state.engine.project.width,
                     self.state.engine.project.height,
                 );
-                p.ensure_size(w, h);
+                // GM20: the paint layer on the paper's rect (the canvas's
+                // helper); the graph's pool stays frame-sized.
+                p.ensure_size(self.canvas.sync_layer_rect(&self.state));
                 g.ensure_size(w, h);
                 let (scene, cutid, frame) = (
                     self.state.view.scene,

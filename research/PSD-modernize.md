@@ -129,7 +129,10 @@ so the sheet panel and graph editor part, GM14, runs sixth):
 16. generators
 17. 3D
 18. manga
-19. ship
+19. sweep: painting on the extended paper (added 2026-10-30, like the next two)
+20. sweep: menus, dialogs and Shift+Delete
+21. sweep: View3D worker, sequence reload and the 3D underlay
+22. ship
 
 ## 1. Definition of done
 
@@ -520,11 +523,14 @@ moved work between parts so each fits.
 | GM16 | Generators | GM9 GM11 | 45 | 3.5M | 2×0.9M | 0.9M | 6.2M |
 | GM17 | 3D layout and toon render | GM10 GM11 | 45 | 3.5M | 2×0.9M | 0.9M | 6.2M |
 | GM18 | Manga pages, tones, rulers | GM8 GM13 GM16 | 45 | 3.5M | 2×0.9M | 0.9M | 6.2M |
+| GM20 | Painting on the extended paper (sweep) | GM4 GM6 GM7 GM10 | 45 | 3.5M | 2×0.9M | 0.9M | 6.2M |
+| GM21 | Menus, dialogs and Shift+Delete (sweep) | GM2 GM3 GM5 GM7 GM8 GM11 GM13 GM14 GM18 | 45 | 3.0M | 2×0.8M | 0.8M | 5.4M |
+| GM22 | View3D worker, sequence reload, 3D underlay (sweep) | GM4 GM6 GM9 GM11 GM12 GM17 GM20 GM21 | 45 | 3.5M | 2×0.9M | 0.9M | 6.2M |
 | GM19 | Ship | all | 45 | 2.0M | 2×0.6M | 0.4M | 3.6M |
 
 **Totals:** implementers about 61.5M, verifiers about 32.2M, fixers about 15.8M, **about 110M tokens overall
 (109.5M, ±20%)**. Implementer time is at most 19 × 45 min = 14.25 h. Wall time with verifiers and fixers is
-about 18–22 h.
+about 18–22 h. The three sweep parts (added 2026-10-30, before the ship part) add about 17.8M and 3 × 45 min.
 
 **Checkpoint.** After the sound part (the 13th in run order), the plan has spent about 75.7M. If the actual
 spend is above 91M (120%), apply the fallback below before starting the satsuei look part.
@@ -2196,7 +2202,7 @@ its slicing go to `left` first, then the line dot shape.
 
 ## GM19 Ship: polish gates, version and release build
 
-*Depends on: GM1–GM18 (or every part not `removed`). Cap 45 min. Filter word: `ship_`. Binding decisions: D0, D5, D6, D7; NEVER-DO 8 and 10.*
+*Depends on: GM1–GM18 and the sweep parts GM20–GM22 (or every part not `removed`). Cap 45 min. Filter word: `ship_`. Binding decisions: D0, D5, D6, D7; NEVER-DO 8 and 10.*
 
 **Goal.** Lock in quality and produce 0.5.0 locally:
 - the colour ratchet at zero;
@@ -2259,6 +2265,361 @@ Nothing is published.
 **Stretch.** None. If the cap is hit, the ratchet work is what goes to `left`, with the count reached.
 
 **Gate.** `cd /c/Users/Lancer/Desktop/GabanStudio && export PATH=/c/Users/Lancer/.cargo/bin:$PATH && cargo test -p animstudio -p anim-core && n=$(cargo test -q -p animstudio ship_ -- --list | grep -c ': test$') && [ "$n" -ge 5 ] && cargo build --release -p animstudio && bash tools/smoke_render.sh && [ -z "$(git tag --list 'v0.5*')" ] && cargo build --release -p animstudio-installer`
+
+## GM20 Painting on the extended paper
+
+*Depends on: GM4, GM6, GM7, GM10. Cap 45 min. Filter word: `extpaper_`. Binding decisions: D0, D1, D3, D7, D10; NEVER-DO 3, 4, 6 and 7.*
+
+**Goal.** The camera part's extended paper (Cut ▸ Paper size…) becomes paper you can draw on: a BG artist paints
+a pan BG past the frame's edges, and the camera pans over what was painted. Today the canvas still paints on a
+frame-sized sheet:
+- the GPU layers are frame-sized, and `fill_texture` drops every tile outside the frame;
+- fill, refill and replace-all, the lasso fill, select-all, the eyedropper and the presence pointer stop at the
+  frame.
+
+This part takes the camera part's two core `left` items: paint layers at paper size with the GPU cap shown, and
+painting, fill and lasso over the paper.
+
+**User-facing behaviour.**
+- **Layers at paper size.** With a paper larger than the frame, the canvas's GPU layers cover the paper: every
+  target `make_target` builds (active, wet, remote, below, above and scratch). The onion, light-table and
+  other-column slots at paper size are Stretch; until then they keep the frame's size and show its part.
+  - A layer has an origin. Texel (0, 0) is the paper's top-left corner in frame coordinates, so a tile at
+    negative coordinates uploads, reads back and displays at its place. A tile across the paper's edge is
+    uploaded and read back in part, as the frame's right and bottom edges are today.
+  - The size is capped by the device's `max_texture_dimension_2d` (`wgpu::Device::limits()`). Past the cap the
+    layers cover the largest window of the paper that holds the frame, and painting stops at its edge. The
+    Paper size window says so ("this GPU paints at most 8192 px a side: painting covers 8192×1080 of the
+    10000×1080 paper") and shows the layers' GPU memory (8 bytes a texel, every target and slot counted).
+  - The layers are rebuilt on a cut switch, or when "set paper" changes the size, never mid-stroke: a change
+    that arrives during a stroke waits until the stroke lands (NEVER-DO 6).
+  - The composite viewer and the GPU graph keep their frame-sized pool. Their DrawingSource and ImageSource
+    slots read the frame window of the paper-sized layer (`composite_layers_into`), so their pixels are as
+    before. The viewer asks for the same `LayerRect` as the canvas, from one helper, so the two never rebuild
+    the layers back and forth.
+- **Painting beyond the frame.** The brush, the eraser, fill, refill and replace-all (Shift+click and
+  Ctrl+Shift+click), the lasso fill and select-all work over the whole paper. Each commit is one `PaintTiles`
+  undo step, as on the frame (NEVER-DO 3). A fill click outside the paper is refused on the Aka lane: "outside
+  the paper: Cut ▸ Paper size… extends it" (D7).
+- The eyedropper and the session presence pointer work over the whole paper.
+- **Old work is untouched.** With the default paper (paper = frame) the layer sizes, the tiles, the fills and
+  every pixel are exactly as before (NEVER-DO 4). In canvas.rs, `paper_w`/`paper_h` mean the frame today; the
+  paper rect is `camera::paper(cut, w, h)`.
+
+**Files and types to extend.**
+- `app/src/paint.rs`:
+  - a pure `LayerRect { origin: (i32, i32), size: (u32, u32), capped: bool }`, made by
+    `layer_rect(paper: IRect, frame: (u32, u32), max_dim: u32)`, and `tile_span(tile, &LayerRect)`: the part of
+    a tile that falls on the layer, and where. Upload and readback both use it, so the two directions cannot
+    disagree;
+  - `PaintLayer::new` (402) and `ensure_size` (998) take a `LayerRect`; `create_layer_texture` (906) and
+    `make_target` (928) build at its size;
+  - `fill_texture` (1397) maps tiles through `tile_span` instead of dropping negative ones, and so does
+    `read_tiles` (1597); `set_onion` (1464) and `sync_other_column` (1523) follow with the Stretch;
+  - `build_projection` (1140), the dab `Uniforms` (144; the origin can ride in its `_pad`) and the shaders
+    offset by the origin;
+  - `composite_layers_into` (1148) also fills the GPU graph's frame-sized DrawingSource and ImageSource slots
+    (graphcomp.rs 606 and 617); there it reads the layer's frame window, texels from −origin at the frame's
+    size.
+- `crates/anim-core/src/fill.rs`: `flood_fill_mask_in(reference, seed, area: IRect, opts, clip)` fills inside
+  `area`, in frame coordinates (negative allowed). `flood_fill_mask` (139) becomes that call over the frame and
+  stays bit-identical. `FillMask` (57) gains its origin, and `get` reads frame coordinates.
+- `crates/anim-core/src/color.rs`: `refill` (523) and `replace_all` (567), through `seed_texel` (498), get the
+  same area forms (`refill_in`, `replace_all_in`). The frame forms become those calls over the frame and stay
+  bit-identical, so `color_tests` pass unchanged.
+- `crates/anim-core/src/camera.rs`: `paper(cut, w, h)` (177), `MAX_PAPER` and `MAX_PAPER_AREA`, read only.
+- `app/src/canvas.rs`:
+  - the `ensure_size` calls (4011, 4019) pass the cut's `LayerRect`, and `paint_paper_image` (233) draws the
+    layers at the paper;
+  - `select_all` (1364) selects the paper, the fill call (6371) uses `flood_fill_mask_in` over the paper, and
+    `commit_lasso_fill` (6076) clips its grid to the paper instead of the frame;
+  - `pick_sample` (7406) and the presence filter (3774) accept points on the paper.
+- `app/src/main.rs`: `PaperForm` (4220) and `paper_size_window` (4984) show the cap and the memory. The editor
+  keeps the device's limit, set from the wgpu device when the canvas is built (the testkit sets its own). The
+  viewer's `p.ensure_size(w, h)` (8138) takes the cut's `LayerRect` from the canvas's helper; `g.ensure_size`
+  stays the frame. `PaintLayer::new`'s two callers (4714, 4793) may start from the frame's rect; the first
+  `ensure_size` moves the layers to the paper.
+- `app/src/doc.rs`: `commit_raster` (1092) is unchanged; its tiles may now be negative. `refill_at` (4935)
+  passes the paper to the area forms.
+
+**Acceptance criteria.**
+1. `layer_rect` pins:
+   - paper = frame 1920×1080 gives origin (0, 0) and size 1920×1080, not capped;
+   - a 3000×1080 paper at x −540 gives origin (−540, 0) and size 3000×1080;
+   - a 10000×1080 paper with `max_dim` 8192 gives an 8192-wide rect that holds the whole frame, `capped`.
+2. `tile_span` with origin (−540, −64): a tile inside maps whole, a tile across the left edge maps only its
+   right part, and a tile off the layer maps to nothing. A CPU mirror of upload then readback through
+   `tile_span` gives back the same tile map, negative tiles included. The frame window a frame-sized target
+   reads (`composite_layers_into`, through a pure helper) starts at layer texel (540, 64) for that origin and
+   has the frame's size.
+3. `flood_fill_mask_in` over a 3000×1080 paper at x −540: a seed at (−300, 500) inside an inked ring fills the
+   ring's inside beyond the frame; a ring cut by the paper's edge fills only up to the edge; a seed at
+   (−600, 500) is refused as `OffPaper`. Over the frame rect it equals `flood_fill_mask` bit for bit.
+4. In the harness, on that paper: a fill click left of the frame is one undo step with tiles at negative x, and
+   undo removes them; Shift+click refill and Ctrl+Shift+click replace-all there work the same way; a click
+   outside the paper is refused with the Aka text and changes nothing.
+5. On that paper, select-all selects the rect from (−540, 0) to (2460, 1080), and a lasso fill drawn across
+   the paper's left edge fills only up to it (no texel left of x −540). The eyedropper at (−100, 500) picks the
+   colour painted there, and a pointer moved there (a pointer-move event in the harness) sets `presence_pos` to
+   that point. With paper = frame, all four are as before.
+6. Paper = frame: the layer rect, a pinned fill mask and a pinned committed tile set equal their values from
+   before this part.
+7. The canvas keeps the `LayerRect` it asks the GPU layer for, with or without a GPU (the harness has none),
+   from one helper that every `ensure_size` caller uses (canvas.rs twice and the viewer in main.rs; a source
+   scan). It follows the cut on a cut switch and after "set paper"; a paper set while the stroke tap shows a
+   stroke in progress changes it only after the stroke lands.
+8. With the editor's limit set to 8192, the Paper size window shows the cap text for a 10000 px paper; for a
+   3000×1080 paper it shows the memory, computed by a pure helper (pinned).
+
+**Tests to add.** At least 8 tests named `extpaper_*`. The gate checks the count. A real GPU's textures cannot
+be reached headless (NEVER-DO 7): the tests pin the geometry, the CPU fill and a CPU mirror of the tile mapping,
+and the build log lists painting beyond the frame on a real GPU as not verified.
+
+**Out of scope.** Tiled GPU layers to get past `max_texture_dimension_2d`; papers past the camera part's
+`MAX_PAPER` and `MAX_PAPER_AREA`; the camera path overlay and camera motion blur.
+
+**Stretch.** The onion and light-table slots at paper size (`set_onion`), then the other columns' slots
+(`sync_other_column`); until then they keep the frame's size. If the cap is hit, the stretch goes to `left`.
+The core (criteria 1–8) never does (D0): every `make_target` target, the graph's frame window, the cap and
+memory text, and every tool above over the paper.
+
+**Gate.** `cd /c/Users/Lancer/Desktop/GabanStudio && export PATH=/c/Users/Lancer/.cargo/bin:$PATH && cargo test -p animstudio -p anim-core && n=$(cargo test -q -p animstudio extpaper_ -- --list | grep -c ': test$') && [ "$n" -ge 8 ]`
+
+## GM21 Menus, dialogs and Shift+Delete
+
+*Depends on: GM2, GM3, GM5, GM7, GM8, GM11, GM13, GM14, GM18. Cap 45 min. Filter word: `tidy_`. Binding decisions: D0, D4, D6, D7, D8, D10, D11, D15; NEVER-DO 3, 5 and 9.*
+
+**Goal.** Close the small gaps the done parts left in the shell, most important first:
+- on Windows, Shift+Delete never reaches Delete frames (sheet) or Industry's Clear cel all (canvas);
+- renaming a cut is the last scaffolding edit that cannot be undone;
+- the New Project dialog keeps its own size table and ignores the templates' dpi and page;
+- the sample cut is a Welcome button only, not a verb;
+- Settings ▸ General does not say whether ffmpeg was found;
+- palettes cannot move between projects (Stretch);
+- there is no File ▸ Revert to saved (Stretch).
+
+**User-facing behaviour.**
+- **Shift+Delete on Windows.** egui-winit turns Shift+Delete into `Event::Cut` and sends no key event (Ctrl+X
+  becomes the same event). `Chord::matches` (config.rs 1660) counts a Cut event with Shift held and Ctrl not
+  held as a press of Delete with Shift. So Delete frames fires over the sheet, and Industry's Clear cel all over
+  the canvas, once a press. Ctrl+X still cuts cells and fires neither. While a text field has focus nothing
+  fires (the chord has no Ctrl, NEVER-DO 9), and the field cuts its text as before. A real Shift+Delete key
+  event (another platform, the testkit) still fires once.
+- **Rename cut is undoable.** `AppState::rename_current_cut` (doc.rs 3378) applies `Command::RenameCut`
+  (command.rs 282, which has its exact inverse) instead of the engine's direct `rename_cut`. A rename is one
+  undo step (D4); renaming to the same name adds none.
+- **New Project from the templates.** templates.rs owns the sizes. `templates::SIZES` lists each template's size
+  under its name, then Square 1080 (1080×1080) and Vertical 1080×1920, which have no template. newproject.rs
+  keeps no table of its own (its `PRESETS` goes).
+  - Picking a template in "start from" sets the size, the rate and the dpi from it. A page template gives its
+    page's size and 350 dpi (D15).
+  - With a page template, the size and dpi fields are greyed with "set by the page template". `new_state()`
+    (newproject.rs 68) keeps the page's size and dpi; today it writes the form's 300 dpi and lets a typed size
+    leave the page meta behind.
+  - For every template, the dialog's project equals the Welcome card's (`templates::build`) apart from its
+    name, and it is Srgb (D8).
+- **Open the sample cut** is a verb: new Action `OpenSample` ("Open the sample cut", group File, menu
+  "File/Open the sample cut", aliases sample, demo, example, tutorial; no chord in either keymap). Over unsaved
+  work it asks "Save changes?" first, through a new `Leave::Sample` (main.rs 4350), like Open. Then it opens
+  `sample::build_sample()` as the Welcome button does, through `go` (5406), so the canvas resyncs. A guest in a
+  room is refused, as for Open.
+- **ffmpeg on Settings ▸ General.** Under "ffmpeg location" the page shows "found: <path>", or
+  `render_queue::NEEDS_FFMPEG` with "look again". It reads and fills the render queue's own cache
+  (`RenderQueue.ffmpeg`), so the page and the pane always agree. The search reads files only and runs once per
+  location, until "look again" or a changed location; never each frame.
+- **Palette import and export** (Stretch, first). New Actions `ExportPalette` ("File/Export/Palette
+  (JSON)…") and `ImportPalette` ("File/Import palette…"), aliases palette, colour model, iro shitei. The file
+  dialogs are the shell's, through new `AppRequest::ExportPalette` and `AppRequest::ImportPalette` (like
+  `ImportSound`).
+  - The file is `{"format": "gaban-palette", "version": 1, "characters": [...]}`, the characters exactly as
+    palette.rs serialises them, variants included. Export writes it atomically (D11) and is refused with "no
+    character palettes yet" when there are none.
+  - Import only adds. Each character joins the project's palettes, and a name clash gets " (2)" (then " (3)").
+    The document becomes dirty (palettes live outside undo, as palette.rs says), and the status lane says
+    "imported N characters".
+  - A file that is not a palette file (bad JSON, another format tag, a newer version) is refused with the
+    reason, and nothing changes.
+- **Revert to saved** (Stretch, second). New Action `RevertToSaved` ("File/Revert to saved…", aliases revert
+  to saved, reload from disk, discard changes; no chord).
+  - It is greyed with "never saved: nothing to revert to" without a file, and "no unsaved changes" when clean.
+  - Otherwise a modal asks "Revert to the saved file? The edits since your last save are dropped." with a held
+    DANGER "Revert" (`plate::danger_hint`, like "Don't Save"; a click does nothing) and Cancel.
+  - Revert lands any gesture in flight, then reopens the file through `AppState::open_path`. The document is
+    clean, the title has no ●, and undo starts empty. Nothing is written (NEVER-DO 5).
+
+**Files and types to extend.**
+- `app/src/config.rs`:
+  - `Chord::matches` (1660);
+  - Action `OpenSample` (and with the stretch `ImportPalette`, `ExportPalette` and `RevertToSaved`) in
+    `Action::ALL`, each with help, group, menu, aliases, context and no chord in either keymap (D6);
+  - `general_page` (3711) takes the queue's ffmpeg cache.
+- `app/src/main.rs`: `Editor::perform` arms and `can_perform` (5145) refusals; `Leave::Sample` (4350) and `go`
+  (5406); the File menu entries. With the stretch: `AppRequest::ImportPalette` and `ExportPalette` (3015),
+  answered by the shell's file dialogs, and the revert modal beside the "Save changes?" one (5648).
+- `app/src/doc.rs`: `rename_current_cut` (3378); with the stretch, `import_palettes(path)` and
+  `export_palettes(path)` through `palettes_mut()` (4838).
+- Stretch: `app/src/palette.rs`: `PaletteFile { format, version, characters }`, `to_json`, `from_json` (the
+  reason on a refusal) and `Palettes::merge(characters) -> usize`.
+- `app/src/templates.rs` (`SIZES`, `Template`, `ALL`, `build`) and `app/src/newproject.rs` (`NewProjectForm`,
+  `new_state` 68, `form_ui` 103).
+- `app/src/render_queue.rs` (`RenderQueue.ffmpeg` 558, `NEEDS_FFMPEG` 32, its "look again" 1023) and
+  `app/src/export.rs` (`find_ffmpeg` 31).
+- Stretch: `app/src/fxui.rs` (a `ParamKind::Polys` arm), `shortcuts_page` in config.rs (3052), and the source
+  inspector in `app/src/nodegraph_panel.rs` (around 1075).
+
+**Acceptance criteria.**
+1. Over the sheet, an input frame holding `Event::Cut` with Shift held, no Ctrl and no key event fires exactly
+   DeleteFrames (Gaban keymap). Over the canvas with the Industry keymap the same frame fires exactly
+   ClearCelAll. Ctrl+X's Cut event fires neither and still cuts the selected cells. With a text field focused
+   nothing fires. A Shift+Delete key event alone still fires DeleteFrames once.
+2. `rename_current_cut("CUT02")` adds one undo step. Undo restores the old name and the `content_hash`, and
+   redo the new name. A rename to the current name adds no step.
+3. `templates::SIZES` holds every template's size plus Square 1080 and Vertical 1080×1920, and newproject.rs
+   has no size table of its own (a source scan). For every template in `templates::ALL`, the form's project
+   equals `templates::build`'s in width, height, fps, dpi, columns and `cut_meta["manga.page"]`, and is Srgb.
+   Manga B5 gives 2591×3624 at 350 dpi. With a page template picked, the harness finds the size and dpi fields
+   disabled.
+4. `OpenSample` has help, group File, its menu path and its aliases. On a clean document it opens the sample
+   (`sample::SIZE`, `sample::FRAMES`). On a dirty one it holds the "Save changes?" modal, and a held
+   "Don't Save" then opens the sample. A guest is refused.
+5. Settings ▸ General in the PanelHarness: with the cache holding a found path it shows "found: <path>"; with
+   none found it shows `NEEDS_FFMPEG` and "look again", whose click empties the cache. Thirty frames of the
+   page run the search at most once (the queue counts its searches).
+6. (Stretch) Palette: exporting, then importing into an empty project, gives the same characters, roles and
+   variants (the JSON is equal). Importing a file with "Hana" into a project that has "Hana" adds "Hana (2)", leaves
+   "Hana" as it was, marks the document dirty and reports the count. Bad JSON, a wrong format tag and a newer
+   version are each refused with their reason, and the palettes and the dirty flag stay as they were. The
+   Actions raise their `AppRequest`s; `ExportPalette` with no characters is refused with "no character
+   palettes yet".
+7. (Stretch) Revert: `can_perform(RevertToSaved)` is refused with "never saved: nothing to revert to" for an
+   untitled project and "no unsaved changes" when clean. After a save to a temp folder and one edit, a held "Revert"
+   reopens the file: the edit is gone, the state is clean, the title has no ●, and undo is empty. A click on
+   "Revert", and Cancel, each change nothing.
+8. Every new Action is in `Action::ALL` with help, a group and a menu path, and the zero-conflict test stays
+   green in both keymaps.
+
+**Tests to add.** At least 10 tests named `tidy_*`, from the core criteria (1–5 and 8) alone; the stretch adds
+its own. The gate checks the count.
+
+**Out of scope.** Adding and renaming scenes through Commands, and a Delete cut verb (no part promised them);
+merging an imported palette into an existing character by role; a recent-palettes list.
+
+**Stretch**, in this order (the first two were stretch in their own parts, ink and paint and never lose work):
+- Palette import and export, as above (criterion 6).
+- Revert to saved, as above (criterion 7).
+- A `ParamKind::Polys` arm in fxui.rs: the Panels node's "panels" parameter shows "N panels: edit them with the
+  panel (koma) tool (K) or the Manga pane" instead of a bare legend.
+- A harness test of Settings ▸ Shortcuts: the Gaban and Industry preset buttons switch the keymap, and a
+  planted clash shows its inline conflict label.
+- A harness test of the source inspector's pass picker and its "iro-tore (absorb trace lines)" checkbox: each
+  change is one undo step.
+
+If the cap is hit, what is not built of the stretch goes to `left`; the core (criteria 1–5 and 8) never does
+(D0).
+
+**Gate.** `cd /c/Users/Lancer/Desktop/GabanStudio && export PATH=/c/Users/Lancer/.cargo/bin:$PATH && cargo test -p animstudio -p anim-core && n=$(cargo test -q -p animstudio tidy_ -- --list | grep -c ': test$') && [ "$n" -ge 10 ]`
+
+## GM22 View3D worker, sequence reload and the 3D underlay
+
+*Depends on: GM4, GM6, GM9, GM11, GM12, GM17, GM20, GM21. Cap 45 min. Filter word: `worker3d_`. Binding decisions: D0, D1, D7, D9, D10, D15; NEVER-DO 2, 6 and 7.*
+
+**Goal.** The 3D layout part's three open items, most important first:
+- the View3D pane renders on the UI thread, so a heavy model stalls orbiting, scrubbing and the pen;
+- an image sequence re-rendered on disk shows only after an edit;
+- the canvas cannot show the 3D layout under the drawing (the first item that part sent to `left`).
+
+**User-facing behaviour.**
+- **View3D on a worker.** The pane hands each render to a CPU worker, following the Final look in viewer.rs
+  (`FinalLook`, 46-160): one keyed job at a time, and the newest key wins (D9).
+  - While a job runs, the pane keeps the last picture with the TALLY dot ("rendering"). A job that lands after
+    the key moved on still replaces the picture (it is newer than the one shown), as the Final look does, and
+    the next job is for the newest key: the keys in between are skipped, so an orbit's picture follows the drag
+    at the render's pace instead of freezing until the drag stops.
+  - A render that fails or panics is said once on the Aka lane, and the same key is not tried again every
+    frame.
+  - The key stays `render_key` (view, frame, size, node, model hash, law, frame width). Orbiting, scrubbing and
+    resizing never wait for a render (NEVER-DO 6).
+  - The worker gets owned inputs (the model asset, the node's recipe at the frame, the view camera, the size),
+    never a borrow of the cut, and runs `render_view`'s maths unchanged (NEVER-DO 2).
+- **Sequence reload.** An ImageSequence's eval value folds the shown file's length and modified time whenever
+  its path resolves: an absolute pattern always (an untitled project's imports are absolute), a relative one
+  when the project folder is known (`AppState::project_dir()`, handed to the evaluator). That is a stat only,
+  never a read, at most once per node and frame between invalidations. Two things invalidate the sequence nodes:
+  - the window regaining focus (you come back from the 3D app that re-rendered them);
+  - a new Action `ReloadSequences` ("File/Reload image sequences", aliases refresh, reload renders, reload
+    sequence; no chord).
+
+  Neither is a document edit: no undo step, and the document stays clean. A file that did not change keeps its
+  value, so the composite, the FX cache and the RAM preview's `FrameCache` all hit; a changed file misses only
+  for the frames that show it. A relative pattern without a project folder keeps today's value.
+- **3D underlay.** A View ▸ 3D underlay latch: new Action `Underlay3d`, context Canvas, no chord, off by
+  default, kept for the session.
+  - It draws the cut's model node (`view3d::model_node`) under the drawing, on the frame rect, at the light
+    table's opacity (`LightTableCfg.opacity`, 0.45). The picture is the node's own CPU render at the current
+    frame (`anim_core::export::render_node_px_env`, the graph's path), so it shows what the composite shows.
+  - It is greyed with `view3d::NO_MODEL` ("no Model3D node — File ▸ Import 3D model…") when the cut has none.
+  - It renders on the same worker, keyed by (node, eval value, size, colour law), at most `MAX_RENDER_W` wide.
+    The node's eval value already moves with what changes per frame (a keyed camera), so a still model
+    scrubbed to another frame reuses the last picture. It never starts a job mid-stroke, and while playing it
+    holds the last picture that finished.
+  - It is view only: no undo step, not dirty, never saved or exported. The canvas records it as drawn, beside
+    `Furniture` (canvas.rs 460): node, frame, rect and opacity.
+
+**Files and types to extend.**
+- `app/src/view3d.rs`: `View3dState` (45) holds the job and its key; `ui` (254) asks the worker instead of
+  calling `render_view` (211) inline; `render_key` (239), `model_node` (112), `MAX_RENDER_W` (30), `NO_MODEL`
+  (33).
+- `app/src/viewer.rs`: `FinalLook` (46-160) and `GraphView` (24), the pattern to follow.
+- `crates/anim-core/src/eval.rs`: the ImageSequence arm (257-267) folds the stamp; `Evaluator` (22) gains the
+  project folder (`set_base`); `invalidate_nodes` (278) serves the reload.
+- `crates/anim-core/src/r3d.rs`: `sequence_stamp(path) -> Option<(u64, u128)>` (length, mtime in ns) beside
+  `sequence_file` (1480).
+- `app/src/doc.rs`: `project_dir()` (951) feeds the evaluator whenever the file path changes, and
+  `reload_sequences()` invalidates every ImageSequence node and what is downstream of it.
+- `app/src/canvas.rs`: the underlay under the below stack, `LightTableCfg` (7538), `Furniture` (460).
+- `app/src/playback.rs`: `FrameCache` follows the eval value as it does today (a changed hash drops the frame).
+- `app/src/config.rs`: Actions `ReloadSequences` and `Underlay3d` (D6). `app/src/main.rs`: their `perform` and
+  `can_perform` arms, the View and File menu entries, and the focus hook (`egui::Event::WindowFocused(true)`).
+  The 3D layout room's help (config.rs 781) and its Room-menu hover (main.rs 7696) stop saying the underlay is
+  not in this build.
+
+**Acceptance criteria.**
+1. A key change in the View3D pane starts one job; the pane keeps the last texture and shows the TALLY dot
+   until the job lands. `ui` never calls `render_view` itself (a source scan).
+2. The job logic, driven without a thread (one pure state machine that the pane and the underlay share): with
+   key A's job pending, wanting B and then C starts nothing; A's result then replaces the picture with the
+   TALLY dot still on, and the next job is C's (B is never rendered); C's result clears the dot.
+3. A job that fails (a model that does not parse) is reported once on the Aka lane, and the same key is not
+   resubmitted on the next frames. A worker that panics (its channel disconnects, fed to the job logic in a
+   pure test) is handled the same way.
+4. With a project folder, or with an absolute pattern and none, the ImageSequence value changes when the shown
+   file's length or mtime changes, and stays equal when neither does. A relative pattern without a project
+   folder keeps today's string (pinned).
+5. `ReloadSequences`, and an `Event::WindowFocused(true)`, invalidate exactly the sequence nodes and what is
+   downstream of them. After one file in a temp folder is rewritten, the next eval differs only for the frames
+   that show it. Neither adds an undo step or makes the document dirty.
+6. `Underlay3d` is refused with `NO_MODEL` on a cut with no Model3D node. On a cut with one (the 3D part's
+   test cube, `CUBE_OBJ` in view3d.rs) it turns on, and the canvas records an underlay on the frame rect at
+   opacity 0.45 for the current frame. Toggling adds no undo step and leaves the document clean, and an export
+   renders the same pixels (a pinned FNV) with it on or off.
+7. The underlay key is (node, eval value, size, colour law): a still model scrubbed to another frame reuses
+   the last picture and starts no job, while a keyed camera's next frame starts one; a stroke in progress (the
+   stroke tap) starts no underlay job; while playing, the canvas holds the last finished picture.
+8. Both new Actions have help, a group and a menu path, and neither keymap has a conflict. Neither the 3D
+   layout room's help (`Action::Layout3dRoom`) nor the Room menu's hover says the underlay is not in this
+   build (the hover by a source scan of main.rs).
+
+**Tests to add.** At least 7 tests named `worker3d_*`. The gate checks the count.
+
+**Out of scope.** A GPU 3D renderer; the underlay in the viewer or under the onion frames; a file watcher
+thread for sequences; the 3D part's stretch (turntable, 2× supersampling, glTF textures and animation, shadow
+mapping).
+
+**Stretch.** An underlay node picker when the cut has several Model3D nodes (the default stays
+`view3d::model_node(cut, selected)`), and an underlay opacity slider in the lightbox fold-out. If the cap is
+hit, the stretch goes to `left`; the core never does (D0).
+
+**Gate.** `cd /c/Users/Lancer/Desktop/GabanStudio && export PATH=/c/Users/Lancer/.cargo/bin:$PATH && cargo test -p animstudio -p anim-core && n=$(cargo test -q -p animstudio worker3d_ -- --list | grep -c ': test$') && [ "$n" -ge 7 ]`
 
 ---
 
@@ -2806,3 +3167,42 @@ what was not verified.
   shaped by hand. 26 `manga_tests`, 15 `mangaui_*`; colour literals unchanged. Left: PDF export and
   slanted freehand panels (stretch); proxy scaling of the Tone's and the Panels' px parameters. Not
   verified: the real window and its folder picker, the guides and the tone by eye, a print.
+- 2026-10-30 — Sweep of the done parts' `left` lists before ship (73 items, each checked against the code at
+  64df613; Lead default: finish the leftovers before ship). 31 were already done at HEAD. 15 go to three parts
+  that run before GM19, which now depends on them: GM20 Painting on the extended paper (2 items), GM21 Menus,
+  dialogs and the palette file (10, three of them stretch) and GM22 View3D worker, sequence reload and the 3D
+  underlay (3). 19 are skipped: stretch not needed daily, or covered by what exists; proxy scaling of the
+  Tone's and the Panels' px parameters is moot (proxies render full size, then shrink). 8 need the real
+  window, a GPU or the Lead's eyes and stay not verified.
+- 2026-10-30 — Sweep review. Every planned item is still open at 64df613 (at least three checked a part), and
+  the planner's "done at HEAD" spot checks held. D0 lets only Stretch go to `left`, so GM20's onion,
+  light-table and other-column slots at paper size became its Stretch, and GM21's palette import and export
+  and Revert to saved (stretch in their own parts) became its first Stretch items. GM21 is renamed Menus,
+  dialogs and Shift+Delete (10 items, five of them stretch). GM20 now covers what a paper-sized layer breaks:
+  the composite viewer's `ensure_size` (one layer-rect helper, or the two rebuild each other's layers), the GPU
+  graph's frame window in `composite_layers_into`, refill, replace-all and the lasso fill (frame-bounded
+  today) and the presence pointer; its layer-rect criterion is a harness check plus a source scan. GM22: the
+  underlay is keyed by the node's eval value (a frame in the key contradicted "a still model reuses its
+  picture"); a late View3D job still replaces the picture, as the Final look does (dropping it froze the
+  picture for a whole orbit); the job logic is pinned without a thread; absolute sequence patterns (an untitled
+  project's imports) get the stamp; the 3D layout room's help stops saying the underlay is missing. The
+  headers' filter words match the gates (`extpaper_`, `tidy_`, `worker3d_`), and the run table and the stage
+  list carry the sweep parts. The skipped list stands: none of the 19 is met in a first session. Not
+  verified: the 45-minute fit of each part is an estimate.
+- 2026-10-30 — GM20 Painting on the extended paper: `paint.rs` gains `LayerRect` (origin, size, capped, and
+  the frame it serves), `paint_area` (the paper when it holds the frame, else the frame), `layer_rect` (each
+  side over the device limit cut to a window centred on the frame, kept in the paper), `tile_span` (upload and
+  readback both go through it; negative tiles legal), `layer_tiles`, `merge_outside` (art outside a capped or
+  shrunk layer survives the pen-up and replay readbacks), `layer_memory` / `memory_text` / `cap_text` and
+  `composite_uniform`. The dab shader takes the layer origin in the old pad slot; the composite pass reads a
+  frame-sized window texel for texel (`textureLoad`) when the layer is not the frame, so the graph pool, the
+  viewer and the onion and column slots stay frame-sized. The canvas keeps its layer rect with or without a
+  GPU (`sync_layer_rect`, held mid-stroke) and every `ensure_size` caller takes it; a rebuild bumps a
+  generation that resyncs the canvas. anim-core: `flood_fill_mask_in`, `refill_in`, `replace_all_in` and
+  `composite_pixel_at` over any paper area (the frame forms delegate, bit for bit); fill / refill / replace
+  clicked off the paper are refused on the Aka lane ("outside the paper: Cut ▸ Paper size… extends it");
+  select-all, the lasso fill, the eyedropper and the presence pointer cover the paper. The Paper size window
+  shows the cap line and the GPU memory. 12 `extpaper_` tests. Left: the onion, light table and other
+  columns are still drawn frame-sized (their Stretch to paper size). Not verified: painting beyond the frame
+  on a real GPU (dabs, readback, the composite window and the layer-sized display quads have no headless
+  check beyond the CPU mirror and naga validation).

@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use crate::camera::IRect;
 use crate::raster::{
     TILE, TILE_LEN, TileCoord, TileData, TileDiff, f16_bits_to_f32, f32_to_f16_bits,
 };
@@ -53,19 +54,25 @@ impl Default for FillOpts {
     }
 }
 
-/// A filled region as a full-canvas bitmask (row-major, w×h).
+/// A filled region as a bitmask over the fill area (row-major, w×h), its
+/// top-left at frame pixel (x0, y0): (0, 0) for a frame fill, negative for
+/// a paper wider than the frame.
 pub struct FillMask {
+    pub x0: i32,
+    pub y0: i32,
     pub w: u32,
     pub h: u32,
     pub bits: Vec<bool>,
 }
 
 impl FillMask {
+    /// Is frame pixel (x, y) filled? Outside the area is never filled.
     pub fn get(&self, x: i32, y: i32) -> bool {
+        let (x, y) = (x as i64 - self.x0 as i64, y as i64 - self.y0 as i64);
         x >= 0
             && y >= 0
-            && (x as u32) < self.w
-            && (y as u32) < self.h
+            && (x as u64) < self.w as u64
+            && (y as u64) < self.h as u64
             && self.bits[y as usize * self.w as usize + x as usize]
     }
 
@@ -144,14 +151,23 @@ pub fn flood_fill_mask(
     opts: &FillOpts,
     clip: Option<&[(f32, f32)]>,
 ) -> Result<FillMask, FillRefusal> {
-    let (w, h) = (width as usize, height as usize);
-    if w == 0
-        || h == 0
-        || seed.0 < 0
-        || seed.1 < 0
-        || seed.0 >= width as i32
-        || seed.1 >= height as i32
-    {
+    flood_fill_mask_in(reference, seed, IRect::frame(width, height), opts, clip)
+}
+
+/// [`flood_fill_mask`] over any paper `area` (frame pixels, may start left
+/// of or above the frame): its edges are the walls, a seed outside it is
+/// `OffPaper`. Over the frame rect it is the frame fill bit for bit.
+pub fn flood_fill_mask_in(
+    reference: &BTreeMap<TileCoord, Arc<TileData>>,
+    seed: (i32, i32),
+    area: IRect,
+    opts: &FillOpts,
+    clip: Option<&[(f32, f32)]>,
+) -> Result<FillMask, FillRefusal> {
+    let (w, h) = (area.w as usize, area.h as usize);
+    let (ax, ay) = (area.x as i64, area.y as i64);
+    let (sx, sy) = (seed.0 as i64 - ax, seed.1 as i64 - ay);
+    if w == 0 || h == 0 || sx < 0 || sy < 0 || sx >= w as i64 || sy >= h as i64 {
         return Err(FillRefusal::OffPaper);
     }
     let clip = clip.filter(|p| p.len() >= 3);
@@ -166,10 +182,10 @@ pub fn flood_fill_mask(
             y1 = y1.max(*py);
         }
         (
-            (x0.floor() as i64).clamp(0, w as i64) as usize,
-            (y0.floor() as i64).clamp(0, h as i64) as usize,
-            (x1.ceil() as i64).clamp(0, w as i64) as usize,
-            (y1.ceil() as i64).clamp(0, h as i64) as usize,
+            ((x0.floor() as i64).clamp(ax, ax + w as i64) - ax) as usize,
+            ((y0.floor() as i64).clamp(ay, ay + h as i64) - ay) as usize,
+            ((x1.ceil() as i64).clamp(ax, ax + w as i64) - ax) as usize,
+            ((y1.ceil() as i64).clamp(ay, ay + h as i64) - ay) as usize,
         )
     });
     if let Some(poly) = clip
@@ -181,8 +197,8 @@ pub fn flood_fill_mask(
     // Boundary grid from the reference: alpha ≥ threshold = ink.
     let mut boundary = vec![false; w * h];
     for ((tx, ty), tile) in reference {
-        let px0 = *tx as i64 * TILE as i64;
-        let py0 = *ty as i64 * TILE as i64;
+        let px0 = *tx as i64 * TILE as i64 - ax;
+        let py0 = *ty as i64 * TILE as i64 - ay;
         for row in 0..TILE {
             let py = py0 + row as i64;
             if py < 0 || py >= h as i64 {
@@ -220,10 +236,11 @@ pub fn flood_fill_mask(
                 }
                 // Outside the bbox = outside the polygon (cheap cull); inside
                 // it, the real even-odd test decides.
+                let (fx, fy) = ((x as i64 + ax) as f32, (y as i64 + ay) as f32);
                 let outside = !inside_band
                     || x < bx0
                     || x >= bx1
-                    || !crate::edit::contains(poly, x as f32 + 0.5, y as f32 + 0.5);
+                    || !crate::edit::contains(poly, fx + 0.5, fy + 0.5);
                 if outside {
                     closed[i] = true;
                 }
@@ -231,14 +248,14 @@ pub fn flood_fill_mask(
         }
     }
 
-    let seed_i = seed.1 as usize * w + seed.0 as usize;
+    let seed_i = sy as usize * w + sx as usize;
     if closed[seed_i] {
         return Err(FillRefusal::OnInk); // ink, or the gap-closing band
     }
 
-    // Scanline flood over the non-ink grid. Canvas edges are walls.
+    // Scanline flood over the non-ink grid. Paper edges are walls.
     let mut bits = vec![false; w * h];
-    let mut stack = vec![(seed.0 as usize, seed.1 as usize)];
+    let mut stack = vec![(sx as usize, sy as usize)];
     while let Some((sx, sy)) = stack.pop() {
         let rowbase = sy * w;
         if bits[rowbase + sx] || closed[rowbase + sx] {
@@ -294,10 +311,11 @@ pub fn flood_fill_mask(
                 if !bits[y * w + x] {
                     continue;
                 }
+                let (fx, fy) = ((x as i64 + ax) as f32, (y as i64 + ay) as f32);
                 if !inside_band
                     || x < bx0
                     || x >= bx1
-                    || !crate::edit::contains(poly, x as f32 + 0.5, y as f32 + 0.5)
+                    || !crate::edit::contains(poly, fx + 0.5, fy + 0.5)
                 {
                     bits[y * w + x] = false;
                 }
@@ -309,8 +327,10 @@ pub fn flood_fill_mask(
     }
 
     Ok(FillMask {
-        w: width,
-        h: height,
+        x0: area.x,
+        y0: area.y,
+        w: area.w,
+        h: area.h,
         bits,
     })
 }
@@ -325,10 +345,10 @@ pub fn fill_diff(
     if color[3] <= 0.0 {
         return Vec::new();
     }
-    let t0x = 0i32;
-    let t0y = 0i32;
-    let t1x = (mask.w as i32 - 1).div_euclid(TILE as i32);
-    let t1y = (mask.h as i32 - 1).div_euclid(TILE as i32);
+    let t0x = mask.x0.div_euclid(TILE as i32);
+    let t0y = mask.y0.div_euclid(TILE as i32);
+    let t1x = (mask.x0 + mask.w as i32 - 1).div_euclid(TILE as i32);
+    let t1y = (mask.y0 + mask.h as i32 - 1).div_euclid(TILE as i32);
     let keep = 1.0 - color[3];
 
     let mut diff = Vec::new();

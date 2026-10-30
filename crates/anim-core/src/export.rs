@@ -168,9 +168,15 @@ pub fn composite_for(cut: &Cut, frame: u32, width: u32, height: u32, purpose: Pu
 /// same flatten and src-over as [`render_frame`], touching only the tile
 /// under (x, y) in each drawing — the eyedropper's read, without the frame.
 pub fn composite_pixel(cut: &Cut, frame: u32, x: u32, y: u32) -> [f32; 4] {
-    let t = TILE as u32;
-    let coord = ((x / t) as i32, (y / t) as i32);
-    let i = (((y % t) * t + x % t) * 4) as usize;
+    composite_pixel_at(cut, frame, x as i32, y as i32)
+}
+
+/// [`composite_pixel`] at any frame pixel, the paper beyond the frame
+/// included (negative x / y read the tiles left of / above it).
+pub fn composite_pixel_at(cut: &Cut, frame: u32, x: i32, y: i32) -> [f32; 4] {
+    let t = TILE as i32;
+    let coord = (x.div_euclid(t), y.div_euclid(t));
+    let i = ((y.rem_euclid(t) * t + x.rem_euclid(t)) * 4) as usize;
     let mut px = [0.0f32; 4];
     for col in cut.render_order().into_iter().filter_map(|id| cut.xsheet.column(id)) {
         let Some(id) = col.resolve(frame) else {

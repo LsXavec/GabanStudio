@@ -233,6 +233,9 @@ pub const CHART_PRESETS: &[(&str, &[f32], &str)] = &[
 /// GM6: the most marks the chart editor makes (inbetweens between two keys).
 pub const CHART_MAX_MARKS: usize = 15;
 
+/// GM20: a fill, refill or replace clicked off the paper (the Aka lane).
+pub const OUTSIDE_PAPER: &str = "outside the paper: Cut ▸ Paper size… extends it";
+
 /// GM18: why a project that is no book makes no page.
 const NOT_A_BOOK: &str =
     "this project is not a manga book — start from the Manga B5, Manga A4 or Webtoon template";
@@ -4578,6 +4581,13 @@ impl AppState {
         self.graph_set_kind(id, NodeKind::ImageSequence { pattern, first, offset, hold_last, fit });
     }
 
+    /// GM20: the paper the tools paint on (frame pixels): the cut's paper
+    /// when it holds the whole frame, else the frame (`paint::paint_area`).
+    pub fn paper_area(&self) -> anim_core::camera::IRect {
+        let (w, h) = (self.engine.project.width, self.engine.project.height);
+        crate::paint::paint_area(anim_core::camera::paper(self.cut(), w, h), (w, h))
+    }
+
     /// GM10: Cut ▸ Paper size — the cut's paper in frame pixels (the frame
     /// itself clears the key), one undo step. A rect past the side or area
     /// cap, or without area, is refused, and says so.
@@ -4955,11 +4965,13 @@ impl AppState {
                 "held/blank frame — a refill edits a frame's OWN cel (draw here first)".into();
             return;
         };
-        let (w, h) = (self.engine.project.width, self.engine.project.height);
+        // GM20: the click and the region range over the paper, beyond the
+        // frame too (the frame forms when paper = frame).
+        let area = self.paper_area();
         let color = self.engine.project.color_law.premultiplied(chip);
         let target = self.active_layer_tiles().cloned().unwrap_or_default();
         let result = if all {
-            anim_core::color::replace_all(&target, seed, w, h, color, clip).map(|(d, _)| d)
+            anim_core::color::replace_all_in(&target, seed, area, color, clip).map(|(d, _)| d)
         } else {
             let bound = self
                 .cut()
@@ -4970,7 +4982,7 @@ impl AppState {
                     lines.flatten()
                 })
                 .unwrap_or_default();
-            anim_core::color::refill(&target, &bound, seed, w, h, under_px, color, clip)
+            anim_core::color::refill_in(&target, &bound, seed, area, under_px, color, clip)
         };
         use anim_core::color::RefillRefusal as RR;
         match result {
@@ -4978,7 +4990,7 @@ impl AppState {
                 let label = if all { "replace colour" } else { "refill" };
                 self.commit_region_edit(label, did, layer, diff);
             }
-            Err(RR::OffPaper) => self.status = "clicked outside the paper".into(),
+            Err(RR::OffPaper) => self.refuse(OUTSIDE_PAPER),
             Err(RR::Bare) => self.refuse("nothing to refill — no paint there (a plain fill paints bare paper)"),
             Err(RR::OnLine) => self.refuse("clicked on the line art — refill the paint beside it"),
             Err(RR::Unchanged) => self.status = "that paint already is the brush colour".into(),
