@@ -13,7 +13,7 @@
 //!   Forge brushes carry bank "my brushes" and engine tag "forge".
 
 use eframe::egui;
-use egui::{Color32, Pos2, Sense, pos2, vec2};
+use egui::{Pos2, Sense, pos2, vec2};
 
 use crate::config::{AutoTip, BrushPreset, CurveDef, EngineDef};
 use crate::plate;
@@ -118,7 +118,7 @@ fn forge_body(
             tex.id(),
             rect,
             egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
-            Color32::WHITE,
+            plate::UNTINTED,
         );
         p.rect_stroke(
             rect,

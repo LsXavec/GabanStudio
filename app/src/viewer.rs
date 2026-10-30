@@ -277,7 +277,7 @@ pub fn ui(
     match graph {
         GraphView::Ready(id) | GraphView::Rendering(id) => {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            painter.image(id, paper_rect, uv, Color32::WHITE);
+            painter.image(id, paper_rect, uv, crate::plate::UNTINTED);
             let tag = painter.text(
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
                 egui::Align2::LEFT_TOP,
@@ -287,7 +287,7 @@ pub fn ui(
                     "🎬 composite"
                 },
                 egui::FontId::proportional(12.0),
-                Color32::from_rgba_unmultiplied(83, 137, 196, 200),
+                crate::plate::alpha(crate::plate::AO, 200),
             );
             if matches!(graph, GraphView::Rendering(_)) {
                 // GM9: the lamp, and in words — an FX render is pending

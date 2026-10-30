@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use eframe::egui;
 use egui::mutex::RwLock;
-use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
+use egui::{Pos2, Rect, Sense, pos2, vec2};
 
 /// The float window's world, written by the MAIN thread each frame and
 /// read (plus zoom/pan mutated) by the viewport callback.
@@ -145,13 +145,13 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
     match s.tex {
         Some(id) => {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            painter.image(id, paper_rect, uv, Color32::WHITE);
+            painter.image(id, paper_rect, uv, crate::plate::UNTINTED);
             painter.text(
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
                 egui::Align2::LEFT_TOP,
                 "🎬 composite (OS window)",
                 egui::FontId::proportional(12.0),
-                Color32::from_rgba_unmultiplied(83, 137, 196, 200),
+                crate::plate::alpha(crate::plate::AO, 200),
             );
         }
         None => {

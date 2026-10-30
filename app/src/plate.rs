@@ -146,7 +146,49 @@ pub fn paper_veil() -> Color32 {
 /// canvas's 3D underlay, faded under the drawing.
 #[inline]
 pub fn faded(opacity: f32) -> Color32 {
-    Color32::from_white_alpha((opacity.clamp(0.0, 1.0) * 255.0).round() as u8)
+    tint((opacity.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+/// GM19: a token at a transparency `a` of 255 — the same hue, never a new
+/// one (the hold rule's Ao under a selection, a Well veil behind a note).
+#[inline]
+pub fn alpha(token: Color32, a: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(token.r(), token.g(), token.b(), a)
+}
+/// GM19: Legend two-thirds of the way over Graphite, opaque — the node
+/// graph's idle pins and wires, which must hide what they cross.
+#[inline]
+pub fn legend_muted() -> Color32 {
+    Color32::from_rgb(100, 102, 94)
+}
+
+// Neutral contrast (GM19). Black and white mean nothing here: they are how a
+// mark reads on ANY paper or picture (the brush cursor's double ring, the
+// scrim behind a modal) and how a texture is drawn as it is.
+
+/// A texture drawn as it is (egui's white tint).
+pub const UNTINTED: Color32 = Color32::WHITE;
+/// A texture drawn at `a` of 255 ([`faded`]'s byte form).
+#[inline]
+pub fn tint(a: u8) -> Color32 {
+    Color32::from_white_alpha(a)
+}
+/// The light half of a mark that must read on any paper.
+#[inline]
+pub fn halo(a: u8) -> Color32 {
+    Color32::from_white_alpha(a)
+}
+/// The dark half of that mark, and the scrim behind a modal.
+#[inline]
+pub fn shade(a: u8) -> Color32 {
+    Color32::from_black_alpha(a)
+}
+
+/// GM19: a colour the ANIMATOR made — a chip, an ink, a swatch, a picked
+/// hue — shown exactly as stored. Document data passing through the
+/// chrome, never a UI colour of its own.
+#[inline]
+pub fn chip([r, g, b, a]: [u8; 4]) -> Color32 {
+    Color32::from_rgba_unmultiplied(r, g, b, a)
 }
 
 // ---------------------------------------------------------------------------

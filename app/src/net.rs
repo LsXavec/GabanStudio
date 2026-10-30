@@ -225,8 +225,10 @@ pub fn generate_key() -> String {
 /// speaks. Layer DEFINITIONS (role, chip, lock, onion) ride inside every
 /// command that carries LayerProps; an older peer would deserialize them
 /// as defaults and the room would fork on definitions nobody can see.
-/// Both sides refuse across the floor, with an update hint.
-pub const MIN_PEER_VERSION: &str = "0.3.0";
+/// Both sides refuse across the floor, with an update hint. GM19 (D5):
+/// 0.5's wire carries commands (sheet edits, FX, cut meta) a 0.3 peer
+/// cannot read, so the floor is the release itself.
+pub const MIN_PEER_VERSION: &str = "0.5.0";
 
 fn below_floor(version: &str) -> bool {
     crate::update::parse_version(version) < crate::update::parse_version(MIN_PEER_VERSION)

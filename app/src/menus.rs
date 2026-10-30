@@ -344,7 +344,15 @@ impl crate::Editor {
                 // whole now, so 画版 would draw too).
                 plate::legend(ui, "gaban studio");
                 plate::value(ui, &format!("version {}", env!("CARGO_PKG_VERSION")));
-                ui.label("A node-graph 2D animation studio: draw, time, paint, edit.");
+                ui.label(
+                    "A node-graph 2D animation studio, layout to delivery: draw, time, paint, \
+                     composite, edit.",
+                );
+                // GM19: where this release's changes are listed.
+                ui.label(
+                    egui::RichText::new("this release's changes: File ▸ Welcome screen… ▸ What's New")
+                        .color(plate::legend_dim()),
+                );
             });
         if let Some(step) = show_me {
             self.show_me(step);

@@ -1933,13 +1933,13 @@ impl CanvasView {
             }
             painter.extend(egui::Shape::dashed_line(
                 &s,
-                egui::Stroke::new(2.5, Color32::from_white_alpha(180)),
+                egui::Stroke::new(2.5, plate::halo(180)),
                 6.0,
                 6.0,
             ));
             painter.extend(egui::Shape::dashed_line(
                 &s,
-                egui::Stroke::new(1.0, Color32::from_black_alpha(230)),
+                egui::Stroke::new(1.0, plate::shade(230)),
                 6.0,
                 6.0,
             ));
@@ -1970,7 +1970,7 @@ impl CanvasView {
                 mesh.vertices.push(egui::epaint::Vertex {
                     pos: s[i],
                     uv: uv[i],
-                    color: Color32::WHITE,
+                    color: plate::UNTINTED,
                 });
             }
             mesh.indices.extend_from_slice(&[0, 1, 2, 2, 1, 3]);
@@ -1979,11 +1979,11 @@ impl CanvasView {
             ants(&[c[0], c[1], c[3], c[2]], true, painter);
             for p in &s {
                 let r = Rect::from_center_size(*p, vec2(9.0, 9.0));
-                painter.rect_filled(r, 1.5, Color32::from_black_alpha(200));
+                painter.rect_filled(r, 1.5, plate::shade(200));
                 painter.rect_stroke(
                     r,
                     1.5,
-                    egui::Stroke::new(1.5, Color32::from_white_alpha(230)),
+                    egui::Stroke::new(1.5, plate::halo(230)),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -2155,7 +2155,7 @@ impl CanvasView {
                 } else {
                     1.0
                 };
-            let col = Color32::from_rgba_unmultiplied(ink[0], ink[1], ink[2], (a * 255.0) as u8);
+            let col = plate::chip([ink[0], ink[1], ink[2], (a * 255.0) as u8]);
             let pt = pos2(x, y);
             painter.line_segment([prev, pt], egui::Stroke::new(w, col));
             prev = pt;
@@ -2323,12 +2323,12 @@ impl CanvasView {
             p.rect_filled(
                 wrect,
                 0.0,
-                Color32::from_rgba_unmultiplied(
+                plate::chip([
                     self.brush_color[0],
                     self.brush_color[1],
                     self.brush_color[2],
                     255,
-                ),
+                ]),
             );
             p.rect_stroke(
                 wrect,
@@ -2355,7 +2355,7 @@ impl CanvasView {
                     pnt.rect_filled(
                         cr,
                         0.0,
-                        Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
+                        plate::chip([c[0], c[1], c[2], 255]),
                     );
                     pnt.rect_stroke(
                         cr,
@@ -2417,7 +2417,7 @@ impl CanvasView {
                         pnt.rect_filled(
                             well,
                             0.0,
-                            Color32::from_rgba_unmultiplied(color[0], color[1], color[2], 255),
+                            plate::chip([color[0], color[1], color[2], 255]),
                         );
                         if self.brush_color[..3] == color[..3] {
                             pnt.rect_stroke(
@@ -2512,7 +2512,7 @@ impl CanvasView {
                         dr.top() + posn[1] * dr.height(),
                     ),
                     *r,
-                    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 255),
+                    plate::chip([c[0], c[1], c[2], 255]),
                 );
             }
             if let Some(hp) = dresp.interact_pointer_pos() {
@@ -2586,14 +2586,16 @@ impl CanvasView {
             let (svr, svresp) = ui.allocate_exact_size(vec2(120.0, 78.0), Sense::click_and_drag());
             let pnt = ui.painter();
             let (hr_, hg, hb) = crate::palette::hsv_to_rgb(self.eye_hsv[0], 1.0, 1.0);
-            let hue_col = Color32::from_rgb(hr_, hg, hb);
+            // The picker's own colours are picked colours (chips), not UI:
+            // the hue at full value, and the square's white and black ends.
+            let hue_col = plate::chip([hr_, hg, hb, 255]);
             let mut mesh = egui::Mesh::default();
             let idx = mesh.vertices.len() as u32;
             for (pt, col) in [
-                (svr.left_top(), Color32::WHITE),
+                (svr.left_top(), plate::chip([255, 255, 255, 255])),
                 (svr.right_top(), hue_col),
-                (svr.right_bottom(), Color32::BLACK),
-                (svr.left_bottom(), Color32::BLACK),
+                (svr.right_bottom(), plate::chip([0, 0, 0, 255])),
+                (svr.left_bottom(), plate::chip([0, 0, 0, 255])),
             ] {
                 mesh.vertices.push(egui::epaint::Vertex {
                     pos: pt,
@@ -2636,7 +2638,7 @@ impl CanvasView {
                         pos2(hue_r.left() + t1 * hue_r.width(), hue_r.bottom()),
                     ),
                     0.0,
-                    Color32::from_rgb(r0, g0, b0),
+                    plate::chip([r0, g0, b0, 255]),
                 );
             }
             let hx = hue_r.left() + (self.eye_hsv[0] / 360.0) * hue_r.width();
@@ -3259,7 +3261,7 @@ impl CanvasView {
                                             pos2(0.0, 0.0),
                                             pos2(1.0, 1.0),
                                         ),
-                                        Color32::WHITE,
+                                        plate::UNTINTED,
                                     );
                                 }
                                 None => {
@@ -3568,7 +3570,7 @@ impl CanvasView {
                 let hover = ["ink", "ao — construction", "aka — correction", "white"][i];
                 if plate::swatch(
                     ui,
-                    Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]),
+                    plate::chip([c[0], c[1], c[2], c[3]]),
                     selected,
                     hover,
                 )
@@ -4015,7 +4017,7 @@ impl CanvasView {
         }
         // Paper furniture (Phase 4): field / safe / peg guides in Ao — the
         // scaffold ink, printed under the drawing like a real layout sheet.
-        let ao = Color32::from_rgba_unmultiplied(83, 137, 196, 110);
+        let ao = plate::alpha(plate::AO, 110);
         // GM10: the camera furniture is paper-space geometry mapped through
         // the view, upright or turned alike: the extended paper's outline,
         // the field chart with its numbers, the safe frames, the centre
@@ -4597,7 +4599,7 @@ impl CanvasView {
         // every editing-display step below.
         let edit_view = composite_tex.is_none();
         if let Some(id) = composite_tex {
-            paint_paper_image(&painter, &xf, id, Color32::WHITE);
+            paint_paper_image(&painter, &xf, id, plate::UNTINTED);
             // Painted overlay tag (zero layout impact) so the mode is never
             // ambiguous — this view looks like art, not like a mode.
             let tag = painter.text(
@@ -4605,7 +4607,7 @@ impl CanvasView {
                 egui::Align2::LEFT_TOP,
                 "composite view",
                 egui::FontId::proportional(12.0),
-                Color32::from_rgb(139, 141, 131), // Legend: the app speaking
+                plate::LEGEND, // Legend: the app speaking
             );
             if composite_pending {
                 // GM9: the lamp, and in words — an FX render is pending
@@ -4626,7 +4628,7 @@ impl CanvasView {
                 egui::Align2::CENTER_CENTER,
                 note,
                 egui::FontId::proportional(13.0),
-                Color32::from_rgb(228, 82, 47),
+                plate::AKA,
                 // Aka: overrules the hand
             );
         }
@@ -4665,7 +4667,7 @@ impl CanvasView {
             above.into_iter().map(|col| (col, tex_of(col))).collect();
         let draw_column = |col: ColumnId, tex: Option<egui::TextureId>| {
             if let Some(id) = tex {
-                paint_paper_image(&painter, &xf, id, Color32::WHITE);
+                paint_paper_image(&painter, &xf, id, plate::UNTINTED);
             }
             if let Some(id) = cut.xsheet.column(col).and_then(|c| c.resolve(frame))
                 && let Some(d) = cut.drawing(id)
@@ -4767,7 +4769,7 @@ impl CanvasView {
                 // THE FLIP: the previous drawing full-strength, alone —
                 // the current cel steps aside until R lifts.
                 if let Some(id) = p.onion_id(0) {
-                    paint_paper_image(&painter, &xf, id, Color32::WHITE);
+                    paint_paper_image(&painter, &xf, id, plate::UNTINTED);
                 }
             } else {
                 // GM6: the light table's pins first (SCAFFOLD, in Ao at the
@@ -4789,7 +4791,7 @@ impl CanvasView {
                 // GM20: the sandwich is layer-sized — its quads cover the
                 // layer rect, the paper beyond the frame included.
                 let lr = p.rect();
-                paint_layer_image(&painter, &xf, &lr, p.below_id(), Color32::WHITE);
+                paint_layer_image(&painter, &xf, &lr, p.below_id(), plate::UNTINTED);
                 // Active layer: the texture holds FULL-strength pixels (so the
                 // pen-up readback stays bit-exact); its layer opacity is applied
                 // here as a display tint. from_white_alpha is an exact o×texel
@@ -4801,7 +4803,7 @@ impl CanvasView {
                     .unwrap_or((true, 1.0));
                 if a_visible {
                     let t = (a_opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
-                    paint_layer_image(&painter, &xf, &lr, p.texture_id(), Color32::from_white_alpha(t));
+                    paint_layer_image(&painter, &xf, &lr, p.texture_id(), plate::tint(t));
                     // Live brush stroke over it, at stroke × layer opacity
                     // (both factors, or the stroke pops at pen-up).
                     // KNOWN latent deviation: where the stroke overlaps existing
@@ -4815,15 +4817,15 @@ impl CanvasView {
                             * a_opacity.clamp(0.0, 1.0)
                             * 255.0)
                             .round() as u8;
-                        paint_layer_image(&painter, &xf, &lr, p.wet_id(), Color32::from_white_alpha(wa));
+                        paint_layer_image(&painter, &xf, &lr, p.wet_id(), plate::tint(wa));
                     }
                 }
                 // Layers over the active one.
-                paint_layer_image(&painter, &xf, &lr, p.above_id(), Color32::WHITE);
+                paint_layer_image(&painter, &xf, &lr, p.above_id(), plate::UNTINTED);
                 // STAGE 2: other artists' LIVE ink, straight from their
                 // dab streams (alpha pre-scaled; cleared at commit).
                 if !self.remote_live.is_empty() {
-                    paint_layer_image(&painter, &xf, &lr, p.remote_id(), Color32::WHITE);
+                    paint_layer_image(&painter, &xf, &lr, p.remote_id(), plate::UNTINTED);
                 }
             }
         }
@@ -4841,7 +4843,7 @@ impl CanvasView {
         //    already shows the live stroke when raster is on).
         if edit_view && !self.raster && self.current.len() >= 2 {
             let c = self.brush_color;
-            let color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+            let color = plate::chip([c[0], c[1], c[2], c[3]]);
             fill_stroke(
                 &painter,
                 &self.current,
@@ -4881,7 +4883,7 @@ impl CanvasView {
                 egui::Align2::CENTER_CENTER,
                 "empty cell — draw to create a new drawing here",
                 egui::FontId::proportional(15.0),
-                Color32::from_rgb(139, 141, 131),
+                plate::LEGEND,
                 // Legend
             );
         }
@@ -4917,7 +4919,7 @@ impl CanvasView {
                 egui::Align2::CENTER_CENTER,
                 "FLIP — previous drawing (release R)",
                 egui::FontId::proportional(13.0),
-                Color32::from_rgb(139, 141, 131), // Legend: the app speaking
+                plate::LEGEND, // Legend: the app speaking
             );
         }
         if state.view.playing {
@@ -4926,7 +4928,7 @@ impl CanvasView {
                 egui::Align2::CENTER_CENTER,
                 "PLAYING — space to stop",
                 egui::FontId::proportional(13.0),
-                Color32::from_rgb(139, 141, 131), // Legend: the app speaking
+                plate::LEGEND, // Legend: the app speaking
             );
         }
         // GM6: shift & trace rests the pen — the paper says so (the Tally
@@ -5022,7 +5024,7 @@ impl CanvasView {
                             pts,
                             egui::Stroke::new(
                                 2.0,
-                                Color32::from_rgba_unmultiplied(83, 137, 196, 200),
+                                plate::alpha(plate::AO, 200),
                             ),
                         ));
                     }
@@ -5191,7 +5193,7 @@ impl CanvasView {
                         aui.painter().rect_filled(
                             back,
                             0.0,
-                            Color32::from_rgba_unmultiplied(14, 15, 13, 242),
+                            plate::alpha(plate::WELL, 242),
                         );
                         aui.painter().rect_stroke(
                             back,
@@ -5275,7 +5277,7 @@ impl CanvasView {
                         aui.painter().rect_filled(
                             back,
                             0.0,
-                            Color32::from_rgba_unmultiplied(14, 15, 13, 242),
+                            plate::alpha(plate::WELL, 242),
                         );
                         aui.painter().rect_stroke(
                             back,
@@ -5353,7 +5355,7 @@ impl CanvasView {
                         aui.painter().rect_filled(
                             back,
                             0.0,
-                            Color32::from_rgba_unmultiplied(14, 15, 13, 242),
+                            plate::alpha(plate::WELL, 242),
                         );
                         aui.painter().rect_stroke(
                             back,
@@ -5457,22 +5459,22 @@ impl CanvasView {
                         .collect();
                     painter.add(egui::Shape::line(pts, egui::Stroke::new(1.0, color)));
                 };
-                ellipse(r * aspect, r, Color32::from_black_alpha(170));
+                ellipse(r * aspect, r, plate::shade(170));
                 ellipse(
                     (r * aspect - 1.0).max(0.5),
                     (r - 1.0).max(0.5),
-                    Color32::from_white_alpha(170),
+                    plate::halo(170),
                 );
             } else {
                 painter.circle_stroke(
                     pos,
                     r,
-                    egui::Stroke::new(1.0, Color32::from_black_alpha(170)),
+                    egui::Stroke::new(1.0, plate::shade(170)),
                 );
                 painter.circle_stroke(
                     pos,
                     (r - 1.0).max(0.5),
-                    egui::Stroke::new(1.0, Color32::from_white_alpha(170)),
+                    egui::Stroke::new(1.0, plate::halo(170)),
                 );
             }
             // Tilt needle (Krita-calligraphy style): a line from the centre
@@ -5486,15 +5488,15 @@ impl CanvasView {
                 let tip = pos + dir * len;
                 painter.line_segment(
                     [pos, tip],
-                    egui::Stroke::new(3.0, Color32::from_white_alpha(150)),
+                    egui::Stroke::new(3.0, plate::halo(150)),
                 );
                 painter.line_segment(
                     [pos, tip],
-                    egui::Stroke::new(1.2, Color32::from_black_alpha(200)),
+                    egui::Stroke::new(1.2, plate::shade(200)),
                 );
             }
             if self.erasing {
-                painter.circle_filled(pos, 1.3, Color32::from_black_alpha(180));
+                painter.circle_filled(pos, 1.3, plate::shade(180));
             }
         }
     }
@@ -7420,16 +7422,14 @@ impl CanvasView {
 /// ink at full strength, the regions wear it dimmed.
 pub fn role_chip_color(role: anim_core::model::LayerRole) -> Color32 {
     use anim_core::model::LayerRole as R;
-    let [ar, ag, ab, _] = plate::AO.to_array();
-    let [kr, kg, kb, _] = plate::AKA.to_array();
     match role {
         R::Line => plate::STRUCK,
         R::Color => plate::LEGEND,
-        R::Shadow => Color32::from_rgba_unmultiplied(ar, ag, ab, 150), // ao, dimmed
+        R::Shadow => plate::alpha(plate::AO, 150), // ao, dimmed
         R::Highlight => plate::PAPER,
         R::Rough => plate::AO,
-        R::ShadowLine => Color32::from_rgba_unmultiplied(ar, ag, ab, 230),
-        R::HighlightLine => Color32::from_rgba_unmultiplied(kr, kg, kb, 170),
+        R::ShadowLine => plate::alpha(plate::AO, 230),
+        R::HighlightLine => plate::alpha(plate::AKA, 170),
         R::Correction => plate::AKA,
         R::Reference => plate::legend_dim(),
         R::Custom => plate::LEGEND,
@@ -7439,7 +7439,7 @@ pub fn role_chip_color(role: anim_core::model::LayerRole) -> Color32 {
 /// A layer's identity ink: its own chip override, else its role's.
 pub fn props_chip_color(p: &anim_core::model::LayerProps) -> Color32 {
     match p.chip {
-        Some([r, g, b, a]) => Color32::from_rgba_unmultiplied(r, g, b, a),
+        Some(rgba) => plate::chip(rgba),
         None => role_chip_color(p.role),
     }
 }
@@ -8270,7 +8270,7 @@ pub const ONION_AHEAD_TINT: [u8; 3] = [205, 206, 199];
 
 /// A ghost's colour: `rgb` at `alpha`, unmultiplied.
 fn ghost_tint(rgb: [u8; 3], alpha: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(rgb[0], rgb[1], rgb[2], alpha)
+    plate::chip([rgb[0], rgb[1], rgb[2], alpha])
 }
 
 fn draw_strokes(
@@ -8283,7 +8283,7 @@ fn draw_strokes(
 ) {
     for stroke in strokes {
         let c = stroke.color;
-        let color = tint.unwrap_or_else(|| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]));
+        let color = tint.unwrap_or_else(|| plate::chip([c[0], c[1], c[2], c[3]]));
         fill_stroke(
             painter,
             &stroke.points,

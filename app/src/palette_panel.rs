@@ -11,7 +11,7 @@
 
 use anim_core::color::RecolourScope;
 use eframe::egui;
-use egui::{Color32, Sense, vec2};
+use egui::{Sense, vec2};
 
 use crate::canvas::CanvasView;
 use crate::doc::AppState;
@@ -81,12 +81,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                             p.rect_filled(
                                 well,
                                 0.0,
-                                Color32::from_rgba_unmultiplied(
+                                crate::plate::chip([
                                     role.color[0],
                                     role.color[1],
                                     role.color[2],
                                     255,
-                                ),
+                                ]),
                             );
                             if armed {
                                 p.rect_stroke(

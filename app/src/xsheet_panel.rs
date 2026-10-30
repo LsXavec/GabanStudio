@@ -2095,12 +2095,8 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
         }
         for (label, rgba) in identity_swatches() {
             let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
-            let [cr, cg, cb, ca] = rgba;
-            ui.painter().circle_filled(
-                r.center(),
-                6.0,
-                egui::Color32::from_rgba_unmultiplied(cr, cg, cb, ca),
-            );
+            ui.painter()
+                .circle_filled(r.center(), 6.0, crate::plate::chip(rgba));
             if props.chip == Some(rgba) {
                 ui.painter().circle_stroke(
                     r.center(),

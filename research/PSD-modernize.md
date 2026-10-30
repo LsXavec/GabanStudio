@@ -3248,3 +3248,18 @@ what was not verified.
   pen lifts; a lost worker repaints; the canvas shows the TALLY dot while the underlay renders; the
   menu item says why a ticked underlay shows nothing (no Model3D, composite view, a BG column over
   it); aliases "3d lo", "3d layout", "layout under", "genzu". 12 `worker3d_` tests and two core tests.
+- 2026-10-30 — GM19 Ship: polish gates, version and release build: the colour-literal ratchet is
+  pinned at 0 (82 → 0) through plate helpers — `alpha(token, a)` for a token at a transparency,
+  `chip(rgba)` for the animator's own colours (chips, inks, swatches, the picker), `UNTINTED`/`tint`
+  for textures, `halo`/`shade` for marks that must read on any paper, `legend_muted` for the node
+  graph's idle pins (its other literals were tokens already). 0.5.0 in the app and the installer,
+  `MIN_PEER_VERSION` 0.5.0; About says it. The sample's first track carries a serifu line made in code
+  (`sample::dialogue_wav`, hound: a 150 Hz buzz under three syllables, as long as the cut). The Welcome
+  screen gains a What's New tab grouped by persona, opened first while `ui.whats_new_seen` is not this
+  version. The probe walks every room with a canvas (`PROBE_ROOMS`: the spine, manga, the forge).
+  `tools/smoke_render.sh` renders the sample through the release exe: 24 PNG16 files; ProRes (prores,
+  pcm_s24le) and H.264 (h264, aac), 24 frames each. README rewritten by persona. 26 `ship_` tests
+  (17 pane smokes at three scales; the retired Brush pane is removed on sight). Gate: 823 passed, 0
+  failed, 1 ignored; smoke render passed; no v0.5 tag; installer built. Left: the sample's FX showcase
+  (camera pan over a wide BG, glow, diffusion, particles). Not verified: the What's New first-launch
+  route and the About window in the running app.

@@ -1,14 +1,17 @@
 //! GM8: the sample cut, built procedurally (no binary assets): a BG plate
 //! (sky gradient over ground), a ball bounce over 24 frames on twos — 12
 //! drawings, the keys marked Key and the rest Inbetween — an empty column B
-//! above it for practice, and a palette with line and paint roles. It opens
+//! above it for practice, and a palette with line and paint roles. GM19: a
+//! short serifu (dialogue) line generated in code rides the first track, so
+//! the lip flap has beats and a delivery has sound to mux. It opens
 //! untitled; Save As keeps it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anim_core::audio::{TrackKind, TrackProps};
 use anim_core::color::ColorLaw;
-use anim_core::model::{CelLayer, Drawing, DrawingDef, DrawingKind};
+use anim_core::model::{AudioClip, CelLayer, Drawing, DrawingDef, DrawingKind};
 use anim_core::raster::{RasterLayer, TILE, TILE_LEN, TileCoord, TileData};
 use anim_core::xsheet::{ColumnDef, ColumnKind, Exposure};
 
@@ -24,6 +27,53 @@ const LINE: [u8; 4] = [26, 26, 26, 255];
 const BALL: [u8; 4] = [214, 72, 60, 255];
 /// The drawings (of 12) that are keys: the start, the contact, the end.
 pub const KEYS: [usize; 3] = [0, 6, 11];
+/// GM19: the dialogue's sample rate.
+pub const VOICE_RATE: u32 = 48_000;
+/// GM19: the dialogue's syllables as (first, last) sheet frames — three
+/// beats a lip flap opens on, silence between and at both ends.
+pub const SYLLABLES: [(u32, u32); 3] = [(3, 8), (10, 15), (17, 21)];
+
+/// GM19: the sample's serifu line, made in code: a 150 Hz voiced buzz (its
+/// harmonics falling off as 1/k) under three syllable swells, as a 16-bit
+/// mono WAV exactly as long as the cut. Deterministic — no noise, no clock.
+pub fn dialogue_wav() -> Vec<u8> {
+    use std::f32::consts::{PI, TAU};
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: VOICE_RATE,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let per_frame = VOICE_RATE / 24;
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut w = hound::WavWriter::new(&mut out, spec).expect("a WAV header into memory");
+        for i in 0..FRAMES * per_frame {
+            let t = i as f32 / VOICE_RATE as f32;
+            // The sheet frame this sample sounds on, fractional.
+            let f = i as f32 / per_frame as f32;
+            let swell = SYLLABLES
+                .iter()
+                .map(|&(a, b)| {
+                    let (a, b) = (a as f32, b as f32 + 1.0);
+                    if (a..b).contains(&f) {
+                        (PI * (f - a) / (b - a)).sin().powi(2)
+                    } else {
+                        0.0
+                    }
+                })
+                .fold(0.0, f32::max);
+            let buzz: f32 = (1..=8)
+                .map(|k| (TAU * 150.0 * k as f32 * t).sin() / k as f32)
+                .sum();
+            let s = 0.25 * swell * buzz;
+            w.write_sample((s * 32767.0).round().clamp(-32768.0, 32767.0) as i16)
+                .expect("into memory");
+        }
+        w.finalize().expect("into memory");
+    }
+    out.into_inner()
+}
 
 /// Rasterise `paint(x, y)` over the tiles covering `[x0, x1) × [y0, y1)`.
 fn raster(
@@ -163,6 +213,9 @@ pub fn build_sample() -> AppState {
     }
     // The ball's column (and B after it) sits above the plate in the sheet.
     cut.xsheet.columns.sort_by_key(|c| c.id != bg_col);
+    // GM19: the serifu line on the first track, from frame 0.
+    cut.audio = Some(AudioClip::from_wav("serifu.wav", dialogue_wav()).expect("the WAV made above reads"));
+    cut.audio_props = TrackProps::new("serifu", TrackKind::Dialogue);
     s.palettes = Palettes {
         characters: vec![CharacterPalette {
             name: "Ball".into(),

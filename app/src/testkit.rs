@@ -1267,9 +1267,10 @@ mod tests {
         assert!(main.contains(concat!("windows_subsystem", " = \"windows\"")));
     }
 
-    /// Colour literals outside plate.rs, measured at 56679ad. The count may
-    /// only go down (D7): lower the pin when it does.
-    const COLOUR_LITERALS_PINNED: usize = 82;
+    /// Colour literals outside plate.rs: 86 at 56679ad, driven to 0 by the
+    /// ship part (GM19) — every colour outside the plate is a token or a
+    /// derived plate helper. The count may only go down (D7), so it stays 0.
+    const COLOUR_LITERALS_PINNED: usize = 0;
 
     fn colour_literals(text: &str) -> usize {
         let prefix = concat!("Color32", "::");
@@ -1317,5 +1318,265 @@ mod tests {
             total <= COLOUR_LITERALS_PINNED,
             "colour literals rose to {total} (pinned {COLOUR_LITERALS_PINNED}) — use plate tokens"
         );
+    }
+
+    // ---- GM19: the ship gates ----
+
+    /// Not one colour literal outside plate.rs, file by file — and the
+    /// counter still counts, so the zero is not a blind scanner's.
+    #[test]
+    fn ship_no_colour_literal_outside_the_plate() {
+        let planted = concat!(
+            "Color32", "::from_rgb(1, 2, 3); Color32", "::WHITE; Color32",
+            "::TRANSPARENT; egui::Color32", "::from_black_alpha(9)"
+        );
+        assert_eq!(colour_literals(planted), 3, "the counter skips only TRANSPARENT");
+        let left: Vec<(String, usize)> = sources()
+            .into_iter()
+            .filter(|(name, _)| name != "plate.rs")
+            .map(|(name, text)| (name, colour_literals(&text)))
+            .filter(|&(_, n)| n > 0)
+            .collect();
+        assert_eq!(left, vec![], "use plate tokens or plate helpers");
+        assert_eq!(COLOUR_LITERALS_PINNED, 0);
+    }
+
+    /// Every Action is described in one plain sentence, has a group and a
+    /// place (a menu path, or the palette for a deck tool), and neither
+    /// keymap binds one chord twice in one context.
+    #[test]
+    fn ship_every_action_is_described_placed_and_clash_free() {
+        use crate::config::{Group, Keymap};
+        let mut seen = std::collections::HashSet::new();
+        for &a in Action::ALL {
+            assert!(seen.insert(a), "{a:?} is listed twice in Action::ALL");
+            assert!(!a.label().trim().is_empty(), "{a:?} has no name");
+            let help = a.help();
+            assert!(
+                (1..=120).contains(&help.chars().count()) && help.ends_with('.'),
+                "{a:?} help is not one plain sentence: {help:?}"
+            );
+            assert!(Group::ALL.contains(&a.group()), "{a:?}");
+            match a.menu() {
+                Some(path) => assert!(path.split_once('/').is_some_and(|(m, i)| !m.is_empty() && !i.is_empty()), "{a:?}: {path}"),
+                None => assert_eq!(a.group(), Group::Tool, "{a:?} is in no menu and not a deck tool"),
+            }
+        }
+        for &km in Keymap::ALL {
+            let binds = config::default_binds(km);
+            assert_eq!(binds.len(), Action::ALL.len(), "{km:?} binds every Action");
+            assert_eq!(config::clashes(&binds), vec![], "{km:?}");
+        }
+    }
+
+    /// 0.5.0 in the app, the installer and the wire floor, and Help ▸ About
+    /// says it.
+    #[test]
+    fn ship_version_is_0_5_0_everywhere() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.5.0");
+        assert_eq!(crate::update::CURRENT_VERSION, "0.5.0");
+        assert_eq!(crate::net::MIN_PEER_VERSION, "0.5.0");
+        assert_eq!(crate::welcome::VERSION, "0.5.0");
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/installer/Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let version = text
+            .lines()
+            .map(str::trim)
+            .find(|l| l.starts_with("version"))
+            .expect("the installer's [package] version");
+        assert_eq!(version, "version = \"0.5.0\"", "{}", manifest.display());
+        let mut h = EditorHarness::new();
+        h.perform(Action::About);
+        h.run();
+        assert!(h.has("version 0.5.0"), "{}", h.describe());
+    }
+
+    /// The refreshed sample renders every frame through the CPU golden
+    /// renderer, and carries its generated serifu line: a Dialogue track
+    /// exactly as long as the cut, sounding in the mixdown a delivery muxes.
+    #[test]
+    fn ship_sample_renders_every_frame_and_speaks() {
+        let s = crate::sample::build_sample();
+        let at = s.at();
+        let cut = s.engine.project.cut(at.scene, at.cut).unwrap();
+        let (w, h) = crate::sample::SIZE;
+        assert_eq!(cut.frame_count, crate::sample::FRAMES);
+        for f in 0..cut.frame_count {
+            let px = anim_core::export::render_graph_frame_law(cut, s.engine.project.color_law, f, w, h)
+                .unwrap_or_else(|| panic!("frame {f}: the sample's output is not wired"));
+            assert_eq!(px.len(), (w * h * 4) as usize, "frame {f}");
+            assert!(px.chunks_exact(4).all(|p| p[3] == 255), "frame {f}: the plate leaves a hole");
+        }
+        assert!(anim_core::audio::has_sound(cut), "the sample is silent");
+        assert_eq!(cut.audio_props.kind, anim_core::audio::TrackKind::Dialogue);
+        let clip = cut.audio.as_ref().unwrap();
+        let secs = clip.samples.len() as f64 / (clip.sample_rate as f64 * clip.channels as f64);
+        assert!((secs - cut.frame_count as f64 / 24.0).abs() < 1e-9, "{secs} s");
+        let mix = anim_core::deliver::mixdown(cut, 24, 0, cut.frame_count - 1).expect("a mixdown");
+        assert!(mix.iter().any(|v| v.abs() > 0.05), "the line is inaudible");
+        // Silence between the syllables, a voice inside them.
+        let rate = crate::sample::VOICE_RATE as usize;
+        let at_frame = |f: f32| clip.samples[(f / 24.0 * rate as f32) as usize].abs();
+        assert_eq!(at_frame(1.0), 0.0, "frame 1 is before the first syllable");
+        let peak = (rate * 5 / 24..rate * 6 / 24).map(|i| clip.samples[i].abs()).fold(0.0, f32::max);
+        assert!(peak > 0.1, "the first syllable peaks at {peak}");
+        assert_eq!(crate::sample::dialogue_wav(), crate::sample::dialogue_wav(), "made the same every time");
+    }
+
+    /// The first launch of a new version opens the Welcome screen on What's
+    /// New, grouped by persona; Start brings the cards back.
+    #[test]
+    fn ship_whats_new_is_grouped_by_persona_and_opens_first() {
+        let personas: Vec<&str> = crate::welcome::WHATS_NEW.iter().map(|(p, _)| *p).collect();
+        assert_eq!(personas, ["Animator", "Painter", "Compositor", "3D", "Manga", "Editor"]);
+        assert!(crate::welcome::WHATS_NEW.iter().all(|(_, items)| !items.is_empty()));
+        assert!(crate::welcome::whats_new_due(""), "a first launch is due");
+        assert!(!crate::welcome::whats_new_due(crate::welcome::VERSION), "seen once, not again");
+        assert!(Config::default().ui.whats_new_seen.is_empty());
+        let mut w = crate::welcome::Welcome::new(&[]);
+        w.tab = crate::welcome::WelcomeTab::WhatsNew;
+        let binds = Config::default().keybinds;
+        let mut h = PanelHarness::new(egui::vec2(1280.0, 800.0), (w, true), move |ui, (w, show)| {
+            let _ = crate::welcome::ui(ui, w, show, &[false; 5], &binds);
+        });
+        assert!(h.has("What's New in 0.5.0"), "{}", h.describe());
+        for p in personas {
+            assert!(h.has(p), "{p}\n{}", h.describe());
+        }
+        assert!(!h.has("New from template"), "the Start cards hide behind the tab");
+        h.click("Start");
+        assert!(h.has("New from template"), "{}", h.describe());
+        assert!(!h.has("What's New in 0.5.0"));
+    }
+
+    // Every pane alone in the dock, 30 headless frames at each probe scale,
+    // over the sample (so the panes have a cut to show): no panic, and the
+    // pane is still there — except the retired Brush pane (owner
+    // 2026-08-17), which the editor removes on sight. One test per pane
+    // keeps each under D0's 2 s.
+    fn smoke_pane(pane: crate::workspace::Pane) {
+        for ppp in crate::PROBE_SCALES {
+            let mut h = EditorHarness::with_state(crate::sample::build_sample()).with_ppp(ppp);
+            h.editor_mut().dock = egui_dock::DockState::new(vec![pane]);
+            h.run_frames(30);
+            let kept = h.editor().dock.find_tab(&pane).is_some();
+            let retired = pane == crate::workspace::Pane::Brush;
+            assert_eq!(kept, !retired, "{pane:?} at {ppp}: kept {kept}, retired {retired}");
+        }
+    }
+
+    macro_rules! ship_pane_smoke {
+        ($($name:ident: $pane:expr,)*) => {
+            /// The panes the smoke tests below drive.
+            const SMOKED_PANES: &[crate::workspace::Pane] = &[$($pane),*];
+            $(
+                #[test]
+                fn $name() {
+                    smoke_pane($pane);
+                }
+            )*
+        };
+    }
+
+    ship_pane_smoke! {
+        ship_pane_canvas: crate::workspace::Pane::Canvas,
+        ship_pane_xsheet: crate::workspace::Pane::XSheet,
+        ship_pane_layers: crate::workspace::Pane::Layers,
+        ship_pane_brush: crate::workspace::Pane::Brush,
+        ship_pane_presets: crate::workspace::Pane::Presets,
+        ship_pane_forge: crate::workspace::Pane::Forge,
+        ship_pane_palette: crate::workspace::Pane::Palette,
+        ship_pane_node_graph: crate::workspace::Pane::NodeGraph,
+        ship_pane_viewer: crate::workspace::Pane::Viewer(0),
+        ship_pane_history: crate::workspace::Pane::History,
+        ship_pane_curves: crate::workspace::Pane::Curves,
+        ship_pane_paint_check: crate::workspace::Pane::PaintCheck,
+        ship_pane_render_queue: crate::workspace::Pane::RenderQueue,
+        ship_pane_board: crate::workspace::Pane::Board,
+        ship_pane_episode: crate::workspace::Pane::Episode,
+        ship_pane_view3d: crate::workspace::Pane::View3D,
+        ship_pane_manga: crate::workspace::Pane::Manga,
+    }
+
+    /// The smoke list names every Pane variant: the add-menu's singletons
+    /// and a viewer (the exhaustive match fails to compile on a new one).
+    #[test]
+    fn ship_pane_smoke_covers_every_pane() {
+        use crate::workspace::Pane;
+        let variant = |p: &Pane| match p {
+            Pane::Canvas
+            | Pane::XSheet
+            | Pane::Layers
+            | Pane::Brush
+            | Pane::Presets
+            | Pane::Forge
+            | Pane::Palette
+            | Pane::NodeGraph
+            | Pane::History
+            | Pane::Curves
+            | Pane::PaintCheck
+            | Pane::RenderQueue
+            | Pane::Board
+            | Pane::Episode
+            | Pane::View3D
+            | Pane::Manga => p.title(),
+            Pane::Viewer(_) => "a viewer".into(),
+        };
+        for p in Pane::ALL {
+            assert!(SMOKED_PANES.contains(p), "{} is not smoke-tested", variant(p));
+        }
+        assert!(SMOKED_PANES.iter().any(|p| matches!(p, Pane::Viewer(_))));
+        assert_eq!(SMOKED_PANES.len(), Pane::ALL.len() + 1);
+    }
+
+    /// The probe walks every room with a canvas — the spine, the manga
+    /// room and the forge — and no room is left out of it.
+    #[test]
+    fn ship_probe_walks_every_room() {
+        let stages: Vec<Stage> = crate::PROBE_ROOMS
+            .iter()
+            .filter_map(|r| match r {
+                crate::ProbeRoom::Stage(st) => Some(*st),
+                crate::ProbeRoom::Forge => None,
+            })
+            .collect();
+        for st in [
+            Stage::Layout,
+            Stage::Drawing,
+            Stage::InkPaint,
+            Stage::Composite,
+            Stage::Edit,
+            Stage::Manga,
+        ] {
+            // Exhaustive: a new Stage fails to compile until it is listed.
+            match st {
+                Stage::Layout
+                | Stage::Drawing
+                | Stage::InkPaint
+                | Stage::Composite
+                | Stage::Edit
+                | Stage::Manga => assert!(stages.contains(&st), "{} is not probed", st.name()),
+            }
+        }
+        assert!(crate::PROBE_ROOMS.iter().any(|r| matches!(r, crate::ProbeRoom::Forge)));
+    }
+
+    fn probe_holds_still(room: crate::ProbeRoom) {
+        for ppp in crate::PROBE_SCALES {
+            let run = room.probe(ppp);
+            let lines = run.lines.join("\n");
+            assert_eq!(run.unmeasured, 0, "{} at {ppp}: no canvas rect\n{lines}", room.name());
+            assert_eq!(run.moved, 0, "{} at {ppp}: the canvas moved\n{lines}", room.name());
+        }
+    }
+
+    #[test]
+    fn ship_probe_manga_room() {
+        probe_holds_still(crate::ProbeRoom::Stage(Stage::Manga));
+    }
+
+    #[test]
+    fn ship_probe_forge_room() {
+        probe_holds_still(crate::ProbeRoom::Forge);
     }
 }

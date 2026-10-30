@@ -293,6 +293,94 @@ pub enum WelcomeAction {
     Back,
 }
 
+// ---- What's New (GM19) -----------------------------------------------------
+
+/// This build's version, as the What's New tab and Help ▸ About say it.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The screen's tabs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WelcomeTab {
+    #[default]
+    Start,
+    /// What this release brings, grouped by who reaches for it — the tab
+    /// the first launch of a new version opens on.
+    WhatsNew,
+}
+
+/// Whether the What's New tab is due: `seen` (the config's last shown
+/// version) is not this build's.
+pub fn whats_new_due(seen: &str) -> bool {
+    seen != VERSION
+}
+
+/// GM19: what 0.5 brings, by persona — the What's New tab's groups.
+pub const WHATS_NEW: [(&str, &[&str]); 6] = [
+    (
+        "Animator",
+        &[
+            "X-sheet editing: insert and delete frames (every column ripples), holds, retimes, typed entry — all undoable",
+            "Light table: onion depth 0–5, keys and inbetweens marked on the sheet, spacing charts, Make inbetweens",
+            "Canvas rotate and mirror, the stabilizer, straight lines, brush size keys, the Alt-click eyedropper",
+            "Menus, the command palette (Ctrl+K), the History pane and the F1 shortcut sheet",
+            "Never lose work: the unsaved guard, autosave every 5 minutes, recovery after a crash",
+        ],
+    ),
+    (
+        "Painter",
+        &[
+            "Exact colour: new projects keep chips exactly as picked (older ones convert, with a backup first)",
+            "Recolour by editing a chip, refill, chip pick, and the nuri check (paint check) for holes and strays",
+            "Palette variants and palette maps",
+        ],
+    ),
+    (
+        "Compositor",
+        &[
+            "Satsuei FX, the same in the view and the delivery: blur, glow, diffusion, grade and .cube LUTs",
+            "Role passes, light wrap, rim, para, vignette, grain, directional motion blur, the satsuei template",
+            "The camera node: pan, T.U./T.B., rotate and shake over paper larger than the frame; multiplane depth",
+            "Particles, speed lines and focus lines as generator nodes",
+            "The render queue: PNG16, TIFF16 and EXR built in; ProRes, DNxHR, H.264 and H.265 through your ffmpeg, sound muxed",
+        ],
+    ),
+    (
+        "3D",
+        &[
+            "glTF and OBJ import, toon-rendered with outlines and passes",
+            "View3D with Blender navigation; set the cut camera from the view",
+            "Image sequences from other apps referenced on disk, and the canvas 3D underlay",
+        ],
+    ),
+    (
+        "Manga",
+        &[
+            "B5 and A4 pages at 350 dpi and webtoon strips; panels with gutters, tones, perspective rulers",
+            "Lettering with tategaki, and balloons",
+        ],
+    ),
+    (
+        "Editor",
+        &[
+            "Sound tracks (WAV, MP3, OGG, FLAC): waveforms, audio-locked playback, scrub, lip flap, mixdown",
+            "The shinkō board (cut board), the episode timeline with TRT, CMX3600 EDL export",
+            "Batch render with no window: animstudio --render <file | --sample> --preset <name> --out <dir>",
+        ],
+    ),
+];
+
+/// GM19: the What's New tab — this release's groups, by persona.
+fn whats_new_ui(ui: &mut egui::Ui) {
+    section(ui, &format!("What's New in {VERSION}"));
+    for (persona, items) in WHATS_NEW {
+        ui.add_space(6.0);
+        section(ui, persona);
+        for item in items {
+            ui.label(egui::RichText::new(format!("· {item}")).color(plate::STRUCK));
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Welcome {
     pub cards: Vec<RecentCard>,
@@ -300,6 +388,8 @@ pub struct Welcome {
     /// Shown again over an open cut (File ▸ Welcome screen…): a modal with
     /// a way back, and the cut stays open until a card replaces it.
     pub over_editor: bool,
+    /// GM19: the tab shown (What's New on a new version's first launch).
+    pub tab: WelcomeTab,
 }
 
 impl Welcome {
@@ -308,6 +398,7 @@ impl Welcome {
             cards: recent_cards(recent),
             textures: HashMap::new(),
             over_editor: false,
+            tab: WelcomeTab::Start,
         }
     }
 
@@ -361,6 +452,14 @@ pub fn ui(
     egui::ScrollArea::vertical().show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.heading("Gaban Studio");
+            // GM19: the tabs sit in the heading's row, so the Start tab's
+            // cards stay where they were.
+            if plate::detent(ui, w.tab == WelcomeTab::Start, "Start").clicked() {
+                w.tab = WelcomeTab::Start;
+            }
+            if plate::detent(ui, w.tab == WelcomeTab::WhatsNew, "What's New").clicked() {
+                w.tab = WelcomeTab::WhatsNew;
+            }
             if w.over_editor
                 && ui
                     .button("Back to the cut")
@@ -371,6 +470,10 @@ pub fn ui(
             }
         });
         ui.add_space(8.0);
+        if w.tab == WelcomeTab::WhatsNew {
+            whats_new_ui(ui);
+            return;
+        }
         section(ui, "New from template");
         ui.horizontal_wrapped(|ui| {
             for (i, t) in templates::ALL.iter().enumerate() {

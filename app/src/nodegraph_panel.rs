@@ -482,9 +482,9 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
 
 fn kind_color(kind: &NodeKind) -> Color32 {
     match kind {
-        NodeKind::DrawingSource { .. } => Color32::from_rgb(83, 137, 196),
-        NodeKind::Solid { .. } => Color32::from_rgb(139, 141, 131),
-        NodeKind::ImageSource { .. } => Color32::from_rgb(228, 225, 214),
+        NodeKind::DrawingSource { .. } => crate::plate::AO,
+        NodeKind::Solid { .. } => crate::plate::LEGEND,
+        NodeKind::ImageSource { .. } => crate::plate::STRUCK,
         // AUDIT [28]: these two hues are in no ratified palette. Node
         // identity comes from tokens now — Legend for an operation, Ao
         // for the one that composites (continuity), as elsewhere.
@@ -500,7 +500,7 @@ fn kind_color(kind: &NodeKind) -> Color32 {
         // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
         // means refusal or destruction, and the graph's result is
         // neither. Its identity is carried by its Struck edge instead.
-        NodeKind::Output => Color32::from_rgb(228, 225, 214),
+        NodeKind::Output => crate::plate::STRUCK,
     }
 }
 
@@ -530,7 +530,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0, Color32::from_rgb(14, 15, 13));
+    painter.rect_filled(rect, 0, crate::plate::WELL);
 
     // Pan with a background drag.
     if response.dragged() && state.pending_wire.is_none() {
@@ -625,7 +625,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                     &painter,
                     out_pin_pos(sv),
                     in_pin_pos(nv, pin),
-                    Color32::from_rgb(139, 141, 131),
+                    crate::plate::LEGEND,
                 );
             }
         }
@@ -639,7 +639,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             &painter,
             out_pin_pos(fv),
             ptr,
-            Color32::from_rgb(83, 137, 196),
+            crate::plate::AO,
         );
     }
 
@@ -649,7 +649,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     for nv in &nodes {
         let selected = state.selected_node == Some(nv.id);
         let is_output = output_node == Some(nv.id);
-        let body = Color32::from_rgb(26, 27, 24);
+        let body = crate::plate::GRAPHITE;
         // AUDIT [39]: square, like every other surface in the app.
         painter.rect_filled(nv.rect, 0, body);
         painter.rect_filled(
@@ -667,11 +667,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 // node's identity edge is Struck, not Aka — the result is
                 // not a correction.
                 if selected {
-                    Color32::from_rgb(239, 194, 74)
+                    crate::plate::TALLY
                 } else if is_output {
-                    Color32::from_rgb(228, 225, 214)
+                    crate::plate::STRUCK
                 } else {
-                    Color32::from_rgb(100, 102, 94)
+                    crate::plate::legend_muted()
                 },
             ),
             egui::StrokeKind::Outside,
@@ -685,7 +685,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 node_title(&nv.kind)
             },
             egui::FontId::proportional(12.0),
-            Color32::from_rgb(228, 225, 214),
+            crate::plate::STRUCK,
         );
 
         // Body drag = move (GM9: shown live, saved once on release — one
@@ -753,9 +753,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             op,
             PIN_R,
             if op_resp.hovered() {
-                Color32::from_rgb(83, 137, 196)
+                crate::plate::AO
             } else {
-                Color32::from_rgb(139, 141, 131)
+                crate::plate::LEGEND
             },
         );
 
@@ -789,11 +789,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 ip,
                 PIN_R,
                 if ip_resp.hovered() {
-                    Color32::from_rgb(83, 137, 196)
+                    crate::plate::AO
                 } else if nv.inputs[pin].is_some() {
-                    Color32::from_rgb(228, 225, 214)
+                    crate::plate::STRUCK
                 } else {
-                    Color32::from_rgb(100, 102, 94)
+                    crate::plate::legend_muted()
                 },
             );
         }
@@ -822,7 +822,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             egui::Align2::CENTER_CENTER,
             format!("{add} to add nodes — the cut's compositing graph lives here"),
             egui::FontId::proportional(13.0),
-            Color32::from_rgb(139, 141, 131),
+            crate::plate::LEGEND,
         );
     }
 }
@@ -1011,7 +1011,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 None => {
                     ui.label(
                         egui::RichText::new("missing image (renders transparent)")
-                            .color(egui::Color32::from_rgb(228, 82, 47)),
+                            .color(crate::plate::AKA),
                     );
                 }
             },

@@ -191,13 +191,13 @@ mod tests {
     #[test]
     fn png_roundtrips_pixels_in_the_right_order() {
         let px = vec![
-            egui::Color32::from_rgba_unmultiplied(255, 0, 0, 255),
-            egui::Color32::from_rgba_unmultiplied(0, 255, 0, 255),
-            egui::Color32::from_rgba_unmultiplied(0, 0, 255, 255),
+            crate::plate::chip([255, 0, 0, 255]),
+            crate::plate::chip([0, 255, 0, 255]),
+            crate::plate::chip([0, 0, 255, 255]),
             // Translucent on purpose: this is the case that catches a
             // premultiplied write. 128 alpha survives the round trip within
             // rounding.
-            egui::Color32::from_rgba_unmultiplied(200, 100, 50, 128),
+            crate::plate::chip([200, 100, 50, 128]),
         ];
         let img = egui::ColorImage::new([2, 2], px);
         let dir = std::env::temp_dir().join("animstudio_uidump_test");

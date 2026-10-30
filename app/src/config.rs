@@ -2517,6 +2517,10 @@ pub struct UiConfig {
     /// GM8: the Quick start steps already done (see welcome::STEPS).
     #[serde(default)]
     pub quick_start: [bool; 5],
+    /// GM19: the version whose What's New the Welcome screen last opened
+    /// on ("" = none yet: the first launch of any version opens on it).
+    #[serde(default)]
+    pub whats_new_seen: String,
     /// Freeze the pane layout: no dragging, splitting, or closing panes
     /// until unlocked. The arrangement itself is untouched.
     #[serde(default)]
@@ -2534,6 +2538,7 @@ impl Default for UiConfig {
             scale: default_ui_scale(),
             show_welcome: true,
             quick_start: [false; 5],
+            whats_new_seen: String::new(),
             lock_positions: false,
             exact_descriptions: false,
         }
@@ -4412,7 +4417,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
 
 /// Draggable pressure-curve editor in a 0..1 box. Returns whether it changed.
 fn pressure_curve_editor(ui: &mut egui::Ui, curve: &mut PressureCurve) -> bool {
-    use egui::{Color32, Pos2, Rect, pos2, vec2};
+    use egui::{Pos2, Rect, pos2, vec2};
     let mut changed = false;
     let (rect, _r) = ui.allocate_exact_size(vec2(220.0, 220.0), egui::Sense::hover());
     let painter = ui.painter_at(rect);
@@ -4479,7 +4484,7 @@ fn pressure_curve_editor(ui: &mut egui::Ui, curve: &mut PressureCurve) -> bool {
             changed = true;
         }
         let col = if hr.hovered() || hr.dragged() {
-            Color32::WHITE
+            crate::plate::STRUCK
         } else {
             crate::plate::AO
         };

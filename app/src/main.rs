@@ -4714,7 +4714,7 @@ impl EditorTabs<'_> {
                     let mut text =
                         egui::RichText::new(format!("{hotkey}{}  {:.0}px", p.name, p.size_px));
                     if let Some(c) = p.color {
-                        text = text.color(egui::Color32::from_rgb(c[0], c[1], c[2]));
+                        text = text.color(plate::chip([c[0], c[1], c[2], 255]));
                     }
                     if ui.button(text).on_hover_text("apply preset").clicked() {
                         self.canvas.apply_preset(p);
@@ -5908,7 +5908,14 @@ impl eframe::App for App {
             &self.config,
         ) {
             Startup::Welcome => {
-                self.welcome = Some(welcome::Welcome::new(&self.config.session.recent));
+                let mut w = welcome::Welcome::new(&self.config.session.recent);
+                // GM19: a new version's first launch opens on What's New.
+                if welcome::whats_new_due(&self.config.ui.whats_new_seen) {
+                    w.tab = welcome::WelcomeTab::WhatsNew;
+                    self.config.ui.whats_new_seen = welcome::VERSION.into();
+                    self.config.save();
+                }
+                self.welcome = Some(w);
             }
             Startup::NewForm => self.new_form = Some(NewProjectForm::default()),
             Startup::DropWelcome => self.welcome = None,
@@ -6364,7 +6371,7 @@ impl eframe::App for App {
                 .anchor(egui::Align2::RIGHT_TOP, [-10.0, 96.0])
                 .show(ui.ctx(), |ui| {
                     egui::Frame::new()
-                        .fill(egui::Color32::from_black_alpha(160))
+                        .fill(plate::shade(160))
                         .inner_margin(4.0)
                         .show(ui, |ui| {
                             ui.label(
@@ -6595,10 +6602,10 @@ fn probe() {
     // Every room, at each display scale (fractional scales can add
     // pixel-rounding jitter that 1.0 never shows).
     let (mut moved, mut blind) = (0usize, 0usize);
-    for &stage in Stage::ALL {
+    for room in PROBE_ROOMS {
         for ppp in PROBE_SCALES {
-            println!("---- {} · pixels_per_point {ppp} ----", stage.name());
-            let run = probe_run(stage, ppp);
+            println!("---- {} · pixels_per_point {ppp} ----", room.name());
+            let run = room.probe(ppp);
             for line in &run.lines {
                 println!("{line}");
             }
@@ -6616,6 +6623,46 @@ fn probe() {
 
 /// The display scales the probe walks (the testkit runs the same set).
 const PROBE_SCALES: [f32; 3] = [1.0, 1.25, 1.5];
+
+/// GM19: a room the probe walks — a stage (the spine, and the manga room
+/// off it), or the forge's arrangement, entered as its button enters it.
+/// The 3D layout room has no canvas pane to hold still; its panes are
+/// smoke-tested at every scale instead (testkit `ship_pane_*`).
+#[derive(Clone, Copy, Debug)]
+enum ProbeRoom {
+    Stage(Stage),
+    Forge,
+}
+
+/// Every room with a canvas: the CLI probe and the ship tests walk these.
+const PROBE_ROOMS: [ProbeRoom; 7] = [
+    ProbeRoom::Stage(Stage::Layout),
+    ProbeRoom::Stage(Stage::Drawing),
+    ProbeRoom::Stage(Stage::InkPaint),
+    ProbeRoom::Stage(Stage::Composite),
+    ProbeRoom::Stage(Stage::Edit),
+    ProbeRoom::Stage(Stage::Manga),
+    ProbeRoom::Forge,
+];
+
+impl ProbeRoom {
+    fn name(self) -> &'static str {
+        match self {
+            ProbeRoom::Stage(st) => st.name(),
+            ProbeRoom::Forge => "forge",
+        }
+    }
+
+    fn probe(self, ppp: f32) -> ProbeRun {
+        match self {
+            ProbeRoom::Stage(st) => probe_run(st, ppp),
+            ProbeRoom::Forge => probe_run_in(ppp, 100, |editor| {
+                editor.dock = Pane::forge_dock();
+                editor.stage = None;
+            }),
+        }
+    }
+}
 
 /// What one probe pass saw.
 struct ProbeRun {
@@ -6641,6 +6688,11 @@ fn probe_run(stage: Stage, ppp: f32) -> ProbeRun {
 /// GM8: the same pass under a UI scale (percent), applied the way the App
 /// applies it — egui's zoom factor over the display's scale.
 fn probe_run_zoom(stage: Stage, ppp: f32, ui_scale: u32) -> ProbeRun {
+    probe_run_in(ppp, ui_scale, |editor| editor.enter_room(stage))
+}
+
+/// GM19: the pass itself, in the room `enter` sets up.
+fn probe_run_in(ppp: f32, ui_scale: u32, enter: impl FnOnce(&mut Editor)) -> ProbeRun {
     let ctx = egui::Context::default();
     ctx.set_pixels_per_point(ppp);
     dress(&ctx);
@@ -6656,7 +6708,7 @@ fn probe_run_zoom(stage: Stage, ppp: f32, ui_scale: u32) -> ProbeRun {
     let mut state = AppState::new_project("probe", 1920, 1080, 24, 300.0);
     state.new_drawing_at_frame(); // cel at frame 0; frame 1 stays empty
     let mut editor = Editor::from_state(state, None, None);
-    editor.enter_room(stage);
+    enter(&mut editor);
     if let Some(tab) = editor.dock.find_tab(&Pane::Canvas) {
         let _ = editor.dock.set_active_tab(tab);
     }
