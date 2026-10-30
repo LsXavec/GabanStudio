@@ -20,13 +20,18 @@ rayon = "1.12"
 # GM11 (D16): delivery writers. PNG16 and TIFF16 through image (png and
 # tiff are locked); image writes EXR only as f32, so the half-float EXR goes
 # through the exr crate its own `exr` feature builds on (both fetched).
-image = { version = "0.25", default-features = false, features = ["png", "tiff", "exr"] }
+image = { version = "0.25", default-features = false, features = ["png", "tiff", "exr", "jpeg"] }
 exr = { version = "1.74", default-features = false }
 # GM11: burn-in text — the app's Plex outlines rasterised on the CPU.
 ab_glyph = "0.2"
 # GM12 (D16): sound tracks — WAV, MP3, OGG Vorbis and FLAC decoded in pure
 # Rust (fetched). The engine only decodes and mixes; playback is the app's.
 symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "mp3", "ogg", "vorbis", "flac"] }
+# GM17 (D16): 3D layout — glTF (binary, or with its buffers embedded) and
+# OBJ read from the bytes embedded in `cut_models` (fetched). JPEG import
+# and sequences ride image's `jpeg` feature above.
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
+tobj = { version = "4", default-features = false }
 
 [dev-dependencies]
 # Tests forge legacy (schema v4/v5) project files directly to prove migration.

@@ -637,7 +637,9 @@ impl GraphCompositor {
             NodeKind::Effect { .. }
             | NodeKind::Camera { .. }
             | NodeKind::DrawingSource { .. }
-            | NodeKind::Generator { .. } => {
+            | NodeKind::Generator { .. }
+            | NodeKind::Model3D { .. }
+            | NodeKind::ImageSequence { .. } => {
                 // GM9 (D9): the subtree renders on the CPU worker; this shows
                 // its upload — the last one while a newer render is pending.
                 // GM10: a Camera too (its paper and sampling are CPU maths);
@@ -910,9 +912,15 @@ impl GraphCompositor {
 /// GM10: nor camera maths — a Camera's planes render at the paper; GM13:
 /// nor a role pass or a trace-line absorb; GM16: nor a generator's.)
 pub fn needs_cpu(kind: &NodeKind) -> bool {
+    // GM17: a Model3D's toon render and an ImageSequence's files are CPU
+    // work too.
     matches!(
         kind,
-        NodeKind::Effect { .. } | NodeKind::Camera { .. } | NodeKind::Generator { .. }
+        NodeKind::Effect { .. }
+            | NodeKind::Camera { .. }
+            | NodeKind::Generator { .. }
+            | NodeKind::Model3D { .. }
+            | NodeKind::ImageSequence { .. }
     ) || kind.is_filtered_source()
 }
 
@@ -1019,6 +1027,8 @@ pub fn job_cut(cut: &Cut, node: NodeId, frame: u32) -> Cut {
         drawing_defs: Default::default(),
         // GM13: a LUT reads its embedded file (shared handles).
         blobs: cut.blobs.clone(),
+        // GM17: a Model3D node reads its embedded model (shared handles).
+        models: cut.models.clone(),
     }
 }
 

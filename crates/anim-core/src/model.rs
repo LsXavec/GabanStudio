@@ -907,6 +907,36 @@ pub struct Cut {
     /// `cut_blobs` side table; edited only through SetCutBlob.
     #[serde(default)]
     pub blobs: std::collections::BTreeMap<String, Arc<Vec<u8>>>,
+    /// GM17 (D15): the cut's 3D models (sets, props), embedded as their
+    /// file's bytes so the cut renders on its own. Saved in the
+    /// `cut_models` side table; edited only through SetCutModel.
+    #[serde(default)]
+    pub models: std::collections::BTreeMap<crate::ids::ModelId, ModelAsset>,
+}
+
+/// GM17: one embedded model — its file's ORIGINAL bytes (glTF binary or
+/// JSON with its buffers inside, or OBJ text), persisted verbatim, as an
+/// image's are. `format` is "glb", "gltf" or "obj"; the meshes are read
+/// from the bytes when rendered ([`crate::r3d::model_of`]).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModelAsset {
+    pub name: String,
+    pub format: String,
+    pub bytes: Arc<Vec<u8>>,
+    /// fnv1a of the bytes — the content address eval recipes fold.
+    pub content_hash: u64,
+}
+
+impl ModelAsset {
+    pub fn new(name: impl Into<String>, format: impl Into<String>, bytes: Vec<u8>) -> Self {
+        let content_hash = crate::value::fnv1a(&bytes);
+        Self {
+            name: name.into(),
+            format: format.into(),
+            bytes: Arc::new(bytes),
+            content_hash,
+        }
+    }
 }
 
 impl Cut {
@@ -928,6 +958,7 @@ impl Cut {
             column_defs: Default::default(),
             drawing_defs: Default::default(),
             blobs: Default::default(),
+            models: Default::default(),
         }
     }
 
@@ -1064,6 +1095,17 @@ impl Cut {
         frame: u32,
     ) -> crate::generator::GenValues {
         crate::generator::GenValues::resolve(generator, params, binds, |id| self.param_value(id, frame))
+    }
+
+    /// GM17: a Model3D node's EFFECTIVE parameters at `frame` (fx_at's
+    /// law), read by every render path and the View3D pane alike.
+    pub fn model_at(
+        &self,
+        params: &crate::fx::FxParams,
+        binds: &crate::fx::FxBinds,
+        frame: u32,
+    ) -> crate::r3d::ModelValues {
+        crate::r3d::ModelValues::resolve(params, binds, |id| self.param_value(id, frame))
     }
 }
 

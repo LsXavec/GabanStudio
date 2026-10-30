@@ -43,6 +43,9 @@ pub enum Pane {
     Board,
     /// GM15: the episode's cuts in order, TRT against the target.
     Episode,
+    /// GM17: the cut's 3D layout through a free view camera (Blender's
+    /// navigation); "Set cut camera from view" keys a Model3D's camera.
+    View3D,
 }
 
 impl Pane {
@@ -63,6 +66,7 @@ impl Pane {
         Pane::RenderQueue,
         Pane::Board,
         Pane::Episode,
+        Pane::View3D,
     ];
 
     /// THE FORGE ROOM (PSD-brush-forge, owner amendment 2026-08-19:
@@ -74,6 +78,17 @@ impl Pane {
         let tree = ds.main_surface_mut();
         let [_canvas, forge] = tree.split_left(NodeIndex::root(), 0.30, vec![Pane::Forge]);
         tree.split_below(forge, 0.68, vec![Pane::Presets, Pane::Palette]);
+        ds
+    }
+
+    /// GM17: THE 3D LAYOUT ROOM (off the stage spine, like the Forge): the
+    /// View3D pane beside a viewer of the composite, the node graph under
+    /// them.
+    pub fn layout3d_dock() -> DockState<Pane> {
+        let mut ds = DockState::new(vec![Pane::View3D]);
+        let tree = ds.main_surface_mut();
+        let [view, _graph] = tree.split_below(NodeIndex::root(), 0.66, vec![Pane::NodeGraph]);
+        tree.split_right(view, 0.6, vec![Pane::Viewer(0)]);
         ds
     }
 
@@ -97,6 +112,7 @@ impl Pane {
             // them.
             Pane::Board => "Shinkō board (cut board)".into(),
             Pane::Episode => "Henshū timeline (episode)".into(),
+            Pane::View3D => "View3D (3D layout)".into(),
             Pane::Viewer(0) => "Viewer".into(),
             Pane::Viewer(n) => format!("Viewer {}", n + 1),
         }

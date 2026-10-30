@@ -175,6 +175,9 @@ pub enum Action {
     MakeCutsFromPanels,
     RenderEpisode,
     AddRetakeNote,
+    /// GM17: File ▸ Import 3D model… (glTF or OBJ, embedded in the cut with
+    /// its Model3D node).
+    Import3DModel,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -419,6 +422,7 @@ impl Action {
         Action::MakeCutsFromPanels,
         Action::RenderEpisode,
         Action::AddRetakeNote,
+        Action::Import3DModel,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -557,6 +561,7 @@ impl Action {
             Action::MakeCutsFromPanels => "Make cuts from panels",
             Action::RenderEpisode => "Render episode",
             Action::AddRetakeNote => "Add retake note…",
+            Action::Import3DModel => "Import 3D model…",
         }
     }
 
@@ -701,6 +706,7 @@ impl Action {
             MakeCutsFromPanels => "Turn the open animatic's BOARD panels into cuts, one per panel cut number, as one undo step.",
             RenderEpisode => "Queue the scene's cuts as one Episode job in the render queue, frame for frame, sound end to end.",
             AddRetakeNote => "Note what to fix on this frame of the open cut (it can set the cut to Retake); the sheet shows it.",
+            Import3DModel => "Embed a glTF (.glb, .gltf) or OBJ model in the cut and add its Model3D node, as one undo step; View3D shows it.",
         }
     }
 
@@ -710,7 +716,7 @@ impl Action {
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | ImportSound | AddSoundTrack
-            | ExportEdl | ExportColorSheet | ExportCutAsProject => Group::File,
+            | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
@@ -782,6 +788,7 @@ impl Action {
             LipFlap => "Sheet/Lip flap…",
             ImportSound => "File/Import sound…",
             AddSoundTrack => "File/Add sound track…",
+            Import3DModel => "File/Import 3D model…",
             FirstFrame => "Sheet/First frame",
             PrevFrame => "Sheet/Previous frame",
             NextFrame => "Sheet/Next frame",
@@ -1045,6 +1052,7 @@ impl Action {
             MakeCutsFromPanels => &["conte", "animatic", "storyboard", "panels", "split cuts"],
             RenderEpisode => &["episode render", "render all cuts", "export episode"],
             AddRetakeNote => &["retake", "note", "fix note", "kantoku", "correction"],
+            Import3DModel => &["3d", "gltf", "glb", "obj", "model", "layout", "blender"],
             _ => &[],
         }
     }
@@ -1378,7 +1386,7 @@ impl Action {
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | PaperSize | LipFlap
-            | BuildSatsuei => None,
+            | BuildSatsuei | Import3DModel => None,
         }
     }
 }

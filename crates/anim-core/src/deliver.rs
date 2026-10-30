@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use crate::color::ColorLaw;
 use crate::command::CutRef;
-use crate::export::{composite_for, graph_composite};
+use crate::export::{RenderEnv, composite_for, graph_composite_env};
 use crate::fx::Image;
 use crate::model::{Cut, LayerRole, Project};
 use crate::text::{self, Face};
@@ -111,8 +111,23 @@ pub fn render(
     height: u32,
     opts: &RenderOpts,
 ) -> Image {
+    render_env(cut, law, frame, width, height, opts, &RenderEnv::default())
+}
+
+/// GM17: [`render`] reading the project's folder (`env.base_dir`, where an
+/// ImageSequence's relative paths resolve) and reporting what it could not
+/// read (a missing frame: transparent, one warning) through `env`.
+pub fn render_env(
+    cut: &Cut,
+    law: ColorLaw,
+    frame: u32,
+    width: u32,
+    height: u32,
+    opts: &RenderOpts,
+    env: &RenderEnv,
+) -> Image {
     let px = match opts.purpose {
-        Purpose::View => graph_composite(cut, law, frame, width, height)
+        Purpose::View => graph_composite_env(cut, law, frame, width, height, env)
             .unwrap_or_else(|| composite_for(cut, frame, width, height, Purpose::View)),
         Purpose::Final => match cut.graph.output {
             Some(_) => {
@@ -125,7 +140,7 @@ pub fn render(
                 } else {
                     cut
                 };
-                graph_composite(source, law, frame, width, height)
+                graph_composite_env(source, law, frame, width, height, env)
                     .unwrap_or_else(|| vec![0.0; width as usize * height as usize * 4])
             }
             None => composite_for(cut, frame, width, height, Purpose::Final),

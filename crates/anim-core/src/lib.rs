@@ -28,6 +28,7 @@ pub mod graph;
 pub mod ids;
 pub mod look;
 pub mod model;
+pub mod r3d;
 pub mod raster;
 pub mod sheet_ops;
 pub mod store;
@@ -280,6 +281,11 @@ impl Engine {
 
     pub fn alloc_cut_id(&mut self) -> CutId {
         CutId(self.project.alloc_id())
+    }
+
+    /// GM17: an id for a model embedded through SetCutModel.
+    pub fn alloc_model_id(&mut self) -> ids::ModelId {
+        ids::ModelId(self.project.alloc_id())
     }
 
     // ---- Editing (undoable) ----------------------------------------------

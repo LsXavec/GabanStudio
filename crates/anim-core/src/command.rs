@@ -13,7 +13,8 @@ use crate::error::{EngineError, Result};
 use crate::graph::{Node, NodeKind};
 use crate::ids::*;
 use crate::model::{
-    AudioClip, CelLayer, Cut, Drawing, DrawingDef, LayerProps, Project, ProjectProps, Stroke,
+    AudioClip, CelLayer, Cut, Drawing, DrawingDef, LayerProps, ModelAsset, Project, ProjectProps,
+    Stroke,
 };
 use crate::raster::TileDiff;
 use crate::xsheet::{Column, ColumnDef, Exposure, ParamColumn, ParamKey};
@@ -307,6 +308,15 @@ pub enum Command {
         before: Option<Arc<Vec<u8>>>,
         after: Option<Arc<Vec<u8>>>,
     },
+    /// GM17: embed (Some) or remove (None) one of the cut's 3D models
+    /// (`Cut::models`). `before` must match; the inverse swaps the two. A
+    /// Model3D node whose model is gone renders transparent.
+    SetCutModel {
+        at: CutRef,
+        id: ModelId,
+        before: Option<ModelAsset>,
+        after: Option<ModelAsset>,
+    },
     SetColumnDef {
         at: CutRef,
         column: ColumnId,
@@ -406,6 +416,7 @@ impl Command {
             | Command::SetCells { at, .. }
             | Command::SetCutMeta { at, .. }
             | Command::SetCutBlob { at, .. }
+            | Command::SetCutModel { at, .. }
             | Command::SetColumnDef { at, .. }
             | Command::SetMemo { at, .. }
             | Command::SetDrawingDef { at, .. }
@@ -1808,6 +1819,39 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 // An Effect reads its file through its key: everything that
                 // could show it re-renders.
                 invalidation_roots: all_nodes(cut),
+            })
+        }
+
+        Command::SetCutModel {
+            at,
+            id,
+            before,
+            after,
+        } => {
+            let cut = cut_mut(project, *at)?;
+            if cut.models.get(id) != before.as_ref() {
+                return Err(EngineError::InvalidCommand(format!(
+                    "model {id} changed since this edit was made"
+                )));
+            }
+            match after {
+                Some(m) => cut.models.insert(*id, m.clone()),
+                None => cut.models.remove(id),
+            };
+            Ok(AppliedEffect {
+                inverse: vec![Command::SetCutModel {
+                    at: *at,
+                    id: *id,
+                    before: after.clone(),
+                    after: before.clone(),
+                }],
+                // The Model3D nodes reading it re-render (and what they feed).
+                invalidation_roots: cut
+                    .graph
+                    .nodes()
+                    .filter(|n| matches!(n.kind, NodeKind::Model3D { model, .. } if model == *id))
+                    .map(|n| n.id)
+                    .collect(),
             })
         }
 

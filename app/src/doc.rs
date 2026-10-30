@@ -529,6 +529,9 @@ pub struct AppState {
     /// GM9: the node graph's add-node menu, node drag and inspector edit —
     /// session-only view state.
     pub graph_ui: crate::nodegraph_panel::GraphUi,
+    /// GM17: the View3D pane's view camera and its last render —
+    /// session-only view state.
+    pub view3d: crate::view3d::View3dState,
     /// X-sheet pane: the selected PARAMETER column (its keying strip shows
     /// under the toolbar) — session-only view state.
     pub param_sel: Option<anim_core::ids::ParamId>,
@@ -682,6 +685,7 @@ impl AppState {
             selected_node: None,
             graph_pan: (0.0, 0.0),
             graph_ui: Default::default(),
+            view3d: Default::default(),
             param_sel: None,
             param_buf: 0.0,
             param_buf_at: None,
@@ -779,6 +783,7 @@ impl AppState {
             selected_node: None,
             graph_pan: (0.0, 0.0),
             graph_ui: Default::default(),
+            view3d: Default::default(),
             param_sel: None,
             param_buf: 0.0,
             param_buf_at: None,
@@ -4008,6 +4013,9 @@ impl AppState {
                 return;
             }
         };
+        // GM17: a JPEG or TIFF is decoded and stored as the PNG an image
+        // keeps (a PNG, or a file that is no image, goes on as it was).
+        let bytes = anim_core::r3d::still_to_png(&bytes).unwrap_or(bytes);
         let name = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
@@ -4038,6 +4046,92 @@ impl AppState {
         }
         self.report(r, "image imported");
     }
+
+    /// GM17 (D15): embed a glTF or OBJ model in the cut and add its Model3D
+    /// node at `pos` — one batch, one undo step (undo removes both). An
+    /// OBJ's material library beside it is embedded inside it. A file that
+    /// does not read is refused with the reason, and nothing changes.
+    pub fn import_model(&mut self, path: &std::path::Path, pos: (f32, f32)) -> Option<NodeId> {
+        let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(format) = anim_core::r3d::format_for_extension(&ext) else {
+            self.refuse(format!("{} is not a model this build reads (.glb, .gltf or .obj)", path.display()));
+            return None;
+        };
+        let mut bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.refuse(format!("3D model import failed: {e}"));
+                return None;
+            }
+        };
+        if format == "obj" {
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let dir = path.parent().unwrap_or(std::path::Path::new("."));
+            let mtl: Vec<String> = text
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("mtllib "))
+                .filter_map(|name| std::fs::read_to_string(dir.join(name.trim())).ok())
+                .collect();
+            if !mtl.is_empty() && !text.contains(anim_core::r3d::EMBEDDED_MTL) {
+                bytes = anim_core::r3d::embed_mtl(&bytes, &mtl.join("\n"));
+            }
+        }
+        if let Err(e) = anim_core::r3d::load(format, &bytes) {
+            self.refuse(format!("{} does not import: {e}", path.display()));
+            return None;
+        }
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "model".into());
+        let at = self.at();
+        let model = self.engine.alloc_model_id();
+        let node = self.engine.alloc_node_id();
+        let asset = anim_core::model::ModelAsset::new(name, format, bytes);
+        let mut cmds = vec![
+            Command::SetCutModel {
+                at,
+                id: model,
+                before: None,
+                after: Some(asset),
+            },
+            Command::AddNode {
+                at,
+                id: node,
+                kind: anim_core::graph::NodeKind::model3d(model),
+            },
+        ];
+        cmds.extend(self.layout_edit(node, Some(pos)));
+        let r = self.engine.apply("import 3D model", cmds);
+        let ok = r.is_ok();
+        if ok {
+            self.node_positions.insert(node.0, pos);
+            self.selected_node = Some(node);
+        }
+        self.report(r, "3D model imported");
+        ok.then_some(node)
+    }
+
+    /// GM17: "Set cut camera from view" — key Model3D node `node`'s camera
+    /// to what the View3D pane's view sees, at the current frame: its bound
+    /// columns keyed, an unbound parameter given its column first. One undo
+    /// step.
+    pub fn set_cut_camera_from_view(&mut self, node: NodeId, view: &anim_core::r3d::Orbit) {
+        let at = self.at();
+        let frame = self.view.frame;
+        let need = anim_core::r3d::camera_columns_needed(self.cut(), node);
+        let ids: Vec<anim_core::ids::ParamId> = (0..need).map(|_| self.engine.alloc_param_id()).collect();
+        let mut cam = view.camera();
+        cam.ortho = false;
+        match anim_core::r3d::key_camera(self.cut(), at, node, &cam, frame, &mut ids.into_iter()) {
+            Ok(cmds) => {
+                let r = self.engine.apply("set cut camera from view", cmds);
+                self.report(r, "cut camera keyed from the view");
+            }
+            Err(e) => self.refuse(e),
+        }
+    }
+
     /// Add a node at `pos` (graph space) — the node and its place in the
     /// saved layout are one undo step (GM9).
     pub fn graph_add_node(&mut self, kind: anim_core::graph::NodeKind, pos: (f32, f32)) {
@@ -4181,7 +4275,12 @@ impl AppState {
             for node in cut.graph.nodes() {
                 use anim_core::graph::NodeKind::*;
                 let (col_x, row) = match node.kind {
-                    DrawingSource { .. } | Solid { .. } | ImageSource { .. } | Generator { .. } => {
+                    DrawingSource { .. }
+                    | Solid { .. }
+                    | ImageSource { .. }
+                    | Generator { .. }
+                    | Model3D { .. }
+                    | ImageSequence { .. } => {
                         n_src += 1;
                         (40.0, n_src - 1)
                     }

@@ -2746,3 +2746,24 @@ what was not verified.
   later part: on-canvas handles for a balloon's tail, the focus-line centre and the clear ellipse
   (typed as frame fractions today); presets stay in px tuned at 1920×1080 (every px parameter's help
   says px). 22 `gen_tests`, 6 `genui_*`.
+- 2026-10-29 — GM17 3D layout and toon render: new `r3d.rs` — glTF (.glb, or .gltf with embedded
+  buffers; node transforms, base colour factor) and OBJ (triangulated; its .mtl embedded as `#mtl `
+  comment lines at import) read from the bytes in the new `cut_models` side table (`ModelAsset`,
+  `Command::SetCutModel`, no version bump); `Camera3` on a 36 mm back (50 mm → 39.6°), a deterministic
+  rasteriser (top-left rule, near clipping, perspective-correct 1/z depth), stepped half-Lambert toon
+  bands with the shadow chip, silhouette/fold/crease outlines dilated to width, and the beauty, lines,
+  shadow matte, depth and ID matte passes; `NodeKind::Model3D` (27 specs, the numbers bindable) and
+  `NodeKind::ImageSequence` (`shot_####.png`, first file at an offset frame, hold last) in export,
+  eval and the GPU view's CPU subtrees; `export::RenderEnv` carries the project folder and de-duplicated
+  warnings (`deliver::render_env`, a missing frame is transparent with one warning). JPEG and TIFF
+  images import as 8-bit PNG. App: View3D pane (Blender orbit/pan/zoom on the middle button and wheel,
+  view buttons for numpad 1/3/7 with their opposites, 0 and 5; half-size render while navigating; "Set
+  cut camera from view" keys the node's camera at the frame, columns made and bound, one undo step),
+  the "3D layout room", File ▸ Import 3D model…, the add menu's 3D category and the Model3D and
+  sequence inspectors. 19 `r3d_tests`, 5 `view3d_*`; colour literals unchanged. Left: the canvas 3D
+  underlay; numpad keys themselves (egui reads numpad digits as the row's, which are chords: 0 RAM
+  preview, Ctrl+0/1 zoom); the project folder reaches `deliver::render_env` but not yet the GPU view,
+  viewers, playback or the render queue (relative sequence paths read from the working folder there);
+  stretch items (turntable, 2× supersampling, glTF textures and animation, shadow mapping). Not
+  verified: the real window, the rfd pickers, the toon look by eye, models beyond the test cube,
+  triangle and sphere.

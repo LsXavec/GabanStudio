@@ -907,6 +907,8 @@ mod tests {
                 // GM12: the sound pickers are the shell's file dialogs.
                 Action::ImportSound => Some(AppRequest::ImportSound),
                 Action::AddSoundTrack => Some(AppRequest::AddSoundTrack),
+                // GM17: the model picker is the shell's file dialog.
+                Action::Import3DModel => Some(AppRequest::Import3DModel),
                 _ => None,
             };
             match want {

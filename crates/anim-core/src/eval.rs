@@ -236,6 +236,33 @@ impl Evaluator {
                     ins.join(", ")
                 ))
             }
+            // GM17: the embedded model by its content (a re-imported file
+            // changes the value) and the RESOLVED parameters (a keyed camera
+            // moves per frame, a still one cache-hits); a missing model is
+            // the sentinel that renders transparent.
+            NodeKind::Model3D { model, params, binds } => match cut.models.get(model) {
+                Some(m) => Value::image(format!(
+                    "model3d({model}:'{}'#{:016x}, {})",
+                    m.name,
+                    m.content_hash,
+                    cut.model_at(params, binds, frame).recipe()
+                )),
+                None => Value::image(format!("missing-model({model})")),
+            },
+            // GM17: the file number this frame shows ("-" before the
+            // sequence starts). The files are read at render, so a sequence
+            // re-rendered on disk shows once the value changes (an edit, a
+            // reload).
+            NodeKind::ImageSequence {
+                pattern,
+                first,
+                offset,
+                hold_last,
+            } => {
+                let n = crate::r3d::sequence_number(*first, *offset, frame)
+                    .map_or_else(|| "-".to_string(), |n| n.to_string());
+                Value::image(format!("seq({pattern:?}, n={n}, hold={hold_last})"))
+            }
         };
 
         visiting.remove(&id);

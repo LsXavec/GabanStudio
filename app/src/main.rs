@@ -46,6 +46,7 @@ mod templates;
 mod testkit;
 mod uidump;
 mod update;
+mod view3d;
 mod viewer;
 mod welcome;
 mod workspace;
@@ -2938,6 +2939,20 @@ impl App {
                     ed.state.set_lut_file(node, key, &path);
                 }
             }
+            // GM17: the model picker is the shell's; the import is one undo
+            // step, and View3D comes forward to show it.
+            AppRequest::Import3DModel => {
+                let Some(ed) = &mut self.editor else { return };
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("3D model (glTF, OBJ)", anim_core::r3d::FORMATS)
+                    .pick_file()
+                {
+                    let pos = (40.0, 40.0 + 90.0 * ed.state.cut().graph.nodes().count() as f32);
+                    if ed.state.import_model(&path, pos).is_some() {
+                        ed.open_pane(Pane::View3D);
+                    }
+                }
+            }
         }
     }
 }
@@ -2968,6 +2983,8 @@ pub enum AppRequest {
     /// is the shell's (it is a window); the decode then runs on a worker.
     ImportSound,
     AddSoundTrack,
+    /// GM17: File ▸ Import 3D model… — the model picker is the shell's.
+    Import3DModel,
     /// GM13: the inspector's "load .cube…" for this node's file parameter
     /// — the .cube picker is the shell's too (a window, on a real click).
     LoadLut {
@@ -3320,6 +3337,8 @@ impl Editor {
                     });
                 }
             },
+            // GM17: the model picker is the shell's.
+            Action::Import3DModel => *out = Performed::App(AppRequest::Import3DModel),
             Action::NewDrawing => s.new_drawing_at_frame(),
             Action::ClearCel => match &selection {
                 Some(poly) => s.clear_current_region(poly),
@@ -3644,6 +3663,8 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::MakeCutsFromPanels
             | Action::RenderEpisode
             | Action::AddRetakeNote
+            // GM17: no model or node added under a live stroke.
+            | Action::Import3DModel
     )
 }
 
@@ -4398,6 +4419,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 board_panel::ui_board(ui, self.state, gesture_safe)
             }
             Pane::Episode => board_panel::ui_episode(ui, self.state),
+            Pane::View3D => view3d::ui(ui, self.state),
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
                     ui.label(
@@ -7183,6 +7205,8 @@ impl Editor {
                     // in its sheet header's context menu.
                     self.menu_item(ui, Action::ImportSound);
                     self.menu_item(ui, Action::AddSoundTrack);
+                    // GM17: a glTF or OBJ model, embedded in the cut.
+                    self.menu_item(ui, Action::Import3DModel);
                     ui.separator();
                     self.menu_item(ui, Action::Settings);
                     self.menu_item(ui, Action::Quit);
@@ -7486,6 +7510,25 @@ impl Editor {
                             // instead of test paper — the owner's report.
                             self.stage = None;
                             self.state.status = "the forge room".into();
+                        }
+                        ui.close();
+                    }
+                    // GM17: THE 3D LAYOUT ROOM, built in beside the forge's
+                    // and off the spine like it.
+                    if ui
+                        .button("3D layout room")
+                        .on_hover_text(
+                            "View3D beside a composite viewer, the node graph under them — \
+                             set the cut camera from the view",
+                        )
+                        .clicked()
+                    {
+                        if self.canvas.stroke_active() {
+                            self.state.refuse("refused — finish the stroke first");
+                        } else {
+                            self.dock = Pane::layout3d_dock();
+                            self.stage = None;
+                            self.state.status = "the 3D layout room".into();
                         }
                         ui.close();
                     }

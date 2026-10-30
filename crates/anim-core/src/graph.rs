@@ -10,7 +10,7 @@ use crate::command::{Command, CutRef};
 use crate::error::{EngineError, Result};
 use crate::fx::{FxBinds, FxKind, FxParams};
 use crate::generator::{GenKind, Preset};
-use crate::ids::{ColumnId, ImageId, NodeId, ParamId};
+use crate::ids::{ColumnId, ImageId, ModelId, NodeId, ParamId};
 use crate::model::{Cut, LayerRole};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -142,6 +142,33 @@ pub enum NodeKind {
         #[serde(default)]
         binds: FxBinds,
     },
+    /// GM17: one of the cut's embedded 3D models, toon-rendered by
+    /// [`crate::r3d`] through its own camera on the CPU in every view (D9).
+    /// Parameters ([`crate::r3d::MODEL_SPECS`]) resolve and bind as an
+    /// Effect's do, so a camera move is keyed on the sheet. A model no
+    /// longer in the cut renders transparent.
+    Model3D {
+        model: ModelId,
+        #[serde(default)]
+        params: FxParams,
+        #[serde(default)]
+        binds: FxBinds,
+    },
+    /// GM17 (D15): frames rendered by another app, referenced on disk and
+    /// never embedded. `pattern`'s run of `#` is the file number, padded to
+    /// the run's length (`renders/shot_####.png`); a relative pattern is
+    /// read from the project's folder. Cut frame `offset` shows file
+    /// `first`; a missing file renders transparent (and is reported), or
+    /// with `hold_last` the nearest earlier file holds.
+    ImageSequence {
+        pattern: String,
+        #[serde(default)]
+        first: u32,
+        #[serde(default)]
+        offset: i32,
+        #[serde(default)]
+        hold_last: bool,
+    },
 }
 
 /// GM10: one plane of a Camera node. `depth` is its z: 0 is the field,
@@ -220,9 +247,34 @@ impl NodeKind {
         }
     }
 
+    /// GM17: a new Model3D node of `model` with every parameter at its
+    /// default.
+    pub fn model3d(model: ModelId) -> Self {
+        Self::Model3D {
+            model,
+            params: crate::r3d::default_params(),
+            binds: FxBinds::default(),
+        }
+    }
+
+    /// GM17: a new ImageSequence node reading `pattern` from file 0 at
+    /// frame 0.
+    pub fn image_sequence(pattern: impl Into<String>) -> Self {
+        Self::ImageSequence {
+            pattern: pattern.into(),
+            first: 0,
+            offset: 0,
+            hold_last: false,
+        }
+    }
+
     pub fn input_count(&self) -> usize {
         match self {
-            Self::DrawingSource { .. } | Self::Solid { .. } | Self::ImageSource { .. } => 0,
+            Self::DrawingSource { .. }
+            | Self::Solid { .. }
+            | Self::ImageSource { .. }
+            | Self::Model3D { .. }
+            | Self::ImageSequence { .. } => 0,
             Self::Transform { .. } | Self::Output => 1,
             Self::Blend { .. } => 2,
             Self::Effect { fx, .. } => fx.inputs(),
@@ -242,6 +294,8 @@ impl NodeKind {
             Self::Effect { fx, .. } => fx.name(),
             Self::Camera { .. } => "Camera",
             Self::Generator { generator, .. } => generator.name(),
+            Self::Model3D { .. } => "Model3D",
+            Self::ImageSequence { .. } => "ImageSequence",
         }
     }
 
@@ -250,9 +304,10 @@ impl NodeKind {
     pub fn references(&self, param: ParamId) -> bool {
         match self {
             Self::Transform { binds, .. } => binds.references(param),
-            Self::Effect { binds, .. } | Self::Camera { binds, .. } | Self::Generator { binds, .. } => {
-                binds.references(param)
-            }
+            Self::Effect { binds, .. }
+            | Self::Camera { binds, .. }
+            | Self::Generator { binds, .. }
+            | Self::Model3D { binds, .. } => binds.references(param),
             _ => false,
         }
     }

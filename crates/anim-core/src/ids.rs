@@ -34,3 +34,5 @@ id_type!(NodeId);
 id_type!(LayerId);
 id_type!(ImageId);
 id_type!(ParamId);
+// GM17: a cut's embedded 3D model (`cut_models`).
+id_type!(ModelId);

@@ -18,6 +18,8 @@
 //! should surface that honestly if a cut still carries legacy vector artwork.
 
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use rayon::prelude::*;
 
@@ -29,6 +31,38 @@ use crate::graph::{BlendMode, Node, NodeKind, PlaneSpec};
 use crate::ids::NodeId;
 use crate::model::Cut;
 use crate::raster::{TILE, f16_bits_to_f32};
+
+/// GM17: what a render reads beyond the cut — the project's folder, where an
+/// ImageSequence's relative paths resolve — and what it reports: a missing
+/// or unreadable frame, each once however many frames show it.
+#[derive(Debug, Default)]
+pub struct RenderEnv {
+    pub base_dir: Option<PathBuf>,
+    warnings: Mutex<Vec<String>>,
+}
+
+impl RenderEnv {
+    pub fn new(base_dir: Option<PathBuf>) -> Self {
+        Self {
+            base_dir,
+            warnings: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Report `msg` (once).
+    pub fn warn(&self, msg: String) {
+        if let Ok(mut w) = self.warnings.lock()
+            && !w.contains(&msg)
+        {
+            w.push(msg);
+        }
+    }
+
+    /// Every warning so far, in the order first reported.
+    pub fn warnings(&self) -> Vec<String> {
+        self.warnings.lock().map(|w| w.clone()).unwrap_or_default()
+    }
+}
 
 /// GM10: where a node renders, in frame coordinates. Everything renders
 /// into the frame itself, except a Camera's planes, which render into the
@@ -418,6 +452,7 @@ fn camera_frame(
     frame: u32,
     (fw, fh): (u32, u32),
     visiting: &mut HashSet<NodeId>,
+    env: &RenderEnv,
 ) -> Vec<f32> {
     let paper = camera::paper(cut, fw, fh);
     let plane_area = Area {
@@ -434,7 +469,7 @@ fn camera_frame(
             continue;
         };
         let z = depths[i];
-        let mut plane = render_node(cut, law, src, frame, plane_area, visiting);
+        let mut plane = render_node(cut, law, src, frame, plane_area, visiting, env);
         let r = st.dof_radius(z);
         if r > 0.0 {
             plane = crate::fx::blur(&Image::from_px(paper.w, paper.h, plane), r, r).px;
@@ -488,6 +523,7 @@ fn render_node(
     frame: u32,
     area: Area,
     visiting: &mut HashSet<NodeId>,
+    env: &RenderEnv,
 ) -> Vec<f32> {
     let (width, height) = (area.rect.w, area.rect.h);
     let empty = || vec![0.0f32; area.len()];
@@ -500,7 +536,7 @@ fn render_node(
     };
     let input = |slot: usize, visiting: &mut HashSet<NodeId>| -> Vec<f32> {
         match node.inputs.get(slot).copied().flatten() {
-            Some((src, _pin)) => render_node(cut, law, src, frame, area, visiting),
+            Some((src, _pin)) => render_node(cut, law, src, frame, area, visiting, env),
             None => empty(),
         }
     };
@@ -586,7 +622,7 @@ fn render_node(
             // GM10 (D9): the camera sees the frame; under another camera's
             // plane its frame lands at the frame's place on that paper.
             let st = CameraState::resolve(cut, params, binds, frame);
-            let px = camera_frame(cut, law, node, planes, &st, frame, (area.fw, area.fh), visiting);
+            let px = camera_frame(cut, law, node, planes, &st, frame, (area.fw, area.fh), visiting, env);
             if area.is_frame() {
                 px
             } else {
@@ -620,6 +656,49 @@ fn render_node(
             };
             crate::generator::render(&v, law, matte.as_ref(), frame, target).px
         }
+        NodeKind::Model3D { model, params, binds } => {
+            // GM17 (D9): the one 3D renderer, shot at the frame; under a
+            // camera's plane the shot lands at the frame's place on the
+            // paper. A missing or unreadable model is transparent.
+            match cut.models.get(model).map(crate::r3d::model_of) {
+                Some(Ok(m)) => {
+                    let v = cut.model_at(params, binds, frame);
+                    let px = crate::r3d::render(&m, &v, law, area.fw, area.fh).px;
+                    if area.is_frame() {
+                        px
+                    } else {
+                        place_frame(&px, area)
+                    }
+                }
+                Some(Err(e)) => {
+                    env.warn(format!("3D model {model}: {e}"));
+                    empty()
+                }
+                None => empty(),
+            }
+        }
+        NodeKind::ImageSequence {
+            pattern,
+            first,
+            offset,
+            hold_last,
+        } => {
+            // GM17 (D15): another app's render, read at render time from
+            // the project's folder; a missing frame is transparent and
+            // reported once.
+            let r = area.rect;
+            crate::r3d::sequence_frame(
+                pattern,
+                *first,
+                *offset,
+                *hold_last,
+                frame,
+                env.base_dir.as_deref(),
+                law,
+                (r.x, r.y, r.w, r.h),
+                &mut |msg| env.warn(msg),
+            )
+        }
     };
     visiting.remove(&id);
     out
@@ -636,8 +715,22 @@ pub fn render_node_px(
     width: u32,
     height: u32,
 ) -> Vec<f32> {
+    render_node_px_env(cut, law, node, frame, width, height, &RenderEnv::default())
+}
+
+/// GM17: [`render_node_px`] reading the project's folder and reporting
+/// through `env` (an ImageSequence's files).
+pub fn render_node_px_env(
+    cut: &Cut,
+    law: ColorLaw,
+    node: NodeId,
+    frame: u32,
+    width: u32,
+    height: u32,
+    env: &RenderEnv,
+) -> Vec<f32> {
     let mut visiting = HashSet::new();
-    render_node(cut, law, node, frame, Area::frame(width, height), &mut visiting)
+    render_node(cut, law, node, frame, Area::frame(width, height), &mut visiting, env)
 }
 
 /// GM10: one node's subtree rendered into `rect` (frame coordinates) of a
@@ -660,7 +753,7 @@ pub fn render_node_rect(
         fw: width,
         fh: height,
     };
-    render_node(cut, law, node, frame, area, &mut visiting)
+    render_node(cut, law, node, frame, area, &mut visiting, &RenderEnv::default())
 }
 
 /// Execute `cut.graph` at `frame` into a premultiplied f32 frame.
@@ -673,9 +766,22 @@ pub fn graph_composite(
     width: u32,
     height: u32,
 ) -> Option<Vec<f32>> {
+    graph_composite_env(cut, law, frame, width, height, &RenderEnv::default())
+}
+
+/// GM17: [`graph_composite`] reading the project's folder and reporting
+/// through `env` (an ImageSequence's files) — the delivery renderer's path.
+pub fn graph_composite_env(
+    cut: &Cut,
+    law: ColorLaw,
+    frame: u32,
+    width: u32,
+    height: u32,
+    env: &RenderEnv,
+) -> Option<Vec<f32>> {
     let output = cut.graph.output?;
     let mut visiting = HashSet::new();
-    Some(render_node(cut, law, output, frame, Area::frame(width, height), &mut visiting))
+    Some(render_node(cut, law, output, frame, Area::frame(width, height), &mut visiting, env))
 }
 
 /// Graph-path render to straight RGBA8 over transparent (PNG-with-alpha).

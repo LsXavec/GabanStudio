@@ -78,6 +78,8 @@ enum Make {
     Node(NodeKind),
     /// "Image (PNG)…" asks for the file first.
     Image,
+    /// GM17: "3D model from file…" asks for the glTF or OBJ first.
+    Model,
 }
 
 /// One entry of the add-node menu.
@@ -234,6 +236,34 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
             make: Make::Node(NodeKind::particles(preset)),
         });
     }
+    // GM17: a node per model the cut holds, a model from a file, and the
+    // frames another app rendered.
+    for (id, m) in &state.cut().models {
+        v.push(Entry {
+            category: "3D",
+            name: format!("3D model: {}", m.name),
+            term: None,
+            aliases: &["model3d", "3d", "layout", "gltf", "obj"],
+            help: "the cut's embedded model, shot by its own camera in the toon look",
+            make: Make::Node(NodeKind::model3d(*id)),
+        });
+    }
+    v.push(Entry {
+        category: "3D",
+        name: "3D model from file…".into(),
+        term: None,
+        aliases: &["model3d", "3d", "import", "gltf", "glb", "obj", "blender"],
+        help: "embeds a glTF or OBJ model in the cut and adds its Model3D node",
+        make: Make::Model,
+    });
+    v.push(Entry {
+        category: "3D",
+        name: "Image sequence".into(),
+        term: None,
+        aliases: &["imagesequence", "sequence", "render", "frames", "exr", "shot"],
+        help: "frames another app rendered, one file per frame (renders/shot_####.png)",
+        make: Make::Node(NodeKind::image_sequence("")),
+    });
     v.extend(out);
     v
 }
@@ -369,11 +399,20 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
         match e.make {
             Make::Node(kind) => state.graph_add_node(kind, menu.world),
             Make::Image => {
+                // GM17: a JPEG or TIFF is stored as the PNG it decodes to.
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PNG image", &["png"])
+                    .add_filter("Image (PNG, JPEG, TIFF)", &["png", "jpg", "jpeg", "tif", "tiff"])
                     .pick_file()
                 {
                     state.graph_import_image(&path, menu.world);
+                }
+            }
+            Make::Model => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("3D model (glTF, OBJ)", anim_core::r3d::FORMATS)
+                    .pick_file()
+                {
+                    state.import_model(&path, menu.world);
                 }
             }
         }
@@ -404,9 +443,11 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
         }
         NodeKind::Transform { .. } => (&["image"], &["the picture it moves, scales and rotates"]),
         NodeKind::Output => (&["image"], &["the cut's final picture"]),
-        NodeKind::DrawingSource { .. } | NodeKind::Solid { .. } | NodeKind::ImageSource { .. } => {
-            (&[], &[])
-        }
+        NodeKind::DrawingSource { .. }
+        | NodeKind::Solid { .. }
+        | NodeKind::ImageSource { .. }
+        | NodeKind::Model3D { .. }
+        | NodeKind::ImageSequence { .. } => (&[], &[]),
     };
     (
         names.get(pin).copied().unwrap_or("input"),
@@ -426,8 +467,11 @@ fn kind_color(kind: &NodeKind) -> Color32 {
             crate::plate::LEGEND
         }
         NodeKind::Blend { .. } => crate::plate::AO,
-        // GM16: a generator makes the cut's own picture, as an image does.
-        NodeKind::Generator { .. } => crate::plate::STRUCK,
+        // GM16: a generator makes the cut's own picture, as an image does;
+        // GM17: so do a 3D model and another app's frames.
+        NodeKind::Generator { .. } | NodeKind::Model3D { .. } | NodeKind::ImageSequence { .. } => {
+            crate::plate::STRUCK
+        }
         // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
         // means refusal or destruction, and the graph's result is
         // neither. Its identity is carried by its Struck edge instead.
@@ -1033,6 +1077,49 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 binds,
             } => {
                 crate::fxui::gen_inspector(ui, state, id, *generator, params, binds);
+            }
+            // GM17: the model's placement, camera and look.
+            NodeKind::Model3D { model, params, binds } => {
+                crate::fxui::model_inspector(ui, state, id, *model, params, binds);
+            }
+            // GM17: the frames another app rendered — `#` is the frame
+            // number, zero-padded; relative names read from the project's
+            // folder.
+            NodeKind::ImageSequence {
+                pattern,
+                first,
+                offset,
+                hold_last,
+            } => {
+                // The name as typed lives in a draft and commits once, when
+                // the field lets go (Enter or a click away): one undo step.
+                let draft = ui.id().with(("sequence pattern", id));
+                let mut text = ui.data(|d| d.get_temp::<String>(draft)).unwrap_or_else(|| pattern.clone());
+                let r = ui
+                    .add(egui::TextEdit::singleline(&mut text).hint_text("renders/shot_####.png"))
+                    .on_hover_text("the files' name, # for the frame number (zero-padded to the #s)");
+                if r.changed() {
+                    ui.data_mut(|d| d.insert_temp(draft, text.clone()));
+                }
+                if r.lost_focus() {
+                    ui.data_mut(|d| d.remove::<String>(draft));
+                    if text != *pattern {
+                        *pattern = text;
+                        changed = true;
+                    }
+                }
+                changed |= ui
+                    .add(egui::DragValue::new(first).prefix("first file "))
+                    .on_hover_text("the number of the file shown at the offset frame")
+                    .changed();
+                changed |= ui
+                    .add(egui::DragValue::new(offset).prefix("at frame "))
+                    .on_hover_text("the cut frame that shows the first file")
+                    .changed();
+                changed |= ui
+                    .checkbox(hold_last, "hold last")
+                    .on_hover_text("a missing file shows the nearest earlier one (the last frame holds)")
+                    .changed();
             }
         }
         if changed {

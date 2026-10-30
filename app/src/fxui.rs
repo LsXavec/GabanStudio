@@ -199,6 +199,28 @@ pub fn gen_inspector(
     }
 }
 
+/// GM17: the selected Model3D node — its model, then the specs' controls
+/// (placement, camera, toon look, outline and pass), as an Effect's.
+pub fn model_inspector(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    id: NodeId,
+    model: anim_core::ids::ModelId,
+    params: &FxParams,
+    binds: &FxBinds,
+) {
+    let name = state.cut().models.get(&model).map(|m| m.name.clone());
+    ui.label(
+        egui::RichText::new(name.as_deref().unwrap_or("model missing: renders transparent"))
+            .color(crate::plate::legend_dim()),
+    );
+    let resolved = state.cut().model_at(params, binds, state.view.frame).values;
+    let specs = anim_core::r3d::MODEL_SPECS;
+    if let Some((params, binds)) = specs_ui(ui, state, id, "Model3D", specs, &resolved, params, binds) {
+        commit_kind(state, id, NodeKind::Model3D { model, params, binds });
+    }
+}
+
 /// Writes `kind` to node `id` as one undo step, unless it is what the node
 /// already holds (a gesture that ends where it began writes nothing).
 fn commit_kind(state: &mut AppState, id: NodeId, kind: NodeKind) {
