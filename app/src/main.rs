@@ -1316,7 +1316,8 @@ impl App {
             }
             // Marked by name AND bank: visible whose it is, filtered
             // out of every config save, gone with the room.
-            e.preset.name = format!("⌂ {}", e.preset.name);
+            // GM16: ◆, not ⌂, which no embedded face draws.
+            e.preset.name = format!("◆ {}", e.preset.name);
             e.preset.bank = SESSION_BANK.to_string();
             installed.push(e.preset);
         }
@@ -5648,7 +5649,7 @@ impl eframe::App for App {
         let layers_cfg = self.config.layers.clone();
         let mut presets = self.config.presets.clone();
         // v0.2.5: the host's brushes ride beside our own while joined
-        // (marked ⌂; the save-back below filters them out — session-
+        // (marked ◆; the save-back below filters them out — session-
         // scoped, never persisted).
         presets.extend(self.session_presets.iter().cloned());
         let mut presets_dirty = false;
@@ -7505,7 +7506,8 @@ impl Editor {
                             // Bound brush preset for this workspace (workflow
                             // stage keeps its own brush).
                             let bound = w.preset.clone().unwrap_or_else(|| "no brush".into());
-                            ui.menu_button(format!("🖌 {bound}"), |ui| {
+                            // GM16: a word, not 🖌, which no embedded face draws.
+                            ui.menu_button(format!("brush: {bound}"), |ui| {
                                 if ui.button("no brush").clicked() {
                                     assign = Some((i, None));
                                     ui.close();

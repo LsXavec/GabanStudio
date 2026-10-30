@@ -593,6 +593,33 @@ fn render_node(
                 place_frame(&px, area)
             }
         }
+        NodeKind::Generator {
+            generator,
+            params,
+            binds,
+        } => {
+            // GM16 (D9): the one implementation of every generator, drawn
+            // in frame coordinates over the area (a camera plane's paper
+            // shows what lies past the frame's edge). The matte pin renders
+            // over the same area.
+            let matte = node
+                .inputs
+                .first()
+                .copied()
+                .flatten()
+                .filter(|_| generator.inputs() > 0)
+                .map(|_| Image::from_px(width, height, input(0, visiting)));
+            let v = cut.gen_at(*generator, params, binds, frame);
+            let target = crate::generator::Target {
+                x: area.rect.x,
+                y: area.rect.y,
+                w: width,
+                h: height,
+                fw: area.fw,
+                fh: area.fh,
+            };
+            crate::generator::render(&v, law, matte.as_ref(), frame, target).px
+        }
     };
     visiting.remove(&id);
     out

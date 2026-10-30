@@ -4181,7 +4181,7 @@ impl AppState {
             for node in cut.graph.nodes() {
                 use anim_core::graph::NodeKind::*;
                 let (col_x, row) = match node.kind {
-                    DrawingSource { .. } | Solid { .. } | ImageSource { .. } => {
+                    DrawingSource { .. } | Solid { .. } | ImageSource { .. } | Generator { .. } => {
                         n_src += 1;
                         (40.0, n_src - 1)
                     }

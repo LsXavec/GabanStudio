@@ -1053,6 +1053,18 @@ impl Cut {
     ) -> crate::fx::FxValues {
         crate::fx::FxValues::resolve(fx, params, binds, |id| self.param_value(id, frame))
     }
+
+    /// GM16: a Generator node's EFFECTIVE parameters at `frame` (fx_at's
+    /// law), read by every render path alike.
+    pub fn gen_at(
+        &self,
+        generator: crate::generator::GenKind,
+        params: &crate::fx::FxParams,
+        binds: &crate::fx::FxBinds,
+        frame: u32,
+    ) -> crate::generator::GenValues {
+        crate::generator::GenValues::resolve(generator, params, binds, |id| self.param_value(id, frame))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

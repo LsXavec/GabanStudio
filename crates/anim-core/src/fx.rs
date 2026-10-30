@@ -122,6 +122,9 @@ pub enum ParamKind {
     /// GM13: exact chip → chip pairs (a palette variant's map), set from the
     /// palette, never by a column.
     ColorMap,
+    /// GM16: a string (a Text generator's lines), typed in the inspector,
+    /// never driven by a column.
+    Text { default: &'static str },
 }
 
 /// One parameter of an FX kind: the inspector, the defaults and the binds
@@ -152,20 +155,23 @@ impl ParamSpec {
                 map: Vec::new(),
                 from: String::new(),
             },
+            ParamKind::Text { default } => FxValue::Text {
+                text: default.to_string(),
+            },
         }
     }
 
     /// Can a param column drive it? A number, a flag and a choice read the
     /// column's value, and a colour mixes its chip toward its second chip
     /// ([`ParamSpec::to_key`]) by the column's 0–1. A file and a colour map
-    /// (GM13) cannot.
+    /// (GM13) cannot, nor a text (GM16).
     pub fn bindable(&self) -> bool {
         match self.kind {
             ParamKind::Float { .. }
             | ParamKind::Color { .. }
             | ParamKind::Bool { .. }
             | ParamKind::Choice { .. } => true,
-            ParamKind::Blob | ParamKind::ColorMap => false,
+            ParamKind::Blob | ParamKind::ColorMap | ParamKind::Text { .. } => false,
         }
     }
 
@@ -195,7 +201,8 @@ impl ParamSpec {
                 }
             }
             (ParamKind::Blob, Some(v @ FxValue::Blob { .. }))
-            | (ParamKind::ColorMap, Some(v @ FxValue::Map { .. })) => v.clone(),
+            | (ParamKind::ColorMap, Some(v @ FxValue::Map { .. }))
+            | (ParamKind::Text { .. }, Some(v @ FxValue::Text { .. })) => v.clone(),
             _ => self.default_value(),
         }
     }
@@ -227,14 +234,15 @@ impl ParamSpec {
                 let mix = |i: usize| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * t).round() as u8;
                 Some(FxValue::Color([mix(0), mix(1), mix(2), mix(3)]))
             }
-            ParamKind::Blob | ParamKind::ColorMap => None,
+            ParamKind::Blob | ParamKind::ColorMap | ParamKind::Text { .. } => None,
         }
     }
 }
 
 /// One stored parameter value (untagged JSON: a number, a bool, an RGBA
-/// array, a choice name, and GM13's `{"blob": key}` and
-/// `{"map": [[chip, chip], ...], "from": variant}` objects).
+/// array, a choice name, GM13's `{"blob": key}` and
+/// `{"map": [[chip, chip], ...], "from": variant}` objects, and GM16's
+/// `{"text": string}`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum FxValue {
@@ -251,6 +259,9 @@ pub enum FxValue {
         #[serde(default)]
         from: String,
     },
+    /// GM16: a text parameter's string, as `{"text": "..."}` (a bare string
+    /// is a choice name).
+    Text { text: String },
 }
 
 impl std::fmt::Display for FxValue {
@@ -272,6 +283,7 @@ impl std::fmt::Display for FxValue {
                 }
                 write!(f, ")")
             }
+            Self::Text { text } => write!(f, "text:{text:?}"),
         }
     }
 }
@@ -550,7 +562,7 @@ const GRADE_SPECS: &[ParamSpec] = &[
     float("tint", "tint (magenta–green)", "Magenta (positive) or green (negative): a green gain.", -1.0, 1.0, 0.0, 0.01),
 ];
 
-const fn color(key: &'static str, label: &'static str, help: &'static str, default: [u8; 4]) -> ParamSpec {
+pub(crate) const fn color(key: &'static str, label: &'static str, help: &'static str, default: [u8; 4]) -> ParamSpec {
     ParamSpec {
         key,
         label,
@@ -559,7 +571,7 @@ const fn color(key: &'static str, label: &'static str, help: &'static str, defau
     }
 }
 
-const fn choice(
+pub(crate) const fn choice(
     key: &'static str,
     label: &'static str,
     help: &'static str,
@@ -577,7 +589,7 @@ const fn choice(
     }
 }
 
-const fn flag(key: &'static str, label: &'static str, help: &'static str, default: bool) -> ParamSpec {
+pub(crate) const fn flag(key: &'static str, label: &'static str, help: &'static str, default: bool) -> ParamSpec {
     ParamSpec {
         key,
         label,

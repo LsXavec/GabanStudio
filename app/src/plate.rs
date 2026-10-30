@@ -168,7 +168,7 @@ pub fn device_px(n: f32, ppp: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// The type plate (§2.2). IBM Plex, four static cuts + a JP subset, installed
+// The type plate (§2.2). IBM Plex, four static cuts + the JP Bold, installed
 // once at boot. Static instances, not variable — determinism at 9.5pt beats
 // an axis nobody drags. Tabular figures are structurally unavailable (epaint
 // shapes with an empty feature list), so every digit column is Mono by law.
@@ -186,11 +186,19 @@ pub fn mono_semibold() -> FontFamily {
 
 /// Install the Plex stack and the type scale. Proportional = Plex Sans
 /// Regular; Monospace = Plex Mono Medium; two named families carry the
-/// SemiBold cuts. The JP subset (kana + the pipeline's kanji, cut from
-/// IBMPlexSansJP-Bold) rides second in every family so 原画 falls through
-/// per-glyph automatically; egui's default fonts stay at the tail so an
-/// unexpected glyph degrades to a drawn shape, never tofu.
+/// SemiBold cuts. IBM Plex Sans JP Bold (GM16: the whole face, the
+/// engine's lettering static, no longer a subset) rides second in every
+/// family so 原画 falls through per-glyph automatically; egui's default
+/// fonts stay at the tail so an unexpected glyph degrades to a drawn shape,
+/// never tofu.
 pub fn install_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(font_definitions());
+    install_type_scale(ctx);
+}
+
+/// The Plex stack as egui font definitions (what [`install_fonts`] sets;
+/// GM16: the glyph-coverage test reads every family's stack from here).
+pub fn font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     // GM11 (D16): Plex Sans Regular and Mono Medium are the engine's own
     // statics (the burn-ins rasterise them too) — the bytes live once.
@@ -205,16 +213,21 @@ pub fn install_fonts(ctx: &egui::Context) {
             "plex-mono-sb",
             &include_bytes!("../assets/fonts/IBMPlexMono-SemiBold.ttf")[..],
         ),
-        (
-            "plex-jp",
-            &include_bytes!("../assets/fonts/IBMPlexSansJP-Bold.subset.otf")[..],
-        ),
+        // GM16: the whole JP Bold, the generators' lettering face — one
+        // copy of its bytes for the UI and the burn-in alike (D16).
+        ("plex-jp", anim_core::text::PLEX_SANS_JP),
     ] {
         fonts
             .font_data
             .insert(name.to_owned(), egui::FontData::from_static(bytes).into());
     }
 
+    // GM16: egui's Hack closes the proportional tail too — of the whole
+    // stack only it draws ▾ and ▸ (the menus' marks; genui_glyph_coverage).
+    // Last, so it draws nothing another face has.
+    if let Some(prop) = fonts.families.get_mut(&FontFamily::Proportional) {
+        prop.push("Hack".to_owned());
+    }
     // Capture egui's default stacks BEFORE prepending, so the named families
     // inherit the same symbol/emoji tail the built-ins keep.
     let default_prop = fonts.families[&FontFamily::Proportional].clone();
@@ -231,8 +244,10 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mut msb = vec!["plex-mono-sb".to_owned(), "plex-jp".to_owned()];
     msb.extend(default_mono);
     fonts.families.insert(mono_semibold(), msb);
-    ctx.set_fonts(fonts);
+    fonts
+}
 
+fn install_type_scale(ctx: &egui::Context) {
     // The type scale (§2.2): body/buttons 11.5, engraved small 9.5, digit
     // columns Mono 11. Heading maps to the SemiBold cut so any stray
     // heading-styled text lands on the engraving face, not a bigger Regular.
@@ -1037,5 +1052,137 @@ mod tests {
         assert_eq!(AKA, Color32::from_rgb(0xE4, 0x52, 0x2F));
         assert_eq!(TALLY, Color32::from_rgb(0xEF, 0xC2, 0x4A));
         assert_eq!(PAPER, Color32::from_rgb(0xF2, 0xEE, 0xE6));
+    }
+
+    /// GM16: the characters of every string and char literal in `src`
+    /// (comments skipped; `\u{…}` escapes decoded).
+    fn literal_chars(src: &str) -> Vec<char> {
+        let c: Vec<char> = src.chars().collect();
+        let mut out = Vec::new();
+        // An escape at `i` (just past the backslash): the char it spells
+        // when it is `\u{…}`, and where the literal goes on.
+        let escape = |i: usize| -> (Option<char>, usize) {
+            if c.get(i) == Some(&'u') && c.get(i + 1) == Some(&'{') {
+                let end = (i + 2..c.len()).find(|&j| c[j] == '}').unwrap_or(c.len() - 1);
+                let hex: String = c[i + 2..end].iter().filter(|ch| **ch != '_').collect();
+                (u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32), end + 1)
+            } else {
+                (None, i + 1)
+            }
+        };
+        let mut i = 0;
+        while i < c.len() {
+            match c[i] {
+                '/' if c.get(i + 1) == Some(&'/') => {
+                    while i < c.len() && c[i] != '\n' {
+                        i += 1;
+                    }
+                }
+                '/' if c.get(i + 1) == Some(&'*') => {
+                    let mut depth = 0;
+                    while i < c.len() {
+                        if c[i] == '/' && c.get(i + 1) == Some(&'*') {
+                            depth += 1;
+                            i += 2;
+                        } else if c[i] == '*' && c.get(i + 1) == Some(&'/') {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        } else {
+                            i += 1;
+                        }
+                    }
+                }
+                'r' if matches!(c.get(i + 1), Some('"') | Some('#')) => {
+                    let mut j = i + 1;
+                    while c.get(j) == Some(&'#') {
+                        j += 1;
+                    }
+                    let hashes = j - i - 1;
+                    if c.get(j) != Some(&'"') {
+                        i = j; // a raw identifier
+                        continue;
+                    }
+                    j += 1;
+                    while j < c.len() && !(c[j] == '"' && (1..=hashes).all(|k| c.get(j + k) == Some(&'#'))) {
+                        out.push(c[j]);
+                        j += 1;
+                    }
+                    i = j + 1 + hashes;
+                }
+                '"' => {
+                    i += 1;
+                    while i < c.len() && c[i] != '"' {
+                        if c[i] == '\\' {
+                            let (ch, next) = escape(i + 1);
+                            out.extend(ch);
+                            i = next;
+                        } else {
+                            out.push(c[i]);
+                            i += 1;
+                        }
+                    }
+                    i += 1;
+                }
+                '\'' if c.get(i + 1) == Some(&'\\') => {
+                    let (ch, next) = escape(i + 2);
+                    out.extend(ch);
+                    i = (next..c.len()).find(|&j| c[j] == '\'').map_or(c.len(), |j| j + 1);
+                }
+                // A char literal, not a lifetime.
+                '\'' if c.get(i + 2) == Some(&'\'') => {
+                    out.push(c[i + 1]);
+                    i += 3;
+                }
+                _ => i += 1,
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn genui_literal_scanner_reads_strings_and_skips_comments() {
+        let src = "// 原画 in a comment\n/* 版 /* nested 版 */ */ let a = \"仕上\"; let b = r#\"撮\"影\"#;\n\
+                   let c = '…'; let d = '\\u{2014}'; fn f<'a>(x: &'a str) {} let e = \"\\u{30BB}\\\"\";";
+        let got: String = literal_chars(src).into_iter().filter(|c| !c.is_ascii()).collect();
+        assert_eq!(got, "仕上撮影…\u{2014}セ");
+    }
+
+    /// Every non-ASCII character in the app's string literals draws in
+    /// every family of the embedded stack (D7: no tofu; GM16: the JP face is
+    /// the whole Bold, so kanji in labels and lettering defaults render).
+    #[test]
+    fn genui_glyph_coverage() {
+        fn rs_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    rs_files(&p, out);
+                } else if p.extension().is_some_and(|x| x == "rs") {
+                    out.push(p);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        rs_files(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        assert!(files.len() > 20, "the app's sources: {}", files.len());
+        let mut chars: Vec<char> = files
+            .iter()
+            .flat_map(|f| literal_chars(&std::fs::read_to_string(f).unwrap()))
+            .filter(|c| !c.is_ascii() && !c.is_whitespace())
+            .collect();
+        chars.sort_unstable();
+        chars.dedup();
+        assert!(chars.contains(&'→') && chars.contains(&'▾'), "the scan finds the labels' symbols");
+        let defs = font_definitions();
+        for (family, names) in &defs.families {
+            let stack: Vec<&[u8]> = names.iter().map(|n| &defs.font_data[n].font[..]).collect();
+            let missing = anim_core::text::uncovered(&stack, chars.iter().copied());
+            assert!(missing.is_empty(), "{family:?} has no glyph for {missing:?}");
+        }
+        // The lettering's default words are in the engine's JP face itself.
+        assert!(anim_core::text::uncovered(&[anim_core::text::PLEX_SANS_JP], "セリフ".chars()).is_empty());
     }
 }

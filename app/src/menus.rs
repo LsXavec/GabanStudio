@@ -323,7 +323,8 @@ impl crate::Editor {
             .default_width(320.0)
             .show(ctx, |ui| {
                 plate::surface(ui);
-                // Latin only: the embedded JP subset has 画 but not 版.
+                // Latin, as the legends are (GM16: the embedded JP face is
+                // whole now, so 画版 would draw too).
                 plate::legend(ui, "gaban studio");
                 plate::value(ui, &format!("version {}", env!("CARGO_PKG_VERSION")));
                 ui.label("A node-graph 2D animation studio: draw, time, paint, edit.");

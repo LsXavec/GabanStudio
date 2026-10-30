@@ -6,6 +6,7 @@
 //! render path when the GPU graph compositor lands.
 
 use anim_core::fx::FxKind;
+use anim_core::generator::{GenKind, Preset};
 use anim_core::graph::{BlendMode, NodeKind};
 use anim_core::ids::NodeId;
 use anim_core::model::LayerRole;
@@ -198,7 +199,8 @@ fn entries(state: &AppState) -> Vec<Entry> {
 }
 
 /// GM13: what the add menu lists — [`entries`] with the satsuei look's
-/// kinds as their own Look category before the Output.
+/// kinds as their own Look category before the Output; GM16: then the
+/// Generators, with a Particles entry per preset.
 fn menu_entries(state: &AppState) -> Vec<Entry> {
     let mut v = entries(state);
     let out = v.pop();
@@ -210,6 +212,26 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
             aliases: fx.aliases(),
             help: fx.help(),
             make: Make::Node(NodeKind::effect(fx)),
+        });
+    }
+    for &generator in GenKind::ALL {
+        v.push(Entry {
+            category: "Generators",
+            name: generator.name().into(),
+            term: generator.term(),
+            aliases: generator.aliases(),
+            help: generator.help(),
+            make: Make::Node(NodeKind::generator(generator)),
+        });
+    }
+    for &preset in Preset::ALL {
+        v.push(Entry {
+            category: "Generators",
+            name: format!("Particles: {}", preset.name()),
+            term: Some(preset.term()),
+            aliases: preset.aliases(),
+            help: GenKind::Particles.help(),
+            make: Make::Node(NodeKind::particles(preset)),
         });
     }
     v.extend(out);
@@ -374,6 +396,7 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
             &["the layer underneath", "the layer composited on top of it"],
         ),
         NodeKind::Effect { fx, .. } => (fx.input_names(), fx.input_help()),
+        NodeKind::Generator { generator, .. } => (generator.input_names(), generator.input_help()),
         // GM10: one pin per plane, named for its place in the stack.
         NodeKind::Camera { .. } => {
             let name = anim_core::camera::PLANE_NAMES.get(pin).copied().unwrap_or("plane");
@@ -403,6 +426,8 @@ fn kind_color(kind: &NodeKind) -> Color32 {
             crate::plate::LEGEND
         }
         NodeKind::Blend { .. } => crate::plate::AO,
+        // GM16: a generator makes the cut's own picture, as an image does.
+        NodeKind::Generator { .. } => crate::plate::STRUCK,
         // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
         // means refusal or destruction, and the graph's result is
         // neither. Its identity is carried by its Struck edge instead.
@@ -784,6 +809,8 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
             title.on_hover_text(fx.help());
         } else if let NodeKind::Camera { .. } = &kind {
             title.on_hover_text(CAMERA_HELP);
+        } else if let NodeKind::Generator { generator, .. } = &kind {
+            title.on_hover_text(generator.help());
         }
         match &mut kind {
             NodeKind::Solid { rgba } => {
@@ -981,6 +1008,14 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
             } => {
                 crate::fxui::camera_inspector(ui, state, id, planes, params, binds);
             }
+            // GM16: the generator's specs, as an Effect's.
+            NodeKind::Generator {
+                generator,
+                params,
+                binds,
+            } => {
+                crate::fxui::gen_inspector(ui, state, id, *generator, params, binds);
+            }
         }
         if changed {
             state.graph_set_kind(id, kind);
@@ -1064,6 +1099,37 @@ mod tests {
         h.perform(Action::Undo);
         assert_eq!(h.state().cut().graph.nodes().count(), count);
         assert!(!h.state().graph_layout().contains_key(&id));
+    }
+
+    #[test]
+    fn genui_typing_speed_and_enter_adds_speed_lines_in_one_undo_step() {
+        let mut h = graph_pane();
+        h.point_at(pos2(700.0, 520.0));
+        h.key(egui::Key::Tab);
+        assert!(h.typing(), "the menu's field has the keys\n{}", h.describe());
+        h.type_text("speed");
+        let depth = h.state().engine.history_len();
+        let count = h.state().cut().graph.nodes().count();
+        h.key(egui::Key::Enter);
+        let s = h.state();
+        assert!(s.graph_ui.add_menu.is_none(), "Enter adds and closes");
+        assert_eq!(s.engine.history_len(), depth + 1, "one history entry");
+        assert_eq!(s.cut().graph.nodes().count(), count + 1);
+        let id = s.selected_node.expect("the new node is selected");
+        let kind = &s.cut().graph.node(id).unwrap().kind;
+        assert!(
+            matches!(kind, NodeKind::Generator { generator: GenKind::SpeedLines, .. }),
+            "{kind:?}"
+        );
+        assert!(crate::graphcomp::needs_cpu(kind), "drawn on the CPU in every view (D9)");
+        // The inspector shows every parameter of the kind's specs.
+        h.run();
+        let keys: Vec<&str> = h.state().graph_ui.fx.fields.iter().map(|(k, _)| *k).collect();
+        for spec in GenKind::SpeedLines.specs() {
+            assert!(keys.contains(&spec.key), "no '{}' field in {keys:?}\n{}", spec.key, h.describe());
+        }
+        h.perform(Action::Undo);
+        assert_eq!(h.state().cut().graph.nodes().count(), count);
     }
 
     #[test]

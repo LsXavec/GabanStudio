@@ -2712,3 +2712,23 @@ what was not verified.
   A card stacks top-down at one size (the board's wrapped, centred row flow had pushed a card's combo
   and notes menu below the visible board, where no click lands). The command palette reads ā ī ū ē ō as
   the plain vowel ("shinko" finds the Shinkō board). 14 `board_tests`, 18 `cutboard_*`.
+- 2026-10-29 — GM16 Generators: particles, speed lines, lettering. Engine: `generator.rs` (not `gen.rs`:
+  `gen` is reserved in Rust 2024, so the module is `anim_core::generator` and the node is
+  `NodeKind::Generator { generator, params, binds }`) — `GenKind` Particles / Speed lines / Focus lines /
+  Text / Balloon with specs, help, romaji terms and aliases; analytic particles (births `i/rate − preroll`,
+  each choice a hash of seed, index and stream, closed-form motion with gravity, wind and a seeded
+  wobble; point, line, rect and matte emitters; dot, streak, soft disc, petal and snowflake; normal or
+  add) and the six presets (Sparks, Snow, Rain, Dust, Sakura petals, Embers); tapered speed lines with a
+  clear band, focus lines stopping at a clear ellipse, held / every frame / on twos; SDF balloons
+  (ellipse, rounded rect, cloud, burst, tail to a point, inner stroke). `ParamKind::Text` / `FxValue::Text`
+  (`{"text": …}`, never bindable). `text.rs`: horizontal and tategaki layout (columns right to left,
+  dashes and brackets turned, 、。 in the top-right corner, small kana nudged, two-digit tate-chu-yoko,
+  line-start kinsoku hanging, wrap), outlines by dilation, the full Plex Sans JP Bold as an engine static.
+  The CPU renderer's Generator arm draws over a camera plane's paper; the eval recipe spells the motion
+  frame so still generators cache-hit. App: the Generators category (and a Particles entry per preset)
+  in the add menu, the inspector from the specs with a text field, `needs_cpu`. The UI's JP fallback is
+  the full face (the subset file stays on disk, unused); the glyph-coverage test found ▾ ▸ ⌂ 🖌 drawn by
+  no face of the stack, so egui's Hack closes the proportional tail (▾ ▸) and the host-preset mark is ◆,
+  the workspace brush menu "brush: …". Vertical Latin stays upright one per cell (no rotated runs;
+  ab_glyph has no `vert` feature, so vertical forms are turned or shifted horizontal glyphs). 19
+  `gen_tests`, 3 `genui_*`.

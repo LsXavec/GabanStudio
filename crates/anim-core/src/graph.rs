@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use crate::command::{Command, CutRef};
 use crate::error::{EngineError, Result};
 use crate::fx::{FxBinds, FxKind, FxParams};
+use crate::generator::{GenKind, Preset};
 use crate::ids::{ColumnId, ImageId, NodeId, ParamId};
 use crate::model::{Cut, LayerRole};
 
@@ -131,6 +132,16 @@ pub enum NodeKind {
         #[serde(default)]
         binds: FxBinds,
     },
+    /// GM16: a picture made from parameters — particles, speed or focus
+    /// lines, lettering, a balloon — drawn by [`crate::generator`] on the
+    /// CPU in every view (D9). Parameters resolve and bind as an Effect's do.
+    Generator {
+        generator: GenKind,
+        #[serde(default)]
+        params: FxParams,
+        #[serde(default)]
+        binds: FxBinds,
+    },
 }
 
 /// GM10: one plane of a Camera node. `depth` is its z: 0 is the field,
@@ -190,6 +201,25 @@ impl NodeKind {
         }
     }
 
+    /// GM16: a new Generator node of `generator` with every parameter at
+    /// its default.
+    pub fn generator(generator: GenKind) -> Self {
+        Self::Generator {
+            generator,
+            params: generator.defaults(),
+            binds: FxBinds::default(),
+        }
+    }
+
+    /// GM16: a Particles generator set to a preset's look.
+    pub fn particles(preset: Preset) -> Self {
+        Self::Generator {
+            generator: GenKind::Particles,
+            params: preset.params(),
+            binds: FxBinds::default(),
+        }
+    }
+
     pub fn input_count(&self) -> usize {
         match self {
             Self::DrawingSource { .. } | Self::Solid { .. } | Self::ImageSource { .. } => 0,
@@ -197,6 +227,7 @@ impl NodeKind {
             Self::Blend { .. } => 2,
             Self::Effect { fx, .. } => fx.inputs(),
             Self::Camera { planes, .. } => planes.len(),
+            Self::Generator { generator, .. } => generator.inputs(),
         }
     }
 
@@ -210,6 +241,7 @@ impl NodeKind {
             Self::Output => "Output",
             Self::Effect { fx, .. } => fx.name(),
             Self::Camera { .. } => "Camera",
+            Self::Generator { generator, .. } => generator.name(),
         }
     }
 
@@ -218,7 +250,9 @@ impl NodeKind {
     pub fn references(&self, param: ParamId) -> bool {
         match self {
             Self::Transform { binds, .. } => binds.references(param),
-            Self::Effect { binds, .. } | Self::Camera { binds, .. } => binds.references(param),
+            Self::Effect { binds, .. } | Self::Camera { binds, .. } | Self::Generator { binds, .. } => {
+                binds.references(param)
+            }
             _ => false,
         }
     }

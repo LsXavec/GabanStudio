@@ -634,12 +634,15 @@ impl GraphCompositor {
                 slot
             }
             NodeKind::Output => self.render_input(cut, &inputs, 0, frame, paint, visiting),
-            NodeKind::Effect { .. } | NodeKind::Camera { .. } | NodeKind::DrawingSource { .. } => {
+            NodeKind::Effect { .. }
+            | NodeKind::Camera { .. }
+            | NodeKind::DrawingSource { .. }
+            | NodeKind::Generator { .. } => {
                 // GM9 (D9): the subtree renders on the CPU worker; this shows
                 // its upload — the last one while a newer render is pending.
                 // GM10: a Camera too (its paper and sampling are CPU maths);
                 // GM13: a role pass or trace-line absorb (the plain source
-                // took the arm above).
+                // took the arm above); GM16: every generator.
                 let slot = self.acquire_cleared();
                 if let Some(&hash) = self.fx_hashes.get(&id) {
                     let key = FxKey { node: id, frame, hash };
@@ -905,9 +908,12 @@ impl GraphCompositor {
 
 /// Does this node's maths live only on the CPU? (D9: no forked FX maths;
 /// GM10: nor camera maths — a Camera's planes render at the paper; GM13:
-/// nor a role pass or a trace-line absorb.)
+/// nor a role pass or a trace-line absorb; GM16: nor a generator's.)
 pub fn needs_cpu(kind: &NodeKind) -> bool {
-    matches!(kind, NodeKind::Effect { .. } | NodeKind::Camera { .. }) || kind.is_filtered_source()
+    matches!(
+        kind,
+        NodeKind::Effect { .. } | NodeKind::Camera { .. } | NodeKind::Generator { .. }
+    ) || kind.is_filtered_source()
 }
 
 /// Does `node`, or anything feeding it, need the CPU?

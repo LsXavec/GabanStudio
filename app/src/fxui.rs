@@ -10,6 +10,7 @@
 
 use anim_core::camera::{CAMERA_SPECS, MAX_PLANES, PLANE_HELP, PLANE_NAMES};
 use anim_core::fx::{self, FxBinds, FxKind, FxParams, FxValue, ParamKind, ParamSpec};
+use anim_core::generator::GenKind;
 use anim_core::graph::{NodeKind, PlaneSpec};
 use anim_core::ids::{NodeId, ParamId};
 use eframe::egui;
@@ -170,6 +171,32 @@ pub fn camera_inspector(
             binds,
         },
     );
+}
+
+/// GM16: the selected Generator node's parameters — its kind's specs'
+/// controls, as an Effect's (a Text parameter is a text field that commits
+/// when it loses focus).
+pub fn gen_inspector(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    id: NodeId,
+    generator: GenKind,
+    params: &FxParams,
+    binds: &FxBinds,
+) {
+    let resolved = state.cut().gen_at(generator, params, binds, state.view.frame).values;
+    let specs = generator.specs();
+    if let Some((params, binds)) = specs_ui(ui, state, id, generator.name(), specs, &resolved, params, binds) {
+        commit_kind(
+            state,
+            id,
+            NodeKind::Generator {
+                generator,
+                params,
+                binds,
+            },
+        );
+    }
 }
 
 /// Writes `kind` to node `id` as one undo step, unless it is what the node
@@ -348,6 +375,22 @@ fn specs_ui(
                     commit = state
                         .palette_variant_map(&name)
                         .map(|map| (key.to_string(), FxValue::Map { map, from: name }));
+                }
+                r.rect
+            }
+            // GM16: a text parameter — the words as typed (Enter starts a
+            // new line), shown live and committed once, when the field lets
+            // go of the keyboard (one undo step per edit).
+            (ParamKind::Text { .. }, FxValue::Text { mut text }) => {
+                let r = ui
+                    .add(egui::TextEdit::multiline(&mut text).desired_rows(2).desired_width(f32::INFINITY))
+                    .on_hover_text(spec.help);
+                if r.changed() {
+                    state.graph_ui.fx.live = Some((id, key.to_string(), FxValue::Text { text: text.clone() }));
+                }
+                if r.lost_focus() {
+                    state.graph_ui.fx.live = None;
+                    commit = Some((key.to_string(), FxValue::Text { text }));
                 }
                 r.rect
             }

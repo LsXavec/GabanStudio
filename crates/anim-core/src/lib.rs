@@ -23,6 +23,7 @@ pub mod eval;
 pub mod export;
 pub mod fill;
 pub mod fx;
+pub mod generator;
 pub mod graph;
 pub mod ids;
 pub mod look;

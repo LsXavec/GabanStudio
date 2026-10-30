@@ -215,6 +215,27 @@ impl Evaluator {
                     ins.join(", ")
                 ))
             }
+            NodeKind::Generator { generator, params, binds } => {
+                // GM16: the RESOLVED parameters, the frame the picture moves
+                // with ("-" when still: held lines, text and balloons
+                // cache-hit across frames; on twos, frames 2k and 2k + 1
+                // share one), and the matte pin ("-" unwired).
+                let mut ins = Vec::with_capacity(generator.inputs());
+                for slot in 0..generator.inputs() {
+                    ins.push(match inputs.get(slot).copied().flatten() {
+                        Some(_) => input_value(slot, self, visiting)?.recipe().to_string(),
+                        None => "-".to_string(),
+                    });
+                }
+                let v = cut.gen_at(*generator, params, binds, frame);
+                let moving = v.motion(frame).map_or_else(|| "-".to_string(), |f| f.to_string());
+                Value::image(format!(
+                    "gen({}, {}, f={moving}, [{}])",
+                    generator.name(),
+                    v.recipe(),
+                    ins.join(", ")
+                ))
+            }
         };
 
         visiting.remove(&id);
