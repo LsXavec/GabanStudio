@@ -1500,6 +1500,19 @@ pub fn sequence_file(
         .or(Some(path))
 }
 
+/// GM22: what an ImageSequence's eval value folds of the file it shows —
+/// its length and modified time (ns since the epoch): a stat, never a read.
+/// None when there is no such file.
+pub fn sequence_stamp(path: &Path) -> Option<(u64, u128)> {
+    let meta = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    Some((meta.len(), ns))
+}
+
 /// The pattern and first number for a sequence picked by one of its files:
 /// the last run of digits in the file's name becomes as many `#`
 /// (`shot_0001.png` is `shot_####.png` from 1), and a file under `base`

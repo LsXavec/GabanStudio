@@ -841,6 +841,42 @@ fn relative_frames_resolve_against_the_project_folder_and_a_missing_one_warns_on
 }
 
 #[test]
+fn the_sequence_value_folds_the_shown_files_length_and_time_once_its_path_resolves() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("shot_0001.png");
+    let red = png_bytes(4, 4, [255, 0, 0, 255]);
+    std::fs::write(&file, &red).unwrap();
+    let (mut engine, at) = seq_rig("shot_####.png", 1, false);
+    let value = |e: &mut Engine| e.eval(at.scene, at.cut, 0).unwrap().recipe().to_string();
+    // A relative pattern with no project folder keeps today's value.
+    assert_eq!(value(&mut engine), "out(seq(\"shot_####.png\", n=1, hold=false, fit=false))");
+    // From the project's folder it folds the file's length and time.
+    engine.evaluator.set_base(Some(dir.path().to_path_buf()));
+    let stamped = value(&mut engine);
+    assert!(stamped.contains(&format!("file={}@", red.len())), "{stamped}");
+    engine.evaluator.invalidate_all();
+    assert_eq!(value(&mut engine), stamped, "an unchanged file keeps its value");
+    // Its time alone moves it, and so does its length.
+    let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(t).unwrap();
+    engine.evaluator.invalidate_all();
+    let touched = value(&mut engine);
+    assert!(touched != stamped && touched.contains("@1000000000000000"), "{touched}");
+    let bigger = png_bytes(8, 8, [0, 0, 255, 255]);
+    std::fs::write(&file, &bigger).unwrap();
+    engine.evaluator.invalidate_all();
+    let rewritten = value(&mut engine);
+    assert!(rewritten != touched && rewritten.contains(&format!("file={}@", bigger.len())), "{rewritten}");
+    // An absolute pattern resolves with no folder; a missing file says "-".
+    let abs = dir.path().join("shot_####.png").to_string_lossy().into_owned();
+    let (mut absolute, at) = seq_rig(&abs, 1, false);
+    let v = absolute.eval(at.scene, at.cut, 0).unwrap().recipe().to_string();
+    assert!(v.contains(&format!("file={}@", bigger.len())), "{v}");
+    assert!(absolute.eval(at.scene, at.cut, 1).unwrap().recipe().contains("file=-)"), "file 2 is missing");
+    assert_eq!(r3d::sequence_stamp(&dir.path().join("nothing.png")), None);
+}
+
+#[test]
 fn a_new_sequence_counts_from_one_and_a_picked_file_names_its_pattern() {
     let NodeKind::ImageSequence { first, offset, hold_last, fit, .. } = NodeKind::image_sequence("shot_####.png")
     else {

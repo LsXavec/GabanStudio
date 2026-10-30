@@ -504,9 +504,18 @@ pub struct RamPreview {
     shown: Option<(CutId, u32, u64)>,
     /// GM17: the project's folder (relative ImageSequence frames).
     base_dir: Option<std::path::PathBuf>,
+    /// GM22: files on disk changed (a reload): recheck at the next sync as
+    /// an edit does.
+    stale: bool,
 }
 
 impl RamPreview {
+    /// GM22: image sequences were reloaded: the held frames are rechecked
+    /// against their new keys at the next sync (an unchanged frame stays).
+    pub fn files_changed(&mut self) {
+        self.stale = true;
+    }
+
     /// GM17: read relative frames from `dir` (the project's folder; None
     /// for an unsaved project). Another folder starts afresh, as another
     /// look does.
@@ -572,7 +581,7 @@ impl RamPreview {
             self.look = Some(look);
             self.checked = rev;
         }
-        if rev != self.checked {
+        if rev != self.checked || std::mem::take(&mut self.stale) {
             // The pass draws the document as it was: let it go.
             self.pass = None;
             self.recheck(engine, look);

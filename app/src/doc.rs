@@ -959,6 +959,42 @@ impl AppState {
         self.file_path.as_deref().and_then(|p| p.parent()).map(|d| d.to_path_buf())
     }
 
+    /// GM22: the evaluator stats an ImageSequence's files from the
+    /// project's folder (each UI frame: a compare; another folder drops the
+    /// values).
+    pub fn sync_eval_base(&mut self) {
+        let dir = self.project_dir();
+        self.engine.evaluator.set_base(dir);
+    }
+
+    /// GM22: File ▸ Reload image sequences (and the window regaining
+    /// focus): every ImageSequence node's values and their downstream are
+    /// dropped, so the next eval stats the files again — a re-rendered file
+    /// changes only the frames that show it. A look at the disk: no undo
+    /// step, nothing dirty. The number of sequence nodes.
+    pub fn reload_sequences(&mut self) -> usize {
+        self.sync_eval_base();
+        let mut stale = HashSet::new();
+        let mut n = 0;
+        for scene in &self.engine.project.scenes {
+            for cut in &scene.cuts {
+                let seqs: Vec<NodeId> = cut
+                    .graph
+                    .nodes()
+                    .filter(|node| matches!(node.kind, anim_core::graph::NodeKind::ImageSequence { .. }))
+                    .map(|node| node.id)
+                    .collect();
+                n += seqs.len();
+                stale.extend(cut.graph.downstream_closure(&seqs));
+            }
+        }
+        if n > 0 {
+            self.engine.evaluator.invalidate_nodes(&stale);
+            self.ram.files_changed();
+        }
+        n
+    }
+
     /// GM17: what a render could not read (a missing frame, a relative
     /// pattern in an unsaved project), said once on the status lane.
     pub fn note_render_warnings(&mut self, warnings: Vec<String>) {

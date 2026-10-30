@@ -3151,6 +3151,34 @@ impl Editor {
                     "final look off: the composite shows every layer".into()
                 };
             }
+            // GM22: the canvas's 3D underlay (a view, kept for the session:
+            // no undo step, the document clean) — refused with no model.
+            Action::Underlay3d => {
+                let u = &mut self.canvas.underlay;
+                if !u.on && view3d::model_node(self.state.cut(), self.state.selected_node).is_none() {
+                    self.state.refuse(format!("refused — {}", view3d::NO_MODEL));
+                } else {
+                    u.on = !u.on;
+                    self.state.status = if u.on {
+                        "3D underlay: the cut's model under the drawing (a view, not in the export)".into()
+                    } else {
+                        "3D underlay off".into()
+                    };
+                }
+            }
+            // GM22: the sequences' files read again (a look at the disk: no
+            // undo step, nothing dirty).
+            Action::ReloadSequences => {
+                let n = self.state.reload_sequences();
+                if n > 0 {
+                    self.final_look.reread();
+                }
+                self.state.status = match n {
+                    0 => "no image sequence in the project".into(),
+                    1 => "image sequence reloaded".into(),
+                    n => format!("{n} image sequences reloaded"),
+                };
+            }
             Action::FrameCurves => curves_panel::frame_stored(&mut self.state),
             Action::TypeIntoCell => {
                 self.open_pane(Pane::XSheet);
@@ -3649,7 +3677,9 @@ impl Editor {
             | Action::View3dBottom
             | Action::View3dCamera
             | Action::View3dOrtho
-            | Action::View3dFrameAll => {} // the chrome's, handled above
+            | Action::View3dFrameAll
+            | Action::Underlay3d
+            | Action::ReloadSequences => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
         }
     }
@@ -3712,6 +3742,10 @@ fn is_chrome(action: Action) -> bool {
             | Action::View3dCamera
             | Action::View3dOrtho
             | Action::View3dFrameAll
+            // GM22: the 3D underlay (a view) and the sequences read again
+            // (the disk, not the document).
+            | Action::Underlay3d
+            | Action::ReloadSequences
     )
 }
 
@@ -3812,6 +3846,10 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::NewPage
             | Action::ClipToPanels
             | Action::ExportPages
+            // GM22: nothing starts mid-stroke — no underlay turned on, no
+            // sequence reread.
+            | Action::Underlay3d
+            | Action::ReloadSequences
     )
 }
 
@@ -5338,6 +5376,12 @@ impl Editor {
             Action::SetCutCameraFromView if s.view3d.orbit.is_some_and(|o| o.ortho) => {
                 Err(view3d::ORTHO_REFUSAL)
             }
+            // GM22: the underlay turns on only over a model (off, always).
+            Action::Underlay3d
+                if !self.canvas.underlay.on && view3d::model_node(s.cut(), s.selected_node).is_none() =>
+            {
+                Err(view3d::NO_MODEL)
+            }
             _ => Ok(()),
         }
     }
@@ -5365,6 +5409,8 @@ impl Editor {
             ),
             // GM11: the composite viewers' delivery look.
             Action::ToggleFinalLook => Some(self.final_look.on),
+            // GM22: the canvas's 3D underlay.
+            Action::Underlay3d => Some(self.canvas.underlay.on),
             // GM12: audio scrub, and a RAM preview pass running.
             Action::ToggleScrub => Some(self.scrub_audio),
             Action::RamPreview => Some(self.state.ram.busy()),
@@ -7213,6 +7259,14 @@ impl Editor {
             final_look: self.final_look.on,
         };
         let range = self.state.play_range();
+        // GM22: the evaluator stats sequence files from the project's
+        // folder; returning to the window reads them again (a render done
+        // meanwhile shows), never mid-stroke.
+        self.state.sync_eval_base();
+        let focused = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true))));
+        if focused && !self.canvas.stroke_active() && self.state.reload_sequences() > 0 {
+            self.final_look.reread();
+        }
         let s = &mut self.state;
         let dir = s.project_dir();
         s.ram.set_base_dir(dir);
@@ -7432,6 +7486,8 @@ impl Editor {
                     self.menu_item(ui, Action::AddSoundTrack);
                     // GM17: a glTF or OBJ model, embedded in the cut.
                     self.menu_item(ui, Action::Import3DModel);
+                    // GM22: a sequence re-rendered on disk, read again.
+                    self.menu_item(ui, Action::ReloadSequences);
                     ui.separator();
                     self.menu_item(ui, Action::Settings);
                     self.menu_item(ui, Action::Quit);
@@ -7746,8 +7802,8 @@ impl Editor {
                         .button("3D layout room")
                         .on_hover_text(
                             "View3D beside a composite viewer, the node graph under them — \
-                             set the cut camera from the view. The canvas's 3D underlay \
-                             (drawing over the model on the canvas) is not in this build",
+                             set the cut camera from the view; View ▸ 3D underlay draws the \
+                             model faded under the canvas's drawing",
                         )
                         .clicked()
                     {

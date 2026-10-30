@@ -142,6 +142,12 @@ pub fn tally_well() -> Color32 {
 pub fn paper_veil() -> Color32 {
     Color32::from_rgba_unmultiplied(26, 27, 24, 110)
 }
+/// GM22: the tint that draws a picture as it is at `opacity` (0..=1): the
+/// canvas's 3D underlay, faded under the drawing.
+#[inline]
+pub fn faded(opacity: f32) -> Color32 {
+    Color32::from_white_alpha((opacity.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
 
 // ---------------------------------------------------------------------------
 // Structure (§2.3). The spacing scale is 2·4·6·8·12·16·24 — nothing else.

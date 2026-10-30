@@ -13,21 +13,36 @@
 //! reads the keypad's digits as the row's, so over View3D they shadow the
 //! pencil box's digits, 0's RAM preview and Home's first frame. The
 //! toolbar's buttons ask for the same verbs (one dispatch).
+//!
+//! GM22: the pane's render and the canvas's 3D underlay run on a worker,
+//! one keyed job at a time ([`JobLogic`], FinalLook's law): the last picture
+//! stays up with the TALLY dot until the next one lands.
+
+use std::path::PathBuf;
+use std::sync::mpsc;
 
 use anim_core::color::ColorLaw;
 use anim_core::fx::Image;
 use anim_core::graph::NodeKind;
 use anim_core::ids::NodeId;
-use anim_core::model::Cut;
+use anim_core::model::{Cut, ModelAsset};
 use anim_core::r3d::{self, Orbit, View};
 use eframe::egui;
 
 use crate::config::Action;
 use crate::doc::AppState;
 
-/// The widest render the pane draws (px): the CPU renderer runs on the UI
-/// thread, and only when the view or what it shows changes.
+/// The widest render the pane (and the underlay) draws (px): the CPU
+/// renderer runs on a worker, and only when the view or what it shows
+/// changes.
 pub const MAX_RENDER_W: u32 = 960;
+
+/// Why a job ended with no picture and no reason: its worker panicked (the
+/// channel closed before it answered).
+pub const WORKER_LOST: &str = "the render stopped before it finished";
+
+/// GM22: how strongly the canvas draws the 3D underlay under the drawing.
+pub const UNDERLAY_OPACITY: f32 = 0.45;
 
 /// Why a View3D verb has nothing to act on.
 pub const NO_MODEL: &str = "no Model3D node — File ▸ Import 3D model…";
@@ -46,10 +61,184 @@ pub struct View3dState {
     pub orbit: Option<Orbit>,
     /// The size of the last render (px).
     pub rendered: Option<(u32, u32)>,
-    texture: Option<(egui::TextureHandle, u64)>,
+    /// GM22: the render's worker and its texture.
+    pub worker: Worker3d,
     /// The verbs the toolbar asked for, run by the editor through the one
     /// dispatch after the dock draws (D6).
     pub asked: Vec<Action>,
+}
+
+impl View3dState {
+    /// Tests: block until the pane's job is in (it lands next frame).
+    #[cfg(test)]
+    pub fn wait(&mut self) {
+        self.worker.wait();
+    }
+}
+
+/// GM22: one keyed job at a time, the law the View3D pane and the 3D
+/// underlay share (FinalLook's): a key unlike the picture's starts a job
+/// unless one runs; then only the newest key waits, and starts when the
+/// running job lands (a late picture still replaces the old one). A key
+/// that failed is said once and never resubmitted.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct JobLogic {
+    /// The key of the picture shown.
+    shown: Option<u64>,
+    /// The key of the job running.
+    pending: Option<u64>,
+    /// The newest key asked for.
+    wanted: Option<u64>,
+    /// The last key that failed.
+    failed: Option<u64>,
+    /// The last reason said (the same one is not said twice in a row).
+    said: Option<String>,
+    /// Jobs started so far.
+    pub started: u32,
+}
+
+impl JobLogic {
+    /// Ask for `key`'s picture; true when its job is to start now.
+    pub fn want(&mut self, key: u64) -> bool {
+        self.wanted = Some(key);
+        self.next() == Some(key)
+    }
+
+    /// Start the newest key when nothing runs and it has no picture (and
+    /// did not fail): the key whose job is to start.
+    pub fn next(&mut self) -> Option<u64> {
+        let key = self.wanted?;
+        if self.pending.is_some() || self.shown == Some(key) || self.failed == Some(key) {
+            return None;
+        }
+        self.pending = Some(key);
+        self.started += 1;
+        Some(key)
+    }
+
+    /// The running job ended: its picture (Ok) is now shown, or it failed —
+    /// the reason to say, unless it was just said.
+    pub fn land(&mut self, result: Result<(), String>) -> Option<String> {
+        let key = self.pending.take()?;
+        match result {
+            Ok(()) => {
+                self.shown = Some(key);
+                self.said = None;
+                None
+            }
+            Err(why) => {
+                self.failed = Some(key);
+                (self.said.as_ref() != Some(&why)).then(|| {
+                    self.said = Some(why.clone());
+                    why
+                })
+            }
+        }
+    }
+
+    /// The worker went away without answering (it panicked): a failure.
+    pub fn lost(&mut self) -> Option<String> {
+        self.land(Err(WORKER_LOST.to_string()))
+    }
+
+    /// The TALLY dot: a job runs, or the newest key's picture is to come.
+    pub fn busy(&self) -> bool {
+        self.pending.is_some() || self.wanted.is_some_and(|k| self.shown != Some(k) && self.failed != Some(k))
+    }
+
+    /// The key of the picture shown.
+    pub fn shown(&self) -> Option<u64> {
+        self.shown
+    }
+
+    /// Tests: the key of the job running.
+    #[cfg(test)]
+    pub fn pending(&self) -> Option<u64> {
+        self.pending
+    }
+}
+
+/// What [`Worker3d::poll`] took in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Landed {
+    /// A picture, now the texture (its size, px).
+    Picture([usize; 2]),
+    /// Why the job failed, to say once.
+    Failed(String),
+}
+
+/// GM22: a [`JobLogic`] and its job on a worker thread (FinalLook's
+/// pattern): the picture lands in the one texture, kept until the next.
+#[derive(Default)]
+pub struct Worker3d {
+    pub jobs: JobLogic,
+    answer: Option<mpsc::Receiver<Result<egui::ColorImage, String>>>,
+    tex: Option<egui::TextureHandle>,
+}
+
+impl Worker3d {
+    /// Take the running job's answer when it is in: a picture replaces the
+    /// texture's pixels; a failure, or a worker gone without answering, is
+    /// said once. None while it renders (or nothing runs).
+    pub fn poll(&mut self, ctx: &egui::Context, name: &str) -> Option<Landed> {
+        let got = match self.answer.as_ref()?.try_recv() {
+            Ok(got) => got,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.answer = None;
+                return self.jobs.lost().map(Landed::Failed);
+            }
+        };
+        self.answer = None;
+        match got {
+            Ok(img) => {
+                let size = img.size;
+                match &mut self.tex {
+                    Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                    None => self.tex = Some(ctx.load_texture(name, img, egui::TextureOptions::LINEAR)),
+                }
+                self.jobs.land(Ok(()));
+                Some(Landed::Picture(size))
+            }
+            Err(why) => self.jobs.land(Err(why)).map(Landed::Failed),
+        }
+    }
+
+    /// Run the job [`JobLogic::want`] started: `render` on its own thread,
+    /// and a repaint when it lands.
+    pub fn start(&mut self, ctx: &egui::Context, render: impl FnOnce() -> Result<Image, String> + Send + 'static) {
+        let (tx, rx) = mpsc::channel();
+        self.answer = Some(rx);
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let answer = render().map(|img| {
+                let bytes: Vec<u8> = img.px.chunks_exact(4).flat_map(anim_core::export::straight_rgba8).collect();
+                egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &bytes)
+            });
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
+    /// The last picture (None before the first lands).
+    pub fn texture(&self) -> Option<&egui::TextureHandle> {
+        self.tex.as_ref()
+    }
+
+    /// Tests: block until the running job answers (no sleep, no clock); its
+    /// answer stays for the next poll.
+    #[cfg(test)]
+    pub fn wait(&mut self) {
+        let Some(rx) = self.answer.take() else {
+            return;
+        };
+        let (tx, again) = mpsc::channel();
+        if let Ok(got) = rx.recv() {
+            let _ = tx.send(got);
+        }
+        // A worker gone without answering stays gone (the channel closed).
+        self.answer = Some(again);
+    }
 }
 
 /// A numpad verb (Blender's keys).
@@ -207,8 +396,37 @@ pub fn render_size(avail: (f32, f32), aspect: f32, navigating: bool) -> (u32, u3
 /// toon look, pass and ID chips (as the node renders), the view's camera
 /// instead of the cut's, and the outline scaled from the project frame's
 /// width `frame_w` to `w` (a line looks as thick as it will deliver). None
-/// when `node` is no Model3D or its model is missing or unreadable.
+/// when `node` is no Model3D or its model is missing or unreadable. GM22:
+/// the pane renders through [`view_job`] on its worker; this is the same
+/// render in one call, for tests.
+#[cfg(test)]
 pub fn render_view(
+    cut: &Cut,
+    node: NodeId,
+    orbit: &Orbit,
+    frame: u32,
+    size: (u32, u32),
+    law: ColorLaw,
+    frame_w: u32,
+) -> Option<Image> {
+    view_job(cut, node, orbit, frame, size, law, frame_w)?.render().ok()
+}
+
+/// GM22: one View3D render with all it reads taken off the document, for
+/// the worker: the model (its bytes shared, not copied), the node's values
+/// at the frame with the outline scaled, the view's camera.
+pub struct ViewJob {
+    model: ModelAsset,
+    values: r3d::ModelValues,
+    first: u32,
+    camera: r3d::Camera3,
+    size: (u32, u32),
+    law: ColorLaw,
+}
+
+/// The job [`render_view`] runs; None when `node` is no Model3D or its
+/// model is missing.
+pub fn view_job(
     cut: &Cut,
     node: NodeId,
     orbit: &Orbit,
@@ -216,20 +434,34 @@ pub fn render_view(
     (w, h): (u32, u32),
     law: ColorLaw,
     frame_w: u32,
-) -> Option<Image> {
+) -> Option<ViewJob> {
     let NodeKind::Model3D { model, params, binds } = &cut.graph.node(node).ok()?.kind else {
         return None;
     };
-    let m = r3d::model_of(cut.models.get(model)?).ok()?;
-    let mut v = cut.model_at(params, binds, frame);
-    let width = v.float("outline");
+    let mut values = cut.model_at(params, binds, frame);
+    let width = values.float("outline");
     if width > 0.0 {
-        v.set_float("outline", width * w as f32 / frame_w.max(1) as f32);
+        values.set_float("outline", width * w as f32 / frame_w.max(1) as f32);
     }
-    let mut scene = r3d::Scene3::default();
-    scene.add_model(&m, &v.xform(), r3d::first_object_id(cut, node));
-    let b = r3d::rasterize(&scene, &orbit.camera(), w, h);
-    Some(r3d::shade(&b, &v, law))
+    Some(ViewJob {
+        model: cut.models.get(model)?.clone(),
+        values,
+        first: r3d::first_object_id(cut, node),
+        camera: orbit.camera(),
+        size: (w, h),
+        law,
+    })
+}
+
+impl ViewJob {
+    /// The picture, or why the model does not read.
+    pub fn render(&self) -> Result<Image, String> {
+        let m = r3d::model_of(&self.model).map_err(|e| format!("3D model {}: {e}", self.model.name))?;
+        let mut scene = r3d::Scene3::default();
+        scene.add_model(&m, &self.values.xform(), self.first);
+        let b = r3d::rasterize(&scene, &self.camera, self.size.0, self.size.1);
+        Ok(r3d::shade(&b, &self.values, self.law))
+    }
 }
 
 /// What a render shows, as one key: the view, the size, the law, the
@@ -321,34 +553,152 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let size = render_size((rect.width(), rect.height()), aspect, navigating);
     let law = state.engine.project.color_law;
     let key = render_key(state.cut(), node, &orbit, frame, size, law, fw);
-    if state.view3d.texture.as_ref().map(|(_, k)| *k) != Some(key)
-        && let Some(img) = render_view(state.cut(), node, &orbit, frame, size, law, fw)
-    {
-        let bytes: Vec<u8> = img.px.chunks_exact(4).flat_map(anim_core::export::straight_rgba8).collect();
-        let color = egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &bytes);
-        match &mut state.view3d.texture {
-            // The one texture, its pixels replaced in place.
-            Some((tex, k)) => {
-                tex.set(color, egui::TextureOptions::LINEAR);
-                *k = key;
-            }
+    // GM22: the render runs on the worker; the last picture stays up (the
+    // one texture, its pixels replaced in place) until the next lands.
+    match state.view3d.worker.poll(ui.ctx(), "view3d") {
+        Some(Landed::Picture([w, h])) => state.view3d.rendered = Some((w as u32, h as u32)),
+        Some(Landed::Failed(why)) => state.refuse(format!("View3D: {why}")),
+        None => {}
+    }
+    if state.view3d.worker.jobs.want(key) {
+        match view_job(state.cut(), node, &orbit, frame, size, law, fw) {
+            Some(job) => state.view3d.worker.start(ui.ctx(), move || job.render()),
             None => {
-                let tex = ui.ctx().load_texture("view3d", color, egui::TextureOptions::LINEAR);
-                state.view3d.texture = Some((tex, key));
+                if let Some(why) = state.view3d.worker.jobs.land(Err("the node's model is missing".into())) {
+                    state.refuse(format!("View3D: {why}"));
+                }
             }
         }
-        state.view3d.rendered = Some(size);
     }
     if navigating {
         ui.ctx().request_repaint();
     }
-    ui.painter_at(rect).rect_filled(rect, 0.0, crate::plate::WELL);
-    if let Some((tex, _)) = &state.view3d.texture {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, crate::plate::WELL);
+    if let Some(tex) = state.view3d.worker.texture() {
         let (w, h) = (rect.width(), rect.height());
         let fit = (w / aspect).min(h);
         let shown = egui::Rect::from_center_size(rect.center(), egui::vec2(fit * aspect, fit));
         let image = egui::Image::new(egui::load::SizedTexture::new(tex.id(), shown.size()));
         ui.put(shown, image);
+    }
+    if state.view3d.worker.jobs.busy() {
+        // The lamp, and in words (the viewers' FX dot).
+        let at = rect.left_top() + egui::vec2(10.0, 10.0);
+        painter.circle_filled(at, 4.0, crate::plate::TALLY);
+        painter.text(
+            at + egui::vec2(8.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            "rendering…",
+            egui::FontId::proportional(12.0),
+            crate::plate::LEGEND,
+        );
+    }
+}
+
+/// GM22: the canvas's 3D underlay — the cut's Model3D node as it delivers
+/// (export's renderer, at most [`MAX_RENDER_W`] across), drawn faded under
+/// the drawing on the frame. A view: off by default, kept for the session,
+/// never in the document or the export. Nothing starts mid-stroke or while
+/// playing; then the last finished picture holds.
+#[derive(Default)]
+pub struct Underlay {
+    pub on: bool,
+    worker: Worker3d,
+    /// The node and frame of the job running, and of the picture shown.
+    asked: Option<(NodeId, u32)>,
+    made: Option<(NodeId, u32)>,
+}
+
+/// The underlay this frame: its texture and the node and frame it shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnderlayPicture {
+    pub tex: egui::TextureId,
+    pub node: NodeId,
+    pub frame: u32,
+}
+
+impl Underlay {
+    /// Take in a finished picture, start the job the current frame wants
+    /// (unless `stroking` or playing), and the picture to draw (None: off,
+    /// no Model3D node, or none finished yet).
+    pub fn sync(&mut self, state: &mut AppState, ctx: &egui::Context, stroking: bool) -> Option<UnderlayPicture> {
+        if !self.on {
+            return None;
+        }
+        let node = model_node(state.cut(), state.selected_node)?;
+        match self.worker.poll(ctx, "underlay3d") {
+            Some(Landed::Picture(_)) => self.made = self.asked,
+            Some(Landed::Failed(why)) => state.refuse(format!("3D underlay: {why}")),
+            None => {}
+        }
+        let (scene, cut, frame) = (state.view.scene, state.view.cut, state.view.frame);
+        let size = underlay_size(state.engine.project.width, state.engine.project.height);
+        let law = state.engine.project.color_law;
+        // The node's eval value keys it (memo hits): a still model keeps
+        // its picture across frames, a keyed camera moves it.
+        let value = state.engine.eval_node(scene, cut, node, frame).map_or(0, |v| v.hash());
+        let key = underlay_key(node, value, size, law);
+        if !stroking && !state.view.playing && self.worker.jobs.want(key) {
+            let snapshot = crate::graphcomp::job_cut(state.cut(), node, frame);
+            let base = state.project_dir();
+            self.asked = Some((node, frame));
+            self.worker.start(ctx, move || underlay_render(&snapshot, node, frame, size, law, base));
+        }
+        let tex = self.worker.texture()?.id();
+        let (node, made) = self.made?;
+        // The picture is this frame's when its key is this frame's.
+        let frame = if self.worker.jobs.shown() == Some(key) { frame } else { made };
+        Some(UnderlayPicture { tex, node, frame })
+    }
+
+    /// Tests: jobs started so far.
+    #[cfg(test)]
+    pub fn started(&self) -> u32 {
+        self.worker.jobs.started
+    }
+
+    /// Tests: block until the underlay's job is in (it lands next sync).
+    #[cfg(test)]
+    pub fn wait(&mut self) {
+        self.worker.wait();
+    }
+}
+
+/// The underlay's render size for a `w × h` project frame: the frame's
+/// shape, at most [`MAX_RENDER_W`] across (the canvas stretches it over the
+/// frame).
+pub fn underlay_size(w: u32, h: u32) -> (u32, u32) {
+    let (w, h) = (w.max(1), h.max(1));
+    if w <= MAX_RENDER_W {
+        return (w, h);
+    }
+    let sh = (h as u64 * MAX_RENDER_W as u64 + w as u64 / 2) / w as u64;
+    (MAX_RENDER_W, (sh as u32).max(1))
+}
+
+/// What an underlay picture shows, as one key: the node, its eval value at
+/// the frame, the size and the law.
+fn underlay_key(node: NodeId, value: u64, size: (u32, u32), law: ColorLaw) -> u64 {
+    anim_core::value::fnv1a(format!("underlay|{node:?}|{value:016x}|{size:?}|{law:?}").as_bytes())
+}
+
+/// The underlay's picture: node `node` as export renders it at `w × h`
+/// from a snapshot; what it cannot read (a model that does not parse, a
+/// missing file) fails the job, said once.
+pub fn underlay_render(
+    cut: &Cut,
+    node: NodeId,
+    frame: u32,
+    (w, h): (u32, u32),
+    law: ColorLaw,
+    base: Option<PathBuf>,
+) -> Result<Image, String> {
+    let env = anim_core::export::RenderEnv::new(base);
+    let px = anim_core::export::render_node_px_env(cut, law, node, frame, w, h, &env);
+    match env.warnings().into_iter().next() {
+        Some(why) => Err(why),
+        None => Ok(Image::from_px(w, h, px)),
     }
 }
 
@@ -454,6 +804,9 @@ mod tests {
         h.run_frames(3);
         assert!(h.has("Set cut camera from view"), "{}", h.describe());
         assert!(h.has("Frame all") && h.has_text_containing(NAV_LEGEND), "{}", h.describe());
+        // GM22: the render is the worker's; it lands the frame after.
+        h.state_mut().view3d.wait();
+        h.run();
         let size = h.state().view3d.rendered.expect("a render");
         assert!(size.0 > 0 && size.1 > 0 && size.0 <= MAX_RENDER_W);
         let before = h.state().engine.history_len();
@@ -704,5 +1057,311 @@ mod tests {
         };
         let bytes = String::from_utf8_lossy(&state.cut().models.get(model).unwrap().bytes).into_owned();
         assert!(bytes.contains("Kd 1 0 0"), "a.mtl travels inside the project");
+    }
+
+    // ---- GM22: the worker, sequence reload and the 3D underlay ------------------------------
+
+    /// A small project (192 × 108: the test pictures stay small) with the cube.
+    fn small_cube(dir: &std::path::Path) -> (AppState, NodeId) {
+        let mut state = AppState::new_project("underlay", 192, 108, 24, 300.0);
+        let path = dir.join("cube.obj");
+        std::fs::write(&path, CUBE_OBJ).unwrap();
+        let node = state.import_model(&path, (40.0, 40.0)).expect("the cube imports");
+        (state, node)
+    }
+
+    #[test]
+    fn worker3d_only_the_newest_key_waits_and_a_late_picture_still_replaces_the_old() {
+        let (a, b, c) = (1, 2, 3);
+        let mut j = JobLogic::default();
+        assert!(j.want(a), "A starts");
+        assert!(!j.want(b) && !j.want(c), "B, then C, wait while A runs");
+        assert_eq!((j.started, j.pending()), (1, Some(a)));
+        assert!(j.busy());
+        assert_eq!(j.land(Ok(())), None);
+        assert_eq!(j.shown(), Some(a), "A's late picture replaces the old one");
+        assert!(j.busy(), "the dot stays on: C is to come");
+        assert_eq!(j.next(), Some(c), "the next job is C's — B never renders");
+        assert_eq!(j.started, 2);
+        assert!(!j.want(c), "C runs already");
+        assert_eq!(j.land(Ok(())), None);
+        assert_eq!(j.shown(), Some(c));
+        assert!(!j.busy(), "C's picture clears the dot");
+        assert!(!j.want(c) && j.next().is_none() && j.started == 2, "a shown key starts nothing");
+    }
+
+    #[test]
+    fn worker3d_a_failed_or_lost_job_is_said_once_and_its_key_never_resubmitted() {
+        // A model that does not parse, rendered on the worker.
+        let dir = tempfile::tempdir().unwrap();
+        let (state, node) = small_cube(dir.path());
+        let broken = || {
+            let mut job = view_job(state.cut(), node, &Orbit::default(), 0, (32, 18), ColorLaw::Srgb, 192).unwrap();
+            job.model.bytes = std::sync::Arc::new(b"# no faces\n".to_vec());
+            job.model.content_hash = 0xbad;
+            job
+        };
+        let ctx = egui::Context::default();
+        let mut w = Worker3d::default();
+        assert!(w.jobs.want(10));
+        let job = broken();
+        w.start(&ctx, move || job.render());
+        w.wait();
+        let Some(Landed::Failed(why)) = w.poll(&ctx, "t") else {
+            panic!("the job fails")
+        };
+        assert!(why.starts_with("3D model "), "{why}");
+        assert!(!w.jobs.want(10) && w.jobs.started == 1, "the failed key is not resubmitted");
+        assert!(!w.jobs.busy(), "and no dot for it");
+        // Another key failing the same way is not said again.
+        assert!(w.jobs.want(11));
+        let job = broken();
+        w.start(&ctx, move || job.render());
+        w.wait();
+        assert_eq!(w.poll(&ctx, "t"), None, "said once");
+        // A worker that panicked: its channel closes unanswered — the same.
+        let mut lost = Worker3d::default();
+        assert!(lost.jobs.want(20));
+        let (tx, rx) = mpsc::channel::<Result<egui::ColorImage, String>>();
+        lost.answer = Some(rx);
+        drop(tx);
+        assert_eq!(lost.poll(&ctx, "t"), Some(Landed::Failed(WORKER_LOST.into())));
+        assert!(!lost.jobs.want(20) && lost.jobs.started == 1, "not resubmitted");
+        assert!(lost.jobs.want(21));
+        assert_eq!(lost.jobs.lost(), None, "a second loss is not said again");
+        assert!(!lost.jobs.want(21));
+    }
+
+    #[test]
+    fn worker3d_a_view_change_starts_one_job_and_the_pane_keeps_its_picture_and_dot_until_it_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _node) = small_cube(dir.path());
+        let mut p = crate::testkit::PanelHarness::new(egui::vec2(240.0, 200.0), state, ui);
+        let settle = |p: &mut crate::testkit::PanelHarness<AppState>| {
+            for _ in 0..4 {
+                p.state_mut().view3d.wait();
+                p.frames(1);
+                if !p.state().view3d.worker.jobs.busy() {
+                    break;
+                }
+            }
+        };
+        settle(&mut p);
+        let size = p.state().view3d.rendered.expect("the first picture");
+        assert!(size.0 <= 240 && size.1 <= 240, "{size:?}");
+        let tex = p.state().view3d.worker.texture().map(|t| t.id()).expect("its texture");
+        let started = p.state().view3d.worker.jobs.started;
+        // The view turns: one job starts; the last picture stays up, with
+        // the dot, until it lands.
+        p.state_mut().view3d.orbit.as_mut().expect("the view").orbit(40.0, 0.0);
+        p.frames(1);
+        let jobs = &p.state().view3d.worker.jobs;
+        assert_eq!(jobs.started, started + 1, "one job");
+        assert!(jobs.busy() && jobs.pending().is_some(), "the dot is on");
+        assert_eq!(p.state().view3d.worker.texture().map(|t| t.id()), Some(tex), "the last picture stays up");
+        p.frames(2);
+        assert_eq!(p.state().view3d.worker.jobs.started, started + 1, "frames while it runs start nothing");
+        settle(&mut p);
+        assert!(!p.state().view3d.worker.jobs.busy(), "its picture clears the dot");
+        assert_eq!(p.state().view3d.worker.texture().map(|t| t.id()), Some(tex), "the one texture, replaced");
+        assert_eq!(p.state().view3d.worker.jobs.started, started + 1);
+        // The pane's ui never renders itself: the worker does.
+        let src = include_str!("view3d.rs");
+        let body = &src[src.find("pub fn ui(").expect("the pane's ui")..];
+        let body = &body[..body.find("\n}\n").expect("its end")];
+        assert!(!body.contains("render_view(") && !body.contains("rasterize("), "the pane renders on the worker");
+    }
+
+    #[test]
+    fn worker3d_a_sequence_value_folds_its_files_length_and_time_once_its_path_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("renders")).unwrap();
+        let file = dir.path().join("renders").join("shot_0001.png");
+        anim_core::deliver::write_png8(&file, &Image::new(4, 4)).unwrap();
+        let len = std::fs::metadata(&file).unwrap().len();
+        let mut state = AppState::new_project("seq", 16, 9, 24, 300.0);
+        state.graph_add_node(NodeKind::image_sequence("renders/shot_####.png"), (0.0, 0.0));
+        let node = state.selected_node.expect("the sequence node");
+        let (scene, cut) = (state.view.scene, state.view.cut);
+        let value = |s: &mut AppState, n| s.engine.eval_node(scene, cut, n, 0).unwrap().recipe().to_string();
+        // Unsaved, a relative pattern keeps today's value (pinned).
+        state.sync_eval_base();
+        assert_eq!(value(&mut state, node), "seq(\"renders/shot_####.png\", n=1, hold=false, fit=true)");
+        // Saved: from the project's folder, the shown file's length and time.
+        state.file_path = Some(dir.path().join("seq.animproj"));
+        state.sync_eval_base();
+        let saved = value(&mut state, node);
+        assert!(saved.contains(&format!(", file={len}@")), "{saved}");
+        state.engine.evaluator.invalidate_all();
+        assert_eq!(value(&mut state, node), saved, "neither changed: the same value");
+        // Its time alone changes it.
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(t).unwrap();
+        state.engine.evaluator.invalidate_all();
+        let touched = value(&mut state, node);
+        assert!(touched != saved && touched.ends_with(&format!("file={len}@2000000000000000)")), "{touched}");
+        // An absolute pattern resolves with no folder.
+        state.file_path = None;
+        state.sync_eval_base();
+        let abs = dir.path().join("renders").join("shot_####.png").to_string_lossy().into_owned();
+        state.graph_add_node(NodeKind::image_sequence(abs), (0.0, 90.0));
+        let absolute = state.selected_node.expect("the second node");
+        let v = value(&mut state, absolute);
+        assert!(v.contains(&format!("file={len}@2000000000000000")), "{v}");
+    }
+
+    #[test]
+    fn worker3d_reload_and_regained_focus_reread_only_the_sequences_and_their_downstream() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("renders")).unwrap();
+        let shot = |n: u32| dir.path().join("renders").join(format!("shot_{n:04}.png"));
+        anim_core::deliver::write_png8(&shot(1), &Image::new(4, 4)).unwrap();
+        anim_core::deliver::write_png8(&shot(2), &Image::new(4, 4)).unwrap();
+        let mut state = AppState::new_project("seq", 16, 9, 24, 300.0);
+        state.graph_add_node(NodeKind::Solid { rgba: [9, 9, 9, 255] }, (0.0, 120.0));
+        let solid = state.selected_node.expect("the solid");
+        state.graph_add_node(NodeKind::image_sequence("renders/shot_####.png"), (0.0, 0.0));
+        let seq = state.selected_node.expect("the sequence node");
+        state.file_path = Some(dir.path().join("seq.animproj"));
+        let mut h = EditorHarness::with_state(state);
+        h.run_frames(2);
+        let (scene, cut) = (h.state().view.scene, h.state().view.cut);
+        let eval = |h: &mut EditorHarness, n, f| h.state_mut().engine.eval_node(scene, cut, n, f).unwrap().hash();
+        let before: Vec<u64> = (0..2).map(|f| eval(&mut h, seq, f)).collect();
+        assert_ne!(before[0], before[1]);
+        eval(&mut h, solid, 0);
+        // File 2 re-rendered on disk (another length): the memo holds it.
+        anim_core::deliver::write_png8(&shot(2), &Image::new(8, 8)).unwrap();
+        assert_eq!(eval(&mut h, seq, 1), before[1], "nothing reads it before a reload");
+        let doc = |h: &EditorHarness| (h.state().engine.history_len(), h.state().engine.revision(), h.state().is_dirty());
+        let was = doc(&h);
+        h.perform(Action::ReloadSequences);
+        let hits = h.state().engine.evaluator.stats.cache_hits;
+        eval(&mut h, solid, 0);
+        assert_eq!(h.state().engine.evaluator.stats.cache_hits, hits + 1, "the solid kept its value");
+        assert_eq!(eval(&mut h, seq, 0), before[0], "frame 0's file is as it was");
+        assert_ne!(eval(&mut h, seq, 1), before[1], "frame 1 shows its new file");
+        assert_eq!(doc(&h), was, "no undo step, nothing dirtier");
+        // The window regaining focus reads them again too.
+        let kept = eval(&mut h, seq, 0);
+        anim_core::deliver::write_png8(&shot(1), &Image::new(8, 8)).unwrap();
+        h.event(egui::Event::WindowFocused(true));
+        assert_ne!(eval(&mut h, seq, 0), kept, "frame 0 shows its new file");
+        assert_eq!(doc(&h), was);
+    }
+
+    #[test]
+    fn worker3d_the_underlay_is_refused_with_no_model_and_draws_the_cube_without_touching_the_document() {
+        let mut empty = EditorHarness::new();
+        assert_eq!(empty.editor().can_perform(Action::Underlay3d), Err(NO_MODEL));
+        assert_eq!(empty.perform(Action::Underlay3d), crate::Performed::Ignored);
+        assert!(!empty.editor().canvas.underlay.on);
+        let dir = tempfile::tempdir().unwrap();
+        let (state, node) = small_cube(dir.path());
+        let mut h = EditorHarness::with_state(state);
+        h.run_frames(2);
+        assert_eq!(h.editor().is_on(Action::Underlay3d), Some(false), "off by default");
+        assert_eq!(h.editor().canvas.underlay_drawn, None);
+        // The export's pixels, pinned: the underlay is a view.
+        let export = |h: &EditorHarness| {
+            let s = h.state();
+            let env = anim_core::export::RenderEnv::default();
+            let opts = anim_core::deliver::RenderOpts::default();
+            let img = anim_core::deliver::render_env(s.cut(), s.engine.project.color_law, 0, 192, 108, &opts, &env);
+            let bytes: Vec<u8> = img.px.iter().flat_map(|v| v.to_le_bytes()).collect();
+            anim_core::value::fnv1a(&bytes)
+        };
+        let off = export(&h);
+        let doc = |h: &EditorHarness| (h.state().engine.history_len(), h.state().engine.revision(), h.state().is_dirty());
+        let was = doc(&h);
+        h.perform(Action::Underlay3d);
+        assert_eq!(h.editor().is_on(Action::Underlay3d), Some(true));
+        h.run_frames(2);
+        h.editor_mut().canvas.underlay.wait();
+        h.run();
+        let drawn = h.editor().canvas.underlay_drawn.expect("the canvas drew the underlay");
+        let frame = anim_core::camera::IRect::frame(192, 108);
+        assert_eq!(drawn, crate::canvas::UnderlayDrawn { node, frame: 0, rect: frame, opacity: 0.45 });
+        assert_eq!(doc(&h), was, "a view: no undo step, the document as clean");
+        assert_eq!(export(&h), off, "the export is the same with it on");
+        assert_eq!(off, 0x6423_45a1_fbfa_3bc4, "pinned");
+        h.perform(Action::Underlay3d);
+        h.run_frames(2);
+        assert_eq!(h.editor().canvas.underlay_drawn, None, "off: nothing drawn");
+        assert_eq!(export(&h), off);
+        assert_eq!(doc(&h), was);
+    }
+
+    #[test]
+    fn worker3d_the_underlay_keys_on_the_nodes_value_and_starts_nothing_mid_stroke_or_while_playing() {
+        fn shown(u: &mut Underlay, s: &mut AppState, ctx: &egui::Context, stroking: bool) -> Option<(NodeId, u32)> {
+            u.sync(s, ctx, stroking).map(|p| (p.node, p.frame))
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (mut state, node) = small_cube(dir.path());
+        let ctx = egui::Context::default();
+        let mut u = Underlay { on: true, ..Default::default() };
+        assert_eq!(shown(&mut u, &mut state, &ctx, false), None, "nothing finished yet");
+        assert_eq!(u.started(), 1);
+        u.wait();
+        assert_eq!(shown(&mut u, &mut state, &ctx, false), Some((node, 0)));
+        // A still model scrubbed: the picture is every frame's — no job.
+        state.view.frame = 3;
+        assert_eq!(shown(&mut u, &mut state, &ctx, false), Some((node, 3)));
+        assert_eq!(u.started(), 1, "the same key: no job");
+        // A keyed camera: each frame's picture is its own.
+        let mut view = Orbit::default();
+        state.view.frame = 0;
+        state.set_cut_camera_from_view(node, &view);
+        view.orbit(-60.0, 20.0);
+        state.view.frame = 4;
+        state.set_cut_camera_from_view(node, &view);
+        state.view.frame = 0;
+        shown(&mut u, &mut state, &ctx, false);
+        assert_eq!(u.started(), 2, "the camera keyed: frame 0's key moved");
+        u.wait();
+        assert_eq!(shown(&mut u, &mut state, &ctx, false), Some((node, 0)));
+        state.view.frame = 1;
+        assert_eq!(shown(&mut u, &mut state, &ctx, true), Some((node, 0)), "mid-stroke the last picture holds");
+        assert_eq!(u.started(), 2, "a stroke in progress starts no job");
+        shown(&mut u, &mut state, &ctx, false);
+        assert_eq!(u.started(), 3, "the keyed camera's next frame starts one");
+        u.wait();
+        assert_eq!(shown(&mut u, &mut state, &ctx, false), Some((node, 1)));
+        // Playing: the last finished picture holds, and no job starts.
+        state.view.playing = true;
+        state.view.frame = 2;
+        assert_eq!(shown(&mut u, &mut state, &ctx, false), Some((node, 1)));
+        assert_eq!(u.started(), 3, "no job while playing");
+    }
+
+    #[test]
+    fn worker3d_the_new_verbs_have_help_a_place_and_no_chord_and_the_room_says_the_underlay_is_in() {
+        use crate::config::{Ctx, Group, Keymap, clashes, default_binds};
+        assert_eq!(Action::ReloadSequences.menu(), Some("File/Reload image sequences"));
+        assert_eq!(Action::Underlay3d.menu(), Some("View/3D underlay"));
+        assert_eq!((Action::ReloadSequences.group(), Action::Underlay3d.group()), (Group::File, Group::View));
+        assert_eq!(Action::Underlay3d.context(), Ctx::Canvas);
+        for a in [Action::ReloadSequences, Action::Underlay3d] {
+            assert!((1..=120).contains(&a.help().chars().count()), "{a:?}");
+            assert!(Action::ALL.contains(&a), "{a:?}");
+            for &km in Keymap::ALL {
+                assert_eq!(crate::cmdpal::chord_of(&default_binds(km), a), None, "{a:?} has no chord");
+            }
+        }
+        for &km in Keymap::ALL {
+            assert_eq!(clashes(&default_binds(km)), vec![], "{km:?}");
+        }
+        for alias in ["refresh", "reload renders", "reload sequence"] {
+            assert!(Action::ReloadSequences.aliases().contains(&alias), "{alias}");
+        }
+        // The room says the underlay is in this build, in its help and on
+        // the Room menu's hover.
+        assert!(!Action::Layout3dRoom.help().contains("not in this build"), "{}", Action::Layout3dRoom.help());
+        let main = include_str!("main.rs");
+        let at = main.find(".button(\"3D layout room\")").expect("the Room menu's button");
+        let hover: String = main[at..].chars().take(320).collect();
+        assert!(!hover.contains("not in this build") && hover.contains("3D underlay"), "{hover}");
+        assert!(main.contains("self.menu_item(ui, Action::ReloadSequences);"), "File ▸ Reload image sequences");
     }
 }

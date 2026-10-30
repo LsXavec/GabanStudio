@@ -522,6 +522,16 @@ pub(crate) fn unpainted_strips(area: IRect, layer: &paint::LayerRect) -> Vec<IRe
     .collect()
 }
 
+/// GM22: the 3D underlay as the canvas drew it this frame: the node and
+/// frame its picture shows, the frame rect it covers, its opacity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct UnderlayDrawn {
+    pub node: anim_core::ids::NodeId,
+    pub frame: u32,
+    pub rect: anim_core::camera::IRect,
+    pub opacity: f32,
+}
+
 /// GM10: the camera furniture the canvas puts on the sheet, in paper
 /// (frame) pixels: the guides come from `anim_core::camera` (one law with
 /// the viewer's safe frames), the paper and the camera's frame from the
@@ -828,6 +838,10 @@ pub struct CanvasView {
     show_peg: bool,
     /// GM10: the camera furniture as drawn this frame.
     pub(crate) furniture: Furniture,
+    /// GM22: View ▸ 3D underlay (a view, kept for the session) and what it
+    /// drew this frame.
+    pub underlay: crate::view3d::Underlay,
+    pub(crate) underlay_drawn: Option<UnderlayDrawn>,
     /// The INPUT plate field was clicked — open Settings at the pen page.
     pub(crate) request_pen_settings: bool,
     /// THE BRUSH LIBRARY (PSD-brush-library): the rail arms and imports;
@@ -1067,6 +1081,8 @@ impl CanvasView {
             show_safe: false,
             show_peg: false,
             furniture: Furniture::default(),
+            underlay: crate::view3d::Underlay::default(),
+            underlay_drawn: None,
             request_pen_settings: false,
             request_brush_import: false,
             brush_engine: None,
@@ -4528,6 +4544,16 @@ impl CanvasView {
             }
         }
 
+        // GM22: the 3D underlay's picture (edit view only: composite view
+        // shows the model as it delivers). Its job never starts mid-stroke.
+        let stroking = self.stroke_active();
+        let underlay = if composite_tex.is_none() {
+            self.underlay.sync(state, ui.ctx(), stroking)
+        } else {
+            None
+        };
+        self.underlay_drawn = None;
+
         // ---- Render layers ------------------------------------------------
         let cut = state.cut();
         let active_col = state.view.active_column;
@@ -4571,6 +4597,19 @@ impl CanvasView {
                 Color32::from_rgb(228, 82, 47),
                 // Aka: overrules the hand
             );
+        }
+
+        // 0. GM22: the 3D underlay, faded under every column, on the frame.
+        if let Some(u) = underlay {
+            let opacity = crate::view3d::UNDERLAY_OPACITY;
+            paint_paper_image(&painter, &xf, u.tex, crate::plate::faded(opacity));
+            let p = &state.engine.project;
+            self.underlay_drawn = Some(UnderlayDrawn {
+                node: u.node,
+                frame: u.frame,
+                rect: anim_core::camera::IRect::frame(p.width, p.height),
+                opacity,
+            });
         }
 
         // 1. The columns UNDER the active one (GM5: Cut::render_split, the

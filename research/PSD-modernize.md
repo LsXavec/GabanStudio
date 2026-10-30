@@ -3229,3 +3229,15 @@ what was not verified.
   its print dpi; blank after a template goes back to the form's defaults. 16 `tidy_` tests. Left: the
   whole stretch list as above (the part reached its cap first). Not verified: a real Windows
   Shift+Delete keypress, and Settings opened from the Welcome screen, in the running app.
+- 2026-10-30 — GM22 View3D worker, sequence reload and the 3D underlay: `view3d.rs` gains `JobLogic`
+  (one keyed job, the newest key waits, a failed key said once and never resubmitted, a lost worker
+  the same) and `Worker3d` (a thread per job, the one texture kept until the next picture lands); the
+  pane renders through `view_job` on it with the TALLY dot while busy. The evaluator holds the project's
+  folder (`set_base`): an ImageSequence whose path resolves folds the shown file's length and mtime
+  (`r3d::sequence_stamp`, a stat); a relative pattern with no folder keeps its old value. File ▸ Reload
+  image sequences and the window regaining focus drop the sequence nodes and their downstream only
+  (`AppState::reload_sequences`; the RAM preview rechecks, the final look rereads). View ▸ 3D underlay
+  (`Underlay`, Canvas context, no chord) draws the cut's Model3D node as export renders it (at most
+  960 wide) at 0.45 on the frame under the columns, keyed by node, eval value, size and law; no job
+  mid-stroke or while playing. 8 `worker3d_` tests and one core test. Left: the stretch (the node
+  picker, the opacity slider). Not verified: the underlay and the dot in the running app.

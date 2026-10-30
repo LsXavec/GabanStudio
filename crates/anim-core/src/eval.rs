@@ -3,6 +3,7 @@
 //! edits invalidate only the edited node and its downstream closure.
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use crate::error::{EngineError, Result};
 use crate::graph::NodeKind;
@@ -22,11 +23,28 @@ pub struct EvalStats {
 pub struct Evaluator {
     cache: HashMap<(NodeId, u32), Value>,
     pub stats: EvalStats,
+    /// GM22: the project's folder, where an ImageSequence's relative files
+    /// are stat'ed (None: an unsaved project).
+    base: Option<PathBuf>,
 }
 
 impl Evaluator {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// GM22: the project's folder (the app hands it over whenever the file
+    /// path changes). Another folder drops every value — rare: a Save As,
+    /// an Open.
+    pub fn set_base(&mut self, base: Option<PathBuf>) {
+        if self.base != base {
+            self.base = base;
+            self.cache.clear();
+        }
+    }
+
+    pub fn base(&self) -> Option<&Path> {
+        self.base.as_deref()
     }
 
     /// Evaluate the cut's output node at `frame`.
@@ -263,7 +281,24 @@ impl Evaluator {
             } => {
                 let n = crate::r3d::sequence_number(*first, *offset, frame)
                     .map_or_else(|| "-".to_string(), |n| n.to_string());
-                Value::image(format!("seq({pattern:?}, n={n}, hold={hold_last}, fit={fit})"))
+                // GM22: once its path resolves — an absolute pattern always,
+                // a relative one from the project's folder — the shown
+                // file's length and time (a stat, never a read; "-" when it
+                // is missing): a file re-rendered on disk changes the value
+                // at the next reload, an unchanged one keeps it. A relative
+                // pattern with no folder keeps the plain value.
+                let base = self.base.as_deref();
+                let resolves =
+                    !pattern.trim().is_empty() && (base.is_some() || !Path::new(pattern).is_relative());
+                let file = if resolves {
+                    let stamp = crate::r3d::sequence_file(pattern, *first, *offset, *hold_last, frame, base)
+                        .and_then(|p| crate::r3d::sequence_stamp(&p))
+                        .map_or_else(|| "-".to_string(), |(len, ns)| format!("{len}@{ns}"));
+                    format!(", file={stamp}")
+                } else {
+                    String::new()
+                };
+                Value::image(format!("seq({pattern:?}, n={n}, hold={hold_last}, fit={fit}{file})"))
             }
         };
 

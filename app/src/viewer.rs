@@ -167,6 +167,12 @@ impl FinalLook {
         }
     }
 
+    /// GM22: files on disk changed (a sequence reload): the frame renders
+    /// again, the last one kept up meanwhile.
+    pub fn reread(&mut self) {
+        self.shown = None;
+    }
+
     fn show(&mut self, key: LookKey, img: Arc<egui::ColorImage>) {
         if let Some(t) = &mut self.tex {
             t.set(img.clone(), egui::TextureOptions::LINEAR);

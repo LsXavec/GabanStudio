@@ -206,6 +206,10 @@ pub enum Action {
     ToggleRulerSnap,
     /// GM18: the canvas tool that draws, splits and moves panels and rulers.
     PanelTool,
+    /// GM22: every image sequence's files read again from disk.
+    ReloadSequences,
+    /// GM22: the cut's Model3D node drawn faded under the canvas's drawing.
+    Underlay3d,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -479,6 +483,8 @@ impl Action {
         Action::ExportPages,
         Action::ToggleRulerSnap,
         Action::PanelTool,
+        Action::ReloadSequences,
+        Action::Underlay3d,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -636,6 +642,8 @@ impl Action {
             Action::ExportPages => "Export pages",
             Action::ToggleRulerSnap => "Snap to rulers",
             Action::PanelTool => "Panel (koma) tool",
+            Action::ReloadSequences => "Reload image sequences",
+            Action::Underlay3d => "3D underlay",
         }
     }
 
@@ -783,7 +791,7 @@ impl Action {
             AddRetakeNote => "Note what to fix on this frame of the open cut (it can set the cut to Retake); the sheet shows it.",
             Import3DModel => "Embed a glTF (.glb, .gltf) or OBJ model in the cut and add its Model3D node, as one undo step; View3D shows it.",
             SetCutCameraFromView => "Key the cut camera to what View3D sees at this frame, as one undo step.",
-            Layout3dRoom => "3D layout (LO) room: View3D, a composite viewer and the node graph. The canvas 3D underlay is not in this build.",
+            Layout3dRoom => "3D layout (LO) room: View3D, a composite viewer and the node graph; View ▸ 3D underlay draws on the model.",
             View3dFront => "View3D: look from the front (numpad 1 in Blender).",
             View3dBack => "View3D: look from the back (Ctrl+numpad 1 in Blender).",
             View3dRight => "View3D: look from the right (numpad 3 in Blender).",
@@ -799,6 +807,8 @@ impl Action {
             ExportPages => "Write the book's pages to a folder as PNG or TIFF at the page's dpi, in colour, grey or 1-bit mono, with trim marks.",
             ToggleRulerSnap => "Hold the pen to the page's perspective rulers (a line toward a vanishing point, or level), or draw free again.",
             PanelTool => "Drag on paper: a panel; across a panel: a split at the gutter; a VP or the horizon: moved. One undo step each.",
+            ReloadSequences => "Read every image sequence's files again (a re-render on disk shows); also on returning to the window.",
+            Underlay3d => "Draw the cut's 3D model faded under the canvas's drawing, at the current frame; a view, not in the export.",
         }
     }
 
@@ -808,12 +818,13 @@ impl Action {
         match self {
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | ImportSound | AddSoundTrack
-            | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel | ExportPages => Group::File,
+            | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel | ExportPages
+            | ReloadSequences => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
             | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView | PinToLightTable
-            | ShiftTrace | ResetShift | ToggleFinalLook | ToggleRulerSnap => Group::View,
+            | ShiftTrace | ResetShift | ToggleFinalLook | ToggleRulerSnap | Underlay3d => Group::View,
             View3dFront | View3dBack | View3dRight | View3dLeft | View3dTop | View3dBottom
             | View3dCamera | View3dOrtho | View3dFrameAll => Group::View,
             SetCutCameraFromView => Group::Cut,
@@ -885,6 +896,7 @@ impl Action {
             ImportSound => "File/Import sound…",
             AddSoundTrack => "File/Add sound track…",
             Import3DModel => "File/Import 3D model…",
+            ReloadSequences => "File/Reload image sequences",
             FirstFrame => "Sheet/First frame",
             PrevFrame => "Sheet/Previous frame",
             NextFrame => "Sheet/Next frame",
@@ -943,6 +955,7 @@ impl Action {
             // GM11: the delivery — its queue, and the look it renders.
             ShowRenderQueue => "Window/Render Queue (delivery)",
             ToggleFinalLook => "View/Final look (delivery)",
+            Underlay3d => "View/3D underlay",
             // GM7: the project's own menu, beside its colour law.
             ConvertColorsToSrgb => "Project/Convert colours to sRGB…",
             BuildComposite => "Project/Build composite from sheet",
@@ -1178,6 +1191,8 @@ impl Action {
             ExportPages => &["print", "tiff", "png", "genkō", "webtoon", "nyūkō", "pages to files"],
             ToggleRulerSnap => &["perspective snap", "pāsu", "vanishing point", "ruler snap"],
             PanelTool => &["koma", "panel tool", "split panel", "frame border", "koma wari"],
+            ReloadSequences => &["refresh", "reload renders", "reload sequence"],
+            Underlay3d => &["3d under canvas", "draw over model", "model underlay", "3d reference"],
             View3dFront => &["numpad 1", "3d front"],
             View3dBack => &["ctrl numpad 1", "3d back"],
             View3dRight => &["numpad 3", "3d right", "side view"],
@@ -1199,7 +1214,7 @@ impl Action {
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | SelectAll | ClearCel | ClearCelAll
             | BrushSmaller | BrushBigger | CopyPixels | PastePixels | KindKey | KindBreakdown
-            | KindInbetween | KindUnset | ToggleRulerSnap | PanelTool => Ctx::Canvas,
+            | KindInbetween | KindUnset | ToggleRulerSnap | PanelTool | Underlay3d => Ctx::Canvas,
             NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames | DeleteFrames | HoldPlus
             | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees | Reverse | ColumnKindCel
             | ColumnKindBg | ColumnKindBook | ColumnKindRef | ToggleColumnHidden
@@ -1566,7 +1581,8 @@ impl Action {
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
-            | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels => None,
+            | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels | ReloadSequences
+            | Underlay3d => None,
         }
     }
 }
