@@ -842,6 +842,8 @@ pub struct CanvasView {
     /// drew this frame.
     pub underlay: crate::view3d::Underlay,
     pub(crate) underlay_drawn: Option<UnderlayDrawn>,
+    /// GM22: this frame showed the composite (the underlay is edit view's).
+    pub(crate) composite_shown: bool,
     /// The INPUT plate field was clicked — open Settings at the pen page.
     pub(crate) request_pen_settings: bool,
     /// THE BRUSH LIBRARY (PSD-brush-library): the rail arms and imports;
@@ -1083,6 +1085,7 @@ impl CanvasView {
             furniture: Furniture::default(),
             underlay: crate::view3d::Underlay::default(),
             underlay_drawn: None,
+            composite_shown: false,
             request_pen_settings: false,
             request_brush_import: false,
             brush_engine: None,
@@ -1417,6 +1420,29 @@ impl CanvasView {
             || self.sel_draft.is_some()
             || self.floating.is_some()
             || self.koma.is_some()
+    }
+
+    /// GM22: why View ▸ 3D underlay, ticked, shows nothing (its menu note):
+    /// no Model3D node on this cut, the composite on the canvas, or a BG
+    /// column drawn over it (the underlay sits under every column).
+    pub(crate) fn underlay_note(&self, state: &AppState) -> Option<&'static str> {
+        if !self.underlay.on {
+            return None;
+        }
+        let cut = state.cut();
+        if crate::view3d::model_node(cut, state.selected_node).is_none() {
+            return Some("not shown: this cut has no Model3D node");
+        }
+        if self.composite_shown {
+            return Some("not shown: composite view");
+        }
+        let frame = state.view.frame;
+        let bg = cut.xsheet.columns.iter().any(|c| {
+            cut.column_def(c.id).kind == anim_core::xsheet::ColumnKind::Bg
+                && cut.column_renders(c.id)
+                && c.resolve(frame).is_some()
+        });
+        bg.then_some("under the BG column — hide it in the sheet to see the model")
     }
 
     /// Switch to the Select tool (V) / back to Paint (B). A live stroke
@@ -4553,6 +4579,12 @@ impl CanvasView {
             None
         };
         self.underlay_drawn = None;
+        self.composite_shown = composite_tex.is_some();
+        // Its picture is still to come (a first one, or this frame's): the
+        // lamp, as View3D shows it.
+        let underlay_pending = composite_tex.is_none()
+            && self.underlay.busy()
+            && crate::view3d::model_node(state.cut(), state.selected_node).is_some();
 
         // ---- Render layers ------------------------------------------------
         let cut = state.cut();
@@ -4599,9 +4631,10 @@ impl CanvasView {
             );
         }
 
-        // 0. GM22: the 3D underlay, faded under every column, on the frame.
+        // 0. GM22: the 3D underlay, faded under every column, on the frame,
+        // at the light table's opacity (the lightbox's pin opacity).
         if let Some(u) = underlay {
-            let opacity = crate::view3d::UNDERLAY_OPACITY;
+            let opacity = self.light_table.opacity.clamp(0.0, 1.0);
             paint_paper_image(&painter, &xf, u.tex, crate::plate::faded(opacity));
             let p = &state.engine.project;
             self.underlay_drawn = Some(UnderlayDrawn {
@@ -5007,6 +5040,20 @@ impl CanvasView {
                     away += 1;
                 }
             }
+        }
+
+        // GM22: the 3D underlay's picture is on its way — the lamp, and in
+        // words, in the canvas's corner past the rule (View3D's dot).
+        if underlay_pending {
+            let at = rect.left_top() + vec2(24.0, 14.0);
+            painter.circle_filled(at, 4.0, crate::plate::TALLY);
+            painter.text(
+                at + vec2(8.0, 0.0),
+                egui::Align2::LEFT_CENTER,
+                "3D underlay rendering…",
+                egui::FontId::proportional(12.0),
+                crate::plate::LEGEND,
+            );
         }
 
         // ---- THE RULE's mirror (spec §5.4): the active column's run

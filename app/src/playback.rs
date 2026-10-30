@@ -475,6 +475,10 @@ struct RamPass {
     /// GM17: the project's folder for the worker, and what it could not
     /// read.
     env: Arc<anim_core::export::RenderEnv>,
+    /// GM22: the frames it draws with their keys, and the range it was
+    /// asked for (a sequence reload rechecks them).
+    keys: Vec<(u32, u64)>,
+    range: (u32, u32),
 }
 
 impl Drop for RamPass {
@@ -511,7 +515,8 @@ pub struct RamPreview {
 
 impl RamPreview {
     /// GM22: image sequences were reloaded: the held frames are rechecked
-    /// against their new keys at the next sync (an unchanged frame stays).
+    /// against their new keys at the next sync (an unchanged frame stays),
+    /// and a running pass carries on unless a frame it draws changed.
     pub fn files_changed(&mut self) {
         self.stale = true;
     }
@@ -575,19 +580,32 @@ impl RamPreview {
         repaint: Option<&egui::Context>,
     ) -> Option<Result<String, String>> {
         let rev = engine.revision();
+        let stale = std::mem::take(&mut self.stale);
         if self.look != Some(look) {
             self.cache.clear();
             self.pass = None;
             self.look = Some(look);
             self.checked = rev;
         }
-        if rev != self.checked || std::mem::take(&mut self.stale) {
+        let mut restart = None;
+        if rev != self.checked {
             // The pass draws the document as it was: let it go.
             self.pass = None;
             self.recheck(engine, look);
             self.checked = rev;
+        } else if stale {
+            // GM22: the image sequences were read again: a held frame whose
+            // file changed drops; a running pass carries on, unless a frame
+            // it draws changed — then it starts again over its range.
+            self.recheck(engine, look);
+            if let Some(pass) = &self.pass
+                && Self::moved(engine, look, &pass.keys)
+            {
+                restart = Some(pass.range);
+                self.pass = None;
+            }
         }
-        let mut msg = None;
+        let mut msg = restart.map(|range| self.start(engine, look, range, repaint));
         let mut finished = false;
         if let Some(pass) = &mut self.pass {
             loop {
@@ -640,6 +658,20 @@ impl RamPreview {
         }
     }
 
+    /// GM22: whether any frame of `keys` now has another key than the one
+    /// it was drawn under (or the cut is gone).
+    fn moved(engine: &mut Engine, look: RamLook, keys: &[(u32, u64)]) -> bool {
+        let frames: Vec<u32> = keys.iter().map(|&(f, _)| f).collect();
+        let evals = evals(engine, look.at, &frames);
+        let Some(cut) = engine.project.cut(look.at.scene, look.at.cut) else {
+            return true;
+        };
+        let (lh, mut memo) = (look.hash(), HashMap::new());
+        keys.iter()
+            .zip(evals)
+            .any(|(&(f, key), eval)| frame_hash(cut, eval, f, lh, &mut memo) != key)
+    }
+
     /// Start a pass over the frames of `lo..=hi` not held, as many as the
     /// cap holds.
     fn start(
@@ -688,6 +720,7 @@ impl RamPreview {
             };
         }
         let total = todo.len();
+        let keys = todo.clone();
         let snapshot = cut.clone();
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -736,6 +769,8 @@ impl RamPreview {
             done: 0,
             stop,
             env,
+            keys,
+            range: (lo, hi),
         });
         Ok(if total < missing {
             format!(

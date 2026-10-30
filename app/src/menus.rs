@@ -203,7 +203,7 @@ impl crate::Editor {
 
     /// GM7: a line of the document's own state under an item's tooltip —
     /// the colour law beside the migration that changes it.
-    fn menu_note(&self, action: Action) -> Option<String> {
+    pub(crate) fn menu_note(&self, action: Action) -> Option<String> {
         match action {
             Action::ConvertColorsToSrgb => Some(format!(
                 "this project: {}",
@@ -214,6 +214,8 @@ impl crate::Editor {
                 .state
                 .page_hand_built()
                 .map(|n| format!("DANGER: it {} ({n} nodes now)", crate::manga_tools::CLIP_DANGER)),
+            // GM22: why a ticked 3D underlay shows nothing.
+            Action::Underlay3d => self.canvas.underlay_note(&self.state).map(String::from),
             _ => None,
         }
     }

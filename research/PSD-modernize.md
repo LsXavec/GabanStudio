@@ -3241,3 +3241,10 @@ what was not verified.
   960 wide) at 0.45 on the frame under the columns, keyed by node, eval value, size and law; no job
   mid-stroke or while playing. 8 `worker3d_` tests and one core test. Left: the stretch (the node
   picker, the opacity slider). Not verified: the underlay and the dot in the running app.
+  Review fixes: the underlay fades at the light table's opacity (`LightTableCfg.opacity`, 0.45 by
+  default); an ImageSequence's stats are kept per node with its values (`r3d::SeqStats`: each file
+  number stat'ed once per reload, a held frame never searches back again); a reload keeps a running
+  RAM pass unless a frame it draws changed (then it starts over); a return mid-stroke reloads when the
+  pen lifts; a lost worker repaints; the canvas shows the TALLY dot while the underlay renders; the
+  menu item says why a ticked underlay shows nothing (no Model3D, composite view, a BG column over
+  it); aliases "3d lo", "3d layout", "layout under", "genzu". 12 `worker3d_` tests and two core tests.

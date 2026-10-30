@@ -528,6 +528,23 @@ impl EditorHarness {
         out
     }
 
+    /// GM22: the meshes the last frame painted with texture `tex` (a paper
+    /// image's quad, as the canvas drew it), nested shapes included.
+    pub fn meshes_with(&self, tex: egui::TextureId) -> Vec<egui::Mesh> {
+        fn walk(s: &egui::Shape, tex: egui::TextureId, out: &mut Vec<egui::Mesh>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, tex, out)),
+                egui::Shape::Mesh(m) if m.texture_id == tex => out.push((**m).clone()),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for c in &self.h.output().shapes {
+            walk(&c.shape, tex, &mut out);
+        }
+        out
+    }
+
     /// The viewport commands the last frame sent to the root window.
     pub fn root_commands(&self) -> Vec<egui::ViewportCommand> {
         self.h

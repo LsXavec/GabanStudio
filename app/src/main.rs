@@ -4217,6 +4217,9 @@ struct Editor {
     last_snippet: Option<playback::Snippet>,
     /// GM12: the mix being made on a worker.
     mix_job: Option<playback::MixJob>,
+    /// GM22: the window came back mid-stroke: the image sequences are read
+    /// again on the first frame after the pen lifts.
+    reload_pending: bool,
     /// GM12: Sheet ▸ Lip flap…'s window is open with this form.
     lip_form: Option<playback::LipForm>,
     /// GM2: what the artist asked for that would drop unsaved work — the
@@ -4822,6 +4825,7 @@ impl Editor {
             scrub_request: None,
             last_snippet: None,
             mix_job: None,
+            reload_pending: false,
             lip_form: None,
             leave: None,
             leave_after_save: None,
@@ -4903,6 +4907,7 @@ impl Editor {
             scrub_request: None,
             last_snippet: None,
             mix_job: None,
+            reload_pending: false,
             lip_form: None,
             leave: None,
             leave_after_save: None,
@@ -7263,9 +7268,15 @@ impl Editor {
         // folder; returning to the window reads them again (a render done
         // meanwhile shows), never mid-stroke.
         self.state.sync_eval_base();
-        let focused = ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true))));
-        if focused && !self.canvas.stroke_active() && self.state.reload_sequences() > 0 {
-            self.final_look.reread();
+        // A return during a stroke reads them when the pen lifts.
+        if ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::WindowFocused(true)))) {
+            self.reload_pending = true;
+        }
+        if self.reload_pending && !self.canvas.stroke_active() {
+            self.reload_pending = false;
+            if self.state.reload_sequences() > 0 {
+                self.final_look.reread();
+            }
         }
         let s = &mut self.state;
         let dir = s.project_dir();

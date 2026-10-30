@@ -877,6 +877,48 @@ fn the_sequence_value_folds_the_shown_files_length_and_time_once_its_path_resolv
 }
 
 #[test]
+fn a_held_sequence_stats_each_file_number_once_per_pass_and_folds_the_held_file() {
+    // Three files held through a 300-frame pass: every held frame folds
+    // file 3's stamp (the file `sequence_file` picks), and the pass stats
+    // each number once — never every earlier one for every frame.
+    let dir = tempfile::tempdir().unwrap();
+    let name = |n: u32| dir.path().join(format!("shot_{n:04}.png"));
+    for n in 1..=3 {
+        std::fs::write(name(n), png_bytes(n + 1, n + 1, [9, 9, 9, 255])).unwrap();
+    }
+    let (mut engine, at) = seq_rig("shot_####.png", 1, true);
+    engine.evaluator.set_base(Some(dir.path().to_path_buf()));
+    let value = |e: &mut Engine, f| e.eval(at.scene, at.cut, f).unwrap().recipe().to_string();
+    let stamp = |n: u32| {
+        let (len, ns) = r3d::sequence_stamp(&name(n)).unwrap();
+        format!("file={len}@{ns})")
+    };
+    for f in 0..300 {
+        let v = value(&mut engine, f);
+        assert!(v.contains(&stamp((f + 1).min(3))), "frame {f}: {v}");
+    }
+    assert_eq!(r3d::sequence_file("shot_####.png", 1, 0, true, 299, Some(dir.path())), Some(name(3)));
+    assert_eq!(engine.evaluator.stats.file_stats, 300, "one stat per frame's number");
+    for f in 0..300 {
+        value(&mut engine, f);
+    }
+    assert_eq!(engine.evaluator.stats.file_stats, 300, "the values are held: no stat");
+    // A reload drops them; a pass from the end searches back once.
+    engine.evaluator.invalidate_all();
+    for f in (0..300).rev() {
+        assert!(value(&mut engine, f).contains(&stamp((f + 1).min(3))), "frame {f}");
+    }
+    assert_eq!(engine.evaluator.stats.file_stats, 600);
+    // A missing folder: one stat per frame, each frame "-".
+    let (mut gone, at) = seq_rig("gone/shot_####.png", 1, true);
+    gone.evaluator.set_base(Some(dir.path().to_path_buf()));
+    for f in 0..300 {
+        assert!(gone.eval(at.scene, at.cut, f).unwrap().recipe().contains("file=-)"), "frame {f}");
+    }
+    assert_eq!(gone.evaluator.stats.file_stats, 300);
+}
+
+#[test]
 fn a_new_sequence_counts_from_one_and_a_picked_file_names_its_pattern() {
     let NodeKind::ImageSequence { first, offset, hold_last, fit, .. } = NodeKind::image_sequence("shot_####.png")
     else {

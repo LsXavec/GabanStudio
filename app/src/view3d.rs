@@ -41,9 +41,6 @@ pub const MAX_RENDER_W: u32 = 960;
 /// channel closed before it answered).
 pub const WORKER_LOST: &str = "the render stopped before it finished";
 
-/// GM22: how strongly the canvas draws the 3D underlay under the drawing.
-pub const UNDERLAY_OPACITY: f32 = 0.45;
-
 /// Why a View3D verb has nothing to act on.
 pub const NO_MODEL: &str = "no Model3D node — File ▸ Import 3D model…";
 
@@ -205,18 +202,32 @@ impl Worker3d {
     }
 
     /// Run the job [`JobLogic::want`] started: `render` on its own thread,
-    /// and a repaint when it lands.
+    /// and a repaint however it ends (its answer, or a panic that closes
+    /// the channel unanswered), so the UI takes it in.
     pub fn start(&mut self, ctx: &egui::Context, render: impl FnOnce() -> Result<Image, String> + Send + 'static) {
+        /// The job's end of the channel: dropped — answered, or unwound by
+        /// a panic — it closes the channel, then asks for the repaint.
+        struct Reply {
+            tx: Option<mpsc::Sender<Result<egui::ColorImage, String>>>,
+            ctx: egui::Context,
+        }
+        impl Drop for Reply {
+            fn drop(&mut self) {
+                drop(self.tx.take());
+                self.ctx.request_repaint();
+            }
+        }
         let (tx, rx) = mpsc::channel();
         self.answer = Some(rx);
-        let ctx = ctx.clone();
+        let reply = Reply { tx: Some(tx), ctx: ctx.clone() };
         std::thread::spawn(move || {
             let answer = render().map(|img| {
                 let bytes: Vec<u8> = img.px.chunks_exact(4).flat_map(anim_core::export::straight_rgba8).collect();
                 egui::ColorImage::from_rgba_unmultiplied([img.w as usize, img.h as usize], &bytes)
             });
-            let _ = tx.send(answer);
-            ctx.request_repaint();
+            if let Some(tx) = &reply.tx {
+                let _ = tx.send(answer);
+            }
         });
     }
 
@@ -652,10 +663,22 @@ impl Underlay {
         Some(UnderlayPicture { tex, node, frame })
     }
 
+    /// The TALLY dot: on, with a picture still to come (a first one, or
+    /// the current frame's).
+    pub fn busy(&self) -> bool {
+        self.on && self.worker.jobs.busy()
+    }
+
     /// Tests: jobs started so far.
     #[cfg(test)]
     pub fn started(&self) -> u32 {
         self.worker.jobs.started
+    }
+
+    /// Tests: the picture's texture (None before the first lands).
+    #[cfg(test)]
+    pub fn texture_id(&self) -> Option<egui::TextureId> {
+        self.worker.texture().map(|t| t.id())
     }
 
     /// Tests: block until the underlay's job is in (it lands next sync).
@@ -1251,6 +1274,59 @@ mod tests {
     }
 
     #[test]
+    fn worker3d_a_reload_keeps_the_ram_previews_unchanged_frames_and_its_pass_unless_a_frame_it_draws_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = |n: u32, side: u32| {
+            let path = dir.path().join(format!("shot_{n:04}.png"));
+            anim_core::deliver::write_png8(&path, &Image::new(side, side)).unwrap();
+        };
+        shot(1, 4);
+        shot(2, 4);
+        // The sequence is the cut's output: the RAM preview holds its frames.
+        let mut s = AppState::new_project("ram", 16, 9, 24, 300.0);
+        s.graph_add_node(NodeKind::image_sequence("shot_####.png"), (0.0, 0.0));
+        let seq = s.selected_node.expect("the sequence node");
+        s.graph_add_node(NodeKind::Output, (200.0, 0.0));
+        let out = s.selected_node.expect("the output node");
+        s.graph_connect(seq, out, 0);
+        s.graph_set_output(out);
+        s.file_path = Some(dir.path().join("ram.animproj"));
+        s.sync_eval_base();
+        let folder = s.project_dir();
+        s.ram.set_base_dir(folder);
+        let p = &s.engine.project;
+        let look = crate::playback::RamLook { at: s.at(), size: (p.width, p.height), law: p.color_law, final_look: false };
+        let cut = s.view.cut;
+        let sync = |s: &mut AppState| s.ram.sync(&mut s.engine, look, (0, 1), None);
+        let held = |s: &AppState| [0, 1].map(|f| s.ram.held(cut, f));
+        // A reload with nothing re-rendered (the window coming back) lets
+        // the running pass carry on: every frame it draws lands.
+        s.ram.toggle();
+        assert_eq!(sync(&mut s), Some(Ok("RAM preview: rendering 2 frames…".to_string())));
+        assert_eq!(s.reload_sequences(), 1);
+        let msg = sync(&mut s);
+        assert!(!matches!(&msg, Some(Ok(m)) if m.contains("rendering")), "not started over: {msg:?}");
+        s.ram.wait();
+        assert_eq!(held(&s), [true, true], "the pass was not let go");
+        // Shot 2 re-rendered: frame 0 stays held, frame 1 drops.
+        shot(2, 8);
+        s.reload_sequences();
+        assert_eq!(sync(&mut s), None);
+        assert_eq!(held(&s), [true, false]);
+        // Re-rendered again while a pass draws it: the pass starts over, and
+        // frame 1 is held under its newest file (a later reload keeps it).
+        s.ram.toggle();
+        assert_eq!(sync(&mut s), Some(Ok("RAM preview: rendering 1 frames…".to_string())));
+        shot(2, 6);
+        s.reload_sequences();
+        sync(&mut s);
+        s.ram.wait();
+        s.reload_sequences();
+        assert_eq!(sync(&mut s), None);
+        assert_eq!(held(&s), [true, true], "drawn again from the new file");
+    }
+
+    #[test]
     fn worker3d_the_underlay_is_refused_with_no_model_and_draws_the_cube_without_touching_the_document() {
         let mut empty = EditorHarness::new();
         assert_eq!(empty.editor().can_perform(Action::Underlay3d), Err(NO_MODEL));
@@ -1285,10 +1361,45 @@ mod tests {
         assert_eq!(doc(&h), was, "a view: no undo step, the document as clean");
         assert_eq!(export(&h), off, "the export is the same with it on");
         assert_eq!(off, 0x6423_45a1_fbfa_3bc4, "pinned");
+        // The quad it painted: its picture on the frame's corners, faded to
+        // the light table's opacity — and the lightbox's pin opacity fades
+        // it too.
+        let quad = |h: &EditorHarness| {
+            let tex = h.editor().canvas.underlay.texture_id().expect("its picture");
+            let meshes = h.meshes_with(tex);
+            assert_eq!(meshes.len(), 1, "one quad");
+            let corners: Vec<egui::Pos2> = meshes[0].vertices.iter().map(|v| v.pos).collect();
+            assert_eq!(corners, h.editor().canvas.view_xform().paper_corners().to_vec(), "on the frame");
+            meshes[0].vertices[0].color
+        };
+        assert_eq!(quad(&h), crate::plate::faded(0.45));
+        // (The shell feeds the canvas the config's light table each frame.)
+        h.rig_mut().config.light_table.opacity = 0.7;
+        h.run();
+        assert_eq!(h.editor().canvas.underlay_drawn.map(|d| d.opacity), Some(0.7));
+        assert_eq!(quad(&h), crate::plate::faded(0.7));
+        // The app's own export — a render queue job from this state —
+        // writes the same file with the underlay on as off.
+        let out = tempfile::tempdir().unwrap();
+        let queued = |h: &mut EditorHarness, name: &str| {
+            let ctx = h.ctx();
+            let s = h.state_mut();
+            s.render_queue.ffmpeg = Some((String::new(), None));
+            s.render_queue.draft.out = out.path().join(name).display().to_string();
+            let at = s.at();
+            assert!(crate::render_queue::add_job(s, at, Some((0, 0))));
+            crate::render_queue::start(s, &ctx);
+            crate::render_queue::wait(s, &ctx);
+            let files: Vec<_> = std::fs::read_dir(out.path().join(name)).unwrap().flatten().collect();
+            assert_eq!(files.len(), 1, "one frame written");
+            std::fs::read(files[0].path()).unwrap()
+        };
+        let with_it = queued(&mut h, "on");
         h.perform(Action::Underlay3d);
         h.run_frames(2);
         assert_eq!(h.editor().canvas.underlay_drawn, None, "off: nothing drawn");
         assert_eq!(export(&h), off);
+        assert_eq!(queued(&mut h, "off"), with_it, "the delivered file is the same");
         assert_eq!(doc(&h), was);
     }
 
@@ -1319,8 +1430,10 @@ mod tests {
         state.view.frame = 0;
         shown(&mut u, &mut state, &ctx, false);
         assert_eq!(u.started(), 2, "the camera keyed: frame 0's key moved");
+        assert!(u.busy(), "the dot: its picture is on its way");
         u.wait();
         assert_eq!(shown(&mut u, &mut state, &ctx, false), Some((node, 0)));
+        assert!(!u.busy(), "it landed: no dot");
         state.view.frame = 1;
         assert_eq!(shown(&mut u, &mut state, &ctx, true), Some((node, 0)), "mid-stroke the last picture holds");
         assert_eq!(u.started(), 2, "a stroke in progress starts no job");
@@ -1333,6 +1446,67 @@ mod tests {
         state.view.frame = 2;
         assert_eq!(shown(&mut u, &mut state, &ctx, false), Some((node, 1)));
         assert_eq!(u.started(), 3, "no job while playing");
+    }
+
+    #[test]
+    fn worker3d_under_the_pen_the_underlay_starts_no_job_and_a_regained_focus_reads_the_files_once_it_lifts() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = dir.path().join("shot_0001.png");
+        anim_core::deliver::write_png8(&shot, &Image::new(4, 4)).unwrap();
+        let (mut state, _) = small_cube(dir.path());
+        state.graph_add_node(NodeKind::image_sequence("shot_####.png"), (0.0, 200.0));
+        let seq = state.selected_node.expect("the sequence node");
+        state.file_path = Some(dir.path().join("cut.animproj"));
+        state.new_drawing_at_frame();
+        let mut h = EditorHarness::with_state(state);
+        h.run();
+        let (scene, cut) = (h.state().view.scene, h.state().view.cut);
+        let value = |h: &mut EditorHarness| h.state_mut().engine.eval_node(scene, cut, seq, 0).unwrap().hash();
+        let was = value(&mut h);
+        // The pen goes down; the underlay is ticked, and the window comes
+        // back with the shot re-rendered, while it is down (the stroke tap).
+        let c = h.editor().canvas.view_xform().paper_to_screen(egui::pos2(96.0, 54.0));
+        h.press_and_move(c, c + egui::vec2(20.0, 8.0), 3);
+        assert!(h.editor().canvas.stroke_active(), "a stroke in progress");
+        h.editor_mut().canvas.underlay.on = true;
+        anim_core::deliver::write_png8(&shot, &Image::new(8, 8)).unwrap();
+        h.event(egui::Event::WindowFocused(true));
+        assert!(h.editor().canvas.stroke_active(), "still drawing");
+        assert_eq!(h.editor().canvas.underlay.started(), 0, "no underlay job mid-stroke");
+        assert_eq!(value(&mut h), was, "nor are the files read under the pen");
+        // The pen lifts: the reload and the underlay's job follow.
+        h.release(c + egui::vec2(20.0, 8.0));
+        assert!(!h.editor().canvas.stroke_active());
+        assert_ne!(value(&mut h), was, "read once the pen is up");
+        assert_eq!(h.editor().canvas.underlay.started(), 1, "the job starts once the pen is up");
+    }
+
+    #[test]
+    fn worker3d_a_ticked_underlay_that_shows_nothing_says_why_under_its_menu_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let (state, _) = small_cube(dir.path());
+        let mut h = EditorHarness::with_state(state);
+        h.run();
+        let note = |h: &EditorHarness| h.editor().menu_note(Action::Underlay3d);
+        assert_eq!(note(&h), None, "off: nothing to say");
+        h.perform(Action::Underlay3d);
+        h.editor_mut().canvas.underlay.wait();
+        h.run();
+        assert!(h.editor().canvas.underlay_drawn.is_some());
+        assert_eq!(note(&h), None, "drawn and seen: nothing to say");
+        // A BG column showing a drawing on the frame covers it.
+        h.state_mut().new_drawing_at_frame();
+        h.state_mut().set_column_kind(anim_core::xsheet::ColumnKind::Bg);
+        h.run();
+        assert!(h.editor().canvas.underlay_drawn.is_some(), "drawn, under the BG");
+        let bg = "under the BG column — hide it in the sheet to see the model";
+        assert_eq!(note(&h).as_deref(), Some(bg));
+        // A cut with no Model3D node.
+        let scene = h.state().view.scene;
+        h.state_mut().new_cut(scene);
+        h.run();
+        assert_eq!(note(&h).as_deref(), Some("not shown: this cut has no Model3D node"));
+        assert!(h.editor().canvas.underlay.on, "still ticked");
     }
 
     #[test]
@@ -1355,6 +1529,10 @@ mod tests {
         for alias in ["refresh", "reload renders", "reload sequence"] {
             assert!(Action::ReloadSequences.aliases().contains(&alias), "{alias}");
         }
+        // The studio's words for it: the 3D LO (layout), the genzu.
+        for alias in ["3d lo", "3d layout", "layout under", "genzu"] {
+            assert!(Action::Underlay3d.aliases().contains(&alias), "{alias}");
+        }
         // The room says the underlay is in this build, in its help and on
         // the Room menu's hover.
         assert!(!Action::Layout3dRoom.help().contains("not in this build"), "{}", Action::Layout3dRoom.help());
@@ -1363,5 +1541,69 @@ mod tests {
         let hover: String = main[at..].chars().take(320).collect();
         assert!(!hover.contains("not in this build") && hover.contains("3D underlay"), "{hover}");
         assert!(main.contains("self.menu_item(ui, Action::ReloadSequences);"), "File ▸ Reload image sequences");
+    }
+
+    #[test]
+    fn worker3d_old_configs_and_projects_still_load_and_the_new_views_save_nothing() {
+        use crate::config::{Config, clashes, config_path_in};
+        // A config from before GM22: neither new verb in its keybinds. It
+        // loads with nothing to say, the verbs filled in without a chord.
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = serde_json::to_value(Config::default()).unwrap();
+        let binds = v["keybinds"].as_array_mut().unwrap();
+        let all = binds.len();
+        binds.retain(|b| !matches!(b["action"].as_str(), Some("ReloadSequences" | "Underlay3d")));
+        assert_eq!(binds.len(), all - 2);
+        std::fs::write(config_path_in(dir.path()), serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+        let (cfg, notes) = Config::load_from(dir.path());
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(cfg.keybinds.len(), Action::ALL.len(), "the new verbs are filled in");
+        for a in [Action::ReloadSequences, Action::Underlay3d] {
+            assert!(cfg.binding(a).is_some_and(|b| b.chord.is_none()), "{a:?} has no chord");
+        }
+        assert_eq!(clashes(&cfg.keybinds), vec![], "no key fires two verbs");
+        // The verbs come last and are stored by name; an older one still reads.
+        assert!(Action::ALL.ends_with(&[Action::ReloadSequences, Action::Underlay3d]));
+        assert_eq!(serde_json::to_string(&Action::Underlay3d).unwrap(), "\"Underlay3d\"");
+        assert_eq!(serde_json::from_str::<Action>("\"ColumnKindBg\"").unwrap(), Action::ColumnKindBg);
+        // A project the store wrote before GM22 (GM22 saves no new field)
+        // with the cube and a sequence opens clean, nothing evaluated …
+        let work = tempfile::tempdir().unwrap();
+        anim_core::deliver::write_png8(&work.path().join("shot_0001.png"), &Image::new(4, 4)).unwrap();
+        let (mut s, _) = small_cube(work.path());
+        s.graph_add_node(NodeKind::image_sequence("shot_####.png"), (0.0, 200.0));
+        let seq = s.selected_node.expect("the sequence node");
+        let old = s.snapshot_project();
+        let file = work.path().join("old.animproj");
+        anim_core::store::save(&old, &file).unwrap();
+        let st = AppState::load_from(file.clone()).unwrap();
+        assert_eq!(st.engine.project, old);
+        assert!(!st.is_dirty(), "an old file opens clean");
+        assert_eq!(st.engine.evaluator.cached_entries(), 0);
+        // … and the underlay, a reload and the sequence read from the
+        // project's folder leave it as it was: the evaluator is not saved.
+        let mut h = EditorHarness::with_state(st);
+        h.perform(Action::Underlay3d);
+        h.editor_mut().canvas.underlay.wait();
+        h.run();
+        assert!(h.editor().canvas.underlay_drawn.is_some());
+        h.perform(Action::ReloadSequences);
+        let (scene, cut) = (h.state().view.scene, h.state().view.cut);
+        let value = h.state_mut().engine.eval_node(scene, cut, seq, 0).unwrap();
+        assert!(!value.recipe().contains("file=-"), "read from the folder: {}", value.recipe());
+        assert!(h.state().engine.evaluator.stats.file_stats > 0);
+        assert!(!h.state().is_dirty());
+        let now = h.state_mut().snapshot_project();
+        assert_eq!(now, old);
+        // Saved again: the same tables, the same project.
+        let again = work.path().join("again.animproj");
+        anim_core::store::save(&now, &again).unwrap();
+        let tables = |f: &std::path::Path| {
+            let db = rusqlite::Connection::open(f).unwrap();
+            let mut q = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").unwrap();
+            q.query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(tables(&again), tables(&file));
+        assert_eq!(anim_core::Engine::load(&again).unwrap().project, old);
     }
 }

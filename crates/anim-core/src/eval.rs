@@ -17,6 +17,8 @@ pub struct EvalStats {
     pub computed: u64,
     /// Node evaluations served from cache.
     pub cache_hits: u64,
+    /// GM22: files stat'ed for ImageSequence values.
+    pub file_stats: u64,
 }
 
 #[derive(Default)]
@@ -26,6 +28,8 @@ pub struct Evaluator {
     /// GM22: the project's folder, where an ImageSequence's relative files
     /// are stat'ed (None: an unsaved project).
     base: Option<PathBuf>,
+    /// GM22: each ImageSequence node's file stats, dropped with its values.
+    seq_stats: HashMap<NodeId, crate::r3d::SeqStats>,
 }
 
 impl Evaluator {
@@ -39,7 +43,7 @@ impl Evaluator {
     pub fn set_base(&mut self, base: Option<PathBuf>) {
         if self.base != base {
             self.base = base;
-            self.cache.clear();
+            self.invalidate_all();
         }
     }
 
@@ -286,13 +290,18 @@ impl Evaluator {
                 // file's length and time (a stat, never a read; "-" when it
                 // is missing): a file re-rendered on disk changes the value
                 // at the next reload, an unchanged one keeps it. A relative
-                // pattern with no folder keeps the plain value.
+                // pattern with no folder keeps the plain value. The node's
+                // stats are kept with its values: a held frame never
+                // searches back over files already stat'ed.
                 let base = self.base.as_deref();
                 let resolves =
                     !pattern.trim().is_empty() && (base.is_some() || !Path::new(pattern).is_relative());
                 let file = if resolves {
-                    let stamp = crate::r3d::sequence_file(pattern, *first, *offset, *hold_last, frame, base)
-                        .and_then(|p| crate::r3d::sequence_stamp(&p))
+                    let stamp = self
+                        .seq_stats
+                        .entry(id)
+                        .or_default()
+                        .shown(pattern, *first, *offset, *hold_last, frame, base, &mut self.stats.file_stats)
                         .map_or_else(|| "-".to_string(), |(len, ns)| format!("{len}@{ns}"));
                     format!(", file={stamp}")
                 } else {
@@ -312,10 +321,12 @@ impl Evaluator {
     /// M2 refines this to frame ranges for X-sheet edits.
     pub fn invalidate_nodes(&mut self, nodes: &HashSet<NodeId>) {
         self.cache.retain(|(id, _), _| !nodes.contains(id));
+        self.seq_stats.retain(|id, _| !nodes.contains(id));
     }
 
     pub fn invalidate_all(&mut self) {
         self.cache.clear();
+        self.seq_stats.clear();
     }
 
     pub fn cached_entries(&self) -> usize {

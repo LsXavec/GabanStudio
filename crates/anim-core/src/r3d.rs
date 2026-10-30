@@ -40,7 +40,7 @@
 //!   `(d − near)/(far − near)`, so it grows with distance), ID matte (one
 //!   colour per object; each mesh of a model is an object).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1511,6 +1511,107 @@ pub fn sequence_stamp(path: &Path) -> Option<(u64, u128)> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_nanos());
     Some((meta.len(), ns))
+}
+
+/// GM22: the file stats one ImageSequence node's eval values make, kept
+/// as long as its values are (the evaluator drops both together): each
+/// file number is stat'ed once, and a held frame's search back skips the
+/// runs already known empty — so a pass over a cut held past its
+/// sequence's end, or over a missing folder, stats each number once
+/// instead of every earlier one for every frame. It picks the file
+/// [`sequence_file`] picks.
+#[derive(Debug, Default)]
+pub struct SeqStats {
+    /// The pattern and folder the numbers were stat'ed for.
+    pattern: String,
+    base: Option<PathBuf>,
+    /// The numbers whose file exists, with its stamp.
+    found: BTreeMap<u32, (u64, u128)>,
+    /// Runs of numbers with no file: first → last (inclusive).
+    gaps: BTreeMap<u32, u32>,
+}
+
+impl SeqStats {
+    /// The stamp ([`sequence_stamp`]) of the file the sequence shows at
+    /// `frame`, None when there is none; `stats` counts the stats made.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shown(
+        &mut self,
+        pattern: &str,
+        first: u32,
+        offset: i32,
+        hold_last: bool,
+        frame: u32,
+        base: Option<&Path>,
+        stats: &mut u64,
+    ) -> Option<(u64, u128)> {
+        if self.pattern != pattern || self.base.as_deref() != base {
+            *self = SeqStats {
+                pattern: pattern.to_string(),
+                base: base.map(Path::to_path_buf),
+                ..SeqStats::default()
+            };
+        }
+        let n = sequence_number(first, offset, frame)?;
+        if let Some(stamp) = self.stat(n, stats) {
+            return Some(stamp);
+        }
+        if !hold_last || !pattern.contains('#') {
+            return None;
+        }
+        // `sequence_file`'s search: the nearest earlier file, at most a
+        // long cut's worth back.
+        let lowest = first.max(n.saturating_sub(100_000));
+        let mut k = n;
+        while k > lowest {
+            k -= 1;
+            match self.gap_start(k) {
+                // A run known empty: on from below it.
+                Some(start) => k = start,
+                None => {
+                    if let Some(stamp) = self.stat(k, stats) {
+                        return Some(stamp);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// File `k`'s stamp: known, or one stat.
+    fn stat(&mut self, k: u32, stats: &mut u64) -> Option<(u64, u128)> {
+        if let Some(stamp) = self.found.get(&k) {
+            return Some(*stamp);
+        }
+        if self.gap_start(k).is_some() {
+            return None;
+        }
+        *stats += 1;
+        let stamp = sequence_stamp(&resolve_path(&expand_hashes(&self.pattern, k), self.base.as_deref()));
+        match stamp {
+            Some(s) => {
+                self.found.insert(k, s);
+            }
+            None => self.add_gap(k),
+        }
+        stamp
+    }
+
+    /// The first number of the empty run that holds `k`.
+    fn gap_start(&self, k: u32) -> Option<u32> {
+        self.gaps
+            .range(..=k)
+            .next_back()
+            .filter(|(_, last)| **last >= k)
+            .map(|(start, _)| *start)
+    }
+
+    /// `k` has no file: one run with the runs just below and above it.
+    fn add_gap(&mut self, k: u32) {
+        let start = k.checked_sub(1).and_then(|below| self.gap_start(below)).unwrap_or(k);
+        let last = k.checked_add(1).and_then(|above| self.gaps.remove(&above)).unwrap_or(k);
+        self.gaps.insert(start, last);
+    }
 }
 
 /// The pattern and first number for a sequence picked by one of its files:
