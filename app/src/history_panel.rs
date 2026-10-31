@@ -42,7 +42,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, shared: b
                 row(ui, n, &e.label, Some(who), e.applied, pos == n, at_saved, &mut jump);
             }
         });
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     let Some(n) = jump.filter(|n| *n != pos) else {
         return;
     };

@@ -4576,6 +4576,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
         // down first, so all content paints over the material.
         plate::surface(ui);
         self.pane_rects.push((*tab, ui.max_rect()));
+        plate::note_pane_body(ui);
         match tab {
             Pane::History => {
                 let gesture_safe = !self.canvas.stroke_active();
@@ -4650,6 +4651,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                     // area the layout probe measures here.
                     self.canvas.dbg_rect = ui.available_rect_before_wrap();
                     self.canvas.dbg_layer = ui.layer_id();
+                    self.canvas.dbg_preview = true;
                     let vs = self.viewers.entry(u8::MAX).or_default();
                     viewer::ui(ui, self.state, self.graph, vs, self.final_look);
                 } else {
@@ -4742,7 +4744,7 @@ impl EditorTabs<'_> {
                     ui.label(egui::RichText::new("no presets — save one above").color(plate::legend_dim()));
                 }
             });
-        plate::note_viewport(ui, scroll.inner_rect);
+        plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     }
 }
 

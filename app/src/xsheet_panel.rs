@@ -1413,7 +1413,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 ui.ctx().request_repaint();
             }
         });
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
 }
 
 /// GM12: the shown sound track's header row (when the cut has sound): the

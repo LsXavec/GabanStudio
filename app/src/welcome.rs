@@ -608,7 +608,7 @@ pub fn ui(
             "off: start-up opens the New Project form; Settings ▸ General turns it back on",
         );
     });
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     out
 }
 

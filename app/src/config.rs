@@ -3204,7 +3204,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                 }
             });
     });
-    crate::plate::note_viewport(ui, scroll.inner_rect);
+    crate::plate::note_viewport(ui, scroll.inner_rect, [false, true]);
 }
 
 /// Settings -> UI Features: behaviour of the shell itself.
@@ -4051,7 +4051,7 @@ fn performance_page(
                     ui.end_row();
             });
     });
-    crate::plate::note_viewport(ui, scroll.inner_rect);
+    crate::plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     if changed {
         config.save();
     }
@@ -4390,7 +4390,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                 });
             }
         });
-    crate::plate::note_viewport(ui, scroll.inner_rect);
+    crate::plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     if let Some(i) = remove {
         config.presets.remove(i);
         changed = true;

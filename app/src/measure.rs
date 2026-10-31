@@ -437,10 +437,13 @@ pub struct Share {
 const GRID: f32 = 4.0;
 
 /// The 4 pt grid of 4.8 over the window. Never a pane's share: the window is
-/// what the person has. A room with no canvas pane scores nothing.
+/// what the person has. A room with no paper scores nothing: no canvas pane,
+/// or Layout's, which holds the preview and leaves `view_xform` as the room
+/// before it left it.
 pub fn paper_share(h: &EditorHarness) -> Share {
     let editor = h.editor();
-    if !editor.pane_rects.iter().any(|(p, _)| *p == Pane::Canvas) {
+    let canvas = editor.pane_rects.iter().any(|(p, _)| *p == Pane::Canvas);
+    if !canvas || editor.canvas.dbg_preview {
         return Share::default();
     }
     let ctx = h.ctx();
@@ -529,14 +532,19 @@ impl Side {
         }
     }
 
-    /// The band this side of a viewport's content clip can fall in: its
-    /// inner edge out to `clip_rect_margin`, a parent clip landing between.
-    fn band(self, v: &Viewport) -> (f32, f32) {
-        let edge = self.of(v.rect);
+    /// The axis that moves content past this side, as `Viewport::axes` has it.
+    fn axis(self) -> usize {
         match self {
-            Side::Left | Side::Top => (edge - v.margin, edge),
-            Side::Right | Side::Bottom => (edge, edge + v.margin),
+            Side::Left | Side::Right => 0,
+            Side::Top | Side::Bottom => 1,
         }
+    }
+
+    /// The band this side of a viewport's content clip can fall in: its
+    /// inner edge out to its reach, a parent clip landing between.
+    fn band(self, v: &Viewport) -> (f32, f32) {
+        let (edge, far) = (self.of(v.rect), self.of(v.reach));
+        (edge.min(far), edge.max(far))
     }
 
     /// `a` and `b` share a stretch along this side.
@@ -548,31 +556,47 @@ impl Side {
     }
 }
 
-/// A registered scroll viewport owns the clip edge `edge` on this side.
+/// A registered scroll viewport owns the clip edge `edge` on this side. Only
+/// on an axis it scrolls: across one, the clip it sits under is a parent's.
 fn owned(views: &[Viewport], side: Side, edge: f32, along: Rect) -> bool {
     views.iter().any(|v| {
         let (lo, hi) = side.band(v);
-        side.alongside(v.rect, along) && (lo - SLACK..=hi + SLACK).contains(&edge)
+        v.axes[side.axis()] && side.alongside(v.rect, along) && (lo - SLACK..=hi + SLACK).contains(&edge)
     })
 }
 
-/// This point sits in a dock pane's body, with no float over it.
-fn in_pane_body(ctx: &Context, at: Pos2, panes: &[Rect]) -> bool {
-    let float = ctx.layer_id_at(at).is_some_and(|top| top != LayerId::background());
-    panes.iter().any(|p| p.contains(at)) && !float
+/// `cut` lies inside `body`. One-sided, so a control its clip took whole
+/// reads too: its `interact_rect` is inverted, and still ends inside.
+fn inside(cut: Rect, body: Rect) -> bool {
+    let b = body.expand(SLACK);
+    cut.min.x >= b.min.x && cut.min.y >= b.min.y && cut.max.x <= b.max.x && cut.max.y <= b.max.y
 }
 
-/// One frame's findings. `panes` are the dock pane bodies `Scope::Chrome`
-/// leaves out. A fixture passes none.
-pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope, panes: &[Rect]) -> Clip {
+/// Every `Area` on screen, a hover card included: `layer_id_at` passes over
+/// the ones that take no input. egui files the background layer as a
+/// window-sized area of its own.
+fn floats(ctx: &Context) -> Vec<Rect> {
+    ctx.memory(|m| {
+        let shown = m.areas().visible_layer_ids();
+        shown.iter().filter(|l| **l != LayerId::background()).filter_map(|l| m.area_rect(l.id)).collect()
+    })
+}
+
+/// One frame's findings. `Scope::Chrome` goes by what cut a shape: a dock
+/// pane's clip means pane content, wherever panning left its middle. A float
+/// over a pane stays chrome, even one kept to the pane's rect.
+pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope) -> Clip {
     let views = plate::viewports(ctx);
+    let (bodies, floats) = (plate::pane_bodies(ctx), floats(ctx));
     let window = ctx.content_rect();
-    let skipped = |at: Pos2| scope == Scope::Chrome && in_pane_body(ctx, at, panes);
+    let in_body = |cut: Rect| scope == Scope::Chrome && bodies.iter().any(|b| inside(cut, *b));
     let mut out = Clip::default();
     for (t, clip) in texts_of(shapes) {
         let text = t.galley.text().trim();
         let bound = t.visual_bounding_rect();
-        if text.is_empty() || skipped(bound.center()) {
+        // A text shape keeps no layer, so a float is told by where it stands.
+        let shown = bound.intersect(clip).center();
+        if text.is_empty() || (in_body(clip) && !floats.iter().any(|f| f.contains(shown))) {
             continue;
         }
         if t.galley.elided {
@@ -607,7 +631,10 @@ pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope, panes: &
                 let past = |&side: &Side| {
                     side.past(r.rect, window) && !owned(&views, side, side.of(at), r.rect)
                 };
-                if SIDES.iter().any(past) {
+                let pane = r.layer_id == LayerId::background() && in_body(at);
+                // Panned off past a corner, no side of the view runs along it.
+                let panned = views.iter().any(|v| v.axes == [true, true] && inside(at, v.reach));
+                if !pane && !panned && SIDES.iter().any(past) {
                     let name = w.info(r.id).and_then(|i| i.label.clone()).unwrap_or_default();
                     off.push((r.rect, name));
                 }
@@ -616,18 +643,15 @@ pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope, panes: &
         off
     });
     for (rect, name) in off {
-        if !skipped(rect.center()) {
-            out.outside += 1;
-            out.found.push(format!("outside {name:?} at {rect:?}"));
-        }
+        out.outside += 1;
+        out.found.push(format!("outside {name:?} at {rect:?}"));
     }
     out
 }
 
 /// This frame as it stands.
 pub fn clip_here(h: &EditorHarness, scope: Scope) -> Clip {
-    let panes: Vec<Rect> = h.editor().pane_rects.iter().map(|(_, r)| *r).collect();
-    clip_frame(&h.ctx(), &h.kit().output().shapes, scope, &panes)
+    clip_frame(&h.ctx(), &h.kit().output().shapes, scope)
 }
 
 /// Every room in `PROBE_ROOMS`, entered as its button enters it, added up.
@@ -935,7 +959,25 @@ mod tests {
     }
 
     fn clip_of(h: &Harness<'static>) -> Clip {
-        clip_frame(&h.ctx, &h.output().shapes, Scope::All, &[])
+        clip_frame(&h.ctx, &h.output().shapes, Scope::All)
+    }
+
+    fn chrome_of(h: &Harness<'static>) -> Clip {
+        clip_frame(&h.ctx, &h.output().shapes, Scope::Chrome)
+    }
+
+    /// A dock pane's body as `EditorTabs` reports one: its clip on `body`.
+    fn pane_body(ui: &mut egui::Ui, body: Rect, paint: impl FnOnce(&mut egui::Ui)) {
+        let mut pane = ui.new_child(egui::UiBuilder::new().max_rect(body));
+        pane.set_clip_rect(body);
+        plate::note_pane_body(&pane);
+        paint(&mut pane);
+    }
+
+    /// `SEVERAL_WORDS` cut by `clip`.
+    fn cut_words(painter: &egui::Painter, clip: Rect, at: Pos2) {
+        let font = FontId::proportional(14.0);
+        painter.with_clip_rect(clip).text(at, Align2::LEFT_TOP, SEVERAL_WORDS, font, plate::SEED_WHITE);
     }
 
     fn ink(ui: &egui::Ui, at: Pos2, colour: Color32) {
@@ -1066,7 +1108,9 @@ mod tests {
                     "clip_chrome": [chrome.clipped, chrome.outside, chrome.elided],
                     "contrast": [contrast.checked, contrast.failures.len(), contrast.unknown.len()],
                     "canvas": format!("{:?}", h.editor().canvas.dbg_rect),
-                    "zoom": h.editor().canvas.view_xform().zoom,
+                    // Layout's pane is the preview: no paper, no zoom.
+                    "preview": h.editor().canvas.dbg_preview,
+                    "zoom": (!h.editor().canvas.dbg_preview).then(|| h.editor().canvas.view_xform().zoom),
                     "clip_found": clip.found,
                     "contrast_failures": contrast.failures,
                 }));
@@ -1077,6 +1121,22 @@ mod tests {
         for (at, (doc, room, want)) in BASELINE.iter().enumerate() {
             assert_eq!(rows[at]["census"], serde_json::json!(want), "{doc} {room}");
         }
+        // The rows above sit in the harness's 8 pt inset, as the journeys
+        // did. The same room on the person's window, beside them.
+        let mut flush = EditorHarness::as_shipped();
+        flush.editor_mut().enter_room(Stage::Drawing);
+        flush.kit_mut().set_size(vec2(1600.0, 900.0));
+        settle(&mut flush);
+        let share = paper_share(&flush);
+        let row = serde_json::json!({
+            "paper": share.paper,
+            "pen_land": share.pen_land,
+            "paper_under_chrome": share.paper_under_chrome,
+            "canvas": format!("{:?}", flush.editor().canvas.dbg_rect),
+            "zoom": flush.editor().canvas.view_xform().zoom,
+        });
+        println!("flush blank Drawing {row}");
+        std::fs::write(path.with_file_name("flush-blank-drawing.json"), row.to_string()).expect("write it");
     }
 
     // ---- paper share ----
@@ -1134,9 +1194,60 @@ mod tests {
         h.editor_mut().enter_room(Stage::Composite);
         settle(&mut h);
         let tabs = &h.editor().pane_rects;
-        if !tabs.iter().any(|(p, _)| *p == Pane::Canvas) {
-            assert_eq!(paper_share(&h), Share::default());
+        assert!(!tabs.is_empty() && !tabs.iter().any(|(p, _)| *p == Pane::Canvas), "{tabs:?}");
+        assert_eq!(paper_share(&h), Share::default());
+    }
+
+    /// Layout's Canvas pane holds the preview: no paper, whatever the room
+    /// before it left in the canvas's transform.
+    #[test]
+    fn auseam_paper_share_reads_no_paper_in_layouts_preview() {
+        let mut readings = Vec::new();
+        for from in [Stage::Drawing, Stage::InkPaint] {
+            let mut h = blank_drawing();
+            h.editor_mut().enter_room(from);
+            settle(&mut h);
+            let before = paper_share(&h);
+            assert!(before.paper > 0.0, "{from:?} has paper: {before:?}");
+            readings.push(before);
+            h.editor_mut().enter_room(Stage::Layout);
+            settle(&mut h);
+            assert!(h.editor().pane_rects.iter().any(|(p, _)| *p == Pane::Canvas));
+            assert_eq!(paper_share(&h), Share::default(), "Layout after {from:?}");
         }
+        assert_ne!(readings[0], readings[1], "two different rooms to come from");
+        // Back on a real canvas the reading returns.
+        let mut h = blank_drawing();
+        let clean = paper_share(&h);
+        h.editor_mut().enter_room(Stage::Layout);
+        settle(&mut h);
+        h.editor_mut().enter_room(Stage::Drawing);
+        settle(&mut h);
+        assert_eq!(paper_share(&h), clean);
+    }
+
+    /// 4.1's arithmetic on the screen the person has: the App lays out from
+    /// the window's edge, and the share is of the whole window.
+    #[test]
+    fn auseam_paper_share_reads_the_persons_window() {
+        let mut h = EditorHarness::as_shipped();
+        h.editor_mut().enter_room(Stage::Drawing);
+        h.kit_mut().set_size(vec2(1600.0, 900.0));
+        settle(&mut h);
+        let pane = h.editor().canvas.dbg_rect;
+        let inset = blank_drawing();
+        let framed = inset.editor().canvas.dbg_rect;
+        assert_eq!(pane.height() - framed.height(), 16.0, "{pane:?} against {framed:?}");
+        assert!(pane.width() > framed.width(), "{pane:?} against {framed:?}");
+        let xf = h.editor().canvas.view_xform();
+        let corners = [xf.paper_to_screen(Pos2::ZERO), xf.paper_to_screen(xf.paper.to_pos2())];
+        let on_screen = Rect::from_two_pos(corners[0], corners[1]).intersect(pane);
+        let share = paper_share(&h);
+        let window = 1600.0 * 900.0;
+        let by_area = 100.0 * on_screen.area() / window;
+        let by_grid = share.paper + 100.0 * (share.paper_under_chrome as f32 * GRID * GRID) / window;
+        assert!((by_grid - by_area).abs() < 0.6, "{by_grid} on the grid, {by_area} by area: {share:?}");
+        assert!(share.paper > paper_share(&inset).paper, "the 8 pt the harness took are back");
     }
 
     // ---- clip audit ----
@@ -1185,6 +1296,77 @@ mod tests {
         settle(&mut h);
         assert_eq!(clip_here(&h, Scope::All).clipped, all.clipped + 1);
         assert_eq!(clip_here(&h, Scope::Chrome).clipped, chrome.clipped);
+        // Hanging over a pane's foot, its middle past the pane: it is the
+        // pane's clip that cuts it, so it is still the pane's.
+        h.rig_mut().seed = None;
+        settle(&mut h);
+        let body = plate::pane_bodies(&h.ctx()).into_iter().find(|b| b.contains(body)).expect("a pane");
+        let at = pos2(body.left() + 20.0, body.bottom() - 6.0);
+        h.rig_mut().seed = Some(Box::new(move |ui| cut_words(ui.painter(), body, at)));
+        settle(&mut h);
+        let shapes = &h.kit().output().shapes;
+        let (seeded, _) = texts_of(shapes).into_iter().find(|(t, _)| t.galley.text() == SEVERAL_WORDS).unwrap();
+        let middle = seeded.visual_bounding_rect().center();
+        assert!(!plate::pane_bodies(&h.ctx()).iter().any(|b| b.contains(middle)), "past the pane");
+        assert_eq!(clip_here(&h, Scope::All).clipped, all.clipped + 1);
+        assert_eq!(clip_here(&h, Scope::Chrome).clipped, chrome.clipped);
+    }
+
+    #[test]
+    fn auseam_clip_audit_keeps_a_float_over_a_pane() {
+        let body = Rect::from_min_max(pos2(20.0, 20.0), pos2(380.0, 280.0));
+        let words = Rect::from_min_size(pos2(100.0, 100.0), vec2(40.0, 12.0));
+        // The hover card's shape takes no input: `layer_id_at` never sees it.
+        for (order, interactable) in [(egui::Order::Middle, true), (egui::Order::Tooltip, false)] {
+            let float = fixture(move |ui| {
+                pane_body(ui, body, |_| {});
+                let area = egui::Area::new(egui::Id::new("seed_card")).order(order).interactable(interactable);
+                area.fixed_pos(words.min).constrain_to(body).show(ui.ctx(), |ui| {
+                    ui.allocate_space(vec2(120.0, 40.0));
+                    cut_words(ui.painter(), words, words.min);
+                });
+            });
+            let got = chrome_of(&float);
+            assert_eq!(got.clipped, 1, "{order:?}: {:?}", got.found);
+            let top = float.ctx.layer_id_at(words.center()).is_none_or(|l| l == LayerId::background());
+            assert_eq!(top, !interactable, "{order:?}: the layer lookup sees only the first");
+        }
+        // The same words on the pane, with no float: its own, so left out.
+        let plain = fixture(move |ui| pane_body(ui, body, |pane| cut_words(pane.painter(), words, words.min)));
+        assert_eq!(clip_of(&plain).clipped, 1);
+        assert_eq!(chrome_of(&plain).clipped, 0);
+    }
+
+    #[test]
+    fn auseam_clip_audit_reads_a_control_by_its_clip() {
+        let body = Rect::from_min_max(pos2(200.0, 40.0), pos2(400.0, 260.0));
+        let button = |x: f32| Rect::from_min_size(pos2(x, 60.0), vec2(80.0, 24.0));
+        // A list scrolled sideways in a pane on the window's edge: one half
+        // gone, its middle out of the window; one gone whole.
+        for x in [380.0, 420.0] {
+            let panned = fixture(move |ui| {
+                pane_body(ui, body, |pane| {
+                    pane.put(button(x), egui::Button::new("Off"));
+                });
+            });
+            assert_eq!(clip_of(&panned).outside, 1, "{:?}", clip_of(&panned).found);
+            assert_eq!(chrome_of(&panned).outside, 0, "{:?}", chrome_of(&panned).found);
+        }
+        // Off the window beside the pane: nothing of a pane's cut it.
+        let chrome = fixture(move |ui| {
+            pane_body(ui, body, |_| {});
+            ui.put(Rect::from_min_size(pos2(380.0, 10.0), vec2(80.0, 24.0)), egui::Button::new("Off"));
+        });
+        assert_eq!(chrome_of(&chrome).outside, 1, "{:?}", chrome_of(&chrome).found);
+        // On a float over the pane: the widget's layer says it is no pane's.
+        let float = fixture(move |ui| {
+            pane_body(ui, body, |_| {});
+            let area = egui::Area::new(egui::Id::new("seed_float")).fixed_pos(pos2(210.0, 60.0));
+            area.constrain_to(body).show(ui.ctx(), |ui| {
+                ui.put(button(380.0), egui::Button::new("Off"));
+            });
+        });
+        assert_eq!(chrome_of(&float).outside, 1, "{:?}", chrome_of(&float).found);
     }
 
     #[test]
@@ -1198,7 +1380,7 @@ mod tests {
         // apart, the clip at 140.
         let registered = fixture(move |ui| {
             let out = egui::ScrollArea::vertical().max_height(132.0).show(ui, rows);
-            plate::note_viewport(ui, out.inner_rect);
+            plate::note_viewport(ui, out.inner_rect, [false, true]);
         });
         let got = clip_of(&registered);
         assert_eq!((got.clipped, got.outside), (0, 0), "{:?}", got.found);
@@ -1224,9 +1406,87 @@ mod tests {
                 );
                 ui.allocate_space(vec2(50.0, 20.0));
             });
-            plate::note_viewport(ui, out.inner_rect);
+            plate::note_viewport(ui, out.inner_rect, [false, true]);
         });
         assert_eq!(clip_of(&across).clipped, 1);
+    }
+
+    /// A list filling a host whose clip is the host, so the parent's clip
+    /// sits on the viewport's own edges: one line too long, one row cut by
+    /// the foot. `noted` is what the note claims scrolls.
+    fn hosted(axes: [bool; 2], noted: [bool; 2]) -> Harness<'static> {
+        fixture(move |ui| {
+            let host = Rect::from_min_size(pos2(20.0, 20.0), vec2(120.0, 116.0));
+            let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(host));
+            inner.set_clip_rect(host);
+            let out = egui::ScrollArea::new(axes).show(&mut inner, |ui| {
+                ui.add(Label::new(SEVERAL_WORDS).extend());
+                for i in 0..20 {
+                    ui.label(format!("row {i}"));
+                }
+            });
+            plate::note_viewport(&inner, out.inner_rect, noted);
+        })
+    }
+
+    #[test]
+    fn auseam_clip_audit_owns_only_the_scrolled_axis() {
+        let edges = |h: &Harness<'static>| {
+            let view = plate::viewports(&h.ctx).first().expect("noted").rect;
+            (view.right(), view.bottom())
+        };
+        // Up and down: the foot is the scroll's, the side is the parent's.
+        let list = hosted([false, true], [false, true]);
+        assert_eq!(edges(&list), (140.0, 136.0), "the parent's clip on the viewport's edges");
+        let got = clip_of(&list);
+        assert_eq!(got.clipped, 1, "{:?}", got.found);
+        assert!(got.found[0].contains("far too long"), "{:?}", got.found);
+        // Left and right: the other way about.
+        let strip = hosted([true, false], [true, false]);
+        assert_eq!(edges(&strip), (140.0, 136.0), "the parent's clip on the viewport's edges");
+        let got = clip_of(&strip);
+        assert_eq!(got.clipped, 1, "{:?}", got.found);
+        assert!(got.found[0].contains("row"), "{:?}", got.found);
+        // Only the note's axes changed: they are what decides.
+        let both = hosted([false, true], [true, true]);
+        assert_eq!(clip_of(&both).clipped, 0, "{:?}", clip_of(&both).found);
+    }
+
+    /// A view panned by hand owns what it cuts on every side, out to `reach`.
+    #[test]
+    fn auseam_clip_audit_owns_a_pan_view() {
+        let rect = Rect::from_min_size(pos2(40.0, 40.0), vec2(120.0, 80.0));
+        let findings = |reach: Option<Rect>| {
+            let panned = fixture(move |ui| {
+                if let Some(reach) = reach {
+                    plate::note_pan_view(ui, rect, reach);
+                }
+                cut_words(ui.painter(), rect, rect.left_bottom() - vec2(0.0, 6.0));
+                ui.put(Rect::from_min_size(pos2(370.0, 60.0), vec2(80.0, 24.0)), egui::Button::new(""));
+            });
+            let got = clip_of(&panned);
+            (got.clipped, got.outside)
+        };
+        assert_eq!(findings(None), (1, 1));
+        assert_eq!(findings(Some(rect)), (0, 1), "its words stop at the rect, the control runs on");
+        assert_eq!(findings(Some(rect.with_max_x(400.0))), (0, 0), "the control's clip is in reach");
+    }
+
+    /// The sample's node graph, panned about: nodes leave the view past its
+    /// sides and corners, and none of that is a cut label or a lost control.
+    /// Panned up over the pane's toolbar is another matter: a node's pins
+    /// stay live there, so past the window's edge they stay findings.
+    #[test]
+    fn auseam_clip_audit_reads_the_node_graph_as_a_pan_view() {
+        let mut h = EditorHarness::with_state(crate::sample::build_sample());
+        h.editor_mut().enter_room(Stage::Edit);
+        h.kit_mut().set_size(vec2(1600.0, 900.0));
+        for pan in [(0.0, 0.0), (900.0, 250.0), (-300.0, -120.0), (500.0, 60.0), (-60.0, 400.0)] {
+            h.state_mut().graph_pan = pan;
+            settle(&mut h);
+            let got = clip_here(&h, Scope::All);
+            assert_eq!((got.clipped, got.outside), (0, 0), "{pan:?}: {:?}", got.found);
+        }
     }
 
     #[test]
@@ -1271,10 +1531,14 @@ mod tests {
         let both = effective(plate::SEED_WHITE.gamma_multiply(0.5), 0.5, black);
         assert!((both[0] - 0.25).abs() < 0.01, "alpha times opacity: {both:?}");
         // A grey passing at 4.5 whole fails once faded through either door.
-        let cases: [(&str, f32, f32, usize); 3] = [
+        // At 0.4 it reads 3.66: an opacity factor's fade is held to 3, a
+        // colour's own alpha is not.
+        let cases: [(&str, f32, f32, usize); 5] = [
             ("whole", 1.0, 1.0, 0),
             ("its own alpha", 0.3, 1.0, 1),
             ("opacity factor", 1.0, 0.3, 1),
+            ("opacity factor over 3", 1.0, 0.4, 0),
+            ("its own alpha under 4.5", 0.4, 1.0, 1),
         ];
         for (name, alpha, opacity, failures) in cases {
             let got = contrast_fixture(move |ui| {
@@ -1306,15 +1570,21 @@ mod tests {
 
     #[test]
     fn auseam_contrast_audit_blends_a_glaze_and_holds_ink3_to_three() {
-        // Mid grey glazed at half over black: the white text's ground is dark.
+        // White ink on white is 1:1. A black glaze at 0.6 leaves a ground of
+        // 0.4 grey, about 5.7:1: the verdict turns on blending it.
+        let unglazed = contrast_fixture(|ui| {
+            ground(ui, plate::SEED_WHITE);
+            ink(ui, pos2(20.0, 20.0), plate::SEED_WHITE);
+        });
+        assert_eq!((unglazed.checked, unglazed.failures.len()), (1, 1), "{unglazed:?}");
         let glazed = contrast_fixture(|ui| {
             ground(ui, plate::SEED_WHITE);
-            ground(ui, plate::SEED_BLACK.gamma_multiply(0.5));
-            ink(ui, pos2(20.0, 20.0), plate::SEED_BLACK);
+            ground(ui, plate::SEED_BLACK.gamma_multiply(0.6));
+            ink(ui, pos2(20.0, 20.0), plate::SEED_WHITE);
         });
         assert_eq!((glazed.checked, glazed.failures.len()), (1, 0), "{glazed:?}");
-        // INK3 on white is about 4.5; on its floor of 3 it passes where a
-        // plain ink of the same colour would not, on a darker ground.
+        // INK3 on white is about 4.6; on this 0.85 grey about 3.2, over its
+        // floor of 3 and under the 4.5 a colour one shade off it is held to.
         let ink3 = plate::INK3;
         let on_grey = contrast_fixture(move |ui| {
             ground(ui, plate::SEED_WHITE);

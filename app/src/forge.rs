@@ -86,7 +86,7 @@ pub fn ui(
         .show(ui, |ui| {
             forge_body(ui, forge, presets, presets_dirty, canvas, status);
         });
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
 }
 
 #[allow(clippy::too_many_arguments)]

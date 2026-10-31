@@ -905,6 +905,9 @@ pub struct CanvasView {
     /// AU1: the layer `dbg_rect` lives on — the paper-share audit's "is this
     /// the canvas" (`layer_id_at` names a layer, never a widget).
     pub dbg_layer: egui::LayerId,
+    /// AU1: `dbg_rect` holds Layout's preview, not this view: no paper in it,
+    /// and `view_xform` is whatever room drew last.
+    pub dbg_preview: bool,
     /// Set once a real pressure pen (Touch with force > 0) is seen. After that,
     /// the mouse-drawing fallback is disabled so Windows' synthesized pen→mouse
     /// clicks (e.g. from a fast light double-tap) can't paint flat-pressure blobs.
@@ -1113,6 +1116,7 @@ impl CanvasView {
             eye_sync_rgb: [0, 0, 0],
             dbg_rect: Rect::NOTHING,
             dbg_layer: egui::LayerId::background(),
+            dbg_preview: false,
             seen_pen: false,
             native_active: false,
             stroke_from_mouse: false,
@@ -3325,7 +3329,7 @@ impl CanvasView {
                     ui.add_space(4.0);
                 }
             });
-        plate::note_viewport(ui, scroll.inner_rect);
+        plate::note_viewport(ui, scroll.inner_rect, [false, true]);
         if let Some(p) = arm {
             self.apply_preset(&p);
         }
@@ -3840,6 +3844,7 @@ impl CanvasView {
         let rect = ui.available_rect_before_wrap();
         self.dbg_rect = rect;
         self.dbg_layer = ui.layer_id();
+        self.dbg_preview = false;
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         self.clipboard_events(ui, rect, state);
@@ -4372,6 +4377,8 @@ impl CanvasView {
                         });
                         self.stroke_streaming = false;
                         state.status = "stroke sent — the host is inking it".into();
+                        // AU1: the pen finished one here; the host inks it.
+                        state.strokes_done = state.strokes_done.wrapping_add(1);
                         self.cel_touched = false;
                         self.current.clear();
                         self.dabs_flushed = 0;
@@ -5304,7 +5311,7 @@ impl CanvasView {
                                     .id_salt("lightbox_scroll")
                                     .max_height(panel.height())
                                     .show(aui, |aui| self.lightbox_rail_ui(aui, state));
-                                plate::note_viewport(aui, out.inner_rect);
+                                plate::note_viewport(aui, out.inner_rect, [false, true]);
                                 self.light_content_h = out.content_size.y.max(50.0);
                             },
                         );
@@ -9768,6 +9775,14 @@ pub(crate) mod extpaper_tests {
         let slot = state.active_slot_resolved().expect("an armed layer");
         assert!(state.commit_raster(Vec::new(), slot).is_none());
         assert_eq!(state.strokes_done, 2);
+        // A stroke that changed no pixel of its own cel: the answer still
+        // says where, and nothing landed to count.
+        state.goto(40);
+        let same = state.active_layer_tiles().expect("its own cel").iter().map(|(c, t)| (*c, t.clone())).collect();
+        let (edits, undo) = (state.engine.revision(), state.engine.history_len());
+        assert!(state.commit_raster(same, slot).is_some());
+        assert_eq!((state.engine.revision(), state.engine.history_len()), (edits, undo));
+        assert_eq!(state.strokes_done, 2, "an empty diff is no stroke");
     }
 
     #[test]
@@ -9810,6 +9825,24 @@ pub(crate) mod extpaper_tests {
         h.run_frames(8);
         assert_eq!(h.state().strokes_done, 1, "{}", h.state().status);
         assert!(tiles(&h) > 0, "the stroke came back from the device");
+    }
+
+    /// A guest's streamed stroke: the host commits it, the pen finished here.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn auseam_stroke_signal_on_a_guests_stream() {
+        let mut h = EditorHarness::with_gpu(wide_state());
+        h.run_frames(4);
+        let canvas = &mut h.editor_mut().canvas;
+        assert!(canvas.raster, "a paint layer is up");
+        (canvas.is_guest, canvas.guest_ready, canvas.session_live) = (true, true, true);
+        let c = canvas.dbg_rect.center();
+        h.drag_path(&[c, c + vec2(40.0, 0.0), c + vec2(80.0, 12.0)]);
+        h.run_frames(8);
+        assert_eq!(h.state().strokes_done, 1, "{}", h.state().status);
+        assert!(h.state().status.starts_with("stroke sent"), "{}", h.state().status);
+        let tiles = h.state().active_layer_tiles().map_or(0, |t| t.len());
+        assert_eq!(tiles, 0, "nothing committed on the guest's side");
     }
 
     #[test]

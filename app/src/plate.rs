@@ -1068,49 +1068,93 @@ pub fn surface_alpha(ui: &mut Ui, alpha: u8) {
 }
 
 /// AU1: a `ScrollArea` reports its viewport here, because egui gives no
-/// other way to find one. The clip audit reads the list (`note_viewport`
-/// sits after every scroll area, a rule test holds that); it exists only
-/// under test.
+/// other way to find one. `axes` are the ones that scroll, `[horizontal,
+/// vertical]` as `ScrollArea::new` takes them. The clip audit reads the list
+/// (`note_viewport` sits after every scroll area, a rule test holds that);
+/// it exists only under test.
 #[cfg_attr(not(test), allow(unused_variables))]
-pub fn note_viewport(ui: &Ui, inner: egui::Rect) {
+pub fn note_viewport(ui: &Ui, inner: egui::Rect, axes: [bool; 2]) {
+    #[cfg(test)]
+    note_view(ui, Viewport { rect: inner, reach: inner.expand(ui.visuals().clip_rect_margin), axes });
+}
+
+/// AU1: a view panned by hand is a scroll viewport on both axes, with no
+/// `ScrollArea` to report it. What pans in it is cut anywhere from `rect`
+/// out to `reach`.
+#[cfg_attr(not(test), allow(unused_variables))]
+pub fn note_pan_view(ui: &Ui, rect: egui::Rect, reach: egui::Rect) {
+    #[cfg(test)]
+    note_view(ui, Viewport { rect, reach, axes: [true, true] });
+}
+
+/// AU1: a dock pane reports the clip its body draws under, so the clip audit
+/// can tell a pane's content from chrome by what cuts it. Only under test.
+#[cfg_attr(not(test), allow(unused_variables))]
+pub fn note_pane_body(ui: &Ui) {
     #[cfg(test)]
     {
-        let view = Viewport { rect: inner, margin: ui.visuals().clip_rect_margin };
-        let pass = ui.ctx().cumulative_pass_nr();
-        ui.ctx().data_mut(|d| {
-            let seen = d.get_temp_mut_or_default::<Viewports>(egui::Id::new("plate_viewports"));
-            if seen.pass != pass {
-                *seen = Viewports { pass, views: Vec::new() };
-            }
-            seen.views.push(view);
-        });
+        let body = ui.clip_rect();
+        this_pass(ui.ctx(), |seen| seen.bodies.push(body));
     }
 }
 
-/// A scroll viewport: its inner rect, and how far past it egui lets the
-/// content's clip run (`clip_rect_margin`, on the scrolled axes).
+/// A scroll viewport: its inner rect, the farthest out a clip can sit on the
+/// sides that scroll (`clip_rect_margin` past the inner rect, for a
+/// `ScrollArea`), and which axes those are.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 pub struct Viewport {
     pub rect: egui::Rect,
-    pub margin: f32,
+    pub reach: egui::Rect,
+    pub axes: [bool; 2],
 }
 
-/// One pass's registered viewports.
+/// One pass's registered viewports and pane bodies.
 #[cfg(test)]
 #[derive(Clone, Default)]
 struct Viewports {
     pass: u64,
     views: Vec<Viewport>,
+    bodies: Vec<egui::Rect>,
+}
+
+#[cfg(test)]
+fn note_view(ui: &Ui, view: Viewport) {
+    this_pass(ui.ctx(), |seen| seen.views.push(view));
+}
+
+/// This pass's list, fresh on the pass's first note.
+#[cfg(test)]
+fn this_pass(ctx: &egui::Context, note: impl FnOnce(&mut Viewports)) {
+    let pass = ctx.cumulative_pass_nr();
+    ctx.data_mut(|d| {
+        let seen = d.get_temp_mut_or_default::<Viewports>(egui::Id::new("plate_viewports"));
+        if seen.pass != pass {
+            *seen = Viewports { pass, ..Viewports::default() };
+        }
+        note(seen);
+    });
+}
+
+/// What the last finished pass registered.
+#[cfg(test)]
+fn last_pass(ctx: &egui::Context) -> Viewports {
+    let last = ctx.cumulative_pass_nr().wrapping_sub(1);
+    ctx.data_mut(|d| d.get_temp::<Viewports>(egui::Id::new("plate_viewports")))
+        .filter(|seen| seen.pass == last)
+        .unwrap_or_default()
 }
 
 /// The viewports the last finished pass registered.
 #[cfg(test)]
 pub fn viewports(ctx: &egui::Context) -> Vec<Viewport> {
-    let last = ctx.cumulative_pass_nr().wrapping_sub(1);
-    ctx.data_mut(|d| d.get_temp::<Viewports>(egui::Id::new("plate_viewports")))
-        .filter(|seen| seen.pass == last)
-        .map_or_else(Vec::new, |seen| seen.views)
+    last_pass(ctx).views
+}
+
+/// The pane bodies the last finished pass registered.
+#[cfg(test)]
+pub fn pane_bodies(ctx: &egui::Context) -> Vec<egui::Rect> {
+    last_pass(ctx).bodies
 }
 
 // ---------------------------------------------------------------------------

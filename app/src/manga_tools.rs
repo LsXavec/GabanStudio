@@ -473,7 +473,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, koma_arme
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| pane(ui, state, koma_armed, &mut edit));
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     let Some(edit) = edit else {
         return;
     };

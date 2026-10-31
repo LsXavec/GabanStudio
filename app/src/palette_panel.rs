@@ -157,7 +157,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                 }
             }
         });
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     if let Some(ri) = remove_role {
         state.palettes.characters[ci].roles.remove(ri);
         // GM13: the variants stay aligned to the model.

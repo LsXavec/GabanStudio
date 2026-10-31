@@ -20,7 +20,7 @@ use crate::doc::AppState;
 /// What the shared per-frame graph execution produced — every consumer
 /// (canvas composite view, viewer panes) words its empty-state from the
 /// ACTUAL cause instead of guessing.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum GraphView {
     /// No visible consumer needed the graph this frame (nothing executed).
     Off,

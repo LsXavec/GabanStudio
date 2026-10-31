@@ -324,7 +324,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             }
         },
     );
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     if let Some(f) = go.and_then(|i| state.paintcheck.findings.as_ref()?.get(i).cloned()) {
         jump(state, canvas, &f);
     }

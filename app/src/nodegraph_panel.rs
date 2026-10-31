@@ -405,7 +405,7 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                         });
                     }
                 });
-                crate::plate::note_viewport(ui, scroll.inner_rect);
+                crate::plate::note_viewport(ui, scroll.inner_rect, [false, true]);
                 // GM8: the whole graph from the sheet, where graphs are made
                 // (a graph shaped by hand is asked about first, DANGER).
                 ui.separator();
@@ -532,6 +532,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0, crate::plate::WELL);
+    // Painted names stop at `rect`, node controls at the pane's own clip.
+    crate::plate::note_pan_view(ui, rect, ui.clip_rect().with_min_y(rect.top()));
 
     // Pan with a background drag.
     if response.dragged() && state.pending_wire.is_none() {

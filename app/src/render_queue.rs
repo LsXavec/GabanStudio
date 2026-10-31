@@ -1290,7 +1290,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 state.render_queue.show_folder = show;
             }
         });
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
 }
 
 fn preset_help(p: &Preset) -> String {

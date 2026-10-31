@@ -212,7 +212,7 @@ impl crate::Editor {
                     });
                 }
             });
-            plate::note_viewport(ui, scroll.inner_rect);
+            plate::note_viewport(ui, scroll.inner_rect, [false, true]);
         });
         if resp.should_close() {
             self.palette.open = false;

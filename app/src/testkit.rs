@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use eframe::egui;
 use eframe::egui_wgpu::{RenderState, RendererOptions};
@@ -32,9 +33,17 @@ pub const CTRL: egui::Modifiers = egui::Modifiers {
     ..egui::Modifiers::NONE
 };
 
-/// A wgpu device with no window and no surface. Only ignored tests reach it.
-fn gpu() -> RenderState {
-    create_render_state(default_wgpu_setup(), RendererOptions::PREDICTABLE)
+/// One real device at work in this process at a time. The kit picks WARP, the
+/// CPU adapter, and two harnesses painting side by side die in d3d10warp.dll
+/// (an access violation in 1 run of 10); devices that only open and close do
+/// not. Without this, `auseam_ -- --ignored` crashes on the default threads.
+static GPU_TURN: Mutex<()> = Mutex::new(());
+
+/// A wgpu device with no window and no surface, and the turn that goes with
+/// it. Only ignored tests reach it.
+fn gpu() -> (RenderState, MutexGuard<'static, ()>) {
+    let turn = GPU_TURN.lock().unwrap_or_else(PoisonError::into_inner);
+    (create_render_state(default_wgpu_setup(), RendererOptions::PREDICTABLE), turn)
 }
 
 /// A primary-button press (or release) at `pos`.
@@ -73,10 +82,27 @@ pub struct Rig {
     /// AU1: a test's seeded fault, painted over the editor every frame so the
     /// audits have something to catch.
     pub seed: Option<Box<dyn FnMut(&mut egui::Ui)>>,
+    /// AU1: the rect the editor was last laid out in.
+    pub root: egui::Rect,
 }
 
 impl Rig {
+    /// A `Ui` harness sits in a frame 8 pt in from the window; the App has
+    /// none. `Boot::Frozen` keeps the inset, because the tests about
+    /// something else and BASELINE were written under it. The other two
+    /// boots are the person's window, so they lay out from its edge.
     fn frame(&mut self, ui: &mut egui::Ui) {
+        if self.boot == Boot::Frozen {
+            return self.drive(ui);
+        }
+        let window = ui.ctx().content_rect();
+        let mut flush = ui.new_child(egui::UiBuilder::new().max_rect(window));
+        flush.set_clip_rect(window);
+        self.drive(&mut flush);
+    }
+
+    fn drive(&mut self, ui: &mut egui::Ui) {
+        self.root = ui.max_rect();
         if !self.dressed {
             // The app's own dressing; fonts go live on the next pass, so
             // this first frame draws nothing.
@@ -174,6 +200,8 @@ pub struct EditorHarness {
     dir: tempfile::TempDir,
     /// The device a GPU harness rebuilds its editor on; None is the suite.
     rs: Option<RenderState>,
+    /// Last, so the turn ends after the harness and its device have gone.
+    _turn: Option<MutexGuard<'static, ()>>,
 }
 
 impl EditorHarness {
@@ -227,7 +255,13 @@ impl EditorHarness {
 
     /// THE FUNNEL: every constructor ends here, so no test can start outside
     /// the boot rule.
-    fn build(state: AppState, dir: tempfile::TempDir, boot: Boot, rs: Option<RenderState>) -> Self {
+    fn build(
+        state: AppState,
+        dir: tempfile::TempDir,
+        boot: Boot,
+        gpu: Option<(RenderState, MutexGuard<'static, ()>)>,
+    ) -> Self {
+        let (rs, _turn) = gpu.unzip();
         let (config, config_notes) = Config::load_from(dir.path());
         let editor = Editor::from_state(state, rs.as_ref(), Some(dir.path()));
         let mut notes = Notes::default();
@@ -246,6 +280,7 @@ impl EditorHarness {
             arms: true,
             stack_room_seen: "",
             seed: None,
+            root: egui::Rect::NOTHING,
         };
         if boot == Boot::Frozen {
             Self::frozen(&mut rig);
@@ -260,7 +295,7 @@ impl EditorHarness {
             None => builder,
         };
         let h = builder.build_ui_state(|ui, rig: &mut Rig| rig.frame(ui), rig);
-        let mut me = Self { h, dir, rs };
+        let mut me = Self { h, dir, rs, _turn };
         me.run();
         me
     }
@@ -2024,6 +2059,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn auseam_shipped_boot_is_flush_to_the_window() {
+        use egui::containers::panel::PanelState;
+        for mut h in [EditorHarness::as_shipped(), EditorHarness::as_first_run()] {
+            h.kit_mut().set_size(egui::vec2(1600.0, 900.0));
+            h.run();
+            let window = h.ctx().content_rect();
+            assert_eq!(h.rig().root, window, "{:?}", h.boot());
+            let panel = |id: &str| PanelState::load(&h.ctx(), egui::Id::new(id)).expect(id).outer_rect;
+            let (top, band) = (panel("top_bar"), panel("status_bar"));
+            assert_eq!((top.min, top.right()), (window.min, window.right()), "the top row");
+            assert_eq!((band.left(), band.max), (window.left(), window.max), "the band");
+        }
+        // The frozen boot stays in the harness's frame: BASELINE stands on it.
+        let frozen = EditorHarness::new();
+        assert_eq!(frozen.rig().root, frozen.ctx().content_rect().shrink(8.0));
+    }
+
+    /// A harness on a real device keeps the process's one turn while it lives.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn auseam_gpu_harness_holds_the_turn() {
+        let h = EditorHarness::with_gpu(AppState::new_project("turn", 64, 64, 24, 1.0));
+        assert!(GPU_TURN.try_lock().is_err(), "a second harness would paint beside it");
+        drop(h);
+    }
+
+    /// The Lead's rule: no test or tool opens a window. The device the ignored
+    /// tests use has no display to make a surface on, the test kit never
+    /// ships, and only the App's own two files hold a door to the desktop.
+    #[test]
+    fn auseam_nothing_under_test_opens_a_window() {
+        let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = default_wgpu_setup() else {
+            panic!("a new headless instance, never a device from elsewhere");
+        };
+        assert!(setup.display_handle.is_none(), "nothing to make a surface on");
+        assert!(setup.instance_descriptor.display.is_none(), "nor an instance that could");
+        assert!(source("testkit.rs").contains(concat!("create_render_state(default_wgpu", "_setup(),")));
+        let manifest = include_str!("../Cargo.toml");
+        let (mut section, mut kit) = ("", Vec::new());
+        for line in manifest.lines() {
+            if line.starts_with('[') {
+                section = line;
+            }
+            if line.starts_with("egui_kittest") {
+                kit.push(section);
+            }
+        }
+        assert_eq!(kit, ["[dev-dependencies]"]);
+        let doors = [
+            concat!("run_", "native"),
+            concat!("create_", "surface"),
+            concat!("compatible_", "surface"),
+            concat!("Viewport", "Builder"),
+            concat!("show_", "viewport"),
+        ];
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut files = sources();
+        files.extend(sources_under(&workspace.join("tools")));
+        files.extend(sources_under(&workspace.join("crates")));
+        let opened: Vec<&str> = files
+            .iter()
+            .filter(|(_, text)| doors.iter().any(|d| text.contains(d)))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(opened, ["floatwin.rs", "main.rs"]);
+        // And live: no room asks for a second window.
+        let mut h = EditorHarness::as_shipped();
+        for room in crate::PROBE_ROOMS {
+            room.enter(h.editor_mut());
+            h.run();
+            let windows = &h.kit().output().viewport_output;
+            assert!(windows.len() == 1 && windows.contains_key(&egui::ViewportId::ROOT), "{room:?}");
+        }
+    }
+
     /// Today's Drawing recipe, spelled out: `dock()` will move on, and what
     /// the frozen boot holds must not.
     fn todays_drawing_recipe() -> egui_dock::DockState<Pane> {
@@ -2096,8 +2207,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 485;
-    const ASSERT_FLOOR: usize = 2972;
+    const TEST_FLOOR: usize = 500;
+    const ASSERT_FLOOR: usize = 3036;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");
@@ -2267,15 +2378,22 @@ mod tests {
         assert_eq!(frozen.rig().stack_room_seen, "");
     }
 
+    const SCROLL_AREA: &str = concat!("ScrollArea", "::");
+
+    /// Where `ScrollArea`s open (true) and notes close them, in file order.
+    fn scroll_marks(text: &str) -> Vec<(usize, bool)> {
+        let note = concat!("note_", "viewport(");
+        let mut marks: Vec<(usize, bool)> = text.match_indices(SCROLL_AREA).map(|(at, _)| (at, true)).collect();
+        marks.extend(text.match_indices(note).map(|(at, _)| (at, false)));
+        marks.sort();
+        marks
+    }
+
     /// `ScrollArea`s with no note after them. A note closes the latest open
     /// area, so nested ones read right.
     fn unregistered_scrolls(text: &str) -> usize {
-        let (area, note) = (concat!("ScrollArea", "::"), concat!("note_", "viewport("));
-        let mut marks: Vec<(usize, bool)> = text.match_indices(area).map(|(at, _)| (at, true)).collect();
-        marks.extend(text.match_indices(note).map(|(at, _)| (at, false)));
-        marks.sort();
         let (mut open, mut strays) = (0usize, 0);
-        for (_, opens) in marks {
+        for (_, opens) in scroll_marks(text) {
             match (opens, open) {
                 (true, _) => open += 1,
                 (false, 0) => strays += 1,
@@ -2285,13 +2403,36 @@ mod tests {
         open + strays
     }
 
+    /// Notes not naming the axes the area they close scrolls.
+    fn misnoted_scrolls(text: &str) -> usize {
+        let (mut open, mut wrong) = (Vec::new(), 0);
+        for (at, opens) in scroll_marks(text) {
+            if opens {
+                open.push(&text[at + SCROLL_AREA.len()..]);
+            } else if let Some(built) = open.pop() {
+                let axes = if built.starts_with("vertical") {
+                    "[false, true]"
+                } else if built.starts_with("horizontal") {
+                    "[true, false]"
+                } else {
+                    "[true, true]"
+                };
+                wrong += usize::from(!text[at..].lines().next().unwrap_or("").contains(axes));
+            }
+        }
+        wrong
+    }
+
     #[test]
     fn auseam_every_scroll_area_is_registered() {
         let one_left = concat!(
             "ScrollArea", "::vertical().show(ui, f); ScrollArea", "::both().show(ui, g); ",
-            "plate::note_", "viewport(ui, r);"
+            "plate::note_", "viewport(ui, r, [true, true]);"
         );
         assert_eq!(unregistered_scrolls(one_left), 1, "the counter counts");
+        assert_eq!(misnoted_scrolls(one_left), 0, "`both` is both");
+        let crossed = concat!("ScrollArea", "::horizontal().show(ui, f); note_", "viewport(ui, r, [false, true]);");
+        assert_eq!(misnoted_scrolls(crossed), 1, "the axes are read");
         let mut sites = 0;
         for (name, text) in sources() {
             // The plate defines the note; measure's own test leaves one out.
@@ -2299,6 +2440,7 @@ mod tests {
                 continue;
             }
             assert_eq!(unregistered_scrolls(&text), 0, "{name}: add plate::note_viewport");
+            assert_eq!(misnoted_scrolls(&text), 0, "{name}: name the axes that scroll");
             sites += text.matches(concat!("note_", "viewport(")).count();
         }
         assert!(sites >= 19, "the spec's 19 sites, found {sites}");

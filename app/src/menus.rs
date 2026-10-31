@@ -286,7 +286,7 @@ impl crate::Editor {
                         });
                     }
                 });
-                plate::note_viewport(ui, scroll.inner_rect);
+                plate::note_viewport(ui, scroll.inner_rect, [false, true]);
             });
         let ticks = self.quick_start;
         let mut show_me = None;

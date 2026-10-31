@@ -358,7 +358,7 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
                 }
             });
         });
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
     if let Some(cut) = open {
         state.goto_cut(scene_id, cut);
     }
@@ -764,7 +764,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
     });
-    plate::note_viewport(ui, scroll.inner_rect);
+    plate::note_viewport(ui, scroll.inner_rect, [true, false]);
     if let Some((from, x)) = dropped {
         let to = rects
             .iter()

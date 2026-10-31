@@ -473,9 +473,10 @@ pub struct AppState {
     /// says mirrors need a fresh snapshot after history rewrites.
     pub history_dirty: bool,
     pub refusal_seq: u32,
-    /// AU1: finished pen strokes, the ONE signal for both routes (the vector
-    /// `commit_stroke` and the raster `commit_raster`). A fill or a paste is
-    /// not a stroke.
+    /// AU1: finished pen strokes, the ONE signal for every route (the vector
+    /// `commit_stroke`, the raster `commit_raster`, and a guest's streamed
+    /// stroke at pen-up, which the host commits). A fill, a paste and a
+    /// stroke that changed nothing are not strokes.
     pub strokes_done: u64,
     /// SESSION generation stamp: bumps on every reported commit and on
     /// undo/redo — the host's cheap "the document moved" signal (the
@@ -1147,8 +1148,10 @@ impl AppState {
         new_tiles: Vec<(TileCoord, Arc<TileData>)>,
         slot: usize,
     ) -> Option<(DrawingId, LayerId)> {
+        let edits = self.engine.revision();
         let landed = self.land_raster(new_tiles, slot);
-        if landed.is_some() {
+        // An empty diff still answers where it would have landed.
+        if landed.is_some() && self.engine.revision() != edits {
             self.strokes_done = self.strokes_done.wrapping_add(1);
         }
         landed
