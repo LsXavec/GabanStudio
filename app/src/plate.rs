@@ -1472,6 +1472,8 @@ pub const SEARCH_W: f32 = 141.0;
 const PILL_PAD: f32 = 14.0;
 /// A choice card's words, from its left edge: the Start float's one text edge.
 pub const CARD_PAD: f32 = 12.0;
+/// AU9: between a control and [`ring`]'s line.
+pub const RING_GAP: f32 = 2.0;
 /// A card chip's words, from its ends.
 const CHIP_PAD: f32 = 10.0;
 /// A ghost row's words, from its ends: a card's edge, so the two line up.
@@ -1521,6 +1523,28 @@ pub fn choice_card(ui: &mut Ui, label: &str, tall: f32) -> Response {
     }
     speak(&resp, egui::WidgetType::Button, None, label);
     describe(resp, "CARD choice_card", label)
+}
+
+/// AU9: the one choice a screen leads with: a [`choice_card`] in solid blue,
+/// white words on it.
+pub fn primary_card(ui: &mut Ui, label: &str, tall: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), tall), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if resp.hovered() { BLUE_DEEP } else { BLUE };
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        let at = Pos2::new(rect.left() + CARD_PAD, rect.center().y);
+        p.text(at, egui::Align2::LEFT_CENTER, label, Role::Card.font(), ON_FILL);
+    }
+    speak(&resp, egui::WidgetType::Button, None, label);
+    describe(resp, "CARD primary_card", label)
+}
+
+/// AU9: Show me's mark: a ring round a control, clear of its edge.
+pub fn ring(ui: &Ui, around: egui::Rect) -> egui::Rect {
+    let ring = around.expand(RING_GAP);
+    ui.painter().rect_stroke(ring, R_CONTROL + RING_GAP as u8, Stroke::new(2.0, BLUE_DEEP), StrokeKind::Outside);
+    ring.expand(2.0)
 }
 
 /// AU6: a small key standing on a [`choice_card`]'s right end, with its right

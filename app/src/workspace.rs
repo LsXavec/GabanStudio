@@ -151,6 +151,10 @@ pub enum Stage {
     /// GM18 (D12): the manga room, OFF the spine (never in [`Stage::ALL`]):
     /// the page large, the Manga pane and the layers beside it.
     Manga,
+    /// AU9: the Export step, also off [`Stage::ALL`], with no stored key: the
+    /// result beside the Export panel. It swaps the dock and nothing else, so
+    /// it arms no tool, layer or view (`Editor::enter_room`).
+    Export,
 }
 
 impl Stage {
@@ -173,6 +177,7 @@ impl Stage {
             Stage::Composite => vocab::STEP_EFFECTS,
             Stage::Edit => vocab::STEP_TIMING,
             Stage::Manga => vocab::STEP_MANGA,
+            Stage::Export => vocab::STEP_EXPORT,
         }
     }
 
@@ -192,6 +197,7 @@ impl Stage {
             Stage::Composite => "composite view",
             Stage::Edit => "select",
             Stage::Manga => "brush · panels · rulers",
+            Stage::Export => "nothing",
         };
         match crate::steps::of(self) {
             Some(step) => (step.studio_words, step.purpose, arms),
@@ -274,6 +280,12 @@ impl Stage {
                 tree.split_below(rail, 0.7, vec![Pane::Layers, Pane::NodeGraph]);
                 ds
             }
+            Stage::Export => {
+                // The picture being exported, and the choices beside it.
+                let mut ds = DockState::new(vec![Pane::Viewer(0)]);
+                ds.main_surface_mut().split_right(NodeIndex::root(), 0.72, vec![Pane::RenderQueue]);
+                ds
+            }
         }
     }
 
@@ -307,7 +319,8 @@ impl Stage {
                 tool: CanvasTool::Select,
                 ..base
             },
-            Stage::Manga => base,
+            // Export never applies a view; the arm is here for the match.
+            Stage::Manga | Stage::Export => base,
         }
     }
 }

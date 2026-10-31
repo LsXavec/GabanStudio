@@ -14,6 +14,7 @@ mod config;
 mod devloop;
 mod doc;
 mod export;
+mod export_step;
 mod floatcanvas;
 mod floats;
 mod forge;
@@ -56,6 +57,8 @@ mod testkit;
 mod tidy_tests;
 #[cfg(test)]
 mod audock_tests;
+#[cfg(test)]
+mod auexport_tests;
 #[cfg(test)]
 #[path = "../../crates/anim-core/tests/support/gif_decode.rs"]
 mod gif_decode;
@@ -111,7 +114,19 @@ fn stage_key(stage: Option<Stage>) -> &'static str {
         Some(Stage::Composite) => "composite",
         Some(Stage::Edit) => "edit",
         Some(Stage::Manga) => "manga",
+        // AU9: for the match alone. `arming_key` stands in front of every
+        // read and write, so this string reaches no config.
+        Some(Stage::Export) => "export",
         None => "custom",
+    }
+}
+
+/// The room key the arming block reads. Export arms nothing: it keeps the key
+/// last armed, `seen`, so the layer and the stack stay as they were.
+fn arming_key(stage: Option<Stage>, seen: &'static str) -> &'static str {
+    match stage {
+        Some(Stage::Export) => seen,
+        s => stage_key(s),
     }
 }
 
@@ -2985,7 +3000,37 @@ impl App {
                     ed.state.begin_page_export(&dir, Some(ctx.clone()));
                 }
             }
+            // AU9: the plain exports' one dialog. Past it, `export_to` is the
+            // same seam a test answers.
+            AppRequest::ExportTo(kind) => {
+                let Some(ed) = &mut self.editor else { return };
+                if let Some(path) = export_dialog(&ed.state, kind) {
+                    ed.export_to(ctx, kind, &path);
+                }
+            }
+            AppRequest::OpenFile(path) => proc::open_file(&path),
+            AppRequest::ShowInFolder(path) => proc::show_in_folder(&path),
         }
+    }
+}
+
+/// AU9: where a plain export goes, asked once: a folder for a picture
+/// sequence, a name you choose for the others.
+fn export_dialog(state: &AppState, kind: render_queue::ExportKind) -> Option<std::path::PathBuf> {
+    use render_queue::ExportKind;
+    let mut dialog = rfd::FileDialog::new();
+    if let Some(dir) = export::suggest_dir(state) {
+        dialog = dialog.set_directory(dir);
+    }
+    let save = |dialog: rfd::FileDialog, title: &str, filter: &str, ext: &str, name: &str| {
+        let dialog = dialog.set_title(title).add_filter(filter, &[ext]);
+        dialog.set_file_name(format!("{name}.{ext}")).save_file()
+    };
+    match kind {
+        ExportKind::Png => dialog.set_title("Export a picture sequence into a folder").pick_folder(),
+        ExportKind::Gif => save(dialog, "Export an animated GIF", "Animated GIF", "gif", "animation"),
+        ExportKind::Mp4 => save(dialog, "Export a video", "MP4 video", "mp4", "animation"),
+        ExportKind::Still => save(dialog, "Export a picture", "PNG image", "png", "picture"),
     }
 }
 
@@ -3033,6 +3078,14 @@ pub enum AppRequest {
     /// GM18: File ▸ Export ▸ Manga pages… — the folder picker is the
     /// shell's; the pages then render and write on a worker.
     ExportPages,
+    /// AU9: Animated GIF, Video (MP4), Picture sequence (PNG) and This frame
+    /// (PNG), from the Export step or File ▸ Export ▸: the save dialog is the
+    /// shell's, the job then runs in the queue.
+    ExportTo(render_queue::ExportKind),
+    /// AU9: `Open file`, and `Show in folder`: the operating system's, past
+    /// a file already written.
+    OpenFile(std::path::PathBuf),
+    ShowInFolder(std::path::PathBuf),
 }
 
 impl Editor {
@@ -3215,6 +3268,7 @@ impl Editor {
             Action::RoomFinishing => self.enter_room(Stage::InkPaint),
             Action::RoomComposite => self.enter_room(Stage::Composite),
             Action::RoomEdit => self.enter_room(Stage::Edit),
+            Action::RoomExport => self.enter_room(Stage::Export),
             // GM17: the 3D layout room, built in and off the spine like the
             // forge's; View3D's numpad verbs move its view only.
             Action::Layout3dRoom => {
@@ -3553,6 +3607,12 @@ impl Editor {
                 Some(why) => s.refuse(format!("refused — {why}")),
                 None => *out = Performed::App(AppRequest::ExportPages),
             },
+            // AU9: the save dialog is the shell's; the job then runs on the
+            // queue's worker.
+            Action::ExportGif => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Gif)),
+            Action::ExportMp4 => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Mp4)),
+            Action::ExportPngSequence => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Png)),
+            Action::ExportStill => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Still)),
             // The stroke latches its rulers at pen-down: a flip mid-stroke
             // holds from the next one.
             Action::ToggleRulerSnap => {
@@ -3672,6 +3732,7 @@ impl Editor {
             | Action::RoomFinishing
             | Action::RoomComposite
             | Action::RoomEdit
+            | Action::RoomExport
             | Action::ShowCurves
             | Action::FrameCurves
             | Action::ShowPaintCheck
@@ -3735,6 +3796,7 @@ fn is_chrome(action: Action) -> bool {
             | Action::RoomFinishing
             | Action::RoomComposite
             | Action::RoomEdit
+            | Action::RoomExport
             | Action::ShowCurves
             | Action::FrameCurves
             | Action::ShowPaintCheck
@@ -3879,6 +3941,12 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::NewPage
             | Action::ClipToPanels
             | Action::ExportPages
+            // AU9: nor the Export step, a dialog or a job.
+            | Action::RoomExport
+            | Action::ExportGif
+            | Action::ExportMp4
+            | Action::ExportPngSequence
+            | Action::ExportStill
             // GM22: nothing starts mid-stroke — no underlay turned on, no
             // sequence reread.
             | Action::Underlay3d
@@ -4193,6 +4261,12 @@ struct Editor {
     /// keeps its close control).
     place: String,
     place_dock: Option<DockState<Pane>>,
+    /// AU9: the way back out of the Export step: the stage it was entered
+    /// from and the arrangement it left, whole. None outside the step.
+    export_from: Option<(Option<Stage>, DockState<Pane>)>,
+    /// AU9: the panels' folds before anyone presses them: closed for a
+    /// person, open under the frozen boot (spec 1.5.2).
+    pub(crate) more_default: bool,
     /// AU3: the panes the lock holds, and the stage and sheet choice they
     /// were read for. The dock asks every frame; the recipe changes rarely.
     held: Vec<Pane>,
@@ -4790,6 +4864,8 @@ struct EditorTabs<'a> {
     /// AU3: the current recipe's panes while Lock UI positions is on, which
     /// keep their place; a panel opened by hand keeps its close control.
     locked: &'a [Pane],
+    /// AU9: as [`Editor::more_default`].
+    more_default: bool,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -4846,7 +4922,10 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 curves_panel::ui(ui, self.state, gesture_safe)
             }
             Pane::PaintCheck => paintcheck::ui(ui, self.state, self.canvas),
-            Pane::RenderQueue => render_queue::ui(ui, self.state),
+            Pane::RenderQueue => {
+                let more = self.more_default;
+                render_queue::ui(ui, self.state, |ui, state| export_step::ui(ui, state, more));
+            }
             Pane::Board => {
                 let gesture_safe = !self.canvas.stroke_active();
                 board_panel::ui_board(ui, self.state, gesture_safe)
@@ -5028,6 +5107,9 @@ impl Editor {
     /// tool/view restore is all-or-nothing, so a live stroke keeps the old
     /// tool state (same law as saved workspaces).
     fn enter_room(&mut self, st: Stage) {
+        if st == Stage::Export {
+            return self.enter_export();
+        }
         self.dock = self.recipe(st);
         if self.canvas.apply_view(&st.view(), &mut self.state) {
             self.stage = Some(st);
@@ -5035,7 +5117,56 @@ impl Editor {
             // charter) and OFF elsewhere.
             self.state.view.line_guard = matches!(st, Stage::InkPaint);
             self.state.status = format!("{}: {}", vocab::STEP, st.name());
+            self.export_left();
         }
+    }
+
+    /// AU9: the Export step swaps the dock and remembers the way back. It is
+    /// the one step that arms nothing: no view is applied, the line guard
+    /// stays, and the stroke guard refuses it outright rather than leave a
+    /// dock swapped under a live stroke.
+    fn enter_export(&mut self) {
+        if self.canvas.stroke_active() {
+            self.state.refuse(doc::FINISH_STROKE);
+            return;
+        }
+        let dock = self.recipe(Stage::Export);
+        if self.stage == Some(Stage::Export) {
+            self.dock = dock;
+        } else {
+            let left = std::mem::replace(&mut self.dock, dock);
+            self.export_from = Some((self.stage, left));
+            self.state.render_queue.panel.back_to = self.place_here();
+        }
+        self.stage = Some(Stage::Export);
+        self.say.exported = None;
+        self.state.status = format!("{}: {}", vocab::STEP, Stage::Export.name());
+    }
+
+    /// AU9: where the person is, as the top row names it.
+    fn place_here(&self) -> String {
+        self.stage.map_or_else(|| self.place.clone(), |st| st.name().to_string())
+    }
+
+    /// AU9: `Back to Draw`: the step it came from, as it was left. Nothing was
+    /// armed on the way in, so nothing is armed on the way out.
+    fn leave_export(&mut self) {
+        match self.export_from.take() {
+            Some((stage, dock)) => {
+                self.dock = dock;
+                self.stage = stage;
+                self.state.status = format!("{}: {}", vocab::STEP, self.place_here());
+                self.export_left();
+            }
+            None => self.enter_room(Stage::Drawing),
+        }
+    }
+
+    /// AU9: off the Export step: its ring and its card stay behind.
+    fn export_left(&mut self) {
+        self.export_from = None;
+        let panel = &mut self.state.render_queue.panel;
+        (panel.ring, panel.done) = (false, None);
     }
 
     /// AU3: the arrangement `st` opens in. Entering a step, booting and
@@ -5096,6 +5227,7 @@ impl Editor {
     /// AU3: the dock is a place off the spine, named `place` on its pill.
     fn go_off_spine(&mut self, place: &str) {
         self.stage = None;
+        self.export_left();
         self.place = place.to_string();
         self.place_dock = Some(self.dock.clone());
         self.held_for = None;
@@ -5239,7 +5371,7 @@ impl Editor {
     /// boot arms exactly what the App arms; `seen` is the caller's own memory
     /// of the room it last armed.
     fn arm_room(&mut self, layers_cfg: &LayersConfig, seen: &mut &'static str) {
-        let room_key = stage_key(self.stage);
+        let room_key = arming_key(self.stage, seen);
         let stack = layers_cfg.stack_for_room(room_key);
         // Entering a room arms its stack's working layer (shiage →
         // color, LO → rough), the way a room re-arms its tool. Never
@@ -5292,6 +5424,8 @@ impl Editor {
             sheet_request: None,
             place: String::new(),
             place_dock: None,
+            export_from: None,
+            more_default: false,
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -5399,6 +5533,8 @@ impl Editor {
             sheet_request: None,
             place: String::new(),
             place_dock: None,
+            export_from: None,
+            more_default: false,
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -5477,8 +5613,8 @@ impl Editor {
     }
 
     /// GM8: "Show me" on Quick start step `i` (AU7: spec 8.3): do the step.
-    /// The export's waits for AU9: it opens the queue, and the Say line holds
-    /// the sentence until a job starts.
+    /// The export's enters the Export step with its first choice ringed: the
+    /// tick is the person's, when their file lands.
     pub(crate) fn show_me(&mut self, i: usize) -> Performed {
         match welcome::STEPS.get(i).map(|s| s.show_me) {
             Some(welcome::ShowMe::Circle) => self.demo_circle(),
@@ -5487,16 +5623,9 @@ impl Editor {
             Some(welcome::ShowMe::Play) if self.state.view.playing => Performed::Done,
             Some(welcome::ShowMe::Play) => self.perform(Action::PlayPause),
             Some(welcome::ShowMe::Export) => {
-                self.enter_room(Stage::Edit);
-                self.open_pane(Pane::RenderQueue);
-                self.say.export_asked = true;
-                self.state.render_queue.reveal_start = true;
-                // With no row left to say it, the same sentence as a remark.
-                if self.say.off || self.say.seen & say::QUEUE != 0 {
-                    self.state.status = say::QUEUE_WORDS.into();
-                    self.status_seen.clear();
-                }
-                Performed::Done
+                let entered = self.perform(Action::RoomExport);
+                self.state.render_queue.panel.ring = entered == Performed::Done;
+                entered
             }
             None => Performed::Ignored,
         }
@@ -5765,14 +5894,16 @@ impl Editor {
     }
 
     /// AU8: the seam behind the save dialog: what happens to the path a person
-    /// chose, so a test can end in a real file with no dialog.
+    /// chose, so a test can end in a real file with no dialog. AU9: the job
+    /// starts where the person stands, with no pane opened.
     pub(crate) fn export_to(
         &mut self,
         ctx: &egui::Context,
         kind: render_queue::ExportKind,
         path: &std::path::Path,
     ) {
-        self.queue_export(ctx, kind, path);
+        self.state.render_queue.panel.done = None;
+        self.start_export(ctx, kind, path, false);
     }
 
     /// GM11: File ▸ Export…'s PNG sequence (`dest` a folder), or its MP4, GIF
@@ -5786,11 +5917,23 @@ impl Editor {
         kind: render_queue::ExportKind,
         dest: &std::path::Path,
     ) {
+        self.start_export(ctx, kind, dest, true);
+    }
+
+    fn start_export(
+        &mut self,
+        ctx: &egui::Context,
+        kind: render_queue::ExportKind,
+        dest: &std::path::Path,
+        queue_forward: bool,
+    ) {
         let Some(i) = render_queue::export_job(&mut self.state, kind, dest, self.export_range)
         else {
             return;
         };
-        self.open_pane(Pane::RenderQueue);
+        if queue_forward {
+            self.open_pane(Pane::RenderQueue);
+        }
         render_queue::start(&mut self.state, ctx);
         let job = &self.state.render_queue.queue.jobs[i];
         self.state.status = format!(
@@ -5798,8 +5941,6 @@ impl Editor {
             job.label,
             job.preset().name
         );
-        // GM8: the Quick start's last step.
-        self.quick_start[welcome::EXPORT_STEP] = true;
     }
 
     /// GM3: may this action run now? Err says why not, in the artist's
@@ -5847,6 +5988,9 @@ impl Editor {
             Action::ExportPages if s.page_export_refusal().is_some() => {
                 Err(s.page_export_refusal().unwrap_or("this book has no page"))
             }
+            // AU9: video needs ffmpeg. The search's answer is cached, so a row
+            // greyed here asks nothing of the disk.
+            Action::ExportMp4 if s.render_queue.ffmpeg_cached() == Some(None) => Err(export_step::NO_FFMPEG),
             // The cheap state checks: the verb would refuse or do nothing.
             Action::PrevCut | Action::NextCut
                 if s.engine.project.scenes.iter().map(|sc| sc.cuts.len()).sum::<usize>() < 2 =>
@@ -6567,7 +6711,7 @@ impl eframe::App for App {
                 net::Session::Idle => None,
             };
             editor.update_tag = self.update_ready.as_ref().map(|(t, _, _)| t.clone());
-            let room_key = stage_key(editor.stage);
+            let room_key = arming_key(editor.stage, self.stack_room_seen);
             editor.arm_room(&layers_cfg, &mut self.stack_room_seen);
             // GM6: the onion and light table settings live in the config.
             editor.canvas.onion = self.config.onion.sane();
@@ -7149,7 +7293,7 @@ enum ProbeRoom {
 }
 
 /// Every room: the CLI probe and the ship tests walk these.
-const PROBE_ROOMS: [ProbeRoom; 8] = [
+const PROBE_ROOMS: [ProbeRoom; 9] = [
     ProbeRoom::Stage(Stage::Layout),
     ProbeRoom::Stage(Stage::Drawing),
     ProbeRoom::Stage(Stage::InkPaint),
@@ -7158,6 +7302,8 @@ const PROBE_ROOMS: [ProbeRoom; 8] = [
     ProbeRoom::Stage(Stage::Manga),
     ProbeRoom::Forge,
     ProbeRoom::Layout3d,
+    // AU9: last, so the shots of the rooms before it keep their numbers.
+    ProbeRoom::Stage(Stage::Export),
 ];
 
 impl ProbeRoom {
@@ -7186,6 +7332,10 @@ impl ProbeRoom {
 
     fn probe(self, ppp: f32) -> ProbeRun {
         match self {
+            // AU9: this step has no paper: its panel is what must hold still.
+            ProbeRoom::Stage(Stage::Export) => {
+                probe_run_in(ppp, 100, Pane::RenderQueue, |editor| self.enter(editor))
+            }
             ProbeRoom::Stage(st) => probe_run(st, ppp),
             ProbeRoom::Forge => probe_run_in(ppp, 100, Pane::Canvas, |editor| self.enter(editor)),
             ProbeRoom::Layout3d => {
@@ -8502,6 +8652,19 @@ impl Editor {
                     self.menu_item(ui, Action::Save);
                     self.menu_item(ui, Action::SaveAs);
                     ui.menu_button("Export…", |ui| {
+                        // AU9: the plain exports: a dialog each, and the job
+                        // runs where the person stands. Other formats opens
+                        // the Export step. The rows below stay as they were.
+                        self.state.render_queue.search_ffmpeg();
+                        self.menu_item(ui, Action::ExportGif);
+                        self.menu_item(ui, Action::ExportMp4);
+                        self.menu_item(ui, Action::ExportPngSequence);
+                        self.menu_item(ui, Action::ExportStill);
+                        if ui.button("Other formats…").on_hover_text(Action::RoomExport.help()).clicked() {
+                            ui.close();
+                            self.invoke(Action::RoomExport, ui.ctx());
+                        }
+                        ui.separator();
                         // GM11: every export is a render queue job, rendered
                         // on its worker while the artist keeps drawing; the
                         // queue itself has every preset.
@@ -8550,7 +8713,7 @@ impl Editor {
                         ui.separator();
 
                         // GM11: each picks where, then queues its job over
-                        // this range and starts the queue (Editor::export_to).
+                        // this range and starts the queue (queue_export).
                         if ui
                             .button("PNG sequence…")
                             .on_hover_text(
@@ -8566,7 +8729,7 @@ impl Editor {
                             }
                             if let Some(dir) = dlg.pick_folder() {
                                 let ctx = ui.ctx().clone();
-                                self.export_to(&ctx, render_queue::ExportKind::Png, &dir);
+                                self.queue_export(&ctx, render_queue::ExportKind::Png, &dir);
                             }
                         }
                         let ffmpeg = self.state.render_queue.ffmpeg_path().is_some();
@@ -8587,7 +8750,7 @@ impl Editor {
                             }
                             if let Some(path) = dlg.save_file() {
                                 let ctx = ui.ctx().clone();
-                                self.export_to(&ctx, render_queue::ExportKind::Mp4, &path);
+                                self.queue_export(&ctx, render_queue::ExportKind::Mp4, &path);
                             }
                         }
                         // GM15: the editorial's exports, written into the
@@ -9018,7 +9181,7 @@ impl Editor {
             pills.spacing_mut().item_spacing.x = 0.0;
             for step in &steps::STEPS {
                 let current = step.stage.is_some() && step.stage == self.stage;
-                let primary = step.stage.is_none();
+                let primary = step.stage == Some(Stage::Export);
                 if plate::step_pill(&mut pills, step.label, current, primary)
                     .on_hover_ui(|ui| {
                         ui.label(step.card());
@@ -9284,6 +9447,7 @@ impl Editor {
             full_band: self.full_band,
             layers_docked,
             locked: if ui_lock { &self.held } else { &[] },
+            more_default: self.more_default,
         };
         let dock_style = dock_style(ui.style().as_ref(), &self.dock);
         let dock_rect = ui.available_rect_before_wrap();
@@ -9323,6 +9487,16 @@ impl Editor {
         // ruler snap and Export pages.
         for action in std::mem::take(&mut self.state.manga.asked) {
             self.invoke(action, ui.ctx());
+        }
+        // AU9: and the Export panel's choices and its Done card.
+        for ask in std::mem::take(&mut self.state.render_queue.panel.asked) {
+            match ask {
+                export_step::Ask::Do(action) => {
+                    self.invoke(action, ui.ctx());
+                }
+                export_step::Ask::Back => self.leave_export(),
+                export_step::Ask::App(request) => self.requests.push(request),
+            }
         }
         // AU4: and the rail's and the floats'. The dock is free here.
         if std::mem::take(&mut self.floats.focus_layers) {

@@ -8,13 +8,14 @@
 //! The lane's order stays `Editor::say_line`'s: a refusal, the machine's last
 //! remark, then what this file picks. Quick Start's ticks are read here too,
 //! from outcomes only: the stroke signal, `AddDrawingAfter`, playback and a
-//! queued export.
+//! finished export's file on disk.
 
 use crate::config::{Action, UiConfig};
+use crate::render_queue::Landed;
 use crate::viewer::ViewerView;
 use crate::welcome::{self, PenCheck};
 use crate::workspace::Stage;
-use crate::{Editor, Pane, Performed, doc, menus, visible_panes};
+use crate::{AppRequest, Editor, Pane, Performed, doc, export_step, menus, visible_panes};
 
 pub const SHOW_ME: &str = "Show me";
 pub const GO_TO_DRAW: &str = "Go to Draw";
@@ -22,13 +23,10 @@ pub const FIX_IT: &str = "Fix it";
 
 /// The Plan preview's answer to a stroke, whether or not a hint can say it.
 pub const PLAN_WORDS: &str = "This step shows a preview. Drawing happens in Draw.";
-/// What the render queue asks of someone Show me sent there. Show me brings
-/// both buttons on screen (`reveal_start`); the presets above them keep their
-/// first choice unless the person picks another.
-pub const QUEUE_WORDS: &str = "Press + this cut, then press Start.";
 
-// The stored bits, one for each row of spec 8.2. 8 is AU9's `Exported ball.gif.`
-// and 13 is AU10's card on the return dot.
+// The stored bits, one for each row of spec 8.2. 13 is AU10's card on the
+// return dot. 15 was AU7's stand-in for the Export step: it may stand set in a
+// config, so it is not given to another row.
 pub const NEW_PAPER: u32 = 1 << 0;
 pub const ADD_DRAWING: u32 = 1 << 1;
 pub const NEXT_POSE: u32 = 1 << 2;
@@ -37,13 +35,14 @@ pub const SHARE: u32 = 1 << 4;
 pub const PLAN: u32 = 1 << 5;
 pub const REFUSED_TWICE: u32 = 1 << 6;
 pub const FLAT_PEN: u32 = 1 << 7;
+/// Never stored: a finished export is news each time, not a lesson.
+pub const EXPORTED: u32 = 1 << 8;
 pub const COLOR: u32 = 1 << 9;
 pub const EFFECTS: u32 = 1 << 10;
 pub const APPEARS_TWICE: u32 = 1 << 11;
 pub const HELD: u32 = 1 << 12;
 /// The canvas line's bit (spec 8.4).
 pub const EMPTY_CELL: u32 = 1 << 14;
-pub const QUEUE: u32 = 1 << 15;
 pub const TWO_DRAWINGS: u32 = 1 << 16;
 
 /// What a hint's button does.
@@ -56,6 +55,8 @@ pub enum Verb {
     Fix(Action),
     /// Settings, on the pen page.
     PenPage,
+    /// The finished export `Say` holds, in the program that opens it.
+    OpenFile,
 }
 
 impl Verb {
@@ -64,6 +65,7 @@ impl Verb {
             Verb::Show(_) => SHOW_ME,
             Verb::GoToDraw => GO_TO_DRAW,
             Verb::Fix(_) | Verb::PenPage => FIX_IT,
+            Verb::OpenFile => export_step::OPEN_FILE,
         }
     }
 
@@ -73,6 +75,7 @@ impl Verb {
             Verb::GoToDraw => Action::RoomDrawing.help(),
             Verb::Fix(action) => action.help(),
             Verb::PenPage => "Open Settings on the pen page.",
+            Verb::OpenFile => "Open the file you exported.",
         }
     }
 }
@@ -88,6 +91,8 @@ pub enum Words {
     Held,
     /// The refusal said twice, held.
     Reason,
+    /// Spec 8.2's `ball.gif`: the file that landed.
+    Exported,
 }
 
 /// The document and the step as the table reads them, and what this frame
@@ -113,8 +118,8 @@ pub struct Facts {
     pub twice: bool,
     /// The render queue is on screen.
     pub queue_up: bool,
-    /// Show me sent the person to the queue.
-    pub export_asked: bool,
+    /// A finished export's name, until something else has happened.
+    pub report: Option<String>,
     /// A stroke was tried on the Plan preview.
     pub plan_tried: bool,
     /// Three pen strokes with no pressure in them.
@@ -130,6 +135,7 @@ pub struct Facts {
     pub added: bool,
     pub filled: bool,
     pub effect_added: bool,
+    /// A finished export's file reached the disk.
     pub exported: bool,
     pub pen_works: bool,
 }
@@ -182,16 +188,6 @@ pub const HINTS: [Hint; 14] = [
         answered: never,
         passes: true,
     },
-    // Asked for by name, so no row that only waits its turn stands in front.
-    Hint {
-        bit: QUEUE,
-        words: Words::Plain(QUEUE_WORDS),
-        verb: None,
-        steps: &[],
-        shows: |f| f.queue_up && f.export_asked,
-        answered: |f| f.exported,
-        passes: false,
-    },
     Hint {
         bit: FLAT_PEN,
         words: Words::Plain("Your pen is drawing without pressure."),
@@ -199,6 +195,17 @@ pub const HINTS: [Hint; 14] = [
         steps: &[],
         shows: |f| f.flat_pen,
         answered: |f| f.pen_works,
+        passes: false,
+    },
+    // Nothing answers it, so its bit is never stored: every finished export
+    // says so, for as long as nothing else has happened (`Say::exported`).
+    Hint {
+        bit: EXPORTED,
+        words: Words::Exported,
+        verb: Some(Verb::OpenFile),
+        steps: &[],
+        shows: |f| f.report.is_some(),
+        answered: never,
         passes: false,
     },
     Hint {
@@ -333,6 +340,7 @@ impl Hint {
             Words::Chord(before, verb, after) => format!("{before}{}{after}", chord(verb)?),
             Words::Held => format!("This drawing stays on screen for {} frames.", f.held?),
             Words::Reason => reason(refusal?),
+            Words::Exported => format!("Exported {}.", f.report.as_deref()?),
         };
         let verb = match self.words {
             Words::Reason => refusal.and_then(fix_of).map(Verb::Fix),
@@ -412,8 +420,9 @@ pub struct Say {
     stood: bool,
     /// `AddDrawingAfter` ran since the last reading.
     pub added: bool,
-    /// Show me sent the person to the queue.
-    pub export_asked: bool,
+    /// An export that finished outside the Export step, until something else
+    /// happens: `Open file` opens this one.
+    pub exported: Option<Landed>,
     /// The stroke just read was `Check your pen`'s.
     pub check_line: bool,
     /// The stroke just read was Show me's circle: no pen drew it.
@@ -472,6 +481,7 @@ impl Say {
     /// Another document: nothing that differs from the last one is an outcome.
     pub fn new_document(&mut self) {
         (self.strokes, self.fills, self.nodes) = (None, None, None);
+        self.exported = None;
     }
 
     /// What this frame asked of the config. True when it changed (the shell
@@ -516,10 +526,10 @@ impl Editor {
     /// AU7: what this frame came to: Quick Start's ticks, and the row that
     /// speaks next. Runs after the dock, where a stroke lands.
     pub(crate) fn say_read(&mut self, ctx: &eframe::egui::Context) {
-        let (stroked, filled) = self.say_outcomes();
+        let (stroked, filled, exported) = self.say_outcomes();
         self.say_plan();
         self.say.count_refusals(&self.state);
-        let facts = self.say_facts(stroked, filled);
+        let facts = self.say_facts(stroked, filled, exported);
         let mut seen = self.say.seen;
         let hint = if self.say.off {
             None
@@ -542,9 +552,10 @@ impl Editor {
         self.say.line_shown |= self.canvas.dbg_empty_line;
     }
 
-    /// The stroke, fill and playback signals, read once, and what they tick.
-    /// A line drawn for `Check your pen` was the check's: it ticks nothing.
-    fn say_outcomes(&mut self) -> (bool, bool) {
+    /// The stroke, fill, playback and export signals, read once, and what they
+    /// tick. A line drawn for `Check your pen` was the check's: it ticks
+    /// nothing.
+    fn say_outcomes(&mut self) -> (bool, bool, bool) {
         let state = &self.state;
         let check_line = std::mem::take(&mut self.say.check_line);
         let circle = std::mem::take(&mut self.say.circle);
@@ -565,8 +576,30 @@ impl Editor {
             }
         }
         self.quick_start[welcome::PLAY_STEP] |= self.state.view.playing;
-        self.quick_start[welcome::EXPORT_STEP] |= self.state.render_queue.busy();
-        (stroked, filled)
+        let exported = self.say_landed();
+        (stroked, filled, exported)
+    }
+
+    /// The files that reached the disk since the last reading (spec 8.3 ticks
+    /// only on one). In the Export step the Done card reports; elsewhere the
+    /// lane does, and at once: a plain finish has nothing to say that the
+    /// report does not, so the remark gives way. With hints off there is no
+    /// report and no button, and the remark stays.
+    fn say_landed(&mut self) -> bool {
+        let landed = std::mem::take(&mut self.state.render_queue.landed);
+        let exported = !landed.is_empty();
+        self.quick_start[welcome::EXPORT_STEP] |= exported;
+        for file in landed {
+            if self.stage == Some(Stage::Export) {
+                self.state.render_queue.panel.done = Some(file);
+            } else if !self.say.off {
+                if file.plain {
+                    self.state.status.clear();
+                }
+                self.say.exported = Some(file);
+            }
+        }
+        exported
     }
 
     /// What a finished stroke ticks (spec 8.3).
@@ -586,7 +619,12 @@ impl Editor {
         self.say.plan_tried = (self.say.plan_tried || tried) && self.stage == Some(Stage::Layout);
     }
 
-    fn say_facts(&mut self, stroked: bool, filled: bool) -> Facts {
+    fn say_facts(&mut self, stroked: bool, filled: bool, exported: bool) -> Facts {
+        let added = std::mem::take(&mut self.say.added);
+        // Work goes on, and the report has been overtaken.
+        if stroked || added {
+            self.say.exported = None;
+        }
         let state = &self.state;
         let cut = state.cut();
         let nodes = cut.graph.nodes().count();
@@ -610,17 +648,17 @@ impl Editor {
             held: held.map(|(key, next)| next.unwrap_or(length).min(length).saturating_sub(key)),
             twice: shown.is_some_and(|d| keys(d) > 1),
             queue_up: visible_panes(&self.dock).contains(&Pane::RenderQueue),
-            export_asked: self.say.export_asked,
+            report: self.say.exported.as_ref().map(|file| file.name.clone()),
             plan_tried: self.say.plan_tried,
             flat_pen: self.say.flat_strokes >= FLAT_STROKES,
             refused_twice: (self.say.refusals >= 2).then(|| self.say.refusal.clone()),
             seen: self.say.seen,
             stood: self.say.stood,
             stroked,
-            added: std::mem::take(&mut self.say.added),
+            added,
             filled,
             effect_added,
-            exported: state.render_queue.busy(),
+            exported,
             pen_works: std::mem::take(&mut self.say.pen_answered),
         }
     }
@@ -648,6 +686,11 @@ impl Editor {
                 self.request_settings_pen = true;
                 self.say.flat_strokes = 0;
                 self.say_answered(FLAT_PEN);
+            }
+            Verb::OpenFile => {
+                if let Some(file) = self.say.exported.take() {
+                    self.requests.push(AppRequest::OpenFile(file.file));
+                }
             }
         }
     }

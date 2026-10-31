@@ -530,7 +530,7 @@ fn start_float(dir: &Path) {
 
 /// AU7: the lane as it teaches: a hint with its button and dots, under the
 /// fold, beside the sheet, and the longest sentence with `Fix it`; each empty
-/// step; the empty cell's line; and Export's queue.
+/// step; the empty cell's line; and Show me's ring in the Export step.
 const SAY: [(&str, u32, u32); 14] = [
     ("say-hint", 1600, 900),
     ("say-hint-1280", 1280, 800),
@@ -581,6 +581,8 @@ fn say_moments(dir: &Path) {
     }
     drop(h);
     let mut s = NewProjectForm::default().new_state();
+    // As a Start card's document, or the Export step's Result has nothing.
+    s.auto_comp();
     s.set_cut_length(6);
     s.goto(3);
     s.new_drawing_at_frame();
@@ -593,7 +595,7 @@ fn say_moments(dir: &Path) {
         shoot(&mut h, draw);
     }
     h.editor_mut().show_me(crate::welcome::EXPORT_STEP);
-    shoot(&mut h, ProbeRoom::Stage(Stage::Edit));
+    shoot(&mut h, ProbeRoom::Stage(Stage::Export));
 }
 
 /// AU8: the queue's preset row with its last two chips, wrapped: the tab in
@@ -619,6 +621,13 @@ fn queue_ready(h: &mut EditorHarness) {
     h.state_mut().render_queue.draft.preset = gif.expect("the GIF preset");
 }
 
+/// AU9: the row stands under the Export panel's choices, on the frozen boot's
+/// open fold: its last chip scrolled up brings them all.
+fn queue_row_up(h: &mut EditorHarness) {
+    h.scroll_to(anim_core::deliver::PRESETS[anim_core::deliver::PRESETS.len() - 1].name);
+    h.run_frames(4);
+}
+
 /// What `state` shows, a frame short of showing it.
 fn queue_screen(h: &mut EditorHarness, state: &str, size: egui::Vec2) {
     h.kit_mut().set_size(size);
@@ -641,6 +650,96 @@ fn queue_moments(dir: &Path) {
             arrive(&mut h, QUEUE_ROOM);
         } else {
             h.run_frames(4);
+        }
+        queue_row_up(&mut h);
+        h.shot(size, &dir.join(format!("{state}.png")));
+    }
+}
+
+/// AU9: the Export panel as a person meets it, on a shipped boot and a PC with
+/// no ffmpeg: each document's choices, Show me's ring, a Done card, the fold
+/// open; and the lane's report from another step.
+const EXPORT: [(&str, u32, u32); 16] = [
+    ("export-animation", 1600, 900),
+    ("export-animation-1280", 1280, 800),
+    ("export-ring", 1600, 900),
+    ("export-ring-1280", 1280, 800),
+    ("export-one-frame", 1600, 900),
+    ("export-one-frame-1280", 1280, 800),
+    ("export-no-art", 1600, 900),
+    ("export-no-art-1280", 1280, 800),
+    ("export-done", 1600, 900),
+    ("export-done-1280", 1280, 800),
+    ("export-more", 1600, 900),
+    ("export-more-1280", 1280, 800),
+    ("say-exported", 1600, 900),
+    ("say-exported-1280", 1280, 800),
+    ("export-file-menu", 1600, 900),
+    ("export-file-menu-1280", 1280, 800),
+];
+
+fn export_owed() -> Vec<(String, u32, u32)> {
+    EXPORT.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+/// A ball that crosses `frames` drawings: `12 drawings, 1.0 s` at 12 fps, with
+/// the composite every template makes, so the Result shows it.
+fn bouncing(frames: u32) -> AppState {
+    let mut s = AppState::new_project("ball", 1280, 720, 12, 72.0);
+    s.auto_comp();
+    s.set_cut_length(frames);
+    for frame in 0..frames as i32 {
+        s.goto(frame as u32);
+        s.new_drawing_at_frame();
+        let (x, y) = (240 + 70 * frame, 200 + (frame - 6).pow(2) * 8);
+        let disc = (-48..=48).flat_map(|dx| (-48..=48).map(move |dy| (dx, dy)));
+        let ball: Vec<(i32, i32)> = disc.filter(|(dx, dy)| dx * dx + dy * dy <= 48 * 48).map(|(dx, dy)| (x + dx, y + dy)).collect();
+        crate::canvas::extpaper_tests::paint_texels(&mut s, &ball, [0.85, 0.2, 0.15, 1.0]);
+    }
+    s.goto(0);
+    s
+}
+
+fn export_moments(dir: &Path) {
+    use crate::render_queue::ExportKind;
+    let work = tempfile::tempdir().expect("a temp folder");
+    let file = work.path().join("ball.gif");
+    let room = ProbeRoom::Stage(Stage::Export);
+    for (state, w, height) in EXPORT {
+        let size = egui::vec2(w as f32, height as f32);
+        let mut h = match state {
+            _ if state.contains("no-art") => EditorHarness::with_gpu_ready(),
+            _ if state.contains("one-frame") => EditorHarness::with_gpu_shipped(bouncing(1)),
+            _ => EditorHarness::with_gpu_shipped(bouncing(12)),
+        };
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        h.kit_mut().set_size(size);
+        h.run_frames(4);
+        let ctx = h.ctx();
+        // These two are about staying where the person stands.
+        let stays = state.starts_with("say-") || state.contains("file-menu");
+        if state.contains("ring") {
+            h.editor_mut().show_me(crate::welcome::EXPORT_STEP);
+        } else if !stays {
+            room.enter(h.editor_mut());
+        }
+        if state.contains("done") || state.starts_with("say-") {
+            h.editor_mut().export_to(&ctx, ExportKind::Gif, &file);
+            h.run_export_to_end();
+        }
+        arrive(&mut h, room);
+        if state.contains("more") {
+            h.click(crate::export_step::MORE_OPTIONS);
+            h.run_frames(4);
+        }
+        // The machine's last remark has its dwell first.
+        h.wait(4.2);
+        if state.contains("file-menu") {
+            h.click("file");
+            h.run_frames(4);
+            h.click("Export… ⏵");
+            h.run_frames(4);
+            assert!(h.has(crate::config::Action::ExportGif.label()), "{state} shows its rows");
         }
         h.shot(size, &dir.join(format!("{state}.png")));
     }
@@ -672,6 +771,23 @@ fn uishot_rooms() {
     check_shots(&dir, &say_owed()).expect("what the Say line teaches");
     queue_moments(&dir);
     check_shots(&dir, &queue_owed()).expect("the queue's preset row");
+    export_moments(&dir);
+    check_shots(&dir, &export_owed()).expect("the Export step's moments");
+}
+
+#[test]
+fn auexport_shots_owe_every_moment_at_both_sizes() {
+    let owed = export_owed();
+    let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
+    let moments = ["export-animation", "export-ring", "export-one-frame", "export-no-art", "export-done", "export-more", "say-exported", "export-file-menu"];
+    for moment in moments {
+        assert!(owed.contains(&(format!("{moment}.png"), 1600, 900)), "{moment} at 1600");
+        assert!(owed.contains(&(format!("{moment}-1280.png"), 1280, 800)), "{moment} at 1280");
+    }
+    let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
+    let taken = pass.find("export_moments(&dir);").expect("it takes them");
+    assert!(taken < pass.find("check_shots(&dir, &export_owed())").expect("it checks them"));
 }
 
 #[test]
@@ -697,6 +813,7 @@ fn augif_queue_shots_show_the_row_they_name() {
         let size = egui::vec2(w as f32, height as f32);
         queue_screen(&mut h, state, size);
         h.run_frames(4);
+        queue_row_up(&mut h);
         assert!(h.has_text_containing(crate::render_queue::NEEDS_FFMPEG), "{state}\n{}", h.describe());
         assert_eq!(h.node_toggled("GIF"), Some(true), "{state}: the armed chip\n{}", h.describe());
         for p in anim_core::deliver::PRESETS {
@@ -797,7 +914,7 @@ fn audock_shots_owe_the_shipped_boot_too() {
     assert_eq!(names.len(), 8, "no two shots share a name: {names:?}");
     assert!(shipped.iter().all(|o| o.0.starts_with("shipped-")), "{names:?}");
     // The ignored pass checks all of these at once.
-    assert_eq!(shots_owed().len() + states_owed().len() + shipped.len(), 58);
+    assert_eq!(shots_owed().len() + states_owed().len() + shipped.len(), 60);
 }
 
 #[test]
@@ -812,9 +929,10 @@ fn aulook_shots_owe_every_state_at_both_sizes() {
 #[test]
 fn auseam_shots_owed_are_sixteen_at_two_sizes_and_answer_shots_before() {
     let owed = shots_owed();
-    assert_eq!(owed.len(), 16);
+    // Sixteen and the Export step's two, at the same two sizes.
+    assert_eq!(owed.len(), 18);
     let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
-    assert_eq!(names.len(), 16, "no two shots share a name: {names:?}");
+    assert_eq!(names.len(), 18, "no two shots share a name: {names:?}");
     let sizes: BTreeSet<(u32, u32)> = owed.iter().map(|o| (o.1, o.2)).collect();
     assert_eq!(sizes, BTreeSet::from([(1280, 800), (1600, 900)]));
     for before in SHOTS_BEFORE {

@@ -9,8 +9,8 @@ use crate::vocab;
 use crate::workspace::Stage;
 
 pub struct Step {
-    /// The stage it lenses. None for Export, a pane until the Export step
-    /// has a stage of its own.
+    /// The stage it lenses. AU9: Export's is `Stage::Export`, off the stored
+    /// spine, so every row now names one.
     pub stage: Option<Stage>,
     pub label: &'static str,
     /// The hover card's first line.
@@ -57,11 +57,11 @@ pub const STEPS: [Step; 6] = [
         action: Action::RoomComposite,
     },
     Step {
-        stage: None,
+        stage: Some(Stage::Export),
         label: vocab::STEP_EXPORT,
         purpose: "Save a file to share.",
         studio_words: "",
-        action: Action::ShowRenderQueue,
+        action: Action::RoomExport,
     },
 ];
 

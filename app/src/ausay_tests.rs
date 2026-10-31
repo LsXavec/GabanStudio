@@ -17,6 +17,7 @@ use crate::welcome::{self, EXPORT_STEP, ShowMe};
 use crate::workspace::Stage;
 use crate::{Pane, Performed, plate, steps, visible_panes};
 
+const GIF: &str = "Animated GIF";
 // The lane's buttons, spoken apart (1.5 rule 9).
 const SHOW_ME: &str = "Show me (say line)";
 const FIX_IT: &str = "Fix it (say line)";
@@ -559,8 +560,16 @@ fn ausay_show_me_draws_one_undoable_circle() {
     assert_eq!(h.state().cut().drawings.len(), drawings, "and the drawing it made");
 }
 
-/// Show me does slots 0 to 3; slot 4 waits for AU9, and ticks at
-/// `queue_export`.
+/// Show me's ring stands around the first choice. It takes the place of AU7's
+/// sentence, which named two buttons in the queue.
+fn ringed(h: &EditorHarness) -> bool {
+    let ring = h.state().render_queue.panel.ring_at;
+    ring.is_some_and(|ring| ring.contains_rect(h.rect(GIF)) && h.rect(GIF).contains_rect(ring.shrink(5.0)))
+}
+
+/// Show me does slots 0 to 3, AU7's four, and slot 4 rings the choice to
+/// press, which stays until a file answers it. The fifth has its own test,
+/// `auexport_show_me_is_five_of_five`; this name stands in AU7's list.
 #[test]
 fn ausay_show_me_is_four_of_five() {
     let kinds: Vec<ShowMe> = welcome::STEPS.iter().map(|s| s.show_me).collect();
@@ -595,9 +604,9 @@ fn ausay_show_me_is_four_of_five() {
     assert!(visible_panes(&h.editor().dock).contains(&Pane::RenderQueue));
     assert!(!h.editor().quick_start[EXPORT_STEP], "no file yet");
     quiet(&mut h);
-    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "the Say line holds the sentence");
+    assert!(ringed(&h), "the ring holds the place");
     h.wait(30.0);
-    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "and keeps it");
+    assert!(ringed(&h), "and keeps it");
 
     // Next circle from the first frame goes through Add drawing.
     let mut h = ready();
@@ -622,10 +631,10 @@ fn queue_ready(h: &mut EditorHarness, dir: &std::path::Path) {
     h.state_mut().render_queue.draft.out = dir.display().to_string();
 }
 
-/// Spec 8.2 and 8.3: Show me alone walks a new document to the queue, and the
-/// lane has the next thing to say at every step until the fifth tick. The
-/// queue's own sentence takes it from there, by the buttons it names. Nothing
-/// on the way opens a window.
+/// Spec 8.2 and 8.3: Show me alone walks a new document to the Export step,
+/// and the lane has the next thing to say at every step until the fifth tick.
+/// The ring takes it from there, on the choice to press. Nothing on the way
+/// opens a window.
 #[test]
 fn ausay_show_me_walks_the_whole_chain() {
     let dir = tempfile::tempdir().unwrap();
@@ -659,28 +668,26 @@ fn ausay_show_me_walks_the_whole_chain() {
     settle(&mut h);
     no_window(&h);
     quiet(&mut h);
-    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS));
-    assert!(says(&h, say::QUEUE_WORDS), "{:?}", h.painted_text());
+    assert!(ringed(&h));
+    assert!(says(&h, GIF), "{:?}", h.painted_text());
     assert!(!h.editor().quick_start[EXPORT_STEP], "no file yet");
-    h.click("+ this cut");
+    h.click(GIF);
     settle(&mut h);
     quiet(&mut h);
-    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "a job waiting is no job started");
-    h.click("Start");
+    assert!(!h.editor().quick_start[EXPORT_STEP], "a dialog waiting is no file");
+    h.answer_export(&dir.path().join("ball.gif"));
+    h.run_export_to_end();
     settle(&mut h);
     assert!(h.editor().quick_start[EXPORT_STEP], "the fifth tick");
-    assert_ne!(h.rig().config.ui.hints_seen & say::QUEUE, 0, "the queue's busy answered it");
-    assert_ne!(picked(&h).as_deref(), Some(say::QUEUE_WORDS));
+    assert_ne!(h.rig().config.ui.hints_seen & say::SHARE, 0, "the file answered Share's row");
+    assert!(!ringed(&h));
     no_window(&h);
-    let ctx = h.ctx();
-    crate::render_queue::wait(h.state_mut(), &ctx);
-    settle(&mut h);
 }
 
-/// AU7's note on Export: the sentence stands until the queue is busy, whatever
-/// else waits to be said; asked again with its row spent, it comes as a remark.
+/// Show me's place on Export stands until a press answers it, whatever else
+/// waits to be said; asked again after a file, it comes again.
 #[test]
-fn ausay_export_sentence_stays_until_the_queue_is_busy() {
+fn ausay_export_ring_stays_until_a_press() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = ready();
     queue_ready(&mut h, dir.path());
@@ -691,31 +698,29 @@ fn ausay_export_sentence_stays_until_the_queue_is_busy() {
     assert_ne!(h.editor_mut().show_me(EXPORT_STEP), Performed::Ignored);
     settle(&mut h);
     quiet(&mut h);
-    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "over the Play row");
+    assert!(ringed(&h), "over the Play row");
     h.state_mut().set_cut_length(6);
     h.state_mut().view.frame = 4;
     assert!(h.state().own_key_drawing().is_none(), "a held frame");
     h.wait(30.0);
     settle(&mut h);
-    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "over a frame's rows, and no timer takes it");
+    assert!(ringed(&h), "over a frame's rows, and no timer takes it");
 
-    h.click("+ this cut");
+    h.click(GIF);
     settle(&mut h);
-    h.click("Start");
+    h.answer_export(&dir.path().join("ball.gif"));
+    h.run_export_to_end();
     settle(&mut h);
-    assert_ne!(h.rig().config.ui.hints_seen & say::QUEUE, 0);
-    let ctx = h.ctx();
-    crate::render_queue::wait(h.state_mut(), &ctx);
-    settle(&mut h);
+    assert_ne!(h.rig().config.ui.hints_seen & say::SHARE, 0);
     quiet(&mut h);
     assert!(!h.state().render_queue.busy());
-    assert_ne!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "answered");
+    assert!(!ringed(&h), "answered");
 
     assert_ne!(h.editor_mut().show_me(EXPORT_STEP), Performed::Ignored);
     settle(&mut h);
-    assert!(says(&h, say::QUEUE_WORDS), "a remark: {:?}", h.painted_text());
+    assert!(ringed(&h), "again: {:?}", h.painted_text());
 
-    // It names what is on screen: both buttons, wherever the pane scrolled to.
+    // It stands around what is on screen, whole, with the pane's room for it.
     for (w, tall) in [(1600.0, 900.0), (1280.0, 800.0)] {
         let mut h = ready();
         sized(&mut h, w, tall);
@@ -724,9 +729,9 @@ fn ausay_export_sentence_stays_until_the_queue_is_busy() {
         settle(&mut h);
         let pane = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::RenderQueue).map(|(_, r, _)| *r);
         let pane = pane.expect("the queue");
-        for button in ["+ this cut", "Start"] {
-            assert!(pane.contains_rect(h.rect(button)), "{w}: {button} {:?} in {pane:?}", h.rect(button));
-        }
+        assert!(pane.contains_rect(h.rect(GIF)), "{w}: {:?} in {pane:?}", h.rect(GIF));
+        let ring = h.state().render_queue.panel.ring_at.expect("a ring");
+        assert!(pane.contains_rect(ring), "{w}: {ring:?} in {pane:?}");
     }
 }
 
@@ -857,6 +862,7 @@ fn ausay_no_step_is_silent() {
         (Stage::Edit, "Add a second drawing to set timing."),
         (Stage::InkPaint, "Nothing to color yet."),
         (Stage::Composite, "Nothing to add effects to yet."),
+        (Stage::Export, crate::export_step::NO_ART),
     ];
     for off in [false, true] {
         for (stage, words) in empty {
@@ -872,10 +878,10 @@ fn ausay_no_step_is_silent() {
             settle(&mut h);
             quiet(&mut h);
             assert!(says(&h, words), "{stage:?} off={off}: {:?}", h.painted_text());
-            // The Plan preview's button is the pane's own, and off has no
-            // action button.
+            // The Plan preview's and the Export panel's button are the pane's
+            // own, and off has no action button.
             let button = match stage {
-                Stage::Layout => h.has(say::GO_TO_DRAW),
+                Stage::Layout | Stage::Export => h.has(say::GO_TO_DRAW),
                 Stage::Drawing => !h.has(LANE_GO_TO_DRAW),
                 _ => h.has(LANE_GO_TO_DRAW) != off,
             };
@@ -1127,7 +1133,7 @@ fn filled_in(words: &str) -> String {
 }
 
 /// The app's sources the person meets: every file past the test-only ones.
-fn sources() -> Vec<(String, String)> {
+pub(crate) fn sources() -> Vec<(String, String)> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let files = std::fs::read_dir(dir).expect("the sources").flatten();
     let named = files.map(|f| (f.file_name().to_string_lossy().to_string(), f.path()));
@@ -1156,6 +1162,7 @@ fn every_hint() -> Vec<Spoken> {
             Words::Chord(before, _, after) => format!("{before}Ctrl+Shift+Space{after}"),
             Words::Held => format!("This drawing stays on screen for {} frames.", full.held.expect("set")),
             Words::Reason => doc::HELD_FRAME.to_string(),
+            Words::Exported => "Exported ball.gif.".to_string(),
         };
         let verb = if matches!(hint.words, Words::Reason) { Some(Verb::Fix(Action::NewDrawing)) } else { hint.verb };
         Spoken { bit: Some(hint.bit), words, verb }

@@ -213,6 +213,14 @@ pub enum Action {
     ClipToPanels,
     /// GM18: the book's pages to PNG or TIFF files in a folder.
     ExportPages,
+    /// AU9: the Export step: the result beside the Export panel.
+    RoomExport,
+    // AU9: the four plain exports, a save dialog each, then a job in the
+    // queue.
+    ExportGif,
+    ExportMp4,
+    ExportPngSequence,
+    ExportStill,
     /// GM18: the pen held to the page's perspective rulers, or free.
     ToggleRulerSnap,
     /// GM18: the canvas tool that draws, splits and moves panels and rulers.
@@ -498,6 +506,11 @@ impl Action {
         Action::NewPage,
         Action::ClipToPanels,
         Action::ExportPages,
+        Action::RoomExport,
+        Action::ExportGif,
+        Action::ExportMp4,
+        Action::ExportPngSequence,
+        Action::ExportStill,
         Action::ToggleRulerSnap,
         Action::PanelTool,
         Action::ReloadSequences,
@@ -663,6 +676,11 @@ impl Action {
             Action::NewPage => "New page",
             Action::ClipToPanels => "Clip to panels",
             Action::ExportPages => "Export pages",
+            Action::RoomExport => "Export step",
+            Action::ExportGif => "Animated GIF",
+            Action::ExportMp4 => "Video (MP4)",
+            Action::ExportPngSequence => "Picture sequence (PNG)",
+            Action::ExportStill => "This frame (PNG)",
             Action::ToggleRulerSnap => "Snap to rulers",
             Action::PanelTool => "Panel (koma) tool",
             Action::ReloadSequences => "Reload image sequences",
@@ -834,6 +852,11 @@ impl Action {
             NewPage => "Add a one-frame page after the book's last, with INK and TONE columns and one panel, as one undo step.",
             ClipToPanels => "Rebuild the page's graph: each column's art cut to the panels over white paper, the borders on top; one undo step.",
             ExportPages => "Write the book's pages to a folder as PNG or TIFF at the page's dpi, in colour, grey or 1-bit mono, with trim marks.",
+            RoomExport => "Open the Export step: the result, and the choices for saving a file to share.",
+            ExportGif => "Save the whole animation as a GIF on white: it plays anywhere.",
+            ExportMp4 => "Save the whole animation as an MP4 video. Needs the free ffmpeg add-on on this PC.",
+            ExportPngSequence => "Save every frame as a numbered PNG picture in a folder.",
+            ExportStill => "Save the frame on screen as one PNG picture on white.",
             ToggleRulerSnap => "Hold the pen to the page's perspective rulers (a line toward a vanishing point, or level), or draw free again.",
             PanelTool => "Drag on paper: a panel; across a panel: a split at the gutter; a VP or the horizon: moved. One undo step each.",
             ReloadSequences => "Read every image sequence's files again (a re-render on disk shows); also on returning to the window.",
@@ -848,7 +871,7 @@ impl Action {
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | ImportSound | AddSoundTrack
             | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel | ExportPages
-            | ReloadSequences => Group::File,
+            | ExportGif | ExportMp4 | ExportPngSequence | ExportStill | ReloadSequences => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
             ZoomFit | ToggleOnion | ToggleCompositeView | CanvasOptions | MissCheck | ZoomIn
@@ -876,8 +899,8 @@ impl Action {
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
             | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
             | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger | PanelTool => Group::Tool,
-            RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit | Layout3dRoom
-            | MangaRoom => Group::Room,
+            RoomLayout | RoomDrawing | RoomFinishing | RoomComposite | RoomEdit | RoomExport
+            | Layout3dRoom | MangaRoom => Group::Room,
             ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue | ShowCutBoard
             | ShowEpisode | RenderEpisode => Group::Window,
             CommandPalette | ShortcutSheet | QuickStart | About | WhatsNew | ToggleHints => Group::Help,
@@ -1025,6 +1048,7 @@ impl Action {
             RoomFinishing => "Room/Color step",
             RoomComposite => "Room/Effects step",
             RoomEdit => "Room/Timing step",
+            RoomExport => "Room/Export step",
             // GM17: the 3D layout room (off the spine, like the forge's),
             // the cut camera keyed from View3D, and View3D's numpad verbs.
             Layout3dRoom => "Room/3D layout (LO)",
@@ -1033,6 +1057,10 @@ impl Action {
             NewPage => "Cut/New page",
             ClipToPanels => "Cut/Clip to panels",
             ExportPages => "File/Export/Manga pages (PNG, TIFF)…",
+            ExportGif => "File/Export/Animated GIF",
+            ExportMp4 => "File/Export/Video (MP4)",
+            ExportPngSequence => "File/Export/Picture sequence (PNG)",
+            ExportStill => "File/Export/This frame (PNG)",
             ToggleRulerSnap => "View/Snap to rulers",
             SetCutCameraFromView => "Cut/Set cut camera from view",
             View3dFront => "View/3D view/Front",
@@ -1232,6 +1260,11 @@ impl Action {
             NewPage => &["page", "manga", "add page", "pēji"],
             ClipToPanels => &["koma", "panels", "clip", "mask to panels", "manga"],
             ExportPages => &["print", "tiff", "png", "genkō", "webtoon", "nyūkō", "pages to files"],
+            RoomExport => &["save a file", "share", "deliver", "render", "room"],
+            ExportGif => &["gif", "loop", "share"],
+            ExportMp4 => &["mp4", "movie", "h264", "video file"],
+            ExportPngSequence => &["image sequence", "frames", "png sequence"],
+            ExportStill => &["still", "picture", "image", "png"],
             ToggleRulerSnap => &["perspective snap", "pāsu", "vanishing point", "ruler snap"],
             PanelTool => &["koma", "panel tool", "split panel", "frame border", "koma wari"],
             ReloadSequences => &["refresh", "reload renders", "reload sequence"],
@@ -1629,6 +1662,10 @@ impl Action {
             ExportPages => Some(ctrl("E")),
             ToggleRulerSnap => Some(ctrl("2")),
             PanelTool => Some(k("K")),
+            // AU9: the Export step on F9, free in both presets (the other
+            // rooms have no key, so this is the one a new person can learn).
+            RoomExport => Some(k("F9")),
+            ExportGif | ExportMp4 | ExportPngSequence | ExportStill => None,
             QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
             | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto

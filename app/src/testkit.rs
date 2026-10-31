@@ -89,7 +89,7 @@ pub struct Rig {
     /// Rig never arms, and tests about something else depend on that.
     arms: bool,
     /// AU1: the room last armed (the App keeps its own).
-    stack_room_seen: &'static str,
+    pub stack_room_seen: &'static str,
     /// AU1: a test's seeded fault, painted over the editor every frame so the
     /// audits have something to catch.
     pub seed: Option<Box<dyn FnMut(&mut egui::Ui)>>,
@@ -125,6 +125,8 @@ impl Rig {
         }
         self.notes.say(&mut self.editor);
         let pen = std::mem::take(&mut self.pen);
+        // AU9: the frozen boot keeps every fold open (spec 1.5.2).
+        self.editor.more_default = self.boot == Boot::Frozen;
         if self.arms {
             self.editor.arm_room(&self.config.layers, &mut self.stack_room_seen);
         }
@@ -403,6 +405,19 @@ impl EditorHarness {
             crate::StartOutcome::Failed(why) => rig.notes.push(why),
             crate::StartOutcome::Stay => {}
         }
+        self.run();
+    }
+
+    /// AU9: the save dialog's answer: the last logged `ExportTo` goes through
+    /// `Editor::export_to` with `path`, as the App sends what a person chose.
+    /// No dialog opens; a journey counts this as the dialog's one action.
+    pub fn answer_export(&mut self, path: &std::path::Path) {
+        let ctx = self.ctx();
+        let rig = self.h.state_mut();
+        let asked = rig.requests.iter().rposition(|r| matches!(r, crate::AppRequest::ExportTo(_)));
+        let asked = asked.unwrap_or_else(|| panic!("no export was asked for: {:?}", rig.requests));
+        let crate::AppRequest::ExportTo(kind) = rig.requests.remove(asked) else { unreachable!() };
+        rig.editor.export_to(&ctx, kind, path);
         self.run();
     }
 
@@ -1383,6 +1398,11 @@ mod tests {
                 Action::AddSoundTrack => Some(AppRequest::AddSoundTrack),
                 // GM17: the model picker is the shell's file dialog.
                 Action::Import3DModel => Some(AppRequest::Import3DModel),
+                // AU9: the plain exports' save dialogs.
+                Action::ExportGif => Some(AppRequest::ExportTo(crate::render_queue::ExportKind::Gif)),
+                Action::ExportMp4 => Some(AppRequest::ExportTo(crate::render_queue::ExportKind::Mp4)),
+                Action::ExportPngSequence => Some(AppRequest::ExportTo(crate::render_queue::ExportKind::Png)),
+                Action::ExportStill => Some(AppRequest::ExportTo(crate::render_queue::ExportKind::Still)),
                 _ => None,
             };
             match want {
@@ -2214,6 +2234,7 @@ mod tests {
             Stage::Composite,
             Stage::Edit,
             Stage::Manga,
+            Stage::Export,
         ] {
             // Exhaustive: a new Stage fails to compile until it is listed.
             match st {
@@ -2222,7 +2243,8 @@ mod tests {
                 | Stage::InkPaint
                 | Stage::Composite
                 | Stage::Edit
-                | Stage::Manga => assert!(stages.contains(&st), "{} is not probed", st.name()),
+                | Stage::Manga
+                | Stage::Export => assert!(stages.contains(&st), "{} is not probed", st.name()),
             }
         }
         assert!(crate::PROBE_ROOMS.iter().any(|r| matches!(r, crate::ProbeRoom::Forge)));
@@ -2549,7 +2571,10 @@ mod tests {
         let (mut moved, mut kept) = (EditorHarness::new(), EditorHarness::new());
         let layers = moved.rig().config.layers.clone();
         let (mut seen_moved, mut seen_kept) = ("", "");
-        for room in crate::PROBE_ROOMS {
+        // The rooms that block knew: the Export step came later, and arms
+        // nothing (`auexport_arming_key_skips_export`).
+        let rooms = crate::PROBE_ROOMS.into_iter().filter(|r| !matches!(r, crate::ProbeRoom::Stage(Stage::Export)));
+        for room in rooms {
             for _twice in 0..2 {
                 room.enter(moved.editor_mut());
                 room.enter(kept.editor_mut());
@@ -2915,16 +2940,17 @@ mod tests {
     }
 
     /// AU2's leave-out list: no renames, no menu moves, no new Actions. The
-    /// parts that make them (AU3, AU4, AU5, AU6, AU7, AU10, AU11) re-pin this and
-    /// say so in their commit bodies. AU4 brought the rail and `CanvasOptions`,
-    /// AU5 `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew` and
-    /// `ToggleLockPositions`, AU7 `ToggleHints`.
+    /// parts that make them (AU3, AU4, AU5, AU6, AU7, AU9, AU10, AU11) re-pin
+    /// this and say so in their commit bodies. AU4 brought the rail and
+    /// `CanvasOptions`, AU5 `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew`
+    /// and `ToggleLockPositions`, AU7 `ToggleHints`, AU9 `RoomExport` and the
+    /// four plain exports.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (160, 0x4caad31a7b7dfe50), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (165, 0x93ec41fb5bedd391), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }

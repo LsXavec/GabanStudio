@@ -30,3 +30,21 @@ pub fn show_folder(dir: &std::path::Path) {
     };
     let _ = command(program).arg(dir).spawn();
 }
+
+/// AU9: `Open file`: a finished export in the program the system opens it
+/// with. Reached only through `AppRequest::OpenFile`, on the artist's press.
+pub fn open_file(file: &std::path::Path) {
+    show_folder(file);
+}
+
+/// AU9: `Show in folder`: the folder, with the file picked out where the
+/// system can do that. Reached only through `AppRequest::ShowInFolder`.
+pub fn show_in_folder(file: &std::path::Path) {
+    if cfg!(windows) {
+        let mut select = std::ffi::OsString::from("/select,");
+        select.push(file);
+        let _ = command("explorer").arg(select).spawn();
+    } else if let Some(dir) = file.parent() {
+        show_folder(dir);
+    }
+}

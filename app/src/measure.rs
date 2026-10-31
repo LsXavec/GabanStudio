@@ -204,6 +204,14 @@ fn hits(hits: &[Hit], hay: &str) -> bool {
     })
 }
 
+/// AU9: the distinct `TERMS` in the words a person read: a journey's jargon
+/// counts what was on its path, not all that the screen holds.
+pub fn jargon_in(read: &[String]) -> Vec<&'static str> {
+    let read: Vec<String> = read.iter().map(|words| words.to_lowercase()).collect();
+    let met = TERMS.iter().filter(|(_, terms, _)| read.iter().any(|words| hits(terms, words)));
+    met.map(|(term, ..)| *term).collect()
+}
+
 /// A count of the screen. The first eleven fields are the baseline's.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Census {

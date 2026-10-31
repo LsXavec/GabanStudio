@@ -42,15 +42,14 @@ pub enum ShowMe {
     Perform(Action),
     /// Playback, unless it already runs.
     Play,
-    /// The editing room with its render queue forward (GM11: every export
-    /// is a queue job, File ▸ Export…'s too). AU9 makes it the Export step.
+    /// The Export step, with its first choice ringed (spec 8.3).
     Export,
 }
 
 pub struct Step {
     pub label: &'static str,
     /// The Action that ticks the step. The others tick on outcomes, in
-    /// `Editor::say_outcomes`: a finished stroke, playback, a queued export.
+    /// `Editor::say_outcomes`: a finished stroke, playback, a finished export.
     pub ticks_on: Option<Action>,
     pub show_me: ShowMe,
 }
@@ -89,7 +88,7 @@ pub const FIRST_STROKE: usize = 0;
 pub const NEXT_POSE: usize = 2;
 /// Ticked when playback runs.
 pub const PLAY_STEP: usize = 3;
-/// The export step (ticked when a render queue job starts).
+/// The export step (ticked when a finished export's file is on disk).
 pub const EXPORT_STEP: usize = 4;
 
 /// Tick the step `action` belongs to; true when a tick was new.
@@ -137,9 +136,7 @@ pub fn checklist_ui(
                     ShowMe::NextCircle => "draws the next circle on a drawing of its own".into(),
                     ShowMe::Perform(a) => format!("does it: {}", a.label()),
                     ShowMe::Play => format!("does it: {}", Action::PlayPause.label()),
-                    ShowMe::Export => {
-                        "opens the edit room's render queue (File ▸ Export… adds a job too)".to_string()
-                    }
+                    ShowMe::Export => "opens the Export step, with its first choice ringed".to_string(),
                 })
                 .clicked()
             {

@@ -519,7 +519,7 @@ fn audock_a_new_pane_leaves_the_paper_in_view() {
     assert_eq!(split.fraction, 0.70);
     // The paper's leaf has the focus after a click; nothing lands on it.
     click_paper(&mut h);
-    h.click(vocab::STEP_EXPORT);
+    h.perform(Action::ShowRenderQueue);
     settle(&mut h);
     let shown = crate::visible_panes(&h.editor().dock);
     assert!(paper_in_view(&h) && shown.contains(&Pane::RenderQueue), "{shown:?}");

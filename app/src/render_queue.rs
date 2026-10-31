@@ -5,8 +5,10 @@
 //! starts, so later edits never leak in (NEVER-DO 6: the pen never waits).
 //! Progress per job; Stop lands after the current frame; a finished job
 //! offers "show folder". The same frame loop runs the windowless batch
-//! render (`animstudio --render`, main.rs).
+//! render (`animstudio --render`, main.rs). AU9: the pane opens on the Export
+//! panel (`export_step`); all of this stands under its `More options`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -305,6 +307,33 @@ impl JobSpec {
         })
     }
 
+    /// AU9: what this job will land, by the names `render_job` writes to, and
+    /// what it can say for itself.
+    fn landing(&self) -> Landing {
+        let format = self.preset.format;
+        let names = &self.slate.names;
+        let files = match format {
+            Format::Video(codec) => vec![self.out.join(deliver::video_name(&self.pattern, names, codec.ext()))],
+            Format::Gif => vec![self.lands_at(format.ext())],
+            _ if self.preset.one_file => vec![self.lands_at(format.ext())],
+            _ => {
+                let pattern = deliver::sequence_pattern(&self.pattern);
+                let frames = self.frames.0..=self.frames.1;
+                frames.map(|f| self.out.join(deliver::expand_pattern(&pattern, names, f + 1, format.ext()))).collect()
+            }
+        };
+        let one_file = self.preset.one_file || matches!(format, Format::Video(_) | Format::Gif);
+        // The drawings its frames show: an episode's frame is its own cut's.
+        let mut drawings = HashSet::new();
+        for f in self.frames.0..=self.frames.1 {
+            let placed = self.episode.as_ref().and_then(|ep| ep.locate(f).map(|(i, local)| (&ep.cuts[i], i, local)));
+            let (cut, which, local) = placed.unwrap_or((&self.cut, 0, f));
+            let columns = cut.xsheet.columns.iter().filter(|c| cut.column_renders(c.id));
+            drawings.extend(columns.filter_map(|c| c.resolve(local)).map(|drawing| (which, drawing)));
+        }
+        Landing { files, one_file, drawings: drawings.len(), fps: self.fps }
+    }
+
     fn frame(&self, f: u32) -> Image {
         // GM15: an episode frame is its own cut's frame, burnt in with
         // that cut's names (the files carry the episode's).
@@ -568,6 +597,78 @@ struct Worker {
     /// Said with the finished job (cels whose legacy vector strokes no
     /// render includes, as v0.3's exports said).
     note: String,
+    landing: Landing,
+}
+
+/// AU9: what a running job expects to leave behind.
+#[derive(Debug, Clone)]
+struct Landing {
+    /// The one file, or a sequence's frames in order.
+    files: Vec<PathBuf>,
+    one_file: bool,
+    drawings: usize,
+    fps: u32,
+}
+
+/// AU9: a job that finished with its file on disk. The sizes are read from
+/// the finished file and the rest is the job's, so a line made from this
+/// cannot be an estimate. `poll` makes one and `Editor::say_outcomes` takes
+/// it: that is what ticks Quick Start's last slot, on any route.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Landed {
+    /// What `Open file` opens: the one file, or a sequence's first picture.
+    pub file: PathBuf,
+    /// `ball.gif`, or `12 pictures` for a sequence.
+    pub name: String,
+    pub drawings: usize,
+    /// Frames rendered.
+    pub frames: usize,
+    pub fps: u32,
+    /// Bytes on disk, over every file of a sequence.
+    pub bytes: u64,
+    /// The job had nothing else to report: no note and no warning.
+    pub plain: bool,
+}
+
+impl Landed {
+    /// `12 drawings, 1.0 s, 184 KB`. One frame has no duration to give.
+    pub fn line(&self) -> String {
+        let drawings = match self.drawings {
+            1 => "1 drawing".to_string(),
+            n => format!("{n} drawings"),
+        };
+        match self.frames {
+            0 | 1 => format!("{drawings}, {}", size_words(self.bytes)),
+            n => format!("{drawings}, {:.1} s, {}", n as f32 / self.fps.max(1) as f32, size_words(self.bytes)),
+        }
+    }
+}
+
+/// A file's size as a person reads it, the way Explorer counts: 1024 bytes
+/// to the KB, rounded up.
+pub fn size_words(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    if bytes < 1000 * KB {
+        format!("{} KB", bytes.div_ceil(KB))
+    } else {
+        format!("{:.1} MB", bytes as f32 / (KB * KB) as f32)
+    }
+}
+
+/// AU9: a finished job's files, read from the disk. None when one of them is
+/// missing: a file that is not there cannot be reported.
+fn landed_files(plan: &Landing, frames: usize, plain: bool) -> Option<Landed> {
+    let mut bytes = 0;
+    for file in &plan.files {
+        bytes += std::fs::metadata(file).ok()?.len();
+    }
+    let file = plan.files.first()?.clone();
+    let name = match plan.files.len() {
+        _ if plan.one_file => file.file_name()?.to_string_lossy().into_owned(),
+        1 => "1 picture".to_string(),
+        n => format!("{n} pictures"),
+    };
+    Some(Landed { file, name, drawings: plan.drawings, frames, fps: plan.fps, bytes, plain })
 }
 
 impl Drop for Worker {
@@ -634,9 +735,10 @@ pub struct RenderQueue {
     pub searches: u32,
     /// "show folder" asks the shell to open this.
     pub show_folder: Option<PathBuf>,
-    /// AU7: Show me sent someone here: the next frame scrolls `Start` up, so
-    /// the two buttons its sentence names are on screen.
-    pub reveal_start: bool,
+    /// AU9: jobs that finished with their file on disk, not yet told.
+    pub landed: Vec<Landed>,
+    /// AU9: the Export panel's own state.
+    pub panel: crate::export_step::Panel,
 }
 
 impl RenderQueue {
@@ -939,6 +1041,11 @@ pub fn export_job(
     // to land there: a stem like `ball_` is a name, not a pattern to tidy.
     let one_file = matches!(kind, ExportKind::Gif | ExportKind::Still);
     state.render_queue.queue.jobs[i].exact_name = one_file && dest.file_stem().is_some();
+    // AU9: `Transparent` keeps the alpha through the existing `PNG 8-bit`. The
+    // job stays one frame and one named file: `launch` holds it to that.
+    if kind == ExportKind::Still && state.render_queue.panel.transparent {
+        state.render_queue.queue.jobs[i].preset = ExportKind::Png.preset();
+    }
     Some(i)
 }
 
@@ -1008,12 +1115,15 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
         }
         spec.mixdown = job.mixdown;
         spec.exact_name = job.exact_name;
+        // AU9: a transparent still is a `PNG 8-bit` job under one chosen name.
+        spec.preset.one_file |= job.exact_name;
         state.render_queue.queue.jobs[i].span = spec.frames;
         let note = match anim_core::export::vector_stroke_cels(&spec.cut) {
             0 => String::new(),
             n => format!(" ({n} cel(s) carry legacy vector strokes — not included)"),
         };
         let ffmpeg = state.render_queue.ffmpeg_path();
+        let landing = spec.landing();
         let cancel = Arc::new(AtomicBool::new(false));
         let rx = spawn(spec, ffmpeg, cancel.clone(), Some(ctx.clone()));
         state.render_queue.worker = Some(Worker {
@@ -1021,6 +1131,7 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
             rx,
             cancel,
             note,
+            landing,
         });
         return;
     }
@@ -1034,6 +1145,7 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
     };
     let job = w.job;
     let note = w.note.clone();
+    let landing = w.landing.clone();
     let mut finished = None;
     let mut frames = 0;
     let mut warnings = Vec::new();
@@ -1077,8 +1189,16 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
         };
         state.status = format!("{} — {first}{more}", state.status);
     }
+    land(state, &landing, &result, note.is_empty() && warnings.is_empty());
     if let Some(next) = state.render_queue.queue.finish(job, result) {
         launch(state, next, ctx);
+    }
+}
+
+/// AU9: a job that ended well reports its file, once it is on disk.
+fn land(state: &mut AppState, landing: &Landing, result: &Result<usize, String>, plain: bool) {
+    if let Ok(frames) = result {
+        state.render_queue.landed.extend(landed_files(landing, *frames, plain));
     }
 }
 
@@ -1095,7 +1215,10 @@ pub fn wait(state: &mut AppState, ctx: &egui::Context) {
             Progress::Frame => state.render_queue.queue.frame_done(job),
             Progress::Warnings(w) => state.note_render_warnings(w),
             Progress::Done(r) => {
-                state.render_queue.worker = None;
+                let landing = state.render_queue.worker.take().map(|w| w.landing.clone());
+                if let Some(landing) = landing {
+                    land(state, &landing, &r, true);
+                }
                 if let Some(next) = state.render_queue.queue.finish(job, r) {
                     launch(state, next, ctx);
                 }
@@ -1104,13 +1227,23 @@ pub fn wait(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
-/// The pane: the new-job form over the job list.
-pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
+/// The pane. AU9: `top` is the Export panel, in the same scrolling; it answers
+/// whether `More options` is open, and the new-job form over the job list
+/// stands under it.
+pub fn ui(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    top: impl FnOnce(&mut egui::Ui, &mut AppState) -> bool,
+) {
     poll(state, ui.ctx());
     let ffmpeg = state.render_queue.ffmpeg_path();
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        .content_margin(crate::export_step::RING_ROOM)
         .show(ui, |ui| {
+            if !top(ui, state) {
+                return;
+            }
             plate::legend(ui, &format!("{} (delivery)", crate::vocab::EXPORT_QUEUE));
             ui.separator();
             ui.label("preset");
@@ -1345,9 +1478,6 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                     .on_hover_text(
                         "render the queued jobs in order on a worker; you can keep drawing",
                     );
-                if std::mem::take(&mut state.render_queue.reveal_start) {
-                    start_key.scroll_to_me(Some(egui::Align::BOTTOM));
-                }
                 if start_key.clicked() {
                     start(state, ui.ctx());
                 }
@@ -1763,9 +1893,11 @@ mod tests {
         h.state_mut().render_queue.draft.out = dir.path().display().to_string();
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
         h.run();
+        h.scroll_to("+ this cut");
         h.click("+ this cut");
         h.run();
         assert_eq!(h.state().render_queue.queue.jobs.len(), 1);
+        h.scroll_to("Start");
         h.click("Start");
         h.run();
         let ctx = h.ctx();
@@ -1775,6 +1907,7 @@ mod tests {
         assert_eq!((j.state.clone(), j.done), (JobState::Done, 3));
         assert_eq!(files(dir.path()).len(), 3);
         assert!(h.has("show folder"));
+        h.scroll_to("show folder");
         h.click("show folder");
         h.run();
         // The shell opens it; the harness only sees the ask.
@@ -2044,9 +2177,9 @@ mod tests {
         );
         assert_eq!(j.out, dir.path());
         assert!(h.state().render_queue.busy(), "started at once");
-        assert!(h.editor().quick_start[crate::welcome::EXPORT_STEP]);
         wait(h.state_mut(), &ctx);
         h.run();
+        assert!(h.editor().quick_start[crate::welcome::EXPORT_STEP]);
         assert_eq!(h.state().render_queue.queue.jobs[0].state, JobState::Done);
         assert_eq!(files(dir.path()).len(), 3);
         assert!(h.has_text_containing(crate::vocab::EXPORT_QUEUE), "{}", h.describe());
@@ -2086,10 +2219,12 @@ mod tests {
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
         h.run();
         assert_eq!(h.node_enabled("+ selected cuts"), Some(false), "nothing picked");
+        h.scroll_to("pick cuts");
         h.click("pick cuts");
         h.click("CUT03");
         h.click("CUT01");
         assert_eq!(h.state().render_queue.draft.picked, vec![cuts[2], cuts[0]]);
+        h.scroll_to("+ selected cuts");
         h.click("+ selected cuts");
         let queued: Vec<CutRef> = h
             .state()
@@ -2398,6 +2533,29 @@ mod tests {
         let (size, ink) = png8(&path, 10, 6);
         assert_eq!((size, ink), ((64, 36), [255, 0, 0, 255]), "frame 5 is the second drawing");
         assert_eq!(png8(&path, 40, 30).1, [255; 4], "on white");
+    }
+
+    /// Spec 5.5: `Transparent` under More options, by the existing `PNG 8-bit`:
+    /// still one frame and one named file, with no white behind the ink.
+    #[test]
+    fn auexport_transparent_still_keeps_its_alpha() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = EditorHarness::with_state(keyed(6, 24, &[(0, BLUE), (3, RED)]));
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
+        h.state_mut().view.frame = 4;
+        h.run();
+        h.click(crate::export_step::TRANSPARENT);
+        assert!(h.state().render_queue.panel.transparent, "the frozen boot's open fold");
+        let ctx = h.ctx();
+        let path = dir.path().join("clear.png");
+        h.editor_mut().export_to(&ctx, ExportKind::Still, &path);
+        h.run_export_to_end();
+        let j = &h.state().render_queue.queue.jobs[0];
+        assert_eq!((j.preset().name, j.state.clone(), j.done), ("PNG 8-bit", JobState::Done, 1));
+        assert_eq!(files(dir.path()), ["clear.png"], "the exact name, and nothing beside it");
+        assert_eq!(png8(&path, 10, 6).1, [255, 0, 0, 255], "frame 5's ink");
+        assert_eq!(png8(&path, 40, 30).1[3], 0, "and nothing behind it");
     }
 
     #[test]
@@ -2751,11 +2909,13 @@ mod tests {
             ("+ episode", "a still takes the first frame"),
             ("+ frames", "a still takes the first of them"),
         ] {
+            h.scroll_to(widget);
             h.hover(widget);
             h.wait(1.0);
             assert!(h.has_text_containing(words), "{widget}: {words}\n{}", h.describe());
         }
         // The pattern's field has no name of its own: the pointer, by hand.
+        h.scroll_to("file names");
         let field = h.rect("file names").right_center() + egui::vec2(40.0, 0.0);
         h.kit_mut().input_mut().events.push(egui::Event::PointerMoved(field));
         h.run();
@@ -2775,15 +2935,21 @@ mod tests {
         assert_eq!(h.node_enabled("GIF"), Some(true), "{}", h.describe());
         assert_eq!(h.node_enabled("Still PNG"), Some(true));
         assert_eq!(h.node_enabled("H.264 review"), Some(false), "an MP4 still takes ffmpeg");
+        h.scroll_to("GIF");
         h.click("GIF");
         assert_eq!(h.state().render_queue.draft.preset, preset_at("GIF"), "{:?}", h.rect("GIF"));
+        h.scroll_to("+ this cut");
         h.click("+ this cut");
+        h.scroll_to("Start");
         h.click("Start");
         h.run_export_to_end();
         assert_eq!(files(dir.path()), ["show_SC01_CUT01.gif"]);
         h.state_mut().view.frame = 4;
+        h.scroll_to("Still PNG");
         h.click("Still PNG");
+        h.scroll_to("+ this cut");
         h.click("+ this cut");
+        h.scroll_to("Start");
         h.click("Start");
         h.run_export_to_end();
         assert_eq!(files(dir.path()), ["show_SC01_CUT01.gif", "show_SC01_CUT01.png"]);
@@ -2813,6 +2979,7 @@ mod tests {
             let _ = h.editor_mut().dock.set_active_tab(tab);
             h.run_frames(2);
             for name in ["GIF", "Still PNG"] {
+                h.scroll_to(name);
                 h.click(name);
                 let armed = h.state().render_queue.draft.preset;
                 assert_eq!(armed, preset_at(name), "{name} at {size:?}: {:?}", h.rect(name));

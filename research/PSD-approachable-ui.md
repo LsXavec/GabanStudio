@@ -1646,6 +1646,17 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - Every part's shots land in `.work/gaban-ui/shots/<part>/` by the workflow's command, and in `shots-after/`, the folder 1.5 rule 6 names, by a copy of that run.
 - `crates/anim-core/tests/fixtures/before-gif.animproj` is a real file from before this part, written by the store at the commit under it. `augif_saved_data_stands` opens it and renders both new kinds, and the project, the file and the config do not move.
 
+**AU9 notes.** Choices the build made where this document was silent or spoke twice. None needs a device.
+
+- `Exported ball.gif.` is a real row of the hint table, in 8.2's place, on `say::EXPORTED`, bit 8. Nothing ever stores that bit, so the row speaks after every export that lands outside the Export step, not once. `HINTS` stays 14: this row takes the place of the retired `QUEUE` row, and bit 15 stays taken, because a saved `hints_seen` may carry it.
+- With hints off there is no report and no `Open file` (8.5), and the queue's own `rendered …` remark stands. With hints on the report clears that remark only when the job had nothing else to say (`Landed::plain`). A note or a warning stays up.
+- The queue's sentence and its `export_asked` went with Show me's fifth step. The ring on the first choice does their job: it stays until something on the panel is pressed or the person leaves the step, and no timer takes it.
+- The ring stands outside its card, so the pane's scrolling keeps `export_step::RING_ROOM` round its content, inside its clip (`ScrollArea::content_margin`). The queue's panel under `More options` shares that edge with the cards.
+- `Other formats…` is `File ▸ Export ▸`'s one hand-built row, because `RoomExport`'s own label is `Export step`, for the step's menu. It runs that Action. The rows under the separator keep `queue_export`, which opens the pane. Pressing a row ticks nothing, on either route: only a landed file ticks Quick Start.
+- `More options` starts open on the frozen boot (1.5.2) and closed on a shipped one. Under the frozen boot the panel pushes the queue below the fold, so the tests that press its controls scroll to them first (`h.scroll_to`, reason `reach`). Storing the fold in `ui.panel_more` stays with the Panels part.
+- A document from the New Project form's blank has no composite, so its Result reads 8.4's `Nothing to show yet.` with `Set up standard composite` beside working choices: the export falls back to the flattened sheet. Every template and every Start card builds the composite, so this is that one route. The Result keeps 8.4's words there.
+- A job in the panel's list is named `ball.gif` when a person chose that name, else `CUT03, GIF`, so it never says the same words as the checkbox or the queue's row below it (1.5 rule 9).
+
 ---
 
 ## 14 Part map
