@@ -156,13 +156,17 @@ fn tool_name(name: &str, label: &str, icon: crate::icons::Icon) -> String {
     }
 }
 
-/// Append the exact identity line to a response's hover, when enabled.
+/// Append the exact identity line to a response's hover, when enabled: a card
+/// of its own above the control, so the pen passes it and the control's own
+/// card keeps its place.
 fn describe(resp: Response, kind: &str, label: &str) -> Response {
-    if exact() {
-        resp.on_hover_text(format!("[{kind} '{label}' · plate.rs]"))
-    } else {
-        resp
-    }
+    if exact() { exact_card(resp, kind, label) } else { resp }
+}
+
+pub(crate) fn exact_card(resp: Response, kind: &str, label: &str) -> Response {
+    let over = resp.rect.left_top() - Vec2::new(0.0, 4.0);
+    let words = || format!("[{kind} '{label}' · plate.rs]");
+    card_at(resp, "exact_card", egui::Align2::LEFT_BOTTOM, over, words)
 }
 
 // Derived colours. No new hues are permitted: each one is a token, opaque or
@@ -546,8 +550,33 @@ pub const CARD_DELAY: f64 = 0.35;
 /// passes through it while the floats below still block. `text` is built only
 /// once the card shows.
 pub fn hover_card(resp: Response, text: impl FnOnce() -> String) -> Response {
+    let beside = resp.rect.right_top() + Vec2::new(8.0, 0.0);
+    card_at(resp, "hover_card", egui::Align2::LEFT_TOP, beside, text)
+}
+
+/// [`hover_card`] with its words ready, for a chain: what a float's controls
+/// wear where a stock tooltip would stop the pen (R15).
+pub trait Card {
+    fn card(self, words: impl Into<String>) -> Self;
+}
+
+impl Card for Response {
+    fn card(self, words: impl Into<String>) -> Self {
+        hover_card(self, || words.into())
+    }
+}
+
+/// One card, by `salt`, so one control can wear two: `at` is the point of it
+/// `pivot` names.
+fn card_at(
+    resp: Response,
+    salt: &str,
+    pivot: egui::Align2,
+    at: Pos2,
+    text: impl FnOnce() -> String,
+) -> Response {
     let ctx = resp.ctx.clone();
-    let id = resp.id.with("hover_card");
+    let id = resp.id.with(salt);
     if !resp.hovered() || resp.is_pointer_button_down_on() {
         ctx.data_mut(|d| d.remove_temp::<f64>(id));
         return resp;
@@ -564,7 +593,8 @@ pub fn hover_card(resp: Response, text: impl FnOnce() -> String) -> Response {
         .interactable(false)
         .fade_in(false)
         .constrain_to(ctx.content_rect())
-        .fixed_pos(resp.rect.right_top() + Vec2::new(8.0, 0.0))
+        .pivot(pivot)
+        .fixed_pos(at)
         .show(&ctx, |ui| {
             frame.show(ui, |ui| {
                 ui.set_max_width(ui.spacing().tooltip_width);
@@ -627,8 +657,8 @@ pub fn rail_key(
     describe(resp, "RAIL KEY rail_key", name)
 }
 
-/// The rail's Size key, drag only: a wedge from thin to thick, marked at `t`
-/// (0 to 1) along its length, thick end up.
+/// The rail's Size key, drag only: a line of dots growing from small to big,
+/// marked at `t` (0 to 1) along its length, big end up.
 pub fn size_key(ui: &mut Ui, size: Vec2, caption: Option<&str>, t: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::drag());
     if ui.is_rect_visible(rect) {
@@ -637,8 +667,13 @@ pub fn size_key(ui: &mut Ui, size: Vec2, caption: Option<&str>, t: f32) -> Respo
         p.rect_filled(rect, R_CONTROL, fill);
         let bottom = rect.bottom() - if caption.is_some() { 22.0 } else { 6.0 };
         let (top, cx) = (rect.top() + 6.0, rect.center().x);
-        let wedge = vec![Pos2::new(cx - 7.0, top), Pos2::new(cx + 7.0, top), Pos2::new(cx, bottom)];
-        p.add(Shape::convex_polygon(wedge, at_rest(ui, INK3), Stroke::NONE));
+        const DOTS: [f32; 5] = [1.5, 2.5, 3.5, 4.5, 6.0];
+        let gap = (bottom - top - 2.0 * DOTS.iter().sum::<f32>()) / (DOTS.len() - 1) as f32;
+        let mut foot = bottom;
+        for r in DOTS {
+            p.circle_filled(Pos2::new(cx, foot - r), r, at_rest(ui, INK3));
+            foot -= 2.0 * r + gap;
+        }
         let y = bottom + (top - bottom) * t.clamp(0.0, 1.0);
         let bar = egui::Rect::from_center_size(Pos2::new(cx, y), Vec2::new(22.0, 3.0));
         p.rect_filled(bar, 1, ink);
@@ -1252,11 +1287,7 @@ fn icon_button_sized(
         (true, true) => icon_name(icon),
     };
     speak(&resp, egui::WidgetType::Button, None, &name);
-    let resp = if hover.is_empty() {
-        resp
-    } else {
-        resp.on_hover_text(hover)
-    };
+    let resp = if hover.is_empty() { resp } else { resp.card(hover) };
     describe(resp, "ACTION icon_button", label)
 }
 
@@ -1665,9 +1696,9 @@ pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
         }
     }
     let _ = if hint.is_empty() {
-        resp.on_hover_text("press and hold to fire — a click does nothing")
+        resp.card("press and hold to fire — a click does nothing")
     } else {
-        resp.on_hover_text(format!("press and hold — {hint}"))
+        resp.card(format!("press and hold — {hint}"))
     };
     fired
 }

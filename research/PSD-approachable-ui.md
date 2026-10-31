@@ -1586,6 +1586,17 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - 2.7's band icons are the five transport keys as well as the Timing sheet button, so a transport key stands 32, not 28. They join the top row at `BAR_ICON` and the panels keep `ICON`.
 - The retired ARMED line also named the fill role (normal, shadow, highlight) while fill was armed, and 4.2 did not move that word anywhere. The Palette's ringed pot marks the role today, and AU4's `Drawing with` card owes its name, so AU4's item 7 now says so.
 
+**AU4 notes.** Choices the build made where this document was silent or spoke twice. The first two are the Lead's to settle: this document asks for two things that cannot both hold, and neither is called accepted. None needs a device.
+
+- Paper under the rail at Fit, strip closed. 4.8 says paper under chrome is 0 at Fit with no float open, 4.1 and 4.8 say Fit stays 94% of the pane, and R17 allows one refit, at the strip's opening. At 1280×800 and 1024×640 with the strip closed they collide: 94% of the pane stands a 16:9 paper at left 38.4 and 44.1 under a rail that ends at 68, with 756 and 642 samples under chrome. The build keeps 94% wherever the paper clears the rail, so 1600×900 and 1280×720 do not move and no strip-open Fit moves. Elsewhere it takes the size that just clears the rail, never under the strip-open Fit: 1280×800 goes from 1203×677 to 1128×634, 1024×640 from 936×526 to 872×490, paper left 76 on both, and opening the strip is still the one refit. The two other answers: Fit on the reference height always, which the Reflow note turned down and which takes 1370×771 to 1277×718 at 1600×900, where nothing collides; or keep 94% and accept the overlap at those two sizes. A document wider than about 2.09:1 keeps 4.8's accepted case.
+- Art under the rail outside blank Draw. With the Timing sheet on, and in Color, the rail covers the art's left edge at Fit, and 4.8's gate does not reach those arrangements. It follows from 4.9's own arithmetic: art starts at 433 and the rail ends at 465 at 1600 wide, 334 and 388 at 1280. Nothing was changed. The other answer is to fit these arrangements to the area right of the rail.
+- The canvas's 14 pt mirror of the sheet's run marks is the sheet's: it shows only while a Timing sheet is on screen, in every room, so blank Draw has none. It stands 12 wide and ends at the rail's left edge.
+- Derive stays held and red, as `plate::danger`, because palettes have no undo and it overwrites a chosen shadow. It moved to the name line, away from the swatches.
+- A rail key's card is `Name (chord) — help`, 4.5's route, so `Exact UI descriptions` keeps working. The tool keys read the registry's line and start with the Action's label until AU12 renames those labels; Size, Brush color, Layers, Hand, Flip and `…` are written by hand in the plain form.
+- The hover card replaced stock tooltips on the rail and in the floats, and on the two layer functions the Layers float shares with the sheet. The sheet's own tooltips stay for AU5, and menu rows stay stock.
+- `set_width` is only a floor: the `More` fold widened a float by 16, the fold's indent over a slider set to the body's width, so the fold now sets `slider_width` to its own width.
+- No shot shows the second OS window: the headless harness takes the embedded branch, so `aurail_both_canvas_hosts_call_one_overlay` proves the path and item 4 stays the real check.
+
 ---
 
 ## 14 Part map

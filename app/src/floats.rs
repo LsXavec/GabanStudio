@@ -19,6 +19,10 @@ const INSET: f32 = 12.0;
 const MARGIN: i8 = 12;
 /// `auto`: a float as tall as its body, capped by its host.
 const AUTO: f32 = f32::INFINITY;
+/// The scroll handle at rest, and the gutter it keeps from the body: as wide
+/// as the bar a hover widens it to, so it lies on no control.
+const HANDLE_W: f32 = 4.0;
+pub const GUTTER: f32 = 10.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Float {
@@ -105,7 +109,19 @@ impl Floats {
         }
         match f {
             Float::Layers => self.layers = true,
-            _ => self.left = Some(f),
+            _ => {
+                self.left = Some(f);
+                self.more = false;
+            }
+        }
+    }
+
+    /// The `…` popover stands where a left float does, so the two trade
+    /// places.
+    pub fn toggle_more(&mut self) {
+        self.more = !self.more;
+        if self.more {
+            self.left = None;
         }
     }
 
@@ -185,14 +201,21 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
                 // at the first touch, past the press of the first pull. It has
                 // no hover to wake the bar either, so the handle stays in sight,
                 // in a gutter of its own: it would lie on the body's right edge.
-                ui.spacing_mut().scroll.dormant_handle_opacity = 0.6;
-                ui.spacing_mut().scroll.floating_allocated_width = 6.0;
+                // Rounded, and in a lighter ink than the words, or it reads
+                // as a stray rule.
+                let bar = &mut ui.spacing_mut().scroll;
+                bar.dormant_handle_opacity = 0.6;
+                bar.floating_width = HANDLE_W;
+                bar.floating_allocated_width = GUTTER;
+                let widgets = &mut ui.visuals_mut().widgets;
+                let ink = std::mem::replace(&mut widgets.inactive.fg_stroke.color, plate::INK3);
                 let scroll = egui::ScrollArea::vertical()
                     .id_salt(("float_scroll", f.heading()))
                     .scroll_source(egui::scroll_area::ScrollSource::ALL)
                     .max_height((size.y - spent).max(40.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
+                        ui.visuals_mut().widgets.inactive.fg_stroke.color = ink;
                         ui.set_width(ui.available_width());
                         body(ui, f, args);
                     });

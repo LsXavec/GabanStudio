@@ -741,6 +741,23 @@ impl EditorHarness {
         out
     }
 
+    /// AU4: the words the last frame painted, nested shapes included: a word
+    /// painted by hand speaks to no tree.
+    pub fn painted_text(&self) -> Vec<String> {
+        fn walk(s: &egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for c in &self.h.output().shapes {
+            walk(&c.shape, &mut out);
+        }
+        out
+    }
+
     /// GM20: the screen rects the last frame outlined in `color` (fill-less
     /// rects: the frame drawn on a wider paper sheet).
     pub fn outlined_rects(&self, color: egui::Color32) -> Vec<egui::Rect> {
@@ -822,6 +839,11 @@ impl EditorHarness {
     /// GM3: is some text on screen (a tooltip, a row) containing `part`?
     pub fn has_text_containing(&self, part: &str) -> bool {
         self.h.query_all_by_label_contains(part).next().is_some()
+    }
+
+    /// AU4: how many widgets carry this name.
+    pub fn query_count(&self, label: &str) -> usize {
+        self.h.query_all_by_label(label).count()
     }
 
     /// GM3: the ONE widget with this name — enabled or greyed (None when
@@ -941,11 +963,37 @@ impl<S: 'static> PanelHarness<S> {
         self.h.query_all_by_label(label).next().is_some()
     }
 
+    pub fn has_text_containing(&self, part: &str) -> bool {
+        self.h.query_all_by_label_contains(part).next().is_some()
+    }
+
     #[track_caller]
     pub fn click(&mut self, label: &str) {
         let count = self.h.query_all_by_label(label).count();
         assert!(count == 1, "click({label:?}): {count} widget(s)\n{}", self.describe());
         self.h.get_by_label(label).click();
+        let _ = self.h.try_run();
+    }
+
+    /// AU4: scroll the ONE widget with this name into view.
+    #[track_caller]
+    pub fn scroll_to(&mut self, label: &str) {
+        self.h.get_by_label(label).scroll_to_me();
+        let _ = self.h.try_run();
+    }
+
+    /// AU4: the pointer rests on the ONE widget with this name for `secs` on
+    /// the egui clock.
+    #[track_caller]
+    pub fn rest_on(&mut self, label: &str, secs: f64) {
+        let count = self.h.query_all_by_label(label).count();
+        assert!(count == 1, "rest_on({label:?}): {count} widget(s)\n{}", self.describe());
+        self.h.get_by_label(label).hover();
+        self.h.step();
+        let now = self.h.ctx.input(|i| i.time);
+        self.h.input_mut().time = Some(now + secs);
+        self.h.step();
+        self.h.input_mut().time = None;
         let _ = self.h.try_run();
     }
 
@@ -1133,6 +1181,15 @@ mod tests {
         let layer = h.state().active_layer_name();
         assert!(h.has(&format!("lock layer {layer}")), "no lock for {layer:?}\n{tree}");
         assert!(h.has(&format!("layer colour {layer}")), "no colour dot for {layer:?}\n{tree}");
+        // AU4: the deck's `layer:` chip said where a stroke lands. On a
+        // shipped editor that is the Layers float's lit row.
+        let mut h = EditorHarness::with_state_shipped(crate::sample::build_sample());
+        let layer = h.state().active_layer_name();
+        assert!(!h.has(&format!("lock layer {layer}")), "shipped Draw has no list until it is asked");
+        h.open_float(crate::floats::Float::Layers);
+        let tree = h.describe();
+        assert!(h.has(&format!("lock layer {layer}")), "no row for {layer:?}\n{tree}");
+        assert_eq!(h.node_toggled(&layer), Some(true), "{layer:?} is not the lit row\n{tree}");
     }
 
     // ---- shortcuts: the text-focus rule ----
@@ -2280,8 +2337,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 566;
-    const ASSERT_FLOOR: usize = 3338;
+    const TEST_FLOOR: usize = 625;
+    const ASSERT_FLOOR: usize = 3646;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

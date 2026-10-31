@@ -4259,6 +4259,9 @@ struct Editor {
     /// AU4: the strip's latch, for this session. AU5 sets it; the band and
     /// the rail's reference height read it now.
     strip_open: bool,
+    /// AU4: the full-band latch (spec R17): set by the second drawing and
+    /// never cleared in a session. The rail's Flip reads it, AU5's band too.
+    full_band: bool,
     /// AU1: every action `perform` answered `Ignored`, however it ran (a
     /// key, a click, the palette). The journey `Recorder` reads it.
     #[cfg(test)]
@@ -4605,7 +4608,7 @@ struct EditorTabs<'a> {
     /// AU4: the overlay's share of the Editor. The rail reads the rest.
     floats: &'a mut floats::Floats,
     rail_off: bool,
-    strip_closed: bool,
+    full_band: bool,
     layers_docked: bool,
     /// AU3: the current recipe's panes while Lock UI positions is on, which
     /// keep their place; a panel opened by hand keeps its close control.
@@ -4719,7 +4722,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                         floats: self.floats,
                         manga: self.stage == Some(Stage::Manga),
                         rail_off: self.rail_off,
-                        strip_closed: self.strip_closed,
+                        full_band: self.full_band,
                         layers_docked: self.layers_docked,
                         pane_rects: Some(self.pane_rects),
                     };
@@ -5093,6 +5096,7 @@ impl Editor {
             pane_rects: Vec::new(),
             floats: floats::Floats::default(),
             strip_open: false,
+            full_band: false,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -5187,6 +5191,7 @@ impl Editor {
             pane_rects: Vec::new(),
             floats: floats::Floats::default(),
             strip_open: false,
+            full_band: false,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -8689,8 +8694,11 @@ impl Editor {
             self.locked_panes();
         }
         let rail_off = self.rail_off();
-        let strip_closed = self.strip_closed();
-        let layers_docked = visible_panes(&self.dock).contains(&Pane::Layers);
+        let panes = visible_panes(&self.dock);
+        let layers_docked = panes.contains(&Pane::Layers);
+        self.canvas.strip_closed = self.strip_closed();
+        self.canvas.sheet_shown = panes.contains(&Pane::XSheet);
+        self.full_band |= self.state.cut().drawings.len() > 1;
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -8710,7 +8718,7 @@ impl Editor {
             pane_rects: &mut self.pane_rects,
             floats: &mut self.floats,
             rail_off,
-            strip_closed,
+            full_band: self.full_band,
             layers_docked,
             locked: if ui_lock { &self.held } else { &[] },
         };
@@ -8780,6 +8788,9 @@ impl Editor {
                         return true;
                     }
                     egui::CentralPanel::default().show(ui, |ui| {
+                        // AU4: its own rail, at its own tier; no strip here,
+                        // and what is under the pointer here is no dock's.
+                        self.canvas.strip_closed = false;
                         self.canvas.ui(
                             ui,
                             &mut self.state,
@@ -8789,8 +8800,6 @@ impl Editor {
                             layers_cfg,
                             native_pen,
                         );
-                        // AU4: its own rail, at its own tier; no strip here,
-                        // and what is under the pointer here is no dock's.
                         let host = self.canvas.dbg_rect;
                         let args = &mut rail::OverlayArgs {
                             raster_available: self.paint.is_some(),
@@ -8800,7 +8809,7 @@ impl Editor {
                             floats: &mut self.floats,
                             manga: self.stage == Some(Stage::Manga),
                             rail_off: false,
-                            strip_closed: false,
+                            full_band: self.full_band,
                             layers_docked: false,
                             pane_rects: None,
                         };

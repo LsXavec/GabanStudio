@@ -11,7 +11,7 @@ use egui::{Color32, Rect, Sense, pos2, vec2};
 use crate::canvas::{props_chip_color, role_chip_color};
 use crate::doc::AppState;
 use crate::icons::Icon;
-use crate::plate;
+use crate::plate::{self, Card};
 
 const ROW_H: f32 = 18.0;
 /// The gutter: an 18pt seconds sub-column + 26pt frame numbers (spec §2.3).
@@ -2066,7 +2066,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
                     egui::Stroke::new(1.5, plate::TALLY),
                 );
             }
-            if resp.on_hover_text(label).clicked() && props.chip != Some(rgba) {
+            if resp.card(label).clicked() && props.chip != Some(rgba) {
                 state.layer_set_props(
                     lid,
                     LayerProps {
@@ -2081,7 +2081,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
 
     // LOCK + ONION — latches, one undo step each.
     let mut locked = props.locked;
-    plate::latch(ui, &mut locked, "locked").on_hover_text(
+    plate::latch(ui, &mut locked, "locked").card(
         "every painting tool refuses on a locked layer (pen, eraser, fill, lasso, select)",
     );
     if locked != props.locked {
@@ -2095,7 +2095,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
     }
     let mut onion = props.onion;
     plate::latch(ui, &mut onion, "in onion ghosts")
-        .on_hover_text("off: this layer never appears in onion-skin ghosts (the flip still shows it)");
+        .card("off: this layer never appears in onion-skin ghosts (the flip still shows it)");
     if onion != props.onion {
         state.layer_set_props(
             lid,
@@ -2213,7 +2213,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             }
         })
         .response
-        .on_hover_text("add a layer — it lands at its role's pipeline position");
+        .card("add a layer — it lands at its role's pipeline position");
 
         // PSD-cel-layers Stage 4: the stack presets. Picking binds the
         // CURRENT room's new cels; apply/conform only ever ADD layers.
@@ -2239,7 +2239,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             let can = have_cel;
             if ui
                 .add_enabled(can, egui::Button::new(format!("add missing '{cur}' layers to this cel")))
-                .on_hover_text("adds only the layers this cel lacks — never deletes, renames, or moves painted layers")
+                .card("adds only the layers this cel lacks — never deletes, renames, or moves painted layers")
                 .clicked()
             {
                 state.apply_stack_to_cel(&cur);
@@ -2247,7 +2247,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             }
             if ui
                 .button(format!("conform the whole cut to '{cur}'"))
-                .on_hover_text("the same additive apply for every layered cel in this cut — one undo step")
+                .card("the same additive apply for every layered cel in this cut — one undo step")
                 .clicked()
             {
                 state.conform_cut(&cur);
@@ -2260,7 +2260,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 let name = state.stack_name_buf.trim().to_string();
                 if ui
                     .add_enabled(can && !name.is_empty(), egui::Button::new("save"))
-                    .on_hover_text("structure only — names, roles, inks, locks, opacity; never pixels")
+                    .card("structure only — names, roles, inks, locks, opacity; never pixels")
                     .clicked()
                 {
                     state.stack_request = Some(crate::doc::StackRequest::Save(name));
@@ -2270,7 +2270,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             });
         })
         .response
-        .on_hover_text("layer-stack presets for the modern pipeline — LO, genga, douga, shiage");
+        .card("layer-stack presets for the modern pipeline — LO, genga, douga, shiage");
     });
 
     // Owned snapshot so row actions can mutate state freely. The FULL props
@@ -2351,7 +2351,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 Icon::Lock,
             );
             if lock_resp
-                .on_hover_text(if props.locked {
+                .card(if props.locked {
                     "locked — click to unlock"
                 } else {
                     "lock this layer (every painting tool refuses)"
@@ -2376,7 +2376,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 &format!("layer colour {name}"),
             );
             plate::identity_dot(ui.painter(), dot_rect.center(), 4.0, props_chip_color(&props));
-            let dot_resp = dot_resp.on_hover_text(format!(
+            let dot_resp = dot_resp.card(format!(
                 "{} — click: define this layer",
                 props.role.label()
             ));
@@ -2448,7 +2448,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                         } else {
                             egui::RichText::new(shown).color(plate::LEGEND)
                         };
-                        let resp = ui.selectable_label(is_active, text).on_hover_text(
+                        let resp = ui.selectable_label(is_active, text).card(
                             "click: edit this layer — double-click: rename — right-click: define",
                         );
                         resp.context_menu(|ui| {
@@ -2503,7 +2503,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         // LINE GUARD: arming-only protection for the line layer (shiage;
         // defaults ON in the Finishing room). A guard, not a lock.
         let mut lg = state.view.line_guard;
-        plate::latch(ui, &mut lg, "line guard").on_hover_text(
+        plate::latch(ui, &mut lg, "line guard").card(
         "while on, the line layer cannot be ARMED as the ink target — cycling skips it, tapping refuses",
         );
         state.view.line_guard = lg;

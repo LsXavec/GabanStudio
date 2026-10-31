@@ -550,6 +550,17 @@ mod tests {
             h.hover("file");
             h.wait(0.2);
         }
+        // AU4: the composite latch left the deck, and its chord went with it
+        // to the View row that took its place.
+        let action = Action::ToggleCompositeView;
+        let chord = chord_of(&binds, action).expect("bound");
+        let line = crate::menus::tip_with(action, Some(chord.clone()));
+        assert!(line.contains(&format!("({chord})")));
+        h.click("view");
+        assert!(!h.has_text_containing(&line), "shown before the hover");
+        h.hover("Composite view");
+        h.wait(1.0);
+        assert!(h.has_text_containing(&line), "no {line:?} on its row\n{}", h.describe());
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use crate::canvas::CanvasTool;
 use crate::config::{Action, SettingsCategory};
 use crate::floats::Float;
 use crate::measure::room_tag;
@@ -285,6 +286,21 @@ const RAIL: [(&str, u32, u32); 3] = [
     ("rail-both-sides", 1024, 640),
 ];
 
+/// AU4: what shows for a moment or under one tool: the first boot's Draw, a
+/// hover card, the dots' popover, the Size bubble at both ends of its range,
+/// and Tool options for the tools that have rows of their own. The OS window
+/// is not here: a harness has no second window (spec 13, item 4).
+const MOMENTS: [(&str, u32, u32); 8] = [
+    ("rail-blank-draw", 1600, 900),
+    ("rail-hover-card", 1600, 900),
+    ("rail-pocket-more", 832, 440),
+    ("rail-size-small", 1600, 900),
+    ("rail-size-large", 1600, 900),
+    ("options-fill", 1600, 900),
+    ("options-select", 1600, 900),
+    ("options-eraser", 1600, 900),
+];
+
 fn float_name(f: Float, suffix: &str) -> String {
     format!("float-{f:?}{suffix}.png")
 }
@@ -293,7 +309,56 @@ fn rail_owed() -> Vec<(String, u32, u32)> {
     let floats = SIZES.iter().flat_map(|(w, h, suffix)| {
         Float::ALL.into_iter().map(move |f| (float_name(f, suffix), *w, *h))
     });
-    floats.chain(RAIL.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h))).collect()
+    let states = RAIL.iter().chain(&MOMENTS);
+    floats.chain(states.map(|(state, w, h)| (format!("{state}.png"), *w, *h))).collect()
+}
+
+/// AU4: the moments, in `MOMENTS`' order, the blank boot's picture first.
+fn moments(h: &mut EditorHarness, dir: &Path) {
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    let mut shots = MOMENTS.iter().map(|(state, w, h)| {
+        (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32))
+    });
+    let (name, size) = shots.next().expect("a shot owed");
+    h.kit_mut().set_size(size);
+    arrive(h, draw);
+    h.shot(size, &name);
+
+    let (name, size) = shots.next().expect("a shot owed");
+    h.hover("Brush color");
+    h.wait(1.0);
+    h.shot(size, &name);
+
+    let (name, pocket) = shots.next().expect("a shot owed");
+    h.kit_mut().set_size(pocket);
+    arrive(h, draw);
+    h.click("More tools");
+    h.shot(pocket, &name);
+    h.click("More tools");
+
+    for pull in [400.0, -400.0] {
+        let (name, size) = shots.next().expect("a shot owed");
+        h.kit_mut().set_size(size);
+        arrive(h, draw);
+        let at = h.rect("Size").center();
+        let to = at + egui::vec2(0.0, pull);
+        h.press_and_move(at, to, 8);
+        h.shot(size, &name);
+        h.release(to);
+    }
+    h.run_frames(4);
+
+    for tool in [Some(CanvasTool::Fill), Some(CanvasTool::Select), None] {
+        let (name, size) = shots.next().expect("a shot owed");
+        let editor = h.editor_mut();
+        match tool {
+            Some(tool) => editor.canvas.set_tool(tool, &mut editor.state),
+            None => editor.canvas.arm_paint(true, &mut editor.state),
+        }
+        h.open_float(Float::ToolOptions);
+        arrive(h, draw);
+        h.shot(size, &name);
+    }
 }
 
 fn rail_and_floats(dir: &Path) {
@@ -320,6 +385,10 @@ fn rail_and_floats(dir: &Path) {
         arrive(&mut h, draw);
         h.shot(size, &dir.join(format!("{state}.png")));
     }
+    drop(h);
+    let mut h = EditorHarness::with_gpu_shipped(NewProjectForm::default().new_state());
+    h.run_frames(4);
+    moments(&mut h, dir);
 }
 
 #[test]
@@ -345,9 +414,22 @@ fn uishot_rooms() {
 #[test]
 fn aurail_shots_owe_every_float_at_both_sizes() {
     let owed = rail_owed();
-    assert_eq!(owed.len(), 2 * Float::ALL.len() + RAIL.len());
+    assert_eq!(owed.len(), 2 * Float::ALL.len() + RAIL.len() + MOMENTS.len());
     let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
     assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
+    let moments = [
+        "rail-blank-draw",
+        "rail-hover-card",
+        "rail-pocket-more",
+        "rail-size-small",
+        "rail-size-large",
+        "options-fill",
+        "options-select",
+        "options-eraser",
+    ];
+    for moment in moments {
+        assert!(names.contains(format!("{moment}.png").as_str()), "{moment}: {names:?}");
+    }
 }
 
 #[test]

@@ -21,7 +21,7 @@ use crate::config::{Action, BrushPreset, LayersConfig, PenConfig, PressureCurve}
 use crate::doc::AppState;
 use crate::icons::Icon;
 use crate::paint::{self, Dab, PaintLayer, PaintMode};
-use crate::plate;
+use crate::plate::{self, Card};
 
 /// Default new-project resolution (the New Project dialog's starting values).
 pub const DEFAULT_PAPER_W: u32 = 1920;
@@ -845,6 +845,11 @@ pub struct CanvasView {
     /// AU4: the rail's Hand: a held state like Space, no tool of its own.
     /// Any tool clears it.
     pub(crate) hand_held: bool,
+    /// AU4: the strip is closed by its latch here, and may open. The host
+    /// sets it before `ui`: the rail's reference height and Fit read it.
+    pub(crate) strip_closed: bool,
+    /// AU4: the sheet is on screen: the rule's mirror stands beside it.
+    pub(crate) sheet_shown: bool,
     /// Refusal edge-flash bookkeeping (seq last seen + when).
     flash_seq: u32,
     flash_since: f64,
@@ -1107,6 +1112,8 @@ impl CanvasView {
             flip_held: false,
             rail_flip: false,
             hand_held: false,
+            strip_closed: false,
+            sheet_shown: false,
             flash_seq: 0,
             flash_since: -10.0,
             onion: OnionCfg::default(),
@@ -2336,9 +2343,7 @@ impl CanvasView {
                 crate::menus::hover_tip_with(resp, a, detail);
             }
             None => {
-                resp.on_hover_ui(|ui| {
-                    ui.label(detail());
-                });
+                plate::hover_card(resp, detail);
             }
         }
     }
@@ -2361,108 +2366,139 @@ impl CanvasView {
             }
         }
         ui.vertical(|ui| {
-            ui.add_space(10.0);
-            let (wrect, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
-            let p = ui.painter();
-            p.rect_filled(wrect.expand(2.0), 0.0, plate::WELL);
-            p.rect_filled(
-                wrect,
-                0.0,
-                plate::chip([
-                    self.brush_color[0],
-                    self.brush_color[1],
-                    self.brush_color[2],
-                    255,
-                ]),
-            );
-            p.rect_stroke(
-                wrect,
-                0.0,
-                egui::Stroke::new(1.0, plate::LEGEND),
-                egui::StrokeKind::Outside,
-            );
-            ui.label(
-                egui::RichText::new(format!(
-                    "#{:02X}{:02X}{:02X}",
-                    self.brush_color[0], self.brush_color[1], self.brush_color[2]
-                ))
-                .monospace()
-                .size(10.0)
-                .color(plate::STRUCK),
-            );
-            if let Some(n) = &armed_role {
-                plate::legend(ui, n);
-            }
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
-                for c in &row_chips {
-                    let (cr, cresp) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::click());
-                    let pnt = ui.painter();
-                    pnt.rect_filled(
-                        cr,
-                        0.0,
-                        plate::chip([c[0], c[1], c[2], 255]),
+                let (wrect, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
+                let p = ui.painter();
+                p.rect_filled(wrect.expand(2.0), 0.0, plate::WELL);
+                p.rect_filled(
+                    wrect,
+                    0.0,
+                    plate::chip([
+                        self.brush_color[0],
+                        self.brush_color[1],
+                        self.brush_color[2],
+                        255,
+                    ]),
+                );
+                p.rect_stroke(
+                    wrect,
+                    0.0,
+                    egui::Stroke::new(1.0, plate::LEGEND),
+                    egui::StrokeKind::Outside,
+                );
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "#{:02X}{:02X}{:02X}",
+                            self.brush_color[0], self.brush_color[1], self.brush_color[2]
+                        ))
+                        .monospace()
+                        .size(10.0)
+                        .color(plate::STRUCK),
                     );
-                    pnt.rect_stroke(
-                        cr,
-                        0.0,
-                        egui::Stroke::new(1.0, plate::INK3),
-                        egui::StrokeKind::Inside,
-                    );
-                    if cresp.clicked() {
-                        self.brush_color = *c;
+                    if let Some(n) = &armed_role {
+                        plate::legend(ui, n);
                     }
-                }
+                    if !row_chips.is_empty() {
+                        ui.horizontal(|ui| {
+                            for c in &row_chips {
+                                let (cr, cresp) = ui.allocate_exact_size(vec2(13.0, 13.0), Sense::click());
+                                let pnt = ui.painter();
+                                pnt.rect_filled(
+                                    cr,
+                                    0.0,
+                                    plate::chip([c[0], c[1], c[2], 255]),
+                                );
+                                pnt.rect_stroke(
+                                    cr,
+                                    0.0,
+                                    egui::Stroke::new(1.0, plate::INK3),
+                                    egui::StrokeKind::Inside,
+                                );
+                                if cresp.clicked() {
+                                    self.brush_color = *c;
+                                }
+                            }
+                        });
+                    }
+                });
             });
         });
-        ui.add_space(12.0);
+        ui.add_space(8.0);
 
         // ---- THE MODEL: the colour-model table ----
         ui.vertical(|ui| {
-            ui.add_space(6.0);
+            // The Color float's width, even where a host leaves more.
+            ui.set_max_width(ui.available_width().min(256.0));
             plate::legend(ui, "model");
-            let headers: Vec<String> = state
-                .palettes
-                .characters
-                .first()
-                .map(|c| c.roles.iter().map(|r| r.name.clone()).collect())
-                .unwrap_or_default();
-            // AU4: the table takes the Color float's width: the name, one
-            // cell per role and `derive`, 2 apart.
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let roles = headers.len().max(1) as f32;
-            let name_w = 44.0;
-            let cells = ui.available_width() - name_w - 80.0 - 2.0 * (roles + 1.0);
-            let cell_w = (cells / roles).clamp(16.0, 32.0);
-            ui.horizontal(|ui| {
-                ui.allocate_exact_size(vec2(name_w, 11.0), Sense::hover());
-                for h in &headers {
-                    let (hr, _) = ui.allocate_exact_size(vec2(cell_w, 11.0), Sense::hover());
-                    ui.painter().text(
-                        hr.center(),
-                        egui::Align2::CENTER_CENTER,
-                        plate::sentence(&h.chars().take(6).collect::<String>()),
-                        egui::FontId::new(8.0, plate::semibold()),
-                        plate::LEGEND,
-                    );
-                }
-            });
+            // AU4: a block to a character: its name and `derive` over its own
+            // roles, each chip over its whole word, and as many to a line as
+            // the widest word leaves room for.
+            ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
+            let font = plate::Role::Small.font();
+            let word_w = |word: &str| {
+                let galley = ui.painter().layout_no_wrap(plate::sentence(word), font.clone(), plate::LEGEND);
+                galley.size().x
+            };
+            let words = state.palettes.characters.iter().flat_map(|c| &c.roles).map(|r| word_w(&r.name));
+            let widest = words.fold(0.0_f32, f32::max);
+            let room = ui.available_width() + 2.0;
+            let cell_w = room / (room / (widest + 2.0)).floor().max(1.0) - 2.0;
             let n_chars = state.palettes.characters.len();
             for ci in 0..n_chars {
+                let cname = state.palettes.characters[ci].name.clone();
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    let cname = state.palettes.characters[ci].name.clone();
-                    let (nr, _) = ui.allocate_exact_size(vec2(name_w, 22.0), Sense::hover());
-                    ui.painter().text(
-                        pos2(nr.left() + 2.0, nr.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        cname.chars().take(7).collect::<String>(),
-                        egui::FontId::new(10.0, egui::FontFamily::Proportional),
-                        plate::LEGEND,
-                    );
+                    plate::value(ui, &cname);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // DERIVE (held DANGER — writes the model, no undo there):
+                        // this row's shadow from its normal, the systematic way.
+                        // Held, it overwrites a chosen colour for good: it stays
+                        // red, off the chips.
+                        if plate::danger(ui, "derive") {
+                            let normal = state.palettes.characters[ci]
+                                .roles
+                                .iter()
+                                .find(|r| r.name == "normal")
+                                .map(|r| r.color);
+                            if let Some(norm) = normal {
+                                let sh = crate::palette::derive_shadow(norm);
+                                // GM2: through palettes_mut — unsaved work.
+                                let ch = &mut state.palettes_mut().characters[ci];
+                                let prev = ch
+                                    .roles
+                                    .iter()
+                                    .position(|r| r.name == "shadow")
+                                    .map(|ri| (ri, ch.roles[ri].color));
+                                match ch.roles.iter_mut().find(|r| r.name == "shadow") {
+                                    Some(r) => r.color = sh,
+                                    None => ch.roles.push(crate::palette::ColorRole {
+                                        name: "shadow".into(),
+                                        color: sh,
+                                    }),
+                                }
+                                // GM7: a changed chip offers to recolour its paint.
+                                if let Some((ri, old)) = prev {
+                                    state.offer_recolour(ci, ri, old, sh);
+                                }
+                                state.status =
+                                    format!("{cname}: shadow derived from normal (edit in the eye)");
+                            } else {
+                                state.refuse("refused — no 'normal' role to derive from");
+                            }
+                        }
+                    });
+                });
+                ui.horizontal_wrapped(|ui| {
                     let n_roles = state.palettes.characters[ci].roles.len();
                     for ri in 0..n_roles {
                         let color = state.palettes.characters[ci].roles[ri].color;
                         let rname = state.palettes.characters[ci].roles[ri].name.clone();
-                        let (pr, presp) = ui.allocate_exact_size(vec2(cell_w, 22.0), Sense::click());
+                        let size = vec2(cell_w, 22.0 + plate::Role::Small.size() + 4.0);
+                        let (cell, presp) = ui.allocate_exact_size(size, Sense::click());
+                        plate::speak(&presp, egui::WidgetType::Button, None, &format!("{cname} {rname}"));
+                        let pr = Rect::from_min_size(cell.min, vec2(cell_w, 22.0));
                         let well = pr.shrink2(vec2(2.0, 1.0));
                         let pnt = ui.painter();
                         pnt.rect_filled(well.expand(1.0), 0.0, plate::WELL);
@@ -2486,54 +2522,27 @@ impl CanvasView {
                                 egui::StrokeKind::Inside,
                             );
                         }
+                        pnt.text(
+                            pos2(cell.center().x, cell.bottom()),
+                            egui::Align2::CENTER_BOTTOM,
+                            plate::sentence(&rname),
+                            font.clone(),
+                            plate::LEGEND,
+                        );
                         if presp.double_clicked() {
                             self.brush_color = color;
                             self.eye_target = Some((ci, ri));
                         } else if presp.clicked() {
                             self.brush_color = color;
                         }
-                        presp.on_hover_text(format!(
+                        presp.card(format!(
                             "{cname} · {rname} — click: arm · double-click: edit in the eye"
                         ));
-                    }
-                    // DERIVE (held DANGER — writes the model, no undo there):
-                    // this row's shadow from its normal, the systematic way.
-                    if plate::danger(ui, "derive") {
-                        let normal = state.palettes.characters[ci]
-                            .roles
-                            .iter()
-                            .find(|r| r.name == "normal")
-                            .map(|r| r.color);
-                        if let Some(norm) = normal {
-                            let sh = crate::palette::derive_shadow(norm);
-                            // GM2: through palettes_mut — unsaved work.
-                            let ch = &mut state.palettes_mut().characters[ci];
-                            let prev = ch
-                                .roles
-                                .iter()
-                                .position(|r| r.name == "shadow")
-                                .map(|ri| (ri, ch.roles[ri].color));
-                            match ch.roles.iter_mut().find(|r| r.name == "shadow") {
-                                Some(r) => r.color = sh,
-                                None => ch.roles.push(crate::palette::ColorRole {
-                                    name: "shadow".into(),
-                                    color: sh,
-                                }),
-                            }
-                            // GM7: a changed chip offers to recolour its paint.
-                            if let Some((ri, old)) = prev {
-                                state.offer_recolour(ci, ri, old, sh);
-                            }
-                            state.status =
-                                format!("{cname}: shadow derived from normal (edit in the eye)");
-                        } else {
-                            state.refuse("refused — no 'normal' role to derive from");
-                        }
                     }
                 });
             }
         });
-        ui.add_space(12.0);
+        ui.add_space(8.0);
 
         // ---- THE DISH: the mixing tray ----
         ui.vertical(|ui| {
@@ -2542,13 +2551,14 @@ impl CanvasView {
                 plate::legend(ui, "dish");
                 if ui
                     .button("rinse")
-                    .on_hover_text("clear the tray (splotches are session-only)")
+                    .card("clear the tray (splotches are session-only)")
                     .clicked()
                 {
                     self.splotches.clear();
                 }
             });
-            let (dr, dresp) = ui.allocate_exact_size(vec2(180.0, 100.0), Sense::click());
+            let wide = ui.available_width().min(180.0);
+            let (dr, dresp) = ui.allocate_exact_size(vec2(wide, 100.0), Sense::click());
             let pnt = ui.painter();
             pnt.rect_filled(dr, plate::R_CONTROL, plate::WELL);
             pnt.rect_stroke(
@@ -2801,7 +2811,7 @@ impl CanvasView {
             None,
             &format!("spacing chart: {} marks (drag a mark to move it)", shown.len()),
         );
-        resp.on_hover_text("drag a mark up or down to move that inbetween's spacing (one undo step)");
+        resp.card("drag a mark up or down to move that inbetween's spacing (one undo step)");
     }
 
     /// The Canvas options float: onion + strength (with a value line — a
@@ -2830,7 +2840,7 @@ impl CanvasView {
                 if cresp.clicked() && !self.stroke_active() {
                     state.goto_adjacent_key(fwd);
                 }
-                cresp.on_hover_text(hover);
+                cresp.card(hover);
             }
         });
         // GM3: the rail's tooltips lead with the registry's line too, so a
@@ -2854,7 +2864,7 @@ impl CanvasView {
         state.view.onion = on;
         let mut lo = state.view.onion_layer_only;
         plate::latch(ui, &mut lo, "line only")
-            .on_hover_text("ghost only the layer matching the active layer's name");
+            .card("ghost only the layer matching the active layer's name");
         state.view.onion_layer_only = lo;
         ui.add_space(2.0);
         // GM6: depth, mode, other columns, opacity with falloff — kept in
@@ -2863,25 +2873,25 @@ impl CanvasView {
         value_line(ui, "strength", format!("{:.0}%", cfg.opacity * 100.0));
         ui.spacing_mut().slider_width = 96.0;
         ui.add(egui::Slider::new(&mut cfg.opacity, 0.1..=1.0).show_value(false))
-            .on_hover_text("the nearest ghost's opacity");
+            .card("the nearest ghost's opacity");
         // Folded by default: the fold-out keeps its old height (the view
         // block stays on screen).
         egui::CollapsingHeader::new("onion depth").show(ui, |ui| {
             value_line(ui, "falloff", format!("{:.0}%", cfg.falloff * 100.0));
             ui.add(egui::Slider::new(&mut cfg.falloff, 0.0..=1.0).show_value(false))
-                .on_hover_text("each ghost farther away keeps this much of the one before");
+                .card("each ghost farther away keeps this much of the one before");
             value_line(ui, "behind · ahead", format!("{} · {}", cfg.before, cfg.after));
             ui.horizontal(|ui| {
                 plate::field(ui, egui::DragValue::new(&mut cfg.before).range(0..=OnionCfg::MAX_DEPTH))
-                    .on_hover_text("ghosts behind (0–5)");
+                    .card("ghosts behind (0–5)");
                 plate::field(ui, egui::DragValue::new(&mut cfg.after).range(0..=OnionCfg::MAX_DEPTH))
-                    .on_hover_text("ghosts ahead (0–5)");
+                    .card("ghosts ahead (0–5)");
             });
             ui.horizontal_wrapped(|ui| {
                 for m in OnionMode::ALL {
                     if ui
                         .selectable_label(cfg.mode == m, m.label())
-                        .on_hover_text(match m {
+                        .card(match m {
                             OnionMode::Drawings => "ghost the previous and next distinct drawings",
                             OnionMode::Frames => "ghost what the column shows 1, 2, … frames away",
                             OnionMode::Keys => "ghost the previous and next genga (key) drawings",
@@ -2904,7 +2914,7 @@ impl CanvasView {
                 );
             }
             plate::latch(ui, &mut cfg.other_columns, "other columns")
-                .on_hover_text("ghost every other column that renders too");
+                .card("ghost every other column that renders too");
         });
         if cfg != self.onion {
             self.onion = cfg.sane();
@@ -2915,11 +2925,8 @@ impl CanvasView {
         egui::CollapsingHeader::new("light table").show(ui, |ui| {
             if let Some(here) = state.current_drawing() {
                 let pinned = state.view.light.is_pinned(here);
-                if ui
-                    .button(if pinned { "unpin this drawing" } else { "pin this drawing" })
-                    .on_hover_text(Action::PinToLightTable.help())
-                    .clicked()
-                {
+                let words = if pinned { "unpin this drawing" } else { "pin this drawing" };
+                if crate::menus::hover_tip(ui.button(words), Action::PinToLightTable, "").clicked() {
                     state.view.light.toggle(state.view.active_column, here);
                 }
             }
@@ -2930,12 +2937,12 @@ impl CanvasView {
                 ui.horizontal(|ui| {
                     if ui
                         .selectable_label(target == Some(*pid), format!("pin {name}"))
-                        .on_hover_text("shift & trace moves this pin")
+                        .card("shift & trace moves this pin")
                         .clicked()
                     {
                         state.view.light.selected = Some(*pid);
                     }
-                    if ui.small_button("unpin").on_hover_text("stop ghosting this drawing").clicked() {
+                    if ui.small_button("unpin").card("stop ghosting this drawing").clicked() {
                         state.view.light.unpin(*pid);
                     }
                 });
@@ -2943,7 +2950,7 @@ impl CanvasView {
             let mut lt = self.light_table;
             value_line(ui, "pin opacity", format!("{:.0}%", lt.opacity * 100.0));
             ui.add(egui::Slider::new(&mut lt.opacity, 0.1..=1.0).show_value(false))
-                .on_hover_text("every pin shows at this opacity");
+                .card("every pin shows at this opacity");
             if lt != self.light_table {
                 self.light_table = lt;
                 self.light_table_request = Some(lt);
@@ -2956,7 +2963,7 @@ impl CanvasView {
             );
             state.view.light.shift_trace = st;
             if !state.view.light.offsets.is_empty()
-                && ui.button("reset shift").on_hover_text(Action::ResetShift.help()).clicked()
+                && crate::menus::hover_tip(ui.button("reset shift"), Action::ResetShift, "").clicked()
             {
                 state.view.light.reset();
             }
@@ -2976,9 +2983,8 @@ impl CanvasView {
                         (DrawingKind::Inbetween, Action::KindInbetween),
                         (DrawingKind::Unset, Action::KindUnset),
                     ] {
-                        if ui.selectable_label(kind == k, k.label()).on_hover_text(verb.help()).clicked()
-                            && !busy
-                        {
+                        let label = ui.selectable_label(kind == k, k.label());
+                        if crate::menus::hover_tip(label, verb, "").clicked() && !busy {
                             state.set_drawing_kind(here, k);
                         }
                     }
@@ -2992,12 +2998,12 @@ impl CanvasView {
                     );
                     ui.horizontal_wrapped(|ui| {
                         for (name, marks, tip) in crate::doc::CHART_PRESETS {
-                            if ui.small_button(*name).on_hover_text(*tip).clicked() && !busy {
+                            if ui.small_button(*name).card(*tip).clicked() && !busy {
                                 state.set_chart(here, marks);
                             }
                         }
                         if chart.is_some()
-                            && ui.small_button("clear").on_hover_text("remove the chart").clicked()
+                            && ui.small_button("clear").card("remove the chart").clicked()
                             && !busy
                         {
                             state.set_chart(here, &[]);
@@ -3007,10 +3013,10 @@ impl CanvasView {
                     // up toward one key; then drag a mark on the chart.
                     value_line(ui, "marks", self.chart_count.to_string());
                     plate::field(ui, egui::DragValue::new(&mut self.chart_count).range(1..=crate::doc::CHART_MAX_MARKS))
-                        .on_hover_text("how many inbetweens the chart asks for (1–15)");
+                        .card("how many inbetweens the chart asks for (1–15)");
                     ui.horizontal_wrapped(|ui| {
                         for spacing in crate::doc::ChartSpacing::ALL {
-                            if ui.small_button(spacing.label()).on_hover_text(spacing.help()).clicked() && !busy {
+                            if ui.small_button(spacing.label()).card(spacing.help()).clicked() && !busy {
                                 state.set_chart(here, &crate::doc::chart_marks(spacing, self.chart_count));
                             }
                         }
@@ -3019,19 +3025,14 @@ impl CanvasView {
                         self.chart_editor(ui, state, here, &c.marks, busy);
                     }
                     if chart.is_some()
-                        && ui
-                            .button("make inbetweens")
-                            .on_hover_text(Action::MakeInbetweens.help())
+                        && crate::menus::hover_tip(ui.button("make inbetweens"), Action::MakeInbetweens, "")
                             .clicked()
                         && !busy
                     {
                         state.make_inbetweens();
                     }
                 }
-                if ui
-                    .button("duplicate cel")
-                    .on_hover_text(Action::DuplicateCel.help())
-                    .clicked()
+                if crate::menus::hover_tip(ui.button("duplicate cel"), Action::DuplicateCel, "").clicked()
                     && !busy
                 {
                     state.duplicate_cel();
@@ -3043,14 +3044,14 @@ impl CanvasView {
         ui.add_space(2.0);
         let mut f = self.show_field;
         plate::latch(ui, &mut f, "field")
-            .on_hover_text("the 12-field chart (field n is n/12 of the frame) + centre cross");
+            .card("the 12-field chart (field n is n/12 of the frame) + centre cross");
         self.show_field = f;
         let mut sa = self.show_safe;
         plate::latch(ui, &mut sa, "safe")
-            .on_hover_text("action safe (93%) and title safe (90%) + centre cross");
+            .card("action safe (93%) and title safe (90%) + centre cross");
         self.show_safe = sa;
         let mut pg = self.show_peg;
-        plate::latch(ui, &mut pg, "peg").on_hover_text("the registration peg bar");
+        plate::latch(ui, &mut pg, "peg").card("the registration peg bar");
         self.show_peg = pg;
         ui.add_space(10.0);
         plate::legend(ui, "view");
@@ -3090,7 +3091,7 @@ impl CanvasView {
                 )
                 .sense(Sense::click()),
             )
-            .on_hover_text("input device — click for pen settings")
+            .card("input device — click for pen settings")
             .clicked()
         {
             self.request_pen_settings = true;
@@ -3146,6 +3147,9 @@ impl CanvasView {
         self.keep_inside_row(ui);
         ui.add_space(4.0);
         egui::CollapsingHeader::new("More").id_salt("brushes_more").show(ui, |ui| {
+            // The fold stands indented, and `set_width` above it is only a
+            // floor: a slider of the body's width would widen the float.
+            ui.spacing_mut().slider_width = ui.available_width();
             self.brush_more_ui(ui);
             self.edge_rows(ui);
             ui.add_space(8.0);
@@ -3161,27 +3165,27 @@ impl CanvasView {
         plate::legend(ui, "pressure");
         ui.add_space(2.0);
         let mut ps = self.dyn_size;
-        plate::latch(ui, &mut ps, "p·size").on_hover_text("pressure drives size");
+        plate::latch(ui, &mut ps, "p·size").card("pressure drives size");
         self.dyn_size = ps;
         let mut po = self.dyn_opacity;
-        plate::latch(ui, &mut po, "p·opac").on_hover_text("pressure drives opacity");
+        plate::latch(ui, &mut po, "p·opac").card("pressure drives opacity");
         self.dyn_opacity = po;
         ui.add_space(4.0);
         value_line(ui, "min size", format!("{:.2}", self.min_size));
         ui.add(egui::Slider::new(&mut self.min_size, 0.0..=1.0).show_value(false))
-            .on_hover_text("size at zero pressure, as a fraction of the brush");
+            .card("size at zero pressure, as a fraction of the brush");
         ui.add_space(10.0);
         plate::legend(ui, "tilt");
         ui.add_space(2.0);
         let mut ts = self.tilt_size;
-        plate::latch(ui, &mut ts, "t·size").on_hover_text("tilting broadens the stroke");
+        plate::latch(ui, &mut ts, "t·size").card("tilting broadens the stroke");
         self.tilt_size = ts;
         let mut to = self.tilt_opacity;
-        plate::latch(ui, &mut to, "t·opac").on_hover_text("tilting lightens the stroke");
+        plate::latch(ui, &mut to, "t·opac").card("tilting lightens the stroke");
         self.tilt_opacity = to;
         let mut tsh = self.tilt_shape;
         plate::latch(ui, &mut tsh, "t·shape")
-            .on_hover_text("the stamp flattens and turns with the pen's lean");
+            .card("the stamp flattens and turns with the pen's lean");
         self.tilt_shape = tsh;
         ui.add_space(4.0);
         value_line(ui, "strength", format!("{:.2}", self.tilt_strength));
@@ -3345,7 +3349,7 @@ impl CanvasView {
                                 }
                                 None => format!("arm '{}' · {:.0}px", p.name, p.size_px),
                             };
-                            if resp.on_hover_text(hover).clicked() {
+                            if resp.card(hover).clicked() {
                                 arm = Some((*p).clone());
                             }
                         }
@@ -3363,7 +3367,7 @@ impl CanvasView {
     fn brush_imports_ui(&mut self, ui: &mut egui::Ui) {
         if ui
             .button("import brushes…")
-            .on_hover_text(
+            .card(
                 "Krita .kpp presets and community .bundle packs — they \
                  paint with OUR brush at the preset's size and strength",
             )
@@ -3373,8 +3377,8 @@ impl CanvasView {
         }
         if !crate::kpp::installed_krita_paths().is_empty()
             && ui
-                .button("import installed Krita's brushes")
-                .on_hover_text(
+                .add(egui::Button::new("import installed Krita's brushes").wrap())
+                .card(
                     "everything the Krita on this machine ships — its \
                      bundles, its presets, and your %APPDATA%/krita \
                      brushes — mapped onto OUR brush honestly",
@@ -3383,7 +3387,7 @@ impl CanvasView {
         {
             self.request_krita_scan = true;
         }
-        if ui.button("Make a brush").on_hover_text("opens the brush maker").clicked() {
+        if ui.button("Make a brush").card("opens the brush maker").clicked() {
             self.request_brush_maker = true;
         }
     }
@@ -3399,7 +3403,7 @@ impl CanvasView {
             ];
             if ui
                 .color_edit_button_srgb(&mut rgb)
-                .on_hover_text("brush colour")
+                .card("brush colour")
                 .changed()
             {
                 self.brush_color = [rgb[0], rgb[1], rgb[2], self.brush_color[3]];
@@ -3413,7 +3417,7 @@ impl CanvasView {
                     selected,
                     hover,
                 )
-                .on_hover_text(hover)
+                .card(hover)
                 .clicked()
                 {
                     self.brush_color = *c;
@@ -3481,7 +3485,7 @@ impl CanvasView {
                         "lasso",
                         "lasso selection",
                     )
-                    .on_hover_text("lasso selection")
+                    .card("lasso selection")
                     .clicked()
                     {
                         self.sel_shape = SelShape::Lasso;
@@ -3493,7 +3497,7 @@ impl CanvasView {
                         "rect",
                         "rect selection",
                     )
-                    .on_hover_text("rectangle selection")
+                    .card("rectangle selection")
                     .clicked()
                     {
                         self.sel_shape = SelShape::Rect;
@@ -3548,7 +3552,7 @@ impl CanvasView {
                     });
                     ui.horizontal(|ui| {
                         if plate::detent(ui, self.fill_ref_cel, "cel")
-                            .on_hover_text(
+                            .card(
                                 "boundaries come from the whole cel (all visible layers)",
                             )
                             .clicked()
@@ -3556,7 +3560,7 @@ impl CanvasView {
                             self.fill_ref_cel = true;
                         }
                         if plate::detent(ui, !self.fill_ref_cel, "layer")
-                            .on_hover_text("boundaries come from the active layer only")
+                            .card("boundaries come from the active layer only")
                             .clicked()
                         {
                             self.fill_ref_cel = false;
@@ -3606,7 +3610,7 @@ impl CanvasView {
                 egui::DragValue::new(&mut stab).range(0..=crate::stabilizer::MAX_LEVEL),
             );
             plate::speak(&field, egui::WidgetType::DragValue, None, crate::vocab::STEADY_STROKE);
-            field.on_hover_text(
+            field.card(
                 "tebure hosei (stabilization): 0 = raw pen; \
                  higher pulls the ink on a longer string",
             );
@@ -3635,11 +3639,11 @@ impl CanvasView {
                     }),
             );
             plate::speak(&field, egui::WidgetType::DragValue, None, crate::vocab::EDGE_SOFTNESS);
-            field.on_hover_text("the dab's edge: toward 100% hard, toward 0% soft");
+            field.card("the dab's edge: toward 100% hard, toward 0% soft");
             self.brush_hardness = hard;
         });
         if plate::detent(ui, self.brush_aliased, crate::vocab::PIXEL_EDGES)
-            .on_hover_text(
+            .card(
                 "hard 0/255 edges, no smoothing (pixel-exact fills): \
                  flow, pressure opacity and paper grain are off",
             )
@@ -3740,8 +3744,14 @@ impl CanvasView {
         let paper_h = state.engine.project.height as f32;
 
         // View transform (GM4 ViewXform): fit paper into rect, then the
-        // user's zoom / pan / turn / mirror on top.
-        let fit = ((rect.width() / paper_w).min(rect.height() / paper_h) * 0.94).max(0.01);
+        // user's zoom / pan / turn / mirror on top. AU4: with the strip closed
+        // the pane stands 56 taller than the strip will leave it, and that can
+        // run a page under the rail: Fit stops at the rail's reach, and never
+        // under the page's strip-open size (spec 13, the AU4 notes).
+        let fit_in = |tall: f32| (rect.width() / paper_w).min(tall / paper_h) * 0.94;
+        let strip_open = fit_in(crate::rail::reference(rect.height(), self.strip_closed));
+        let clear = (rect.width() - 2.0 * crate::floats::LEFT_X) / paper_w;
+        let fit = clear.clamp(strip_open, fit_in(rect.height())).max(0.01);
         self.last_fit = fit;
         self.xf.center = rect.center();
         self.xf.paper = vec2(paper_w, paper_h);
@@ -3769,12 +3779,16 @@ impl CanvasView {
         }
         self.space_was_down = space;
         // AU4: the rail's Hand is the same hold, kept for a hand on the pen.
-        let hand = (space && self.hand_engaged) || self.hand_held;
+        let space_hand = space && self.hand_engaged;
+        let hand = space_hand || self.hand_held;
         if hand {
             let m = ui.input(|i| i.modifiers);
             let pointer = response.interact_pointer_pos();
             if response.dragged_by(egui::PointerButton::Primary) {
-                crate::shortcuts::note_hand_drag(ui.ctx());
+                // Only a Space hold has a tap to swallow.
+                if space_hand {
+                    crate::shortcuts::note_hand_drag(ui.ctx());
+                }
                 if m.shift
                     && let Some(p) = pointer
                 {
@@ -3798,11 +3812,13 @@ impl CanvasView {
             if response.drag_stopped() {
                 self.hand_turn = None;
             }
-            ui.ctx().set_cursor_icon(if response.dragged() {
-                egui::CursorIcon::Grabbing
-            } else {
-                egui::CursorIcon::Grab
-            });
+            // The rail's Hand outlives the pointer's stay: its cursor is the
+            // canvas's, not the rail's or the panels'.
+            if response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            } else if space_hand || response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
         }
 
         // Zoom at cursor / middle-drag pan — DISABLED during playback: the pen
@@ -4957,11 +4973,13 @@ impl CanvasView {
         // marks at the canvas's left edge, at the sheet's own 18pt pitch —
         // "how long is this hold, am I on ones, which frame" answered in
         // peripheral vision at the pen tip, like a VU meter at a desk.
-        if !self.composite_view {
+        // AU4: it mirrors the sheet, so it stands with the sheet, in the
+        // inset the rail leaves it.
+        if !self.composite_view && self.sheet_shown {
             let count = state.frame_count();
             let strip = Rect::from_min_max(
                 pos2(rect.left(), rect.top() + 6.0),
-                pos2(rect.left() + 14.0, rect.bottom() - 6.0),
+                pos2(rect.left() + crate::rail::RAIL_X, rect.bottom() - 6.0),
             );
             let mp = painter.with_clip_rect(strip);
             mp.rect_filled(strip, 0.0, crate::plate::WELL);

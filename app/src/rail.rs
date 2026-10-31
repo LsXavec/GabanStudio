@@ -12,6 +12,7 @@ use crate::doc::AppState;
 use crate::floats::{self, Float, Floats};
 use crate::icons::Icon;
 use crate::menus::{hover_tip, hover_tip_with};
+use crate::plate::Card;
 use crate::{Pane, plate};
 
 /// The rail's left edge, from its host's.
@@ -92,8 +93,8 @@ pub struct OverlayArgs<'a> {
     pub manga: bool,
     /// 3D and the Brush maker show no rail.
     pub rail_off: bool,
-    /// The strip is closed by its latch here, and may open.
-    pub strip_closed: bool,
+    /// The full-band latch: from the second drawing, slot 9 holds Flip.
+    pub full_band: bool,
     /// A Layers tab is on screen: the rail's Layers focuses it.
     pub layers_docked: bool,
     /// The dock's list of what is under the pointer. None in the OS window.
@@ -117,11 +118,7 @@ enum Key {
 
 /// Slot 9: Manga's panel tool, else Flip from the second drawing.
 fn slot_nine(args: &OverlayArgs) -> Option<Key> {
-    if args.manga {
-        Some(Key::Panel)
-    } else {
-        args.state.onion_neighbors().iter().any(Option::is_some).then_some(Key::Flip)
-    }
+    if args.manga { Some(Key::Panel) } else { args.full_band.then_some(Key::Flip) }
 }
 
 /// The rail's keys, top down, and what the Pocket tier's `…` holds. A vector
@@ -168,15 +165,15 @@ fn tool_face(key: Key) -> ToolFace {
     }
 }
 
-fn tool_armed(canvas: &CanvasView, key: Key) -> bool {
-    !canvas.hand_held
-        && match key {
-            Key::Brush => canvas.tool == CanvasTool::Paint && !canvas.erasing,
-            Key::Eraser => canvas.tool == CanvasTool::Paint && canvas.erasing,
-            Key::Select => canvas.tool == CanvasTool::Select,
-            Key::Fill => matches!(canvas.tool, CanvasTool::Fill | CanvasTool::LassoFill),
-            _ => canvas.tool == CanvasTool::Panel,
-        }
+/// The canvas's tool is this key's, armed or waiting behind the hand.
+fn tool_is(canvas: &CanvasView, key: Key) -> bool {
+    match key {
+        Key::Brush => canvas.tool == CanvasTool::Paint && !canvas.erasing,
+        Key::Eraser => canvas.tool == CanvasTool::Paint && canvas.erasing,
+        Key::Select => canvas.tool == CanvasTool::Select,
+        Key::Fill => matches!(canvas.tool, CanvasTool::Fill | CanvasTool::LassoFill),
+        _ => canvas.tool == CanvasTool::Panel,
+    }
 }
 
 /// The rail calls `set_tool` directly: the matching Actions toggle.
@@ -193,7 +190,8 @@ fn arm(args: &mut OverlayArgs, key: Key) {
 
 fn tool_key(ui: &mut egui::Ui, args: &mut OverlayArgs, key: Key, size: Vec2, captioned: bool) {
     let face = tool_face(key);
-    let armed = tool_armed(args.canvas, key);
+    let (waiting, held) = (tool_is(args.canvas, key), args.canvas.hand_held);
+    let armed = waiting && !held;
     let caption = captioned.then_some(face.caption);
     let opened = armed && args.floats.is_open(face.options);
     let resp = plate::rail_key(ui, size, Sense::click(), face.icon, caption, face.name, armed, opened, armed);
@@ -205,7 +203,10 @@ fn tool_key(ui: &mut egui::Ui, args: &mut OverlayArgs, key: Key, size: Vec2, cap
     if resp.clicked() {
         if armed {
             let busy = args.canvas.stroke_active();
-            args.floats.open(face.options, busy);
+            args.floats.toggle(face.options, busy);
+        } else if waiting {
+            // It comes back as it was: arming would turn Draw to fill into Fill.
+            args.canvas.hand_held = false;
         } else {
             arm(args, key);
         }
@@ -240,16 +241,18 @@ fn size_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: bo
         bubble(ui.ctx(), &resp, args.canvas);
     }
     plate::hover_card(resp, || {
-        format!("Size: {px:.1} px. Drag up for bigger, down for smaller.")
+        format!("Size — drag up for bigger, down for smaller. Now {px:.1} px.")
     });
 }
 
-/// The true-size bubble beside the Size key: a dab as the paper will show it.
+/// The true-size bubble beside the Size key: a dab as the paper will show it,
+/// and its size in words on a row of their own.
 fn bubble(ctx: &egui::Context, key: &egui::Response, canvas: &CanvasView) {
     let px = canvas.active_px();
     let across = (px * canvas.view_scale()).clamp(2.0, BUBBLE_MAX);
     let side = (across + 16.0).max(56.0);
-    let at = pos2(key.rect.right() + 12.0, key.rect.center().y - side * 0.5);
+    let row = plate::Role::Small.size() + 6.0;
+    let at = pos2(key.rect.right() + 12.0, key.rect.center().y - (side + row) * 0.5);
     egui::Area::new(egui::Id::new("rail_size_bubble"))
         .order(egui::Order::Tooltip)
         .interactable(false)
@@ -258,13 +261,13 @@ fn bubble(ctx: &egui::Context, key: &egui::Response, canvas: &CanvasView) {
         .fixed_pos(at)
         .show(ctx, |ui| {
             plate::island_frame(ui.style(), 4).show(ui, |ui| {
-                let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
-                ui.painter().circle_filled(rect.center(), across * 0.5, plate::INK);
+                let (rect, _) = ui.allocate_exact_size(vec2(side, side + row), Sense::hover());
+                let dab = pos2(rect.center().x, rect.top() + side * 0.5);
+                ui.painter().circle_filled(dab, across * 0.5, plate::INK);
                 let below = pos2(rect.center().x, rect.bottom() - 2.0);
                 let font = plate::Role::Small.font();
                 let words = format!("{px:.0} px");
-                let color = plate::BLUE_DEEP;
-                ui.painter().text(below, egui::Align2::CENTER_BOTTOM, words, font, color);
+                ui.painter().text(below, egui::Align2::CENTER_BOTTOM, words, font, plate::INK);
             });
         });
 }
@@ -274,7 +277,7 @@ fn color_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: b
     let caption = captioned.then_some("Color");
     let ink = plate::chip(args.canvas.brush_color);
     let resp = plate::color_key(ui, size, caption, ink, opened);
-    let resp = plate::hover_card(resp, || "Brush color. Opens the colors.".to_string());
+    let resp = resp.card("Brush color — opens your colors");
     if resp.clicked() {
         let busy = args.canvas.stroke_active();
         args.floats.toggle(Float::Color, busy);
@@ -286,7 +289,7 @@ fn layers_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: 
     let caption = captioned.then_some("Layers");
     let resp =
         plate::rail_key(ui, size, Sense::click(), Icon::Layers, caption, "Layers", false, opened, false);
-    let resp = plate::hover_card(resp, || args.canvas.drawing_with(args.state));
+    let resp = resp.card("Layers — opens your layers");
     if resp.clicked() {
         if args.layers_docked {
             args.floats.focus_layers = true;
@@ -301,9 +304,7 @@ fn hand_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: bo
     let held = args.canvas.hand_held;
     let caption = captioned.then_some("Hand");
     let resp = plate::rail_key(ui, size, Sense::click(), Icon::Hand, caption, "Hand", held, false, false);
-    let resp = plate::hover_card(resp, || {
-        "Hand: drag the canvas to move it, as with Space held. Any tool lets go.".to_string()
-    });
+    let resp = resp.card("Hand (Space) — drag to move the canvas. Tap a tool to stop.");
     if resp.clicked() && !args.canvas.pen_busy() {
         args.canvas.hand_held = !held;
     }
@@ -316,7 +317,7 @@ fn flip_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: bo
     let caption = captioned.then_some("Flip");
     let resp = plate::rail_key(ui, size, Sense::drag(), Icon::Flip, caption, "Flip", held, false, false);
     args.canvas.rail_flip = resp.is_pointer_button_down_on();
-    plate::hover_card(resp, || "Flip: hold to see the drawing before this one (R).".to_string());
+    resp.card("Flip (R) — hold to see the drawing before this one.");
 }
 
 fn draw_key(ui: &mut egui::Ui, args: &mut OverlayArgs, key: Key, tier: Tier, captioned: bool) {
@@ -334,15 +335,21 @@ fn draw_key(ui: &mut egui::Ui, args: &mut OverlayArgs, key: Key, tier: Tier, cap
             let open = args.floats.more;
             let resp =
                 plate::rail_key(ui, size, Sense::click(), Icon::Dots, None, "More tools", false, open, false);
-            if resp.clicked() {
-                args.floats.more = !open;
+            if resp.card("More tools — the keys this height leaves out").clicked() {
+                args.floats.toggle_more();
             }
         }
     }
 }
 
 /// The Pocket tier's `…`: a row beside the rail, its keys at their full size.
+/// Hand and Layers are picks, and it closes behind them; Size and Flip are
+/// held on it.
 fn popover(ctx: &egui::Context, args: &mut OverlayArgs, keys: &[Key], host: Rect, top: f32) -> Rect {
+    let picks = |args: &OverlayArgs| {
+        (args.canvas.hand_held, args.floats.is_open(Float::Layers), args.floats.focus_layers)
+    };
+    let before = picks(args);
     let shown = egui::Area::new(egui::Id::new("rail_popover"))
         .order(egui::Order::Middle)
         .fixed_pos(pos2(host.left() + floats::LEFT_X, top))
@@ -358,6 +365,9 @@ fn popover(ctx: &egui::Context, args: &mut OverlayArgs, keys: &[Key], host: Rect
                 });
             });
         });
+    if picks(args) != before {
+        args.floats.more = false;
+    }
     if let Some(rects) = args.pane_rects.as_deref_mut() {
         rects.push((Pane::Canvas, shown.response.rect, shown.response.layer_id));
     }
@@ -369,8 +379,12 @@ fn popover(ctx: &egui::Context, args: &mut OverlayArgs, keys: &[Key], host: Rect
 pub fn overlay(ui: &egui::Ui, args: &mut OverlayArgs, host: Rect) {
     let ctx = ui.ctx();
     args.floats.settle(args.canvas.stroke_active());
+    // A Layers tab came on screen: one list of layers at a time.
+    if args.layers_docked {
+        args.floats.close(Float::Layers);
+    }
     args.canvas.rail_flip = false;
-    let reference = reference(host.height(), args.strip_closed);
+    let reference = reference(host.height(), args.canvas.strip_closed);
     let tier = if args.rail_off { Tier::Hidden } else { Tier::of(reference, host.width()) };
     let mut top = host.top() + 12.0;
     if tier != Tier::Hidden {
