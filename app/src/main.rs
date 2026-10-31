@@ -2579,7 +2579,15 @@ impl App {
     /// GM2, once per frame: the start-up crash check (first frame), the
     /// editor's requests, the recent list and the running record.
     fn worksafe_shell(&mut self, ctx: &egui::Context) {
-        let Some(dir) = self.data_dir.as_deref() else { return };
+        // With no data dir there is no record to keep, and the editor's
+        // requests (every Start choice among them) still go out.
+        let Some(dir) = self.data_dir.as_deref() else {
+            let requests = self.editor.as_mut().map(|ed| std::mem::take(&mut ed.requests));
+            for r in requests.into_iter().flatten() {
+                self.handle_request(ctx, r);
+            }
+            return;
+        };
         if !self.worksafe_started {
             self.worksafe_started = true;
             // Other copies' records BEFORE writing this one's. A live copy
@@ -3091,15 +3099,11 @@ impl Editor {
             Action::ProjectSettings => {
                 self.project_form = Some(ProjectForm::of(&self.state.engine.project));
             }
-            // GM8: the Welcome screen again, past the unsaved guard (a
-            // choice on it may open another document); the shell shows it.
-            Action::WelcomeScreen => {
-                if !self.hold_leave(Leave::Welcome) {
-                    self.request_welcome = true;
-                }
-            }
-            // AU6: the same float, on its other tab. It opens nothing but a
-            // float, so no guard asks.
+            // AU6: the Start float again (spec 8.1): it opens nothing but a
+            // float, so no guard asks; a card on it that replaces the document
+            // goes through the guard itself.
+            Action::WelcomeScreen => self.open_start(welcome::Welcome::over_editor(&self.recent)),
+            // AU6: the same float, on its other tab.
             Action::WhatsNew => {
                 let mut w = welcome::Welcome::over_editor(&self.recent);
                 w.tab = welcome::WelcomeTab::WhatsNew;
@@ -4140,9 +4144,6 @@ struct Editor {
     graph: Option<graphcomp::GraphCompositor>,
     /// Set when the user clicks "New…"; the App picks it up to show the dialog.
     request_new: bool,
-    /// GM8: File ▸ Welcome screen… was answered; the shell opens the float
-    /// with the config's recent list ([`Editor::start_asked`]).
-    request_welcome: bool,
     /// Set when the user clicks "settings".
     request_settings: bool,
     /// PSD-shipping: UPDATE READY clicked in the Foot (App acts on it).
@@ -4317,6 +4318,9 @@ struct Editor {
     /// float's latch asking the shell to store it.
     pub show_start: bool,
     pub show_start_request: Option<bool>,
+    /// AU6: the shell has a question up (the recovery offer, the New form):
+    /// fed each frame, so a dropped file waits its turn.
+    pub shell_asks: bool,
     /// AU6: Lock UI positions this frame, and the verb asking the shell to
     /// store a flip.
     ui_lock: bool,
@@ -4606,8 +4610,6 @@ pub enum Leave {
     /// The recovery dialog's "Open recovered" over a document that has
     /// work of its own (a handover restore, say): asked about like an Open.
     Recover(worksafe::Recovered),
-    /// GM8: File ▸ Welcome screen… — its cards open other documents.
-    Welcome,
     /// GM21: File ▸ Open the sample cut.
     Sample,
     /// AU6: a Start float choice that puts another document here.
@@ -5068,14 +5070,6 @@ impl Editor {
         self.start = Some(w);
     }
 
-    /// AU6: the shell's half of File ▸ Welcome screen…: the float, over the
-    /// open cut.
-    pub(crate) fn start_asked(&mut self) {
-        if std::mem::take(&mut self.request_welcome) {
-            self.open_start(welcome::Welcome::over_editor(&self.recent));
-        }
-    }
-
     /// AU6: what the float chose. A choice that puts another document here
     /// goes through the unsaved guard first, inside the editor, so the Rig
     /// covers it; the others are the shell's, and their own paths ask.
@@ -5276,7 +5270,6 @@ impl Editor {
             paint,
             graph,
             request_new: false,
-            request_welcome: false,
             request_settings: false,
             request_update: false,
             update_tag: None,
@@ -5347,6 +5340,7 @@ impl Editor {
             strokes_seen: 0,
             show_start: true,
             show_start_request: None,
+            shell_asks: false,
             ui_lock: false,
             lock_request: None,
             strip_open: false,
@@ -5384,7 +5378,6 @@ impl Editor {
             paint,
             graph,
             request_new: false,
-            request_welcome: false,
             request_update: false,
             update_tag: None,
             request_settings: false,
@@ -5453,6 +5446,7 @@ impl Editor {
             strokes_seen: 0,
             show_start: true,
             show_start_request: None,
+            shell_asks: false,
             ui_lock: false,
             lock_request: None,
             strip_open: false,
@@ -6076,7 +6070,6 @@ impl Editor {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             Leave::New => self.request_new = true,
-            Leave::Welcome => self.request_welcome = true,
             // Land any in-flight gesture in the CURRENT project first — its
             // commit must not cross into the opened one.
             Leave::Open => {
@@ -6568,6 +6561,7 @@ impl eframe::App for App {
             editor.scrub_audio = self.config.perf.scrub_audio;
             editor.state.ram.set_cap_mb(self.config.perf.ram_preview_mb);
             editor.show_start = self.config.ui.show_welcome;
+            editor.shell_asks = !self.recovery.is_empty() || self.new_form.is_some();
             editor.ui(
                 ui,
                 &pen,
@@ -6654,7 +6648,6 @@ impl eframe::App for App {
                 editor.request_new = false;
                 self.new_form = Some(NewProjectForm::default());
             }
-            editor.start_asked();
             if editor.request_settings {
                 editor.request_settings = false;
                 self.settings_open = true;
@@ -8102,18 +8095,23 @@ impl Editor {
     }
 
     /// AU6: a project file dropped on the window opens, past the unsaved
-    /// guard; anything else is said no to. The first project wins.
+    /// guard; anything else is said no to. The first project wins. A question
+    /// on screen is answered first: a drop never takes its place.
     fn open_dropped(&mut self, ctx: &egui::Context) {
         let paths: Vec<_> =
             ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
         if paths.is_empty() {
             return;
         }
-        let project = paths.iter().find(|p| p.extension().is_some_and(|e| e == "animproj"));
-        match project {
+        let is_project = |p: &&std::path::PathBuf| {
+            p.extension().is_some_and(|e| e.eq_ignore_ascii_case("animproj"))
+        };
+        let asking = self.shell_asks || self.leave.is_some() || self.leave_after_save.is_some();
+        match paths.iter().find(is_project) {
             Some(_) if self.canvas.is_guest => {
                 self.state.refuse("refused — leave the room first (Settings › Session) to open your own file");
             }
+            Some(_) if asking => self.state.refuse("refused — answer the question on screen first"),
             Some(path) => self.leave(Leave::OpenPath(path.clone()), ctx),
             None => self.state.refuse("refused — only a project file (.animproj) opens here"),
         }
@@ -8137,19 +8135,30 @@ impl Editor {
         }
     }
 
+    /// AU6: a line drawn for `Check your pen` was the check's, not the
+    /// paper's: it comes off through Undo's own route, so the document is as
+    /// it stood and a card after the check has nothing to ask about.
+    fn lift_check_line(&mut self) {
+        if !self.canvas.stroke_active() {
+            self.perform_into(Action::Undo, &mut Performed::Done);
+        }
+    }
+
     /// AU6: the Start float over the pane the dock just drew (spec 8.1), and
     /// what ends it: a finished stroke, the Layers float opening, its `×`.
     fn start_ui(&mut self, ctx: &egui::Context, dock: egui::Rect) {
         let stroked = self.state.strokes_done != self.strokes_seen;
         self.strokes_seen = self.state.strokes_done;
         // A finished stroke accepts the paper under it, and stays on it. One
-        // `Check your pen` asked for is that check's answer instead.
+        // that `Check your pen` is listening for is that check's line instead.
         if stroked && let Some(w) = &mut self.start {
-            if w.pen == welcome::PenCheck::Waiting {
-                w.pen = self.canvas.pen_verdict();
-                w.pen_said = true;
-            } else {
-                self.start = None;
+            match w.pen.read(self.canvas.pen_verdict()) {
+                Some(pen) => {
+                    w.pen_said = pen != w.pen;
+                    w.pen = pen;
+                    self.lift_check_line();
+                }
+                None => self.start = None,
             }
         }
         if !self.canvas.stroke_active()
@@ -8161,19 +8170,21 @@ impl Editor {
             self.start = None;
         }
         let Some(mut w) = self.start.take() else { return };
-        let host = if visible_panes(&self.dock).contains(&Pane::Canvas) && !self.float_canvas.open {
-            self.canvas.dbg_rect
-        } else {
-            dock
-        };
+        let on_canvas = visible_panes(&self.dock).contains(&Pane::Canvas) && !self.float_canvas.open;
+        let host = if on_canvas { self.canvas.dbg_rect } else { dock };
         let (pos, size) = floats::start_place(host);
-        let head = floats::Head { words: welcome::HEADING, role: plate::Role::Title, rule: true };
+        let page = w.tab as usize;
+        let head = floats::Head { words: welcome::HEADING, role: plate::Role::Title, start: true, page };
         let mut show = self.show_start;
         let mut action = None;
         let (shown, close) = floats::frame(ctx, head, pos, size, host, |ui| {
             action = welcome::float_body(ui, &mut w, &mut show);
         });
-        self.pane_rects.push((Pane::Canvas, shown.rect, shown.layer_id));
+        // Over the canvas it is the canvas's for the keys. With no canvas on
+        // screen it claims no pane, and the focused pane answers them.
+        if on_canvas {
+            self.pane_rects.push((Pane::Canvas, shown.rect, shown.layer_id));
+        }
         if show != self.show_start {
             self.show_start = show;
             self.show_start_request = Some(show);

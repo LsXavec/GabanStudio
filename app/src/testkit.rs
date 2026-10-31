@@ -250,19 +250,20 @@ impl EditorHarness {
     /// Over a data dir the test prepared (a bad config.json, say): config
     /// and workspaces load from it exactly as the app loads them.
     pub fn with_dir(state: AppState, dir: tempfile::TempDir) -> Self {
-        Self::build(state, dir, Boot::Frozen, None)
+        Self::build(Some(state), dir, Boot::Frozen, None)
     }
 
     /// The editor over a real wgpu device with no window: a paint layer, a
     /// compositor, real raster strokes. Only ignored tests call this; the
     /// suite stays free of a GPU device.
     pub fn with_gpu(state: AppState) -> Self {
-        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::Frozen, Some(gpu()))
+        Self::build(Some(state), tempfile::tempdir().expect("temp data dir"), Boot::Frozen, Some(gpu()))
     }
 
-    /// A blank document on a fresh install, past its first launch.
+    /// A fresh install past its first launch: the ready paper, the Start
+    /// float closed.
     pub fn as_shipped() -> Self {
-        Self::with_state_shipped(NewProjectForm::default().new_state())
+        Self::with_dir_shipped(tempfile::tempdir().expect("temp data dir"))
     }
 
     /// What a fresh install's first launch shows: the ready paper, and the
@@ -273,33 +274,42 @@ impl EditorHarness {
 
     /// A first launch over a data dir the test prepared: an upgrader's, say.
     pub fn with_dir_first_run(dir: tempfile::TempDir) -> Self {
-        let state = crate::templates::INTENTS[crate::templates::ANIMATION].build();
-        Self::build(state, dir, Boot::FirstRun, None)
+        Self::build(None, dir, Boot::FirstRun, None)
+    }
+
+    /// A first launch's steps, over another document: the sweeps' aspects.
+    pub fn with_state_first_run(state: AppState) -> Self {
+        Self::build(Some(state), tempfile::tempdir().expect("temp data dir"), Boot::FirstRun, None)
     }
 
     pub fn with_state_shipped(state: AppState) -> Self {
-        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::Shipped, None)
+        Self::build(Some(state), tempfile::tempdir().expect("temp data dir"), Boot::Shipped, None)
     }
 
-    /// A blank document over a data dir the test prepared.
+    /// The ready paper over a data dir the test prepared.
     pub fn with_dir_shipped(dir: tempfile::TempDir) -> Self {
-        Self::build(NewProjectForm::default().new_state(), dir, Boot::Shipped, None)
+        Self::build(None, dir, Boot::Shipped, None)
     }
 
     pub fn with_gpu_shipped(state: AppState) -> Self {
-        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::Shipped, Some(gpu()))
+        Self::build(Some(state), tempfile::tempdir().expect("temp data dir"), Boot::Shipped, Some(gpu()))
+    }
+
+    /// The ready paper on a real device: the blank Draw's pictures.
+    pub fn with_gpu_ready() -> Self {
+        Self::build(None, tempfile::tempdir().expect("temp data dir"), Boot::Shipped, Some(gpu()))
     }
 
     /// A first launch on a real device: the Start float's pictures.
     pub fn with_gpu_first_run() -> Self {
-        let state = crate::templates::INTENTS[crate::templates::ANIMATION].build();
-        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::FirstRun, Some(gpu()))
+        Self::build(None, tempfile::tempdir().expect("temp data dir"), Boot::FirstRun, Some(gpu()))
     }
 
     /// THE FUNNEL: every constructor ends here, so no test can start outside
-    /// the boot rule.
+    /// the boot rule. With no document it is the ready paper, entered before
+    /// its first frame, as the App enters it.
     fn build(
-        state: AppState,
+        state: Option<AppState>,
         dir: tempfile::TempDir,
         boot: Boot,
         gpu: Option<(RenderState, MutexGuard<'static, ()>)>,
@@ -309,10 +319,15 @@ impl EditorHarness {
         if boot == Boot::Frozen {
             Self::frozen(&mut config);
         }
+        let paper = crate::templates::ANIMATION;
+        let ready = state.is_none() || boot == Boot::FirstRun;
+        let state = state.unwrap_or_else(|| crate::templates::INTENTS[paper].build());
         let mut editor = Editor::boot(state, rs.as_ref(), Some(dir.path()), &config.ui);
+        if ready {
+            editor.enter_intent(paper);
+        }
         // What the App's `Startup::Welcome` does to the paper it made.
         if boot == Boot::FirstRun {
-            editor.enter_intent(crate::templates::ANIMATION);
             crate::start_over(&mut editor, &mut config);
         }
         let mut notes = Notes::default();
@@ -741,6 +756,16 @@ impl EditorHarness {
         self.h.step();
     }
 
+    /// AU6: a Move from a tablet that reports no force.
+    pub fn pen_move_flat(&mut self, pos: egui::Pos2) {
+        let mut touch = pen(egui::TouchPhase::Move, pos);
+        if let egui::Event::Touch { force, .. } = &mut touch {
+            *force = None;
+        }
+        self.h.input_mut().events.extend([touch, egui::Event::PointerMoved(pos)]);
+        self.h.step();
+    }
+
     /// The pen lifts, and the pointer it emulated is gone with it.
     pub fn pen_up(&mut self, pos: egui::Pos2) {
         let events = [pen(egui::TouchPhase::End, pos), primary(pos, false), egui::Event::PointerGone];
@@ -785,6 +810,36 @@ impl EditorHarness {
             walk(&c.shape, fill, &mut out);
         }
         out
+    }
+
+    /// AU6: the centres and radii of the circles the last frame filled with
+    /// `fill`, nested shapes included.
+    pub fn filled_circles(&self, fill: egui::Color32) -> Vec<(egui::Pos2, f32)> {
+        fn walk(s: &egui::Shape, fill: egui::Color32, out: &mut Vec<(egui::Pos2, f32)>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, fill, out)),
+                egui::Shape::Circle(c) if c.fill == fill => out.push((c.center, c.radius)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for c in &self.h.output().shapes {
+            walk(&c.shape, fill, &mut out);
+        }
+        out
+    }
+
+    /// AU6: where the last frame painted `word`: the left of its first line.
+    pub fn painted_at(&self, word: &str) -> egui::Pos2 {
+        fn walk(s: &egui::Shape, word: &str) -> Option<egui::Pos2> {
+            match s {
+                egui::Shape::Vec(v) => v.iter().find_map(|s| walk(s, word)),
+                egui::Shape::Text(t) if t.galley.text() == word => Some(t.pos),
+                _ => None,
+            }
+        }
+        let found = self.h.output().shapes.iter().find_map(|c| walk(&c.shape, word));
+        found.unwrap_or_else(|| panic!("{word:?} was not painted"))
     }
 
     /// AU4: the words the last frame painted, nested shapes included: a word

@@ -29,7 +29,7 @@ fn settle(h: &mut EditorHarness) {
 }
 
 /// A window `w`×`h` points at 100%, at a stored scale, as the App zooms it.
-fn window(harness: &mut EditorHarness, w: f32, h: f32, stored: f32) {
+pub(crate) fn window(harness: &mut EditorHarness, w: f32, h: f32, stored: f32) {
     let scale = crate::effective_scale(stored, w, h);
     harness.kit_mut().set_size(vec2(w / scale, h / scale));
     harness.kit_mut().set_pixels_per_point(scale);
@@ -1559,13 +1559,22 @@ fn aurail_saved_data_stands() {
 }
 
 /// The floors of 4.1, the band at 92, and the paper clear of the chrome at
-/// Fit, as the shipped boot stands and with the strip open. 4.8's accepted
-/// case is wider than any aspect here.
+/// Fit, with the strip closed, as a picture opens, and open, as the ready
+/// paper does. 4.8's accepted case is wider than any aspect here.
 #[test]
 fn aurail_paper_share_holds_at_every_size_and_aspect() {
+    paper_share_sweep(|state| match state {
+        Some(state) => EditorHarness::with_state_shipped(state),
+        None => EditorHarness::as_shipped(),
+    });
+}
+
+/// That sweep, from whatever `boot` opens: its own blank on `None`, the given
+/// document otherwise.
+pub(crate) fn paper_share_sweep(boot: impl Fn(Option<AppState>) -> EditorHarness) {
     for strip_open in [false, true] {
         for (at, (w, tall)) in SIZES.into_iter().enumerate() {
-            let mut h = EditorHarness::as_shipped();
+            let mut h = boot(None);
             h.editor_mut().strip_open = strip_open;
             window(&mut h, w, tall, 1.0);
             h.perform(Action::ZoomFit);
@@ -1578,7 +1587,7 @@ fn aurail_paper_share_holds_at_every_size_and_aspect() {
             for (w, tall) in SIZES {
                 let mut state = AppState::new_project("aspect", pw, ph, 24, 300.0);
                 state.new_drawing_at_frame();
-                let mut h = EditorHarness::with_state_shipped(state);
+                let mut h = boot(Some(state));
                 h.editor_mut().strip_open = strip_open;
                 for stored in PROBE_SCALES {
                     window(&mut h, w, tall, stored);
@@ -1601,6 +1610,7 @@ fn aurail_fit_moves_only_as_far_as_the_rail_asks() {
     let fit = |h: &EditorHarness| h.editor().canvas.view_xform().zoom;
     for (w, tall) in [(1600.0, 900.0), (1280.0, 720.0)] {
         let mut h = EditorHarness::as_shipped();
+        h.editor_mut().strip_open = false;
         window(&mut h, w, tall, 1.0);
         h.perform(Action::ZoomFit);
         settle(&mut h);
@@ -1611,6 +1621,7 @@ fn aurail_fit_moves_only_as_far_as_the_rail_asks() {
     }
     for (w, tall) in SIZES {
         let mut h = EditorHarness::as_shipped();
+        h.editor_mut().strip_open = false;
         window(&mut h, w, tall, 1.0);
         h.perform(Action::ZoomFit);
         settle(&mut h);
@@ -1623,8 +1634,8 @@ fn aurail_fit_moves_only_as_far_as_the_rail_asks() {
     }
 }
 
-/// Median ≥32, none under 24, essentials on screen, strip closed as a blank
-/// document boots and open; and the interim tally the part reports, printed
+/// Median ≥32, none under 24, essentials on screen, strip closed and open,
+/// as the ready paper boots; and the interim tally the part reports, printed
 /// for the record.
 #[test]
 fn aurail_census_of_shipped_draw() {

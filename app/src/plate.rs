@@ -788,6 +788,17 @@ pub fn note_mark(painter: &egui::Painter, center: Pos2, ink: Color32) {
     painter.line_segment([top, Pos2::new(center.x + 5.0, center.y - 2.5)], Stroke::new(1.0, ink));
 }
 
+/// The peg bar's steel: the one dark surface in the chrome (spec 2.1), over
+/// the strip's sheets and as the rule on the Start float.
+pub fn peg_bar(painter: &egui::Painter, rect: egui::Rect) {
+    painter.rect_filled(rect, 0.0, STEEL);
+}
+
+/// One round peg hole.
+pub fn peg_hole(painter: &egui::Painter, center: Pos2) {
+    painter.circle_filled(center, 2.5, DESK);
+}
+
 /// A word over the picture, on an island of its own: no ink holds on every
 /// painted ground. Returns the word's rect.
 pub fn picture_tag(painter: &egui::Painter, at: Pos2, word: &str) -> egui::Rect {
@@ -1099,6 +1110,23 @@ pub fn latch_width(ui: &Ui, label: &str) -> f32 {
 /// with an `INK3` edge, blue with a white tick while latched. Clicking
 /// toggles.
 pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    latch_drawn(ui, on, label, true)
+}
+
+/// A [`latch`] with no solid blue: an ink tick in the neutral box. For a
+/// screen whose two solid blue things are spoken for (spec 2.1).
+pub fn quiet_latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    latch_drawn(ui, on, label, false)
+}
+
+/// The tick of a latch's 16 pt box.
+fn paint_tick(p: &egui::Painter, tick_box: egui::Rect, ink: Color32) {
+    let at = |x: f32, y: f32| tick_box.min + Vec2::new(x, y);
+    let tick = vec![at(3.5, 8.0), at(6.5, 11.0), at(12.5, 5.0)];
+    p.add(Shape::line(tick, Stroke::new(2.0, ink)));
+}
+
+fn latch_drawn(ui: &mut Ui, on: &mut bool, label: &str, loud: bool) -> Response {
     let (rect, mut resp) =
         ui.allocate_exact_size(Vec2::new(latch_width(ui, label), CTRL_H), Sense::click());
     if resp.clicked() {
@@ -1113,7 +1141,7 @@ pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
             Pos2::new(snap(rect.left(), ppp), snap(rect.center().y - LATCH_BOX * 0.5, ppp)),
             Vec2::splat(LATCH_BOX),
         );
-        let solid = *on && ui.is_enabled();
+        let solid = loud && *on && ui.is_enabled();
         if solid {
             p.rect_filled(tick_box, R_SHEET, TALLY);
         } else {
@@ -1121,9 +1149,7 @@ pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
             p.rect_stroke(tick_box, R_SHEET, Stroke::new(1.0, edge), StrokeKind::Inside);
         }
         if *on {
-            let at = |x: f32, y: f32| tick_box.min + Vec2::new(x, y);
-            let tick = vec![at(3.5, 8.0), at(6.5, 11.0), at(12.5, 5.0)];
-            p.add(Shape::line(tick, Stroke::new(2.0, if solid { ON_FILL } else { INK })));
+            paint_tick(p, tick_box, if solid { ON_FILL } else { INK });
         }
         let ink = if *on || resp.hovered() {
             STRUCK
@@ -1398,12 +1424,12 @@ pub const PILL_H: f32 = 32.0;
 /// Search, styled as an input.
 pub const SEARCH_W: f32 = 141.0;
 const PILL_PAD: f32 = 14.0;
-/// A choice card's words, from its left edge.
-const CARD_PAD: f32 = 12.0;
+/// A choice card's words, from its left edge: the Start float's one text edge.
+pub const CARD_PAD: f32 = 12.0;
 /// A card chip's words, from its ends.
 const CHIP_PAD: f32 = 10.0;
-/// A ghost row's words, from its ends.
-const ROW_PAD: f32 = 8.0;
+/// A ghost row's words, from its ends: a card's edge, so the two line up.
+const ROW_PAD: f32 = CARD_PAD;
 
 /// A pill's width: its words at the Step role, and the pad either side.
 pub fn pill_width(ui: &Ui, words: &str) -> f32 {
@@ -1482,22 +1508,74 @@ pub fn ghost_row(ui: &mut Ui, label: &str, width: f32, open: Option<bool>) -> Re
     if ui.is_rect_visible(rect) {
         let (fill, ink) = ghost(ui, &resp);
         let chevron = if open.is_some() { ICON + 4.0 } else { 0.0 };
-        let room = width - 2.0 * ROW_PAD - chevron;
-        let mut job = LayoutJob::simple_singleline(label.to_string(), Role::Chrome.font(), ink);
-        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
-        let words = ui.fonts_mut(|f| f.layout_job(job));
-        let p = ui.painter();
-        p.rect_filled(rect, R_CONTROL, fill);
-        p.galley(Pos2::new(rect.left() + ROW_PAD, rect.center().y - words.size().y / 2.0), words, ink);
+        row_words(ui, rect, label, chevron, fill, ink);
         if let Some(open) = open {
             let centre = Pos2::new(rect.right() - ROW_PAD - ICON / 2.0, rect.center().y);
             let mark = egui::Rect::from_center_size(centre, Vec2::splat(ICON));
             let icon = if open { crate::icons::Icon::Up } else { crate::icons::Icon::Down };
-            crate::icons::paint(p, mark, ink, icon);
+            crate::icons::paint(ui.painter(), mark, ink, icon);
         }
     }
     speak(&resp, egui::WidgetType::Button, open, label);
     describe(resp, "ACTION ghost_row", label)
+}
+
+/// AU6: a [`ghost_row`] with a dim note at its right end, which the row's
+/// name, its spoken label, leaves room for.
+pub fn noted_row(ui: &mut Ui, label: &str, note: &str, width: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = ghost(ui, &resp);
+        let dim = ui.painter().layout_no_wrap(note.to_string(), Role::Small.font(), INK3);
+        row_words(ui, rect, label, dim.size().x + 8.0, fill, ink);
+        let at = Pos2::new(rect.right() - ROW_PAD - dim.size().x, rect.center().y - dim.size().y / 2.0);
+        ui.painter().galley(at, dim, INK3);
+    }
+    speak(&resp, egui::WidgetType::Button, None, label);
+    describe(resp, "ACTION noted_row", label)
+}
+
+/// AU6: a [`ghost_row`] that says a state the app is in: on the wash, in the
+/// current words' blue. Pressing it does what the row does at rest.
+pub fn current_row(ui: &mut Ui, label: &str, width: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        row_words(ui, rect, label, 0.0, BLUE_WASH, BLUE_DEEP);
+    }
+    speak(&resp, egui::WidgetType::Button, Some(true), label);
+    describe(resp, "DETENT current_row", label)
+}
+
+/// A row's ground and its one elided line, with `kept` held free at its
+/// right end.
+fn row_words(ui: &Ui, rect: egui::Rect, label: &str, kept: f32, fill: Color32, ink: Color32) {
+    let mut job = LayoutJob::simple_singleline(label.to_string(), Role::Chrome.font(), ink);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(rect.width() - 2.0 * ROW_PAD - kept);
+    let words = ui.fonts_mut(|f| f.layout_job(job));
+    let p = ui.painter();
+    p.rect_filled(rect, R_CONTROL, fill);
+    p.galley(Pos2::new(rect.left() + ROW_PAD, rect.center().y - words.size().y / 2.0), words, ink);
+}
+
+/// AU6: a check's answer: a mark and plain words, standing in the latch's
+/// columns, and no control. A tick says yes, a cross no, so colour says
+/// neither.
+pub fn answer(ui: &mut Ui, yes: bool, words: &str) -> Response {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = LATCH_TEXT_X - LATCH_BOX;
+        let (slot, _) = ui.allocate_exact_size(Vec2::splat(LATCH_BOX), Sense::hover());
+        let p = ui.painter();
+        if yes {
+            paint_tick(p, slot, INK);
+        } else {
+            let mark = egui::Rect::from_center_size(slot.center(), Vec2::splat(8.0));
+            let ink = Stroke::new(2.0, INK);
+            p.line_segment([mark.left_top(), mark.right_bottom()], ink);
+            p.line_segment([mark.right_top(), mark.left_bottom()], ink);
+        }
+        ui.label(egui::RichText::new(words).color(INK))
+    })
+    .inner
 }
 
 /// The off-spine pill: read-only, on the wash, `width` wide. A longer name

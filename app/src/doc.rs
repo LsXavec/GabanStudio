@@ -768,7 +768,7 @@ impl AppState {
             .columns
             .first()
             .ok_or("cut has no X-sheet columns")?;
-        Ok(Self {
+        let mut state = Self {
             view: ViewContext {
                 scene: scene.id,
                 cut: cut.id,
@@ -839,7 +839,22 @@ impl AppState {
             loop_ranges: HashMap::new(),
             sound_import: None,
             ram: Default::default(),
-        })
+        };
+        state.face_a_drawable_column();
+        Ok(state)
+    }
+
+    /// AU6: an opened project stands on the first column a stroke can land
+    /// on: a plate with no armed layer (the example's `BG`) or a locked column
+    /// would refuse the first line. With none, the first column stands.
+    fn face_a_drawable_column(&mut self) {
+        let first = self.view.active_column;
+        let columns: Vec<ColumnId> = self.cut().xsheet.columns.iter().map(|c| c.id).collect();
+        let takes = columns.into_iter().find(|&column| {
+            self.view.active_column = column;
+            self.active_slot_resolved().is_some() && !self.active_column_def().locked
+        });
+        self.view.active_column = takes.unwrap_or(first);
     }
 
     // ---- Accessors --------------------------------------------------------

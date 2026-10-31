@@ -542,7 +542,7 @@ fn paint(
     let painter = ui.painter();
     let clip = ui.clip_rect();
     let bar = Rect::from_min_size(rect.min, vec2(rect.width(), BAR_H));
-    painter.rect_filled(bar, 0.0, plate::STEEL);
+    plate::peg_bar(painter, bar);
     let fps = state.fps();
     let seen = ruler.frame(clip.left())..=ruler.frame(clip.right()).saturating_add(1);
     // The second ticks, white; a label in the bar's own ink wherever the
@@ -637,7 +637,7 @@ fn paint_sheet(painter: &egui::Painter, at: Rect, sheet: &Sheet, drawings: &Hash
     };
     // The sheet under the pointer is the one Delete takes: it shows.
     painter.rect_filled(at, round, if under { plate::HOVER } else { plate::PAPER });
-    painter.circle_filled(pos2(at.center().x, at.top() + 6.0), 2.5, plate::DESK);
+    plate::peg_hole(painter, pos2(at.center().x, at.top() + 6.0));
     let twice = drawings.get(&id).is_some_and(|t| t.uses > 1);
     let worded = twice && at.width() >= WORDED;
     if at.width() >= NUMBERED {

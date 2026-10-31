@@ -4,14 +4,17 @@
 use eframe::egui;
 use egui::{Id, Key, LayerId, Modifiers, Order, Pos2, Rect, pos2, vec2};
 
+use crate::aurail_tests::{paper_share_sweep, window};
 use crate::canvas::extpaper_tests::paint_texels;
-use crate::config::{Action, Config, UiConfig};
+use crate::config::{Action, Config, Ctx, Keymap, UiConfig};
 use crate::floats::{self, Float};
 use crate::measure::{self, Census, Reading};
-use crate::testkit::{Boot, EditorHarness};
+use crate::testkit::{Boot, CTRL, EditorHarness};
 use crate::welcome::{self, HEADING, PenCheck, Welcome, WelcomeAction, WelcomeTab};
 use crate::workspace::Stage;
-use crate::{AppRequest, Leave, Pane, Performed, Startup, sample, startup_route, templates};
+use crate::{
+    AppRequest, Leave, PROBE_SCALES, Pane, Performed, Startup, plate, sample, startup_route, templates,
+};
 
 const SIZES: [(f32, f32); 4] = [(1600.0, 900.0), (1280.0, 800.0), (1280.0, 720.0), (1024.0, 640.0)];
 
@@ -122,6 +125,27 @@ fn austart_fresh_launch_opens_on_ready_paper() {
     assert_eq!(h.state().strokes_done, 1);
 }
 
+/// The shipped boot is that launch with the float closed (spec 1): the same
+/// blank Draw, measured on the same paper.
+#[test]
+fn austart_shipped_boot_is_the_ready_paper_with_the_float_closed() {
+    let stands = |h: &EditorHarness| {
+        let p = &h.state().engine.project;
+        (p.width, p.height, h.state().fps(), h.state().frame_count(), h.editor().stage, h.editor().strip_open)
+    };
+    let mut shipped = EditorHarness::as_shipped();
+    sized(&mut shipped, 1600.0, 900.0);
+    assert_eq!(shipped.boot(), Boot::Shipped);
+    assert!(!is_open(&shipped), "the float is closed");
+    let mut first = first_run();
+    let word = stands(&first);
+    assert_eq!(stands(&shipped), word);
+    first.click("Close Start");
+    settle(&mut first);
+    assert_eq!(first.editor().canvas.dbg_rect, shipped.editor().canvas.dbg_rect, "the same pane");
+    assert_eq!(stands(&first), word, "closing the float moves nothing");
+}
+
 #[test]
 fn austart_first_stroke_closes_the_float_and_keeps_the_stroke() {
     let mut h = first_run();
@@ -155,22 +179,25 @@ fn austart_raster_stroke_closes_the_float() {
 #[test]
 fn austart_stroke_at_the_paper_centre_with_the_float_open() {
     for (w, tall) in SIZES {
-        let mut h = EditorHarness::as_first_run();
-        sized(&mut h, w, tall);
-        let (at, float) = (paper_middle(&h), float_open(&h));
-        assert!(!float.contains(at), "{w}×{tall}: the centre is free: {at:?} {float:?}");
-        line_at(&mut h, at);
-        assert_eq!(strokes(&h), 1, "{w}×{tall}");
-        assert!(!is_open(&h), "{w}×{tall}");
+        for stored in PROBE_SCALES {
+            let mut h = EditorHarness::as_first_run();
+            window(&mut h, w, tall, stored);
+            let (at, float) = (paper_middle(&h), float_open(&h));
+            let size = format!("{w}×{tall} at {stored}");
+            assert!(!float.contains(at), "{size}: the centre is free: {at:?} {float:?}");
+            line_at(&mut h, at);
+            assert_eq!(strokes(&h), 1, "{size}");
+            assert!(!is_open(&h), "{size}");
+        }
     }
 }
 
 #[test]
 fn austart_largest_float_leaves_the_paper_centre_clear() {
-    for (w, tall) in SIZES {
+    for ((w, tall), stored) in SIZES.into_iter().flat_map(|size| PROBE_SCALES.map(|stored| (size, stored))) {
         let dir = tempfile::tempdir().unwrap();
         let mut h = EditorHarness::as_first_run();
-        sized(&mut h, w, tall);
+        window(&mut h, w, tall, stored);
         with_recents(&mut h, dir.path());
         for what in ["recents", "More sizes", "What's new"] {
             match what {
@@ -181,7 +208,7 @@ fn austart_largest_float_leaves_the_paper_centre_clear() {
             settle(&mut h);
             let float = float_open(&h);
             let pane = h.editor().canvas.dbg_rect;
-            let at = format!("{what} at {w}×{tall}: {float:?} in {pane:?}");
+            let at = format!("{what} at {w}×{tall}, {stored}: {float:?} in {pane:?}");
             assert!(float.left() > paper_middle(&h).x, "the paper's centre is clear: {at}");
             assert!(float.left() > pane.center().x, "past the pane's centre: {at}");
             assert!(pane.contains_rect(float), "inside its pane: {at}");
@@ -394,15 +421,21 @@ fn austart_untouched_blank_never_asks_to_save() {
 #[test]
 fn austart_every_entry_lands_a_stroke() {
     use templates::{ANIMATION, PICTURE, PICTURE_SQUARE, PICTURE_TALL};
+    let dir = tempfile::tempdir().unwrap();
+    let recent = recents(dir.path()).remove(0);
     let cards = [ANIMATION, PICTURE, PICTURE_SQUARE, PICTURE_TALL].map(WelcomeAction::Intent);
     let sizes = (0..templates::ALL.len()).map(WelcomeAction::Template);
-    let others = [WelcomeAction::Sample, WelcomeAction::ShowMe(0)];
-    let mut entries = cards.len() + others.len();
+    let others = [WelcomeAction::Sample, WelcomeAction::ShowMe(0), WelcomeAction::OpenRecent(recent)];
+    let entries = cards.len() + templates::ALL.len() + others.len();
+    let mut landed = 0;
     for action in cards.into_iter().chain(sizes).chain(others) {
         let mut h = first_run();
         h.answer_start(action.clone());
         settle(&mut h);
         assert!(!is_open(&h), "{action:?}: a document chosen ends the float");
+        if let WelcomeAction::OpenRecent(file) = &action {
+            assert_eq!(h.state().file_path.as_ref(), Some(file), "the file is open");
+        }
         let before = h.state().strokes_done;
         let at = paper_middle(&h);
         assert!(h.editor().canvas.dbg_rect.contains(at), "{action:?}: the paper is on screen");
@@ -410,15 +443,44 @@ fn austart_every_entry_lands_a_stroke() {
         let (room, said) = (h.editor().stage, h.state().status.clone());
         assert_eq!(h.state().strokes_done, before + 1, "{action:?} in {room:?}: {said}");
         assert!(h.state().is_dirty(), "{action:?}");
-        entries += 1;
+        landed += 1;
     }
-    assert!(entries >= 8);
+    assert_eq!(landed, entries);
+    assert!(landed >= 8);
     // The two that need the shell go out as requests.
     let mut h = first_run();
     h.answer_start(WelcomeAction::Open);
     h.answer_start(WelcomeAction::Custom);
     assert_eq!(h.rig().requests, [AppRequest::Open, AppRequest::NewProject]);
     assert!(is_open(&h), "and the float waits for what they do");
+}
+
+/// A project stands on a column a stroke lands on when it opens: past a plate
+/// with no armed layer, past a locked column. With none it stands on its
+/// first. Where it stands is the view's: the file saves back byte for byte.
+#[test]
+fn austart_a_project_opens_on_a_column_that_draws() {
+    let dir = tempfile::tempdir().unwrap();
+    let (file, again) = (dir.path().join("shot.animproj"), dir.path().join("again.animproj"));
+    let opened = |locked: &[&str]| {
+        let mut state = crate::sample::build_sample();
+        let (scene, cut) = (state.view.scene, state.view.cut);
+        let sheet = state.engine.project.cut_mut(scene, cut).expect("the cut");
+        let ids: Vec<_> = sheet.xsheet.columns.iter().filter(|c| locked.contains(&c.name.as_str())).map(|c| c.id).collect();
+        for id in ids {
+            let def = sheet.column_def(id);
+            sheet.set_column_def(id, anim_core::xsheet::ColumnDef { locked: true, ..def });
+        }
+        anim_core::store::save(&state.engine.project, &file).expect("saved");
+        let opened = crate::doc::AppState::load_from(file.clone()).expect("opened");
+        anim_core::store::save(&opened.engine.project, &again).expect("saved");
+        assert_eq!(std::fs::read(&file).unwrap(), std::fs::read(&again).unwrap());
+        let on = opened.cut().xsheet.columns.iter().find(|c| c.id == opened.view.active_column);
+        (on.expect("a column").name.clone(), opened.active_slot_resolved().is_some())
+    };
+    assert_eq!(opened(&[]), ("A".to_string(), true), "past the plate");
+    assert_eq!(opened(&["A"]), ("B".to_string(), true), "past the lock");
+    assert_eq!(opened(&["A", "B"]), ("BG".to_string(), false), "none draws: the first");
 }
 
 #[test]
@@ -586,6 +648,54 @@ fn austart_more_sizes_holds_every_template_and_the_form() {
 }
 
 #[test]
+fn austart_more_sizes_rows_say_their_size() {
+    let mut h = first_run();
+    h.click("More sizes");
+    settle(&mut h);
+    let wide = h.rect("More sizes").width();
+    let painted = h.painted_text();
+    for t in &templates::ALL[..3] {
+        let size = format!("{}×{}", t.width, t.height);
+        assert!(painted.contains(&size), "{}: {size} in {painted:?}", t.name);
+        assert!(h.has(t.name) && !h.has(&size), "it speaks the name alone");
+        assert_eq!(h.rect(t.name).width(), wide, "{}", t.name);
+    }
+    // Its name keeps the row's left, its note the right edge, in the dim ink.
+    let name = &templates::ALL[0];
+    let (row, at) = (h.rect(name.name), h.painted_at(name.name));
+    let note = h.painted_at(&format!("{}×{}", name.width, name.height));
+    assert_eq!(at.x, row.left() + plate::CARD_PAD);
+    assert!(note.x > at.x + 40.0 && note.x < row.right() - plate::CARD_PAD, "{note:?} in {row:?}");
+}
+
+/// Opening `More sizes` scrolls the body, and moves nothing sideways: the
+/// handle lives in the float's margin, and it still answers there.
+#[test]
+fn austart_more_sizes_moves_nothing_sideways() {
+    let mut h = first_run();
+    let names = ["A drawing", "Square", "Tall", "An animation", "A comic", "Open a project", "More sizes"];
+    let before = names.map(|name| h.rect(name));
+    let float = float_open(&h);
+    h.click("More sizes");
+    settle(&mut h);
+    for (name, was) in names.into_iter().zip(before) {
+        let now = h.rect(name);
+        assert_eq!((now.left(), now.right()), (was.left(), was.right()), "{name}");
+    }
+    assert_eq!(float_open(&h).width(), float.width());
+    let rest = plate::INK3.gamma_multiply(0.6);
+    let handles = h.filled_rects(rest);
+    let handle = *handles.iter().find(|r| float.contains_rect(**r)).expect("the handle at rest");
+    assert_eq!(handle.width(), 4.0, "{handle:?}");
+    assert!(handle.left() >= before[0].right() + 6.0, "clear of the cards: {handle:?}");
+    assert!(handle.right() < float.right(), "inside the float: {handle:?}");
+    let comic = h.rect("A comic");
+    h.drag_path(&[handle.center(), handle.center() + vec2(0.0, 30.0), handle.center() + vec2(0.0, 60.0)]);
+    settle(&mut h);
+    assert!(h.rect("A comic").top() < comic.top(), "the handle scrolls the body");
+}
+
+#[test]
 fn austart_intents_are_the_table() {
     let table: Vec<_> = templates::INTENTS.iter().map(|t| (t.name, t.width, t.height)).collect();
     let want = [
@@ -641,6 +751,65 @@ fn austart_first_screen_budget() {
     println!("first screen: {} controls, {} words", screen.controls, screen.words);
     assert!(screen.controls <= 44, "controls: {} {screen:?}", screen.controls);
     assert!(screen.words <= 70, "words: {} {screen:?}", screen.words);
+    // At most two solid blue things: the armed tool and the one primary.
+    let blues = h.filled_rects(plate::BLUE);
+    assert!(blues.len() <= 2, "solid blue: {blues:?}");
+}
+
+/// The first screen's text keeps one left edge: heading, cards, rows, the
+/// Recent legend, and the latch's box.
+#[test]
+fn austart_words_stand_on_one_edge() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = first_run();
+    with_recents(&mut h, dir.path());
+    let edge = float_open(&h).left() + 12.0 + plate::CARD_PAD;
+    for word in ["Start", "A drawing", "An animation", "A comic", "Open a project", "Open the example"] {
+        assert_eq!(h.painted_at(word).x, edge, "{word}");
+    }
+    for word in ["More sizes", "Recent", RECENT[0], RECENT[1], "Check your pen"] {
+        assert_eq!(h.painted_at(word).x, edge, "{word}");
+    }
+    assert_eq!(h.rect("Show at startup").left(), edge, "the latch's box");
+    // On the other tab too, and in the answer to a check.
+    let w = h.editor_mut().start.as_mut().expect("open");
+    (w.pen, w.pen_said) = (PenCheck::Mouse, true);
+    settle(&mut h);
+    let said = h.rect(welcome::MOUSE_FIX);
+    assert_eq!(said.left(), edge, "{said:?}");
+    assert_eq!(h.painted_at(welcome::MOUSE_FIX).x, edge, "{said:?}");
+    // That answer scrolled the body: What's New still opens at its own top.
+    h.editor_mut().start.as_mut().expect("open").tab = WelcomeTab::WhatsNew;
+    settle(&mut h);
+    assert_eq!(h.painted_at(&format!("What's New in {}", welcome::VERSION)).x, edge);
+}
+
+/// The peg bar is the float's rule (spec 2.1): steel, one round peg hole, in
+/// the head's 72 pt. No other float wears it.
+#[test]
+fn austart_rule_is_the_peg_bar() {
+    let mut h = first_run();
+    let float = float_open(&h);
+    let inside = |rects: Vec<Rect>| rects.into_iter().filter(|r| float.contains_rect(*r)).collect::<Vec<_>>();
+    let bars = inside(h.filled_rects(plate::STEEL));
+    assert_eq!(bars.len(), 1, "{bars:?}");
+    let bar = bars[0];
+    assert_eq!(bar.width(), float.width() - 24.0, "margin to margin");
+    let holes = h.filled_circles(plate::DESK);
+    let holes: Vec<_> = holes.iter().filter(|(at, _)| bar.contains(*at)).collect();
+    assert_eq!(holes.len(), 1, "one round peg hole: {holes:?}");
+    assert_eq!(holes[0], &(bar.center(), 2.5));
+    let head = h.rect("A drawing").top() - float.top() + 12.0;
+    assert!(head <= 72.0, "spec 8.1's head block: {head}");
+    assert!(float.top() + 12.0 < bar.top() && bar.bottom() <= h.rect("A drawing").top());
+    // Any other float stands as it stood.
+    h.click("Close Start");
+    h.open_float(Float::Brushes);
+    settle(&mut h);
+    let area = h.ctx().memory(|m| m.area_rect(Id::new(("float", Float::Brushes.heading()))));
+    let area = area.expect("the Brushes float");
+    let steel = h.filled_rects(plate::STEEL);
+    assert!(!steel.iter().any(|r| area.contains_rect(*r)), "{steel:?} in {area:?}");
 }
 
 #[test]
@@ -658,6 +827,16 @@ fn austart_paper_share_holds_once_the_float_closes() {
         assert!(share.pen_land >= PEN_FLOORS[at], "pen at {w}×{tall}: {share:?}");
         assert_eq!(share.paper_under_chrome, 0, "{w}×{tall}: {share:?}");
     }
+    // The rail's whole sweep, from a first launch: strip closed and open,
+    // every aspect, every stored scale, on the same floors.
+    paper_share_sweep(|state| {
+        let mut h = match state {
+            Some(state) => EditorHarness::with_state_first_run(state),
+            None => EditorHarness::as_first_run(),
+        };
+        h.click("Close Start");
+        h
+    });
 }
 
 // ---- the lock ----
@@ -721,6 +900,12 @@ fn austart_drop_to_open_goes_through_leave() {
     drop_file(&mut h, &file);
     assert_eq!(h.state().file_path.as_ref(), Some(&file));
     assert!(!is_open(&h));
+    // A name in capitals is the same project.
+    let shouted = dir.path().join("LOUD.ANIMPROJ");
+    std::fs::copy(&file, &shouted).expect("copied");
+    let mut h = first_run();
+    drop_file(&mut h, &shouted);
+    assert_eq!(h.state().file_path.as_ref(), Some(&shouted));
     // Work in the way: the guard asks, and nothing has moved.
     let mut h = EditorHarness::as_shipped();
     sized(&mut h, 1600.0, 900.0);
@@ -729,12 +914,77 @@ fn austart_drop_to_open_goes_through_leave() {
     drop_file(&mut h, &file);
     assert_eq!(h.editor().leave, Some(Leave::OpenPath(file.clone())));
     assert!(h.state().file_path.is_none());
+    // That question stands: a second drop waits for its answer.
+    let seq = h.state().refusal_seq;
+    drop_file(&mut h, &shouted);
+    assert_eq!(h.editor().leave, Some(Leave::OpenPath(file.clone())), "the first one's");
+    assert_eq!(h.state().refusal_seq, seq + 1, "said no to");
     // What is no project is refused in plain words.
     let mut h = first_run();
     let seq = h.state().refusal_seq;
     drop_file(&mut h, &dir.path().join("picture.png"));
     assert_ne!(h.state().refusal_seq, seq);
     assert!(h.state().file_path.is_none() && is_open(&h));
+    // The shell's own questions, the recovery offer and the New form, stand
+    // the same way. The App feeds this; the Rig has neither.
+    let mut h = first_run();
+    h.editor_mut().shell_asks = true;
+    let seq = h.state().refusal_seq;
+    drop_file(&mut h, &file);
+    assert!(h.state().file_path.is_none() && is_open(&h), "nothing opened behind it");
+    assert_eq!(h.state().refusal_seq, seq + 1);
+    h.editor_mut().shell_asks = false;
+    drop_file(&mut h, &file);
+    assert_eq!(h.state().file_path.as_ref(), Some(&file), "and it opens once answered");
+}
+
+fn pen_of(h: &EditorHarness) -> Option<PenCheck> {
+    h.editor().start.as_ref().map(|w| w.pen)
+}
+
+/// A pen line with force, leftward from `from`.
+fn pen_line(h: &mut EditorHarness, from: Pos2) {
+    h.pen_down(from);
+    h.pen_move(from + vec2(-30.0, 0.0));
+    h.pen_move(from + vec2(-60.0, 5.0));
+    h.pen_up(from + vec2(-60.0, 5.0));
+    settle(h);
+}
+
+/// A tablet's line whose samples never carry force.
+fn flat_line(h: &mut EditorHarness, from: Pos2) {
+    h.pen_down(from);
+    h.pen_move_flat(from + vec2(-30.0, 0.0));
+    h.pen_move_flat(from + vec2(-60.0, 5.0));
+    h.pen_up(from + vec2(-60.0, 5.0));
+    settle(h);
+}
+
+#[test]
+fn austart_check_your_pen_reads_every_transition() {
+    use PenCheck::{Idle, Mouse, NoPressure, Waiting, Works};
+    // A stroke with no check under way, or after a good answer, ends the float.
+    for stood in [Idle, Works] {
+        for heard in [Waiting, Works, NoPressure, Mouse] {
+            assert_eq!(stood.read(heard), None, "{stood:?} heard {heard:?}");
+        }
+    }
+    // Asked, or still without pressure: the line is read, and a tap says nothing.
+    for stood in [Waiting, NoPressure, Mouse] {
+        assert_eq!(stood.read(Works), Some(Works), "{stood:?}");
+        assert_eq!(stood.read(NoPressure), Some(NoPressure), "{stood:?}");
+        assert_eq!(stood.read(Waiting), Some(stood), "{stood:?}");
+    }
+    assert_eq!(Waiting.read(Mouse), Some(Mouse));
+    assert_eq!(NoPressure.read(Mouse), Some(Mouse));
+    assert_eq!(Mouse.read(Mouse), None, "you can still draw: the second mouse line is a real one");
+    // Every answer is words and a mark, and every one of them names the fix.
+    assert_eq!(Works.verdict(), Some((true, "Pressure works", None)));
+    for found in [NoPressure, Mouse] {
+        let (yes, said, fix) = found.verdict().expect("an answer");
+        assert!(!yes && said == "No pressure" && fix.is_some_and(|f| f.contains("Windows Ink")), "{found:?}");
+    }
+    assert!(welcome::MOUSE_FIX.starts_with("A mouse has no pressure. You can still draw."));
 }
 
 #[test]
@@ -744,37 +994,32 @@ fn austart_check_your_pen_reports() {
     settle(&mut h);
     assert!(h.has("Draw one line"), "it asks for the line");
     let at = paper_middle(&h);
-    h.pen_down(at);
-    h.pen_move(at + vec2(-30.0, 0.0));
-    h.pen_move(at + vec2(-60.0, 5.0));
-    h.pen_up(at + vec2(-60.0, 5.0));
-    settle(&mut h);
+    pen_line(&mut h, at);
     assert_eq!(h.state().strokes_done, 1);
-    assert_eq!(h.editor().start.as_ref().map(|w| w.pen), Some(PenCheck::Works));
+    assert_eq!(pen_of(&h), Some(PenCheck::Works));
     assert!(is_open(&h) && h.has("Pressure works"), "the answer stays to be read");
+    assert_eq!(strokes(&h), 0, "the check's line came off the paper");
     // The check is over: the next line is the first one that counts. It is
     // the pen's: the canvas takes the mouse for the pen's echo from here on.
-    let again = at + vec2(-60.0, 60.0);
-    h.pen_down(again);
-    h.pen_move(again + vec2(-30.0, 0.0));
-    h.pen_up(again + vec2(-30.0, 0.0));
-    settle(&mut h);
+    pen_line(&mut h, at + vec2(-60.0, 60.0));
     assert_eq!(h.state().strokes_done, 2);
     assert!(!is_open(&h));
-    // A mouse carries no force: the plain fix, naming Windows Ink.
+    assert_eq!(strokes(&h), 1, "that one stays");
+    // A mouse carries no force: the fix, which names Windows Ink for the
+    // tablet a mouse may be, and the word that a mouse can still draw.
     let mut h = first_run();
     h.click("Check your pen");
     settle(&mut h);
     let at = paper_middle(&h);
     line_at(&mut h, at);
-    assert_eq!(h.editor().start.as_ref().map(|w| w.pen), Some(PenCheck::NoPressure));
+    assert_eq!(pen_of(&h), Some(PenCheck::Mouse));
     assert!(h.has("No pressure") && h.has_text_containing("Windows Ink"));
-    assert!(welcome::PEN_FIX.contains("Windows Ink"));
+    assert!(h.has(welcome::MOUSE_FIX), "{}", h.describe());
     assert!(float_open(&h).height() <= 460.5);
     // Asked again, it reads the next line.
-    h.click("No pressure");
+    h.click("Check your pen");
     settle(&mut h);
-    assert_eq!(h.editor().start.as_ref().map(|w| w.pen), Some(PenCheck::Waiting));
+    assert_eq!(pen_of(&h), Some(PenCheck::Waiting));
     // At the worst case the fix lands below the fold: the body goes to it.
     let dir = tempfile::tempdir().unwrap();
     let mut h = EditorHarness::as_first_run();
@@ -784,8 +1029,241 @@ fn austart_check_your_pen_reports() {
     settle(&mut h);
     let at = paper_middle(&h);
     line_at(&mut h, at);
-    let (fix, float) = (h.rect(welcome::PEN_FIX), float_open(&h));
+    let (fix, float) = (h.rect(welcome::MOUSE_FIX), float_open(&h));
     assert!(fix.bottom() <= float.bottom(), "the fix is read whole: {fix:?} in {float:?}");
+    // A tablet that reports flat is told the same fix, without the mouse.
+    let mut h = first_run();
+    h.click("Check your pen");
+    settle(&mut h);
+    let at = paper_middle(&h);
+    flat_line(&mut h, at);
+    assert_eq!(pen_of(&h), Some(PenCheck::NoPressure));
+    assert!(h.has("No pressure") && h.has(welcome::PEN_FIX), "{}", h.describe());
+    assert!(welcome::PEN_FIX.contains("Windows Ink"));
+}
+
+/// `No pressure` keeps listening: the pen, fixed, answers without another
+/// press, and the line after a good answer is the one that ends the float.
+#[test]
+fn austart_check_your_pen_keeps_listening_after_no_pressure() {
+    for flat in [false, true] {
+        let mut h = first_run();
+        h.click("Check your pen");
+        settle(&mut h);
+        let at = paper_middle(&h);
+        if flat {
+            flat_line(&mut h, at);
+            flat_line(&mut h, at + vec2(0.0, 30.0));
+            assert_eq!(pen_of(&h), Some(PenCheck::NoPressure), "still flat: it says so");
+        } else {
+            line_at(&mut h, at);
+        }
+        assert!(h.has("No pressure") && is_open(&h));
+        pen_line(&mut h, at + vec2(0.0, 60.0));
+        assert_eq!(pen_of(&h), Some(PenCheck::Works), "flat {flat}: read without a press");
+        assert!(is_open(&h) && h.has("Pressure works") && !h.has("No pressure"));
+        assert_eq!(strokes(&h), 0, "flat {flat}: every line was the check's");
+        pen_line(&mut h, at + vec2(0.0, 90.0));
+        assert!(!is_open(&h), "flat {flat}");
+        assert_eq!(strokes(&h), 1, "flat {flat}");
+    }
+    // A mouse that goes on drawing is drawing: it was told it could.
+    let mut h = first_run();
+    h.click("Check your pen");
+    settle(&mut h);
+    let at = paper_middle(&h);
+    line_at(&mut h, at);
+    assert_eq!((pen_of(&h), strokes(&h)), (Some(PenCheck::Mouse), 0));
+    line_at(&mut h, at + vec2(0.0, 40.0));
+    assert!(!is_open(&h), "the float makes way");
+    assert_eq!(strokes(&h), 1, "and the line stays");
+}
+
+/// A tap gives no Move sample, so it says nothing of the pen. The Rig's paint
+/// has no raster layer: the CPU route lands the dab a tap commits there.
+#[test]
+fn austart_a_pen_tap_keeps_asking() {
+    let mut h = first_run();
+    h.click("Check your pen");
+    settle(&mut h);
+    let at = paper_middle(&h);
+    h.pen_tap(at);
+    settle(&mut h);
+    assert_eq!(h.editor().canvas.pen_verdict(), PenCheck::Waiting);
+    assert_eq!(pen_of(&h), Some(PenCheck::Waiting), "a vector tap commits nothing");
+    paint_texels(h.state_mut(), &[(10, 10)], [1.0, 0.0, 0.0, 1.0]);
+    settle(&mut h);
+    assert_eq!(h.state().strokes_done, 1);
+    assert_eq!(pen_of(&h), Some(PenCheck::Waiting), "a dab is a stroke, and says nothing either");
+    assert!(h.has("Draw one line") && !h.has("No pressure"));
+    assert!(!h.state().is_dirty(), "and it leaves nothing behind");
+    // The line after it answers.
+    pen_line(&mut h, at);
+    assert_eq!(pen_of(&h), Some(PenCheck::Works));
+}
+
+/// Both stroke routes answer (spec 1.5 rule 11): the raster tap and the raster
+/// line, on a real device.
+#[test]
+#[ignore = "needs a GPU adapter"]
+fn austart_check_your_pen_reads_the_raster_route() {
+    let mut h = EditorHarness::with_gpu_first_run();
+    h.run_frames(4);
+    assert!(h.editor().canvas.raster, "the paint layer is live");
+    h.click("Check your pen");
+    h.run_frames(4);
+    let at = paper_middle(&h);
+    h.pen_tap(at);
+    h.run_frames(8);
+    assert_eq!(h.state().strokes_done, 1, "{}", h.state().status);
+    assert_eq!(pen_of(&h), Some(PenCheck::Waiting), "the tap keeps asking");
+    assert!(!h.state().is_dirty(), "and its dab came off");
+    pen_line(&mut h, at);
+    h.run_frames(8);
+    assert_eq!(h.state().strokes_done, 2, "{}", h.state().status);
+    assert_eq!(pen_of(&h), Some(PenCheck::Works));
+    assert!(h.has("Pressure works") && is_open(&h));
+    assert!(!h.state().is_dirty(), "the check's line came off");
+    // The answer is in, so the next line is drawing.
+    pen_line(&mut h, at + vec2(0.0, 60.0));
+    h.run_frames(8);
+    assert_eq!(h.state().strokes_done, 3, "{}", h.state().status);
+    assert!(!is_open(&h) && h.state().is_dirty(), "a real line stays");
+}
+
+/// The check leaves nothing to save: its line is off the paper, so a card
+/// after it replaces the blank without a question.
+#[test]
+fn austart_a_card_after_a_pen_check_asks_nothing() {
+    let mut h = first_run();
+    h.click("Check your pen");
+    settle(&mut h);
+    let at = paper_middle(&h);
+    pen_line(&mut h, at);
+    assert_eq!(pen_of(&h), Some(PenCheck::Works));
+    assert!(!h.state().is_dirty(), "the blank is clean again");
+    h.click("A drawing");
+    settle(&mut h);
+    assert_eq!(h.editor().leave, None, "nothing to ask about");
+    assert!(!h.has("Save changes?"));
+    assert_eq!(h.rig().requests, [AppRequest::Start(WelcomeAction::Intent(templates::PICTURE))]);
+    // Work that was there before the check stays, and is still asked about.
+    let mut h = first_run();
+    h.click("Close Start");
+    settle(&mut h);
+    let at = paper_middle(&h);
+    line_at(&mut h, at);
+    assert_eq!(strokes(&h), 1);
+    h.editor_mut().open_start(Welcome::new(&[]));
+    settle(&mut h);
+    h.click("Check your pen");
+    settle(&mut h);
+    line_at(&mut h, at + vec2(0.0, 40.0));
+    assert_eq!(strokes(&h), 1, "the check's line alone came off");
+    h.click("A drawing");
+    settle(&mut h);
+    assert!(h.has("Save changes?"), "the work before the check is unsaved");
+}
+
+/// The check says where it stands: the row on the wash while it listens, and
+/// an answer that is a mark and words, no control.
+#[test]
+fn austart_check_your_pen_shows_its_state() {
+    let mut h = first_run();
+    let idle = float_census(&mut h);
+    let row = h.rect("Check your pen");
+    assert!(!h.filled_rects(plate::BLUE_WASH).contains(&row));
+    h.click("Check your pen");
+    settle(&mut h);
+    assert_eq!(h.rect("Draw one line"), row);
+    assert!(h.filled_rects(plate::BLUE_WASH).contains(&row), "the current row's wash");
+    let at = paper_middle(&h);
+    pen_line(&mut h, at);
+    assert_eq!(h.rect("Check your pen"), row, "the row is back, and asks again");
+    assert!(h.painted_text().contains(&"Pressure works".to_string()));
+    let answered = float_census(&mut h);
+    assert_eq!(answered.controls, idle.controls, "an answer is no control");
+    h.click("Pressure works");
+    settle(&mut h);
+    assert_eq!(pen_of(&h), Some(PenCheck::Works), "and pressing it does nothing");
+    h.click("Check your pen");
+    settle(&mut h);
+    assert_eq!(pen_of(&h), Some(PenCheck::Waiting));
+}
+
+/// With no canvas on screen the float claims no pane: the keys are the
+/// focused pane's, under the pointer's float as anywhere else.
+#[test]
+fn austart_over_no_canvas_the_focused_pane_has_the_keys() {
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1600.0, 900.0);
+    h.editor_mut().enter_room(Stage::Edit);
+    h.editor_mut().open_pane(Pane::XSheet);
+    settle(&mut h);
+    assert!(!crate::visible_panes(&h.editor().dock).contains(&Pane::Canvas), "Timing's Viewer is front");
+    h.editor_mut().open_start(Welcome::new(&[]));
+    settle(&mut h);
+    let on = float_open(&h).center();
+    h.point_at(on);
+    settle(&mut h);
+    let ctx = h.ctx();
+    assert_eq!(h.editor_mut().shortcut_ctx(&ctx), Ctx::Sheet);
+    let from = h.performed().len();
+    h.key_mods(CTRL, Key::V);
+    let fired: Vec<_> = h.performed()[from..].iter().map(|(a, _)| *a).collect();
+    assert!(fired.contains(&Action::PasteCells), "{fired:?}");
+    assert!(!fired.contains(&Action::PastePixels), "{fired:?}");
+    h.rig_mut().config.set_keymap(Keymap::Industry);
+    settle(&mut h);
+    let from = h.performed().len();
+    h.key(Key::Delete);
+    let fired: Vec<_> = h.performed()[from..].iter().map(|(a, _)| *a).collect();
+    assert!(!fired.contains(&Action::ClearCel), "Delete clears no cel behind the float: {fired:?}");
+    assert!(is_open(&h));
+    // Over the canvas it is the canvas's, as it was.
+    let mut h = first_run();
+    let on = float_open(&h).center();
+    h.point_at(on);
+    settle(&mut h);
+    let ctx = h.ctx();
+    assert_eq!(h.editor_mut().shortcut_ctx(&ctx), Ctx::Canvas);
+}
+
+/// The float's cost: no window, no shader, one branch while it is closed, and
+/// while open no look at the disk: its rows are what it read when it opened.
+#[test]
+fn austart_float_opens_no_window_and_adds_no_shader() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = first_run();
+    with_recents(&mut h, dir.path());
+    let windows = &h.kit().output().viewport_output;
+    assert!(windows.len() == 1 && windows.contains_key(&egui::ViewportId::ROOT));
+    let doors = [
+        concat!("show_", "viewport"),
+        concat!("Viewport", "Builder"),
+        concat!("rfd", "::"),
+        concat!("create_shader_", "module"),
+        concat!(".w", "gsl"),
+    ];
+    let (body, frame) = (include_str!("welcome.rs"), include_str!("floats.rs"));
+    for text in [body, frame] {
+        let found: Vec<_> = doors.iter().filter(|door| text.contains(**door)).collect();
+        assert!(found.is_empty(), "{found:?}");
+    }
+    let main = include_str!("main.rs");
+    let from = main.find("fn start_ui(").expect("the float's frame");
+    let closed = main[from..].find("self.start.take() else { return }").expect("its early way out");
+    let dock = main[from..].find("visible_panes(").expect("what it reads when open");
+    assert!(closed < dock, "closed, it costs a branch");
+    let from = body.find("pub fn float_body(").expect("its body");
+    let to = body.find("/// The Welcome screen, drawn into").expect("the end of its rows");
+    assert!(from < to);
+    for disk in [concat!("std::", "fs"), concat!(".is_", "file"), concat!(".exi", "sts("), "read_meta"] {
+        assert!(!body[from..to].contains(disk), "{disk}");
+    }
+    std::fs::remove_file(dir.path().join(format!("{}.animproj", RECENT[0]))).expect("removed");
+    settle(&mut h);
+    assert!(h.has(RECENT[0]), "the rows stand as they were read");
 }
 
 #[test]
@@ -797,7 +1275,6 @@ fn austart_menu_rows_open_the_float_with_no_modal() {
     assert!(!is_open(&h), "the shipped boot is a fresh install with it closed");
     assert_eq!(Action::WelcomeScreen.menu(), Some("File/Welcome screen…"));
     h.perform(Action::WelcomeScreen);
-    h.editor_mut().start_asked();
     settle(&mut h);
     assert!(is_open(&h) && float_rect(&h).is_some());
     assert!(h.ctx().memory(|m| m.top_modal_layer()).is_none(), "no Modal");
@@ -816,6 +1293,25 @@ fn austart_menu_rows_open_the_float_with_no_modal() {
     h.click("What's new");
     settle(&mut h);
     assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::WhatsNew));
+    h.click("Close Start");
+    settle(&mut h);
+    // Over unsaved work the row still asks nothing. A card that replaces the
+    // cut does, once.
+    h.state_mut().add_column();
+    assert!(h.state().is_dirty());
+    assert_eq!(h.perform(Action::WelcomeScreen), Performed::Done);
+    settle(&mut h);
+    assert!(is_open(&h), "it opens at once");
+    assert_eq!(h.editor().leave, None);
+    assert!(h.ctx().memory(|m| m.top_modal_layer()).is_none(), "no Modal over dirty work");
+    h.click("A drawing");
+    settle(&mut h);
+    assert!(h.has("Save changes?"), "the card asks");
+    assert_eq!(h.editor().leave, Some(Leave::Start(WelcomeAction::Intent(templates::PICTURE))));
+    assert!(h.ctx().memory(|m| m.top_modal_layer()).is_some());
+    h.hold("Don't Save");
+    settle(&mut h);
+    assert!(!h.has("Save changes?") && h.editor().leave.is_none(), "once");
     // An open dialog is the shell's to answer; the App's gate reads the old
     // screen's field, which nothing sets now.
     let source = include_str!("main.rs");

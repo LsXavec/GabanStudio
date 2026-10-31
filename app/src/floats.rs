@@ -23,6 +23,8 @@ const AUTO: f32 = f32::INFINITY;
 /// as the bar a hover widens it to, so it lies on no control.
 const HANDLE_W: f32 = 4.0;
 pub const GUTTER: f32 = 10.0;
+/// The Start float's rule: the peg bar, cut down to a line (spec 2.1).
+const PEG_RULE_H: f32 = 8.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Float {
@@ -174,7 +176,7 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
     let id = egui::Id::new(("float", f.heading()));
     let tall = ctx.memory(|m| m.area_rect(id)).map_or(size.y, |r| r.height().min(size.y));
     let pos = f.pos(host, rail_top, vec2(size.x, tall));
-    let head = Head { words: f.heading(), role: plate::Role::Heading, rule: false };
+    let head = Head { words: f.heading(), role: plate::Role::Heading, start: false, page: 0 };
     let (shown, close) = frame(ctx, head, pos, size, host, |ui| body(ui, f, args));
     if close {
         args.floats.close(f);
@@ -192,11 +194,17 @@ pub fn start_place(pane: Rect) -> (Pos2, Vec2) {
     (pos2(pane.right() - INSET - size.x, pane.top() + INSET), size)
 }
 
-/// A float's heading: its words, their type role, and a rule under them.
+/// A float's heading: its words, their type role, and whether it is the Start
+/// float's. That one has the peg rule under its words, which stand on the
+/// body's text edge, and a scroll reaching into the right margin: the handle
+/// lives there, so a body that starts to scroll moves nothing sideways.
+/// `page` is the body's tab: each keeps its own scroll, or a tab opens part
+/// way down, with its way back out of sight.
 pub struct Head<'a> {
     pub words: &'a str,
     pub role: plate::Role,
-    pub rule: bool,
+    pub start: bool,
+    pub page: usize,
 }
 
 /// A float's frame, each float's and the Start float's: an `Area` at `Middle`,
@@ -211,6 +219,8 @@ pub fn frame(
     body: impl FnOnce(&mut egui::Ui),
 ) -> (egui::Response, bool) {
     let inner = size.x - 2.0 * f32::from(MARGIN);
+    let reach = if head.start { GUTTER } else { 0.0 };
+    let margin = egui::Margin { right: MARGIN - reach as i8, ..egui::Margin::same(MARGIN) };
     let mut close = false;
     let heading = head.words;
     let shown = egui::Area::new(egui::Id::new(("float", heading)))
@@ -222,17 +232,23 @@ pub fn frame(
             // An `Area` holds its ui to the size it had last frame, and the
             // first of those is egui's 400: the height is the float's to say.
             ui.set_max_height(size.y);
-            plate::island_frame(ui.style(), MARGIN).show(ui, |ui| {
-                ui.set_width(inner);
+            plate::island_frame(ui.style(), MARGIN).inner_margin(margin).show(ui, |ui| {
+                ui.set_width(inner + reach);
                 ui.horizontal(|ui| {
+                    if head.start {
+                        ui.add_space(plate::CARD_PAD);
+                    }
                     let words = egui::RichText::new(heading).font(head.role.font());
                     ui.label(words.color(plate::INK));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(reach);
                         close = plate::close_key(ui, &format!("Close {heading}")).clicked();
                     });
                 });
-                if head.rule {
-                    ui.add(egui::Separator::default().spacing(2.0));
+                if head.start {
+                    let (rule, _) = ui.allocate_exact_size(vec2(inner, PEG_RULE_H), egui::Sense::hover());
+                    plate::peg_bar(ui.painter(), rule);
+                    plate::peg_hole(ui.painter(), rule.center());
                 } else {
                     ui.add_space(4.0);
                 }
@@ -246,17 +262,17 @@ pub fn frame(
                 let bar = &mut ui.spacing_mut().scroll;
                 bar.dormant_handle_opacity = 0.6;
                 bar.floating_width = HANDLE_W;
-                bar.floating_allocated_width = GUTTER;
+                bar.floating_allocated_width = GUTTER - reach;
                 let widgets = &mut ui.visuals_mut().widgets;
                 let ink = std::mem::replace(&mut widgets.inactive.fg_stroke.color, plate::INK3);
                 let scroll = egui::ScrollArea::vertical()
-                    .id_salt(("float_scroll", heading))
+                    .id_salt(("float_scroll", heading, head.page))
                     .scroll_source(egui::scroll_area::ScrollSource::ALL)
                     .max_height((size.y - spent).max(40.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.visuals_mut().widgets.inactive.fg_stroke.color = ink;
-                        ui.set_width(ui.available_width());
+                        ui.set_width(ui.available_width() - reach);
                         body(ui);
                     });
                 plate::note_viewport(ui, scroll.inner_rect, [false, true]);

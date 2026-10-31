@@ -2128,13 +2128,19 @@ impl CanvasView {
         )
     }
 
-    /// AU6: what `Check your pen` reads off the last stroke: it carried real
-    /// tablet force, or it came in as a mouse. A mouse has no force to read.
+    /// AU6: what `Check your pen` reads off the last stroke. It came in as a
+    /// mouse, or its samples never carried force, or at least one did. A tap
+    /// has no Move sample to read at all, so it says nothing either way.
     pub(crate) fn pen_verdict(&self) -> crate::welcome::PenCheck {
-        if self.dbg_mouse_mode || self.dbg_some == 0 {
-            crate::welcome::PenCheck::NoPressure
+        use crate::welcome::PenCheck;
+        if self.stroke_from_mouse {
+            PenCheck::Mouse
+        } else if self.dbg_mouse_mode {
+            PenCheck::NoPressure
+        } else if self.dbg_some > 0 {
+            PenCheck::Works
         } else {
-            crate::welcome::PenCheck::Works
+            PenCheck::Waiting
         }
     }
 

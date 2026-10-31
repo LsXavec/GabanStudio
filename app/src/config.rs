@@ -788,7 +788,7 @@ impl Action {
             BuildComposite => "Replace the node graph with every rendered column in sheet order (one undo step).",
             AddNode => "Open the add-node menu at the pointer: sources, blends, FX, generators (particles, speed lines, text, balloons), output.",
             ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
-            WelcomeScreen => "Show the Welcome screen: templates, recent files and the sample cut (unsaved work is asked about first).",
+            WelcomeScreen => "Open the Start panel: templates, recent files and the sample cut (a card asks about unsaved work).",
             OpenSample => "Open the sample cut to learn on (unsaved work is asked about first).",
             WhatsNew => "Show what this release brings, in the Start panel.",
             ToggleLockPositions => "Keep the panels where they are: tabs stop dragging and the step's panels stay open.",
@@ -3943,7 +3943,7 @@ pub(crate) fn general_page(
     // GM8: the Start float's start-up latch lives here too, so a latch
     // turned off there can be turned back on.
     ui.add_space(6.0);
-    if crate::plate::latch(ui, &mut config.ui.show_welcome, "Show the Welcome screen at startup")
+    if crate::plate::latch(ui, &mut config.ui.show_welcome, "Show Start at startup")
         .on_hover_text("off: start-up opens the same blank paper without it (File ▸ Welcome screen… still shows it)")
         .changed()
     {

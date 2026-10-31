@@ -389,7 +389,7 @@ fn rail_and_floats(dir: &Path) {
         h.shot(size, &dir.join(format!("{state}.png")));
     }
     drop(h);
-    let mut h = EditorHarness::with_gpu_shipped(NewProjectForm::default().new_state());
+    let mut h = EditorHarness::with_gpu_ready();
     h.run_frames(4);
     moments(&mut h, dir);
 }
@@ -472,7 +472,7 @@ fn strip_moments(dir: &Path) {
 /// AU6: the Start float: a fresh install's, at its worst case with two
 /// recents, with `More sizes` open, on What's New, and a pen check's answer;
 /// on the narrowest window, where its body scrolls.
-const START: [(&str, u32, u32); 10] = [
+const START: [(&str, u32, u32); 12] = [
     ("start-fresh", 1600, 900),
     ("start-fresh-1280", 1280, 800),
     ("start-recents", 1600, 900),
@@ -482,6 +482,8 @@ const START: [(&str, u32, u32); 10] = [
     ("start-whats-new", 1600, 900),
     ("start-whats-new-1280", 1280, 800),
     ("start-pen-fix", 1280, 800),
+    ("start-pen-mouse", 1280, 800),
+    ("start-pen-works", 1280, 800),
     ("start-narrow", 832, 520),
 ];
 
@@ -490,6 +492,7 @@ fn start_owed() -> Vec<(String, u32, u32)> {
 }
 
 fn start_float(dir: &Path) {
+    use crate::welcome::PenCheck;
     let names = tempfile::tempdir().expect("a folder for the recent files");
     let recent: Vec<PathBuf> = ["Ball bounce", "Walk cycle"]
         .iter()
@@ -513,8 +516,9 @@ fn start_float(dir: &Path) {
         if state.contains("whats-new") {
             w.tab = crate::welcome::WelcomeTab::WhatsNew;
         }
-        if state.contains("pen-fix") {
-            w.pen = crate::welcome::PenCheck::NoPressure;
+        let pens = [("pen-fix", PenCheck::NoPressure), ("pen-mouse", PenCheck::Mouse), ("pen-works", PenCheck::Works)];
+        if let Some((_, said)) = pens.iter().find(|(tag, _)| state.contains(tag)) {
+            w.pen = *said;
             w.pen_said = true;
         }
         h.editor_mut().start = Some(w);

@@ -1351,7 +1351,8 @@ fn austrip_natural_end_still_rewinds() {
 /// (spec, Section 13).
 #[test]
 fn austrip_add_drawing_after_one_drawing_across_the_shot() {
-    let mut h = EditorHarness::as_shipped();
+    let shot = crate::newproject::NewProjectForm::default().new_state();
+    let mut h = EditorHarness::with_state_shipped(shot);
     h.kit_mut().set_size(vec2(1280.0, 800.0));
     settle(&mut h);
     let count = h.state().frame_count();

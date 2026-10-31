@@ -425,12 +425,12 @@ pub struct Welcome {
     pub more_open: bool,
     /// AU6: how `Check your pen` stands.
     pub pen: PenCheck,
-    /// AU6: the answer just came in: the body scrolls to it once.
+    /// AU6: the answer just came in: the body scrolls down to it, once.
     pub pen_said: bool,
 }
 
-/// AU6: `Check your pen`: the next line drawn is read, and says one of two
-/// things.
+/// AU6: `Check your pen`: the next line drawn is read, and the row below says
+/// what it found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PenCheck {
     #[default]
@@ -438,23 +438,52 @@ pub enum PenCheck {
     /// Asked: the next finished stroke answers, and the float stays up for it.
     Waiting,
     Works,
+    /// A tablet's stream, moving, that never carried force.
     NoPressure,
+    /// The line came in as a mouse. A tablet with Windows Ink off comes in
+    /// the same way, and nothing tells the two apart.
+    Mouse,
 }
 
 impl PenCheck {
     /// What the row says now. Pressing it asks again.
     pub fn words(self) -> &'static str {
         match self {
-            PenCheck::Idle => "Check your pen",
             PenCheck::Waiting => "Draw one line",
-            PenCheck::Works => "Pressure works",
-            PenCheck::NoPressure => "No pressure",
+            _ => "Check your pen",
+        }
+    }
+
+    /// The answer shown under the row, in words and with its fix.
+    pub fn verdict(self) -> Option<(bool, &'static str, Option<&'static str>)> {
+        match self {
+            PenCheck::Idle | PenCheck::Waiting => None,
+            PenCheck::Works => Some((true, "Pressure works", None)),
+            PenCheck::NoPressure => Some((false, "No pressure", Some(PEN_FIX))),
+            PenCheck::Mouse => Some((false, "No pressure", Some(MOUSE_FIX))),
+        }
+    }
+
+    /// What a finished stroke does to the check, `heard` being what
+    /// `pen_verdict` read off it. None: the stroke was no check line; it
+    /// stands, and ends the float. A check that found no pressure keeps
+    /// listening for the fixed pen, but a mouse goes on drawing: a second
+    /// mouse line is a real one.
+    pub fn read(self, heard: PenCheck) -> Option<PenCheck> {
+        match (self, heard) {
+            (PenCheck::Idle | PenCheck::Works, _) | (PenCheck::Mouse, PenCheck::Mouse) => None,
+            // A tap has nothing to read: keep asking.
+            (_, PenCheck::Waiting) => Some(self),
+            _ => Some(heard),
         }
     }
 }
 
-/// AU6: the plain fix under `No pressure`.
+/// AU6: the plain fix under `No pressure`, for a tablet that reports flat.
 pub const PEN_FIX: &str = "Turn on Windows Ink in your tablet's settings, then draw one line again.";
+/// The same answer to a mouse, for the tablet that may be one.
+pub const MOUSE_FIX: &str = "A mouse has no pressure. You can still draw. For a tablet pen, turn on \
+                             Windows Ink in the tablet's settings, then draw one line again.";
 
 impl Welcome {
     pub fn new(recent: &[PathBuf]) -> Self {
@@ -512,7 +541,13 @@ const CARD_GAP: f32 = 8.0;
 /// The float's rows stand this far apart, and a group this much further from
 /// the next: spec 8.1's budget, with its last row unscrolled at the worst case.
 const ROW_GAP: f32 = 2.0;
-const GROUP_GAP: f32 = 6.0;
+const GROUP_GAP: f32 = 4.0;
+
+/// What is no card or row on the float, on the one edge their words start at.
+fn on_edge<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let edge = egui::Margin::symmetric(plate::CARD_PAD as i8, 0);
+    egui::Frame::new().inner_margin(edge).show(ui, add).inner
+}
 
 /// AU6: the Start float's body, inside the frame's scroll: spec 8.1's entries
 /// in its budget's order. `show_at_startup` is the latch's.
@@ -528,7 +563,7 @@ pub fn float_body(
             w.tab = WelcomeTab::Start;
         }
         ui.add_space(GROUP_GAP);
-        whats_new_ui(ui);
+        on_edge(ui, whats_new_ui);
         return None;
     }
     let mut out = None;
@@ -552,7 +587,11 @@ pub fn float_body(
     ui.add_space(GROUP_GAP);
     let half = (wide - ui.spacing().item_spacing.x) / 2.0;
     ui.horizontal(|ui| {
-        let check = plate::ghost_row(ui, w.pen.words(), half, None);
+        let check = if w.pen == PenCheck::Waiting {
+            plate::current_row(ui, w.pen.words(), half)
+        } else {
+            plate::ghost_row(ui, w.pen.words(), half, None)
+        };
         if check.card("Draw one line and see whether your pen reports pressure").clicked() {
             w.pen = PenCheck::Waiting;
         }
@@ -560,14 +599,20 @@ pub fn float_body(
             w.tab = WelcomeTab::WhatsNew;
         }
     });
-    if w.pen == PenCheck::NoPressure {
-        let fix = ui.label(egui::RichText::new(PEN_FIX).color(plate::LEGEND));
-        if std::mem::take(&mut w.pen_said) {
-            fix.scroll_to_me(Some(egui::Align::Max));
-        }
+    if let Some((yes, said, fix)) = w.pen.verdict() {
+        on_edge(ui, |ui| {
+            plate::answer(ui, yes, said);
+            if let Some(fix) = fix {
+                ui.label(egui::RichText::new(fix).color(plate::LEGEND));
+            }
+        });
     }
-    plate::latch(ui, show_at_startup, "Show at startup")
-        .card("Off: the app opens on the same paper, without this panel");
+    let latch = on_edge(ui, |ui| plate::quiet_latch(ui, show_at_startup, "Show at startup"));
+    let latch = latch.card("Off: the app opens on the same paper, without this panel");
+    // To the body's end, not the answer's: that leaves its last line in the fade.
+    if std::mem::take(&mut w.pen_said) {
+        latch.scroll_to_me(Some(egui::Align::Max));
+    }
     out
 }
 
@@ -590,7 +635,7 @@ fn intent_cards(ui: &mut egui::Ui, out: &mut Option<WelcomeAction>) {
         *out = Some(WelcomeAction::Intent(templates::PICTURE));
     }
     let animation = plate::choice_card(ui, "An animation", CARD_H);
-    if animation.card("Drawings that move, on the paper already open").clicked() {
+    if animation.card("Drawings that move, on new paper").clicked() {
         *out = Some(WelcomeAction::Intent(templates::ANIMATION));
     }
     ui.spacing_mut().item_spacing.y = gap;
@@ -604,7 +649,7 @@ fn intent_cards(ui: &mut egui::Ui, out: &mut Option<WelcomeAction>) {
 /// `More sizes`: every template, then the form.
 fn more_sizes(ui: &mut egui::Ui, wide: f32, out: &mut Option<WelcomeAction>) {
     for (i, t) in templates::ALL.iter().enumerate() {
-        let row = plate::ghost_row(ui, t.name, wide, None);
+        let row = plate::noted_row(ui, t.name, &format!("{}×{}", t.width, t.height), wide);
         if row.card(format!("{}\n{}", t.summary(), t.tooltip())).clicked() {
             *out = Some(WelcomeAction::Template(i));
         }
@@ -622,7 +667,7 @@ fn recent_rows(ui: &mut egui::Ui, w: &Welcome, wide: f32, out: &mut Option<Welco
         return;
     }
     ui.add_space(GROUP_GAP);
-    plate::legend(ui, "Recent");
+    on_edge(ui, |ui| plate::legend(ui, "Recent"));
     for c in rows {
         let name = c.path.file_stem().map(|s| s.to_string_lossy().into_owned());
         let name = name.unwrap_or_else(|| c.path.display().to_string());
@@ -1335,22 +1380,23 @@ mod tests {
 
     #[test]
     fn welcome_screen_comes_back_after_startup() {
-        // File ▸ Welcome screen…: a clean cut goes at once.
+        // File ▸ Welcome screen…: the float opens at once, clean or not, and
+        // the open cut stands under it: only a card that replaces it asks.
         let mut s = crate::sample::build_sample();
         s.saved_rev = s.engine.revision();
         let mut h = crate::testkit::EditorHarness::with_state(s);
         assert_eq!(Action::WelcomeScreen.menu(), Some("File/Welcome screen…"));
         assert_eq!(h.perform(Action::WelcomeScreen), crate::Performed::Done);
-        assert!(h.editor().request_welcome);
-        // Unsaved work is asked about first.
-        h.editor_mut().request_welcome = false;
+        assert!(h.editor().start.as_ref().is_some_and(|w| w.over_editor));
+        h.editor_mut().start = None;
         h.state_mut().add_column();
         assert!(h.state().is_dirty());
-        h.perform(Action::WelcomeScreen);
+        let (rev, group) = (h.state().engine.revision(), h.state().untitled_group.clone());
+        assert_eq!(h.perform(Action::WelcomeScreen), crate::Performed::Done);
         h.run();
-        assert!(h.editor().leave_pending() && !h.editor().request_welcome);
-        h.hold("Don't Save");
-        assert!(h.editor().request_welcome);
+        assert!(h.editor().start.is_some() && !h.editor().leave_pending());
+        assert_eq!((h.state().engine.revision(), h.state().untitled_group.clone()), (rev, group));
+        assert!(h.state().is_dirty());
         // The palette finds it by the words a newcomer types.
         assert!(Action::WelcomeScreen.aliases().contains(&"templates"));
         // Over a cut the screen stays until a card or Back ends it.
@@ -1378,10 +1424,7 @@ mod tests {
                 crate::config::general_page(ui, &mut config, None, &mut flag, None);
             });
         h.run();
-        assert!(
-            h.query_by_label("Show the Welcome screen at startup")
-                .is_some()
-        );
+        assert!(h.query_by_label("Show Start at startup").is_some());
     }
 
     #[test]
