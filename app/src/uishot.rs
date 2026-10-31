@@ -469,6 +469,60 @@ fn strip_moments(dir: &Path) {
     h.shot(size, &name);
 }
 
+/// AU6: the Start float: a fresh install's, at its worst case with two
+/// recents, with `More sizes` open, on What's New, and a pen check's answer;
+/// on the narrowest window, where its body scrolls.
+const START: [(&str, u32, u32); 10] = [
+    ("start-fresh", 1600, 900),
+    ("start-fresh-1280", 1280, 800),
+    ("start-recents", 1600, 900),
+    ("start-recents-1280", 1280, 800),
+    ("start-more-sizes", 1600, 900),
+    ("start-more-sizes-1280", 1280, 800),
+    ("start-whats-new", 1600, 900),
+    ("start-whats-new-1280", 1280, 800),
+    ("start-pen-fix", 1280, 800),
+    ("start-narrow", 832, 520),
+];
+
+fn start_owed() -> Vec<(String, u32, u32)> {
+    START.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn start_float(dir: &Path) {
+    let names = tempfile::tempdir().expect("a folder for the recent files");
+    let recent: Vec<PathBuf> = ["Ball bounce", "Walk cycle"]
+        .iter()
+        .map(|name| names.path().join(format!("{name}.animproj")))
+        .collect();
+    let project = crate::sample::build_sample().engine.project;
+    for file in &recent {
+        anim_core::store::save(&project, file).expect("a recent file");
+    }
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    let mut h = EditorHarness::with_gpu_first_run();
+    h.run_frames(4);
+    for (state, w, height) in START {
+        let size = egui::vec2(w as f32, height as f32);
+        h.kit_mut().set_size(size);
+        let mut w = crate::welcome::Welcome::new(&[]);
+        if !state.contains("fresh") {
+            w = crate::welcome::Welcome::new(&recent);
+        }
+        w.more_open = state.contains("more-sizes");
+        if state.contains("whats-new") {
+            w.tab = crate::welcome::WelcomeTab::WhatsNew;
+        }
+        if state.contains("pen-fix") {
+            w.pen = crate::welcome::PenCheck::NoPressure;
+            w.pen_said = true;
+        }
+        h.editor_mut().start = Some(w);
+        arrive(&mut h, draw);
+        h.shot(size, &dir.join(format!("{state}.png")));
+    }
+}
+
 #[test]
 #[ignore = "needs a GPU adapter and UISHOT_DIR; writes PNGs"]
 fn uishot_rooms() {
@@ -489,6 +543,22 @@ fn uishot_rooms() {
     check_shots(&dir, &rail_owed()).expect("the rail's tiers and every float");
     strip_moments(&dir);
     check_shots(&dir, &strip_owed()).expect("the strip's moments");
+    start_float(&dir);
+    check_shots(&dir, &start_owed()).expect("the Start float's moments");
+}
+
+#[test]
+fn austart_shots_owe_the_float_at_both_sizes() {
+    let owed = start_owed();
+    let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
+    for state in ["start-fresh", "start-recents", "start-more-sizes", "start-whats-new"] {
+        for (_, w, h) in [(0, 1600, 900), (0, 1280, 800)] {
+            let suffix = if w == 1280 { "-1280" } else { "" };
+            let name = format!("{state}{suffix}.png");
+            assert!(owed.contains(&(name.clone(), w, h)), "{name}");
+        }
+    }
 }
 
 #[test]

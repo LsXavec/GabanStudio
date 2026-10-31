@@ -1398,6 +1398,12 @@ pub const PILL_H: f32 = 32.0;
 /// Search, styled as an input.
 pub const SEARCH_W: f32 = 141.0;
 const PILL_PAD: f32 = 14.0;
+/// A choice card's words, from its left edge.
+const CARD_PAD: f32 = 12.0;
+/// A card chip's words, from its ends.
+const CHIP_PAD: f32 = 10.0;
+/// A ghost row's words, from its ends.
+const ROW_PAD: f32 = 8.0;
 
 /// A pill's width: its words at the Step role, and the pad either side.
 pub fn pill_width(ui: &Ui, words: &str) -> f32 {
@@ -1427,6 +1433,71 @@ pub fn step_pill(ui: &mut Ui, label: &str, current: bool, primary: bool) -> Resp
     }
     speak(&resp, egui::WidgetType::Button, Some(current), label);
     describe(resp, "DETENT step_pill", label)
+}
+
+/// AU6: a big choice on the Start float: a `WELL` card the float's width,
+/// `tall` tall, its words on the left in the Card role. The right end is the
+/// caller's, for a [`card_chip`].
+pub fn choice_card(ui: &mut Ui, label: &str, tall: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), tall), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, _) = filled(&resp);
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        let at = Pos2::new(rect.left() + CARD_PAD, rect.center().y);
+        p.text(at, egui::Align2::LEFT_CENTER, label, Role::Card.font(), INK);
+    }
+    speak(&resp, egui::WidgetType::Button, None, label);
+    describe(resp, "CARD choice_card", label)
+}
+
+/// AU6: a small key standing on a [`choice_card`]'s right end, with its right
+/// edge at `right`: another size of the card's choice.
+pub fn card_chip(ui: &mut Ui, card: egui::Rect, right: f32, label: &str) -> Response {
+    let width = text_width(ui, label, CTRL_TEXT) + 2.0 * CHIP_PAD;
+    let size = Vec2::new(width, CHROME_H - 4.0);
+    let rect = egui::Rect::from_min_size(Pos2::new(right - width, card.center().y - size.y / 2.0), size);
+    let resp = ui.interact(rect, ui.id().with(("card_chip", label)), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = if resp.is_pointer_button_down_on() {
+            (BLUE_WASH, BLUE_DEEP)
+        } else if resp.hovered() {
+            (PAPER, STRUCK)
+        } else {
+            (ISLAND, LEGEND)
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        p.text(rect.center(), egui::Align2::CENTER_CENTER, label, Role::Panel.font(), ink);
+    }
+    speak(&resp, egui::WidgetType::Button, None, label);
+    describe(resp, "CHIP card_chip", label)
+}
+
+/// AU6: one line of words that acts, a ghost `CTRL_H` tall and `width` wide.
+/// A longer name elides. A row that opens something below it speaks whether
+/// it is open, and shows it with a chevron.
+pub fn ghost_row(ui: &mut Ui, label: &str, width: f32, open: Option<bool>) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = ghost(ui, &resp);
+        let chevron = if open.is_some() { ICON + 4.0 } else { 0.0 };
+        let room = width - 2.0 * ROW_PAD - chevron;
+        let mut job = LayoutJob::simple_singleline(label.to_string(), Role::Chrome.font(), ink);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(room);
+        let words = ui.fonts_mut(|f| f.layout_job(job));
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        p.galley(Pos2::new(rect.left() + ROW_PAD, rect.center().y - words.size().y / 2.0), words, ink);
+        if let Some(open) = open {
+            let centre = Pos2::new(rect.right() - ROW_PAD - ICON / 2.0, rect.center().y);
+            let mark = egui::Rect::from_center_size(centre, Vec2::splat(ICON));
+            let icon = if open { crate::icons::Icon::Up } else { crate::icons::Icon::Down };
+            crate::icons::paint(p, mark, ink, icon);
+        }
+    }
+    speak(&resp, egui::WidgetType::Button, open, label);
+    describe(resp, "ACTION ghost_row", label)
 }
 
 /// The off-spine pill: read-only, on the wash, `width` wide. A longer name

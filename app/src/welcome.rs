@@ -5,7 +5,7 @@
 //! base64 PNG 256 px wide, at most 64 KB) and its reader.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anim_core::command::CutRef;
 use anim_core::model::Project;
@@ -14,6 +14,7 @@ use eframe::egui;
 
 use crate::config::Action;
 use crate::plate;
+use crate::plate::Card;
 use crate::templates;
 use crate::workspace::Stage;
 
@@ -24,6 +25,10 @@ pub const THUMB_WIDTH: u32 = 256;
 pub const THUMB_MAX_BYTES: usize = 64 * 1024;
 /// The recent cards shown (the config keeps its own, longer list).
 pub const RECENT_CARDS: usize = 12;
+/// AU6: the Start float's heading.
+pub const HEADING: &str = "Start";
+/// AU6: the Start float's recent rows; the rest are under File ▸ Open recent.
+const RECENT_ROWS: usize = 2;
 
 // ---- Quick start -----------------------------------------------------------
 
@@ -277,9 +282,11 @@ pub fn recent_cards(recent: &[PathBuf]) -> Vec<RecentCard> {
 }
 
 /// What the screen asks of the App.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WelcomeAction {
     Template(usize),
+    /// AU6: a card on the Start float: an entry of `templates::INTENTS`.
+    Intent(usize),
     Custom,
     Open,
     OpenRecent(PathBuf),
@@ -291,6 +298,15 @@ pub enum WelcomeAction {
     Settings,
     /// Close the screen shown over an open cut (File ▸ Welcome screen…).
     Back,
+}
+
+impl WelcomeAction {
+    /// This choice puts another document in place of the open one, so the
+    /// unsaved guard asks first. The rest ask for themselves, or drop nothing.
+    pub fn replaces_document(&self) -> bool {
+        use WelcomeAction::*;
+        matches!(self, Template(_) | Intent(_) | OpenRecent(_) | Sample | ShowMe(_))
+    }
 }
 
 // ---- What's New (GM19) -----------------------------------------------------
@@ -405,7 +421,40 @@ pub struct Welcome {
     pub over_editor: bool,
     /// GM19: the tab shown (What's New on a new version's first launch).
     pub tab: WelcomeTab,
+    /// AU6: `More sizes` is open.
+    pub more_open: bool,
+    /// AU6: how `Check your pen` stands.
+    pub pen: PenCheck,
+    /// AU6: the answer just came in: the body scrolls to it once.
+    pub pen_said: bool,
 }
+
+/// AU6: `Check your pen`: the next line drawn is read, and says one of two
+/// things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PenCheck {
+    #[default]
+    Idle,
+    /// Asked: the next finished stroke answers, and the float stays up for it.
+    Waiting,
+    Works,
+    NoPressure,
+}
+
+impl PenCheck {
+    /// What the row says now. Pressing it asks again.
+    pub fn words(self) -> &'static str {
+        match self {
+            PenCheck::Idle => "Check your pen",
+            PenCheck::Waiting => "Draw one line",
+            PenCheck::Works => "Pressure works",
+            PenCheck::NoPressure => "No pressure",
+        }
+    }
+}
+
+/// AU6: the plain fix under `No pressure`.
+pub const PEN_FIX: &str = "Turn on Windows Ink in your tablet's settings, then draw one line again.";
 
 impl Welcome {
     pub fn new(recent: &[PathBuf]) -> Self {
@@ -414,6 +463,9 @@ impl Welcome {
             textures: HashMap::new(),
             over_editor: false,
             tab: WelcomeTab::Start,
+            more_open: false,
+            pen: PenCheck::Idle,
+            pen_said: false,
         }
     }
 
@@ -426,7 +478,8 @@ impl Welcome {
     }
 
     /// Drop a card (Remove) without touching the disk.
-    pub fn forget(&mut self, path: &Path) {
+    #[cfg(test)]
+    pub fn forget(&mut self, path: &std::path::Path) {
         self.cards.retain(|c| c.path != path);
     }
 
@@ -453,8 +506,137 @@ fn section(ui: &mut egui::Ui, text: &str) {
     ui.label(egui::RichText::new(text).strong().color(plate::LEGEND));
 }
 
+/// A card on the float, and the gap between cards.
+const CARD_H: f32 = 44.0;
+const CARD_GAP: f32 = 8.0;
+/// The float's rows stand this far apart, and a group this much further from
+/// the next: spec 8.1's budget, with its last row unscrolled at the worst case.
+const ROW_GAP: f32 = 2.0;
+const GROUP_GAP: f32 = 6.0;
+
+/// AU6: the Start float's body, inside the frame's scroll: spec 8.1's entries
+/// in its budget's order. `show_at_startup` is the latch's.
+pub fn float_body(
+    ui: &mut egui::Ui,
+    w: &mut Welcome,
+    show_at_startup: &mut bool,
+) -> Option<WelcomeAction> {
+    let wide = ui.available_width();
+    ui.spacing_mut().item_spacing.y = ROW_GAP;
+    if w.tab == WelcomeTab::WhatsNew {
+        if plate::ghost_row(ui, "Back to Start", wide, None).clicked() {
+            w.tab = WelcomeTab::Start;
+        }
+        ui.add_space(GROUP_GAP);
+        whats_new_ui(ui);
+        return None;
+    }
+    let mut out = None;
+    intent_cards(ui, &mut out);
+    ui.add_space(GROUP_GAP);
+    let open = plate::ghost_row(ui, "Open a project", wide, None);
+    if open.card("Open a project saved on this computer").clicked() {
+        out = Some(WelcomeAction::Open);
+    }
+    let sample = plate::ghost_row(ui, "Open the example", wide, None);
+    if sample.card("A ball bounce to look through and draw on").clicked() {
+        out = Some(WelcomeAction::Sample);
+    }
+    if plate::ghost_row(ui, "More sizes", wide, Some(w.more_open)).clicked() {
+        w.more_open = !w.more_open;
+    }
+    if w.more_open {
+        more_sizes(ui, wide, &mut out);
+    }
+    recent_rows(ui, w, wide, &mut out);
+    ui.add_space(GROUP_GAP);
+    let half = (wide - ui.spacing().item_spacing.x) / 2.0;
+    ui.horizontal(|ui| {
+        let check = plate::ghost_row(ui, w.pen.words(), half, None);
+        if check.card("Draw one line and see whether your pen reports pressure").clicked() {
+            w.pen = PenCheck::Waiting;
+        }
+        if plate::ghost_row(ui, "What's new", half, None).clicked() {
+            w.tab = WelcomeTab::WhatsNew;
+        }
+    });
+    if w.pen == PenCheck::NoPressure {
+        let fix = ui.label(egui::RichText::new(PEN_FIX).color(plate::LEGEND));
+        if std::mem::take(&mut w.pen_said) {
+            fix.scroll_to_me(Some(egui::Align::Max));
+        }
+    }
+    plate::latch(ui, show_at_startup, "Show at startup")
+        .card("Off: the app opens on the same paper, without this panel");
+    out
+}
+
+/// The float's three cards. `A drawing` holds its other two sizes.
+fn intent_cards(ui: &mut egui::Ui, out: &mut Option<WelcomeAction>) {
+    let gap = ui.spacing_mut().item_spacing.y;
+    ui.spacing_mut().item_spacing.y = CARD_GAP;
+    let drawing = plate::choice_card(ui, "A drawing", CARD_H);
+    let mut right = drawing.rect.right() - 8.0;
+    for (word, intent) in [("Tall", templates::PICTURE_TALL), ("Square", templates::PICTURE_SQUARE)] {
+        let t = &templates::INTENTS[intent];
+        let chip = plate::card_chip(ui, drawing.rect, right, word);
+        right = chip.rect.left() - 4.0;
+        if chip.card(format!("{}×{}", t.width, t.height)).clicked() {
+            *out = Some(WelcomeAction::Intent(intent));
+        }
+    }
+    let t = &templates::INTENTS[templates::PICTURE];
+    if drawing.card(format!("One picture, {}×{}", t.width, t.height)).clicked() && out.is_none() {
+        *out = Some(WelcomeAction::Intent(templates::PICTURE));
+    }
+    let animation = plate::choice_card(ui, "An animation", CARD_H);
+    if animation.card("Drawings that move, on the paper already open").clicked() {
+        *out = Some(WelcomeAction::Intent(templates::ANIMATION));
+    }
+    ui.spacing_mut().item_spacing.y = gap;
+    let t = &templates::ALL[templates::COMIC];
+    let comic = plate::choice_card(ui, "A comic", CARD_H);
+    if comic.card(format!("A page: {}", t.name)).clicked() {
+        *out = Some(WelcomeAction::Template(templates::COMIC));
+    }
+}
+
+/// `More sizes`: every template, then the form.
+fn more_sizes(ui: &mut egui::Ui, wide: f32, out: &mut Option<WelcomeAction>) {
+    for (i, t) in templates::ALL.iter().enumerate() {
+        let row = plate::ghost_row(ui, t.name, wide, None);
+        if row.card(format!("{}\n{}", t.summary(), t.tooltip())).clicked() {
+            *out = Some(WelcomeAction::Template(i));
+        }
+    }
+    let custom = plate::ghost_row(ui, "Custom size", wide, None);
+    if custom.card("Name, size and frame rate of your own").clicked() {
+        *out = Some(WelcomeAction::Custom);
+    }
+}
+
+/// The last files still on disk, by name; hidden when there are none.
+fn recent_rows(ui: &mut egui::Ui, w: &Welcome, wide: f32, out: &mut Option<WelcomeAction>) {
+    let mut rows = w.cards.iter().filter(|c| !c.missing).take(RECENT_ROWS).peekable();
+    if rows.peek().is_none() {
+        return;
+    }
+    ui.add_space(GROUP_GAP);
+    plate::legend(ui, "Recent");
+    for c in rows {
+        let name = c.path.file_stem().map(|s| s.to_string_lossy().into_owned());
+        let name = name.unwrap_or_else(|| c.path.display().to_string());
+        let row = plate::ghost_row(ui, &name, wide, None);
+        if row.card(c.path.display().to_string()).clicked() {
+            *out = Some(WelcomeAction::OpenRecent(c.path.clone()));
+        }
+    }
+}
+
 /// The Welcome screen, drawn into the central area (or a modal over an
-/// open cut). `binds` names the chords beside Open… and the checklist.
+/// open cut). `binds` names the chords beside Open… and the checklist. AU6:
+/// the Start float took its place on screen; its tests still read it here.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn ui(
     ui: &mut egui::Ui,
     w: &mut Welcome,
@@ -1208,9 +1390,9 @@ mod tests {
         let mut c = crate::config::Config::default();
         // Nothing open: the Welcome screen.
         assert_eq!(startup_route(false, false, None, &c), Startup::Welcome);
-        // The latch off: the New Project form, as before GM8.
+        // The latch off: the same paper with no float (AU6; a form before).
         c.ui.show_welcome = false;
-        assert_eq!(startup_route(false, false, None, &c), Startup::NewForm);
+        assert_eq!(startup_route(false, false, None, &c), Startup::ReadyPaper);
         // A cut restored under the start-up screen (recovery, a handover)
         // drops it; a form over the screen keeps it for its Cancel.
         c.ui.show_welcome = true;

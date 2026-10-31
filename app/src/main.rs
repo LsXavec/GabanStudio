@@ -58,6 +58,8 @@ mod audock_tests;
 #[cfg(test)]
 mod aurail_tests;
 #[cfg(test)]
+mod austart_tests;
+#[cfg(test)]
 mod austrip_tests;
 mod uidump;
 #[cfg(test)]
@@ -2950,6 +2952,17 @@ impl App {
                     }
                 }
             }
+            // AU6: a Start float choice, past the guard. The seam says what
+            // it does; this is the part with a window to do it in.
+            AppRequest::Start(action) => {
+                let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
+                match apply_start(action, rs, dir, &self.config.ui) {
+                    StartOutcome::Replace(editor) => self.editor = Some(*editor),
+                    StartOutcome::Request(r) => self.handle_request(ctx, r),
+                    StartOutcome::Failed(why) => self.notes.push(why),
+                    StartOutcome::Stay => {}
+                }
+            }
             // GM18: the pages' folder is the shell's; the Manga pane's
             // options say how they are written.
             AppRequest::ExportPages => {
@@ -2967,7 +2980,7 @@ impl App {
 }
 
 /// What [`Editor::perform`] did with an action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Performed {
     /// The editor carried it out.
     Done,
@@ -2979,8 +2992,10 @@ pub enum Performed {
 }
 
 /// The shell-level verbs an action can ask for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppRequest {
+    /// AU6: what the Start float chose (spec 8.1).
+    Start(welcome::WelcomeAction),
     NewProject,
     Open,
     /// GM21: File ▸ Open the sample cut.
@@ -3083,6 +3098,15 @@ impl Editor {
                     self.request_welcome = true;
                 }
             }
+            // AU6: the same float, on its other tab. It opens nothing but a
+            // float, so no guard asks.
+            Action::WhatsNew => {
+                let mut w = welcome::Welcome::over_editor(&self.recent);
+                w.tab = welcome::WelcomeTab::WhatsNew;
+                self.open_start(w);
+            }
+            // AU6: the shell stores it, as Settings does.
+            Action::ToggleLockPositions => self.lock_request = Some(!self.ui_lock),
             // GM10: the cut's paper window (its "set paper" is the edit).
             Action::PaperSize => self.paper_form = Some(PaperForm::of(&self.state)),
             // GM11: the delivery jobs' pane, and the composite viewers'
@@ -3645,6 +3669,8 @@ impl Editor {
             | Action::ConvertColorsToSrgb
             | Action::ProjectSettings
             | Action::WelcomeScreen
+            | Action::WhatsNew
+            | Action::ToggleLockPositions
             | Action::PaperSize
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
@@ -3705,6 +3731,8 @@ fn is_chrome(action: Action) -> bool {
             | Action::ConvertColorsToSrgb
             | Action::ProjectSettings
             | Action::WelcomeScreen
+            | Action::WhatsNew
+            | Action::ToggleLockPositions
             | Action::PaperSize
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
@@ -4112,7 +4140,8 @@ struct Editor {
     graph: Option<graphcomp::GraphCompositor>,
     /// Set when the user clicks "New…"; the App picks it up to show the dialog.
     request_new: bool,
-    /// GM8: File ▸ Welcome screen… was answered; the App shows the screen.
+    /// GM8: File ▸ Welcome screen… was answered; the shell opens the float
+    /// with the config's recent list ([`Editor::start_asked`]).
     request_welcome: bool,
     /// Set when the user clicks "settings".
     request_settings: bool,
@@ -4277,9 +4306,25 @@ struct Editor {
     pane_rects: Vec<(Pane, egui::Rect, egui::LayerId)>,
     /// AU4: who is open over the canvas. Not saved.
     floats: floats::Floats,
+    /// AU6: the Start float, drawn in `Editor::ui`, so nothing but a stroke
+    /// on its own rect is ever behind a question.
+    pub start: Option<welcome::Welcome>,
+    /// AU6: asked for during a stroke: it opens at pen-up (spec 4.5).
+    start_waiting: Option<welcome::Welcome>,
+    /// AU6: `strokes_done` when last looked at. A change is a finished stroke.
+    strokes_seen: u64,
+    /// AU6: `config.ui.show_welcome`, fed by the shell like the lock, and the
+    /// float's latch asking the shell to store it.
+    pub show_start: bool,
+    pub show_start_request: Option<bool>,
+    /// AU6: Lock UI positions this frame, and the verb asking the shell to
+    /// store a flip.
+    ui_lock: bool,
+    pub lock_request: Option<bool>,
     /// AU4: the strip's latch, for this session: set when a document opens
-    /// with more than one frame and by Add drawing, and never cleared by
-    /// itself. The band and the rail's reference height read it.
+    /// with more than one frame, by Add drawing and by the Animation intent
+    /// (AU6), and never cleared by itself. The band and the rail's reference
+    /// height read it.
     strip_open: bool,
     /// AU4: the full-band latch (spec R17): set by the second drawing and
     /// never cleared in a session. The rail's Flip reads it, AU5's band too.
@@ -4352,8 +4397,8 @@ fn gcd(a: u32, b: u32) -> u32 {
     if b == 0 { a } else { gcd(b, a % b) }
 }
 
-/// GM8 start-up route: the Welcome screen unless its latch is off (then
-/// the New Project form, as before).
+/// GM8 start-up route: the Start float unless its latch is off (then the
+/// same paper with no float, AU6).
 fn startup_shows_welcome(config: &Config) -> bool {
     config.ui.show_welcome
 }
@@ -4363,16 +4408,18 @@ fn startup_shows_welcome(config: &Config) -> bool {
 enum Startup {
     /// A cut, a form or the screen is up: leave it.
     Keep,
+    /// AU6: the ready paper, with the Start float over it.
     Welcome,
-    NewForm,
+    /// AU6: the ready paper alone.
+    ReadyPaper,
     /// A cut opened under the start-up screen (a restore, a card): drop it.
     DropWelcome,
 }
 
 /// GM8: the start-up route from the facts alone — nothing open and no
-/// dialog shows the Welcome screen (or the New Project form with its latch
-/// off); a cut opening drops the start-up screen, but not one asked for
-/// over the cut (File ▸ Welcome screen…).
+/// dialog makes the ready paper (AU6), with the Start float unless its latch
+/// is off; a cut opening drops a start-up screen, but not one asked for over
+/// the cut (File ▸ Welcome screen…).
 fn startup_route(
     editor: bool,
     form: bool,
@@ -4384,7 +4431,7 @@ fn startup_route(
             if startup_shows_welcome(config) {
                 Startup::Welcome
             } else {
-                Startup::NewForm
+                Startup::ReadyPaper
             }
         }
         Some(w) if editor && !w.over_editor => Startup::DropWelcome,
@@ -4456,6 +4503,7 @@ fn merge_quick_start(config: &mut Config, ticks: &[bool; 5]) -> bool {
 
 /// GM8: Remove on a Welcome recent card — off the config's list and the
 /// screen (the caller saves the config; the file is never touched).
+#[cfg(test)]
 fn forget_recent(config: &mut Config, w: &mut welcome::Welcome, path: &std::path::Path) {
     config.session.recent.retain(|p| p != path);
     w.forget(path);
@@ -4487,6 +4535,66 @@ fn welcome_show_me(
     (editor, did)
 }
 
+/// AU6: an entry of `INTENTS`: one of the Start float's cards, or the ready
+/// paper, which is the first of them.
+fn open_intent(
+    i: usize,
+    rs: Option<&RenderState>,
+    data_dir: Option<&std::path::Path>,
+    ui: &config::UiConfig,
+) -> Editor {
+    let i = i.min(templates::INTENTS.len() - 1);
+    let mut editor = Editor::boot(templates::INTENTS[i].build(), rs, data_dir, ui);
+    editor.enter_intent(i);
+    editor
+}
+
+/// AU6: the Start float over `editor`, at start-up: a new version's first
+/// launch opens it on What's New, once. True when the config changed (the
+/// caller saves).
+fn start_over(editor: &mut Editor, config: &mut Config) -> bool {
+    let (w, seen) = welcome::open_at_startup(&mut config.ui, &config.session.recent);
+    editor.open_start(w);
+    seen
+}
+
+/// AU6: what a Start choice does.
+pub(crate) enum StartOutcome {
+    /// Another document, in an editor of its own.
+    Replace(Box<Editor>),
+    /// The shell's to carry out: its dialogs, its windows.
+    Request(AppRequest),
+    /// It could not be done, and this says why. No document was touched.
+    Failed(String),
+    Stay,
+}
+
+/// AU6: what a Start choice does. No App, no window, no dialog: the unsaved
+/// guard has already been past ([`Editor::choose_start`]).
+pub(crate) fn apply_start(
+    a: welcome::WelcomeAction,
+    rs: Option<&RenderState>,
+    dir: Option<&std::path::Path>,
+    ui: &config::UiConfig,
+) -> StartOutcome {
+    use welcome::WelcomeAction as Choice;
+    let replace = |editor: Editor| StartOutcome::Replace(Box::new(editor));
+    match a {
+        Choice::Template(i) => replace(open_template(i, rs, dir, ui)),
+        Choice::Intent(i) => replace(open_intent(i, rs, dir, ui)),
+        Choice::Custom => StartOutcome::Request(AppRequest::NewProject),
+        Choice::Open => StartOutcome::Request(AppRequest::Open),
+        Choice::OpenRecent(path) => match AppState::load_from(path) {
+            Ok(state) => replace(Editor::boot(state, rs, dir, ui)),
+            Err(msg) => StartOutcome::Failed(format!("could not open that project — {msg}")),
+        },
+        Choice::Sample => replace(Editor::boot(sample::build_sample(), rs, dir, ui)),
+        Choice::ShowMe(step) => replace(welcome_show_me(step, rs, dir, ui).0),
+        Choice::Settings => StartOutcome::Request(AppRequest::Settings),
+        Choice::Remove(_) | Choice::Back => StartOutcome::Stay,
+    }
+}
+
 /// GM2: an action that drops the open document — asked about first when
 /// the document has unsaved changes.
 #[derive(Debug, Clone, PartialEq)]
@@ -4502,6 +4610,8 @@ pub enum Leave {
     Welcome,
     /// GM21: File ▸ Open the sample cut.
     Sample,
+    /// AU6: a Start float choice that puts another document here.
+    Start(welcome::WelcomeAction),
 }
 
 /// GM2: an edit to the recent list from the Open Recent menu.
@@ -4932,6 +5042,52 @@ impl Editor {
     fn enter_template(&mut self, t: &templates::Template) {
         self.sheet_in_draw |= t.sheet_on;
         self.enter_room(t.room);
+        // AU6: Timing opens on its Viewer with Select armed: an Animatic's
+        // first move is a stroke on the board, so the canvas comes forward
+        // with the brush.
+        if t.room == Stage::Edit {
+            self.open_pane(Pane::Canvas);
+            self.canvas.arm_paint(false, &mut self.state);
+        }
+    }
+
+    /// AU6: an entry of `INTENTS`, entered: Animation alone opens the strip.
+    fn enter_intent(&mut self, i: usize) {
+        self.enter_template(&templates::INTENTS[i]);
+        self.strip_open = i == templates::ANIMATION;
+    }
+
+    /// AU6: the Start float, now or at pen-up. It stands on the right, so
+    /// Layers makes way for it (spec 4.5).
+    pub(crate) fn open_start(&mut self, w: welcome::Welcome) {
+        if self.canvas.stroke_active() {
+            self.start_waiting = Some(w);
+            return;
+        }
+        self.floats.close(floats::Float::Layers);
+        self.start = Some(w);
+    }
+
+    /// AU6: the shell's half of File ▸ Welcome screen…: the float, over the
+    /// open cut.
+    pub(crate) fn start_asked(&mut self) {
+        if std::mem::take(&mut self.request_welcome) {
+            self.open_start(welcome::Welcome::over_editor(&self.recent));
+        }
+    }
+
+    /// AU6: what the float chose. A choice that puts another document here
+    /// goes through the unsaved guard first, inside the editor, so the Rig
+    /// covers it; the others are the shell's, and their own paths ask.
+    fn choose_start(&mut self, action: welcome::WelcomeAction, ctx: &egui::Context) {
+        use welcome::WelcomeAction as Choice;
+        if self.canvas.is_guest && (action.replaces_document() || action == Choice::Open) {
+            self.state.refuse("refused — leave the room first (Settings › Session) to open your own file");
+        } else if action.replaces_document() {
+            self.leave(Leave::Start(action), ctx);
+        } else {
+            self.requests.push(AppRequest::Start(action));
+        }
     }
 
     /// AU3: the dock is a place off the spine, named `place` on its pill.
@@ -5186,6 +5342,13 @@ impl Editor {
             help: menus::HelpWindows::default(),
             pane_rects: Vec::new(),
             floats: floats::Floats::default(),
+            start: None,
+            start_waiting: None,
+            strokes_seen: 0,
+            show_start: true,
+            show_start_request: None,
+            ui_lock: false,
+            lock_request: None,
             strip_open: false,
             full_band: false,
             strip: strip::Strip::default(),
@@ -5285,6 +5448,13 @@ impl Editor {
             help: menus::HelpWindows::default(),
             pane_rects: Vec::new(),
             floats: floats::Floats::default(),
+            start: None,
+            start_waiting: None,
+            strokes_seen: 0,
+            show_start: true,
+            show_start_request: None,
+            ui_lock: false,
+            lock_request: None,
             strip_open: false,
             full_band: false,
             strip: strip::Strip::default(),
@@ -5825,6 +5995,7 @@ impl Editor {
             // GM18: the pen's ruler snap, and the panel tool armed.
             Action::ToggleRulerSnap => Some(self.state.manga.snap),
             Action::PanelTool => Some(self.canvas.tool == canvas::CanvasTool::Panel),
+            Action::ToggleLockPositions => Some(self.ui_lock),
             _ => None,
         }
     }
@@ -5839,7 +6010,7 @@ impl Editor {
             return Performed::Ignored;
         }
         let r = self.perform(action);
-        match r {
+        match r.clone() {
             Performed::App(AppRequest::NewProject) => self.leave(Leave::New, ctx),
             Performed::App(AppRequest::Open) => self.leave(Leave::Open, ctx),
             Performed::App(AppRequest::OpenSample) => self.leave(Leave::Sample, ctx),
@@ -5933,15 +6104,23 @@ impl Editor {
                     Err(e) => self.state.refuse(format!("could not open the autosave — {e}")),
                 }
             }
+            // AU6: the shell swaps the editor; a gesture lands here first.
+            Leave::Start(action) => {
+                self.canvas.finish_gesture(&mut self.state);
+                self.requests.push(AppRequest::Start(action));
+            }
         }
         if self.state.untitled_group != doc {
             // Another document: the canvas resyncs, and the last autosave
             // belonged to the one before (the running record must not pair
-            // them) — so does one still being written.
+            // them) — so does one still being written. AU6: and a document
+            // chosen is the end of the Start float.
             self.canvas.engine_changed();
             self.autosave_job = None;
             self.last_autosave = None;
             self.last_autosave_at = None;
+            self.start = None;
+            self.start_waiting = None;
         }
     }
 
@@ -6302,23 +6481,24 @@ impl eframe::App for App {
         }
         // GM8: the UI scale (Settings ▸ General), as egui's zoom factor.
         apply_ui_scale(ui.ctx(), &self.config);
-        // Nothing open and no dialog -> the Welcome screen (GM8), or the
-        // New Project form when its "Show at startup" latch is off.
-        match startup_route(
+        // Nothing open and no dialog -> the ready paper (AU6), with the Start
+        // float over it unless its "Show at startup" latch is off.
+        let route = startup_route(
             self.editor.is_some(),
             self.new_form.is_some(),
             self.welcome.as_ref(),
             &self.config,
-        ) {
-            Startup::Welcome => {
+        );
+        match route {
+            Startup::Welcome | Startup::ReadyPaper => {
+                let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
+                let mut paper = open_intent(templates::ANIMATION, rs, dir, &self.config.ui);
                 // GM19: a new version's first launch opens on What's New.
-                let (w, seen) = welcome::open_at_startup(&mut self.config.ui, &self.config.session.recent);
-                if seen {
+                if route == Startup::Welcome && start_over(&mut paper, &mut self.config) {
                     self.config.save();
                 }
-                self.welcome = Some(w);
+                self.editor = Some(paper);
             }
-            Startup::NewForm => self.new_form = Some(NewProjectForm::default()),
             Startup::DropWelcome => self.welcome = None,
             Startup::Keep => {}
         }
@@ -6387,6 +6567,7 @@ impl eframe::App for App {
             }
             editor.scrub_audio = self.config.perf.scrub_audio;
             editor.state.ram.set_cap_mb(self.config.perf.ram_preview_mb);
+            editor.show_start = self.config.ui.show_welcome;
             editor.ui(
                 ui,
                 &pen,
@@ -6405,6 +6586,15 @@ impl eframe::App for App {
             // AU3: the Timing sheet button's choice, remembered.
             if let Some(on) = editor.sheet_request.take() {
                 self.config.ui.sheet_in_draw = on;
+                self.config.save();
+            }
+            // AU6: the Start float's latch, and the lock's verb.
+            if let Some(on) = editor.show_start_request.take() {
+                self.config.ui.show_welcome = on;
+                self.config.save();
+            }
+            if let Some(on) = editor.lock_request.take() {
+                self.config.ui.lock_positions = on;
                 self.config.save();
             }
             // Stage 4: the strip's stack requests (the App owns config).
@@ -6464,10 +6654,7 @@ impl eframe::App for App {
                 editor.request_new = false;
                 self.new_form = Some(NewProjectForm::default());
             }
-            if editor.request_welcome {
-                editor.request_welcome = false;
-                self.welcome = Some(welcome::Welcome::over_editor(&self.config.session.recent));
-            }
+            editor.start_asked();
             if editor.request_settings {
                 editor.request_settings = false;
                 self.settings_open = true;
@@ -6779,11 +6966,8 @@ impl eframe::App for App {
         }
 
         // New Project dialog: full-screen when no project, modal window over one.
-        // The Welcome screen likewise (GM8: a modal over an open cut).
         if self.new_form.is_some() {
             self.show_new_dialog(ui);
-        } else if self.welcome.is_some() {
-            self.show_welcome(ui);
         }
 
         // Cap the redraw rate (playback still runs at the project frame rate).
@@ -6822,98 +7006,6 @@ impl eframe::App for App {
 }
 
 impl App {
-    /// GM8: the Welcome screen — the central area when nothing is open, a
-    /// modal over the cut when File ▸ Welcome screen… asked — and what its
-    /// cards ask. A card that opens a document ends the screen.
-    fn show_welcome(&mut self, ui: &mut egui::Ui) {
-        let Some(mut w) = self.welcome.take() else {
-            return;
-        };
-        let mut show = self.config.ui.show_welcome;
-        let ticks = self.config.ui.quick_start;
-        let binds = &self.config.keybinds;
-        let mut action = None;
-        let over_cut = self.editor.is_some();
-        if over_cut {
-            let ctx = ui.ctx().clone();
-            let room = ctx.content_rect();
-            let frame = plate::dialog_frame(&ctx.global_style());
-            let modal = egui::Modal::new(egui::Id::new("gm8_welcome")).frame(frame).show(&ctx, |ui| {
-                ui.set_width((room.width() - 120.0).clamp(320.0, 980.0));
-                ui.set_max_height((room.height() - 120.0).max(240.0));
-                welcome::ui(ui, &mut w, &mut show, &ticks, binds)
-            });
-            // Esc or a click outside: back to the cut.
-            let back = modal.should_close();
-            action = modal.inner.or(back.then_some(welcome::WelcomeAction::Back));
-        } else {
-            egui::CentralPanel::default().show(ui, |ui| {
-                action = welcome::ui(ui, &mut w, &mut show, &ticks, binds);
-            });
-        }
-        if show != self.config.ui.show_welcome {
-            self.config.ui.show_welcome = show;
-            self.config.save();
-        }
-        let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
-        let remembered = self.config.ui.clone();
-        let opened = |state: AppState| Editor::boot(state, rs, dir, &remembered);
-        let mut done = false;
-        match action {
-            Some(welcome::WelcomeAction::Template(i)) => {
-                self.editor = Some(open_template(i, rs, dir, &remembered));
-                done = true;
-            }
-            // The form shows over the screen; its Cancel comes back here.
-            Some(welcome::WelcomeAction::Custom) => {
-                self.new_form = Some(NewProjectForm::default());
-            }
-            Some(welcome::WelcomeAction::Open) => match AppState::pick_and_open() {
-                Some(Ok(state)) => {
-                    self.editor = Some(opened(state));
-                    done = true;
-                }
-                Some(Err(msg)) => {
-                    self.notes.push(format!("could not open that project — {msg}"));
-                }
-                None => {}
-            },
-            Some(welcome::WelcomeAction::OpenRecent(path)) => {
-                match AppState::load_from(path.clone()) {
-                    Ok(state) => {
-                        self.editor = Some(opened(state));
-                        done = true;
-                    }
-                    Err(msg) => {
-                        self.notes.push(format!("could not open that project — {msg}"));
-                    }
-                }
-            }
-            Some(welcome::WelcomeAction::Remove(path)) => {
-                forget_recent(&mut self.config, &mut w, &path);
-                self.config.save();
-            }
-            Some(welcome::WelcomeAction::Sample) => {
-                self.editor = Some(opened(sample::build_sample()));
-                done = true;
-            }
-            Some(welcome::WelcomeAction::ShowMe(step)) => {
-                self.editor = Some(welcome_show_me(step, rs, dir, &remembered).0);
-                done = true;
-            }
-            // Over a cut the modal would sit above the Settings window.
-            Some(welcome::WelcomeAction::Settings) => {
-                self.settings_open = true;
-                done = over_cut;
-            }
-            Some(welcome::WelcomeAction::Back) => done = true,
-            None => {}
-        }
-        if !done {
-            self.welcome = Some(w);
-        }
-    }
-
     fn show_new_dialog(&mut self, ui: &mut egui::Ui) {
         let has_editor = self.editor.is_some();
         // GM8: Custom size… from the Welcome screen can go back to it.
@@ -8009,6 +8101,91 @@ impl Editor {
         }
     }
 
+    /// AU6: a project file dropped on the window opens, past the unsaved
+    /// guard; anything else is said no to. The first project wins.
+    fn open_dropped(&mut self, ctx: &egui::Context) {
+        let paths: Vec<_> =
+            ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
+        if paths.is_empty() {
+            return;
+        }
+        let project = paths.iter().find(|p| p.extension().is_some_and(|e| e == "animproj"));
+        match project {
+            Some(_) if self.canvas.is_guest => {
+                self.state.refuse("refused — leave the room first (Settings › Session) to open your own file");
+            }
+            Some(path) => self.leave(Leave::OpenPath(path.clone()), ctx),
+            None => self.state.refuse("refused — only a project file (.animproj) opens here"),
+        }
+    }
+
+    /// AU6: Esc closes the Start float, when nothing nearer has the key: a
+    /// modal, a menu, or a field that keeps it. Under a stroke it waits for
+    /// the stroke, whose end closes it.
+    fn start_esc(&mut self, ctx: &egui::Context) {
+        if self.start.is_none()
+            || self.palette.open
+            || self.canvas.stroke_active()
+            || ctx.memory(|m| m.top_modal_layer()).is_some()
+            || egui::Popup::is_any_open(ctx)
+            || ctx.egui_wants_keyboard_input()
+        {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.start = None;
+        }
+    }
+
+    /// AU6: the Start float over the pane the dock just drew (spec 8.1), and
+    /// what ends it: a finished stroke, the Layers float opening, its `×`.
+    fn start_ui(&mut self, ctx: &egui::Context, dock: egui::Rect) {
+        let stroked = self.state.strokes_done != self.strokes_seen;
+        self.strokes_seen = self.state.strokes_done;
+        // A finished stroke accepts the paper under it, and stays on it. One
+        // `Check your pen` asked for is that check's answer instead.
+        if stroked && let Some(w) = &mut self.start {
+            if w.pen == welcome::PenCheck::Waiting {
+                w.pen = self.canvas.pen_verdict();
+                w.pen_said = true;
+            } else {
+                self.start = None;
+            }
+        }
+        if !self.canvas.stroke_active()
+            && let Some(w) = self.start_waiting.take()
+        {
+            self.open_start(w);
+        }
+        if self.floats.is_open(floats::Float::Layers) {
+            self.start = None;
+        }
+        let Some(mut w) = self.start.take() else { return };
+        let host = if visible_panes(&self.dock).contains(&Pane::Canvas) && !self.float_canvas.open {
+            self.canvas.dbg_rect
+        } else {
+            dock
+        };
+        let (pos, size) = floats::start_place(host);
+        let head = floats::Head { words: welcome::HEADING, role: plate::Role::Title, rule: true };
+        let mut show = self.show_start;
+        let mut action = None;
+        let (shown, close) = floats::frame(ctx, head, pos, size, host, |ui| {
+            action = welcome::float_body(ui, &mut w, &mut show);
+        });
+        self.pane_rects.push((Pane::Canvas, shown.rect, shown.layer_id));
+        if show != self.show_start {
+            self.show_start = show;
+            self.show_start_request = Some(show);
+        }
+        if !close {
+            self.start = Some(w);
+        }
+        if let Some(action) = action {
+            self.choose_start(action, ctx);
+        }
+    }
+
     fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -8024,8 +8201,10 @@ impl Editor {
         // AU5: from here, so the strip's entry in the band survives the dock.
         self.pane_rects.clear();
         self.strip.begin();
+        self.ui_lock = ui_lock;
         // GM2: never lose work — close guard, save modal, title, autosave.
         self.worksafe_frame(ui.ctx());
+        self.open_dropped(ui.ctx());
         // AU5: a document opened. The strip opens with it when it holds more
         // than one frame, and its scale is worked out afresh. A frame added
         // later opens nothing: that refit would land under a stroke.
@@ -8062,6 +8241,7 @@ impl Editor {
         menus::publish(ui.ctx(), binds);
         self.palette_ui(ui.ctx(), binds);
         self.help_windows(ui.ctx(), binds);
+        self.start_esc(ui.ctx());
         // THE BRUSH LIBRARY (PSD-brush-library): the rail raised the
         // flag; the import runs HERE, where presets are mutable, and
         // never mid-stroke (NEVER-DO 3).
@@ -9029,7 +9209,8 @@ impl Editor {
             locked: if ui_lock { &self.held } else { &[] },
         };
         let dock_style = dock_style(ui.style().as_ref(), &self.dock);
-        plate::note_dock(ui, ui.available_rect_before_wrap());
+        let dock_rect = ui.available_rect_before_wrap();
+        plate::note_dock(ui, dock_rect);
         // UI lock (Settings -> UI Features): the layout freezes — no tab
         // dragging and no splits, and the recipe's panes stay open — but the
         // arrangement is kept.
@@ -9073,6 +9254,7 @@ impl Editor {
         if std::mem::take(&mut self.canvas.request_brush_maker) {
             self.open_brush_maker();
         }
+        self.start_ui(ui.ctx(), dock_rect);
 
         // Phase 5 step 2: the canvas in its own OS window. Tabs' borrows of
         // state/canvas/paint end above, so this can borrow them fresh.

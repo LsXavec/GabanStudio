@@ -285,11 +285,24 @@ pub struct Reading {
 impl Reading {
     /// The frame `ctx` last finished, with `shapes` as it painted them.
     pub fn of_frame(ctx: &Context, shapes: &[ClippedShape]) -> Self {
+        Self::read(ctx, shapes, None)
+    }
+
+    /// AU6: one float of that frame: the rows on its `layer`, the words
+    /// inside its `rect`.
+    pub fn of_float(ctx: &Context, shapes: &[ClippedShape], layer: LayerId, rect: Rect) -> Self {
+        Self::read(ctx, shapes, Some((layer, rect)))
+    }
+
+    fn read(ctx: &Context, shapes: &[ClippedShape], only: Option<(LayerId, Rect)>) -> Self {
         let window = ctx.content_rect();
         let rows = ctx.viewport(|v| {
             let w = &v.prev_pass.widgets;
             let mut rows = Vec::new();
-            for (_, rects) in w.layers() {
+            for (layer, rects) in w.layers() {
+                if only.is_some_and(|(o, _)| o != *layer) {
+                    continue;
+                }
                 for r in rects.iter().filter(|r| interactive(r.sense)) {
                     let at = r.interact_rect.intersect(window);
                     if at.width() > 0.0 && at.height() > 0.0 {
@@ -308,7 +321,8 @@ impl Reading {
         // AU5: the strip is one surface, and each sheet on it is a control
         // (spec 7.2), up to the cap.
         let sheets = crate::plate::strip_sheets(ctx);
-        rows.extend(sheets.iter().take(crate::strip::CENSUS_CAP).map(|at| Row {
+        let cap = if only.is_some() { 0 } else { crate::strip::CENSUS_CAP };
+        rows.extend(sheets.iter().take(cap).map(|at| Row {
             w: at.width().round_ties_even(),
             h: at.height().round_ties_even(),
             focus: true,
@@ -318,7 +332,8 @@ impl Reading {
         for (t, clip) in texts_of(shapes) {
             let at = t.visual_bounding_rect().intersect(clip.intersect(window));
             let text = t.galley.text();
-            if at.width() > 0.0 && at.height() > 0.0 && !text.trim().is_empty() {
+            let inside = only.is_none_or(|(_, rect)| rect.contains_rect(at));
+            if inside && at.width() > 0.0 && at.height() > 0.0 && !text.trim().is_empty() {
                 let one_line = text.replace(['\n', '\t'], " ").replace('\r', "");
                 texts.push((at.height().round_ties_even(), one_line));
             }

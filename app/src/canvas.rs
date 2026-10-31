@@ -2128,6 +2128,16 @@ impl CanvasView {
         )
     }
 
+    /// AU6: what `Check your pen` reads off the last stroke: it carried real
+    /// tablet force, or it came in as a mouse. A mouse has no force to read.
+    pub(crate) fn pen_verdict(&self) -> crate::welcome::PenCheck {
+        if self.dbg_mouse_mode || self.dbg_some == 0 {
+            crate::welcome::PenCheck::NoPressure
+        } else {
+            crate::welcome::PenCheck::Works
+        }
+    }
+
     /// The engine changed under the displayed texture (session snapshot
     /// applied) — resync the raster display from truth.
     pub(crate) fn engine_changed(&mut self) {

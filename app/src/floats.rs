@@ -173,10 +173,49 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
     // host's cap stands in until the Area has one.
     let id = egui::Id::new(("float", f.heading()));
     let tall = ctx.memory(|m| m.area_rect(id)).map_or(size.y, |r| r.height().min(size.y));
+    let pos = f.pos(host, rail_top, vec2(size.x, tall));
+    let head = Head { words: f.heading(), role: plate::Role::Heading, rule: false };
+    let (shown, close) = frame(ctx, head, pos, size, host, |ui| body(ui, f, args));
+    if close {
+        args.floats.close(f);
+    }
+    if let Some(rects) = args.pane_rects.as_deref_mut() {
+        rects.push((f.pane(), shown.rect, shown.layer_id));
+    }
+}
+
+/// AU6: where the Start float stands in a pane of `pane`, and its size (spec
+/// 4.5): top right, and wide enough only to stay past the pane's centre.
+pub fn start_place(pane: Rect) -> (Pos2, Vec2) {
+    let w = (pane.width() / 2.0 - 20.0).clamp(240.0, 320.0);
+    let size = vec2(w, (pane.height() - 24.0).min(460.0));
+    (pos2(pane.right() - INSET - size.x, pane.top() + INSET), size)
+}
+
+/// A float's heading: its words, their type role, and a rule under them.
+pub struct Head<'a> {
+    pub words: &'a str,
+    pub role: plate::Role,
+    pub rule: bool,
+}
+
+/// A float's frame, each float's and the Start float's: an `Area` at `Middle`,
+/// its heading and close key outside the scroll. Says the area's response,
+/// and whether the close key was pressed.
+pub fn frame(
+    ctx: &egui::Context,
+    head: Head,
+    pos: Pos2,
+    size: Vec2,
+    host: Rect,
+    body: impl FnOnce(&mut egui::Ui),
+) -> (egui::Response, bool) {
     let inner = size.x - 2.0 * f32::from(MARGIN);
-    let shown = egui::Area::new(id)
+    let mut close = false;
+    let heading = head.words;
+    let shown = egui::Area::new(egui::Id::new(("float", heading)))
         .order(egui::Order::Middle)
-        .fixed_pos(f.pos(host, rail_top, vec2(size.x, tall)))
+        .fixed_pos(pos)
         .constrain_to(host)
         .fade_in(false)
         .show(ctx, |ui| {
@@ -186,16 +225,17 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
             plate::island_frame(ui.style(), MARGIN).show(ui, |ui| {
                 ui.set_width(inner);
                 ui.horizontal(|ui| {
-                    let words = egui::RichText::new(f.heading()).font(plate::Role::Heading.font());
+                    let words = egui::RichText::new(heading).font(head.role.font());
                     ui.label(words.color(plate::INK));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let name = format!("Close {}", f.heading());
-                        if plate::close_key(ui, &name).clicked() {
-                            args.floats.close(f);
-                        }
+                        close = plate::close_key(ui, &format!("Close {heading}")).clicked();
                     });
                 });
-                ui.add_space(4.0);
+                if head.rule {
+                    ui.add(egui::Separator::default().spacing(2.0));
+                } else {
+                    ui.add_space(4.0);
+                }
                 let spent = ui.cursor().top() - ui.max_rect().top() + 2.0 * f32::from(MARGIN);
                 // Drag too: a pen has no wheel, and egui's default only starts
                 // at the first touch, past the press of the first pull. It has
@@ -210,21 +250,19 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
                 let widgets = &mut ui.visuals_mut().widgets;
                 let ink = std::mem::replace(&mut widgets.inactive.fg_stroke.color, plate::INK3);
                 let scroll = egui::ScrollArea::vertical()
-                    .id_salt(("float_scroll", f.heading()))
+                    .id_salt(("float_scroll", heading))
                     .scroll_source(egui::scroll_area::ScrollSource::ALL)
                     .max_height((size.y - spent).max(40.0))
                     .auto_shrink([false, true])
                     .show(ui, |ui| {
                         ui.visuals_mut().widgets.inactive.fg_stroke.color = ink;
                         ui.set_width(ui.available_width());
-                        body(ui, f, args);
+                        body(ui);
                     });
                 plate::note_viewport(ui, scroll.inner_rect, [false, true]);
             });
         });
-    if let Some(rects) = args.pane_rects.as_deref_mut() {
-        rects.push((f.pane(), shown.response.rect, shown.response.layer_id));
-    }
+    (shown.response, close)
 }
 
 /// The open floats, over `host`.

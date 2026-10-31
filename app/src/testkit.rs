@@ -140,6 +140,7 @@ impl Rig {
         }
         editor.scrub_audio = config.perf.scrub_audio;
         editor.state.ram.set_cap_mb(config.perf.ram_preview_mb);
+        editor.show_start = config.ui.show_welcome;
         editor.ui(
             ui,
             &config.pen,
@@ -165,6 +166,17 @@ impl Rig {
             if let Some(dir) = &self.editor.data_dir {
                 self.config.save_to(dir).expect("the rig's config saves");
             }
+        }
+        // AU6: the Start float's latch and the lock's verb, likewise.
+        let (show, lock) = (self.editor.show_start_request.take(), self.editor.lock_request.take());
+        if let Some(on) = show {
+            self.config.ui.show_welcome = on;
+        }
+        if let Some(on) = lock {
+            self.config.ui.lock_positions = on;
+        }
+        if let (true, Some(dir)) = (show.is_some() || lock.is_some(), &self.editor.data_dir) {
+            self.config.save_to(dir).expect("the rig's config saves");
         }
         // GM4: the OPTIONS row's stabilizer level, saved as the App saves it.
         if let Some(level) = self.editor.canvas.stabilizer_request.take() {
@@ -203,9 +215,9 @@ impl Rig {
 
 /// AU1: how a harness starts (the spec's three boots). `Frozen` keeps today's
 /// behaviour for every test about something else, so a change of default
-/// cannot disturb it; `Shipped` is a fresh install past its first launch;
-/// `FirstRun` is that first launch. The last two are one boot until the
-/// Start float lands.
+/// cannot disturb it; `Shipped` is a fresh install past its first launch, the
+/// Start float closed; `FirstRun` is that first launch: the ready paper, with
+/// the float open.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Boot {
     Frozen,
@@ -253,10 +265,16 @@ impl EditorHarness {
         Self::with_state_shipped(NewProjectForm::default().new_state())
     }
 
-    /// What a fresh install's first launch shows.
+    /// What a fresh install's first launch shows: the ready paper, and the
+    /// Start float over it.
     pub fn as_first_run() -> Self {
-        let state = NewProjectForm::default().new_state();
-        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::FirstRun, None)
+        Self::with_dir_first_run(tempfile::tempdir().expect("temp data dir"))
+    }
+
+    /// A first launch over a data dir the test prepared: an upgrader's, say.
+    pub fn with_dir_first_run(dir: tempfile::TempDir) -> Self {
+        let state = crate::templates::INTENTS[crate::templates::ANIMATION].build();
+        Self::build(state, dir, Boot::FirstRun, None)
     }
 
     pub fn with_state_shipped(state: AppState) -> Self {
@@ -272,6 +290,12 @@ impl EditorHarness {
         Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::Shipped, Some(gpu()))
     }
 
+    /// A first launch on a real device: the Start float's pictures.
+    pub fn with_gpu_first_run() -> Self {
+        let state = crate::templates::INTENTS[crate::templates::ANIMATION].build();
+        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::FirstRun, Some(gpu()))
+    }
+
     /// THE FUNNEL: every constructor ends here, so no test can start outside
     /// the boot rule.
     fn build(
@@ -285,7 +309,12 @@ impl EditorHarness {
         if boot == Boot::Frozen {
             Self::frozen(&mut config);
         }
-        let editor = Editor::boot(state, rs.as_ref(), Some(dir.path()), &config.ui);
+        let mut editor = Editor::boot(state, rs.as_ref(), Some(dir.path()), &config.ui);
+        // What the App's `Startup::Welcome` does to the paper it made.
+        if boot == Boot::FirstRun {
+            editor.enter_intent(crate::templates::ANIMATION);
+            crate::start_over(&mut editor, &mut config);
+        }
         let mut notes = Notes::default();
         for n in config_notes {
             notes.push(n);
@@ -340,6 +369,22 @@ impl EditorHarness {
 
     pub fn boot(&self) -> Boot {
         self.h.state().boot
+    }
+
+    /// AU6: what the App does with a Start choice past the guard: the seam
+    /// runs and the result is installed, so a test strokes on the document
+    /// that entry really makes. A dialog stays a logged request.
+    pub fn answer_start(&mut self, action: crate::welcome::WelcomeAction) {
+        let rs = self.rs.clone();
+        let dir = self.dir.path().to_path_buf();
+        let rig = self.h.state_mut();
+        match crate::apply_start(action, rs.as_ref(), Some(&dir), &rig.config.ui) {
+            crate::StartOutcome::Replace(editor) => rig.editor = *editor,
+            crate::StartOutcome::Request(r) => rig.requests.push(r),
+            crate::StartOutcome::Failed(why) => rig.notes.push(why),
+            crate::StartOutcome::Stay => {}
+        }
+        self.run();
     }
 
     /// AU1: the harness itself: the audits read its frame output.
@@ -2338,8 +2383,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 689;
-    const ASSERT_FLOOR: usize = 3969;
+    const TEST_FLOOR: usize = 721;
+    const ASSERT_FLOOR: usize = 4183;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");
@@ -2797,15 +2842,15 @@ mod tests {
     }
 
     /// AU2's leave-out list: no renames, no menu moves, no new Actions. The
-    /// parts that make them (AU3, AU4, AU5, AU10, AU11) re-pin this and say so
-    /// in their commit bodies. AU4 brought the rail and `CanvasOptions`, AU5
-    /// `AddDrawingAfter` and `GoToFrame`.
+    /// parts that make them (AU3, AU4, AU5, AU6, AU10, AU11) re-pin this and say
+    /// so in their commit bodies. AU4 brought the rail and `CanvasOptions`, AU5
+    /// `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew` and `ToggleLockPositions`.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (157, 0xe0f8d4ef86144cd7), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (159, 0x28b3fca773c7dd4d), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }

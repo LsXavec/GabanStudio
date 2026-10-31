@@ -241,7 +241,7 @@ fn audock_canvas_tab_cannot_close() {
 }
 
 /// A middle click on the tab of `pane`, which is first in its leaf.
-fn middle_click_tab(h: &mut EditorHarness, pane: Pane) {
+pub(crate) fn middle_click_tab(h: &mut EditorHarness, pane: Pane) {
     let rects = &h.editor().pane_rects;
     let (_, at, _) = rects.iter().find(|(p, ..)| *p == pane).expect("on screen");
     let bodies = plate::pane_bodies(&h.ctx());

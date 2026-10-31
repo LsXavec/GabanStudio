@@ -149,6 +149,10 @@ pub enum Action {
     WelcomeScreen,
     /// GM21: File ▸ Open the sample cut — the Welcome's sample as a verb.
     OpenSample,
+    /// AU6: the Start float, on its What's new tab.
+    WhatsNew,
+    /// AU6: Lock UI positions, from the View menu.
+    ToggleLockPositions,
     /// GM10: Cut ▸ Paper size… — the sheet the camera pans over.
     PaperSize,
     /// GM11: Window ▸ Render Queue — the delivery jobs, on a worker.
@@ -452,6 +456,8 @@ impl Action {
         Action::ProjectSettings,
         Action::WelcomeScreen,
         Action::OpenSample,
+        Action::WhatsNew,
+        Action::ToggleLockPositions,
         Action::PaperSize,
         Action::ShowRenderQueue,
         Action::ToggleFinalLook,
@@ -614,6 +620,8 @@ impl Action {
             Action::ProjectSettings => "Project settings…",
             Action::WelcomeScreen => "Welcome screen…",
             Action::OpenSample => "Open the sample cut",
+            Action::WhatsNew => "What's New",
+            Action::ToggleLockPositions => "Lock UI positions",
             Action::PaperSize => "Paper size…",
             Action::ShowRenderQueue => "Render Queue (delivery)",
             Action::ToggleFinalLook => "Final look (delivery)",
@@ -782,6 +790,8 @@ impl Action {
             ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
             WelcomeScreen => "Show the Welcome screen: templates, recent files and the sample cut (unsaved work is asked about first).",
             OpenSample => "Open the sample cut to learn on (unsaved work is asked about first).",
+            WhatsNew => "Show what this release brings, in the Start panel.",
+            ToggleLockPositions => "Keep the panels where they are: tabs stop dragging and the step's panels stay open.",
             PaperSize => "Set the cut's paper: the sheet the camera pans over, larger than the frame for BG pans and hiki slides.",
             ShowRenderQueue => "Open the render queue: delivery jobs (PNG16, TIFF16, EXR, ProRes, line test) rendered on a worker.",
             ToggleFinalLook => "Show the composite as the master delivers it: no rough, reference or correction layers, rendered on a worker.",
@@ -855,7 +865,7 @@ impl Action {
             | PasteCellsInsert | TypeIntoCell | InterpHold | InterpLinear | InterpEase
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
             | HandlesFlat | HandlesBroken => Group::Sheet,
-            FrameCurves => Group::View,
+            FrameCurves | ToggleLockPositions => Group::View,
             PrevCut | NextCut | PaperSize | MakeCutsFromPanels | AddRetakeNote | NewPage => Group::Cut,
             AddNode | BuildSatsuei | ClipToPanels => Group::Composite,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
@@ -865,7 +875,7 @@ impl Action {
             | MangaRoom => Group::Room,
             ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue | ShowCutBoard
             | ShowEpisode | RenderEpisode => Group::Window,
-            CommandPalette | ShortcutSheet | QuickStart | About => Group::Help,
+            CommandPalette | ShortcutSheet | QuickStart | About | WhatsNew => Group::Help,
         }
     }
 
@@ -985,6 +995,8 @@ impl Action {
             ProjectSettings => "Project/Project settings…",
             WelcomeScreen => "File/Welcome screen…",
             OpenSample => "File/Open the sample cut",
+            WhatsNew => "Help/What's New",
+            ToggleLockPositions => "View/Lock UI positions",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
             PaperSize => "Cut/Paper size…",
@@ -1113,6 +1125,8 @@ impl Action {
             ProjectSettings => &["project properties", "resolution", "frame rate", "canvas size"],
             WelcomeScreen => &["templates", "new from template", "start page", "welcome"],
             OpenSample => &["sample", "demo", "example", "tutorial"],
+            WhatsNew => &["release notes", "changes", "changelog"],
+            ToggleLockPositions => &["lock panels", "freeze layout", "lock layout"],
             PaperSize => &["paper", "hiki", "BG pan", "pan paper", "kami", "BG sheet"],
             // GM5: the sheet verbs by the words a timing sheet uses.
             InsertFrames => &["insert frames", "add frame", "open a frame"],
@@ -1613,6 +1627,7 @@ impl Action {
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
+            | WhatsNew | ToggleLockPositions
             | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels | ReloadSequences
             | Underlay3d | CanvasOptions | GoToFrame => None,
         }
@@ -2841,8 +2856,11 @@ impl Config {
             // GM19: no file at all is a fresh install — nothing older to
             // compare with, so its first screen is Start, not What's New
             // (a config an earlier version wrote reads "" and is due).
+            // AU6: and it starts with the panels locked. An existing config
+            // keeps what it says, so `UiConfig::default()` does not move.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 cfg.ui.whats_new_seen = crate::welcome::VERSION.into();
+                cfg.ui.lock_positions = true;
             }
             Err(_) => {}
         }
@@ -3922,11 +3940,11 @@ pub(crate) fn general_page(
             }
         }
     });
-    // GM8: the Welcome screen's start-up latch lives here too, so a latch
-    // turned off on that screen can be turned back on.
+    // GM8: the Start float's start-up latch lives here too, so a latch
+    // turned off there can be turned back on.
     ui.add_space(6.0);
     if crate::plate::latch(ui, &mut config.ui.show_welcome, "Show the Welcome screen at startup")
-        .on_hover_text("off: start-up opens the New Project form (File ▸ Welcome screen… still shows it)")
+        .on_hover_text("off: start-up opens the same blank paper without it (File ▸ Welcome screen… still shows it)")
         .changed()
     {
         changed = true;
@@ -3942,8 +3960,9 @@ fn ui_features_page(ui: &mut egui::Ui, config: &mut Config) {
     let mut changed = false;
     changed |= crate::plate::latch(ui, &mut config.ui.lock_positions, "Lock UI positions")
         .on_hover_text(
-            "freeze the pane layout: no dragging, splitting, or closing \
-             windows until unlocked. The arrangement itself is kept.",
+            "keep the panels where they are: no dragging or splitting, and \
+             the step's own panels stay open. A panel you opened can still \
+             close. The arrangement itself is kept.",
         )
         .changed();
     changed |= crate::plate::latch(ui, &mut config.ui.exact_descriptions, "Exact UI descriptions")

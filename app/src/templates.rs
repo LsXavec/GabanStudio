@@ -1,7 +1,11 @@
-//! GM8: New from template — the Welcome cards' data. Every template makes
-//! an Srgb project (D8) with 72- or 120-frame cuts (D13), its starting
-//! columns, an auto-comp graph (`doc::build_auto_comp`) and a first room;
-//! the room's cel-stack preset arms when the editor enters it.
+//! GM8: New from template — the Start float's `More sizes` and the New
+//! Project form's list. Every template makes an Srgb project (D8) with its
+//! cut length (D13; a manga page is one frame), its starting columns, an
+//! auto-comp graph (`doc::build_auto_comp`, a page graph for a page) and a
+//! first room, one a stroke lands in; the room's cel-stack preset arms when
+//! the editor enters it. AU6: `INTENTS` are the float's own cards, outside
+//! `ALL`, at one frame and one track: a person's first document, not a
+//! studio's cut.
 
 use anim_core::color::ColorLaw;
 use anim_core::manga::Page;
@@ -42,7 +46,7 @@ pub const ALL: &[Template] = &[
         height: 1080,
         fps: 24,
         cut_frames: 72,
-        room: Stage::Layout,
+        room: Stage::Drawing,
         sheet_on: true,
         columns: &[BG, A, B, C],
         page: None,
@@ -64,7 +68,7 @@ pub const ALL: &[Template] = &[
         height: 2160,
         fps: 24,
         cut_frames: 72,
-        room: Stage::Layout,
+        room: Stage::Drawing,
         sheet_on: true,
         columns: &[BG, A, B, C, D],
         page: None,
@@ -117,6 +121,39 @@ pub const ALL: &[Template] = &[
         page: Some(Page::webtoon),
     },
 ];
+
+/// AU6: one Draw document for the Start float's cards.
+const fn intent(name: &'static str, width: u32, height: u32) -> Template {
+    Template {
+        name,
+        width,
+        height,
+        fps: 12,
+        cut_frames: 1,
+        room: Stage::Drawing,
+        sheet_on: false,
+        columns: &[A],
+        page: None,
+    }
+}
+
+/// AU6: what the Start float's cards make (spec 8.1). The ready paper is the
+/// first of them.
+pub const INTENTS: &[Template] = &[
+    intent("Animation", 1280, 720),
+    intent("Picture", 1920, 1080),
+    intent("Square picture", 2048, 2048),
+    intent("Tall picture", 1080, 1920),
+];
+
+/// `INTENTS` by name. Animation alone opens the strip.
+pub const ANIMATION: usize = 0;
+pub const PICTURE: usize = 1;
+pub const PICTURE_SQUARE: usize = 2;
+pub const PICTURE_TALL: usize = 3;
+
+/// `ALL`'s Manga B5, `A comic` on the Start float.
+pub const COMIC: usize = 4;
 
 /// GM21: the sizes the New Project dialog offers — every template's under
 /// its name, then two no template has. The dialog keeps no table of its own.
@@ -209,6 +246,9 @@ impl Template {
             }
         }
         s.engine.clear_history();
+        // AU6: what the template built is where the work starts, not work:
+        // an untouched blank has nothing to save.
+        s.saved_rev = s.engine.revision();
         s
     }
 }

@@ -46,7 +46,7 @@ fn tidy_shift_delete_cut_event_deletes_a_frame_over_the_sheet() {
     let from = h.performed().len();
     windows_shift_delete(&mut h);
     assert_eq!(fired_since(&h, from), [Action::DeleteFrames], "once per press");
-    assert_eq!(h.performed().last().map(|p| p.1), Some(Performed::Done));
+    assert_eq!(h.performed().last().map(|p| &p.1), Some(&Performed::Done));
     assert_eq!(h.state().frame_count(), frames - 1);
     assert!(h.state().sheet_ui.clipboard.is_none(), "no cells were cut");
 }
