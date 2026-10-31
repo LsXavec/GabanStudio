@@ -17,8 +17,8 @@ const SHIFT: egui::Modifiers = egui::Modifiers {
 };
 
 fn sheet_centre(h: &EditorHarness) -> egui::Pos2 {
-    let r = h.editor().pane_rects.iter().find(|(p, _)| *p == crate::workspace::Pane::XSheet);
-    r.map(|(_, r)| r.center()).expect("the drawing room docks the sheet")
+    let r = h.editor().pane_rects.iter().find(|(p, ..)| *p == crate::workspace::Pane::XSheet);
+    r.map(|(_, r, _)| r.center()).expect("the drawing room docks the sheet")
 }
 
 /// The actions fired since `from` (an index into `performed`).

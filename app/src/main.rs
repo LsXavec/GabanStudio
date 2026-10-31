@@ -15,6 +15,7 @@ mod devloop;
 mod doc;
 mod export;
 mod floatcanvas;
+mod floats;
 mod forge;
 mod floatwin;
 mod fxui;
@@ -39,6 +40,7 @@ mod palette_panel;
 mod plate;
 mod playback;
 mod proc;
+mod rail;
 mod render_queue;
 mod runs;
 mod sample;
@@ -52,6 +54,8 @@ mod testkit;
 mod tidy_tests;
 #[cfg(test)]
 mod audock_tests;
+#[cfg(test)]
+mod aurail_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;
@@ -3277,6 +3281,12 @@ impl Editor {
             }
             return;
         }
+        // AU4: a float, so it never opens under a live pen.
+        if action == Action::CanvasOptions {
+            let busy = ed.canvas.stroke_active();
+            ed.floats.toggle(floats::Float::CanvasOptions, busy);
+            return;
+        }
         // Composite view swaps what the canvas renders — blocked mid-stroke
         // (the live stroke's sandwich would vanish under it).
         if action == Action::ToggleCompositeView {
@@ -3535,6 +3545,7 @@ impl Editor {
             Action::ToggleEraser
             | Action::ToggleAlphaLock
             | Action::ToggleCompositeView
+            | Action::CanvasOptions
             | Action::SelectTool
             | Action::BrushTool
             | Action::FillTool
@@ -4239,8 +4250,15 @@ struct Editor {
     /// GM3: the help windows (F1's shortcut sheet, quick start, about).
     pub help: menus::HelpWindows,
     /// GM3: where each pane was drawn this frame — the pane under the
-    /// pointer picks which shortcuts apply.
-    pane_rects: Vec<(Pane, egui::Rect)>,
+    /// pointer picks which shortcuts apply. AU4: with its layer, so a float
+    /// over a pane speaks for itself; the rail and floats join as the panes
+    /// they serve.
+    pane_rects: Vec<(Pane, egui::Rect, egui::LayerId)>,
+    /// AU4: who is open over the canvas. Not saved.
+    floats: floats::Floats,
+    /// AU4: the strip's latch, for this session. AU5 sets it; the band and
+    /// the rail's reference height read it now.
+    strip_open: bool,
     /// AU1: every action `perform` answered `Ignored`, however it ran (a
     /// key, a click, the palette). The journey `Recorder` reads it.
     #[cfg(test)]
@@ -4583,7 +4601,12 @@ struct EditorTabs<'a> {
     /// the one CanvasView from two places.
     float_canvas_open: bool,
     /// GM3: where each pane is drawn (the shortcut context reads it).
-    pane_rects: &'a mut Vec<(Pane, egui::Rect)>,
+    pane_rects: &'a mut Vec<(Pane, egui::Rect, egui::LayerId)>,
+    /// AU4: the overlay's share of the Editor. The rail reads the rest.
+    floats: &'a mut floats::Floats,
+    rail_off: bool,
+    strip_closed: bool,
+    layers_docked: bool,
     /// AU3: the current recipe's panes while Lock UI positions is on, which
     /// keep their place; a panel opened by hand keeps its close control.
     locked: &'a [Pane],
@@ -4598,7 +4621,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
         // Every pane sits on the plate's grain (owner's amendment): laid
         // down first, so all content paints over the material.
         plate::surface(ui);
-        self.pane_rects.push((*tab, ui.max_rect()));
+        self.pane_rects.push((*tab, ui.max_rect(), ui.layer_id()));
         plate::note_pane_body(ui);
         match tab {
             Pane::History => {
@@ -4686,8 +4709,21 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                         self.pen,
                         self.layers_cfg,
                         self.native_pen,
-                        self.presets,
-                    )
+                    );
+                    let host = self.canvas.dbg_rect;
+                    let args = &mut rail::OverlayArgs {
+                        raster_available: self.paint.is_some(),
+                        canvas: self.canvas,
+                        state: self.state,
+                        presets: self.presets,
+                        floats: self.floats,
+                        manga: self.stage == Some(Stage::Manga),
+                        rail_off: self.rail_off,
+                        strip_closed: self.strip_closed,
+                        layers_docked: self.layers_docked,
+                        pane_rects: Some(self.pane_rects),
+                    };
+                    rail::overlay(ui, args, host);
                 }
             }
             Pane::Viewer(id) => {
@@ -4845,6 +4881,44 @@ impl Editor {
         self.place = place.to_string();
         self.place_dock = Some(self.dock.clone());
         self.held_for = None;
+    }
+
+    /// AU4: 3D and the Brush maker show no rail and no strip.
+    fn rail_off(&self) -> bool {
+        self.stage.is_none() && [vocab::LAYOUT_3D, vocab::BRUSH_MAKER].contains(&self.place.as_str())
+    }
+
+    /// AU4: the strip may show here. It never shares the screen with the
+    /// sheet, which holds the same frames (spec R16).
+    fn strip_room(&self) -> bool {
+        !self.rail_off() && !visible_panes(&self.dock).contains(&Pane::XSheet)
+    }
+
+    /// AU4: the strip's latch is all that keeps it away.
+    fn strip_closed(&self) -> bool {
+        !self.strip_open && self.strip_room()
+    }
+
+    /// AU4: a drawing canvas stands somewhere this frame, for a float to
+    /// open over: not Plan's preview, unless the OS window has it.
+    fn canvas_shown(&self) -> bool {
+        self.float_canvas.open
+            || (self.stage != Some(Stage::Layout) && visible_panes(&self.dock).contains(&Pane::Canvas))
+    }
+
+    /// AU4: `Make a brush`, and the arrangement menu's Brush maker row.
+    fn open_brush_maker(&mut self) {
+        if self.canvas.stroke_active() {
+            self.state.refuse("refused — finish the stroke first");
+        } else {
+            self.dock = Pane::forge_dock();
+            // Off-spine like every custom room (saved rooms do the same):
+            // otherwise a forge room entered from LAYOUT kept the stage, and
+            // the Canvas pane stayed the read-only composite PREVIEW instead
+            // of test paper — the owner's report.
+            self.go_off_spine(vocab::BRUSH_MAKER);
+            self.state.status = "the forge room".into();
+        }
     }
 
     /// AU3: what the off-spine pill says; None on the spine. Manga is a
@@ -5017,6 +5091,8 @@ impl Editor {
             palette: cmdpal::Palette::default(),
             help: menus::HelpWindows::default(),
             pane_rects: Vec::new(),
+            floats: floats::Floats::default(),
+            strip_open: false,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -5109,6 +5185,8 @@ impl Editor {
             palette: cmdpal::Palette::default(),
             help: menus::HelpWindows::default(),
             pane_rects: Vec::new(),
+            floats: floats::Floats::default(),
+            strip_open: false,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -5353,10 +5431,14 @@ impl Editor {
     /// pointer, else the focused pane (shortcuts.rs resolves shared chords
     /// by it).
     pub fn shortcut_ctx(&mut self, ctx: &egui::Context) -> config::Ctx {
-        let pane = ctx
-            .pointer_latest_pos()
-            .and_then(|p| self.pane_rects.iter().find(|(_, r)| r.contains(p)))
-            .map(|(pane, _)| *pane)
+        // AU4: the topmost layer answers, so a float speaks for what it
+        // covers. A popup over everything falls through to the focus.
+        let under = ctx.pointer_latest_pos().and_then(|p| {
+            let top = ctx.layer_id_at(p);
+            self.pane_rects.iter().find(|(_, r, layer)| r.contains(p) && top == Some(*layer))
+        });
+        let pane = under
+            .map(|(pane, ..)| *pane)
             .or_else(|| self.dock.find_active_focused().map(|(_, t)| *t));
         match pane {
             Some(Pane::Canvas) => config::Ctx::Canvas,
@@ -5440,6 +5522,7 @@ impl Editor {
         let shared = guest || self.canvas.session_live;
         let s = &self.state;
         match action {
+            Action::CanvasOptions if !self.canvas_shown() => Err("no canvas here"),
             Action::Undo if !shared && !s.engine.can_undo() => Err("nothing to undo"),
             Action::Redo if !shared && !s.engine.can_redo() => {
                 Err("nothing to redo — undo something first")
@@ -5608,6 +5691,7 @@ impl Editor {
         match action {
             Action::ToggleOnion => Some(self.state.view.onion),
             Action::ToggleCompositeView => Some(self.canvas.composite_view),
+            Action::CanvasOptions => Some(self.floats.is_open(floats::Float::CanvasOptions)),
             Action::MissCheck => Some(self.canvas.miss_check),
             Action::ToggleLoop => Some(self.state.view.loop_playback),
             Action::MirrorView => Some(self.canvas.view_mirrored()),
@@ -6987,8 +7071,8 @@ fn probe_run_in(ppp: f32, ui_scale: u32, still: Pane, enter: impl FnOnce(&mut Ed
                 editor
                     .pane_rects
                     .iter()
-                    .find(|(p, _)| *p == still)
-                    .map_or(egui::Rect::NOTHING, |(_, r)| *r)
+                    .find(|(p, ..)| *p == still)
+                    .map_or(egui::Rect::NOTHING, |(_, r, _)| *r)
             };
             if !(r.is_finite() && r.is_positive()) {
                 if label != "settle" {
@@ -8042,18 +8126,7 @@ impl Editor {
                         )
                         .clicked()
                     {
-                        if self.canvas.stroke_active() {
-                            self.state.refuse("refused — finish the stroke first");
-                        } else {
-                            self.dock = Pane::forge_dock();
-                            // Off-spine like every custom room (saved rooms
-                            // do the same): otherwise a forge room entered
-                            // from LAYOUT kept the stage, and the Canvas
-                            // pane stayed the read-only composite PREVIEW
-                            // instead of test paper — the owner's report.
-                            self.go_off_spine(vocab::BRUSH_MAKER);
-                            self.state.status = "the forge room".into();
-                        }
+                        self.open_brush_maker();
                         ui.close();
                     }
                     // GM17: THE 3D LAYOUT ROOM, built in beside the forge's
@@ -8351,8 +8424,12 @@ impl Editor {
 
         // THE FOOT (spec §4.1): transport is GLOBAL state, bolted to the
         // chassis — a tape deck's motor is never on a removable reel.
-        egui::Panel::bottom("status_bar").frame(plate::desk_frame(ui.style())).show_separator_line(false).show(ui, |ui| {
-            ui.add_space(2.0);
+        // AU4: the band's two exact heights (spec 4.4). The strip's 56 stand
+        // above the transport row, which is always the last 36; AU5 fills them.
+        let strip = if self.strip_open && self.strip_room() { rail::STRIP_H } else { 0.0 };
+        let band = egui::Panel::bottom("status_bar").exact_size(plate::BAND_H + strip);
+        band.frame(plate::desk_frame(ui.style())).show_separator_line(false).show(ui, |ui| {
+            ui.add_space(strip);
             // Under the fold width the rarer keys wait behind one `…`.
             let fold = ui.ctx().content_rect().width() < steps::FOLD;
             ui.horizontal(|ui| {
@@ -8474,7 +8551,6 @@ impl Editor {
                     });
                 });
             });
-            ui.add_space(2.0);
         });
 
         // The docking shell replaces the fixed left/central panels: panes are
@@ -8612,6 +8688,9 @@ impl Editor {
         if ui_lock {
             self.locked_panes();
         }
+        let rail_off = self.rail_off();
+        let strip_closed = self.strip_closed();
+        let layers_docked = visible_panes(&self.dock).contains(&Pane::Layers);
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -8629,6 +8708,10 @@ impl Editor {
             native_pen,
             float_canvas_open: self.float_canvas.open,
             pane_rects: &mut self.pane_rects,
+            floats: &mut self.floats,
+            rail_off,
+            strip_closed,
+            layers_docked,
             locked: if ui_lock { &self.held } else { &[] },
         };
         tabs.pane_rects.clear();
@@ -8670,6 +8753,13 @@ impl Editor {
         for action in std::mem::take(&mut self.state.manga.asked) {
             self.invoke(action, ui.ctx());
         }
+        // AU4: and the rail's and the floats'. The dock is free here.
+        if std::mem::take(&mut self.floats.focus_layers) {
+            self.open_pane(Pane::Layers);
+        }
+        if std::mem::take(&mut self.canvas.request_brush_maker) {
+            self.open_brush_maker();
+        }
 
         // Phase 5 step 2: the canvas in its own OS window. Tabs' borrows of
         // state/canvas/paint end above, so this can borrow them fresh.
@@ -8698,8 +8788,23 @@ impl Editor {
                             pen,
                             layers_cfg,
                             native_pen,
-                            presets,
                         );
+                        // AU4: its own rail, at its own tier; no strip here,
+                        // and what is under the pointer here is no dock's.
+                        let host = self.canvas.dbg_rect;
+                        let args = &mut rail::OverlayArgs {
+                            raster_available: self.paint.is_some(),
+                            canvas: &mut self.canvas,
+                            state: &mut self.state,
+                            presets,
+                            floats: &mut self.floats,
+                            manga: self.stage == Some(Stage::Manga),
+                            rail_off: false,
+                            strip_closed: false,
+                            layers_docked: false,
+                            pane_rects: None,
+                        };
+                        rail::overlay(ui, args, host);
                     });
                     // The OS ✕ is a REQUEST, not a command — same law as
                     // Save/Open/workspace switching (guard_gesture): a live

@@ -58,6 +58,9 @@ pub const NOTES: &str = "MEMO";
 pub const DRAWINGS: &str = "library";
 pub const LAYERS: &str = "Cel Layers";
 pub const BRUSHES: &str = "Presets";
+// The rail's two left floats that have no older word.
+pub const TOOL_OPTIONS: &str = "Tool options";
+pub const CANVAS_OPTIONS: &str = "Canvas options";
 pub const LAYER_SET: &str = "stack";
 /// Retired: the row's word leaves the screen and `Drawing with` takes its
 /// place in the hover card.
@@ -145,6 +148,8 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("DRAWINGS", DRAWINGS, "library"),
     ("LAYERS", LAYERS, "Cel Layers"),
     ("BRUSHES", BRUSHES, "Presets"),
+    ("TOOL_OPTIONS", TOOL_OPTIONS, "Tool options"),
+    ("CANVAS_OPTIONS", CANVAS_OPTIONS, "Canvas options"),
     ("LAYER_SET", LAYER_SET, "stack"),
     ("DRAWING_WITH", DRAWING_WITH, "ARMED"),
     ("EXPORT_QUEUE", EXPORT_QUEUE, "Render Queue"),

@@ -30,12 +30,47 @@ pub const DEFAULT_PAPER_H: u32 = 1080;
 /// The pencil case (spec §6 defect 5): ink · ao · aka · white. Ao and Aka are
 /// the trade's blue/red pencils at the plate's own values, so the swatch board
 /// reads by colour alone, peripherally, without stopping the stroke.
-const SWATCHES: [[u8; 4]; 4] = [
+pub(crate) const SWATCHES: [[u8; 4]; 4] = [
     [25, 25, 30, 255],             // ink
     plate::PENCIL_AO.to_array(),   // ao — construction / blue pencil
     plate::PENCIL_AKA.to_array(),  // aka — the sakkan's correction
     [245, 245, 245, 255],          // white
 ];
+
+/// The private fields AU4's deck walk reads back.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DeckReads {
+    pub sel_shape: SelShape,
+    pub fill_ref_cel: bool,
+    pub alpha_lock: bool,
+    pub dyn_size: bool,
+    pub flip_held: bool,
+}
+
+/// An engraved label over a track, with its value beside it.
+fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &plate::sentence(label),
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(9.5, plate::semibold()),
+            color: plate::LEGEND,
+            ..Default::default()
+        },
+    );
+    job.append(
+        &format!("  {value}"),
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(11.0, egui::FontFamily::Monospace),
+            color: plate::STRUCK,
+            ..Default::default()
+        },
+    );
+    ui.label(job);
+}
 
 // Pen-input tuning derived from Krita's tablet pipeline (see
 // research/krita-pen-tuning.md). The load-bearing insight: egui/winit on
@@ -747,12 +782,6 @@ pub struct CanvasView {
     /// The pencil-box preset the brush was last armed FROM (by name). The
     /// slot's Tally ring draws broken once the live numbers drift off it.
     armed_preset: Option<String>,
-    /// The brush rail (canvas right edge) is showing. Opens on hover at the
-    /// edge, stays while the pointer is on it or a drag is live.
-    rail_open: bool,
-    /// Last frame's measured rail content height — centres the floating
-    /// controls on the grip's line (settles in one frame).
-    rail_content_h: f32,
     /// SESSION v2: this app is a GUEST in someone's room — finished
     /// strokes are SENT, never committed locally (one writer, NEVER-DO 1).
     pub(crate) is_guest: bool,
@@ -810,6 +839,12 @@ pub struct CanvasView {
     /// drawing at full strength — the animator's flip. Pure display,
     /// recomputed every frame; never engages mid-stroke or in playback.
     flip_held: bool,
+    /// AU4: the rail's Flip key is down: R by another hand. The rail writes
+    /// it after this view's frame, so it reads a frame late.
+    pub(crate) rail_flip: bool,
+    /// AU4: the rail's Hand: a held state like Space, no tool of its own.
+    /// Any tool clears it.
+    pub(crate) hand_held: bool,
     /// Refusal edge-flash bookkeeping (seq last seen + when).
     flash_seq: u32,
     flash_since: f64,
@@ -877,17 +912,12 @@ pub struct CanvasView {
     /// One click imports the INSTALLED Krita's own brushes (bundles +
     /// presets + the user's %APPDATA%/krita).
     pub(crate) request_krita_scan: bool,
+    /// AU4: `Make a brush`, in the Brushes float. The rooms are the Editor's.
+    pub(crate) request_brush_maker: bool,
     brush_search: String,
     /// Lazy thumbnail textures by preset name; None = no cached thumb
     /// (the painted-dab fallback draws instead — never tofu).
     thumb_cache: std::collections::HashMap<String, Option<egui::TextureHandle>>,
-    /// The lightbox rail (left edge) is showing — same fold law as the
-    /// brush rail (owner 2026-08-17: everything in the canvas folds).
-    light_open: bool,
-    light_content_h: f32,
-    /// THE PAINT DISH (bottom edge, its own room 2026-08-17).
-    dish_open: bool,
-    dish_content_w: f32,
     /// Session mixing splotches: (position 0..1 in the tray, radius, colour).
     /// Never saved — the model is the only colour truth (NEVER-DO 2).
     splotches: Vec<([f32; 2], f32, [u8; 4])>,
@@ -908,9 +938,11 @@ pub struct CanvasView {
     /// AU1: `dbg_rect` holds Layout's preview, not this view: no paper in it,
     /// and `view_xform` is whatever room drew last.
     pub dbg_preview: bool,
-    /// Set once a real pressure pen (Touch with force > 0) is seen. After that,
-    /// the mouse-drawing fallback is disabled so Windows' synthesized pen→mouse
-    /// clicks (e.g. from a fast light double-tap) can't paint flat-pressure blobs.
+    /// Set once a pen comes down on the canvas's own layer. After that, the
+    /// mouse-drawing fallback is disabled so Windows' synthesized pen→mouse
+    /// clicks (e.g. from a fast light double-tap) can't paint flat-pressure
+    /// blobs. A Touch on the rail or a float says nothing of the sort: the
+    /// mouse beside it must still draw.
     seen_pen: bool,
     /// Latched when octotablet delivers native tablet samples: the native path
     /// owns the pen; egui Touch/mouse (duplicates of the same physical strokes)
@@ -1047,8 +1079,6 @@ impl CanvasView {
             raster_new_cel: false,
             pen_curve: PressureCurve::linear(),
             armed_preset: None,
-            rail_open: false,
-            rail_content_h: 420.0,
             is_guest: false,
             session_live: false,
             stroke_outbox: Vec::new(),
@@ -1075,6 +1105,8 @@ impl CanvasView {
             presence_pos: None,
             miss_check: false,
             flip_held: false,
+            rail_flip: false,
+            hand_held: false,
             flash_seq: 0,
             flash_since: -10.0,
             onion: OnionCfg::default(),
@@ -1104,12 +1136,9 @@ impl CanvasView {
             lasso_soft: 0.0,
             lasso_grow: 0.0,
             request_krita_scan: false,
+            request_brush_maker: false,
             brush_search: String::new(),
             thumb_cache: std::collections::HashMap::new(),
-            light_open: false,
-            light_content_h: 330.0,
-            dish_open: false,
-            dish_content_w: 620.0,
             splotches: Vec::new(),
             eye_target: None,
             eye_hsv: [0.0, 0.0, 0.0],
@@ -1148,7 +1177,21 @@ impl CanvasView {
 
     /// Flip between brush and eraser (bound to a rebindable shortcut).
     pub fn toggle_eraser(&mut self) {
+        self.hand_held = false;
         self.erasing = !self.erasing;
+    }
+
+    /// AU4: the rail's Brush and Eraser. `set_tool` refuses a live stroke by
+    /// itself only when the tool changes; ink turning to eraser under the pen
+    /// is the same refusal.
+    pub(crate) fn arm_paint(&mut self, erasing: bool, state: &mut AppState) {
+        self.hand_held = false;
+        if self.touch_active || !self.current.is_empty() || self.raster_stroke_done {
+            state.refuse("refused — finish the stroke first");
+            return;
+        }
+        self.set_tool(CanvasTool::Paint, state);
+        self.erasing = erasing;
     }
 
     /// Flip alpha-lock (bound to a rebindable shortcut).
@@ -1159,6 +1202,7 @@ impl CanvasView {
     /// Apply a brush preset wholesale (keybind 1–8, Presets pane, or a
     /// workspace switch bound to it). Also drops the eraser — a preset is ink.
     pub fn apply_preset(&mut self, p: &crate::config::BrushPreset) {
+        self.hand_held = false;
         // PSD-brush-engine: arm the preset's machinery (None clears it —
         // the pencil box always lands here with None).
         if self.brush_engine != p.engine {
@@ -1330,6 +1374,39 @@ impl CanvasView {
         self.raster_brush_px
     }
 
+    /// AU4: the rail's Size: what the active route draws at, as it stands.
+    pub(crate) fn active_px(&self) -> f32 {
+        if self.raster { self.raster_brush_px } else { self.brush_width }
+    }
+
+    /// AU4: the range of [`Self::active_px`], as the old sliders had it.
+    pub(crate) fn px_range(&self) -> (f32, f32) {
+        if self.raster { (1.0, 300.0) } else { (0.5, 16.0) }
+    }
+
+    /// AU4: the rail's Size sets the active route's size, never mid-stroke
+    /// (the live stroke's dabs would change under the pen). Answers whether
+    /// it took.
+    pub(crate) fn set_brush_px(&mut self, px: f32, state: &mut AppState) -> bool {
+        if self.stroke_active() {
+            state.refuse("refused — finish the stroke first");
+            return false;
+        }
+        let (lo, hi) = self.px_range();
+        let px = px.clamp(lo, hi);
+        if self.raster {
+            self.raster_brush_px = px;
+        } else {
+            self.brush_width = px;
+        }
+        true
+    }
+
+    /// The zoom a dab reads at: the rail's bubble shows the brush true size.
+    pub(crate) fn view_scale(&self) -> f32 {
+        self.xf.zoom
+    }
+
     fn sync_xf(&mut self) {
         self.xf.zoom = self.last_fit * self.zoom;
         self.xf.pan = self.pan;
@@ -1360,7 +1437,7 @@ impl CanvasView {
     /// pending), a selection outline being drawn, or a transform handle
     /// being dragged (GM18: or a panel-tool drag). A Space hold that starts
     /// here never takes the hand.
-    fn pen_busy(&self) -> bool {
+    pub(crate) fn pen_busy(&self) -> bool {
         self.touch_active
             || !self.current.is_empty()
             || self.raster_stroke_done
@@ -1462,6 +1539,7 @@ impl CanvasView {
     /// blocks the switch (the stroke pipeline would be orphaned mid-flight);
     /// leaving Select commits any floating transform rather than losing it.
     pub fn set_tool(&mut self, tool: CanvasTool, state: &mut AppState) {
+        self.hand_held = false;
         if self.tool == tool {
             return;
         }
@@ -2081,6 +2159,18 @@ impl CanvasView {
     // (presence_wet is RETIRED — STAGE 2's dab stream IS the live view;
     // peers with old builds still send wet points and they still draw.)
 
+    /// What AU4's deck walk reads back of the fields no float can show it.
+    #[cfg(test)]
+    pub fn deck_reads(&self) -> DeckReads {
+        DeckReads {
+            sel_shape: self.sel_shape,
+            fill_ref_cel: self.fill_ref_cel,
+            alpha_lock: self.alpha_lock,
+            dyn_size: self.dyn_size,
+            flip_held: self.flip_held,
+        }
+    }
+
     /// The slate's arming line: what the pen does right now, in a word.
     pub fn arming_pencil(&self) -> String {
         match self.tool {
@@ -2120,9 +2210,10 @@ impl CanvasView {
         ui: &mut egui::Ui,
         p: &BrushPreset,
         digit: usize,
+        wide: f32,
         state: &mut AppState,
     ) {
-        let (rect, resp) = ui.allocate_exact_size(vec2(88.0, 44.0), Sense::click());
+        let (rect, resp) = ui.allocate_exact_size(vec2(wide, 44.0), Sense::click());
         let armed = self.tool == CanvasTool::Paint
             && !self.erasing
             && self.armed_preset.as_deref() == Some(p.name.as_str());
@@ -2252,65 +2343,6 @@ impl CanvasView {
         }
     }
 
-    /// The eraser as the pencil box's fourth detent.
-    fn eraser_slot(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        let (rect, resp) = ui.allocate_exact_size(vec2(56.0, 44.0), Sense::click());
-        let armed = self.tool == CanvasTool::Paint && self.erasing;
-        plate::speak(&resp, egui::WidgetType::SelectableLabel, Some(armed), "eraser");
-        if resp.clicked() {
-            if self.tool != CanvasTool::Paint {
-                self.set_tool(CanvasTool::Paint, state);
-            }
-            self.erasing = true;
-        }
-        if !ui.is_rect_visible(rect) {
-            return;
-        }
-        let painter = ui.painter();
-        painter.rect_filled(rect, plate::R_CONTROL, plate::WELL);
-        let ink = if armed || resp.hovered() {
-            plate::STRUCK
-        } else {
-            plate::LEGEND
-        };
-        crate::icons::paint(
-            painter,
-            Rect::from_center_size(
-                pos2(rect.center().x, rect.top() + 15.0),
-                egui::Vec2::splat(18.0),
-            ),
-            ink,
-            Icon::Eraser,
-        );
-        painter.text(
-            pos2(rect.center().x, rect.bottom() - 9.0),
-            egui::Align2::CENTER_CENTER,
-            "ERASER",
-            egui::FontId::new(9.5, plate::semibold()),
-            ink,
-        );
-        if armed {
-            painter.rect_stroke(
-                rect,
-                plate::R_CONTROL,
-                egui::Stroke::new(2.0, plate::TALLY),
-                egui::StrokeKind::Inside,
-            );
-        } else if resp.hovered() {
-            painter.rect_stroke(
-                rect,
-                plate::R_CONTROL,
-                egui::Stroke::new(1.0, plate::LEGEND),
-                egui::StrokeKind::Inside,
-            );
-        }
-        // GM3: name, chord, one line of help — from the registry.
-        let resp = crate::menus::hover_tip(resp, Action::ToggleEraser, "");
-        if plate::exact() {
-            resp.on_hover_text("[PENCIL SLOT 'eraser' · canvas.rs eraser_slot]");
-        }
-    }
-
     /// THE PAINT DISH's content (its room, 2026-08-17): ARMED WELL with
     /// row context · THE MODEL (characters × roles — the colour-model
     /// table) · THE DISH (mixing splotches) · THE EYE (compact SV+hue).
@@ -2394,10 +2426,17 @@ impl CanvasView {
                 .first()
                 .map(|c| c.roles.iter().map(|r| r.name.clone()).collect())
                 .unwrap_or_default();
+            // AU4: the table takes the Color float's width: the name, one
+            // cell per role and `derive`, 2 apart.
+            ui.spacing_mut().item_spacing.x = 2.0;
+            let roles = headers.len().max(1) as f32;
+            let name_w = 44.0;
+            let cells = ui.available_width() - name_w - 80.0 - 2.0 * (roles + 1.0);
+            let cell_w = (cells / roles).clamp(16.0, 32.0);
             ui.horizontal(|ui| {
-                ui.allocate_exact_size(vec2(56.0, 11.0), Sense::hover());
+                ui.allocate_exact_size(vec2(name_w, 11.0), Sense::hover());
                 for h in &headers {
-                    let (hr, _) = ui.allocate_exact_size(vec2(32.0, 11.0), Sense::hover());
+                    let (hr, _) = ui.allocate_exact_size(vec2(cell_w, 11.0), Sense::hover());
                     ui.painter().text(
                         hr.center(),
                         egui::Align2::CENTER_CENTER,
@@ -2411,7 +2450,7 @@ impl CanvasView {
             for ci in 0..n_chars {
                 ui.horizontal(|ui| {
                     let cname = state.palettes.characters[ci].name.clone();
-                    let (nr, _) = ui.allocate_exact_size(vec2(56.0, 22.0), Sense::hover());
+                    let (nr, _) = ui.allocate_exact_size(vec2(name_w, 22.0), Sense::hover());
                     ui.painter().text(
                         pos2(nr.left() + 2.0, nr.center().y),
                         egui::Align2::LEFT_CENTER,
@@ -2423,7 +2462,7 @@ impl CanvasView {
                     for ri in 0..n_roles {
                         let color = state.palettes.characters[ci].roles[ri].color;
                         let rname = state.palettes.characters[ci].roles[ri].name.clone();
-                        let (pr, presp) = ui.allocate_exact_size(vec2(32.0, 22.0), Sense::click());
+                        let (pr, presp) = ui.allocate_exact_size(vec2(cell_w, 22.0), Sense::click());
                         let well = pr.shrink2(vec2(2.0, 1.0));
                         let pnt = ui.painter();
                         pnt.rect_filled(well.expand(1.0), 0.0, plate::WELL);
@@ -2765,32 +2804,9 @@ impl CanvasView {
         resp.on_hover_text("drag a mark up or down to move that inbetween's spacing (one undo step)");
     }
 
-    /// The lightbox fold-out's content: onion + strength (with a value
-    /// line — a silent dial reads as a bug), paper furniture, view, INPUT.
-    fn lightbox_rail_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        fn vline(ui: &mut egui::Ui, label: &str, value: String) {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
-                &plate::sentence(label),
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::new(9.5, plate::semibold()),
-                    color: plate::LEGEND,
-                    ..Default::default()
-                },
-            );
-            job.append(
-                &format!("  {value}"),
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::new(11.0, egui::FontFamily::Monospace),
-                    color: plate::STRUCK,
-                    ..Default::default()
-                },
-            );
-            ui.label(job);
-        }
-
+    /// The Canvas options float: onion + strength (with a value line — a
+    /// silent dial reads as a bug), paper furniture, view, INPUT.
+    pub(crate) fn lightbox_rail_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
         // THE QUEUE (shiage charter): prev/next CEL at the paper's own
         // edge, 44x40 — the room's second verb; Q/W are their keys.
         plate::legend(ui, "queue");
@@ -2844,17 +2860,17 @@ impl CanvasView {
         // GM6: depth, mode, other columns, opacity with falloff — kept in
         // the config (an edit lands in onion_request for the shell).
         let mut cfg = self.onion;
-        vline(ui, "strength", format!("{:.0}%", cfg.opacity * 100.0));
+        value_line(ui, "strength", format!("{:.0}%", cfg.opacity * 100.0));
         ui.spacing_mut().slider_width = 96.0;
         ui.add(egui::Slider::new(&mut cfg.opacity, 0.1..=1.0).show_value(false))
             .on_hover_text("the nearest ghost's opacity");
         // Folded by default: the fold-out keeps its old height (the view
         // block stays on screen).
         egui::CollapsingHeader::new("onion depth").show(ui, |ui| {
-            vline(ui, "falloff", format!("{:.0}%", cfg.falloff * 100.0));
+            value_line(ui, "falloff", format!("{:.0}%", cfg.falloff * 100.0));
             ui.add(egui::Slider::new(&mut cfg.falloff, 0.0..=1.0).show_value(false))
                 .on_hover_text("each ghost farther away keeps this much of the one before");
-            vline(ui, "behind · ahead", format!("{} · {}", cfg.before, cfg.after));
+            value_line(ui, "behind · ahead", format!("{} · {}", cfg.before, cfg.after));
             ui.horizontal(|ui| {
                 plate::field(ui, egui::DragValue::new(&mut cfg.before).range(0..=OnionCfg::MAX_DEPTH))
                     .on_hover_text("ghosts behind (0–5)");
@@ -2925,7 +2941,7 @@ impl CanvasView {
                 });
             }
             let mut lt = self.light_table;
-            vline(ui, "pin opacity", format!("{:.0}%", lt.opacity * 100.0));
+            value_line(ui, "pin opacity", format!("{:.0}%", lt.opacity * 100.0));
             ui.add(egui::Slider::new(&mut lt.opacity, 0.1..=1.0).show_value(false))
                 .on_hover_text("every pin shows at this opacity");
             if lt != self.light_table {
@@ -2952,7 +2968,7 @@ impl CanvasView {
             let busy = self.stroke_active();
             egui::CollapsingHeader::new("genga · douga").show(ui, |ui| {
                 let kind = state.cut().drawing_kind(here);
-                vline(ui, "kind", kind.label().to_string());
+                value_line(ui, "kind", kind.label().to_string());
                 ui.horizontal_wrapped(|ui| {
                     for (k, verb) in [
                         (DrawingKind::Key, Action::KindKey),
@@ -2969,7 +2985,7 @@ impl CanvasView {
                 });
                 if kind == DrawingKind::Key {
                     let chart = state.cut().drawing_def(here).chart;
-                    vline(
+                    value_line(
                         ui,
                         "chart",
                         chart.as_ref().map_or("none".to_string(), |c| format!("{} marks", c.marks.len())),
@@ -2989,7 +3005,7 @@ impl CanvasView {
                     });
                     // The chart editor: any count of marks, even or closing
                     // up toward one key; then drag a mark on the chart.
-                    vline(ui, "marks", self.chart_count.to_string());
+                    value_line(ui, "marks", self.chart_count.to_string());
                     plate::field(ui, egui::DragValue::new(&mut self.chart_count).range(1..=crate::doc::CHART_MAX_MARKS))
                         .on_hover_text("how many inbetweens the chart asks for (1–15)");
                     ui.horizontal_wrapped(|ui| {
@@ -3044,11 +3060,11 @@ impl CanvasView {
             self.fit_view();
         }
         // GM4: absolute — 100% is one paper px to one screen point.
-        vline(ui, "zoom", format!("{:3.0}%", self.abs_zoom() * 100.0));
+        value_line(ui, "zoom", format!("{:3.0}%", self.abs_zoom() * 100.0));
         // GM4: the turn and the mirror stand by the zoom — the angle, the
         // upright detent (armed when upright; a click turns it back) and
         // the mirror latch.
-        vline(ui, "turn", format!("{:4.0}°", self.rotation_deg));
+        value_line(ui, "turn", format!("{:4.0}°", self.rotation_deg));
         let upright = plate::detent(ui, self.rotation_deg == 0.0, "upright");
         if crate::menus::hover_tip(upright, Action::ResetRotation, "").clicked() {
             self.set_view_rotation(0.0);
@@ -3081,49 +3097,66 @@ impl CanvasView {
         }
     }
 
-    /// The brush rail's content, centred on ONE axis: every slider is a
-    /// bare track (no side text), so the track's centre IS the rail's
-    /// centre — the point the hand reflexes to (owner 2026-08-17). Labels
-    /// ride ABOVE the tracks as engraved value lines.
-    fn brush_rail_ui(&mut self, ui: &mut egui::Ui, presets: &[BrushPreset]) {
-        fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
-            let mut job = egui::text::LayoutJob::default();
-            job.append(
-                &plate::sentence(label),
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::new(9.5, plate::semibold()),
-                    color: plate::LEGEND,
-                    ..Default::default()
-                },
-            );
-            job.append(
-                &format!("  {value}"),
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::new(11.0, egui::FontFamily::Monospace),
-                    color: plate::STRUCK,
-                    ..Default::default()
-                },
-            );
-            ui.label(job);
-        }
+    /// The Brushes float: the old brush rail, the pencil box and the deck's
+    /// pen aids. Its essentials stand first, the rest behind `More`. Every
+    /// slider is a bare track; labels ride ABOVE the tracks as engraved
+    /// value lines.
+    pub(crate) fn brush_rail_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        presets: &[BrushPreset],
+        state: &mut AppState,
+    ) {
         let title = if self.erasing {
             "eraser".to_string()
         } else {
             self.armed_preset.clone().unwrap_or_else(|| "brush".into())
         };
-        plate::legend(ui, &title);
+        // Never the bare word: the rail's keys are spoken `Brush` and `Eraser`.
+        plate::legend(ui, &format!("{}: {title}", crate::vocab::DRAWING_WITH));
         ui.add_space(8.0);
-        ui.spacing_mut().slider_width = 150.0;
-        value_line(ui, "size", format!("{:.0} px", self.raster_brush_px));
-        ui.add(egui::Slider::new(&mut self.raster_brush_px, 1.0..=300.0).show_value(false));
-        ui.add_space(4.0);
-        value_line(ui, "flow", format!("{:.2}", self.brush_flow));
-        ui.add(egui::Slider::new(&mut self.brush_flow, 0.05..=1.0).show_value(false));
+        // THE PENCIL BOX (genga room charter): the three named pencils.
+        // Arming a pencil arms the brush; the Tally ring breaks when the
+        // live brush drifts off the preset.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            // Three across what the float leaves: its handle takes a gutter.
+            let wide = (ui.available_width() - 2.0 * 6.0) / 3.0;
+            for (i, p) in presets.iter().enumerate() {
+                if matches!(p.name.as_str(), "atari" | "genga" | "shusei") {
+                    self.pencil_slot(ui, p, i + 1, wide, state);
+                }
+            }
+        });
+        self.brush_library_ui(ui, presets);
+        ui.add_space(8.0);
+        ui.spacing_mut().slider_width = ui.available_width();
+        // The route's size, as the rail's key has it: this float opens on
+        // the vector brush too.
+        let (mut px, (lo, hi)) = (self.active_px(), self.px_range());
+        value_line(ui, "size", format!("{px:.1} px"));
+        if ui.add(egui::Slider::new(&mut px, lo..=hi).show_value(false)).changed() {
+            self.set_brush_px(px, state);
+        }
         ui.add_space(4.0);
         value_line(ui, "opacity", format!("{:.2}", self.brush_opacity));
         ui.add(egui::Slider::new(&mut self.brush_opacity, 0.05..=1.0).show_value(false));
+        ui.add_space(4.0);
+        self.steady_row(ui);
+        self.keep_inside_row(ui);
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new("More").id_salt("brushes_more").show(ui, |ui| {
+            self.brush_more_ui(ui);
+            self.edge_rows(ui);
+            ui.add_space(8.0);
+            self.brush_imports_ui(ui);
+        });
+    }
+
+    /// The Brushes float's `More`: flow and the pen's dynamics.
+    fn brush_more_ui(&mut self, ui: &mut egui::Ui) {
+        value_line(ui, "flow", format!("{:.2}", self.brush_flow));
+        ui.add(egui::Slider::new(&mut self.brush_flow, 0.05..=1.0).show_value(false));
         ui.add_space(10.0);
         plate::legend(ui, "pressure");
         ui.add_space(2.0);
@@ -3161,9 +3194,11 @@ impl CanvasView {
                     .small(),
             );
         }
+    }
 
-        // ---- THE LIBRARY (PSD-brush-library): imported Krita presets,
-        // browsed and ARMED here; edited only in Settings → Brushes.
+    /// THE LIBRARY (PSD-brush-library): imported Krita presets, browsed and
+    /// ARMED here; edited only in Settings → Brushes.
+    fn brush_library_ui(&mut self, ui: &mut egui::Ui, presets: &[BrushPreset]) {
         ui.add_space(10.0);
         value_line(ui, "library", format!("{}", presets.len()));
         ui.add_space(2.0);
@@ -3322,7 +3357,10 @@ impl CanvasView {
         if let Some(p) = arm {
             self.apply_preset(&p);
         }
-        ui.add_space(4.0);
+    }
+
+    /// The float's way out to more brushes: imports and the Brush maker.
+    fn brush_imports_ui(&mut self, ui: &mut egui::Ui) {
         if ui
             .button("import brushes…")
             .on_hover_text(
@@ -3345,199 +3383,14 @@ impl CanvasView {
         {
             self.request_krita_scan = true;
         }
+        if ui.button("Make a brush").on_hover_text("opens the brush maker").clicked() {
+            self.request_brush_maker = true;
+        }
     }
 
-    /// Brush & tool controls — a dockable pane of its own (the old canvas
-    /// toolbar). Wrapped layout: in a narrow dock it flows to more rows
-    /// without pushing any other pane around.
-    pub fn brush_ui(
-        &mut self,
-        ui: &mut egui::Ui,
-        state: &mut AppState,
-        raster_available: bool,
-        presets: &[BrushPreset],
-    ) {
-        // Sliders are the widest fixed-size widgets — scale them to the pane
-        // so the toolbox keeps collapsing in narrow docks instead of hitting
-        // a ~180px floor at the dock divider.
-        // Responsive: below the threshold the pane drops to COMPACT mode —
-        // icon buttons and drag-value numbers instead of labelled sliders —
-        // so it collapses to a slim icon rail beside the canvas.
-        let compact = ui.available_width() < 190.0;
-        let sw = (ui.available_width() * 0.45).clamp(48.0, 110.0);
-        ui.spacing_mut().slider_width = sw;
-        // The raster/vector engine switch is a GPU backend choice, not a tool
-        // (spec §6 defect 2) — it lives in Settings → Performance now.
-        if !raster_available {
-            self.raster = false;
-        }
-        // With NO GPU at all (the headless testkit and layout probe — the
-        // app always has one) the full deck still lays out so it can be
-        // measured and driven; strokes stay on the CPU path and the GPU
-        // tools refuse with their reason. A user's vector choice keeps the
-        // plain brush slider (GM1).
-        let full_deck = self.raster || !raster_available;
-        ui.horizontal_wrapped(|ui| {
-            if full_deck {
-                // ---- THE PENCIL BOX (genga room charter): the three named
-                // pencils + the eraser, one XL detent group with specimen
-                // strokes. Arming a pencil arms the brush; the Tally ring
-                // breaks when the live brush drifts off the preset.
-                // Compact drops the painted caption only: every control keeps
-                // its full spoken name (a caption-less "lasso" would collide
-                // with the lasso selection shape).
-                let lbl = |s: &'static str| if compact { "" } else { s };
-                for (i, p) in presets.iter().enumerate() {
-                    if matches!(p.name.as_str(), "atari" | "genga" | "shusei") {
-                        self.pencil_slot(ui, p, i + 1, state);
-                    }
-                }
-                self.eraser_slot(ui, state);
-                ui.separator();
-                // Select / transform tool (V; B returns to paint). Leaving
-                // Select commits any floating transform. A detent: clicking
-                // the armed position does nothing.
-                // GM3: every deck tooltip leads with the registry's line —
-                // name, the chord as bound now, one line of help — built
-                // only while hovered.
-                use crate::menus::hover_tip;
-                let sel_on = self.tool == CanvasTool::Select;
-                if hover_tip(
-                    plate::tool_button(ui, sel_on, Icon::Select, lbl("select"), "select"),
-                    Action::SelectTool,
-                    "drag = select, drag inside = move, corners = scale, just \
-                    outside = rotate; Enter applies, Esc cancels",
-                )
-                .clicked()
-                    && !sel_on
-                {
-                    self.set_tool(CanvasTool::Select, state);
-                }
-                // (Select's shape options live in the OPTIONS row below —
-                // arming a tool must never move the strip. Spec defect 4.)
-                // Fill / bucket tool (G): the shiage verb.
-                let fill_on = self.tool == CanvasTool::Fill;
-                if hover_tip(
-                    plate::tool_button(ui, fill_on, Icon::Fill, lbl("fill"), "fill"),
-                    Action::FillTool,
-                    "click a region; line art bounds it. gap closes line \
-                    breaks; under tucks the flat beneath the lines; cel/layer \
-                    picks the boundary reference. Shift+click refills a painted \
-                    flat (nuri-naoshi); Ctrl+Shift+click replaces its colour on \
-                    the whole layer",
-                )
-                .clicked()
-                    && !fill_on
-                {
-                    self.set_tool(CanvasTool::Fill, state);
-                }
-                // Lasso fill: loop a region, it fills feathered.
-                let lf_on = self.tool == CanvasTool::LassoFill;
-                if hover_tip(
-                    plate::tool_button(ui, lf_on, Icon::Lasso, lbl("lasso fill"), "lasso fill"),
-                    Action::LassoFillTool,
-                    "softness feathers the edge inward, grow shifts the edge; \
-                    one loop = one undo step",
-                )
-                .clicked()
-                    && !lf_on
-                {
-                    self.set_tool(CanvasTool::LassoFill, state);
-                }
-                // (Fill's gap/under/boundary options live in the OPTIONS
-                // row below, same law.)
-                // ---- The latches (independent states, Tally left-edge). ----
-                // Alpha lock (L): ink can only recolor pixels the active
-                // layer already has coverage on — never paint outside its
-                // silhouette. Combines with brush or eraser.
-                let mut lock = self.alpha_lock;
-                hover_tip(
-                    plate::tool_latch(ui, &mut lock, Icon::Lock, lbl("lock"), "alpha lock"),
-                    Action::ToggleAlphaLock,
-                    "ink only recolors pixels this layer already has \
-                    coverage on; the silhouette can't grow",
-                );
-                self.alpha_lock = lock;
-                // Composite view: the node graph's rendered output (review
-                // mode — painting pauses). Blocked mid-stroke: swapping the
-                // view under a live stroke would orphan its display.
-                let mut comp = self.composite_view;
-                hover_tip(
-                    plate::tool_latch(ui, &mut comp, Icon::Comp, lbl("comp"), "composite view"),
-                    Action::ToggleCompositeView,
-                    "what the node graph renders (playback/export truth); \
-                    painting pauses here",
-                );
-                if comp != self.composite_view && !self.stroke_active() {
-                    self.composite_view = comp;
-                }
-                // Active cel-layer chip (RETAS trace-line colours). Click or A
-                // cycles; strokes land on this layer. Red = hidden. Wide mode
-                // pads to a FIXED width (no reflow on layer switch); compact
-                // mode is the bare glyph with the name in the tooltip.
-                let lname = state.active_layer_name();
-                let hidden = state.active_layer_props().is_some_and(|p| !p.visible);
-                // Hidden is a CONFIGURATION the animator chose, not a
-                // contradiction — so it dims, it does not go red (the
-                // Warning Law, spec §3). The refusal at stroke time is
-                // where the contradiction lives.
-                // Identity by DEFINITION (chip override, else role) — the
-                // armed role when this frame has no own cel yet.
-                let color = if hidden {
-                    plate::INK3
-                } else {
-                    match state.active_layer_props() {
-                        Some(p) => props_chip_color(p),
-                        None => role_chip_color(state.view.active_role),
-                    }
-                };
-                // Seated chip (owner's audit): identity dot + name in a
-                // Well slot, same material as every other control.
-                let (crect, cresp) =
-                    ui.allocate_exact_size(vec2(96.0, plate::CTRL_H + 4.0), Sense::click());
-                plate::speak(&cresp, egui::WidgetType::Button, None, &format!("layer: {lname}"));
-                if cresp.clicked() {
-                    state.cycle_layer(false);
-                }
-                if ui.is_rect_visible(crect) {
-                    let pnt = ui.painter();
-                    pnt.rect_filled(crect, plate::R_CONTROL, plate::filled(&cresp).0);
-                    plate::identity_dot(pnt, pos2(crect.left() + 10.0, crect.center().y), 4.0, color);
-                    let shown: String = lname.chars().take(10).collect();
-                    pnt.text(
-                        pos2(crect.left() + 20.0, crect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        shown,
-                        egui::FontId::new(11.0, egui::FontFamily::Monospace),
-                        if hidden {
-                            plate::legend_dim()
-                        } else {
-                            plate::STRUCK
-                        },
-                    );
-                }
-                cresp.on_hover_text(if hidden {
-                    format!("layer '{lname}' is HIDDEN — painting refused (A cycles)")
-                } else {
-                    format!("active layer: {lname} — strokes land here (A cycles)")
-                });
-            // (Size, flow, opacity and the dynamics latches live in
-            // the OPTIONS row below — the strip's membership is law.)
-            // (ERASE CEL moved to the Cel Layers pane footer as a
-            // guarded DANGER control — spec §6 defects 6/7. A
-            // destructive command does not sit in the tool strip
-            // dressed like a mode switch.)
-            } else {
-                plate::field(
-                    ui,
-                    egui::Slider::new(&mut self.brush_width, 0.5..=16.0)
-                        .text("brush")
-                        .fixed_decimals(1),
-                );
-            }
-            if !compact {
-                ui.separator();
-            }
+    /// The Color float: the deck's picker and pencil case, over the dish.
+    pub(crate) fn color_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+        ui.horizontal(|ui| {
             // Custom colour picker (any RGB); the swatches beside it are presets.
             let mut rgb = [
                 self.brush_color[0],
@@ -3566,162 +3419,233 @@ impl CanvasView {
                     self.brush_color = *c;
                 }
             }
-            if !compact {
-                ui.separator();
-            }
-            // (fit view + zoom live on the lightbox rail now — Phase 4.)
-            // NOTHING VARIABLE-WIDTH GOES IN THIS ROW (canvas-stability law):
-            // diagnostics live in the status bar; PLAYING is a canvas overlay.
         });
+        ui.add_space(8.0);
+        self.dish_ui(ui, state);
+    }
 
-        // ---- OPTIONS row (spec defect 4): ALWAYS allocated at OPTIONS_H,
-        // even when empty, so arming select or fill NEVER moves the strip
-        // above — the armed tool's sub-elements land here and nowhere else.
-        if full_deck {
-            let full = vec2(ui.available_width(), plate::OPTIONS_H);
-            plate::fixed_row(
+    /// `Keep inside strokes` (L): ink can only recolor pixels the active
+    /// layer already has coverage on — never paint outside its silhouette.
+    /// Combines with brush or eraser, so Brushes and Tool options share it.
+    pub(crate) fn keep_inside_row(&mut self, ui: &mut egui::Ui) {
+        let mut lock = self.alpha_lock;
+        crate::menus::hover_tip(
+            plate::tool_latch(
                 ui,
-                full,
-                |ui| {
-                    match self.tool {
-                        CanvasTool::Select => {
-                            plate::legend(ui, "select");
-                            if plate::tool_button(
-                                ui,
-                                self.sel_shape == SelShape::Lasso,
-                                Icon::Lasso,
-                                "lasso",
-                                "lasso selection",
-                            )
-                            .on_hover_text("lasso selection")
-                            .clicked()
-                            {
-                                self.sel_shape = SelShape::Lasso;
-                            }
-                            if plate::tool_button(
-                                ui,
-                                self.sel_shape == SelShape::Rect,
-                                Icon::Marquee,
-                                "rect",
-                                "rect selection",
-                            )
-                            .on_hover_text("rectangle selection")
-                            .clicked()
-                            {
-                                self.sel_shape = SelShape::Rect;
-                            }
-                        }
-                        CanvasTool::Fill => {
-                            plate::legend(ui, "fill");
-                            // Engraved label BEFORE, 64pt value (shiage:
-                            // leak-chasing nudges these several times a cel).
-                            plate::legend(ui, "gap");
-                            let mut gap = self.fill_gap;
-                            plate::field(ui, egui::DragValue::new(&mut gap).range(0..=8));
-                            self.fill_gap = gap;
-                            plate::legend(ui, "under");
-                            let mut grow = self.fill_grow;
-                            plate::field(ui, egui::DragValue::new(&mut grow).range(0..=4));
-                            self.fill_grow = grow;
-                            if plate::detent(ui, self.fill_ref_cel, "cel")
-                                .on_hover_text(
-                                    "boundaries come from the whole cel (all visible layers)",
-                                )
-                                .clicked()
-                            {
-                                self.fill_ref_cel = true;
-                            }
-                            if plate::detent(ui, !self.fill_ref_cel, "layer")
-                                .on_hover_text("boundaries come from the active layer only")
-                                .clicked()
-                            {
-                                self.fill_ref_cel = false;
-                            }
-                        }
-                        CanvasTool::LassoFill => {
-                            plate::legend(ui, "lasso fill");
-                            plate::legend(ui, "softness");
-                            let mut soft = self.lasso_soft;
-                            plate::field(ui, egui::DragValue::new(&mut soft).range(0.0..=64.0));
-                            self.lasso_soft = soft;
-                            plate::legend(ui, "grow");
-                            let mut grow = self.lasso_grow;
-                            plate::field(
-                                ui,
-                                egui::DragValue::new(&mut grow).range(-16.0..=16.0),
-                            );
-                            self.lasso_grow = grow;
-                        }
-                        // GM18: the panel tool's gestures, said where its
-                        // options would sit (the gutters are the Manga pane's).
-                        CanvasTool::Panel => {
-                            plate::legend(ui, "panel (koma)");
-                            ui.label(
-                                egui::RichText::new(
-                                    "drag on paper: a panel · across a panel: a split · \
-                                     from a VP or the horizon: moved",
-                                )
-                                .small()
-                                .color(plate::legend_dim()),
-                            );
-                        }
-                        _ => {
-                            // GM4: the pen aids sit here — the dab's edge,
-                            // aliased, and the stabilizer.
-                            plate::legend(ui, "hardness");
-                            let mut hard = self.brush_hardness;
-                            // Shown as a percent (the stored edge stays 0–1).
-                            plate::field(
-                                ui,
-                                egui::DragValue::new(&mut hard)
-                                    .range(0.0..=1.0)
-                                    .speed(0.01)
-                                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
-                                    .custom_parser(|s| {
-                                        let s = s.trim().trim_end_matches('%').trim();
-                                        s.parse::<f64>().ok().map(|v| v / 100.0)
-                                    }),
-                            )
-                            .on_hover_text("the dab's edge: toward 100% hard, toward 0% soft");
-                            self.brush_hardness = hard;
-                            if plate::detent(ui, self.brush_aliased, "aliased")
-                                .on_hover_text(
-                                    "hard 0/255 edges, no smoothing (pixel-exact fills): \
-                                     flow, pressure opacity and paper grain are off",
-                                )
-                                .clicked()
-                            {
-                                self.brush_aliased = !self.brush_aliased;
-                            }
-                            plate::legend(ui, "stabilizer");
-                            let mut stab = self.stabilizer;
-                            plate::field(
-                                ui,
-                                egui::DragValue::new(&mut stab)
-                                    .range(0..=crate::stabilizer::MAX_LEVEL),
-                            )
-                            .on_hover_text(
-                                "tebure hosei (stabilization): 0 = raw pen; \
-                                 higher pulls the ink on a longer string",
-                            );
-                            if stab != self.stabilizer {
-                                self.stabilizer = stab;
-                                self.stabilizer_request = Some(stab);
-                            }
-                            // Brush / eraser edits live on the RIGHT RAIL
-                            // (owner 2026-08-17): hover the canvas's right
-                            // edge. The deck stays clear; the row stays
-                            // claimed so nothing moves.
-                            ui.add_space(4.0);
-                            ui.label(
-                                egui::RichText::new("brush edits → hover the canvas's right edge")
-                                    .size(10.5)
-                                    .color(plate::legend_dim()),
-                            );
-                        }
+                &mut lock,
+                Icon::Lock,
+                crate::vocab::KEEP_INSIDE_STROKES_SHORT,
+                crate::vocab::KEEP_INSIDE_STROKES,
+            ),
+            Action::ToggleAlphaLock,
+            "ink only recolors pixels this layer already has \
+            coverage on; the silhouette can't grow",
+        );
+        self.alpha_lock = lock;
+    }
+
+    /// The Brush card's line: where a stroke lands, and with what. A fill
+    /// names its role too, the one job of the retired ARMED line.
+    pub(crate) fn drawing_with(&self, state: &AppState) -> String {
+        let pencil = match &self.armed_preset {
+            _ if self.erasing => "eraser",
+            Some(name) => name.as_str(),
+            None => "brush",
+        };
+        let mut line = format!(
+            "{}: {} · {pencil}",
+            crate::vocab::DRAWING_WITH,
+            state.active_layer_name()
+        );
+        if matches!(self.tool, CanvasTool::Fill | CanvasTool::LassoFill) {
+            let mut roles = state.palettes.characters.iter().flat_map(|ch| &ch.roles);
+            if let Some(role) = roles.find(|r| r.color[..3] == self.brush_color[..3]) {
+                line.push_str(&format!(" · {}", role.name));
+            }
+        }
+        line
+    }
+
+    /// The Tool options float: the armed tool's rows, the old deck's OPTIONS
+    /// row laid out top down.
+    pub(crate) fn tool_options_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
+        use crate::menus::hover_tip;
+        match self.tool {
+            CanvasTool::Select => {
+                plate::legend(ui, "selection shape");
+                ui.horizontal(|ui| {
+                    if plate::tool_button(
+                        ui,
+                        self.sel_shape == SelShape::Lasso,
+                        Icon::Lasso,
+                        "lasso",
+                        "lasso selection",
+                    )
+                    .on_hover_text("lasso selection")
+                    .clicked()
+                    {
+                        self.sel_shape = SelShape::Lasso;
                     }
-                },
+                    if plate::tool_button(
+                        ui,
+                        self.sel_shape == SelShape::Rect,
+                        Icon::Marquee,
+                        "rect",
+                        "rect selection",
+                    )
+                    .on_hover_text("rectangle selection")
+                    .clicked()
+                    {
+                        self.sel_shape = SelShape::Rect;
+                    }
+                });
+            }
+            CanvasTool::Fill | CanvasTool::LassoFill => {
+                // The `Fill` chooser: the rail says `Fill`, so this row speaks
+                // its own name (1.5 rule 9). Lasso fill loops a region and
+                // fills it feathered.
+                ui.horizontal(|ui| {
+                    let fill_on = self.tool == CanvasTool::Fill;
+                    if hover_tip(
+                        plate::tool_button(ui, fill_on, Icon::Fill, "Fill", "Fill a region"),
+                        Action::FillTool,
+                        "click a region; line art bounds it. gap closes line \
+                        breaks; under tucks the flat beneath the lines; cel/layer \
+                        picks the boundary reference. Shift+click refills a painted \
+                        flat (nuri-naoshi); Ctrl+Shift+click replaces its colour on \
+                        the whole layer",
+                    )
+                    .clicked()
+                    {
+                        self.set_tool(CanvasTool::Fill, state);
+                    }
+                    let lf_on = self.tool == CanvasTool::LassoFill;
+                    let draw = crate::vocab::DRAW_TO_FILL;
+                    if hover_tip(
+                        plate::tool_button(ui, lf_on, Icon::Lasso, draw, draw),
+                        Action::LassoFillTool,
+                        "softness feathers the edge inward, grow shifts the edge; \
+                        one loop = one undo step",
+                    )
+                    .clicked()
+                    {
+                        self.set_tool(CanvasTool::LassoFill, state);
+                    }
+                });
+                ui.add_space(4.0);
+                if self.tool == CanvasTool::Fill {
+                    // Engraved label BEFORE, 64pt value (shiage:
+                    // leak-chasing nudges these several times a cel).
+                    ui.horizontal(|ui| {
+                        plate::legend(ui, "gap");
+                        let mut gap = self.fill_gap;
+                        plate::field(ui, egui::DragValue::new(&mut gap).range(0..=8));
+                        self.fill_gap = gap;
+                        plate::legend(ui, "under");
+                        let mut grow = self.fill_grow;
+                        plate::field(ui, egui::DragValue::new(&mut grow).range(0..=4));
+                        self.fill_grow = grow;
+                    });
+                    ui.horizontal(|ui| {
+                        if plate::detent(ui, self.fill_ref_cel, "cel")
+                            .on_hover_text(
+                                "boundaries come from the whole cel (all visible layers)",
+                            )
+                            .clicked()
+                        {
+                            self.fill_ref_cel = true;
+                        }
+                        if plate::detent(ui, !self.fill_ref_cel, "layer")
+                            .on_hover_text("boundaries come from the active layer only")
+                            .clicked()
+                        {
+                            self.fill_ref_cel = false;
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        plate::legend(ui, "softness");
+                        let mut soft = self.lasso_soft;
+                        plate::field(ui, egui::DragValue::new(&mut soft).range(0.0..=64.0));
+                        self.lasso_soft = soft;
+                        plate::legend(ui, "grow");
+                        let mut grow = self.lasso_grow;
+                        plate::field(ui, egui::DragValue::new(&mut grow).range(-16.0..=16.0));
+                        self.lasso_grow = grow;
+                    });
+                }
+            }
+            // GM18: the panel tool's gestures, said where its options would
+            // sit (the gutters are the Manga pane's).
+            CanvasTool::Panel => {
+                plate::legend(ui, "panel (koma)");
+                ui.label(
+                    egui::RichText::new(
+                        "drag on paper: a panel · across a panel: a split · \
+                         from a VP or the horizon: moved",
+                    )
+                    .small()
+                    .color(plate::legend_dim()),
+                );
+            }
+            CanvasTool::Paint => {
+                plate::legend(ui, if self.erasing { "eraser options" } else { "brush options" });
+                self.keep_inside_row(ui);
+            }
+        }
+    }
+
+    /// `Steady stroke`: an essential of the Brushes float. GM4: the pen aids
+    /// sit with the brush.
+    fn steady_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            plate::legend(ui, crate::vocab::STEADY_STROKE);
+            let mut stab = self.stabilizer;
+            let field = plate::field(
+                ui,
+                egui::DragValue::new(&mut stab).range(0..=crate::stabilizer::MAX_LEVEL),
             );
+            plate::speak(&field, egui::WidgetType::DragValue, None, crate::vocab::STEADY_STROKE);
+            field.on_hover_text(
+                "tebure hosei (stabilization): 0 = raw pen; \
+                 higher pulls the ink on a longer string",
+            );
+            if stab != self.stabilizer {
+                self.stabilizer = stab;
+                self.stabilizer_request = Some(stab);
+            }
+        });
+    }
+
+    /// `Edge softness` and `Pixel edges`, in the Brushes float's `More`.
+    fn edge_rows(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            plate::legend(ui, crate::vocab::EDGE_SOFTNESS);
+            let mut hard = self.brush_hardness;
+            // Shown as a percent (the stored edge stays 0–1).
+            let field = plate::field(
+                ui,
+                egui::DragValue::new(&mut hard)
+                    .range(0.0..=1.0)
+                    .speed(0.01)
+                    .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                    .custom_parser(|s| {
+                        let s = s.trim().trim_end_matches('%').trim();
+                        s.parse::<f64>().ok().map(|v| v / 100.0)
+                    }),
+            );
+            plate::speak(&field, egui::WidgetType::DragValue, None, crate::vocab::EDGE_SOFTNESS);
+            field.on_hover_text("the dab's edge: toward 100% hard, toward 0% soft");
+            self.brush_hardness = hard;
+        });
+        if plate::detent(ui, self.brush_aliased, crate::vocab::PIXEL_EDGES)
+            .on_hover_text(
+                "hard 0/255 edges, no smoothing (pixel-exact fills): \
+                 flow, pressure opacity and paper grain are off",
+            )
+            .clicked()
+        {
+            self.brush_aliased = !self.brush_aliased;
         }
     }
 
@@ -3735,7 +3659,6 @@ impl CanvasView {
         pen: &PenConfig,
         layers_cfg: &LayersConfig,
         native_pen: &[PenSample],
-        presets: &[BrushPreset],
     ) {
         self.color_law = state.engine.project.color_law;
         self.pen_curve = pen.pressure_curve.clone();
@@ -3784,22 +3707,8 @@ impl CanvasView {
         // the pencil box are the colour-arming gestures now.)
         let _ = layers_cfg;
 
-        // The tool deck rides ON the drawing surface (owner's directive
-        // 2026-08-17): brush controls are part of the instrument, not a
-        // floating sub-window above it. The paper gets everything below.
-        let deck_raster = paint.is_some();
-        egui::Panel::top("canvas_tool_deck")
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                crate::plate::surface(ui);
-                ui.add_space(2.0);
-                self.brush_ui(ui, state, deck_raster, presets);
-                ui.add_space(2.0);
-            });
-
-        // (The lightbox rail folds out from the LEFT edge now — owner's
-        // law: nothing lives fixed in the canvas but the top deck. See the
-        // fold-out beside the brush rail below.)
+        // (Nothing lives fixed in the canvas: the tools ride over it on the
+        // rail, rail.rs. The paper gets the whole pane.)
         let mut paint = paint;
         if paint.is_none() {
             self.raster = false;
@@ -3809,9 +3718,10 @@ impl CanvasView {
 
         // R-FLIP: momentary, polled (not an Action — actions fire on
         // press; the flip lives exactly as long as the key is down). Never
-        // while typing, playing, mid-stroke, or in composite review.
-        self.flip_held = ui.input(|i| i.key_down(egui::Key::R))
-            && !ui.ctx().egui_wants_keyboard_input()
+        // while typing, playing, mid-stroke, or in composite review. The
+        // rail's Flip key is the same hold for a hand on the pen.
+        let r_down = ui.input(|i| i.key_down(egui::Key::R)) && !ui.ctx().egui_wants_keyboard_input();
+        self.flip_held = (r_down || self.rail_flip)
             && !self.stroke_active()
             && !state.view.playing
             && !self.composite_view;
@@ -3853,10 +3763,13 @@ impl CanvasView {
         }
         if !space {
             self.hand_engaged = false;
+        }
+        if !space && !self.hand_held {
             self.hand_turn = None;
         }
         self.space_was_down = space;
-        let hand = space && self.hand_engaged;
+        // AU4: the rail's Hand is the same hold, kept for a hand on the pen.
+        let hand = (space && self.hand_engaged) || self.hand_held;
         if hand {
             let m = ui.input(|i| i.modifiers);
             let pointer = response.interact_pointer_pos();
@@ -5125,221 +5038,6 @@ impl CanvasView {
                 crate::plate::TALLY,
                 egui::Stroke::NONE,
             ));
-        }
-
-        // ---- The brush rail (owner 2026-08-17): brush editing lives at
-        // the canvas's RIGHT edge, hidden until reached for. It floats as
-        // an overlay so the paper NEVER rescales when it opens. It cannot
-        // open mid-stroke, and it stays open through a slider drag.
-        const RAIL_W: f32 = 210.0;
-        if self.raster {
-            let hover = ui.ctx().pointer_hover_pos();
-            let zone_w = if self.rail_open { RAIL_W + 12.0 } else { 16.0 };
-            let in_zone = hover.is_some_and(|hp| {
-                hp.x >= rect.right() - zone_w
-                    && hp.x <= rect.right() + 1.0
-                    && hp.y >= rect.top()
-                    && hp.y <= rect.bottom()
-            });
-            let dragging = ui.input(|i| i.pointer.any_down());
-            self.rail_open = if self.rail_open {
-                in_zone || dragging
-            } else {
-                in_zone && !dragging && !self.stroke_active()
-            };
-            // The slide (owner 2026-08-17): in and out like a toolbar
-            // should — 160ms, overlay only, so the paper never rescales.
-            let t = ui.ctx().animate_bool_with_time(
-                egui::Id::new("brush_rail_slide"),
-                self.rail_open,
-                0.16,
-            );
-            if t > 0.001 {
-                let x = rect.right() - RAIL_W * t;
-                let panel = Rect::from_min_size(pos2(x, rect.top()), vec2(RAIL_W, rect.height()));
-                egui::Area::new(egui::Id::new("canvas_brush_rail"))
-                    .fixed_pos(panel.min)
-                    .constrain(false)
-                    .show(ui.ctx(), |aui| {
-                        // Clipped to the paper area: the slide emerges from
-                        // the edge and nothing spills over neighbours.
-                        aui.set_clip_rect(rect);
-                        let pad = ((panel.height() - self.rail_content_h) * 0.5).max(0.0);
-                        // The backing is sized to the CONTENT, not the
-                        // column (owner 2026-08-17): readable text, without
-                        // walling off the paper above and below the stack.
-                        let back = Rect::from_min_size(
-                            pos2(panel.left() + 2.0, panel.top() + pad - 12.0),
-                            vec2(RAIL_W - 8.0, self.rail_content_h + 24.0),
-                        );
-                        plate::float_ground(aui, back);
-                        aui.allocate_ui_with_layout(
-                            panel.size(),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |aui| {
-                                aui.set_min_size(panel.size());
-                                aui.add_space(pad);
-                                // Measure the STACK itself by allocation
-                                // cursor, immune to min_rect inflation (the
-                                // previous measurement fed back on itself
-                                // and decayed the pad to zero — the bug the
-                                // owner's screenshot caught).
-                                let y0 = aui.next_widget_position().y;
-                                self.brush_rail_ui(aui, presets);
-                                let y1 = aui.next_widget_position().y;
-                                self.rail_content_h = (y1 - y0).max(50.0);
-                            },
-                        );
-                    });
-            } else {
-                // The grip: a quiet affordance while the rail is hidden.
-                let gx = rect.right() - 6.0;
-                let gcy = rect.center().y;
-                for dy in [-9.0f32, 0.0, 9.0] {
-                    painter.line_segment(
-                        [pos2(gx, gcy + dy - 3.0), pos2(gx, gcy + dy + 3.0)],
-                        egui::Stroke::new(2.0, crate::plate::INK3),
-                    );
-                }
-            }
-        }
-
-        // ---- THE LIGHTBOX FOLD-OUT (owner's law, 2026-08-17): the left
-        // edge mirrors the right — hover to slide out, clipped to the
-        // paper, vertically centred, content-sized backing. Onion, paper
-        // furniture, view, and the INPUT plate field live here.
-        const LIGHT_W: f32 = 136.0;
-        {
-            let hover = ui.ctx().pointer_hover_pos();
-            let zone_w = if self.light_open {
-                LIGHT_W + 12.0
-            } else {
-                16.0
-            };
-            let in_zone = hover.is_some_and(|hp| {
-                hp.x >= rect.left() - 1.0
-                    && hp.x <= rect.left() + zone_w
-                    && hp.y >= rect.top()
-                    && hp.y <= rect.bottom()
-            });
-            let dragging = ui.input(|i| i.pointer.any_down());
-            self.light_open = if self.light_open {
-                in_zone || dragging
-            } else {
-                in_zone && !dragging && !self.stroke_active()
-            };
-            let t = ui.ctx().animate_bool_with_time(
-                egui::Id::new("lightbox_slide"),
-                self.light_open,
-                0.16,
-            );
-            if t > 0.001 {
-                let x = rect.left() - LIGHT_W * (1.0 - t);
-                let panel = Rect::from_min_size(pos2(x, rect.top()), vec2(LIGHT_W, rect.height()));
-                egui::Area::new(egui::Id::new("canvas_lightbox_rail"))
-                    .fixed_pos(panel.min)
-                    .constrain(false)
-                    .show(ui.ctx(), |aui| {
-                        aui.set_clip_rect(rect);
-                        let pad = ((panel.height() - self.light_content_h) * 0.5).max(0.0);
-                        let back = Rect::from_min_size(
-                            pos2(panel.left() + 2.0, panel.top() + pad - 12.0),
-                            vec2(LIGHT_W - 8.0, self.light_content_h + 24.0),
-                        );
-                        plate::float_ground(aui, back);
-                        aui.allocate_ui_with_layout(
-                            panel.size(),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |aui| {
-                                aui.set_min_size(panel.size());
-                                aui.add_space(pad);
-                                // GM6: taller than the paper (genga · douga
-                                // open on a small window) the fold-out
-                                // scrolls, so no control falls off its foot.
-                                let out = egui::ScrollArea::vertical()
-                                    .id_salt("lightbox_scroll")
-                                    .max_height(panel.height())
-                                    .show(aui, |aui| self.lightbox_rail_ui(aui, state));
-                                plate::note_viewport(aui, out.inner_rect, [false, true]);
-                                self.light_content_h = out.content_size.y.max(50.0);
-                            },
-                        );
-                    });
-            } else {
-                // The left grip, clear of the mirror strip.
-                let gx = rect.left() + 20.0;
-                let gcy = rect.center().y;
-                for dy in [-9.0f32, 0.0, 9.0] {
-                    painter.line_segment(
-                        [pos2(gx, gcy + dy - 3.0), pos2(gx, gcy + dy + 3.0)],
-                        egui::Stroke::new(2.0, crate::plate::INK3),
-                    );
-                }
-            }
-        }
-
-        // ---- THE PAINT DISH (its room, 2026-08-17): colour folds UP from
-        // the bottom edge — the rendering stage's instrument. Fold law
-        // inherited whole; contents centred on the grip's vertical line.
-        const DISH_H: f32 = 150.0;
-        if self.raster {
-            let hover = ui.ctx().pointer_hover_pos();
-            let zone_h = if self.dish_open { DISH_H + 12.0 } else { 16.0 };
-            let in_zone = hover.is_some_and(|hp| {
-                hp.y >= rect.bottom() - zone_h
-                    && hp.y <= rect.bottom() + 1.0
-                    && hp.x >= rect.left()
-                    && hp.x <= rect.right()
-            });
-            let dragging = ui.input(|i| i.pointer.any_down());
-            self.dish_open = if self.dish_open {
-                in_zone || dragging
-            } else {
-                in_zone && !dragging && !self.stroke_active()
-            };
-            let t = ui.ctx().animate_bool_with_time(
-                egui::Id::new("paint_dish_slide"),
-                self.dish_open,
-                0.16,
-            );
-            if t > 0.001 {
-                let y = rect.bottom() - DISH_H * t;
-                let panel = Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), DISH_H));
-                egui::Area::new(egui::Id::new("canvas_paint_dish"))
-                    .fixed_pos(panel.min)
-                    .constrain(false)
-                    .show(ui.ctx(), |aui| {
-                        aui.set_clip_rect(rect);
-                        let pad = ((panel.width() - self.dish_content_w) * 0.5).max(0.0);
-                        let back = Rect::from_min_size(
-                            pos2(panel.left() + pad - 12.0, panel.top() + 2.0),
-                            vec2(self.dish_content_w + 24.0, DISH_H - 6.0),
-                        );
-                        plate::float_ground(aui, back);
-                        aui.allocate_ui_with_layout(
-                            panel.size(),
-                            egui::Layout::left_to_right(egui::Align::Center),
-                            |aui| {
-                                aui.set_min_size(panel.size());
-                                aui.add_space(pad);
-                                let x0 = aui.next_widget_position().x;
-                                self.dish_ui(aui, state);
-                                let x1 = aui.next_widget_position().x;
-                                self.dish_content_w = (x1 - x0).max(240.0);
-                            },
-                        );
-                    });
-            } else {
-                // The dish grip: bottom centre.
-                let gy = rect.bottom() - 6.0;
-                let gcx = rect.center().x;
-                for dx in [-9.0f32, 0.0, 9.0] {
-                    painter.line_segment(
-                        [pos2(gcx + dx - 3.0, gy), pos2(gcx + dx + 3.0, gy)],
-                        egui::Stroke::new(2.0, crate::plate::INK3),
-                    );
-                }
-            }
         }
 
         // ---- Brush-outline cursor (Krita-style) --------------------------
@@ -7010,7 +6708,6 @@ impl CanvasView {
             } = event
             {
                 touch_seen = true;
-                self.seen_pen = true; // a pen/stylus is driving input — not a mouse
                 match phase {
                     // Step 2: distrust the Start force (WM_POINTERDOWN pressure
                     // is usually 0 -> None). Seed provisionally; the first real
@@ -7024,6 +6721,7 @@ impl CanvasView {
                         // (Same clickthrough gate as the native path: raw
                         // Touch events also bypass egui's layering.)
                         if ui.ctx().layer_id_at(*pos) == Some(ui.layer_id()) {
+                            self.seen_pen = true; // a pen on the canvas — not a mouse
                             if picking {
                                 if rect.contains(*pos) {
                                     self.eyedrop(*pos, to_paper, state);

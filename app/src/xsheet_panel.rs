@@ -2113,7 +2113,62 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
 // double-click = rename, opacity drag commits ONCE at gesture end. The + menu
 // inserts presets at their anime-correct stack positions.
 
+/// A row's opacity: live value during the drag, committed ONCE at the end
+/// (one gesture = one undo step).
+fn opacity_cells(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    lid: LayerId,
+    opacity: f32,
+    props: &LayerProps,
+    track: f32,
+) {
+    let mut live = match &state.strip_opacity {
+        Some((oid, v)) if *oid == lid => *v,
+        _ => opacity,
+    };
+    // AUDIT [3]: this was an egui Slider whose track is invisible
+    // under our Visuals — a bare handle on the plate with no 0 or
+    // full. The rail shows its range; the readout is Mono 11 Struck
+    // (the old .monospace().small() pair resolved to 9.5 PROP).
+    let resp = plate::rail(ui, &mut live, 0.0..=1.0, track);
+    ui.label(
+        egui::RichText::new(format!("{:3.0}%", live * 100.0))
+            .monospace()
+            .size(11.0)
+            .color(plate::STRUCK),
+    );
+    if resp.drag_stopped() {
+        state.strip_opacity = None;
+        if (live - opacity).abs() > 0.001 {
+            state.layer_set_props(
+                lid,
+                LayerProps {
+                    opacity: live,
+                    ..props.clone()
+                },
+            );
+        }
+    } else if resp.dragged() {
+        state.strip_opacity = Some((lid, live));
+    } else if resp.changed() {
+        // Click-to-set (no drag): apply immediately.
+        state.layer_set_props(
+            lid,
+            LayerProps {
+                opacity: live,
+                ..props.clone()
+            },
+        );
+    }
+}
+
 pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+    /// Under this width a row's opacity moves to a line of its own: the
+    /// furniture, the 48 name cell and the percentage come to this.
+    const NARROW_STRIP: f32 = 296.0;
+    /// That line starts under the name: eye, lock and dot before it.
+    const NARROW_INDENT: f32 = 72.0;
     // Same width-isolation as the parent panel: the strip's rows must never
     // drive the panel width (they appear/disappear on undo/redo and playback).
     ui.set_min_width(ui.available_width());
@@ -2258,6 +2313,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         return;
     }
     let armed_id = state.active_layer_id();
+    let narrow = ui.available_width() < NARROW_STRIP;
     for (row_i, (lid, name, visible, opacity)) in rows.iter().enumerate() {
         let is_active = armed_id == Some(*lid);
         let props = full[row_i].clone();
@@ -2334,7 +2390,8 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // Reserve what the row's fixed furniture actually needs —
             // eye 27 + dot 12 + two chevrons 54 + slider 60 + "100%" 34 +
             // spacing — or the percentage clips off the panel's edge.
-            let name_w = (ui.available_width() - 190.0).max(48.0);
+            let reserve = if narrow { 72.0 } else { 190.0 };
+            let name_w = (ui.available_width() - reserve).max(48.0);
             ui.allocate_ui_with_layout(
                 vec2(name_w, 20.0),
                 egui::Layout::left_to_right(egui::Align::Center),
@@ -2422,47 +2479,19 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 state.layer_move(*lid, false);
             }
 
-            // Opacity: live value during the drag, committed ONCE at the end
-            // (one gesture = one undo step).
-            let mut live = match &state.strip_opacity {
-                Some((oid, v)) if oid == lid => *v,
-                _ => *opacity,
-            };
-            // AUDIT [3]: this was an egui Slider whose track is invisible
-            // under our Visuals — a bare handle on the plate with no 0 or
-            // full. The rail shows its range; the readout is Mono 11 Struck
-            // (the old .monospace().small() pair resolved to 9.5 PROP).
-            let resp = plate::rail(ui, &mut live, 0.0..=1.0, 60.0);
-            ui.label(
-                egui::RichText::new(format!("{:3.0}%", live * 100.0))
-                    .monospace()
-                    .size(11.0)
-                    .color(plate::STRUCK),
-            );
-            if resp.drag_stopped() {
-                state.strip_opacity = None;
-                if (live - *opacity).abs() > 0.001 {
-                    state.layer_set_props(
-                        *lid,
-                        LayerProps {
-                            opacity: live,
-                            ..props.clone()
-                        },
-                    );
-                }
-            } else if resp.dragged() {
-                state.strip_opacity = Some((*lid, live));
-            } else if resp.changed() {
-                // Click-to-set (no drag): apply immediately.
-                state.layer_set_props(
-                    *lid,
-                    LayerProps {
-                        opacity: live,
-                        ..props.clone()
-                    },
-                );
+            if !narrow {
+                opacity_cells(ui, state, *lid, *opacity, &props, 60.0);
             }
         });
+        // AU4: the Layers float is too narrow for the row: opacity takes a
+        // line of its own, under the name.
+        if narrow {
+            ui.horizontal(|ui| {
+                ui.add_space(NARROW_INDENT);
+                let track = ui.available_width() - 44.0;
+                opacity_cells(ui, state, *lid, *opacity, &props, track);
+            });
+        }
     }
 
     // ---- The destructive commands: apart from the rows, Aka-edged, and

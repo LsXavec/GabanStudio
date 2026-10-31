@@ -514,28 +514,25 @@ mod tests {
         let digit = 1 + h.rig().config.presets.iter().position(|p| p.name == "genga").unwrap();
         let genga = format!("genga pencil ({digit})");
         let genga_preset = Action::preset_slot(digit).expect("a pencil-box slot");
-        // The lightbox fold-out slides out when the pointer reaches the
-        // canvas's left edge (above its vertically centred content).
-        let edge = {
-            let r = h.editor().canvas.dbg_rect;
-            egui::pos2(r.left() + 4.0, r.top() + 4.0)
-        };
-        for (button, action, in_lightbox) in [
-            ("select", Action::SelectTool, false),
-            ("fill", Action::FillTool, false),
-            ("lasso fill", Action::LassoFillTool, false),
-            ("alpha lock", Action::ToggleAlphaLock, false),
-            ("composite view", Action::ToggleCompositeView, false),
-            ("eraser", Action::ToggleEraser, false),
-            // The fold-out and the pencil box name their chords as bound too.
-            ("miss check", Action::MissCheck, true),
-            ("onion", Action::ToggleOnion, true),
-            ("fit", Action::ZoomFit, true),
-            (genga.as_str(), genga_preset, false),
+        use crate::floats::Float;
+        for (button, action, float) in [
+            ("Select", Action::SelectTool, None),
+            ("Eraser", Action::ToggleEraser, None),
+            ("Fill", Action::FillTool, None),
+            // AU4: the deck's keys stand on the rail and in the floats.
+            (crate::vocab::DRAW_TO_FILL, Action::LassoFillTool, Some(Float::ToolOptions)),
+            (crate::vocab::KEEP_INSIDE_STROKES, Action::ToggleAlphaLock, Some(Float::Brushes)),
+            ("miss check", Action::MissCheck, Some(Float::CanvasOptions)),
+            ("onion", Action::ToggleOnion, Some(Float::CanvasOptions)),
+            ("fit", Action::ZoomFit, Some(Float::CanvasOptions)),
+            (genga.as_str(), genga_preset, Some(Float::Brushes)),
         ] {
-            if in_lightbox {
-                h.point_at(edge);
-                h.wait(0.5);
+            if let Some(float) = float {
+                // Tool options answer the armed tool: Fill's hold the chooser.
+                if float == Float::ToolOptions {
+                    h.click("Fill");
+                }
+                h.open_float(float);
                 h.scroll_to(button);
             }
             let chord = chord_of(&binds, action).expect("bound");
@@ -814,7 +811,7 @@ mod tests {
         h.key(egui::Key::Delete);
         assert_eq!(cols(&h), 2, "Delete over the canvas kept the column");
         // Over the sheet it removes the active column.
-        let sheet = h.editor().pane_rects.iter().find(|(p, _)| *p == Pane::XSheet).map(|(_, r)| *r);
+        let sheet = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::XSheet).map(|(_, r, _)| *r);
         let sheet = sheet.expect("the drawing room docks the sheet");
         h.point_at(sheet.center());
         h.key(egui::Key::Delete);

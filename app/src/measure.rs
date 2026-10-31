@@ -477,7 +477,7 @@ const GRID: f32 = 4.0;
 /// before it left it.
 pub fn paper_share(h: &EditorHarness) -> Share {
     let editor = h.editor();
-    let canvas = editor.pane_rects.iter().any(|(p, _)| *p == Pane::Canvas);
+    let canvas = editor.pane_rects.iter().any(|(p, ..)| *p == Pane::Canvas);
     if !canvas || editor.canvas.dbg_preview {
         return Share::default();
     }
@@ -632,8 +632,11 @@ pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope) -> Clip 
         let text = t.galley.text().trim();
         let bound = t.visual_bounding_rect();
         // A text shape keeps no layer, so a float is told by where it stands.
-        let shown = bound.intersect(clip).center();
-        if text.is_empty() || (in_body(clip) && !floats.iter().any(|f| f.contains(shown))) {
+        // Text its clip took whole stands nowhere: the rail is a float over
+        // every canvas, and the empty rect's middle can land on it.
+        let shown = bound.intersect(clip);
+        let on_float = shown.is_positive() && floats.iter().any(|f| f.contains(shown.center()));
+        if text.is_empty() || (in_body(clip) && !on_float) {
             continue;
         }
         if t.galley.elided {
@@ -981,6 +984,7 @@ mod tests {
     use egui_kittest::Harness;
 
     use super::*;
+    use crate::floats::Float;
     use crate::newproject::NewProjectForm;
     use crate::workspace::Stage;
 
@@ -1232,7 +1236,7 @@ mod tests {
         h.editor_mut().enter_room(Stage::Composite);
         settle(&mut h);
         let tabs = &h.editor().pane_rects;
-        assert!(!tabs.is_empty() && !tabs.iter().any(|(p, _)| *p == Pane::Canvas), "{tabs:?}");
+        assert!(!tabs.is_empty() && !tabs.iter().any(|(p, ..)| *p == Pane::Canvas), "{tabs:?}");
         assert_eq!(paper_share(&h), Share::default());
     }
 
@@ -1250,7 +1254,7 @@ mod tests {
             readings.push(before);
             h.editor_mut().enter_room(Stage::Layout);
             settle(&mut h);
-            assert!(h.editor().pane_rects.iter().any(|(p, _)| *p == Pane::Canvas));
+            assert!(h.editor().pane_rects.iter().any(|(p, ..)| *p == Pane::Canvas));
             assert_eq!(paper_share(&h), Share::default(), "Layout after {from:?}");
         }
         assert_ne!(readings[0], readings[1], "two different rooms to come from");
@@ -1956,19 +1960,26 @@ mod tests {
         assert_eq!((plate::legend_dim().a(), plate::legend_muted().a()), (255, 255));
         let mut read = 0;
         in_every_room(|at, h| {
-            for (t, _) in texts_of(&h.kit().output().shapes) {
-                let job = &t.galley.job;
-                for s in &job.sections {
-                    let colour = s.format.color;
-                    let colour = if colour == plate::SECTION_PLACEHOLDER { t.fallback_color } else { colour };
-                    let ink = t.override_text_color.unwrap_or(colour);
-                    let words = &job.text[s.byte_range.start.0..s.byte_range.end.0];
-                    // The one transparency text takes is a disabled scope's.
-                    let dimmed = plate::INK.gamma_multiply(plate::DISABLED_ALPHA);
-                    assert!(ink.a() == 255 || ink == dimmed, "{at}: {words:?} in {ink:?}");
-                    read += 1;
+            // AU4: the deck's words stand in the floats, and are read there.
+            for float in [None, Some(Float::Brushes), Some(Float::Color), Some(Float::CanvasOptions)] {
+                if let Some(float) = float {
+                    h.open_float(float);
+                }
+                for (t, _) in texts_of(&h.kit().output().shapes) {
+                    let job = &t.galley.job;
+                    for s in &job.sections {
+                        let colour = s.format.color;
+                        let colour = if colour == plate::SECTION_PLACEHOLDER { t.fallback_color } else { colour };
+                        let ink = t.override_text_color.unwrap_or(colour);
+                        let words = &job.text[s.byte_range.start.0..s.byte_range.end.0];
+                        // The one transparency text takes is a disabled scope's.
+                        let dimmed = plate::INK.gamma_multiply(plate::DISABLED_ALPHA);
+                        assert!(ink.a() == 255 || ink == dimmed, "{at}: {words:?} in {ink:?}");
+                        read += 1;
+                    }
                 }
             }
+            h.editor_mut().floats = Default::default();
         });
         assert!(read > 1500, "read {read} sections");
     }

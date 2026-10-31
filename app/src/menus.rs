@@ -69,16 +69,15 @@ pub fn hover_tip_with(
     action: Action,
     more: impl FnOnce() -> String,
 ) -> egui::Response {
-    resp.on_hover_ui(|ui| {
-        // As on_hover_text does: a tooltip keeps its width.
-        ui.set_max_width(ui.spacing().tooltip_width);
-        let mut text = tip(ui.ctx(), action);
+    let ctx = resp.ctx.clone();
+    crate::plate::hover_card(resp, || {
+        let mut text = tip(&ctx, action);
         let more = more();
         if !more.is_empty() {
             text.push('\n');
             text.push_str(&more);
         }
-        ui.label(text);
+        text
     })
 }
 

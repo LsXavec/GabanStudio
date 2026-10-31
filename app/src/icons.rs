@@ -129,6 +129,24 @@ const MASKS: &[(Icon, &str, &[u8], &[u8])] = &[
         mask_bytes!("sheet", 24),
         mask_bytes!("sheet", 48),
     ),
+    (
+        Icon::Hand,
+        "hand",
+        mask_bytes!("hand", 24),
+        mask_bytes!("hand", 48),
+    ),
+    (
+        Icon::Flip,
+        "flip",
+        mask_bytes!("flip", 24),
+        mask_bytes!("flip", 48),
+    ),
+    (
+        Icon::Layers,
+        "layers",
+        mask_bytes!("layers", 24),
+        mask_bytes!("layers", 48),
+    ),
 ];
 
 /// Decode a white-alpha PNG mask into a texture, cached per-Context. The
@@ -202,6 +220,18 @@ pub enum Icon {
     Search,
     /// Ruled columns — the Timing sheet.
     Sheet,
+    /// An open hand — the rail's pan.
+    Hand,
+    /// A sheet with its corner turned — the rail's flip.
+    Flip,
+    /// Stacked sheets on the slant — the Layers float.
+    Layers,
+    /// Three dots — what a popover keeps.
+    Dots,
+    /// A cross — a float's close key.
+    Close,
+    /// A notch on a panel edge — the manga panel tool.
+    Panel,
     /// Cel-queue chevrons (shiage): open apex left/right.
     ChevL,
     ChevR,
@@ -407,6 +437,33 @@ pub fn paint(p: &Painter, rect: Rect, ink: Color32, icon: Icon) {
             p.rect_stroke(Rect::from_min_max(at(0.08, 0.08), at(0.92, 0.92)), 0.0, s, StrokeKind::Middle);
             p.line_segment([at(0.36, 0.08), at(0.36, 0.92)], s);
             p.line_segment([at(0.64, 0.08), at(0.64, 0.92)], s);
+        }
+        Icon::Hand => {
+            for x in [0.3f32, 0.5, 0.7] {
+                p.line_segment([at(x, 0.12), at(x, 0.6)], s);
+            }
+            p.rect_stroke(Rect::from_min_max(at(0.2, 0.5), at(0.8, 0.92)), 2.0, s, StrokeKind::Middle);
+        }
+        Icon::Flip => {
+            p.rect_stroke(Rect::from_min_max(at(0.08, 0.3), at(0.72, 0.92)), 0.0, s, StrokeKind::Middle);
+            p.add(Shape::line(vec![at(0.3, 0.1), at(0.92, 0.1), at(0.92, 0.7)], s));
+        }
+        Icon::Layers => {
+            p.add(Shape::closed_line(vec![at(0.5, 0.08), at(0.92, 0.32), at(0.5, 0.56), at(0.08, 0.32)], s));
+            p.add(Shape::line(vec![at(0.12, 0.62), at(0.5, 0.84), at(0.88, 0.62)], s));
+        }
+        Icon::Dots => {
+            for x in [0.2f32, 0.5, 0.8] {
+                p.circle_filled(at(x, 0.5), r.width() * 0.08, ink);
+            }
+        }
+        Icon::Close => {
+            p.line_segment([at(0.2, 0.2), at(0.8, 0.8)], s);
+            p.line_segment([at(0.8, 0.2), at(0.2, 0.8)], s);
+        }
+        Icon::Panel => {
+            p.rect_stroke(Rect::from_min_max(at(0.08, 0.12), at(0.92, 0.88)), 0.0, s, StrokeKind::Middle);
+            p.line_segment([at(0.58, 0.12), at(0.42, 0.88)], s);
         }
         Icon::Play => {
             p.add(Shape::convex_polygon(

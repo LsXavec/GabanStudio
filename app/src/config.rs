@@ -42,6 +42,7 @@ pub enum Action {
     RemoveColumn,
     ToggleOnion,
     ToggleCompositeView,
+    CanvasOptions,
     SelectTool,
     BrushTool,
     FillTool,
@@ -361,6 +362,7 @@ impl Action {
         Action::RemoveColumn,
         Action::ToggleOnion,
         Action::ToggleCompositeView,
+        Action::CanvasOptions,
         Action::SelectTool,
         Action::BrushTool,
         Action::FillTool,
@@ -518,6 +520,7 @@ impl Action {
             Action::RemoveColumn => "Remove selected column",
             Action::ToggleOnion => "Toggle onion skin",
             Action::ToggleCompositeView => "Composite view (node-graph output)",
+            Action::CanvasOptions => "Canvas options…",
             Action::SelectTool => "Select / transform tool",
             Action::BrushTool => "Paint tool (brush)",
             Action::FillTool => "Flood fill tool",
@@ -677,6 +680,7 @@ impl Action {
             RemoveColumn => "Remove the selected x-sheet column.",
             ToggleOnion => "Show neighbouring drawings faintly under this one.",
             ToggleCompositeView => "Show the node graph's composite instead of the edit view.",
+            CanvasOptions => "Open the float of paper, guide and view settings beside the canvas.",
             SelectTool => "Select, move, scale and rotate ink.",
             BrushTool => "Back to the brush.",
             FillTool => "Flood-fill closed areas with the brush colour. Shift+click: refill a flat; Ctrl+Shift+click: layer-wide.",
@@ -822,8 +826,8 @@ impl Action {
             | ReloadSequences => Group::File,
             Undo | Redo | History | SelectAll | ClearCel | ClearCelAll | CopyPixels
             | PastePixels | DuplicateCel => Group::Edit,
-            ZoomFit | ToggleOnion | ToggleCompositeView | MissCheck | ZoomIn | ZoomOut | Zoom100
-            | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView | PinToLightTable
+            ZoomFit | ToggleOnion | ToggleCompositeView | CanvasOptions | MissCheck | ZoomIn
+            | ZoomOut | Zoom100 | RotateViewLeft | RotateViewRight | ResetRotation | MirrorView | PinToLightTable
             | ShiftTrace | ResetShift | ToggleFinalLook | ToggleRulerSnap | Underlay3d => Group::View,
             View3dFront | View3dBack | View3dRight | View3dLeft | View3dTop | View3dBottom
             | View3dCamera | View3dOrtho | View3dFrameAll => Group::View,
@@ -881,6 +885,7 @@ impl Action {
             MirrorView => "View/Mirror view",
             ToggleOnion => "View/Onion skin",
             ToggleCompositeView => "View/Composite view",
+            CanvasOptions => "View/Canvas options…",
             MissCheck => "View/Miss check",
             // GM12: the transport's verbs share one submenu (the play
             // verb's path had a "/" in its name, which filed it in a
@@ -1027,6 +1032,7 @@ impl Action {
             // "light table" stays free for the light table's own verb (GM6).
             ToggleOnion => &["onion", "ghost", "sukashi"],
             ToggleCompositeView => &["render", "output", "comp"],
+            CanvasOptions => &["lightbox settings", "paper settings", "peg bar"],
             ToggleEraser => &["rubber", "erase"],
             ToggleAlphaLock => &["preserve alpha", "lock transparency"],
             SelectTool => &["move", "transform", "lasso select"],
@@ -1591,7 +1597,7 @@ impl Action {
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
             | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels | ReloadSequences
-            | Underlay3d => None,
+            | Underlay3d | CanvasOptions => None,
         }
     }
 }

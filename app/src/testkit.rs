@@ -56,6 +56,17 @@ fn primary(pos: egui::Pos2, pressed: bool) -> egui::Event {
     }
 }
 
+/// One touch of a pen, as egui-winit reports it.
+fn pen(phase: egui::TouchPhase, pos: egui::Pos2) -> egui::Event {
+    egui::Event::Touch {
+        device_id: egui::TouchDeviceId(1),
+        id: egui::TouchId(1),
+        phase,
+        pos,
+        force: Some(0.5),
+    }
+}
+
 /// What the harness drives each frame: the editor, the shell's config, the
 /// shell's notes, and the log of every shortcut dispatched with what
 /// perform returned.
@@ -659,6 +670,44 @@ impl EditorHarness {
         self.run();
     }
 
+    /// AU4: a float open, by the call its rail key and menu row end in. No
+    /// test says where a control lives, only which float holds it.
+    pub fn open_float(&mut self, f: crate::floats::Float) {
+        let busy = self.editor().canvas.stroke_active();
+        self.editor_mut().floats.open(f, busy);
+        self.run();
+        self.run_frames(2);
+    }
+
+    /// AU4: a pen comes down at `pos`, in egui-winit's order: no hover before
+    /// it, and a Touch ahead of the pointer it emulates. One frame only: a
+    /// `run` here can spend a second of the harness clock while a scroll view
+    /// keeps repainting, and a press that long is no click.
+    pub fn pen_down(&mut self, pos: egui::Pos2) {
+        let events = [pen(egui::TouchPhase::Start, pos), egui::Event::PointerMoved(pos), primary(pos, true)];
+        self.h.input_mut().events.extend(events);
+        self.h.step();
+    }
+
+    pub fn pen_move(&mut self, pos: egui::Pos2) {
+        let events = [pen(egui::TouchPhase::Move, pos), egui::Event::PointerMoved(pos)];
+        self.h.input_mut().events.extend(events);
+        self.h.step();
+    }
+
+    /// The pen lifts, and the pointer it emulated is gone with it.
+    pub fn pen_up(&mut self, pos: egui::Pos2) {
+        let events = [pen(egui::TouchPhase::End, pos), primary(pos, false), egui::Event::PointerGone];
+        self.h.input_mut().events.extend(events);
+        self.h.step();
+        self.run();
+    }
+
+    pub fn pen_tap(&mut self, pos: egui::Pos2) {
+        self.pen_down(pos);
+        self.pen_up(pos);
+    }
+
     /// GM2: the window's close button — one frame with a Close event on the
     /// root viewport. Returns the viewport commands that frame sent.
     pub fn request_close(&mut self) -> Vec<egui::ViewportCommand> {
@@ -953,6 +1002,10 @@ impl<S: 'static> PanelHarness<S> {
         describe_tree(&self.h)
     }
 
+    pub fn ctx(&self) -> egui::Context {
+        self.h.ctx.clone()
+    }
+
     pub fn state(&self) -> &S {
         &self.h.state().0
     }
@@ -1012,16 +1065,19 @@ mod tests {
         for step in crate::steps::STEPS {
             assert!(h.has(step.label), "step switcher lacks {:?}:\n{tree}", step.label);
         }
-        for tool in ["select", "fill", "lasso fill"] {
-            assert!(h.has(tool), "tool deck lacks {tool:?}:\n{tree}");
+        for tool in ["Select", "Fill"] {
+            assert!(h.has(tool), "the rail lacks {tool:?}:\n{tree}");
         }
+        h.click("Fill");
+        h.open_float(crate::floats::Float::ToolOptions);
+        assert!(h.has(crate::vocab::DRAW_TO_FILL), "Tool options lack it:\n{}", h.describe());
     }
 
     #[test]
     fn testkit_click_fill_tool_by_label() {
         let mut h = EditorHarness::new();
         assert!(h.editor().canvas.tool == CanvasTool::Paint);
-        h.click("fill");
+        h.click("Fill");
         assert!(h.editor().canvas.tool == CanvasTool::Fill);
     }
 
@@ -1066,15 +1122,15 @@ mod tests {
             .iter()
             .position(|p| p.name == "genga")
             .expect("the pencil box has a genga pencil");
+        h.open_float(crate::floats::Float::Brushes);
         h.click(&format!("genga pencil ({digit})"));
         assert_eq!(h.editor().canvas.arming_pencil(), "genga");
         assert!(!h.editor().canvas.erasing);
-        h.click("eraser");
-        assert!(h.editor().canvas.erasing, "the eraser slot did not arm");
+        h.click("Eraser");
+        assert!(h.editor().canvas.erasing, "the eraser key did not arm");
         assert_eq!(h.editor().canvas.arming_pencil(), "eraser");
         let tree = h.describe();
         let layer = h.state().active_layer_name();
-        assert!(h.has(&format!("layer: {layer}")), "no layer chip {layer:?}\n{tree}");
         assert!(h.has(&format!("lock layer {layer}")), "no lock for {layer:?}\n{tree}");
         assert!(h.has(&format!("layer colour {layer}")), "no colour dot for {layer:?}\n{tree}");
     }
@@ -2179,7 +2235,7 @@ mod tests {
         assert_eq!(dock(&Stage::dock_with_sheet()), dock(&todays_drawing_recipe()));
         assert_ne!(dock(&Stage::Drawing.dock()), dock(&Stage::dock_with_sheet()), "Draw is the canvas alone");
         h.run();
-        assert!(h.editor().pane_rects.iter().any(|(p, _)| *p == Pane::XSheet), "the sheet is on");
+        assert!(h.editor().pane_rects.iter().any(|(p, ..)| *p == Pane::XSheet), "the sheet is on");
         // No room arms: the rooms' stacks never reach the document.
         let before = what_is_armed(&h);
         h.editor_mut().enter_room(Stage::InkPaint);
@@ -2640,7 +2696,8 @@ mod tests {
         ("doc.rs", "    pub fn undo_to(", 0x387309403f18550e),
         ("workspace.rs", "    pub fn load_from", 0xeedf52910f122df8),
         ("workspace.rs", "    pub fn save_to", 0x18ceee7d714dc4d4),
-        ("canvas.rs", "    fn handle_pen(", 0xad3d4cbab93a4f72),
+        // AU4: `seen_pen` latches past the layer gate, and only there.
+        ("canvas.rs", "    fn handle_pen(", 0x999c4cb09447e79e),
         ("main.rs", "fn pump_tablet(", 0x16ed0af8f504e210),
     ];
 
@@ -2681,17 +2738,15 @@ mod tests {
         );
     }
 
-    /// AU2's leave-out list: no rail, no renames, no menu moves, no new
-    /// Actions. The parts that make them (AU3, AU4, AU10, AU11) re-pin this
-    /// and say so in their commit bodies.
+    /// AU2's leave-out list: no renames, no menu moves, no new Actions. The
+    /// parts that make them (AU3, AU4, AU10, AU11) re-pin this and say so in
+    /// their commit bodies. AU4 brought the rail and `CanvasOptions`.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
-        let files = sources();
-        assert!(!files.iter().any(|(name, _)| name == "rail.rs"), "the rail is a later part's");
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (154, 0x06c369cdf385ee05), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (155, 0x0f238c8af5891c36), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }

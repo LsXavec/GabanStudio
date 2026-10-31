@@ -745,7 +745,7 @@ mod tests {
 
     /// Where pane `pane` was drawn last frame.
     fn pane_rect(h: &EditorHarness, pane: Pane) -> egui::Rect {
-        let r = h.editor().pane_rects.iter().find(|(p, _)| *p == pane).map(|(_, r)| *r);
+        let r = h.editor().pane_rects.iter().find(|(p, ..)| *p == pane).map(|(_, r, _)| *r);
         r.unwrap_or_else(|| panic!("{pane:?} is docked"))
     }
 

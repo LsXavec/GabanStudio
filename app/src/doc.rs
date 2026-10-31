@@ -6122,8 +6122,8 @@ mod sheetedit_tests {
     }
 
     fn sheet_centre(h: &EditorHarness) -> egui::Pos2 {
-        let r = h.editor().pane_rects.iter().find(|(p, _)| *p == Pane::XSheet);
-        r.map(|(_, r)| r.center()).expect("the drawing room docks the sheet")
+        let r = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::XSheet);
+        r.map(|(_, r, _)| r.center()).expect("the drawing room docks the sheet")
     }
 
     #[test]
@@ -6540,7 +6540,7 @@ mod lighttable_tests {
 
     /// The canvas pane's centre in the drawing room.
     fn canvas_center(h: &EditorHarness) -> egui::Pos2 {
-        let c = h.editor().pane_rects.iter().find(|(p, _)| *p == Pane::Canvas).map(|(_, r)| r.center());
+        let c = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Canvas).map(|(_, r, _)| r.center());
         c.expect("the drawing room docks the canvas")
     }
 
@@ -6719,7 +6719,7 @@ mod lighttable_tests {
         h.run();
         let strokes = |h: &EditorHarness| h.state().cut().drawings.iter().map(|d| d.strokes.len()).sum::<usize>();
         let (before, steps) = (strokes(&h), h.state().engine.position());
-        let c = h.editor().pane_rects.iter().find(|(p, _)| *p == Pane::Canvas).map(|(_, r)| r.center());
+        let c = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Canvas).map(|(_, r, _)| r.center());
         let c = c.expect("the drawing room docks the canvas");
         h.drag(c, c + egui::vec2(60.0, 0.0), 6);
         h.run();
@@ -7271,19 +7271,15 @@ mod lighttable_tests {
     #[test]
     fn lighttable_the_chart_editor_lays_and_drags_the_marks() {
         let (mut h, d) = keyed(&[0, 8]);
-        // The lightbox fold-out slides out at the canvas's left edge; its
-        // genga · douga section opens on a click.
-        let edge = {
-            let r = h.editor().canvas.dbg_rect;
-            egui::pos2(r.left() + 4.0, r.top() + 4.0)
-        };
-        h.point_at(edge);
-        h.wait(0.5);
+        // The Canvas options float; its genga · douga section opens on a click
+        // and starts at the float's foot.
+        h.open_float(crate::floats::Float::CanvasOptions);
         h.click("genga · douga");
+        h.scroll_to("genga (key)");
         h.click("genga (key)");
         assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Key);
         // Open, the section runs past the harness's short paper: the
-        // fold-out scrolls to what is below its foot.
+        // float scrolls to what is below its foot.
         h.scroll_to("ato-zume (slow in)");
         h.click("ato-zume (slow in)");
         let chart = h.state().cut().drawing_def(d[0]).chart.expect("a chart");

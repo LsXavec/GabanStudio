@@ -10,6 +10,7 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::config::{Action, SettingsCategory};
+use crate::floats::Float;
 use crate::measure::room_tag;
 use crate::newproject::NewProjectForm;
 use crate::plate;
@@ -277,6 +278,50 @@ fn shipped(dir: &Path) {
     shoot(&mut h, place);
 }
 
+/// AU4: the rail's smaller tiers, and a float on each side at once.
+const RAIL: [(&str, u32, u32); 3] = [
+    ("rail-compact", 832, 520),
+    ("rail-pocket", 832, 440),
+    ("rail-both-sides", 1024, 640),
+];
+
+fn float_name(f: Float, suffix: &str) -> String {
+    format!("float-{f:?}{suffix}.png")
+}
+
+fn rail_owed() -> Vec<(String, u32, u32)> {
+    let floats = SIZES.iter().flat_map(|(w, h, suffix)| {
+        Float::ALL.into_iter().map(move |f| (float_name(f, suffix), *w, *h))
+    });
+    floats.chain(RAIL.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h))).collect()
+}
+
+fn rail_and_floats(dir: &Path) {
+    let mut h = EditorHarness::with_gpu_shipped(crate::sample::build_sample());
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    h.run_frames(4);
+    for (w, height, suffix) in SIZES {
+        let size = egui::vec2(w as f32, height as f32);
+        h.kit_mut().set_size(size);
+        for f in Float::ALL {
+            h.open_float(f);
+            arrive(&mut h, draw);
+            h.shot(size, &dir.join(float_name(f, suffix)));
+            h.editor_mut().floats.close(f);
+        }
+    }
+    for (state, w, height) in RAIL {
+        let size = egui::vec2(w as f32, height as f32);
+        h.kit_mut().set_size(size);
+        if state == "rail-both-sides" {
+            h.open_float(Float::Brushes);
+            h.open_float(Float::Layers);
+        }
+        arrive(&mut h, draw);
+        h.shot(size, &dir.join(format!("{state}.png")));
+    }
+}
+
 #[test]
 #[ignore = "needs a GPU adapter and UISHOT_DIR; writes PNGs"]
 fn uishot_rooms() {
@@ -293,6 +338,16 @@ fn uishot_rooms() {
     drop(h);
     shipped(&dir);
     check_shots(&dir, &shipped_owed()).expect("what only a shipped editor shows");
+    rail_and_floats(&dir);
+    check_shots(&dir, &rail_owed()).expect("the rail's tiers and every float");
+}
+
+#[test]
+fn aurail_shots_owe_every_float_at_both_sizes() {
+    let owed = rail_owed();
+    assert_eq!(owed.len(), 2 * Float::ALL.len() + RAIL.len());
+    let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
 }
 
 #[test]

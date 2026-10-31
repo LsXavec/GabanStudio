@@ -284,6 +284,12 @@ const CTRL_TEXT: f32 = Role::Panel.size();
 const ICON: f32 = 16.0;
 /// The icons on the top row and the band (spec 2.7).
 pub const BAR_ICON: f32 = 20.0;
+/// The icon in a rail key (spec 2.6).
+pub const RAIL_ICON: f32 = 22.0;
+/// A control on the top row or the band (spec 2.6).
+pub const CHROME_H: f32 = 32.0;
+/// The transport row: the band's last 36 (spec 4.4).
+pub const BAND_H: f32 = 36.0;
 /// A detent's ring takes this much of the control's left.
 const DETENT_W: f32 = 22.0;
 /// The gap between the sheet head's rows, down from `item_spacing`: the
@@ -521,6 +527,172 @@ pub fn float_ground(ui: &Ui, rect: egui::Rect) {
     let painter = ui.painter();
     painter.add(ui.visuals().window_shadow.as_shape(rect, CornerRadius::same(R_FLOAT)));
     painter.rect_filled(rect, R_FLOAT, ISLAND);
+}
+
+/// The rail's and a float's frame: the island, the float's corners, the
+/// window's shadow, `margin` inside.
+pub fn island_frame(style: &egui::Style, margin: i8) -> egui::Frame {
+    egui::Frame::new()
+        .fill(ISLAND)
+        .corner_radius(R_FLOAT)
+        .shadow(style.visuals.window_shadow)
+        .inner_margin(margin)
+}
+
+/// How long a pointer rests on a control before its card shows (spec 4.5).
+pub const CARD_DELAY: f64 = 0.35;
+
+/// A hover card: at `Order::Tooltip`, and never interactable, so the pen
+/// passes through it while the floats below still block. `text` is built only
+/// once the card shows.
+pub fn hover_card(resp: Response, text: impl FnOnce() -> String) -> Response {
+    let ctx = resp.ctx.clone();
+    let id = resp.id.with("hover_card");
+    if !resp.hovered() || resp.is_pointer_button_down_on() {
+        ctx.data_mut(|d| d.remove_temp::<f64>(id));
+        return resp;
+    }
+    let now = ctx.input(|i| i.time);
+    let since = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || now));
+    if now - since < CARD_DELAY {
+        ctx.request_repaint_after_secs((CARD_DELAY - (now - since)) as f32);
+        return resp;
+    }
+    let frame = egui::Frame::popup(&ctx.global_style()).fill(ISLAND);
+    egui::Area::new(id)
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .fade_in(false)
+        .constrain_to(ctx.content_rect())
+        .fixed_pos(resp.rect.right_top() + Vec2::new(8.0, 0.0))
+        .show(&ctx, |ui| {
+            frame.show(ui, |ui| {
+                ui.set_max_width(ui.spacing().tooltip_width);
+                ui.label(text());
+            });
+        });
+    resp
+}
+
+/// The ink a rail key stands in: solid blue armed, the wash while it holds a
+/// float open, a ghost at rest.
+fn rail_inks(ui: &Ui, resp: &Response, armed: bool, opened: bool) -> (Color32, Color32) {
+    if armed {
+        (TALLY, ON_FILL)
+    } else if opened {
+        (BLUE_WASH, BLUE_DEEP)
+    } else {
+        ghost(ui, resp)
+    }
+}
+
+/// A rail key: `size`, its icon at [`RAIL_ICON`], and its caption at the Small
+/// role, under the icon (`None` in the shorter tiers). `sense` is `click`, or
+/// `drag` for a key that acts while it is held. `options` draws the small
+/// mark that says a click on this armed tool opens its options.
+#[allow(clippy::too_many_arguments)] // a key's whole face; a struct would be noise
+pub fn rail_key(
+    ui: &mut Ui,
+    size: Vec2,
+    sense: egui::Sense,
+    icon: crate::icons::Icon,
+    caption: Option<&str>,
+    name: &str,
+    armed: bool,
+    opened: bool,
+    options: bool,
+) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(size, sense);
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = rail_inks(ui, &resp, armed, opened);
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        let centre = match caption {
+            Some(_) => Pos2::new(rect.center().x, rect.top() + 4.0 + RAIL_ICON * 0.5),
+            None => rect.center(),
+        };
+        crate::icons::paint(p, egui::Rect::from_center_size(centre, Vec2::splat(RAIL_ICON)), ink, icon);
+        if let Some(words) = caption {
+            let font = Role::Small.font();
+            p.text(Pos2::new(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, words, font, ink);
+        }
+        // In the top corner: the caption runs out to the bottom one.
+        if options {
+            let (r, t) = (rect.right() - 4.0, rect.top() + 4.0);
+            let mark = vec![Pos2::new(r, t), Pos2::new(r, t + 6.0), Pos2::new(r - 6.0, t)];
+            p.add(Shape::convex_polygon(mark, ink, Stroke::NONE));
+        }
+    }
+    speak(&resp, egui::WidgetType::SelectableLabel, Some(armed), name);
+    describe(resp, "RAIL KEY rail_key", name)
+}
+
+/// The rail's Size key, drag only: a wedge from thin to thick, marked at `t`
+/// (0 to 1) along its length, thick end up.
+pub fn size_key(ui: &mut Ui, size: Vec2, caption: Option<&str>, t: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::drag());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = ghost(ui, &resp);
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        let bottom = rect.bottom() - if caption.is_some() { 22.0 } else { 6.0 };
+        let (top, cx) = (rect.top() + 6.0, rect.center().x);
+        let wedge = vec![Pos2::new(cx - 7.0, top), Pos2::new(cx + 7.0, top), Pos2::new(cx, bottom)];
+        p.add(Shape::convex_polygon(wedge, at_rest(ui, INK3), Stroke::NONE));
+        let y = bottom + (top - bottom) * t.clamp(0.0, 1.0);
+        let bar = egui::Rect::from_center_size(Pos2::new(cx, y), Vec2::new(22.0, 3.0));
+        p.rect_filled(bar, 1, ink);
+        if let Some(words) = caption {
+            let font = Role::Small.font();
+            p.text(Pos2::new(cx, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, words, font, ink);
+        }
+    }
+    speak(&resp, egui::WidgetType::Slider, None, "Size");
+    describe(resp, "RAIL KEY size_key", "Size")
+}
+
+/// The rail's Color key: a swatch of `colour`, its caption under it. `opened`
+/// says the Color float is up.
+pub fn color_key(
+    ui: &mut Ui,
+    size: Vec2,
+    caption: Option<&str>,
+    colour: Color32,
+    opened: bool,
+) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = rail_inks(ui, &resp, false, opened);
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        let centre = match caption {
+            Some(_) => Pos2::new(rect.center().x, rect.top() + 4.0 + RAIL_ICON * 0.5),
+            None => rect.center(),
+        };
+        let well = egui::Rect::from_center_size(centre, Vec2::splat(RAIL_ICON));
+        p.rect_filled(well, R_INPUT, colour);
+        p.rect_stroke(well, R_INPUT, Stroke::new(1.0, INK3), egui::StrokeKind::Outside);
+        if let Some(words) = caption {
+            let font = Role::Small.font();
+            p.text(Pos2::new(rect.center().x, rect.bottom() - 11.0), egui::Align2::CENTER_CENTER, words, font, ink);
+        }
+    }
+    speak(&resp, egui::WidgetType::Button, None, "Brush color");
+    describe(resp, "RAIL KEY color_key", "Brush color")
+}
+
+/// A float's close key: a ghost at the heading's height.
+pub fn close_key(ui: &mut Ui, name: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(CHROME_H - 4.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = ghost(ui, &resp);
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        let cross = egui::Rect::from_center_size(rect.center(), Vec2::splat(ICON));
+        crate::icons::paint(p, cross, ink, crate::icons::Icon::Close);
+    }
+    speak(&resp, egui::WidgetType::Button, None, name);
+    describe(resp, "ACTION close_key", name)
 }
 
 /// How far apart two opaque colours read: WCAG's ratio, 1 to 21.
@@ -987,7 +1159,12 @@ fn latch_size(ui: &Ui, label: &str, size: f32) -> Vec2 {
     } else {
         text_width(ui, label, CTRL_TEXT) + 5.0
     };
-    Vec2::new(8.0 + size + text_w + 8.0, CTRL_H)
+    Vec2::new(8.0 + size + text_w + 8.0, height_for(size))
+}
+
+/// A band control stands with the top row (spec 2.6), a panel's at `CTRL_H`.
+fn height_for(icon: f32) -> f32 {
+    if icon == BAR_ICON { CHROME_H } else { CTRL_H }
 }
 
 fn latch_face(
@@ -1047,8 +1224,8 @@ fn icon_button_sized(
     } else {
         text_width(ui, label, CTRL_TEXT) + 5.0
     };
-    let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(6.0 + size + text_w + 6.0, CTRL_H), Sense::click());
+    let (rect, resp) = ui
+        .allocate_exact_size(Vec2::new(6.0 + size + text_w + 6.0, height_for(size)), Sense::click());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let (fill, ink) = ghost(ui, &resp);
