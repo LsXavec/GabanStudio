@@ -106,7 +106,7 @@ fn tidy_cut_event_does_nothing_while_typing() {
     let frames = h.state().frame_count();
     // The room menu's name field, typed into and its text selected
     // (Shift+Home), with the pointer resting over the sheet.
-    h.click("room");
+    h.click(crate::vocab::STEP);
     h.focus_text_field(0);
     h.type_text("gb");
     assert_eq!(h.editor().ws_name, "gb", "{}", h.describe());

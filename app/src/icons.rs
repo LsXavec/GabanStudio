@@ -105,6 +105,30 @@ const MASKS: &[(Icon, &str, &[u8], &[u8])] = &[
         mask_bytes!("plus", 24),
         mask_bytes!("plus", 48),
     ),
+    (
+        Icon::Undo,
+        "undo",
+        mask_bytes!("undo", 24),
+        mask_bytes!("undo", 48),
+    ),
+    (
+        Icon::Redo,
+        "redo",
+        mask_bytes!("redo", 24),
+        mask_bytes!("redo", 48),
+    ),
+    (
+        Icon::Search,
+        "search",
+        mask_bytes!("search", 24),
+        mask_bytes!("search", 48),
+    ),
+    (
+        Icon::Sheet,
+        "sheet",
+        mask_bytes!("sheet", 24),
+        mask_bytes!("sheet", 48),
+    ),
 ];
 
 /// Decode a white-alpha PNG mask into a texture, cached per-Context. The
@@ -171,6 +195,13 @@ pub enum Icon {
     Fit,
     /// Plus — add.
     Plus,
+    /// A hooked arrow, back and forward — the top row's history keys.
+    Undo,
+    Redo,
+    /// Lens — find a command.
+    Search,
+    /// Ruled columns — the Timing sheet.
+    Sheet,
     /// Cel-queue chevrons (shiage): open apex left/right.
     ChevL,
     ChevR,
@@ -359,6 +390,23 @@ pub fn paint(p: &Painter, rect: Rect, ink: Color32, icon: Icon) {
         Icon::Plus => {
             p.line_segment([at(0.5, 0.12), at(0.5, 0.88)], s);
             p.line_segment([at(0.12, 0.5), at(0.88, 0.5)], s);
+        }
+        Icon::Undo => {
+            p.add(Shape::line(vec![at(0.3, 0.14), at(0.08, 0.36), at(0.3, 0.58)], s));
+            p.add(Shape::line(vec![at(0.08, 0.36), at(0.92, 0.36), at(0.92, 0.86), at(0.42, 0.86)], s));
+        }
+        Icon::Redo => {
+            p.add(Shape::line(vec![at(0.7, 0.14), at(0.92, 0.36), at(0.7, 0.58)], s));
+            p.add(Shape::line(vec![at(0.92, 0.36), at(0.08, 0.36), at(0.08, 0.86), at(0.58, 0.86)], s));
+        }
+        Icon::Search => {
+            p.circle_stroke(at(0.42, 0.42), r.width() * 0.32, s);
+            p.line_segment([at(0.66, 0.66), at(0.92, 0.92)], s);
+        }
+        Icon::Sheet => {
+            p.rect_stroke(Rect::from_min_max(at(0.08, 0.08), at(0.92, 0.92)), 0.0, s, StrokeKind::Middle);
+            p.line_segment([at(0.36, 0.08), at(0.36, 0.92)], s);
+            p.line_segment([at(0.64, 0.08), at(0.64, 0.92)], s);
         }
         Icon::Play => {
             p.add(Shape::convex_polygon(

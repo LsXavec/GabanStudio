@@ -1,0 +1,398 @@
+{
+  "list": [
+    {
+      "name": "draw",
+      "dock": {
+        "surfaces": [
+          {
+            "Main": {
+              "nodes": [
+                {
+                  "Horizontal": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "fraction": 0.24,
+                    "fully_collapsed": false,
+                    "collapsed_leaf_count": 0
+                  }
+                },
+                {
+                  "Vertical": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "fraction": 0.62,
+                    "fully_collapsed": false,
+                    "collapsed_leaf_count": 0
+                  }
+                },
+                {
+                  "Vertical": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "fraction": 0.11,
+                    "fully_collapsed": false,
+                    "collapsed_leaf_count": 0
+                  }
+                },
+                {
+                  "Leaf": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "viewport": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "tabs": [
+                      "XSheet"
+                    ],
+                    "active": 0,
+                    "scroll": 0.0,
+                    "collapsed": false
+                  }
+                },
+                {
+                  "Leaf": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "viewport": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "tabs": [
+                      "Layers"
+                    ],
+                    "active": 0,
+                    "scroll": 0.0,
+                    "collapsed": false
+                  }
+                },
+                {
+                  "Leaf": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "viewport": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "tabs": [
+                      "Brush"
+                    ],
+                    "active": 0,
+                    "scroll": 0.0,
+                    "collapsed": false
+                  }
+                },
+                {
+                  "Leaf": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "viewport": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "tabs": [
+                      "Canvas"
+                    ],
+                    "active": 0,
+                    "scroll": 0.0,
+                    "collapsed": false
+                  }
+                },
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty"
+              ],
+              "focused_node": 5,
+              "collapsed": false,
+              "collapsed_leaf_count": 0
+            }
+          }
+        ],
+        "focused_surface": null
+      },
+      "preset": "genga pen"
+    },
+    {
+      "name": "timing",
+      "dock": {
+        "surfaces": [
+          {
+            "Main": {
+              "nodes": [
+                {
+                  "Horizontal": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "fraction": 0.5,
+                    "fully_collapsed": false,
+                    "collapsed_leaf_count": 0
+                  }
+                },
+                {
+                  "Vertical": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "fraction": 0.7,
+                    "fully_collapsed": false,
+                    "collapsed_leaf_count": 0
+                  }
+                },
+                {
+                  "Vertical": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "fraction": 0.11,
+                    "fully_collapsed": false,
+                    "collapsed_leaf_count": 0
+                  }
+                },
+                {
+                  "Leaf": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "viewport": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "tabs": [
+                      "XSheet"
+                    ],
+                    "active": 0,
+                    "scroll": 0.0,
+                    "collapsed": false
+                  }
+                },
+                {
+                  "Leaf": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "viewport": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "tabs": [
+                      "Layers"
+                    ],
+                    "active": 0,
+                    "scroll": 0.0,
+                    "collapsed": false
+                  }
+                },
+                {
+                  "Leaf": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "viewport": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "tabs": [
+                      "Brush"
+                    ],
+                    "active": 0,
+                    "scroll": 0.0,
+                    "collapsed": false
+                  }
+                },
+                {
+                  "Leaf": {
+                    "rect": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "viewport": {
+                      "min": {
+                        "x": null,
+                        "y": null
+                      },
+                      "max": {
+                        "x": null,
+                        "y": null
+                      }
+                    },
+                    "tabs": [
+                      "Canvas"
+                    ],
+                    "active": 0,
+                    "scroll": 0.0,
+                    "collapsed": false
+                  }
+                },
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty",
+                "Empty"
+              ],
+              "focused_node": 5,
+              "collapsed": false,
+              "collapsed_leaf_count": 0
+            }
+          }
+        ],
+        "focused_surface": null
+      },
+      "preset": "shadow airbrush"
+    }
+  ]
+}

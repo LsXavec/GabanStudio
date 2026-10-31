@@ -10,19 +10,26 @@
 // The table is declared whole; panels start reading it as their rows flip.
 #![allow(dead_code)]
 
-/// `room`, as the menu and the status line say it.
-pub const STEP: &str = "room";
+/// `step`, as the menu and the status line say it.
+pub const STEP: &str = "step";
 /// The network room: "in a room" is what the lamp says of it.
 pub const SHARED_SESSION: &str = "in a room";
 pub const ARRANGEMENT: &str = "workspace";
 
-// The steps. `Stage::name()` reads these.
-pub const STEP_PLAN: &str = "layout";
-pub const STEP_DRAW: &str = "genga (drawing)";
-pub const STEP_COLOR: &str = "shiage (ink & paint)";
-pub const STEP_EFFECTS: &str = "satsuei (composite)";
-pub const STEP_TIMING: &str = "henshū (edit)";
-pub const STEP_MANGA: &str = "manga (pages)";
+// The steps. `Stage::name()` and `steps::STEPS` read these.
+pub const STEP_PLAN: &str = "Plan";
+pub const STEP_DRAW: &str = "Draw";
+pub const STEP_COLOR: &str = "Color";
+pub const STEP_EFFECTS: &str = "Effects";
+pub const STEP_TIMING: &str = "Timing";
+pub const STEP_MANGA: &str = "Manga";
+pub const STEP_EXPORT: &str = "Export";
+
+// The Timing sheet button: its caption, and what it says aloud by what its
+// click will do.
+pub const SHEET_BUTTON: &str = "Timing sheet";
+pub const SHOW_TIMING_SHEET: &str = "Show Timing sheet";
+pub const HIDE_TIMING_SHEET: &str = "Hide Timing sheet";
 
 pub const BRUSH_MAKER: &str = "Brush Forge";
 pub const LAYOUT_3D: &str = "3D layout";
@@ -101,15 +108,19 @@ pub const LIP_FLAP_TITLE: &str = "Kuchipaku (lip flap)";
 /// Today's word for every constant above, in the table's order: the pin.
 #[cfg(test)]
 pub const TABLE: &[(&str, &str, &str)] = &[
-    ("STEP", STEP, "room"),
+    ("STEP", STEP, "step"),
     ("SHARED_SESSION", SHARED_SESSION, "in a room"),
     ("ARRANGEMENT", ARRANGEMENT, "workspace"),
-    ("STEP_PLAN", STEP_PLAN, "layout"),
-    ("STEP_DRAW", STEP_DRAW, "genga (drawing)"),
-    ("STEP_COLOR", STEP_COLOR, "shiage (ink & paint)"),
-    ("STEP_EFFECTS", STEP_EFFECTS, "satsuei (composite)"),
-    ("STEP_TIMING", STEP_TIMING, "henshū (edit)"),
-    ("STEP_MANGA", STEP_MANGA, "manga (pages)"),
+    ("STEP_PLAN", STEP_PLAN, "Plan"),
+    ("STEP_DRAW", STEP_DRAW, "Draw"),
+    ("STEP_COLOR", STEP_COLOR, "Color"),
+    ("STEP_EFFECTS", STEP_EFFECTS, "Effects"),
+    ("STEP_TIMING", STEP_TIMING, "Timing"),
+    ("STEP_MANGA", STEP_MANGA, "Manga"),
+    ("STEP_EXPORT", STEP_EXPORT, "Export"),
+    ("SHEET_BUTTON", SHEET_BUTTON, "Timing sheet"),
+    ("SHOW_TIMING_SHEET", SHOW_TIMING_SHEET, "Show Timing sheet"),
+    ("HIDE_TIMING_SHEET", HIDE_TIMING_SHEET, "Hide Timing sheet"),
     ("BRUSH_MAKER", BRUSH_MAKER, "Brush Forge"),
     ("LAYOUT_3D", LAYOUT_3D, "3D layout"),
     ("SHOT", SHOT, "cut"),

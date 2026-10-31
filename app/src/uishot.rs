@@ -92,7 +92,7 @@ fn walk(h: &mut EditorHarness, dir: &Path, size: egui::Vec2, suffix: &str) {
 }
 
 /// The menus, by what opens them.
-const MENUS: [&str; 9] = ["file", "edit", "view", "sheet", "cut", "project", "room", "window", "help"];
+const MENUS: [&str; 9] = ["file", "edit", "view", "sheet", "cut", "project", crate::vocab::STEP, "window", "help"];
 
 /// The states off the rooms' own floors, by file name.
 const STATES: [&str; 8] = [
@@ -224,6 +224,59 @@ fn states(h: &mut EditorHarness, dir: &Path, size: egui::Vec2, suffix: &str) {
     h.rig_mut().seed = None;
 }
 
+/// AU3: what only a shipped editor shows, by file name and size: the flush
+/// canvas, the sheet it asks for, the place pill, the row and foot gone
+/// narrow. 832×520 is the room 1024×640 leaves at 150%.
+const SHIPPED: [(&str, u32, u32); 8] = [
+    ("flush", 1600, 900),
+    ("flush-1280", 1280, 800),
+    ("sheet-on", 1600, 900),
+    ("sheet-on-1280", 1280, 800),
+    ("place-1280", 1280, 800),
+    ("narrow", 1024, 640),
+    ("narrow-menu", 1024, 640),
+    ("narrow-place", 832, 520),
+];
+
+fn shipped_name(state: &str) -> String {
+    format!("shipped-{state}.png")
+}
+
+fn shipped_owed() -> Vec<(String, u32, u32)> {
+    SHIPPED.iter().map(|(state, w, h)| (shipped_name(state), *w, *h)).collect()
+}
+
+fn shipped(dir: &Path) {
+    let mut h = EditorHarness::with_gpu_shipped(crate::sample::build_sample());
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    let mut shots = SHIPPED.iter().map(|(state, w, h)| (shipped_name(state), egui::vec2(*w as f32, *h as f32)));
+    let mut shoot = |h: &mut EditorHarness, room: ProbeRoom| {
+        let (name, size) = shots.next().expect("a shot owed");
+        h.kit_mut().set_size(size);
+        arrive(h, room);
+        h.shot(size, &dir.join(name));
+    };
+    for _ in SIZES {
+        h.run_frames(4);
+        shoot(&mut h, draw);
+    }
+    h.click(crate::vocab::SHOW_TIMING_SHEET);
+    for _ in SIZES {
+        shoot(&mut h, draw);
+    }
+    h.click(crate::vocab::HIDE_TIMING_SHEET);
+    let place = ProbeRoom::Layout3d;
+    place.enter(h.editor_mut());
+    shoot(&mut h, place);
+    h.editor_mut().enter_room(Stage::Drawing);
+    shoot(&mut h, draw);
+    h.click("Menu");
+    shoot(&mut h, draw);
+    h.key(egui::Key::Escape);
+    place.enter(h.editor_mut());
+    shoot(&mut h, place);
+}
+
 #[test]
 #[ignore = "needs a GPU adapter and UISHOT_DIR; writes PNGs"]
 fn uishot_rooms() {
@@ -237,6 +290,9 @@ fn uishot_rooms() {
     }
     check_shots(&dir, &shots_owed()).expect("the shots the spec lists");
     check_shots(&dir, &states_owed()).expect("the states the look reaches");
+    drop(h);
+    shipped(&dir);
+    check_shots(&dir, &shipped_owed()).expect("what only a shipped editor shows");
 }
 
 #[test]

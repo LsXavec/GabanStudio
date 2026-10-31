@@ -17,6 +17,8 @@ pub struct Template {
     pub fps: u32,
     pub cut_frames: u32,
     pub room: Stage,
+    /// AU3: this project starts with the Timing sheet on in Draw.
+    pub sheet_on: bool,
     /// Sheet order, left to right, with each column's kind.
     pub columns: &'static [(&'static str, ColumnKind)],
     /// GM18: a manga template's page (its geometry in the cut meta, the
@@ -41,6 +43,7 @@ pub const ALL: &[Template] = &[
         fps: 24,
         cut_frames: 72,
         room: Stage::Layout,
+        sheet_on: true,
         columns: &[BG, A, B, C],
         page: None,
     },
@@ -51,6 +54,7 @@ pub const ALL: &[Template] = &[
         fps: 24,
         cut_frames: 72,
         room: Stage::Drawing,
+        sheet_on: false,
         columns: &[BG, A, B],
         page: None,
     },
@@ -61,6 +65,7 @@ pub const ALL: &[Template] = &[
         fps: 24,
         cut_frames: 72,
         room: Stage::Layout,
+        sheet_on: true,
         columns: &[BG, A, B, C, D],
         page: None,
     },
@@ -71,6 +76,7 @@ pub const ALL: &[Template] = &[
         fps: 24,
         cut_frames: 120,
         room: Stage::Edit,
+        sheet_on: false,
         // The boards are the picture (a BG-band column, so they render and
         // export), the A column draws over them.
         columns: &[("BOARD", ColumnKind::Bg), A],
@@ -84,6 +90,7 @@ pub const ALL: &[Template] = &[
         fps: 24,
         cut_frames: 1,
         room: Stage::Manga,
+        sheet_on: false,
         columns: PAGE_COLUMNS,
         page: Some(Page::b5),
     },
@@ -94,6 +101,7 @@ pub const ALL: &[Template] = &[
         fps: 24,
         cut_frames: 1,
         room: Stage::Manga,
+        sheet_on: false,
         columns: PAGE_COLUMNS,
         page: Some(Page::a4),
     },
@@ -104,6 +112,7 @@ pub const ALL: &[Template] = &[
         fps: 24,
         cut_frames: 1,
         room: Stage::Manga,
+        sheet_on: false,
         columns: PAGE_COLUMNS,
         page: Some(Page::webtoon),
     },

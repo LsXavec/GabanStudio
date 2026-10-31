@@ -1012,7 +1012,7 @@ mod tests {
     /// The editor on a fresh Manga B5 book, in its room.
     fn b5() -> EditorHarness {
         let mut h = EditorHarness::new();
-        *h.editor_mut() = crate::open_template(template("Manga B5"), None, None);
+        *h.editor_mut() = crate::open_template(template("Manga B5"), None, None, &Default::default());
         h.run();
         h
     }
@@ -1051,7 +1051,7 @@ mod tests {
         ] {
             assert!(h.has(label), "the manga room has no {label:?}\n{}", h.describe());
         }
-        assert_eq!(Action::MangaRoom.menu(), Some("Room/manga (pages)"));
+        assert_eq!(Action::MangaRoom.menu(), Some("Room/Manga"));
         // The page's tone starts at the common screen: 60 lpi at 45°, round.
         assert_eq!(h.node_toggled("60 lpi"), Some(true));
         assert_eq!(h.node_toggled("screen 45°"), Some(true));

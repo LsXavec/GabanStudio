@@ -48,6 +48,13 @@ fn texts_of(shapes: &[ClippedShape]) -> Vec<(&TextShape, Rect)> {
     out
 }
 
+/// AU3: the words painted inside `area` this frame: the top row's, say.
+pub fn words_in(h: &EditorHarness, area: Rect) -> Vec<String> {
+    let shapes = &h.kit().output().shapes;
+    let inside = texts_of(shapes).into_iter().filter(|(t, _)| area.contains_rect(t.visual_bounding_rect()));
+    inside.map(|(t, _)| t.galley.text().trim().to_string()).collect()
+}
+
 /// The name a report or a picture gives a room.
 pub fn room_tag(room: ProbeRoom) -> String {
     match room {
@@ -484,7 +491,8 @@ pub fn paper_share(h: &EditorHarness) -> Share {
 /// What an audit looks at.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scope {
-    /// Only what sits outside dock pane bodies: top row, band, rail, floats.
+    /// Only what sits outside the dock: top row, band, rail, floats. Its tab
+    /// bars go with its panels, which `All` gates (AU15).
     Chrome,
     All,
 }
@@ -587,7 +595,8 @@ fn floats(ctx: &Context) -> Vec<Rect> {
 /// over a pane stays chrome, even one kept to the pane's rect.
 pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope) -> Clip {
     let views = plate::viewports(ctx);
-    let (bodies, floats) = (plate::pane_bodies(ctx), floats(ctx));
+    let (mut bodies, floats) = (plate::pane_bodies(ctx), floats(ctx));
+    bodies.extend(plate::dock_rect(ctx));
     let window = ctx.content_rect();
     let in_body = |cut: Rect| scope == Scope::Chrome && bodies.iter().any(|b| inside(cut, *b));
     let mut out = Clip::default();
@@ -1232,6 +1241,8 @@ mod tests {
     #[test]
     fn auseam_paper_share_reads_the_persons_window() {
         let mut h = EditorHarness::as_shipped();
+        // The frozen boot keeps the sheet: like for like (AU3).
+        h.editor_mut().sheet_in_draw = true;
         h.editor_mut().enter_room(Stage::Drawing);
         h.kit_mut().set_size(vec2(1600.0, 900.0));
         settle(&mut h);
@@ -1869,7 +1880,7 @@ mod tests {
         h.kit_mut().set_size(vec2(1600.0, 900.0));
         h.editor_mut().enter_room(Stage::Drawing);
         settle(&mut h);
-        for menu in ["file", "edit", "view", "sheet", "cut", "project", "room", "window", "help"] {
+        for menu in ["file", "edit", "view", "sheet", "cut", "project", crate::vocab::STEP, "window", "help"] {
             h.click(menu);
             add(menu, text_contrast_audit(&mut h));
             h.click(menu);
@@ -2021,7 +2032,7 @@ mod tests {
             h.editor_mut().enter_room(Stage::Drawing);
             settle(&mut h);
             let closed = built_rows(&h);
-            for menu in ["file", "edit", "view", "sheet", "cut", "project", "room", "window", "help"] {
+            for menu in ["file", "edit", "view", "sheet", "cut", "project", crate::vocab::STEP, "window", "help"] {
                 h.click(menu);
                 settle(&mut h);
                 assert!(egui::Popup::is_any_open(&h.ctx()), "{menu} at {size:?} opens");
@@ -2153,6 +2164,7 @@ mod tests {
     fn sheet_rows(room: Stage, size: egui::Vec2) -> usize {
         let mut h = EditorHarness::with_state_shipped(crate::sample::build_sample());
         h.kit_mut().set_size(size);
+        h.editor_mut().sheet_in_draw = true;
         h.editor_mut().enter_room(room);
         settle(&mut h);
         let sheet = &h.state().sheet_ui;
@@ -2165,8 +2177,8 @@ mod tests {
 
     /// Spec 2.6: row density unchanged. These are the rows each room held on
     /// the commit before the new look (the review found 10, 14, 9 and 7 at
-    /// 1600x900). AU3 takes the sheet out of the shipped Draw recipe, and that
-    /// room's rows move with it.
+    /// 1600x900). AU3 takes the sheet out of the shipped Draw recipe, so
+    /// Draw's rows are its sheet-on recipe's.
     #[test]
     fn aulook_sheet_keeps_its_rows() {
         let rooms = [Stage::Drawing, Stage::Edit, Stage::Layout, Stage::InkPaint];

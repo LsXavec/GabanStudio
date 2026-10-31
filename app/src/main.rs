@@ -44,11 +44,14 @@ mod runs;
 mod sample;
 mod shortcuts;
 mod stabilizer;
+mod steps;
 mod templates;
 #[cfg(test)]
 mod testkit;
 #[cfg(test)]
 mod tidy_tests;
+#[cfg(test)]
+mod audock_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;
@@ -157,6 +160,7 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1720.0, 960.0])
+            .with_min_inner_size([1024.0, 640.0])
             .with_title("Gaban Studio"),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             surface,
@@ -292,54 +296,6 @@ fn run_cli_job(
         println!("warning: {w}");
     }
     result
-}
-
-/// A slate room tab (spec §4.2): kanji over romaji caps, all four identical
-/// in structure; the active room takes the wash with deep ink. `name` is the
-/// room's house label (romaji + English, D7) — what it answers to.
-fn slate_tab(
-    ui: &mut egui::Ui,
-    active: bool,
-    kanji: &str,
-    romaji: &str,
-    name: &str,
-) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(72.0, 34.0), egui::Sense::click());
-    // The painted tab still answers to a name (AccessKit, D7).
-    resp.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            ui.is_enabled(),
-            active,
-            format!("room {name}"),
-        )
-    });
-    if ui.is_rect_visible(rect) {
-        let p = ui.painter();
-        let (fill, ink) = if active {
-            (plate::BLUE_WASH, plate::BLUE_DEEP)
-        } else if resp.hovered() {
-            (plate::HOVER, plate::STRUCK)
-        } else {
-            (plate::WELL, plate::LEGEND)
-        };
-        p.rect_filled(rect, plate::R_CONTROL, fill);
-        p.text(
-            egui::pos2(rect.center().x, rect.top() + 11.0),
-            egui::Align2::CENTER_CENTER,
-            kanji,
-            egui::FontId::new(13.0, egui::FontFamily::Proportional),
-            ink,
-        );
-        p.text(
-            egui::pos2(rect.center().x, rect.bottom() - 9.0),
-            egui::Align2::CENTER_CENTER,
-            romaji.to_uppercase(),
-            egui::FontId::new(8.5, plate::semibold()),
-            ink,
-        );
-    }
-    resp
 }
 
 struct App {
@@ -2070,16 +2026,7 @@ impl App {
             // needs the session's images before any Begin that
             // references them, and gets the host's loadable layout.
             if fresh_join && let net::Session::Hosting(h) = &self.session {
-                let layout = self
-                    .editor
-                    .as_ref()
-                    .map(|ed| workspace::Workspace {
-                        name: "host's layout".into(),
-                        dock: ed.dock.clone(),
-                        preset: None,
-                        view: Some(ed.canvas.snapshot_view(&ed.state)),
-                    })
-                    .and_then(|w| serde_json::to_string(&w).ok());
+                let layout = self.editor.as_ref().and_then(Editor::host_layout);
                 for j in &joiners {
                     for (hash, (w, hh, b)) in &self.session_res {
                         h.send_stroke_frame_to(*j, net::enc_res(*hash, *w, *hh, b));
@@ -2395,7 +2342,8 @@ impl App {
                                 ed.state.status = "live from the host".into();
                             } else {
                                 let rs = self.render_state.as_ref();
-                                let mut ed = Editor::from_state(st, rs, self.data_dir.as_deref());
+                                let mut ed =
+                                    Editor::boot(st, rs, self.data_dir.as_deref(), &self.config.ui);
                                 ed.stage = self.editor.as_ref().and_then(|o| o.stage);
                                 ed.canvas.engine_changed();
                                 ed.state.status = "live from the host".into();
@@ -2509,10 +2457,11 @@ impl App {
             match loaded {
                 Ok(state) => {
                     devloop::Session::clear_pending();
-                    Some(Editor::from_state(
+                    Some(Editor::boot(
                         state,
                         cc.wgpu_render_state.as_ref(),
                         data_dir.as_deref(),
+                        &config.ui,
                     ))
                 }
                 Err(e) => {
@@ -2707,10 +2656,11 @@ impl App {
                 Some(ed) => ed.leave(Leave::Recover(r), ctx),
                 None => match worksafe::open_recovered(&r) {
                     Ok(state) => {
-                        self.editor = Some(Editor::from_state(
+                        self.editor = Some(Editor::boot(
                             state,
                             self.render_state.as_ref(),
                             self.data_dir.as_deref(),
+                            &self.config.ui,
                         ));
                         self.new_form = None;
                         let _ = std::fs::remove_file(&r.record);
@@ -3190,7 +3140,7 @@ impl Editor {
             }
             Action::ResetLayout => {
                 let st = self.stage.unwrap_or(Stage::Drawing);
-                self.dock = st.dock();
+                self.dock = self.recipe(st);
                 self.state.status = format!("layout reset: {}", st.name());
             }
             Action::ZoomFit => self.canvas.fit_view(),
@@ -3211,7 +3161,7 @@ impl Editor {
             // forge's; View3D's numpad verbs move its view only.
             Action::Layout3dRoom => {
                 self.dock = Pane::layout3d_dock();
-                self.stage = None;
+                self.go_off_spine(vocab::LAYOUT_3D);
                 self.state.status = "the 3D layout room".into();
             }
             // GM18: the manga room, off the spine (D12).
@@ -4147,6 +4097,14 @@ struct Editor {
     /// cleared when panes are rearranged: the highlight means "this is the
     /// room I'm working from", not "the layout is pixel-identical".
     stage: Option<Stage>,
+    /// AU3: `ui.sheet_in_draw`, mirrored here because `enter_room` and
+    /// `from_state` see no config. The App and the Rig copy a change back.
+    sheet_in_draw: bool,
+    /// AU3: where the arrangement came from while `stage` is None: the
+    /// off-spine pill's name, and the panes it opened with (the lock keeps
+    /// those; a panel opened by hand keeps its close control).
+    place: String,
+    place_panes: Vec<Pane>,
     /// Named, persisted workspaces (%APPDATA%/AnimStudio/workspaces.json).
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
@@ -4359,9 +4317,53 @@ fn startup_route(
     }
 }
 
-/// GM8: the UI scale (Settings ▸ General) as egui's zoom factor.
+/// AU3: the dock's style for this frame (spec 4.6). A dock of one tab draws
+/// flush: no tab bar and no margin, so its pane body is the centre rect.
+fn dock_style(base: &egui::Style, dock: &DockState<Pane>) -> egui_dock::Style {
+    let mut s = plate::dock_style(base);
+    s.dock_area_padding = None;
+    // egui_dock clamps every divider so each side keeps `separator.extra`
+    // pixels — the DEFAULT IS 175px, which silently blocked collapsing
+    // panes. 26px keeps the tab bar grabbable while letting panes shrink to
+    // slim rails.
+    s.separator.extra = 26.0;
+    s.separator.width = 6.0;
+    let flush = dock.iter_all_tabs().count() == 1;
+    s.tab_bar.height = if flush { 0.0 } else { 34.0 };
+    if flush {
+        s.tab.tab_body.inner_margin = egui::Margin::ZERO;
+        s.tab.tab_body.stroke = egui::Stroke::NONE;
+        s.tab_bar.hline_color = egui::Color32::TRANSPARENT;
+    }
+    s
+}
+
+/// AU3: `a` and `b` are one arrangement: the same leaves, tabs and splits,
+/// wherever their dividers stand and whichever tabs are in front.
+fn same_shape(a: &DockState<Pane>, b: &DockState<Pane>) -> bool {
+    type Shape = Vec<(std::mem::Discriminant<egui_dock::Node<Pane>>, Vec<Pane>)>;
+    let shape = |d: &DockState<Pane>| -> Shape {
+        d.main_surface()
+            .iter()
+            .filter(|n| !matches!(n, egui_dock::Node::Empty))
+            .map(|n| (std::mem::discriminant(n), n.tabs().unwrap_or_default().to_vec()))
+            .collect()
+    };
+    a.iter_all_tabs().count() == b.iter_all_tabs().count() && shape(a) == shape(b)
+}
+
+/// AU3: the zoom a stored scale gets in a window `w`×`h` points at 100%: never
+/// past what leaves 760×520 points of room. The stored scale never changes. A
+/// window with no size yet keeps the scale.
+fn effective_scale(stored: f32, w: f32, h: f32) -> f32 {
+    if w > 0.0 && h > 0.0 { stored.min(w / 760.0).min(h / 520.0) } else { stored }
+}
+
+/// GM8: the UI scale (Settings ▸ General) as egui's zoom factor, capped by
+/// the window (AU3).
 fn apply_ui_scale(ctx: &egui::Context, config: &Config) {
-    ctx.set_zoom_factor(config.ui.zoom());
+    let window = ctx.content_rect().size() * ctx.zoom_factor();
+    ctx.set_zoom_factor(effective_scale(config.ui.zoom(), window.x, window.y));
 }
 
 /// GM8: OR this session's Quick start ticks into the config; true when
@@ -4385,10 +4387,15 @@ fn forget_recent(config: &mut Config, w: &mut welcome::Welcome, path: &std::path
 }
 
 /// GM8: a template's project in its first room.
-fn open_template(i: usize, rs: Option<&RenderState>, data_dir: Option<&std::path::Path>) -> Editor {
+fn open_template(
+    i: usize,
+    rs: Option<&RenderState>,
+    data_dir: Option<&std::path::Path>,
+    ui: &config::UiConfig,
+) -> Editor {
     let t = &templates::ALL[i.min(templates::ALL.len() - 1)];
-    let mut editor = Editor::from_state(t.build(), rs, data_dir);
-    editor.enter_room(t.room);
+    let mut editor = Editor::boot(t.build(), rs, data_dir, ui);
+    editor.enter_template(t);
     editor
 }
 
@@ -4398,8 +4405,9 @@ fn welcome_show_me(
     step: usize,
     rs: Option<&RenderState>,
     data_dir: Option<&std::path::Path>,
+    ui: &config::UiConfig,
 ) -> (Editor, Performed) {
-    let mut editor = Editor::from_state(sample::build_practice(), rs, data_dir);
+    let mut editor = Editor::boot(sample::build_practice(), rs, data_dir, ui);
     let did = editor.show_me(step);
     (editor, did)
 }
@@ -4553,6 +4561,9 @@ struct EditorTabs<'a> {
     float_canvas_open: bool,
     /// GM3: where each pane is drawn (the shortcut context reads it).
     pane_rects: &'a mut Vec<(Pane, egui::Rect)>,
+    /// AU3: the current recipe's panes while Lock UI positions is on, which
+    /// keep their place; a panel opened by hand keeps its close control.
+    locked: Vec<Pane>,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -4664,9 +4675,10 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
     }
 
     // Everything except the canvas can be closed (re-add from the "panes"
-    // menu); losing the canvas would strand the user.
-    fn closeable(&mut self, tab: &mut Pane) -> bool {
-        !matches!(tab, Pane::Canvas)
+    // menu); losing the canvas would strand the user. The lock keeps the
+    // recipe's panes too.
+    fn is_closeable(&self, tab: &Pane) -> bool {
+        !matches!(tab, Pane::Canvas) && !self.locked.contains(tab)
     }
 
     // Closing a viewer drops its zoom/pan — re-adding its id later must give
@@ -4760,18 +4772,106 @@ impl Editor {
         }
     }
 
+    /// The layout a host sends a joiner, as loadable text. AU3: a dock that
+    /// cannot be written whole is not sent.
+    fn host_layout(&self) -> Option<String> {
+        let layout = workspace::Workspace {
+            name: "host's layout".into(),
+            dock: self.dock.clone(),
+            preset: None,
+            view: Some(self.canvas.snapshot_view(&self.state)),
+        };
+        layout.normalised().ok().and_then(|w| serde_json::to_string(&w).ok())
+    }
+
     /// Enter a spine room — the room switcher, the layout probe and the
     /// room verbs all come through here. The layout always swaps; the
     /// tool/view restore is all-or-nothing, so a live stroke keeps the old
     /// tool state (same law as saved workspaces).
     fn enter_room(&mut self, st: Stage) {
-        self.dock = st.dock();
+        self.dock = self.recipe(st);
         if self.canvas.apply_view(&st.view(), &mut self.state) {
             self.stage = Some(st);
             // LINE GUARD defaults ON in the ink & paint room (shiage
             // charter) and OFF elsewhere.
             self.state.view.line_guard = matches!(st, Stage::InkPaint);
-            self.state.status = format!("room: {}", st.name());
+            self.state.status = format!("{}: {}", vocab::STEP, st.name());
+        }
+    }
+
+    /// AU3: the arrangement `st` opens in. Entering a step, booting and
+    /// Reset all read it, so they agree.
+    fn recipe(&self, st: Stage) -> DockState<Pane> {
+        match st {
+            Stage::Drawing if self.sheet_in_draw => Stage::dock_with_sheet(),
+            _ => st.dock(),
+        }
+    }
+
+    /// AU3: a template's project opens in the template's first step, its
+    /// Timing sheet on where the template starts it on.
+    fn enter_template(&mut self, t: &templates::Template) {
+        self.sheet_in_draw |= t.sheet_on;
+        self.enter_room(t.room);
+    }
+
+    /// AU3: the dock is a place off the spine, named `place` on its pill.
+    fn go_off_spine(&mut self, place: &str) {
+        self.stage = None;
+        self.place = place.to_string();
+        self.place_panes = self.dock.iter_all_tabs().map(|(_, t)| *t).collect();
+    }
+
+    /// AU3: what the off-spine pill says; None on the spine. Manga is a
+    /// stage, but it has no pill of its own.
+    fn place_name(&self) -> Option<&str> {
+        match self.stage {
+            Some(Stage::Manga) => Some(vocab::STEP_MANGA),
+            Some(_) => None,
+            None if self.place.is_empty() => Some(vocab::ARRANGEMENT),
+            None => Some(&self.place),
+        }
+    }
+
+    /// AU3: the panes Lock UI positions holds: the current recipe's.
+    fn locked_panes(&self) -> Vec<Pane> {
+        match self.stage {
+            Some(st) => self.recipe(st).iter_all_tabs().map(|(_, t)| *t).collect(),
+            None => self.place_panes.clone(),
+        }
+    }
+
+    /// Every Editor is born through this or [`Editor::boot_form`].
+    pub fn boot(
+        state: AppState,
+        rs: Option<&RenderState>,
+        dir: Option<&std::path::Path>,
+        ui: &config::UiConfig,
+    ) -> Editor {
+        let mut editor = Editor::from_state(state, rs, dir);
+        editor.apply_ui(ui);
+        editor
+    }
+
+    /// [`Editor::boot`] over a New Project form.
+    pub fn boot_form(
+        form: &NewProjectForm,
+        rs: Option<&RenderState>,
+        dir: Option<&std::path::Path>,
+        ui: &config::UiConfig,
+    ) -> Editor {
+        let mut editor = Editor::from_form(form, rs, dir);
+        editor.apply_ui(ui);
+        editor
+    }
+
+    /// Copy the remembered fields in, and rebuild the dock when the recipe
+    /// then differs.
+    fn apply_ui(&mut self, ui: &config::UiConfig) {
+        let changed = self.sheet_in_draw != ui.sheet_in_draw;
+        self.sheet_in_draw = ui.sheet_in_draw;
+        if changed && let Some(st @ Stage::Drawing) = self.stage {
+            self.dock = self.recipe(st);
         }
     }
 
@@ -4831,6 +4931,9 @@ impl Editor {
             // and the spine's canonical default.
             dock: Stage::Drawing.dock(),
             stage: Some(Stage::Drawing),
+            sheet_in_draw: false,
+            place: String::new(),
+            place_panes: Vec::new(),
             status_seen: String::new(),
             status_since: 0.0,
             refusal_seen_seq: 0,
@@ -4917,6 +5020,9 @@ impl Editor {
             request_settings_pen: false,
             dock: Stage::Drawing.dock(),
             stage: Some(Stage::Drawing),
+            sheet_in_draw: false,
+            place: String::new(),
+            place_panes: Vec::new(),
             status_seen: String::new(),
             status_since: 0.0,
             refusal_seen_seq: 0,
@@ -5227,7 +5333,9 @@ impl Editor {
     }
 
     /// GM3: open a pane, or bring it to the front when it is already
-    /// docked. A new one tabs in beside the layer strip (or the sheet).
+    /// docked. A new one tabs in beside the layer strip (or the sheet);
+    /// AU3: on a dock of one leaf it splits off to the right, so the paper
+    /// stays in view.
     pub fn open_pane(&mut self, pane: Pane) {
         if let Some(path) = self.dock.find_tab(&pane) {
             let _ = self.dock.set_active_tab(path);
@@ -5239,7 +5347,18 @@ impl Editor {
             .find_map(|p| self.dock.find_tab(p));
         match beside {
             Some(path) => self.dock[path.node_path()].append_tab(pane),
-            None => self.dock.main_surface_mut().push_to_focused_leaf(pane),
+            None => self.add_pane(pane),
+        }
+    }
+
+    /// AU3: a pane with nowhere to tab in: split a dock of one leaf, else
+    /// join the focused leaf.
+    fn add_pane(&mut self, pane: Pane) {
+        let tree = self.dock.main_surface_mut();
+        if tree.iter().filter(|n| n.is_leaf()).count() == 1 {
+            tree.split_right(egui_dock::NodeIndex::root(), 0.70, vec![pane]);
+        } else {
+            tree.push_to_focused_leaf(pane);
         }
     }
 
@@ -6023,6 +6142,11 @@ impl eframe::App for App {
             editor.update_tag = self.update_ready.as_ref().map(|(t, _, _)| t.clone());
             let room_key = stage_key(editor.stage);
             editor.arm_room(&layers_cfg, &mut self.stack_room_seen);
+            // AU3: a template that starts the sheet on is the same memory.
+            if editor.sheet_in_draw != self.config.ui.sheet_in_draw {
+                self.config.ui.sheet_in_draw = editor.sheet_in_draw;
+                self.config.save();
+            }
             // GM6: the onion and light table settings live in the config.
             editor.canvas.onion = self.config.onion.sane();
             editor.canvas.light_table = self.config.light_table;
@@ -6048,6 +6172,11 @@ impl eframe::App for App {
             );
             if let Some(on) = editor.scrub_request.take() {
                 self.config.perf.scrub_audio = on;
+                self.config.save();
+            }
+            // AU3: the Timing sheet button's choice, remembered.
+            if editor.sheet_in_draw != self.config.ui.sheet_in_draw {
+                self.config.ui.sheet_in_draw = editor.sheet_in_draw;
                 self.config.save();
             }
             // Stage 4: the strip's stack requests (the App owns config).
@@ -6280,7 +6409,7 @@ impl eframe::App for App {
                         .cloned()
                     {
                         ed.dock = w.dock;
-                        ed.stage = None;
+                        ed.go_off_spine(&name);
                         if let Some(v) = w.view {
                             let _ = ed.canvas.apply_view(&v, &mut ed.state);
                         }
@@ -6296,7 +6425,7 @@ impl eframe::App for App {
                         && let Ok(w) = serde_json::from_str::<workspace::Workspace>(json)
                     {
                         ed.dock = w.dock;
-                        ed.stage = None;
+                        ed.go_off_spine(&w.name);
                         if let Some(v) = w.view {
                             let _ = ed.canvas.apply_view(&v, &mut ed.state);
                         }
@@ -6495,11 +6624,12 @@ impl App {
             self.config.save();
         }
         let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
-        let opened = |state: AppState| Editor::from_state(state, rs, dir);
+        let remembered = self.config.ui.clone();
+        let opened = |state: AppState| Editor::boot(state, rs, dir, &remembered);
         let mut done = false;
         match action {
             Some(welcome::WelcomeAction::Template(i)) => {
-                self.editor = Some(open_template(i, rs, dir));
+                self.editor = Some(open_template(i, rs, dir, &remembered));
                 done = true;
             }
             // The form shows over the screen; its Cancel comes back here.
@@ -6536,7 +6666,7 @@ impl App {
                 done = true;
             }
             Some(welcome::WelcomeAction::ShowMe(step)) => {
-                self.editor = Some(welcome_show_me(step, rs, dir).0);
+                self.editor = Some(welcome_show_me(step, rs, dir, &remembered).0);
                 done = true;
             }
             // Over a cut the modal would sit above the Settings window.
@@ -6585,11 +6715,15 @@ impl App {
         }
         match action {
             Some(FormAction::Create) => {
-                let mut editor =
-                    Editor::from_form(&form, self.render_state.as_ref(), self.data_dir.as_deref());
+                let mut editor = Editor::boot_form(
+                    &form,
+                    self.render_state.as_ref(),
+                    self.data_dir.as_deref(),
+                    &self.config.ui,
+                );
                 // GM8: a template's cut opens in its first room.
                 if let Some(t) = form.template() {
-                    editor.enter_room(t.room);
+                    editor.enter_template(t);
                 }
                 self.editor = Some(editor);
                 // A Welcome screen behind the form has done its job.
@@ -6597,10 +6731,11 @@ impl App {
             }
             Some(FormAction::Open) => match AppState::pick_and_open() {
                 Some(Ok(state)) => {
-                    self.editor = Some(Editor::from_state(
+                    self.editor = Some(Editor::boot(
                         state,
                         self.render_state.as_ref(),
                         self.data_dir.as_deref(),
+                        &self.config.ui,
                     ));
                     self.welcome = None;
                 }
@@ -6698,7 +6833,7 @@ impl ProbeRoom {
             ProbeRoom::Stage(st) => editor.enter_room(st),
             ProbeRoom::Forge => {
                 editor.dock = Pane::forge_dock();
-                editor.stage = None;
+                editor.go_off_spine(vocab::BRUSH_MAKER);
             }
             ProbeRoom::Layout3d => {
                 editor.perform(Action::Layout3dRoom);
@@ -6761,7 +6896,7 @@ fn probe_run_in(ppp: f32, ui_scale: u32, still: Pane, enter: impl FnOnce(&mut Ed
     let layers_cfg = config.layers.clone();
     let mut state = AppState::new_project("probe", 1920, 1080, 24, 300.0);
     state.new_drawing_at_frame(); // cel at frame 0; frame 1 stays empty
-    let mut editor = Editor::from_state(state, None, None);
+    let mut editor = Editor::boot(state, None, None, &config.ui);
     enter(&mut editor);
     if let Some(tab) = editor.dock.find_tab(&still) {
         let _ = editor.dock.set_active_tab(tab);
@@ -7178,22 +7313,13 @@ impl Editor {
         self.sync_audio(dt);
     }
 
-    /// THE FOOT's right lane: the room lamp, the tape counter, and the pen
-    /// diagnostics. Laid out FIRST from the row's right edge so a long
-    /// chatter line can never push it off the screen (the clipping the
-    /// owner's frame_007 debug outlines caught).
+    /// THE FOOT's right lane: the Timing sheet button, the room lamp and the
+    /// pen. Laid out FIRST from the row's right edge so a long chatter line
+    /// can never push it off the screen (the clipping the owner's frame_007
+    /// debug outlines caught).
     fn foot_right(&mut self, ui: &mut egui::Ui, room: &Option<(String, Vec<String>)>) {
-        // PERSISTENT lane: history as a tape counter, and the
-        // pen diagnostics (fixed-width, never in a toolbar).
         ui.add_space(8.0);
-        // The build's version — two machines cross-checked at a glance
-        // (owner 2026-08-19).
-        ui.label(
-            egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
-                .monospace()
-                .size(9.5)
-                .color(plate::legend_dim()),
-        );
+        self.sheet_button(ui);
         ui.separator();
         // PSD-shipping: UPDATE READY — the published build moved past
         // this one. Tally lamp; the click IS the relaunch (session
@@ -7236,44 +7362,142 @@ impl Editor {
                 ui.separator();
             }
         }
-        let can_redo = self.state.engine.can_redo();
-        let can_undo = self.state.engine.can_undo();
-        let mut tape = egui::text::LayoutJob::default();
-        let seg = |job: &mut egui::text::LayoutJob, t: &str, on: bool| {
-            job.append(
-                t,
-                0.0,
-                egui::TextFormat {
-                    font_id: egui::FontId::new(10.5, plate::semibold()),
-                    color: if on {
-                        plate::LEGEND
-                    } else {
-                        plate::legend_dim()
-                    },
-                    ..Default::default()
-                },
-            );
-        };
-        seg(&mut tape, "REDO", can_redo);
-        seg(&mut tape, " · ", false);
-        seg(&mut tape, "UNDO", can_undo);
-        ui.label(tape);
-        ui.separator();
+        // The pen, one word on the foot, its diagnostics under the hand.
         let (diag, healthy, mouse_mode) = self.canvas.pressure_diag();
         if mouse_mode {
-            ui.label(egui::RichText::new("input: mouse — no pressure").color(plate::LEGEND));
+            ui.label(egui::RichText::new("mouse").color(plate::LEGEND))
+                .on_hover_text("input: mouse — no pressure");
         } else {
-            ui.label(
-                egui::RichText::new(diag)
-                    .monospace()
-                    .size(11.0)
-                    .color(if healthy {
-                        plate::STRUCK
-                    } else {
-                        plate::legend_dim()
-                    }),
-            );
+            let ink = if healthy { plate::STRUCK } else { plate::legend_dim() };
+            ui.label(egui::RichText::new("pen").color(ink)).on_hover_text(diag);
         }
+    }
+
+    /// AU3: the Timing sheet button: one click, remembered in Draw. Absent
+    /// in Plan and Timing, whose recipes hold the sheet; everywhere else it
+    /// opens the pane.
+    fn sheet_button(&mut self, ui: &mut egui::Ui) {
+        if matches!(self.stage, Some(Stage::Layout | Stage::Edit)) {
+            return;
+        }
+        let draw = self.stage == Some(Stage::Drawing);
+        let shown = self.dock.find_tab(&Pane::XSheet).is_some();
+        let name = if draw && shown {
+            vocab::HIDE_TIMING_SHEET
+        } else {
+            vocab::SHOW_TIMING_SHEET
+        };
+        let mut on = shown;
+        if plate::tool_latch(ui, &mut on, Icon::Sheet, vocab::SHEET_BUTTON, name)
+            .on_hover_text(name)
+            .clicked()
+        {
+            if self.canvas.stroke_active() {
+                self.state.refuse("refused — finish the stroke first");
+            } else if draw {
+                self.switch_sheet(shown);
+            } else {
+                self.open_pane(Pane::XSheet);
+            }
+        }
+    }
+
+    /// AU3: Draw with the sheet or without it, remembered. A dock that is
+    /// neither recipe was arranged by hand, so only the sheet's tab comes or
+    /// goes and the rest of the arrangement stays.
+    fn switch_sheet(&mut self, shown: bool) {
+        self.sheet_in_draw = !shown;
+        if same_shape(&self.dock, &Stage::Drawing.dock())
+            || same_shape(&self.dock, &Stage::dock_with_sheet())
+        {
+            self.dock = self.recipe(Stage::Drawing);
+        } else if let Some(tab) = self.dock.find_tab(&Pane::XSheet) {
+            self.dock.remove_tab(tab);
+        } else {
+            self.open_pane(Pane::XSheet);
+        }
+    }
+
+    /// The transport's first key: Home.
+    fn first_frame_key(&mut self, ui: &mut egui::Ui) {
+        if plate::icon_button(ui, Icon::SkipBack, "", "first frame (Home)").clicked()
+            && !self.canvas.stroke_active()
+        {
+            self.state.goto(0);
+        }
+    }
+
+    /// The transport's last key: End.
+    fn last_frame_key(&mut self, ui: &mut egui::Ui) {
+        if plate::icon_button(ui, Icon::SkipFwd, "", "last frame (End)").clicked()
+            && !self.canvas.stroke_active()
+        {
+            let last = self.state.frame_count() - 1;
+            self.state.goto(last);
+        }
+    }
+
+    /// The loop, the sound and the rates: the transport past the frame
+    /// field, in the foot or in its `…` when the window is narrow.
+    fn transport_rest(&mut self, ui: &mut egui::Ui) {
+        let mut lp = self.state.view.loop_playback;
+        plate::latch(ui, &mut lp, "loop").on_hover_text(
+            "off = playback stops at the end of the loop range (or the cut)",
+        );
+        self.state.view.loop_playback = lp;
+        // GM12: the loop range — "in" and "out" mark the
+        // playhead; × plays the whole cut again. Every
+        // slot keeps its width whatever it reads (D7).
+        if playback::transport_key(ui, "in", "loop in", 26.0)
+            .on_hover_text("the loop range starts at this frame (Shift+I)")
+            .clicked()
+        {
+            self.invoke(Action::LoopIn, ui.ctx());
+        }
+        if playback::transport_key(ui, "out", "loop out", 30.0)
+            .on_hover_text("the loop range ends at this frame (Shift+O)")
+            .clicked()
+        {
+            self.invoke(Action::LoopOut, ui.ctx());
+        }
+        let range = self.state.loop_range();
+        let text = match range {
+            Some((a, b)) => format!("{}–{}", a + 1, b + 1),
+            None => "—".to_string(),
+        };
+        playback::readout(ui, &text, 64.0, plate::LEGEND)
+            .on_hover_text("this cut's loop range (— = none: the whole cut plays)");
+        let clear = ui.add_enabled_ui(range.is_some(), |ui| {
+            playback::transport_key(ui, "×", "clear loop range", 22.0)
+                .on_hover_text("clear the loop range (Alt+X)")
+                .on_disabled_hover_text("this cut has no loop range")
+        });
+        if clear.inner.clicked() {
+            self.invoke(Action::ClearLoop, ui.ctx());
+        }
+        let mut scrub = self.scrub_audio;
+        if plate::latch(ui, &mut scrub, "scrub")
+            .on_hover_text("on = a stopped playhead's move sounds one frame (Shift+S)")
+            .changed()
+        {
+            self.scrub_audio = scrub;
+            self.scrub_request = Some(scrub);
+        }
+        ui.label(
+            egui::RichText::new(format!("{:.3}", self.state.fps() as f32))
+                .monospace()
+                .size(11.0)
+                .color(plate::LEGEND),
+        );
+        // GM12: frames passed over to keep up with the sound.
+        let dropped = format!("dropped {}", self.play_dropped);
+        let ink = if self.play_dropped > 0 {
+            plate::LEGEND
+        } else {
+            plate::legend_dim()
+        };
+        playback::readout(ui, &dropped, 96.0, ink)
+            .on_hover_text("frames passed over to keep up with the sound");
     }
 
     fn ui(
@@ -7404,7 +7628,8 @@ impl Editor {
         }
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.play_tick(dt);
-        egui::Panel::top("top_bar").frame(plate::desk_frame(ui.style())).show_separator_line(false).show(ui, |ui| {
+        let row_frame = plate::desk_frame(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
+        egui::Panel::top("top_bar").frame(row_frame).exact_size(44.0).show_separator_line(false).show(ui, |ui| {
             // Owner's directive (2026-08-17): the bar read small. The Chrome
             // role, scoped to this panel only, with wider breathing room:
             // the bar is the one surface read from arm's length.
@@ -7413,17 +7638,19 @@ impl Editor {
                 let st = ui.style_mut();
                 st.text_styles.insert(TextStyle::Body, plate::Role::Chrome.font());
                 st.text_styles.insert(TextStyle::Button, plate::Role::Chrome.font());
-                st.spacing.item_spacing.x = 8.0;
+                // Nine menus, the steps and the actions share the row.
+                st.spacing.item_spacing.x = 2.0;
                 st.spacing.icon_width = 18.0;
-                // The whole row holds at 1280 wide: nothing falls off the end.
                 st.spacing.button_padding.x = 6.0;
             }
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                // THE SLATE (spec §4.1): file commands live in ONE
-                // detent; the wordmark is deleted — the operator knows
-                // what he opened.
-                let file_menu_was_open = std::mem::take(&mut self.file_menu_open);
+            // THE TOP ROW (AU3, spec 4.2): the menus, the steps, the actions.
+            let row = ui.max_rect();
+            let window = ui.ctx().content_rect().width();
+            let place = self.place_name().map(str::to_string);
+            let narrow = steps::narrow(window, place.is_some());
+            let file_menu_was_open = std::mem::take(&mut self.file_menu_open);
+            let mut menus = |ui: &mut egui::Ui| {
+                // File commands live in ONE detent.
                 ui.menu_button("file", |ui| {
                     // GM2: the recent files are checked on disk as the menu
                     // opens, not on every frame it stays open.
@@ -7734,127 +7961,8 @@ impl Editor {
                     }
                 });
 
-                // Slate identity: filename + dirty mark, then the cut's
-                // vitals as engraved fields (transport lives in the FOOT;
-                // undo/redo live on the keys and the Foot's counter).
-                // The identity: the file's stem once one exists; before
-                // the first save, the NAME the artist gave the project
-                // (owner's report: "Drawing boog" showed as untitled).
-                // "untitled" only when both are absent.
-                let fname = self
-                    .state
-                    .file_path
-                    .as_ref()
-                    .and_then(|p| p.file_stem().map(|os| os.to_string_lossy().to_string()))
-                    .or_else(|| {
-                        let n = self.state.engine.project.name.trim();
-                        (!n.is_empty() && n != "Untitled").then(|| n.to_string())
-                    })
-                    .unwrap_or_else(|| "untitled".into());
-                // AUDIT [3]: these were variable-width labels sitting
-                // BEFORE the room tabs, so the tabs slid sideways the
-                // instant the dirty mark appeared — on the first stroke
-                // of every session. Both fields are now fixed slots with
-                // elision inside, and the dirty mark is a painted Tally
-                // dot in permanently reserved space (a character would
-                // change the string's width).
-                // GM2: the real dirty mark (revision vs saved + meta edits),
-                // not "has undo history".
-                let dirty = self.state.is_dirty();
-                let (frect, _) =
-                    ui.allocate_exact_size(egui::vec2(150.0, 20.0), egui::Sense::hover());
-                {
-                    let p = ui.painter();
-                    let mut shown = fname.clone();
-                    if shown.chars().count() > 16 {
-                        shown = shown.chars().take(15).collect::<String>() + "…";
-                    }
-                    p.text(
-                        egui::pos2(frect.left(), frect.center().y),
-                        egui::Align2::LEFT_CENTER,
-                        shown,
-                        egui::FontId::new(14.0, egui::FontFamily::Proportional),
-                        plate::STRUCK,
-                    );
-                    if dirty {
-                        p.circle_filled(
-                            egui::pos2(frect.right() - 6.0, frect.center().y),
-                            3.0,
-                            plate::TALLY,
-                        );
-                    }
-                }
-                if dirty {
-                    // GM2: the dot says what it means — on hover, and to
-                    // screen readers and the testkit (D7).
-                    let dot = egui::Rect::from_center_size(
-                        egui::pos2(frect.right() - 6.0, frect.center().y),
-                        egui::vec2(12.0, 16.0),
-                    );
-                    let resp = ui.interact(dot, ui.id().with("gm2_unsaved"), egui::Sense::hover());
-                    plate::speak(&resp, egui::WidgetType::Label, None, "unsaved changes");
-                    // Built only while hovered, never every frame.
-                    let at = self.last_autosave_at;
-                    let _ = resp.on_hover_ui(|ui| {
-                        ui.label(match at {
-                            Some(t) => format!(
-                                "unsaved changes — not in your file until you save \
-                                 (autosaved {})",
-                                worksafe::clock_hm(t, worksafe::utc_offset_min())
-                            ),
-                            None => "unsaved changes — not in your file until you save".into(),
-                        });
-                    });
-                }
-                let (vrect, _) =
-                    ui.allocate_exact_size(egui::vec2(200.0, 20.0), egui::Sense::hover());
-                ui.painter().text(
-                    egui::pos2(vrect.left(), vrect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    format!(
-                        "{} · {}f · {:.3} · {}×{}",
-                        self.state.cut().name.chars().take(8).collect::<String>(),
-                        self.state.frame_count(),
-                        self.state.fps() as f32,
-                        self.state.engine.project.width,
-                        self.state.engine.project.height,
-                    ),
-                    egui::FontId::new(11.5, egui::FontFamily::Monospace),
-                    plate::LEGEND,
-                );
-                ui.separator();
-                // (Onion + line-only moved to the canvas lightbox rail —
-                // Phase 4: onion is a property of the light box.)
-                // THE STAGE SPINE (workflow trees, LENS-DOCK Phase 3): the
-                // four fixed pipeline rooms, in order. Switching re-lenses
-                // the SAME document — layout + tool/view state swap, data
-                // never forks. Tool/view restore is all-or-nothing; a live
-                // stroke keeps the old tool state (same law as saved
-                // workspaces below).
-                for st in Stage::ALL {
-                    let (kanji, romaji) = match st {
-                        Stage::Layout => ("レイアウト", "layout"),
-                        Stage::Drawing => ("原画", "genga"),
-                        Stage::InkPaint => ("仕上げ", "shiage"),
-                        Stage::Composite => ("撮影", "satsuei"),
-                        Stage::Edit => ("編集", "henshū"),
-                        // Off the spine: never in `Stage::ALL`.
-                        Stage::Manga => ("漫画", "manga"),
-                    };
-                    // GM8 room card: term, purpose and the tools it arms.
-                    let (term, purpose, arms) = st.card();
-                    if slate_tab(ui, self.stage == Some(*st), kanji, romaji, st.name())
-                        .on_hover_text(format!(
-                            "{term} — {purpose}\n{}\narms: {arms}",
-                            st.describes()
-                        ))
-                        .clicked()
-                    {
-                        self.enter_room(*st);
-                    }
-                }
                 // GM3: was "ws" — the rooms, then the saved arrangements.
-                ui.menu_button("room", |ui| {
+                ui.menu_button(vocab::STEP, |ui| {
                     self.menu_items(ui, "Room");
                     ui.separator();
                     ui.label(egui::RichText::new("save current arrangement as:").color(plate::legend_dim()));
@@ -7903,7 +8011,7 @@ impl Editor {
                             // from LAYOUT kept the stage, and the Canvas
                             // pane stayed the read-only composite PREVIEW
                             // instead of test paper — the owner's report.
-                            self.stage = None;
+                            self.go_off_spine(vocab::BRUSH_MAKER);
                             self.state.status = "the forge room".into();
                         }
                         ui.close();
@@ -7964,7 +8072,7 @@ impl Editor {
                         let name = self.workspaces.list[i].name.clone();
                         self.dock = self.workspaces.list[i].dock.clone();
                         // A custom room is off-spine — no stage highlighted.
-                        self.stage = None;
+                        self.go_off_spine(&name);
                         // Same all-or-nothing tool/view + brush gate as the
                         // stage buttons.
                         let view_ok = match self.workspaces.list[i].view {
@@ -8034,9 +8142,7 @@ impl Editor {
                         .clicked()
                         && let Some(id) = next_id
                     {
-                        self.dock
-                            .main_surface_mut()
-                            .push_to_focused_leaf(Pane::Viewer(id));
+                        self.add_pane(Pane::Viewer(id));
                         ui.close();
                     }
                     ui.separator();
@@ -8090,68 +8196,133 @@ impl Editor {
                     self.menu_items(ui, "Window");
                 });
                 self.help_menu(ui);
-            });
-            // Row 2 — THE ARMING LINE (spec §4.2): what the pen will do
-            // RIGHT NOW: drawing · column · layer · pencil.
-            ui.horizontal(|ui| {
-                plate::legend(ui, "armed");
-                let dname = {
-                    let cut = self.state.cut();
-                    self.state
-                        .current_drawing()
-                        .and_then(|id| cut.drawing(id))
-                        .map(|d| d.name.clone())
-                        .unwrap_or_else(|| "—".into())
-                };
-                let col = {
-                    let cut = self.state.cut();
-                    cut.xsheet
-                        .columns
-                        .iter()
-                        .find(|c| c.id == self.state.view.active_column)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_default()
-                };
-                // With fill armed, the pot's NAME rides the arming line —
-                // kills the "what colour am I holding" saccade (shiage).
-                let mut arming = format!(
-                    "{dname} · col {col} · {} · {}",
-                    self.state.active_layer_name(),
-                    self.canvas.arming_pencil(),
-                );
-                if self.canvas.arming_pencil() == "fill" {
-                    for ch in &self.state.palettes.characters {
-                        for r in &ch.roles {
-                            if r.color[..3] == self.canvas.brush_color[..3] {
-                                arming.push_str(&format!(" · {}", r.name));
-                            }
-                        }
-                    }
+            };
+            let mut strip = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(row)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            if narrow {
+                strip.menu_button("Menu", |ui| menus(ui));
+            } else {
+                menus(&mut strip);
+            }
+            let menus_end = strip.min_rect().right();
+            // The actions first: the steps' last pill takes what they leave.
+            let search_w = if narrow { plate::PILL_H } else { plate::SEARCH_W };
+            let actions_left = row.right() - 2.0 * plate::PILL_H - search_w;
+            let dot = egui::Rect::from_center_size(
+                egui::pos2(actions_left - 10.0, row.center().y),
+                egui::vec2(12.0, 16.0),
+            );
+            // THE STEPS. Switching re-lenses the SAME document — layout +
+            // tool/view state swap, data never forks. Tool/view restore is
+            // all-or-nothing; a live stroke keeps the old tool state (same
+            // law as saved workspaces).
+            let steps_width: f32 = steps::STEPS.iter().map(|s| plate::pill_width(ui, s.label)).sum();
+            let limit = dot.left() - steps::GROUP_GAP;
+            let room = limit - (menus_end + steps::GROUP_GAP) - steps_width;
+            let place_width = place
+                .as_deref()
+                .map_or(0.0, |name| steps::place_width(plate::pill_width(ui, name), room));
+            let steps_x = steps::island_x(window, menus_end, steps_width, place_width, limit);
+            let island = egui::Rect::from_min_size(
+                egui::pos2(steps_x, row.top()),
+                egui::vec2(steps_width + place_width, row.height()),
+            );
+            ui.painter().rect_filled(island, plate::R_PILL, plate::ISLAND);
+            let mut pills = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(island)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            pills.spacing_mut().item_spacing.x = 0.0;
+            for step in &steps::STEPS {
+                let current = step.stage.is_some() && step.stage == self.stage;
+                let primary = step.stage.is_none();
+                if plate::step_pill(&mut pills, step.label, current, primary)
+                    .on_hover_ui(|ui| {
+                        ui.label(step.card());
+                    })
+                    .clicked()
+                {
+                    self.invoke(step.action, ui.ctx());
                 }
-                ui.label(
-                    egui::RichText::new(arming)
-                        .monospace()
-                        .size(11.5)
-                        .color(plate::STRUCK),
-                );
-            });
-            ui.add_space(2.0);
+            }
+            if let Some(name) = &place {
+                // Draw is the way back; the pill only says where this is.
+                let card = match self.stage {
+                    Some(st) => st.describes(),
+                    None => name,
+                };
+                plate::place_pill(&mut pills, name, place_width).on_hover_text(card);
+            }
+            // GM2: the real dirty mark (revision vs saved + meta edits), not
+            // "has undo history". A painted dot in reserved space, so it
+            // moves nothing when it lights.
+            if self.state.is_dirty() {
+                ui.painter().circle_filled(dot.center(), 3.0, plate::TALLY);
+                // GM2: the dot says what it means — on hover, and to screen
+                // readers and the testkit (D7).
+                let resp = ui.interact(dot, ui.id().with("gm2_unsaved"), egui::Sense::hover());
+                plate::speak(&resp, egui::WidgetType::Label, None, "unsaved changes");
+                // Built only while hovered, never every frame.
+                let at = self.last_autosave_at;
+                let _ = resp.on_hover_ui(|ui| {
+                    ui.label(match at {
+                        Some(t) => format!(
+                            "unsaved changes — not in your file until you save \
+                             (autosaved {})",
+                            worksafe::clock_hm(t, worksafe::utc_offset_min())
+                        ),
+                        None => "unsaved changes — not in your file until you save".into(),
+                    });
+                });
+            }
+            // THE ACTIONS, on their own island. Undo and Redo speak apart
+            // from the Edit menu's rows.
+            let actions = egui::Rect::from_min_max(egui::pos2(actions_left, row.top()), row.right_bottom());
+            ui.painter().rect_filled(actions, plate::R_PILL, plate::ISLAND);
+            let mut keys = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(actions)
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            keys.spacing_mut().item_spacing.x = 0.0;
+            for (action, icon, name) in [
+                (Action::Undo, Icon::Undo, "Undo (toolbar)"),
+                (Action::Redo, Icon::Redo, "Redo (toolbar)"),
+            ] {
+                let can = self.can_perform(action);
+                let tip = menus::tip(ui.ctx(), action);
+                let key = keys.add_enabled_ui(can.is_ok(), |ui| plate::island_key(ui, icon, name, &tip)).inner;
+                let key = match can {
+                    Ok(()) => key,
+                    Err(why) => key.on_disabled_hover_text(why),
+                };
+                if key.clicked() {
+                    self.invoke(action, ui.ctx());
+                }
+            }
+            let tip = menus::tip(ui.ctx(), Action::CommandPalette);
+            if plate::search_key(&mut keys, !narrow, &tip).clicked() {
+                self.invoke(Action::CommandPalette, ui.ctx());
+            }
         });
 
         // THE FOOT (spec §4.1): transport is GLOBAL state, bolted to the
         // chassis — a tape deck's motor is never on a removable reel.
         egui::Panel::bottom("status_bar").frame(plate::desk_frame(ui.style())).show_separator_line(false).show(ui, |ui| {
             ui.add_space(2.0);
+            // Under the fold width the rarer keys wait behind one `…`.
+            let fold = ui.ctx().content_rect().width() < steps::FOLD;
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.foot_right(ui, &room);
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         let gesture = self.canvas.stroke_active();
-                        if plate::icon_button(ui, Icon::SkipBack, "", "first frame (Home)")
-                            .clicked()
-                            && !gesture
-                        {
-                            self.state.goto(0);
+                        if !fold {
+                            self.first_frame_key(ui);
                         }
                         if plate::icon_button(ui, Icon::StepBack, "", "previous frame (S)")
                             .clicked()
@@ -8172,18 +8343,23 @@ impl Editor {
                         {
                             self.state.step(1);
                         }
-                        if plate::icon_button(ui, Icon::SkipFwd, "", "last frame (End)").clicked()
-                            && !gesture
-                        {
-                            let last = self.state.frame_count() - 1;
-                            self.state.goto(last);
+                        if !fold {
+                            self.last_frame_key(ui);
                         }
                         // The one number an animator most wants to type into
                         // stops being the one number that cannot be typed into.
                         let count = self.state.frame_count();
                         let mut f1 = self.state.view.frame + 1;
+                        // The cut's facts ride the counter's card (AU3).
+                        let facts = format!(
+                            "current frame — type or drag\n{}, {count} frames, {} fps, {}×{}",
+                            self.state.cut().name,
+                            self.state.fps(),
+                            self.state.engine.project.width,
+                            self.state.engine.project.height,
+                        );
                         if plate::field(ui, egui::DragValue::new(&mut f1).range(1..=count))
-                            .on_hover_text("current frame — type or drag")
+                            .on_hover_text(facts)
                             .changed()
                             && !gesture
                         {
@@ -8194,64 +8370,19 @@ impl Editor {
                                 .monospace()
                                 .color(plate::LEGEND),
                         );
-                        let mut lp = self.state.view.loop_playback;
-                        plate::latch(ui, &mut lp, "loop").on_hover_text(
-                            "off = playback stops at the end of the loop range (or the cut)",
-                        );
-                        self.state.view.loop_playback = lp;
-                        // GM12: the loop range — "in" and "out" mark the
-                        // playhead; × plays the whole cut again. Every
-                        // slot keeps its width whatever it reads (D7).
-                        if playback::transport_key(ui, "in", "loop in", 26.0)
-                            .on_hover_text("the loop range starts at this frame (Shift+I)")
-                            .clicked()
-                        {
-                            self.invoke(Action::LoopIn, ui.ctx());
-                        }
-                        if playback::transport_key(ui, "out", "loop out", 30.0)
-                            .on_hover_text("the loop range ends at this frame (Shift+O)")
-                            .clicked()
-                        {
-                            self.invoke(Action::LoopOut, ui.ctx());
-                        }
-                        let range = self.state.loop_range();
-                        let text = match range {
-                            Some((a, b)) => format!("{}–{}", a + 1, b + 1),
-                            None => "—".to_string(),
-                        };
-                        playback::readout(ui, &text, 64.0, plate::LEGEND)
-                            .on_hover_text("this cut's loop range (— = none: the whole cut plays)");
-                        let clear = ui.add_enabled_ui(range.is_some(), |ui| {
-                            playback::transport_key(ui, "×", "clear loop range", 22.0)
-                                .on_hover_text("clear the loop range (Alt+X)")
-                                .on_disabled_hover_text("this cut has no loop range")
-                        });
-                        if clear.inner.clicked() {
-                            self.invoke(Action::ClearLoop, ui.ctx());
-                        }
-                        let mut scrub = self.scrub_audio;
-                        if plate::latch(ui, &mut scrub, "scrub")
-                            .on_hover_text("on = a stopped playhead's move sounds one frame (Shift+S)")
-                            .changed()
-                        {
-                            self.scrub_audio = scrub;
-                            self.scrub_request = Some(scrub);
-                        }
-                        ui.label(
-                            egui::RichText::new(format!("{:.3}", self.state.fps() as f32))
-                                .monospace()
-                                .size(11.0)
-                                .color(plate::LEGEND),
-                        );
-                        // GM12: frames passed over to keep up with the sound.
-                        let dropped = format!("dropped {}", self.play_dropped);
-                        let ink = if self.play_dropped > 0 {
-                            plate::LEGEND
+                        if fold {
+                            ui.menu_button("…", |ui| {
+                                ui.horizontal(|ui| {
+                                    self.first_frame_key(ui);
+                                    self.last_frame_key(ui);
+                                });
+                                self.transport_rest(ui);
+                            })
+                            .response
+                            .on_hover_text("first and last frame, the loop range and the sound");
                         } else {
-                            plate::legend_dim()
-                        };
-                        playback::readout(ui, &dropped, 96.0, ink)
-                            .on_hover_text("frames passed over to keep up with the sound");
+                            self.transport_rest(ui);
+                        }
                         ui.separator();
                         // REFUSAL lane: the machine overruled the hand.
                         // Dwells 4s; a repeat of the same refusal re-flashes.
@@ -8293,7 +8424,9 @@ impl Editor {
                         let age = ui.input(|i| i.time) - self.status_since;
                         if age < 4.0 && !self.state.status.is_empty() {
                             let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
-                            ui.label(egui::RichText::new(&self.state.status).color(ink));
+                            let words = egui::RichText::new(&self.state.status).color(ink);
+                            // It stops at the right lane; its hover has the rest.
+                            ui.add(egui::Label::new(words).truncate());
                         }
                     });
                 });
@@ -8433,6 +8566,7 @@ impl Editor {
             ui.ctx()
                 .request_repaint_of(floatwin::FloatViewer::viewport_id());
         }
+        let locked = if ui_lock { self.locked_panes() } else { Vec::new() };
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -8450,20 +8584,18 @@ impl Editor {
             native_pen,
             float_canvas_open: self.float_canvas.open,
             pane_rects: &mut self.pane_rects,
+            locked,
         };
         tabs.pane_rects.clear();
-        let mut dock_style = plate::dock_style(ui.style().as_ref());
-        // egui_dock clamps every divider so each side keeps `separator.extra`
-        // pixels — the DEFAULT IS 175px, which silently blocked collapsing
-        // panes (e.g. the Brush band above the canvas). 26px keeps the tab bar
-        // grabbable while letting panes shrink to slim rails.
-        dock_style.separator.extra = 26.0;
+        let dock_style = dock_style(ui.style().as_ref(), &self.dock);
+        plate::note_dock(ui, ui.available_rect_before_wrap());
         // UI lock (Settings -> UI Features): the layout freezes — no tab
-        // dragging, no splits, no closing — but the arrangement is kept.
+        // dragging and no splits, and the recipe's panes stay open — but the
+        // arrangement is kept.
         DockArea::new(&mut self.dock)
             .style(dock_style)
             .draggable_tabs(!ui_lock)
-            .show_close_buttons(!ui_lock)
+            .show_close_buttons(true)
             .allowed_splits(if ui_lock {
                 egui_dock::AllowedSplits::None
             } else {

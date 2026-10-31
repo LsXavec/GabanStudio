@@ -1388,7 +1388,7 @@ mod tests {
         // Through the editor: over a clean document it opens at once and
         // the dead copy's record goes...
         let ctx = egui::Context::default();
-        let mut ed = crate::Editor::from_state(doc(), None, Some(dir.path()));
+        let mut ed = crate::Editor::boot(doc(), None, Some(dir.path()), &Default::default());
         ed.leave(crate::Leave::Recover(r.clone()), &ctx);
         assert_eq!(ed.state.engine.project, newest);
         assert!(!rec.path_in(dir.path()).exists(), "the work is open again: the record goes");
@@ -1396,7 +1396,7 @@ mod tests {
         rec.write_in(dir.path()).unwrap();
         let mut busy = doc();
         busy.new_drawing_at_frame();
-        let mut ed = crate::Editor::from_state(busy, None, Some(dir.path()));
+        let mut ed = crate::Editor::boot(busy, None, Some(dir.path()), &Default::default());
         ed.leave(crate::Leave::Recover(r), &ctx);
         assert!(ed.leave_pending(), "never replaces unsaved work unasked");
         assert_ne!(ed.state.engine.project, newest);

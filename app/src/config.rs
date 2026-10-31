@@ -251,7 +251,7 @@ impl Group {
             Group::Sheet => "sheet",
             Group::Cut => "cut",
             Group::Composite => "composite",
-            Group::Room => "room",
+            Group::Room => crate::vocab::STEP,
             Group::Window => "window",
             Group::Help => "help",
             Group::Tool => "tools",
@@ -538,13 +538,13 @@ impl Action {
             Action::Quit => "Quit",
             Action::ResetLayout => "Reset layout",
             Action::ZoomFit => "Fit view (reset zoom & pan)",
-            // The room detents' own names (Stage::name, D7/D12: romaji
-            // first, then English), so one room has one name on the bar.
-            Action::RoomLayout => "layout room",
-            Action::RoomDrawing => "genga (drawing) room",
-            Action::RoomFinishing => "shiage (ink & paint) room",
-            Action::RoomComposite => "satsuei (composite) room",
-            Action::RoomEdit => "henshū (edit) room",
+            // The pills' own names (Stage::name) with their kind: the pill
+            // says `Plan`, the row says `Plan step`.
+            Action::RoomLayout => "Plan step",
+            Action::RoomDrawing => "Draw step",
+            Action::RoomFinishing => "Color step",
+            Action::RoomComposite => "Effects step",
+            Action::RoomEdit => "Timing step",
             Action::ZoomIn => "Zoom in",
             Action::ZoomOut => "Zoom out",
             Action::Zoom100 => "Actual size (100%)",
@@ -636,7 +636,7 @@ impl Action {
             Action::View3dCamera => "Camera view",
             Action::View3dOrtho => "Ortho / perspective",
             Action::View3dFrameAll => "Frame all",
-            Action::MangaRoom => "Manga (pages) room",
+            Action::MangaRoom => "Manga pages",
             Action::NewPage => "New page",
             Action::ClipToPanels => "Clip to panels",
             Action::ExportPages => "Export pages",
@@ -695,13 +695,13 @@ impl Action {
             History => "Every step so far; click one to go back or forward to it.",
             Settings => "Shortcuts, pen, performance and the rest.",
             Quit => "Close the app (asks first about unsaved work).",
-            ResetLayout => "Put this room's panes back where they started.",
+            ResetLayout => "Put this step's panes back where they started.",
             ZoomFit => "Fit the whole paper back in its pane, centred; a turned view keeps its turn.",
-            RoomLayout => "Open the layout room: the cut's preview and timing.",
-            RoomDrawing => "Open the genga (drawing) room: canvas and sheet.",
-            RoomFinishing => "Open the shiage (ink & paint) room: palettes and fill.",
-            RoomComposite => "Open the satsuei (composite) room: the node graph, curves and the result.",
-            RoomEdit => "Open the henshū (edit) room: cuts and the sheet head.",
+            RoomLayout => "Open the Plan step: the cut's preview and timing.",
+            RoomDrawing => "Open the Draw step: the paper, one drawing at a time.",
+            RoomFinishing => "Open the Color step: palettes and fill.",
+            RoomComposite => "Open the Effects step: the node graph, curves and the result.",
+            RoomEdit => "Open the Timing step: cuts and the sheet head.",
             ZoomIn => "Zoom the canvas in one step on the zoom ladder.",
             ZoomOut => "Zoom the canvas out one step on the zoom ladder.",
             Zoom100 => "One paper pixel to one screen point.",
@@ -801,7 +801,7 @@ impl Action {
             View3dCamera => "View3D: look through the cut camera (numpad 0 in Blender).",
             View3dOrtho => "View3D: orthographic, or perspective again (numpad 5 in Blender).",
             View3dFrameAll => "View3D: frame the whole model, keeping the view's direction (Home in Blender).",
-            MangaRoom => "Manga (pages) room: the page large, the Manga pane (pages, panels, tones, rulers) and the layers.",
+            MangaRoom => "Manga pages: the page large, the Manga pane (pages, panels, tones, rulers) and the layers.",
             NewPage => "Add a one-frame page after the book's last, with INK and TONE columns and one panel, as one undo step.",
             ClipToPanels => "Rebuild the page's graph: each column's art cut to the panels over white paper, the borders on top; one undo step.",
             ExportPages => "Write the book's pages to a folder as PNG or TIFF at the page's dpi, in colour, grey or 1-bit mono, with trim marks.",
@@ -981,18 +981,18 @@ impl Action {
             MakeCutsFromPanels => "Cut/Make cuts from panels",
             RenderEpisode => "Window/Render Queue/+ episode",
             AddRetakeNote => "Cut/Add retake note…",
-            // Each item is its room detent's Stage::name (a test holds them
-            // together).
-            RoomLayout => "Room/layout",
-            RoomDrawing => "Room/genga (drawing)",
-            RoomFinishing => "Room/shiage (ink & paint)",
-            RoomComposite => "Room/satsuei (composite)",
-            RoomEdit => "Room/henshū (edit)",
+            // Each item is its pill's Stage::name with its kind (a test
+            // holds them together): the pill says `Plan`, the row `Plan step`.
+            RoomLayout => "Room/Plan step",
+            RoomDrawing => "Room/Draw step",
+            RoomFinishing => "Room/Color step",
+            RoomComposite => "Room/Effects step",
+            RoomEdit => "Room/Timing step",
             // GM17: the 3D layout room (off the spine, like the forge's),
             // the cut camera keyed from View3D, and View3D's numpad verbs.
             Layout3dRoom => "Room/3D layout (LO)",
             // GM18: the manga room (off the spine) and its page verbs.
-            MangaRoom => "Room/manga (pages)",
+            MangaRoom => "Room/Manga",
             NewPage => "Cut/New page",
             ClipToPanels => "Cut/Clip to panels",
             ExportPages => "File/Export/Manga pages (PNG, TIFF)…",
@@ -1054,12 +1054,12 @@ impl Action {
             RotateViewLeft | RotateViewRight | ResetRotation => &["turn", "tilt canvas", "spin"],
             MirrorView => &["flop", "reverse view", "flip horizontal", "hanten", "flip canvas"],
             BrushSmaller | BrushBigger => &["size", "brush size", "bracket"],
-            // The English words still find the rooms by their romaji names.
-            RoomLayout => &["lo"],
-            RoomDrawing => &["drawing", "douga"],
-            RoomFinishing => &["paint", "ink", "colour"],
-            RoomComposite => &["composite", "compositing", "photography"],
-            RoomEdit => &["edit", "henshu", "editing"],
+            // The studio's words and the old room names still find the steps.
+            RoomLayout => &["lo", "layout", "room"],
+            RoomDrawing => &["drawing", "douga", "genga", "room"],
+            RoomFinishing => &["paint", "ink", "colour", "shiage", "finishing", "room"],
+            RoomComposite => &["composite", "compositing", "photography", "satsuei", "room"],
+            RoomEdit => &["edit", "henshu", "henshū", "editing", "room"],
             // GM8: the auto-comp and the project's settings.
             BuildComposite => &["auto comp", "autocomp", "wire graph", "build graph"],
             // GM9: the FX it adds, by their trade words too.
@@ -1185,7 +1185,7 @@ impl Action {
             Import3DModel => &["3d", "gltf", "glb", "obj", "model", "layout", "blender"],
             SetCutCameraFromView => &["align camera to view", "kamera", "LO camera"],
             Layout3dRoom => &["3d", "layout", "LO"],
-            MangaRoom => &["manga", "comic", "pages", "koma", "tone", "webtoon", "book"],
+            MangaRoom => &["manga", "comic", "pages", "koma", "tone", "webtoon", "book", "room"],
             NewPage => &["page", "manga", "add page", "pēji"],
             ClipToPanels => &["koma", "panels", "clip", "mask to panels", "manga"],
             ExportPages => &["print", "tiff", "png", "genkō", "webtoon", "nyūkō", "pages to files"],
@@ -2530,6 +2530,10 @@ pub struct UiConfig {
     /// so edits can be asked for by an element's true name.
     #[serde(default)]
     pub exact_descriptions: bool,
+    /// AU3: the Timing sheet in Draw, the band's one click, remembered.
+    /// `Editor.sheet_in_draw` mirrors it (see `Editor::boot`).
+    #[serde(default)]
+    pub sheet_in_draw: bool,
 }
 
 impl Default for UiConfig {
@@ -2541,6 +2545,7 @@ impl Default for UiConfig {
             whats_new_seen: String::new(),
             lock_positions: false,
             exact_descriptions: false,
+            sheet_in_draw: false,
         }
     }
 }

@@ -163,9 +163,8 @@ impl Stage {
         Stage::Edit,
     ];
 
-    /// Button label: the anime-pipeline term (romaji) + English, so the
-    /// rooms read instantly for both audiences. ("Layout" is already the
-    /// industry loanword in Japanese — レイアウト — so it stands alone.)
+    /// The step's word on screen. The studio's own word stays in the hover
+    /// card (`steps::STEPS`) and in the aliases.
     pub fn name(self) -> &'static str {
         match self {
             Stage::Layout => vocab::STEP_PLAN,
@@ -177,39 +176,37 @@ impl Stage {
         }
     }
 
-    /// Hover text: which real pipeline stages this room merges.
+    /// Hover text: what the step is for.
     pub fn describes(self) -> &'static str {
-        match self {
-            Stage::Layout => "ekonte + layout — storyboard and framing against reference",
-            Stage::Drawing => "genga + dōga + sakkan — keys, inbetweens, supervision",
-            Stage::InkPaint => "shiage — ink & paint with the result live beside you",
-            Stage::Composite => "satsuei — compositing: the node graph, curves and the result",
-            Stage::Edit => "henshū — timing and review; the sheet is the master",
-            Stage::Manga => "manga — pages, panels (koma), screen tone and perspective rulers",
-        }
+        self.card().1
     }
 
-    /// GM8 room card: (term, one-line purpose, the tools it arms).
+    /// GM8 step card: (studio word, one-line purpose, the tools it arms). A
+    /// step on the spine reads its words from `steps::STEPS`; Manga has no
+    /// pill, so its own are here.
     pub fn card(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Stage::Layout => ("レイアウト", "frame the shot against reference", "brush"),
-            Stage::Drawing => ("原画", "draw keys and inbetweens", "brush · onion skin"),
-            Stage::InkPaint => ("仕上げ", "fill and check the colour", "fill · line guard"),
-            Stage::Composite => ("撮影", "build the composite in the graph", "composite view"),
-            Stage::Edit => ("編集", "time and review the cut", "select"),
-            Stage::Manga => ("漫画", "draw the book's pages", "brush · panels · rulers"),
+        let arms = match self {
+            Stage::Layout => "brush",
+            Stage::Drawing => "brush · onion skin",
+            Stage::InkPaint => "fill · line guard",
+            Stage::Composite => "composite view",
+            Stage::Edit => "select",
+            Stage::Manga => "brush · panels · rulers",
+        };
+        match crate::steps::of(self) {
+            Some(step) => (step.studio_words, step.purpose, arms),
+            None => ("manga", "Draw the book's pages, panels and screen tone.", arms),
         }
     }
 
-    /// AU1: the classic draw room; presets tabbed behind the layer strip
-    /// (each drawing pass keeps its own pencil). `dock()` for now; this
-    /// keeps the recipe when the shipped Drawing dock moves on.
+    /// AU1: the classic draw room, with the Timing sheet; presets tabbed
+    /// behind the layer strip (each drawing pass keeps its own pencil). AU3:
+    /// `Editor::recipe` picks it when `sheet_in_draw` is on.
     pub fn dock_with_sheet() -> DockState<Pane> {
         let mut ds = DockState::new(vec![Pane::Canvas]);
         let tree = ds.main_surface_mut();
-        let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.24, vec![Pane::XSheet]);
+        let [_canvas, rail] = tree.split_left(NodeIndex::root(), 0.24, vec![Pane::XSheet]);
         tree.split_below(rail, 0.62, vec![Pane::Layers, Pane::Presets, Pane::Forge]);
-        tree.split_above(canvas, 0.11, vec![Pane::Brush]);
         ds
     }
 
@@ -222,13 +219,13 @@ impl Stage {
                 // images are graph nodes).
                 let mut ds = DockState::new(vec![Pane::Canvas]);
                 let tree = ds.main_surface_mut();
-                let [canvas, rail] =
+                let [_canvas, rail] =
                     tree.split_left(NodeIndex::root(), 0.22, vec![Pane::XSheet, Pane::NodeGraph]);
                 tree.split_below(rail, 0.6, vec![Pane::Layers]);
-                tree.split_above(canvas, 0.11, vec![Pane::Brush]);
                 ds
             }
-            Stage::Drawing => Stage::dock_with_sheet(),
+            // AU3: the paper alone; `dock_with_sheet` is one click away.
+            Stage::Drawing => DockState::new(vec![Pane::Canvas]),
             Stage::InkPaint => {
                 // Edit canvas + live composite viewer SIDE BY SIDE (the A2
                 // motivation), palette under the viewer — GM7: the nuri
@@ -237,9 +234,8 @@ impl Stage {
                 let tree = ds.main_surface_mut();
                 let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.18, vec![Pane::XSheet]);
                 tree.split_below(rail, 0.55, vec![Pane::Layers]);
-                let [canvas, side] = tree.split_right(canvas, 0.58, vec![Pane::Viewer(0)]);
+                let [_canvas, side] = tree.split_right(canvas, 0.58, vec![Pane::Viewer(0)]);
                 tree.split_below(side, 0.55, vec![Pane::Palette, Pane::PaintCheck]);
-                tree.split_above(canvas, 0.11, vec![Pane::Brush]);
                 ds
             }
             Stage::Composite => {
@@ -271,12 +267,11 @@ impl Stage {
             }
             Stage::Manga => {
                 // The page large; the Manga pane (pages, panels, tones,
-                // rulers) on the left over the layers, the brush on top.
+                // rulers) on the left over the layers.
                 let mut ds = DockState::new(vec![Pane::Canvas]);
                 let tree = ds.main_surface_mut();
-                let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.26, vec![Pane::Manga]);
+                let [_canvas, rail] = tree.split_left(NodeIndex::root(), 0.26, vec![Pane::Manga]);
                 tree.split_below(rail, 0.7, vec![Pane::Layers, Pane::NodeGraph]);
-                tree.split_above(canvas, 0.11, vec![Pane::Brush]);
                 ds
             }
         }
@@ -348,6 +343,41 @@ pub struct Workspace {
     pub view: Option<WorkspaceView>,
 }
 
+/// AU3: a rect egui_dock has not laid out yet is infinite, serde_json writes
+/// infinity as `null`, and a `null` cannot be read back: inside any object
+/// holding `min` and `max`, a null `x` or `y` becomes 0.0. Nothing else
+/// changes; the dock measures every rect afresh on its next frame.
+fn finite_rects(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("min") && map.contains_key("max") {
+                for corner in ["min", "max"] {
+                    for axis in ["x", "y"] {
+                        let at = map.get_mut(corner).and_then(|c| c.get_mut(axis));
+                        if let Some(n) = at.filter(|n| n.is_null()) {
+                            *n = serde_json::Value::from(0.0);
+                        }
+                    }
+                }
+            }
+            map.values_mut().for_each(finite_rects);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(finite_rects),
+        _ => {}
+    }
+}
+
+impl Workspace {
+    /// AU3: this workspace as every save path writes it. A dock never drawn
+    /// holds infinite rects (see [`finite_rects`]); egui_dock has no public
+    /// write to a node's rect, so the repair goes through JSON.
+    pub fn normalised(&self) -> serde_json::Result<Workspace> {
+        let mut v = serde_json::to_value(self)?;
+        finite_rects(&mut v);
+        serde_json::from_value(v)
+    }
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Workspaces {
     pub list: Vec<Workspace>,
@@ -364,7 +394,9 @@ impl Workspaces {
     /// a newer build with pane kinds this build doesn't know) must not reset
     /// every workspace — the readable ones survive, the original bytes are
     /// kept as `workspaces.json.bad` and one note says how many were
-    /// dropped. A leftover `workspaces.json.tmp` is never read.
+    /// dropped. A leftover `workspaces.json.tmp` is never read. AU3: a file
+    /// from before [`Workspace::normalised`] has its null rects repaired
+    /// first, so a workspace saved undrawn loads like any other.
     pub fn load_from(dir: &Path) -> (Self, Vec<String>) {
         let path = Self::path_in(dir);
         // No seeded defaults anymore: the stage spine provides the built-in
@@ -378,7 +410,9 @@ impl Workspaces {
                 Ok(v) => match v.get("list").and_then(|l| l.as_array()) {
                     Some(items) => {
                         for it in items {
-                            match serde_json::from_value::<Workspace>(it.clone()) {
+                            let mut it = it.clone();
+                            finite_rects(&mut it);
+                            match serde_json::from_value::<Workspace>(it) {
                                 Ok(w) => list.push(w),
                                 Err(_) => dropped = dropped.map(|n| n + 1),
                             }
@@ -404,9 +438,12 @@ impl Workspaces {
         (Self { list }, notes)
     }
 
-    /// Save to `dir/workspaces.json` atomically (`.tmp` + rename).
+    /// Save to `dir/workspaces.json` atomically (`.tmp` + rename), each
+    /// workspace [`Workspace::normalised`].
     pub fn save_to(&self, dir: &Path) -> std::io::Result<()> {
-        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let list = self.list.iter().map(Workspace::normalised).collect::<Result<_, _>>();
+        let saved = Workspaces { list: list.map_err(std::io::Error::other)? };
+        let text = serde_json::to_string_pretty(&saved).map_err(std::io::Error::other)?;
         crate::config::write_atomic(&Self::path_in(dir), text.as_bytes())
     }
 }

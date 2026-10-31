@@ -747,7 +747,7 @@ mod tests {
         // Each template's card opens its first room.
         let mut h = crate::testkit::EditorHarness::new();
         for (i, t) in templates::ALL.iter().enumerate() {
-            *h.editor_mut() = crate::open_template(i, None, None);
+            *h.editor_mut() = crate::open_template(i, None, None, &Default::default());
             h.run();
             assert_eq!(h.editor().stage, Some(t.room), "{}", t.name);
         }
@@ -959,7 +959,7 @@ mod tests {
         assert!(panes.contains(&crate::workspace::Pane::NodeGraph));
         assert!(panes.contains(&crate::workspace::Pane::Viewer(0)));
         assert!(panes.contains(&crate::workspace::Pane::Curves));
-        assert!(h.has("room satsuei (composite)"));
+        assert!(h.has(crate::vocab::STEP_EFFECTS));
         assert!(crate::workspace::Stage::Composite.view().composite_view);
         // The layout probe passes in the new room, at every display scale.
         for ppp in crate::PROBE_SCALES {
@@ -1227,7 +1227,7 @@ mod tests {
     #[test]
     fn welcome_show_me_works_from_the_screen() {
         // Step 1 on the sample: its empty column B takes the new drawing.
-        let (ed, did) = crate::welcome_show_me(0, None, None);
+        let (ed, did) = crate::welcome_show_me(0, None, None, &Default::default());
         assert_eq!(did, crate::Performed::Done);
         assert!(ed.quick_start[0], "step 1 ticked");
         let b = ed.state.cut().xsheet.column(ed.state.view.active_column).unwrap();
@@ -1235,7 +1235,7 @@ mod tests {
         assert!(ed.state.current_drawing().is_some());
         // Every step does something from the screen it is offered on.
         for (i, step) in STEPS.iter().enumerate() {
-            let (ed, did) = crate::welcome_show_me(i, None, None);
+            let (ed, did) = crate::welcome_show_me(i, None, None, &Default::default());
             assert_eq!(did, crate::Performed::Done, "step {}", i + 1);
             if let Some(a) = step.ticks_on.filter(|a| *a != Action::MakeInbetweens) {
                 assert!(ed.quick_start[i], "step {} ({a:?}) ticked", i + 1);

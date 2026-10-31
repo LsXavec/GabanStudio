@@ -148,6 +148,13 @@ impl Rig {
         if let Some(on) = self.editor.scrub_request.take() {
             self.config.perf.scrub_audio = on;
         }
+        // AU3: the Timing sheet button's choice, saved as the App saves it.
+        if self.editor.sheet_in_draw != self.config.ui.sheet_in_draw {
+            self.config.ui.sheet_in_draw = self.editor.sheet_in_draw;
+            if let Some(dir) = &self.editor.data_dir {
+                self.config.save_to(dir).expect("the rig's config saves");
+            }
+        }
         // GM4: the OPTIONS row's stabilizer level, saved as the App saves it.
         if let Some(level) = self.editor.canvas.stabilizer_request.take() {
             self.config.pen.stabilizer = level;
@@ -262,13 +269,16 @@ impl EditorHarness {
         gpu: Option<(RenderState, MutexGuard<'static, ()>)>,
     ) -> Self {
         let (rs, _turn) = gpu.unzip();
-        let (config, config_notes) = Config::load_from(dir.path());
-        let editor = Editor::from_state(state, rs.as_ref(), Some(dir.path()));
+        let (mut config, config_notes) = Config::load_from(dir.path());
+        if boot == Boot::Frozen {
+            Self::frozen(&mut config);
+        }
+        let editor = Editor::boot(state, rs.as_ref(), Some(dir.path()), &config.ui);
         let mut notes = Notes::default();
         for n in config_notes {
             notes.push(n);
         }
-        let mut rig = Rig {
+        let rig = Rig {
             editor,
             config,
             notes,
@@ -277,14 +287,11 @@ impl EditorHarness {
             pen: Vec::new(),
             dressed: false,
             boot,
-            arms: true,
+            arms: boot != Boot::Frozen,
             stack_room_seen: "",
             seed: None,
             root: egui::Rect::NOTHING,
         };
-        if boot == Boot::Frozen {
-            Self::frozen(&mut rig);
-        }
         let builder = Harness::builder()
             .with_size(egui::vec2(1280.0, 800.0))
             .with_pixels_per_point(1.0)
@@ -300,12 +307,13 @@ impl EditorHarness {
         me
     }
 
-    /// Everything the frozen boot holds still, in one place. Written into the
-    /// rig before its first frame. Later parts add a line each time a default
+    /// Everything the frozen boot holds still, in one place (with `arms`,
+    /// which it switches off). Written into the config before the editor is
+    /// built, so a boot reads it. Later parts add a line each time a default
     /// moves.
-    fn frozen(rig: &mut Rig) {
-        rig.config.ui.lock_positions = false;
-        rig.arms = false;
+    fn frozen(config: &mut Config) {
+        config.ui.lock_positions = false;
+        config.ui.sheet_in_draw = true;
     }
 
     /// A new editor over `state` in this harness's data dir and on its
@@ -314,7 +322,8 @@ impl EditorHarness {
     pub fn rebuild_editor(&mut self, state: AppState) {
         let rs = self.rs.clone();
         let dir = self.dir.path().to_path_buf();
-        self.h.state_mut().editor = Editor::from_state(state, rs.as_ref(), Some(&dir));
+        let rig = self.h.state_mut();
+        rig.editor = Editor::boot(state, rs.as_ref(), Some(&dir), &rig.config.ui);
     }
 
     pub fn boot(&self) -> Boot {
@@ -618,9 +627,19 @@ impl EditorHarness {
 
     /// GM14: a secondary-button click at `pos` (a context menu opens).
     pub fn right_click_pos(&mut self, pos: egui::Pos2) {
+        self.button_click_pos(egui::PointerButton::Secondary, pos);
+    }
+
+    /// AU3: a middle-button click at `pos` (a dock tab closes).
+    pub fn middle_click_pos(&mut self, pos: egui::Pos2) {
+        self.button_click_pos(egui::PointerButton::Middle, pos);
+    }
+
+    /// One frame down and one up, so egui still calls it a click.
+    fn button_click_pos(&mut self, button: egui::PointerButton, pos: egui::Pos2) {
         let button = |pressed| egui::Event::PointerButton {
             pos,
-            button: egui::PointerButton::Secondary,
+            button,
             pressed,
             modifiers: egui::Modifiers::NONE,
         };
@@ -830,6 +849,11 @@ impl EditorHarness {
     pub fn data_dir(&self) -> &Path {
         self.dir.path()
     }
+
+    /// AU3: the app quits and its data dir stays, for the next launch.
+    pub fn quit(self) -> tempfile::TempDir {
+        self.dir
+    }
 }
 
 /// One panel's ui fn in a fixed rect, with the same queries.
@@ -985,14 +1009,8 @@ mod tests {
         assert!(ed.paint.is_none() && ed.graph.is_none(), "a GPU resource was created");
         assert!(ed.audio_out.is_none() && !ed.audio_tried, "an audio device was opened");
         let tree = h.describe();
-        for room in [
-            "room layout",
-            "room genga (drawing)",
-            "room shiage (ink & paint)",
-            "room satsuei (composite)",
-            "room henshū (edit)",
-        ] {
-            assert!(h.has(room), "room switcher lacks {room:?}:\n{tree}");
+        for step in crate::steps::STEPS {
+            assert!(h.has(step.label), "step switcher lacks {:?}:\n{tree}", step.label);
         }
         for tool in ["select", "fill", "lasso fill"] {
             assert!(h.has(tool), "tool deck lacks {tool:?}:\n{tree}");
@@ -1008,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "room genga (drawing)")]
+    #[should_panic(expected = "Effects")]
     fn testkit_click_missing_label_shows_the_tree() {
         let mut h = EditorHarness::new();
         h.click("no such widget");
@@ -1074,7 +1092,7 @@ mod tests {
 
     /// Open the room menu (GM3: was "ws") and focus its name field.
     fn focus_field(h: &mut EditorHarness) {
-        h.click("room");
+        h.click(crate::vocab::STEP);
         h.focus_text_field(0);
         assert!(h.typing(), "no text field took focus\n{}", h.describe());
     }
@@ -2027,7 +2045,7 @@ mod tests {
     fn auseam_every_constructor_goes_through_the_funnel() {
         let body = harness_impl();
         assert_eq!(body.matches(concat!("Harness", "::builder()")).count(), 1, "one builder");
-        let builds = concat!("Editor", "::from_state(");
+        let builds = concat!("Editor", "::boot(");
         assert_eq!(body.matches(builds).count(), 2, "`build` and `rebuild_editor` alone");
         let mut constructors = 0;
         for piece in body.split("\n    pub fn ").skip(1) {
@@ -2141,9 +2159,8 @@ mod tests {
         let mut ds = egui_dock::DockState::new(vec![Pane::Canvas]);
         let tree = ds.main_surface_mut();
         let root = egui_dock::NodeIndex::root();
-        let [canvas, rail] = tree.split_left(root, 0.24, vec![Pane::XSheet]);
+        let [_, rail] = tree.split_left(root, 0.24, vec![Pane::XSheet]);
         tree.split_below(rail, 0.62, vec![Pane::Layers, Pane::Presets, Pane::Forge]);
-        tree.split_above(canvas, 0.11, vec![Pane::Brush]);
         ds
     }
 
@@ -2160,7 +2177,7 @@ mod tests {
         h.editor_mut().enter_room(Stage::Drawing);
         assert_eq!(dock(&h.editor().dock), dock(&todays_drawing_recipe()));
         assert_eq!(dock(&Stage::dock_with_sheet()), dock(&todays_drawing_recipe()));
-        assert_eq!(dock(&Stage::Drawing.dock()), dock(&Stage::dock_with_sheet()), "equal for now");
+        assert_ne!(dock(&Stage::Drawing.dock()), dock(&Stage::dock_with_sheet()), "Draw is the canvas alone");
         h.run();
         assert!(h.editor().pane_rects.iter().any(|(p, _)| *p == Pane::XSheet), "the sheet is on");
         // No room arms: the rooms' stacks never reach the document.
@@ -2207,8 +2224,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 518;
-    const ASSERT_FLOOR: usize = 3094;
+    const TEST_FLOOR: usize = 566;
+    const ASSERT_FLOOR: usize = 3338;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");
@@ -2352,6 +2369,30 @@ mod tests {
         }
         let call = concat!(".arm", "_room(&layers_cfg, &mut self.stack_room_seen)");
         assert_eq!(main.matches(call).count(), 1, "the App arms through it, once a frame");
+    }
+
+    /// AU3: the remembered Draw switch cannot be forgotten by one more door:
+    /// the two raw constructors have one caller each, and no other file has
+    /// any. The test kit and the App come through the boots too.
+    #[test]
+    fn audock_every_editor_is_built_through_boot() {
+        let raw = [concat!("Editor::from", "_state("), concat!("Editor::from", "_form(")];
+        let selfish = [concat!("Self::from", "_state("), concat!("Self::from", "_form(")];
+        let mut built = 0;
+        for (name, text) in sources() {
+            for word in raw {
+                let at_most = usize::from(name == "main.rs");
+                assert!(text.matches(word).count() <= at_most, "{name} builds an Editor with {word}");
+                built += text.matches(word).count();
+            }
+            for word in selfish {
+                assert_eq!(text.matches(word).count(), 0, "{name} goes round the boot with {word}");
+            }
+        }
+        assert_eq!(built, 2, "each raw constructor is called once, by its boot");
+        for raw in ["from_state", "from_form"] {
+            assert!(source("main.rs").contains(&format!("fn {raw}(")), "{raw} keeps its name");
+        }
     }
 
     #[test]
@@ -2597,8 +2638,8 @@ mod tests {
         ("doc.rs", "    pub fn undo(", 0xe15edd6f411d2b83),
         ("doc.rs", "    pub fn redo(", 0xcaa16d99af9d7dbd),
         ("doc.rs", "    pub fn undo_to(", 0x387309403f18550e),
-        ("workspace.rs", "    pub fn load_from", 0x547f4833d3d5505f),
-        ("workspace.rs", "    pub fn save_to", 0x69f1eccf6e056338),
+        ("workspace.rs", "    pub fn load_from", 0xeedf52910f122df8),
+        ("workspace.rs", "    pub fn save_to", 0x18ceee7d714dc4d4),
         ("canvas.rs", "    fn handle_pen(", 0xad3d4cbab93a4f72),
         ("main.rs", "fn pump_tablet(", 0x16ed0af8f504e210),
     ];
@@ -2633,13 +2674,16 @@ mod tests {
         );
         assert_eq!(
             keys(&config["ui"]),
-            ["exact_descriptions", "lock_positions", "quick_start", "scale", "show_welcome", "whats_new_seen"]
+            [
+                "exact_descriptions", "lock_positions", "quick_start", "scale", "sheet_in_draw", "show_welcome",
+                "whats_new_seen",
+            ]
         );
     }
 
     /// AU2's leave-out list: no rail, no renames, no menu moves, no new
-    /// Actions. The parts that make them (AU4, AU10, AU11) re-pin this and
-    /// say so in their commit bodies.
+    /// Actions. The parts that make them (AU3, AU4, AU10, AU11) re-pin this
+    /// and say so in their commit bodies.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let files = sources();
@@ -2647,7 +2691,7 @@ mod tests {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (154, 0x3afda4aaf0d73def), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (154, 0x06c369cdf385ee05), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }

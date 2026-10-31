@@ -985,13 +985,7 @@ pub fn icon_button(ui: &mut Ui, icon: crate::icons::Icon, label: &str, hover: &s
         ui.allocate_exact_size(Vec2::new(6.0 + ICON + text_w + 6.0, CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        let (fill, ink) = if resp.is_pointer_button_down_on() {
-            (BLUE_WASH, BLUE_DEEP)
-        } else if resp.hovered() {
-            (WELL, STRUCK)
-        } else {
-            (Color32::TRANSPARENT, at_rest(ui, LEGEND))
-        };
+        let (fill, ink) = ghost(ui, &resp);
         p.rect_filled(rect, R_CONTROL, fill);
         let icon_rect = egui::Rect::from_center_size(
             Pos2::new(rect.left() + 6.0 + ICON * 0.5, rect.center().y),
@@ -1021,6 +1015,104 @@ pub fn icon_button(ui: &mut Ui, icon: crate::icons::Icon, label: &str, hover: &s
         resp.on_hover_text(hover)
     };
     describe(resp, "ACTION icon_button", label)
+}
+
+/// The top row's pills, islands and island keys stand this tall.
+pub const PILL_H: f32 = 32.0;
+/// Search, styled as an input.
+pub const SEARCH_W: f32 = 141.0;
+const PILL_PAD: f32 = 14.0;
+
+/// A pill's width: its words at the Step role, and the pad either side.
+pub fn pill_width(ui: &Ui, words: &str) -> f32 {
+    let font = Role::Step.font();
+    let width = ui.fonts_mut(|f| f.layout_no_wrap(words.to_string(), font, INK).size().x);
+    width + 2.0 * PILL_PAD
+}
+
+/// A step pill on the step island: the current step on the wash, the
+/// `primary` one solid blue until it is current, the rest ghosts.
+pub fn step_pill(ui: &mut Ui, label: &str, current: bool, primary: bool) -> Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(pill_width(ui, label), PILL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = if current || (!primary && resp.is_pointer_button_down_on()) {
+            (BLUE_WASH, BLUE_DEEP)
+        } else if primary {
+            (if resp.hovered() { BLUE_DEEP } else { BLUE }, ON_FILL)
+        } else if resp.hovered() {
+            (WELL, INK)
+        } else {
+            (Color32::TRANSPARENT, INK)
+        };
+        let p = ui.painter();
+        p.rect_filled(rect, R_PILL, fill);
+        p.text(rect.center(), egui::Align2::CENTER_CENTER, label, Role::Step.font(), ink);
+    }
+    speak(&resp, egui::WidgetType::Button, Some(current), label);
+    describe(resp, "DETENT step_pill", label)
+}
+
+/// The off-spine pill: read-only, on the wash, `width` wide. A longer name
+/// elides; it answers to `Current place: <name>` either way.
+pub fn place_pill(ui: &mut Ui, name: &str, width: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, PILL_H), Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let mut job = LayoutJob::simple_singleline(name.to_string(), Role::Step.font(), BLUE_DEEP);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(width - 2.0 * PILL_PAD);
+        let words = ui.fonts_mut(|f| f.layout_job(job));
+        let p = ui.painter();
+        p.rect_filled(rect, R_PILL, BLUE_WASH);
+        p.galley(rect.center() - words.size() * 0.5, words, BLUE_DEEP);
+    }
+    speak(&resp, egui::WidgetType::Label, None, &format!("Current place: {name}"));
+    resp
+}
+
+/// An icon key on an island: a `PILL_H` square ghost. `name` is what it
+/// answers to and `hover` its tip; the top row's differ.
+pub fn island_key(ui: &mut Ui, icon: crate::icons::Icon, name: &str, hover: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(PILL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = ghost(ui, &resp);
+        let p = ui.painter();
+        p.rect_filled(rect, R_PILL, fill);
+        crate::icons::paint(p, egui::Rect::from_center_size(rect.center(), Vec2::splat(ICON)), ink, icon);
+    }
+    speak(&resp, egui::WidgetType::Button, None, name);
+    describe(resp.on_hover_text(hover), "ACTION island_key", name)
+}
+
+/// Search: a button in an input's clothes, or the bare lens when the row is
+/// narrow. It answers to `Search` both ways.
+pub fn search_key(ui: &mut Ui, wide: bool, hover: &str) -> Response {
+    if !wide {
+        return island_key(ui, crate::icons::Icon::Search, "Search", hover);
+    }
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(SEARCH_W, PILL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let well = rect.shrink(2.0);
+        let (fill, ink) = filled(&resp);
+        let p = ui.painter();
+        p.rect_filled(well, R_PILL, fill);
+        let lens = Pos2::new(well.left() + 10.0 + ICON * 0.5, well.center().y);
+        crate::icons::paint(p, egui::Rect::from_center_size(lens, Vec2::splat(ICON)), ink, crate::icons::Icon::Search);
+        label_at(ui, lens.x + ICON * 0.5 + 6.0, well.center().y, "Search", CTRL_TEXT, ink);
+    }
+    speak(&resp, egui::WidgetType::Button, None, "Search");
+    describe(resp.on_hover_text(hover), "ACTION search_key", "Search")
+}
+
+/// A ghost control's ground and content by state, as [`icon_button`] paints
+/// them.
+fn ghost(ui: &Ui, resp: &Response) -> (Color32, Color32) {
+    if resp.is_pointer_button_down_on() {
+        (BLUE_WASH, BLUE_DEEP)
+    } else if resp.hovered() {
+        (WELL, STRUCK)
+    } else {
+        (Color32::TRANSPARENT, at_rest(ui, LEGEND))
+    }
 }
 
 /// A colour swatch: an 18×18 fill with its `INK3` ring, so a pale colour
@@ -1411,6 +1503,14 @@ pub fn note_pane_body(ui: &Ui) {
     }
 }
 
+/// AU3: the dock reports the rect it is handed, the centre of the window: a
+/// tab bar is its panel's, not chrome. Only under test.
+#[cfg_attr(not(test), allow(unused_variables))]
+pub fn note_dock(ui: &Ui, rect: egui::Rect) {
+    #[cfg(test)]
+    this_pass(ui.ctx(), |seen| seen.dock = Some(rect));
+}
+
 /// A scroll viewport: its inner rect, the farthest out a clip can sit on the
 /// sides that scroll (`clip_rect_margin` past the inner rect, for a
 /// `ScrollArea`), and which axes those are.
@@ -1422,13 +1522,14 @@ pub struct Viewport {
     pub axes: [bool; 2],
 }
 
-/// One pass's registered viewports and pane bodies.
+/// One pass's registered viewports, pane bodies and dock.
 #[cfg(test)]
 #[derive(Clone, Default)]
 struct Viewports {
     pass: u64,
     views: Vec<Viewport>,
     bodies: Vec<egui::Rect>,
+    dock: Option<egui::Rect>,
 }
 
 #[cfg(test)]
@@ -1468,6 +1569,12 @@ pub fn viewports(ctx: &egui::Context) -> Vec<Viewport> {
 #[cfg(test)]
 pub fn pane_bodies(ctx: &egui::Context) -> Vec<egui::Rect> {
     last_pass(ctx).bodies
+}
+
+/// The dock's rect in the last finished pass.
+#[cfg(test)]
+pub fn dock_rect(ctx: &egui::Context) -> Option<egui::Rect> {
+    last_pass(ctx).dock
 }
 
 // ---------------------------------------------------------------------------

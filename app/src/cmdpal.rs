@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn cmdui_all_menus_present_and_edit_undo_undoes() {
         let mut h = EditorHarness::new();
-        for m in ["file", "edit", "view", "sheet", "cut", "room", "window", "help"] {
+        for m in ["file", "edit", "view", "sheet", "cut", crate::vocab::STEP, "window", "help"] {
             assert!(h.has(m), "no {m} menu\n{}", h.describe());
         }
         let before = h.state().engine.position();
@@ -656,8 +656,8 @@ mod tests {
             assert!(score(word, a).is_some(), "{word:?} finds {a:?}");
         }
         let mut h = EditorHarness::new();
-        h.click("room");
-        h.click("shiage (ink & paint)");
+        h.click(crate::vocab::STEP);
+        h.click("Color step");
         assert_eq!(h.editor().stage, Some(Stage::InkPaint));
     }
 
