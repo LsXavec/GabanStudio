@@ -513,7 +513,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, koma_arme
 }
 
 fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Option<Edit>) {
-    plate::legend(ui, "manga (pages)");
+    plate::legend(ui, crate::vocab::MANGA_PANE);
     let page = Page::of(state.cut());
     let not_a_book = state.new_page_refusal();
     match &page {
@@ -746,7 +746,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
     if let Some(h) = rulers.horizon {
         const LEVEL: &str = "The horizon's height, page px from the top; the points on it move with it.";
         ui.horizontal(|ui| {
-            plate::legend(ui, "horizon Y").on_hover_text(LEVEL);
+            plate::legend(ui, crate::vocab::HORIZON_Y).on_hover_text(LEVEL);
             let (r, y) = held_field(ui, &mut state.manga.held, "horizon y", h, -1.0e6..=1.0e6, 1.0, "");
             r.on_hover_text(LEVEL);
             if let Some(y) = y {
@@ -1030,7 +1030,7 @@ mod tests {
         let h = b5();
         assert_eq!(h.editor().stage, Some(Stage::Manga));
         for label in [
-            "Manga (pages)",
+            crate::vocab::MANGA_PANE,
             "New page",
             "panel 1",
             "Split across",
@@ -1290,7 +1290,7 @@ mod tests {
         let before = Rulers::of(h.state().cut());
         assert_eq!(before.vps.len(), 1);
         assert!(h.has("VP1") && h.has("horizon"), "the page guides name the handles\n{}", h.describe());
-        assert!(h.has("VP 1") && h.has("Horizon Y"), "and the pane places them by number");
+        assert!(h.has("VP 1") && h.has(crate::vocab::HORIZON_Y), "and the pane places them by number");
         // The guides latch hides them; the panel tool shows them again.
         h.scroll_to("page guides");
         h.click("page guides");

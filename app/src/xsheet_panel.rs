@@ -225,16 +225,15 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         state.sheet_ui.length_at = Some(frames);
     }
     plate::legend(ui, "shaku (length)");
-    let resp = ui
-        .add(
-            egui::TextEdit::singleline(&mut state.sheet_ui.length)
-                .id(id)
-                .desired_width(44.0)
-                .font(egui::FontId::monospace(11.0)),
-        )
-        .on_hover_text(
-            "the cut's length: frames (60) or seconds+frames (2+12) — Enter sets it, one undo step",
-        );
+    let resp = plate::text_field(
+        ui,
+        egui::TextEdit::singleline(&mut state.sheet_ui.length)
+            .id(id)
+            .desired_width(44.0),
+    )
+    .on_hover_text(
+        "the cut's length: frames (60) or seconds+frames (2+12) — Enter sets it, one undo step",
+    );
     ui.label(
         egui::RichText::new(seconds_plus_frames(frames, fps))
             .monospace()
@@ -267,14 +266,14 @@ fn memo_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         state.sheet_ui.memo_at = Some(here);
     }
     plate::legend(ui, "memo (serifu)");
-    let resp = ui
-        .add(
-            egui::TextEdit::singleline(&mut state.sheet_ui.memo)
-                .id(id)
-                .desired_width(130.0)
-                .hint_text("serifu / action"),
-        )
-        .on_hover_text("this frame's memo: dialogue (serifu) and action notes — one undo step");
+    let resp = plate::text_field(
+        ui,
+        egui::TextEdit::singleline(&mut state.sheet_ui.memo)
+            .id(id)
+            .desired_width(130.0)
+            .hint_text("serifu / action"),
+    )
+    .on_hover_text("this frame's memo: dialogue (serifu) and action notes — one undo step");
     if resp.lost_focus() {
         let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
         // The field's own Enter, not the sheet's Type-into-cell key.
@@ -415,10 +414,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     // horizontally on every frame of playback.
     ui.set_min_width(ui.available_width());
     clipboard_events(ui, state, gesture_safe);
+    // The head keeps the sheet's density, not a panel's: every point it
+    // takes comes off the rows (spec 2.6: row density unchanged).
+    ui.spacing_mut().item_spacing.y = plate::SHEET_GAP;
 
     // (The title row is EVICTED — the dock tab and the Slate already name
     // this sheet; ~145pt of header chrome becomes grid rows. Spec §4.2.)
-    ui.add_space(2.0);
 
     // ---- THE HENSHU HEAD (charter §B): ONE fixed 26pt row, Edit room
     // only — cut nav, the cut's identity, standing LIFT KEY, and the
@@ -519,7 +520,6 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     .color(plate::STRUCK),
             );
         });
-        ui.add_space(2.0);
     }
 
     // Column tabs (active column = the one the pen draws into).
@@ -543,6 +543,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             state.add_column();
         }
     });
+
+    // From here to the grid the head stands at a sheet row's height, as it
+    // did before the new look: `ui.horizontal` and the stock controls read
+    // their height from these, and at a panel's height they cost the grid
+    // two rows. The drawer's body holds panel controls and takes them back.
+    let controls = ui.spacing().clone();
+    let row_text = ui.text_style_height(&egui::TextStyle::Button).ceil();
+    let head = ui.spacing_mut();
+    head.interact_size.y = ROW_H;
+    head.button_padding.y = (ROW_H - row_text) * 0.5;
+
     ui.horizontal(|ui| {
         ui.menu_button("key", |ui| {
             if ui
@@ -580,6 +591,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     egui::CollapsingHeader::new("library")
         .default_open(false)
         .show(ui, |ui| {
+    *ui.spacing_mut() = controls.clone();
     ui.horizontal_wrapped(|ui| {
     let drawings: Vec<(anim_core::ids::DrawingId, String)> = state
             .cut()
@@ -606,9 +618,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             let renaming = matches!(&state.drawing_rename, Some((rid, _)) if *rid == id);
             if renaming {
             let (_, mut buf) = state.drawing_rename.take().expect("checked above");
-            let resp = ui.add(
-            egui::TextEdit::singleline(&mut buf).desired_width(90.0),
-                );
+            let resp = plate::text_field(ui, egui::TextEdit::singleline(&mut buf).desired_width(90.0));
                 let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
                 if resp.lost_focus() {
                 let trimmed = buf.trim();
@@ -752,26 +762,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     1 => ("H".to_string(), def.hidden, format!("hide column {}", col.name)),
                     _ => ("L".to_string(), def.locked, format!("lock column {}", col.name)),
                 };
-                let ink = match (what, on) {
-                    (1, true) => plate::AKA,
-                    (2, true) => plate::TALLY,
-                    _ if resp.hovered() => plate::STRUCK,
-                    _ => plate::legend_dim(),
-                };
-                let p = ui.painter();
-                p.rect_stroke(
-                    r.shrink(1.0),
-                    0.0,
-                    egui::Stroke::new(1.0, if on { ink } else { plate::hairline() }),
-                    egui::StrokeKind::Inside,
-                );
-                p.text(
-                    r.center(),
-                    egui::Align2::CENTER_CENTER,
-                    text,
-                    egui::FontId::monospace(10.0),
-                    ink,
-                );
+                let lit = on.then_some(if what == 1 {
+                    (plate::RED_WASH, plate::AKA)
+                } else {
+                    (plate::BLUE_WASH, plate::BLUE_DEEP)
+                });
+                plate::chip_face(ui, r, &resp, &text, lit);
                 let typ = if what == 0 {
                     egui::WidgetType::Button
                 } else {
@@ -789,6 +785,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             }
         }
     });
+    *ui.spacing_mut() = controls;
     match header_edit {
         Some((col, 0)) => state.cycle_kind_of(col),
         Some((col, 1)) => state.toggle_hidden_of(col),
@@ -1466,26 +1463,12 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             (1, now.solo, "solo track", "solo: while any track is soloed, only soloed tracks sound"),
         ] {
             let (r, resp) = ui.allocate_exact_size(vec2(22.0, ROW_H), Sense::click());
-            let ink = match (what, on) {
-                (0, true) => plate::AKA,
-                (1, true) => plate::TALLY,
-                _ if resp.hovered() => plate::STRUCK,
-                _ => plate::legend_dim(),
-            };
-            let p = ui.painter();
-            p.rect_stroke(
-                r.shrink(1.0),
-                0.0,
-                egui::Stroke::new(1.0, if on { ink } else { plate::hairline() }),
-                egui::StrokeKind::Inside,
-            );
-            p.text(
-                r.center(),
-                egui::Align2::CENTER_CENTER,
-                if what == 0 { "M" } else { "S" },
-                egui::FontId::monospace(10.0),
-                ink,
-            );
+            let lit = on.then_some(if what == 0 {
+                (plate::RED_WASH, plate::AKA)
+            } else {
+                (plate::BLUE_WASH, plate::BLUE_DEEP)
+            });
+            plate::chip_face(ui, r, &resp, if what == 0 { "M" } else { "S" }, lit);
             plate::speak(&resp, egui::WidgetType::Checkbox, Some(on), name);
             if resp.on_hover_text(hover).clicked() && gesture_safe {
                 let mut next = now.clone();
@@ -1610,7 +1593,8 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
     let editable = !state.view.playing;
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new(format!("{name} @ {}", frame + 1)).color(plate::LEGEND));
-        ui.add_enabled(
+        plate::field_if(
+            ui,
             editable,
             egui::DragValue::new(&mut state.param_buf).speed(0.5),
         );
@@ -1927,8 +1911,7 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
             Some((d, live)) if d == panel.drawing => live,
             _ => panel.cut,
         };
-        let r = ui
-            .add(egui::DragValue::new(&mut n).range(1..=999).update_while_editing(false))
+        let r = plate::field(ui, egui::DragValue::new(&mut n).range(1..=999).update_while_editing(false))
             .on_hover_text("the cut this panel belongs to: drag, or click and type");
         if r.drag_stopped() {
             if let Some((_, live)) = state.sheet_ui.panel_edit.take() {
@@ -2218,7 +2201,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             ui.separator();
             plate::legend(ui, "save this cel's stack");
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut state.stack_name_buf).desired_width(130.0));
+                plate::text_field(ui, egui::TextEdit::singleline(&mut state.stack_name_buf).desired_width(130.0));
                 let name = state.stack_name_buf.trim().to_string();
                 if ui
                     .add_enabled(can && !name.is_empty(), egui::Button::new("save"))
@@ -2361,7 +2344,9 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                     let renaming = matches!(&state.strip_rename, Some((rid, _)) if rid == lid);
                     if renaming {
                         let (_, mut buf) = state.strip_rename.take().expect("checked above");
-                        let resp = ui.text_edit_singleline(&mut buf);
+                        // `field`, not `text_field`: this row keeps the
+                        // strip's height while it renames.
+                        let resp = plate::field(ui, egui::TextEdit::singleline(&mut buf));
                         // Escape cancels (same fix as the drawing-library rename —
                         // bare lost_focus committed the aborted text).
                         let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));

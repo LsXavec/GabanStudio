@@ -189,6 +189,7 @@ fn dress(ctx: &egui::Context) {
     ctx.set_style_of(egui::Theme::Light, style.clone());
     ctx.set_style_of(egui::Theme::Dark, style);
     plate::install_fonts(ctx);
+    ctx.add_plugin(plate::FocusRing);
     // GM4: Ctrl+= / Ctrl+- / Ctrl+0 are the canvas's zoom verbs (D6
     // Actions); egui's own UI zoom would swallow those keys first.
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
@@ -4686,7 +4687,8 @@ impl EditorTabs<'_> {
     fn presets_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
-            ui.add(
+            plate::text_field(
+                ui,
                 egui::TextEdit::singleline(self.preset_name)
                     .hint_text("name…")
                     .desired_width(110.0),
@@ -5025,17 +5027,17 @@ impl Editor {
                 plate::surface(ui);
                 egui::Grid::new("project_settings").num_columns(2).show(ui, |ui| {
                     ui.label("name");
-                    ui.text_edit_singleline(&mut form.name);
+                    plate::text_field(ui, egui::TextEdit::singleline(&mut form.name));
                     ui.end_row();
                     // The paper is anchored top-left: art keeps its place.
                     const RESIZE_NOTE: &str =
                         "the canvas grows or crops from the top-left; drawings are not scaled";
                     ui.label("resolution").on_hover_text(RESIZE_NOTE);
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut form.width).range(16..=16384))
+                        plate::field(ui, egui::DragValue::new(&mut form.width).range(16..=16384))
                             .on_hover_text(RESIZE_NOTE);
                         ui.label("×");
-                        ui.add(egui::DragValue::new(&mut form.height).range(16..=16384))
+                        plate::field(ui, egui::DragValue::new(&mut form.height).range(16..=16384))
                             .on_hover_text(RESIZE_NOTE);
                         let g = gcd(form.width, form.height).max(1);
                         ui.label(
@@ -5045,13 +5047,13 @@ impl Editor {
                     });
                     ui.end_row();
                     ui.label("fps");
-                    ui.add(egui::DragValue::new(&mut form.fps).range(1..=240));
+                    plate::field(ui, egui::DragValue::new(&mut form.fps).range(1..=240));
                     ui.end_row();
                     ui.label("default cut length");
-                    ui.add(egui::DragValue::new(&mut form.cut_frames).range(1..=100_000).suffix(" frames"));
+                    plate::field(ui, egui::DragValue::new(&mut form.cut_frames).range(1..=100_000).suffix(" frames"));
                     ui.end_row();
                     ui.label("dpi");
-                    ui.add(egui::DragValue::new(&mut form.dpi).range(1.0..=2400.0));
+                    plate::field(ui, egui::DragValue::new(&mut form.dpi).range(1.0..=2400.0));
                     ui.end_row();
                     ui.label("colour law");
                     ui.horizontal(|ui| {
@@ -5125,18 +5127,18 @@ impl Editor {
                     const CORNER: &str = "the paper's top-left in frame px; below 0 reaches left of or above the frame";
                     ui.label("corner").on_hover_text(CORNER);
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut form.rect.x).range(-max..=max).prefix("x "))
+                        plate::field(ui, egui::DragValue::new(&mut form.rect.x).range(-max..=max).prefix("x "))
                             .on_hover_text(CORNER);
-                        ui.add(egui::DragValue::new(&mut form.rect.y).range(-max..=max).prefix("y "))
+                        plate::field(ui, egui::DragValue::new(&mut form.rect.y).range(-max..=max).prefix("y "))
                             .on_hover_text(CORNER);
                     });
                     ui.end_row();
                     const SIZE: &str = "the paper's width and height in px (the frame is the default)";
                     ui.label("size").on_hover_text(SIZE);
                     ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut form.rect.w).range(1..=camera::MAX_PAPER).prefix("w "))
+                        plate::field(ui, egui::DragValue::new(&mut form.rect.w).range(1..=camera::MAX_PAPER).prefix("w "))
                             .on_hover_text(SIZE);
-                        ui.add(egui::DragValue::new(&mut form.rect.h).range(1..=camera::MAX_PAPER).prefix("h "))
+                        plate::field(ui, egui::DragValue::new(&mut form.rect.h).range(1..=camera::MAX_PAPER).prefix("h "))
                             .on_hover_text(SIZE);
                     });
                     ui.end_row();
@@ -7515,17 +7517,11 @@ impl Editor {
                             ui.label("frames");
                             let mut a1 = a + 1;
                             let mut b1 = b + 1;
-                            if ui
-                                .add(egui::DragValue::new(&mut a1).range(1..=b1))
-                                .changed()
-                            {
+                            if plate::field(ui, egui::DragValue::new(&mut a1).range(1..=b1)).changed() {
                                 a = a1 - 1;
                             }
                             ui.label("–");
-                            if ui
-                                .add(egui::DragValue::new(&mut b1).range(a1..=n))
-                                .changed()
-                            {
+                            if plate::field(ui, egui::DragValue::new(&mut b1).range(a1..=n)).changed() {
                                 b = b1 - 1;
                             }
                         });
@@ -7626,7 +7622,8 @@ impl Editor {
                     // (scaffolding, not undoable). Empty-buffer pattern: type
                     // a new name and confirm; no pre-seeding to fight.
                     ui.horizontal(|ui| {
-                        ui.add(
+                        plate::text_field(
+                            ui,
                             egui::TextEdit::singleline(&mut self.rename_buf)
                                 .hint_text("new name…")
                                 .desired_width(110.0),
@@ -7862,7 +7859,7 @@ impl Editor {
                     ui.separator();
                     ui.label(egui::RichText::new("save current arrangement as:").color(plate::legend_dim()));
                     ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.ws_name);
+                        plate::text_field(ui, egui::TextEdit::singleline(&mut self.ws_name));
                         let name = self.ws_name.trim().to_string();
                         if ui.button("save").clicked() && !name.is_empty() {
                             // Saving a room captures the CURRENT tool/view

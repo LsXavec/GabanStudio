@@ -2445,4 +2445,209 @@ mod tests {
         }
         assert!(sites >= 19, "the spec's 19 sites, found {sites}");
     }
+
+    // ---- AU2: what the look holds everywhere, and what it left alone ----
+
+    /// Is the byte at `at` inside a `plate` FIELD call? Only the last one
+    /// opened before it can hold it.
+    fn in_a_field(text: &str, at: usize) -> bool {
+        let routes = ["plate::field", "plate::text_field", "plate::pattern_field"];
+        let last = routes.iter().filter_map(|route| text[..at].rfind(route)).max();
+        last.is_some_and(|from| {
+            let mut depth = 0;
+            for c in text[from..at].chars() {
+                match c {
+                    '(' => depth += 1,
+                    ')' if depth == 1 => return false,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+            }
+            depth > 0
+        })
+    }
+
+    /// A file's fields, how many stand frameless, and those outside the
+    /// plate's FIELD. A `Slider` with its value box off holds no field.
+    fn fields_in(text: &str) -> (usize, usize, Vec<String>) {
+        let calls = [
+            "TextEdit::singleline(",
+            "TextEdit::multiline(",
+            "DragValue::new(",
+            "Slider::new(",
+            "text_edit_singleline(",
+            "text_edit_multiline(",
+        ];
+        let (mut sites, mut frameless, mut bare) = (0, 0, Vec::new());
+        for call in calls {
+            for (at, _) in text.match_indices(call) {
+                sites += 1;
+                let statement = &text[at..at + text[at..].find(';').unwrap_or(text.len() - at)];
+                if in_a_field(text, at) {
+                    continue;
+                }
+                if call.starts_with("Slider") && statement.contains("show_value(false)") {
+                    continue;
+                }
+                if statement.contains("Frame::NONE") {
+                    frameless += 1;
+                    continue;
+                }
+                bare.push(statement.lines().next().unwrap_or(statement).to_string());
+            }
+        }
+        (sites, frameless, bare)
+    }
+
+    /// Every field is the `WELL` with the 1 pt `INK3` edge (spec 2.6), which
+    /// only `plate` paints: at AU2's review 0 of 33 `TextEdit`s had it. The
+    /// sheet's entry alone goes frameless: its cell is its frame.
+    #[test]
+    fn aulook_every_field_goes_through_the_plate() {
+        let seeded = "\
+            ui.add(egui::TextEdit::singleline(&mut a));\n\
+            ui.text_edit_multiline(&mut b);\n\
+            ui.add(egui::DragValue::new(&mut c).speed(1));\n\
+            ui.add(egui::Slider::new(&mut d, 0..=9));\n\
+            ui.add(egui::Slider::new(&mut e, 0..=9).show_value(false));\n\
+            plate::field(ui, egui::DragValue::new(&mut f));\n\
+            let r = plate::text_field(\n    ui,\n    egui::TextEdit::multiline(&mut g),\n);\n\
+            plate::field(ui, f); ui.add(egui::DragValue::new(&mut h));\n\
+            match k { A => plate::field(ui, b), B => ui.add(egui::DragValue::new(&mut i)) };\n\
+            ui.add(egui::TextEdit::singleline(&mut j).frame(egui::Frame::NONE));\n";
+        let (sites, frameless, bare) = fields_in(seeded);
+        assert_eq!((sites, frameless, bare.len()), (10, 1, 6), "{bare:?}");
+        let (mut sites, mut frameless, mut bare) = (0, 0, Vec::new());
+        for (name, text) in sources().iter().filter(|(name, _)| name != "plate.rs") {
+            let (here, loose, found) = fields_in(&shipped(text));
+            sites += here;
+            frameless += loose;
+            bare.extend(found.into_iter().map(|f| format!("{name}: {f}")));
+        }
+        assert!(bare.is_empty(), "{} fields outside the plate:\n{}", bare.len(), bare.join("\n"));
+        assert_eq!(frameless, 1, "the sheet's entry, and nothing else");
+        assert!(sites >= 90, "the scan read {sites} sites");
+    }
+
+    /// A stock checkbox takes the style's rest: no edge, and a radius that
+    /// rounds its 14 pt box to a `WELL` disc nobody reads as a control. The
+    /// latch is the ringed box, and it answers to the same calls.
+    #[test]
+    fn aulook_every_checkbox_is_a_latch() {
+        let sources = sources();
+        let stock = sources.iter().filter(|(_, text)| shipped(text).contains(".checkbox("));
+        let found: Vec<&str> = stock.map(|(name, _)| name.as_str()).collect();
+        assert!(found.is_empty(), "stock checkboxes in {found:?}");
+    }
+
+    /// The app's windows are the three it always opened, call by call: the
+    /// file by file rule above would pass a fourth in `main.rs`.
+    #[test]
+    fn aulook_nothing_opens_a_window() {
+        let boot = concat!("run_", "native(");
+        let main_view = concat!("show_", "viewport_immediate(");
+        let float = concat!("show_", "viewport_deferred(");
+        let mut found = Vec::new();
+        for (name, text) in sources() {
+            for call in [boot, main_view, float] {
+                let n = text.matches(call).count();
+                if n > 0 {
+                    found.push((name.clone(), call, n));
+                }
+            }
+        }
+        let want = [("floatwin.rs", float, 1), ("main.rs", boot, 1), ("main.rs", main_view, 1)];
+        assert_eq!(found, want.map(|(name, call, n)| (name.to_string(), call, n)));
+    }
+
+    fn digest(text: &str) -> u64 {
+        text.bytes().fold(0xcbf29ce484222325, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+    }
+
+    /// The item opening on the line that starts with `head`, indent and all,
+    /// through the line that closes it: a shader's `"#;`, an item's own `}`.
+    /// An empty `head` is the whole file.
+    fn item_of(text: &str, head: &str) -> String {
+        let lines: Vec<&str> = text.lines().collect();
+        if head.is_empty() {
+            return lines.join("\n");
+        }
+        let first = lines.iter().position(|l| l.starts_with(head));
+        let first = first.unwrap_or_else(|| panic!("no line starts {head:?}"));
+        let indent = head.len() - head.trim_start().len();
+        let close = if head.starts_with("const ") { "\"#;".to_string() } else { " ".repeat(indent) + "}" };
+        let last = (first..lines.len()).find(|&i| lines[i] == close);
+        lines[first..=last.unwrap_or_else(|| panic!("{head:?} never closes"))].join("\n")
+    }
+
+    /// What the look was told to leave alone, by digest: the shaders, the
+    /// wire, the stroke commits and undo, the dock's save and the pen route.
+    /// Each digest was read from the commit before AU2, so a match says it
+    /// did not touch them. A later part that owns one re-pins it here, and
+    /// says so in its commit body.
+    const LEFT_ALONE: [(&str, &str, u64); 15] = [
+        ("graphcomp.rs", "const XFORM_SHADER", 0x95f089600de90992),
+        ("graphcomp.rs", "const BLEND_SHADER", 0x35d164fec72ac70c),
+        ("paint.rs", "const SHADER", 0xa0fde5985464fb0f),
+        ("paint.rs", "const COMPOSITE_SHADER", 0x208a30bfac9192e5),
+        ("net.rs", "", 0xe23a7ac3a222dd11),
+        ("doc.rs", "    pub fn commit_stroke", 0xa2fcb632dfd8a2a1),
+        ("doc.rs", "    pub fn commit_raster", 0xdc168671a7f290e0),
+        ("doc.rs", "    fn land_raster", 0x39b08904694b93d1),
+        ("doc.rs", "    pub fn undo(", 0xe15edd6f411d2b83),
+        ("doc.rs", "    pub fn redo(", 0xcaa16d99af9d7dbd),
+        ("doc.rs", "    pub fn undo_to(", 0x387309403f18550e),
+        ("workspace.rs", "    pub fn load_from", 0x547f4833d3d5505f),
+        ("workspace.rs", "    pub fn save_to", 0x69f1eccf6e056338),
+        ("canvas.rs", "    fn handle_pen(", 0xad3d4cbab93a4f72),
+        ("main.rs", "fn pump_tablet(", 0x16ed0af8f504e210),
+    ];
+
+    #[test]
+    fn aulook_the_seams_stand_as_they_stood() {
+        assert_eq!(digest("a"), 0xaf63dc4c8601ec8c, "FNV-1a");
+        let seeded = "fn before() {\n}\n    fn item(\n        a: u8,\n    ) {\n    }\n    fn after() {\n    }\n";
+        assert_eq!(item_of(seeded, "    fn item("), "    fn item(\n        a: u8,\n    ) {\n    }");
+        let shader = "const A: &str = r#\"\nfn f() {\n}\n\"#;\nconst B: u8 = 1;\n";
+        assert_eq!(item_of(shader, "const A"), "const A: &str = r#\"\nfn f() {\n}\n\"#;");
+        let files = sources();
+        for (file, head, pinned) in LEFT_ALONE {
+            let text = &files.iter().find(|(name, _)| name == file).unwrap().1;
+            let got = digest(&item_of(text, head));
+            assert_eq!(got, pinned, "{file} {head:?} moved to 0x{got:016x}: is this part meant to?");
+        }
+    }
+
+    /// The config's sections and the `ui` section's keys: its shape, and only
+    /// its names, so nothing of a session's secrets can reach a pin.
+    #[test]
+    fn aulook_config_shape_stands() {
+        let config = serde_json::to_value(Config::default()).unwrap();
+        let keys = |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<String>>();
+        assert_eq!(
+            keys(&config),
+            [
+                "keybinds", "keymap", "layers", "light_table", "onion", "pen", "perf", "presets", "render",
+                "session", "ui", "update_repo",
+            ]
+        );
+        assert_eq!(
+            keys(&config["ui"]),
+            ["exact_descriptions", "lock_positions", "quick_start", "scale", "show_welcome", "whats_new_seen"]
+        );
+    }
+
+    /// AU2's leave-out list: no rail, no renames, no menu moves, no new
+    /// Actions. The parts that make them (AU4, AU10, AU11) re-pin this and
+    /// say so in their commit bodies.
+    #[test]
+    fn aulook_what_was_left_out_stays_out() {
+        let files = sources();
+        assert!(!files.iter().any(|(name, _)| name == "rail.rs"), "the rail is a later part's");
+        let actions: String =
+            Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
+        let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
+        assert_eq!((Action::ALL.len(), digest(&actions)), (154, 0x3afda4aaf0d73def), "the Actions, their words, their menus");
+        assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
+    }
 }

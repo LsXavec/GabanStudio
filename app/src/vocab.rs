@@ -90,6 +90,14 @@ pub const LOCK_TRACK: &str = "lock column";
 pub const NEXT_DRAWING: &str = "Next key";
 pub const PREVIOUS_DRAWING: &str = "Previous key";
 
+// Legends a test reads back, as the plate paints them.
+pub const APP_NAME: &str = "Gaban Studio";
+pub const SAVED_STATE: &str = "Saved";
+pub const HORIZON_Y: &str = "Horizon Y";
+pub const MANGA_PANE: &str = "Manga (pages)";
+pub const CANVAS_GESTURES: &str = "Canvas gestures";
+pub const LIP_FLAP_TITLE: &str = "Kuchipaku (lip flap)";
+
 /// Today's word for every constant above, in the table's order: the pin.
 #[cfg(test)]
 pub const TABLE: &[(&str, &str, &str)] = &[
@@ -156,4 +164,10 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("LOCK_TRACK", LOCK_TRACK, "lock column"),
     ("NEXT_DRAWING", NEXT_DRAWING, "Next key"),
     ("PREVIOUS_DRAWING", PREVIOUS_DRAWING, "Previous key"),
+    ("APP_NAME", APP_NAME, "Gaban Studio"),
+    ("SAVED_STATE", SAVED_STATE, "Saved"),
+    ("HORIZON_Y", HORIZON_Y, "Horizon Y"),
+    ("MANGA_PANE", MANGA_PANE, "Manga (pages)"),
+    ("CANVAS_GESTURES", CANVAS_GESTURES, "Canvas gestures"),
+    ("LIP_FLAP_TITLE", LIP_FLAP_TITLE, "Kuchipaku (lip flap)"),
 ];

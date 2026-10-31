@@ -161,7 +161,8 @@ impl crate::Editor {
         let resp = egui::Modal::new(id).area(area).frame(frame).show(ctx, |ui| {
             ui.set_width(560.0);
             plate::legend(ui, "command palette");
-            let field = ui.add(
+            let field = plate::text_field(
+                ui,
                 egui::TextEdit::singleline(&mut self.palette.query)
                     .hint_text("type a command — name, alias or what it does")
                     .desired_width(f32::INFINITY),
@@ -786,7 +787,7 @@ mod tests {
         h.state_mut().undo_to(1);
         h.perform(Action::History);
         h.run();
-        let (mark, row3) = (h.rect("Saved"), h.rect("3. draw"));
+        let (mark, row3) = (h.rect(crate::vocab::SAVED_STATE), h.rect("3. draw"));
         assert!(
             (mark.center().y - row3.center().y).abs() < 2.0,
             "the saved mark sits on row 3: {mark:?} vs {row3:?}"
@@ -866,6 +867,6 @@ mod tests {
         // The About window says its name in glyphs the embedded font has.
         h.perform(Action::About);
         h.run();
-        assert!(h.has("Gaban Studio"), "{}", h.describe());
+        assert!(h.has(crate::vocab::APP_NAME), "{}", h.describe());
     }
 }

@@ -171,7 +171,8 @@ pub fn form_ui(
         .spacing([14.0, 10.0])
         .show(ui, |ui| {
             plate::legend(ui, "name");
-            ui.add(
+            plate::text_field(
+                ui,
                 egui::TextEdit::singleline(&mut form.name)
                     .desired_width(220.0)
                     .hint_text("the cut's name"),
@@ -230,24 +231,24 @@ pub fn form_ui(
             plate::legend(ui, "size");
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!paged, |ui| {
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut form.width)
-                                .range(1..=16384)
-                                .suffix(" px"),
-                        )
-                        .changed()
+                    if plate::field(
+                        ui,
+                        egui::DragValue::new(&mut form.width)
+                            .range(1..=16384)
+                            .suffix(" px"),
+                    )
+                    .changed()
                     {
                         form.preset = None;
                     }
                     ui.label(egui::RichText::new("×").color(plate::LEGEND));
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut form.height)
-                                .range(1..=16384)
-                                .suffix(" px"),
-                        )
-                        .changed()
+                    if plate::field(
+                        ui,
+                        egui::DragValue::new(&mut form.height)
+                            .range(1..=16384)
+                            .suffix(" px"),
+                    )
+                    .changed()
                     {
                         form.preset = None;
                     }
@@ -272,7 +273,8 @@ pub fn form_ui(
             ui.end_row();
             plate::legend(ui, "frame rate");
             ui.horizontal(|ui| {
-                ui.add(
+                plate::field(
+                    ui,
                     egui::DragValue::new(&mut form.fps)
                         .range(1..=120)
                         .suffix(" fps"),
@@ -304,7 +306,8 @@ pub fn form_ui(
             ui.end_row();
             plate::legend(ui, "print");
             ui.horizontal(|ui| {
-                ui.add_enabled(
+                plate::field_if(
+                    ui,
                     !paged,
                     egui::DragValue::new(&mut form.dpi)
                         .range(1..=1200)

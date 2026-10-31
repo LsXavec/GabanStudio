@@ -1091,7 +1091,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             });
             ui.horizontal(|ui| {
                 ui.label("output folder");
-                ui.add(
+                plate::text_field(
+                    ui,
                     egui::TextEdit::singleline(&mut d.out)
                         .hint_text(out_hint)
                         .desired_width(220.0),
@@ -1099,7 +1100,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             });
             ui.horizontal(|ui| {
                 ui.label("file names");
-                ui.add(egui::TextEdit::singleline(&mut d.pattern).desired_width(220.0))
+                plate::pattern_field(ui, egui::TextEdit::singleline(&mut d.pattern).desired_width(220.0))
                     .on_hover_text(
                         "{project} {scene} {cut} {frame} {frame:04}; an image sequence \
                          whose pattern has no frame gets _{frame:04}",
@@ -1206,11 +1207,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 // Untouched, the range is the whole cut (as File ▸ Export's).
                 let (a, b) = resolve(n, state.render_queue.draft.range);
                 let (mut a1, mut b1) = (a + 1, b + 1);
-                let moved_a = ui
-                    .add(egui::DragValue::new(&mut a1).range(1..=n).prefix("from "))
+                let moved_a = plate::field(ui, egui::DragValue::new(&mut a1).range(1..=n).prefix("from "))
                     .changed();
-                let moved_b = ui
-                    .add(egui::DragValue::new(&mut b1).range(1..=n).prefix("to "))
+                let moved_b = plate::field(ui, egui::DragValue::new(&mut b1).range(1..=n).prefix("to "))
                     .changed();
                 if moved_a || moved_b {
                     state.render_queue.draft.range = Some((a1 - 1, (b1 - 1).max(a1 - 1)));

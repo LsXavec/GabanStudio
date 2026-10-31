@@ -939,6 +939,7 @@ impl<'h> Recorder<'h> {
 
 #[cfg(test)]
 mod tests {
+    use egui::epaint::{ColorMode, RectShape};
     use egui::{Align2, FontId, Label, pos2, vec2};
     use egui_kittest::Harness;
 
@@ -1884,6 +1885,7 @@ mod tests {
         add("recovery", recovery_contrast());
         println!("audit: {checked} sections read, {unread} on no known ground");
         assert!(checked > 2000, "the audit read {checked} sections");
+        assert_eq!(unread, 0, "a word the audit cannot read is a word it passed unread");
         assert!(failed.is_empty(), "{} under their floor:\n{}", failed.len(), failed.join("\n"));
     }
 
@@ -1955,6 +1957,9 @@ mod tests {
         assert_eq!(of(TextStyle::Button), Role::Panel.font());
         assert_eq!(of(TextStyle::Small), Role::Small.font());
         assert_eq!(of(TextStyle::Heading), Role::Heading.font());
+        // The old mono call sites read Plex Sans; only a pattern keeps a mono.
+        assert_eq!(of(TextStyle::Monospace), Role::Panel.font());
+        assert_eq!(style.drag_value_text_style, TextStyle::Body);
         assert_eq!(plate::mono_font(), FontId::new(12.0, plate::mono()));
     }
 
@@ -1995,6 +2000,48 @@ mod tests {
         settle(&mut h);
         let right = h.rect("help").right();
         assert!(right <= 1280.0, "the last menu ends at {right}");
+    }
+
+    /// Every row built this pass, painted or not: a row wholly off the window
+    /// is never painted, so painted text cannot tell it is gone.
+    fn built_rows(h: &EditorHarness) -> Vec<(String, egui::Rect)> {
+        use egui_kittest::kittest::{NodeT, Queryable};
+        let label = |n: &egui_kittest::Node<'_>| n.accesskit_node().label().unwrap_or_default().to_string();
+        let rows = h.kit().query_all_by_role(egui::accesskit::Role::Button);
+        rows.map(|n| (label(&n), n.rect())).collect()
+    }
+
+    /// Every menu's every row stands inside every window the rooms are
+    /// measured at: a row off the window is a row a person cannot reach.
+    #[test]
+    fn aulook_menus_stay_on_the_window() {
+        for size in [vec2(1600.0, 900.0), vec2(1280.0, 800.0), vec2(1280.0, 720.0)] {
+            let mut h = EditorHarness::with_state(crate::sample::build_sample());
+            h.kit_mut().set_size(size);
+            h.editor_mut().enter_room(Stage::Drawing);
+            settle(&mut h);
+            let closed = built_rows(&h);
+            for menu in ["file", "edit", "view", "sheet", "cut", "project", "room", "window", "help"] {
+                h.click(menu);
+                settle(&mut h);
+                assert!(egui::Popup::is_any_open(&h.ctx()), "{menu} at {size:?} opens");
+                let rows: Vec<_> = built_rows(&h).into_iter().filter(|r| !closed.contains(r)).collect();
+                assert!(!rows.is_empty(), "{menu} at {size:?} builds its rows");
+                let off: Vec<&str> =
+                    rows.iter().filter(|r| r.1.bottom() > size.y).map(|r| r.0.as_str()).collect();
+                let bottom = rows.iter().map(|r| r.1.bottom()).fold(0.0, f32::max);
+                println!("{menu} at {size:?}: {} rows to {bottom}, {} off: {off:?}", rows.len(), off.len());
+                assert!(off.is_empty(), "{menu} at {size:?} loses {off:?}");
+                match menu {
+                    "sheet" => assert!(rows.len() >= 34, "the whole menu was read: {}", rows.len()),
+                    "edit" => assert!(rows.iter().all(|r| r.1.height() == plate::CTRL_H), "{rows:?}"),
+                    _ => {}
+                }
+                h.key(egui::Key::Escape);
+                settle(&mut h);
+                assert!(!egui::Popup::is_any_open(&h.ctx()), "{menu} at {size:?} closes");
+            }
+        }
     }
 
     #[test]
@@ -2038,5 +2085,385 @@ mod tests {
         assert!(!got.ui.show_welcome && got.ui.lock_positions && got.ui.exact_descriptions);
         assert_eq!((got.session.api_key.as_str(), got.session.totp_secret.as_str()), ("", ""));
         assert_eq!((got.render.ffmpeg.as_str(), got.render.out_dir.as_str()), ("C:/tools/ffmpeg.exe", "D:/renders"));
+    }
+
+    // ---- the review of the look: what a person sees of it ----
+
+    /// The rects a frame paints, walked out of their `Vec`s.
+    fn rects_of(shapes: &[ClippedShape]) -> Vec<RectShape> {
+        fn walk(shape: &Shape, out: &mut Vec<RectShape>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                Shape::Rect(r) => out.push(r.clone()),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out
+    }
+
+    /// Every colour a frame lays down outside its words, fills and strokes.
+    fn marks_of(shapes: &[ClippedShape]) -> Vec<Color32> {
+        fn walk(shape: &Shape, out: &mut Vec<Color32>) {
+            match shape {
+                Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                Shape::Rect(r) => out.extend([r.fill, r.stroke.color]),
+                Shape::Circle(c) => out.extend([c.fill, c.stroke.color]),
+                Shape::LineSegment { stroke, .. } => out.push(stroke.color),
+                Shape::Path(p) => {
+                    out.push(p.fill);
+                    if let ColorMode::Solid(colour) = p.stroke.color {
+                        out.push(colour);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+        out.retain(|c| c.a() > 0);
+        out
+    }
+
+    /// Arming any tool leaves the paper where it was: the options row is one
+    /// height whatever it holds (the rows moved it by up to 3 pt).
+    #[test]
+    fn aulook_arming_a_tool_leaves_the_paper_still() {
+        use crate::canvas::CanvasTool;
+        for size in [vec2(1600.0, 900.0), vec2(1280.0, 800.0)] {
+            let mut h = EditorHarness::new();
+            h.kit_mut().set_size(size);
+            settle(&mut h);
+            let where_it_is = |h: &EditorHarness| {
+                let c = &h.editor().canvas;
+                (c.dbg_rect, c.view_xform().zoom, c.view_xform().paper_bounds())
+            };
+            let at_rest = where_it_is(&h);
+            for tool in [CanvasTool::Select, CanvasTool::Fill, CanvasTool::LassoFill, CanvasTool::Panel, CanvasTool::Paint] {
+                h.editor_mut().canvas.tool = tool;
+                settle(&mut h);
+                assert_eq!(where_it_is(&h), at_rest, "{tool:?} at {size:?}");
+            }
+        }
+    }
+
+    /// The whole rows the sheet's view holds of the sample, booted as a person
+    /// boots: an animator reads the sheet row by row.
+    fn sheet_rows(room: Stage, size: egui::Vec2) -> usize {
+        let mut h = EditorHarness::with_state_shipped(crate::sample::build_sample());
+        h.kit_mut().set_size(size);
+        h.editor_mut().enter_room(room);
+        settle(&mut h);
+        let sheet = &h.state().sheet_ui;
+        let row_of = |frame| sheet.cell_center(0, frame).expect("the sheet drew its rows");
+        let row_h = row_of(1).y - row_of(0).y;
+        let view = plate::viewports(&h.ctx()).into_iter().rev().find(|v| v.rect.contains(row_of(0)));
+        println!("{room:?} at {size:?}: {:?}", view.map(|v| v.rect));
+        (view.expect("the sheet's scroll view").rect.height() / row_h) as usize
+    }
+
+    /// Spec 2.6: row density unchanged. These are the rows each room held on
+    /// the commit before the new look (the review found 10, 14, 9 and 7 at
+    /// 1600x900). AU3 takes the sheet out of the shipped Draw recipe, and that
+    /// room's rows move with it.
+    #[test]
+    fn aulook_sheet_keeps_its_rows() {
+        let rooms = [Stage::Drawing, Stage::Edit, Stage::Layout, Stage::InkPaint];
+        for (size, floors) in [(vec2(1600.0, 900.0), [15, 19, 14, 12]), (vec2(1280.0, 720.0), [9, 12, 8, 7])] {
+            for (room, floor) in rooms.into_iter().zip(floors) {
+                let rows = sheet_rows(room, size);
+                assert!(rows >= floor, "{room:?} at {size:?} holds {rows} rows, {floor} before the new look");
+            }
+        }
+    }
+
+    /// A word field and a number field, as `plate` hands them out.
+    #[test]
+    fn aulook_fields_wear_the_well() {
+        let h = dressed(|ui| {
+            let mut words = String::from("Cut 12");
+            plate::text_field(ui, egui::TextEdit::singleline(&mut words));
+        });
+        let shapes = &h.output().shapes;
+        let rects = rects_of(shapes);
+        let edge = rects.iter().find(|r| r.stroke.width > 0.0).expect("the field's edge");
+        assert_eq!(edge.stroke, egui::Stroke::new(1.0, plate::INK3));
+        assert_eq!(edge.fill, plate::WELL);
+        assert_eq!(edge.corner_radius, egui::CornerRadius::same(plate::R_INPUT));
+        assert_eq!(edge.rect.height(), plate::CTRL_H, "a word field is a panel control");
+
+        let h = dressed(|ui| {
+            let mut value = 12;
+            plate::field(ui, egui::DragValue::new(&mut value));
+        });
+        let shapes = &h.output().shapes;
+        let rects = rects_of(shapes);
+        let edge = rects.iter().find(|r| r.stroke.width > 0.0).expect("the field's edge");
+        assert_eq!(edge.stroke, egui::Stroke::new(1.0, plate::INK3));
+        assert_eq!(edge.fill, plate::WELL);
+        assert_eq!(edge.corner_radius, egui::CornerRadius::same(plate::R_INPUT));
+    }
+
+    /// Stock controls stay edgeless: the field's edge is `field`'s alone.
+    #[test]
+    fn aulook_a_button_has_no_edge() {
+        let h = dressed(|ui| {
+            let _ = ui.button("Save");
+        });
+        let shapes = &h.output().shapes;
+        let rects = rects_of(shapes);
+        assert!(rects.iter().any(|r| r.fill == plate::WELL), "the button's ground: {rects:?}");
+        assert!(rects.iter().all(|r| r.stroke.width == 0.0), "{rects:?}");
+    }
+
+    #[test]
+    fn aulook_latch_is_a_checkbox() {
+        let painted = |on: bool| {
+            let h = dressed(move |ui| {
+                let mut on = on;
+                plate::latch(ui, &mut on, "Snap");
+            });
+            let shapes = &h.output().shapes;
+            let rects = rects_of(shapes);
+            let square = rects.iter().find(|r| r.rect.size() == vec2(16.0, 16.0));
+            (square.expect("the 16 pt box").clone(), marks_of(shapes))
+        };
+        let (off, marks) = painted(false);
+        assert_eq!(off.corner_radius, egui::CornerRadius::same(4));
+        assert_eq!(off.stroke, egui::Stroke::new(1.0, plate::INK3));
+        assert_eq!(off.fill, Color32::TRANSPARENT);
+        assert!(!marks.contains(&plate::ON_FILL), "no tick at rest");
+        let (on, marks) = painted(true);
+        assert_eq!(on.corner_radius, egui::CornerRadius::same(4));
+        assert_eq!(on.fill, plate::BLUE);
+        assert!(marks.contains(&plate::ON_FILL), "the white tick");
+        // The box is a control's edge: 3.0 on either ground a latch stands on.
+        for ground in [plate::ISLAND, plate::DESK] {
+            assert!(plate::contrast(plate::INK3, ground) >= 3.0, "{:?}", ground.to_array());
+        }
+    }
+
+    /// Spec 2.8: in a disabled scope a painted control has no ground and every
+    /// mark and word is `INK` through `disabled_alpha`, never a dimmer ink.
+    #[test]
+    fn aulook_disabled_controls_ink_with_ink() {
+        use crate::icons::Icon;
+        let mut h = dressed(|ui| {
+            ui.add_enabled_ui(false, |ui| {
+                let (mut on, mut off, mut value) = (true, false, 0.5);
+                plate::detent(ui, true, "Armed");
+                plate::detent(ui, false, "Free");
+                plate::detent_dim(ui, false, "Dim");
+                plate::latch(ui, &mut on, "Latched");
+                plate::latch(ui, &mut off, "Free");
+                plate::tool_button(ui, true, Icon::Brush, "Armed", "");
+                plate::tool_button(ui, false, Icon::Brush, "Free", "");
+                plate::tool_latch(ui, &mut on, Icon::Lock, "Latched", "");
+                plate::tool_latch(ui, &mut off, Icon::Lock, "Free", "");
+                plate::icon_button(ui, Icon::Eraser, "Action", "");
+                plate::swatch(ui, plate::INK, true, "ink");
+                plate::rail(ui, &mut value, 0.0..=1.0, 80.0);
+                plate::meter(ui, Some(0.5), 80.0);
+                plate::danger(ui, "ERASE CEL");
+            });
+        });
+        h.set_size(vec2(400.0, 800.0));
+        h.run_steps(2);
+        let panel = h.ctx.global_style().visuals.panel_fill;
+        let shapes = &h.output().shapes;
+        let dimmed = plate::INK.gamma_multiply(plate::DISABLED_ALPHA);
+        let marks: Vec<Color32> = marks_of(shapes).into_iter().filter(|c| *c != panel).collect();
+        assert!(marks.len() >= 16, "read {} marks", marks.len());
+        for mark in marks {
+            assert_eq!(mark, dimmed, "{:?}", mark.to_array());
+        }
+        // A scope dims painted words in their glyphs, not in the job.
+        let texts = texts_of(shapes);
+        assert!(texts.len() >= 10, "read {} words", texts.len());
+        for (t, _) in texts {
+            let glyphs = t.galley.rows.iter().flat_map(|row| &row.row.visuals.mesh.vertices);
+            assert!(glyphs.clone().count() > 0, "{:?} has glyphs", t.galley.job.text);
+            for glyph in glyphs {
+                assert_eq!(glyph.color, dimmed, "{:?}", t.galley.job.text);
+            }
+        }
+    }
+
+    /// A disabled field keeps its well (spec 2.3, "disabled content in a
+    /// field"), and its edge is `INK` through the scope.
+    #[test]
+    fn aulook_a_disabled_field_keeps_its_well() {
+        let h = dressed(|ui| {
+            ui.add_enabled_ui(false, |ui| {
+                let mut value = 12;
+                plate::field(ui, egui::DragValue::new(&mut value));
+            });
+        });
+        let shapes = &h.output().shapes;
+        let rects = rects_of(shapes);
+        let edge = rects.iter().find(|r| r.stroke.width > 0.0).expect("the field's edge");
+        assert_eq!(edge.stroke.color, plate::INK.gamma_multiply(plate::DISABLED_ALPHA));
+        assert_eq!(edge.fill, plate::WELL.gamma_multiply(plate::DISABLED_ALPHA));
+    }
+
+    /// What `paint` returns, given focus, and the frame `plate::FocusRing`
+    /// leaves.
+    fn focused(mut paint: impl FnMut(&mut egui::Ui) -> egui::Response + 'static) -> (Rect, Vec<RectShape>) {
+        let seen = std::rc::Rc::new(std::cell::Cell::new(Rect::NOTHING));
+        let held = seen.clone();
+        let mut h = dressed(move |ui| {
+            ui.ctx().add_plugin(plate::FocusRing);
+            let r = paint(ui);
+            r.request_focus();
+            held.set(r.interact_rect);
+        });
+        h.run_steps(2);
+        (seen.get(), rects_of(&h.output().shapes))
+    }
+
+    /// Spec 2.8: a 2 pt blue ring, 2 pt off, on what took focus by the Tab
+    /// ring, whoever painted it; and none on a frame with nothing focused.
+    #[test]
+    fn aulook_focus_wears_the_ring() {
+        let held = |(at, rects): (Rect, Vec<RectShape>)| {
+            let ring = rects.iter().find(|r| r.stroke == egui::Stroke::new(2.0, plate::BLUE));
+            let ring = ring.unwrap_or_else(|| panic!("no ring in {rects:?}"));
+            assert_eq!(ring.rect, at.expand(2.0));
+            assert_eq!(ring.stroke_kind, egui::StrokeKind::Outside);
+            assert_eq!(ring.fill, Color32::TRANSPARENT);
+        };
+        held(focused(|ui| ui.button("Save")));
+        held(focused(|ui| {
+            let mut on = false;
+            plate::latch(ui, &mut on, "Snap")
+        }));
+        held(focused(|ui| plate::tool_button(ui, false, crate::icons::Icon::Brush, "Brush", "")));
+        held(focused(|ui| plate::swatch(ui, plate::RED, false, "red")));
+        held(focused(|ui| {
+            let mut words = String::from("Cut 12");
+            plate::text_field(ui, egui::TextEdit::singleline(&mut words))
+        }));
+        let h = dressed(|ui| {
+            ui.ctx().add_plugin(plate::FocusRing);
+            let _ = ui.button("Save");
+        });
+        let rects = rects_of(&h.output().shapes);
+        assert!(rects.iter().all(|r| r.stroke.width != 2.0), "nothing has focus: {rects:?}");
+    }
+
+    /// The boot installs the ring.
+    #[test]
+    fn aulook_the_boot_wears_the_ring() {
+        let mut h = blank_drawing();
+        let rings = |h: &EditorHarness| {
+            let rects = rects_of(&h.kit().output().shapes);
+            let round = egui::CornerRadius::same(plate::R_CONTROL + 4);
+            rects.iter().filter(|r| r.stroke == egui::Stroke::new(2.0, plate::BLUE) && r.corner_radius == round).count()
+        };
+        assert_eq!(rings(&h), 0, "nothing has focus");
+        h.perform(Action::CommandPalette);
+        settle(&mut h);
+        assert_eq!(rings(&h), 1, "the palette's field took focus");
+    }
+
+    #[test]
+    fn aulook_spacing_radii_and_shadows_are_the_table() {
+        use egui::epaint::Shadow;
+        let style = plate::style();
+        let s = &style.spacing;
+        assert_eq!(s.button_padding, vec2(10.0, 6.0));
+        assert_eq!(s.item_spacing, vec2(6.0, 4.0));
+        assert_eq!(s.window_margin, egui::Margin::same(12));
+        assert_eq!(s.menu_margin, egui::Margin::same(6));
+        assert_eq!(s.indent, 16.0);
+        assert_eq!(s.interact_size.y, 28.0);
+        let v = &style.visuals;
+        let radius = egui::CornerRadius::same;
+        assert_eq!(v.window_corner_radius, radius(12), "floats");
+        assert_eq!(v.menu_corner_radius, radius(10), "menus");
+        let w = &v.widgets;
+        for state in [&w.noninteractive, &w.inactive, &w.hovered, &w.active, &w.open] {
+            assert_eq!(state.corner_radius, radius(8), "controls");
+        }
+        assert_eq!(plate::dialog_frame(&style).corner_radius, radius(14), "dialogs");
+        assert_eq!(
+            [plate::R_DIALOG, plate::R_FLOAT, plate::R_MENU, plate::R_CONTROL, plate::R_INPUT, plate::R_SHEET],
+            [14, 12, 10, 8, 6, 4]
+        );
+        let shadow = |offset, blur, a| Shadow { offset, blur, spread: 0, color: plate::alpha(plate::SHADOW, a) };
+        assert_eq!(v.window_shadow, shadow([0, 6], 24, 41), "floats and the rail");
+        assert_eq!(v.popup_shadow, shadow([0, 4], 16, 46), "menus");
+        assert_eq!(plate::dialog_frame(&style).shadow, shadow([0, 12], 40, 71), "dialogs");
+        // The dock's pane margin stays what it was, or the sheet pays for it.
+        assert_eq!(plate::dock_style(&style).tab.tab_body.inner_margin, egui::Margin::same(6));
+    }
+
+    /// Spec 2.6: chips carry no stroke, on or off, and stand in a sheet's
+    /// corners: a stroke a chip costs vertices the performance gate counts.
+    #[test]
+    fn aulook_small_controls_carry_no_strokes() {
+        let mut h = EditorHarness::with_state(crate::sample::build_sample());
+        h.kit_mut().set_size(vec2(1600.0, 900.0));
+        h.editor_mut().enter_room(Stage::Drawing);
+        settle(&mut h);
+        let inside = |h: &EditorHarness, chip: Rect| -> Vec<RectShape> {
+            let rects = rects_of(&h.kit().output().shapes);
+            rects.into_iter().filter(|r| chip.contains_rect(r.rect) && r.rect.area() > 0.0).collect()
+        };
+        for name in ["hide column A", "lock column A"] {
+            let chip = h.rect(name);
+            let faces = inside(&h, chip);
+            assert!(!faces.is_empty(), "{name} paints a face");
+            for face in faces {
+                assert_eq!(face.stroke.width, 0.0, "{name}: {face:?}");
+                assert_eq!(face.fill, plate::WELL, "{name} at rest");
+                assert_eq!(face.corner_radius, egui::CornerRadius::same(plate::R_SHEET));
+            }
+        }
+        h.click("hide column A");
+        settle(&mut h);
+        let chip = h.rect("hide column A");
+        let lit = inside(&h, chip);
+        assert!(lit.iter().any(|r| r.fill == plate::RED_WASH), "lit takes the wash: {lit:?}");
+        assert!(lit.iter().all(|r| r.stroke.width == 0.0), "and still no stroke: {lit:?}");
+    }
+
+    /// Spec 2.5: a DANGER's words are sentence case on screen, and its stored
+    /// name, what a test and a screen reader find it by, stays.
+    #[test]
+    fn aulook_danger_words_are_sentence_case() {
+        use egui_kittest::kittest::Queryable;
+        let names = [
+            "ERASE CEL", "DELETE LAYER", "REMOVE DRAWING", "REMOVE TRACK", "REMOVE NODE", "DELETE PRESET",
+            "DELETE ROOM", "RESET SHORTCUTS", "REMOVE BANK", "OVERWRITE", "LIFT KEY", "REMOVE CHARACTER",
+            "Don't Save",
+        ];
+        for name in names {
+            let h = dressed(move |ui| {
+                plate::danger(ui, name);
+            });
+            let shapes = &h.output().shapes;
+            let words: Vec<String> = texts_of(shapes).iter().map(|(t, _)| t.galley.job.text.clone()).collect();
+            let want = plate::sentence(&name.to_lowercase());
+            assert_eq!(words, [want.clone()]);
+            assert!(!want[1..].contains(char::is_uppercase), "{want}");
+            assert!(h.query_by_label(name).is_some(), "{name} still answers to its name");
+        }
+    }
+
+    /// A character's dot stands out of the ground it sits on: a colour too
+    /// close to that ground takes a ring.
+    #[test]
+    fn aulook_identity_dot_keeps_an_edge() {
+        let dot = |colour: Color32| {
+            let h = dressed(move |ui| {
+                plate::identity_dot(ui.painter(), pos2(40.0, 40.0), 6.0, colour);
+            });
+            marks_of(&h.output().shapes).contains(&plate::INK3)
+        };
+        assert!(dot(plate::ISLAND), "the island's own colour needs its ring");
+        assert!(dot(plate::WELL), "as does the well's");
+        assert!(!dot(plate::RED), "a colour that stands out needs none");
     }
 }

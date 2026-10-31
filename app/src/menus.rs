@@ -127,6 +127,14 @@ pub fn gesture_rows(query: &str) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
+/// The rows `menu` stands at: one for an item, one for a submenu.
+fn menu_rows(menu: &str) -> usize {
+    let filed = Action::ALL.iter().filter_map(|a| a.menu()?.strip_prefix(menu)?.strip_prefix('/'));
+    let rows: std::collections::BTreeSet<&str> =
+        filed.map(|path| path.split('/').next().unwrap_or(path)).collect();
+    rows.len()
+}
+
 impl crate::Editor {
     /// One action as a menu item: the last segment of its menu path, its
     /// chord at the right, a one-line tooltip; greyed with the reason when
@@ -176,6 +184,7 @@ impl crate::Editor {
     /// three-part path ("Sheet/Key handles/flat") files the item in a
     /// submenu, opened where its first item sits.
     pub(crate) fn menu_items(&mut self, ui: &mut egui::Ui, menu: &str) {
+        plate::fit_menu(ui, menu_rows(menu));
         let mut subs: Vec<&str> = Vec::new();
         for a in Action::ALL {
             let Some(path) = a.menu() else { continue };
@@ -253,7 +262,7 @@ impl crate::Editor {
                 plate::surface(ui);
                 ui.horizontal(|ui| {
                     plate::legend(ui, "find");
-                    ui.text_edit_singleline(&mut help.sheet_query);
+                    plate::text_field(ui, egui::TextEdit::singleline(&mut help.sheet_query));
                 });
                 ui.separator();
                 let rows = sheet_rows(binds, &help.sheet_query);
@@ -276,7 +285,7 @@ impl crate::Editor {
                     let gestures = gesture_rows(&help.sheet_query);
                     if !gestures.is_empty() {
                         ui.add_space(4.0);
-                        plate::legend(ui, "canvas gestures");
+                        plate::legend(ui, crate::vocab::CANVAS_GESTURES);
                     }
                     for (gesture, what) in gestures {
                         ui.horizontal(|ui| {
@@ -346,7 +355,7 @@ impl crate::Editor {
                 plate::surface(ui);
                 // Latin, as the legends are (GM16: the embedded JP face is
                 // whole now, so 画版 would draw too).
-                plate::legend(ui, "Gaban Studio");
+                plate::legend(ui, crate::vocab::APP_NAME);
                 plate::value(ui, &format!("version {}", env!("CARGO_PKG_VERSION")));
                 ui.label(
                     "A node-graph 2D animation studio, layout to delivery: draw, time, paint, \

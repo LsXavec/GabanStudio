@@ -462,12 +462,12 @@ fn key_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         state.curves.value = Some(((pid, frame), key.value));
     }
     let mut v = state.curves.value.map_or(key.value, |(_, v)| v);
-    let resp = ui
-        .add_enabled(
-            gesture_safe,
-            egui::DragValue::new(&mut v).speed(0.05).update_while_editing(false),
-        )
-        .on_hover_text("this key's value: drag it, or click and type — one undo step when you let go");
+    let resp = plate::field_if(
+        ui,
+        gesture_safe,
+        egui::DragValue::new(&mut v).speed(0.05).update_while_editing(false),
+    )
+    .on_hover_text("this key's value: drag it, or click and type — one undo step when you let go");
     state.curves.value_field = Some(resp.rect);
     state.curves.value = Some(((pid, frame), v));
     state.curves.value_editing = resp.has_focus() || resp.dragged();

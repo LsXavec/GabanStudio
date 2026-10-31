@@ -9,10 +9,14 @@ use std::time::Duration;
 
 use eframe::egui;
 
+use crate::config::{Action, SettingsCategory};
 use crate::measure::room_tag;
+use crate::newproject::NewProjectForm;
+use crate::plate;
 use crate::testkit::EditorHarness;
 use crate::viewer::GraphView;
 use crate::workspace::Stage;
+use crate::worksafe::{Autosave, Recovery, RunningRecord, recovery_ui};
 use crate::{PROBE_ROOMS, ProbeRoom};
 
 /// The sizes every room is shot at, and what each adds to the file name.
@@ -87,6 +91,139 @@ fn walk(h: &mut EditorHarness, dir: &Path, size: egui::Vec2, suffix: &str) {
     }
 }
 
+/// The menus, by what opens them.
+const MENUS: [&str; 9] = ["file", "edit", "view", "sheet", "cut", "project", "room", "window", "help"];
+
+/// The states off the rooms' own floors, by file name.
+const STATES: [&str; 8] = [
+    "palette",
+    "f1-sheet",
+    "save-prompt",
+    "recovery",
+    "settings-general",
+    "settings-ui",
+    "settings-session",
+    "new-cut",
+];
+
+fn state_name(state: &str, suffix: &str) -> String {
+    format!("state-{state}{suffix}.png")
+}
+
+/// Every picture of a state a run owes, kept apart from the rooms' sixteen.
+fn states_owed() -> Vec<(String, u32, u32)> {
+    let menus = MENUS.map(|menu| format!("menu-{menu}"));
+    let states = menus.iter().map(String::as_str).chain(STATES);
+    let owed = SIZES.iter().flat_map(|(w, h, suffix)| {
+        states.clone().map(move |state| (state_name(state, suffix), *w, *h))
+    });
+    owed.collect()
+}
+
+/// The App's settings window on a page of its own: the App holds it, and no
+/// harness holds the App. A default `Config` carries no secret.
+fn settings(page: SettingsCategory) -> Box<dyn FnMut(&mut egui::Ui)> {
+    let mut config = crate::config::Config::default();
+    let (mut open, mut category, mut capturing) = (true, page, None);
+    let (mut session_action, mut layout_act, mut join_room) = (None, None, None);
+    let (mut check_now, mut show_autosaves, mut layout_name) = (false, false, String::new());
+    Box::new(move |ui| {
+        crate::config::settings_window(
+            ui.ctx(),
+            &mut open,
+            &mut config,
+            &mut capturing,
+            &mut category,
+            "winit",
+            None,
+            &mut session_action,
+            "",
+            false,
+            false,
+            &[],
+            "",
+            &mut check_now,
+            &[],
+            &mut join_room,
+            &[],
+            false,
+            &mut layout_name,
+            &mut layout_act,
+            None,
+            &mut show_autosaves,
+            None,
+        );
+    })
+}
+
+/// The recovery offer in its modal: the App's too.
+fn recovery() -> Box<dyn FnMut(&mut egui::Ui)> {
+    let now = 1_000_000;
+    let record = RunningRecord { pid: 7, open: Some("Cut 12.animproj".into()), autosave: None, started: 1 };
+    let autosaves = vec![Autosave { path: "a.animproj".into(), at: now - 30 }];
+    let mut offer = Recovery { record_path: "running-7-1.json".into(), record, autosaves, selected: 0 };
+    Box::new(move |ui| {
+        let frame = plate::dialog_frame(&ui.ctx().global_style());
+        egui::Modal::new(egui::Id::new("uishot_recovery"))
+            .frame(frame)
+            .show(ui.ctx(), |ui| recovery_ui(ui, &mut offer, now, 0));
+    })
+}
+
+/// The new-cut form, as an open editor shows it.
+fn new_cut() -> Box<dyn FnMut(&mut egui::Ui)> {
+    let mut form = NewProjectForm::default();
+    Box::new(move |ui| {
+        egui::Window::new("New Project")
+            .frame(plate::dialog_frame(ui.style()))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                crate::newproject::form_ui(ui, &mut form, true);
+            });
+    })
+}
+
+fn states(h: &mut EditorHarness, dir: &Path, size: egui::Vec2, suffix: &str) {
+    h.kit_mut().set_size(size);
+    h.editor_mut().enter_room(Stage::Drawing);
+    arrive(h, ProbeRoom::Stage(Stage::Drawing));
+    for menu in MENUS {
+        h.click(menu);
+        h.run_frames(4);
+        assert!(egui::Popup::is_any_open(&h.ctx()), "the {menu} shot shows {menu} open");
+        h.shot(size, &dir.join(state_name(&format!("menu-{menu}"), suffix)));
+        // Not a second click: a long menu can stand over its own label.
+        h.key(egui::Key::Escape);
+        h.run_frames(4);
+        assert!(!egui::Popup::is_any_open(&h.ctx()), "{menu} closed before the next shot");
+    }
+    for (state, toggle) in [("palette", Action::CommandPalette), ("f1-sheet", Action::ShortcutSheet)] {
+        h.perform(toggle);
+        h.run_frames(4);
+        h.shot(size, &dir.join(state_name(state, suffix)));
+        h.perform(toggle);
+    }
+    h.editor_mut().leave = Some(crate::Leave::Open);
+    h.run_frames(4);
+    h.shot(size, &dir.join(state_name("save-prompt", suffix)));
+    h.editor_mut().leave = None;
+    let seeded = [
+        ("recovery", recovery()),
+        ("settings-general", settings(SettingsCategory::General)),
+        ("settings-ui", settings(SettingsCategory::UiFeatures)),
+        ("settings-session", settings(SettingsCategory::Session)),
+        ("new-cut", new_cut()),
+    ];
+    for (state, seed) in seeded {
+        h.rig_mut().seed = Some(seed);
+        h.run_frames(4);
+        h.shot(size, &dir.join(state_name(state, suffix)));
+    }
+    h.rig_mut().seed = None;
+}
+
 #[test]
 #[ignore = "needs a GPU adapter and UISHOT_DIR; writes PNGs"]
 fn uishot_rooms() {
@@ -94,9 +231,21 @@ fn uishot_rooms() {
     let mut h = EditorHarness::with_gpu(crate::sample::build_sample());
     h.run_frames(4);
     for (w, height, suffix) in SIZES {
-        walk(&mut h, &dir, egui::vec2(w as f32, height as f32), suffix);
+        let size = egui::vec2(w as f32, height as f32);
+        walk(&mut h, &dir, size, suffix);
+        states(&mut h, &dir, size, suffix);
     }
     check_shots(&dir, &shots_owed()).expect("the shots the spec lists");
+    check_shots(&dir, &states_owed()).expect("the states the look reaches");
+}
+
+#[test]
+fn aulook_shots_owe_every_state_at_both_sizes() {
+    let owed = states_owed();
+    assert_eq!(owed.len(), 2 * (MENUS.len() + STATES.len()));
+    let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
+    assert!(owed.iter().all(|o| o.0.starts_with("state-")), "the rooms' names stay the rooms'");
 }
 
 #[test]

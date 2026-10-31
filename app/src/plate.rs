@@ -88,8 +88,6 @@ pub const PENCIL_AO: Color32 = Color32::from_rgb(83, 137, 196);
 pub const PENCIL_AKA: Color32 = Color32::from_rgb(228, 82, 47);
 /// The grey the ghost AHEAD is tinted from.
 pub const PENCIL_LEGEND: Color32 = Color32::from_rgb(139, 141, 131);
-/// The pale ink a colour-less brush specimen shows in.
-pub const PENCIL_STRUCK: Color32 = Color32::from_rgb(228, 225, 214);
 
 // `LayerProps.chip` is stored in the document, and a stored chip is matched
 // to its ring by value, so these are frozen: a token moving must not change
@@ -272,17 +270,32 @@ pub const ROW_H: f32 = 18.0;
 pub const GUTTER_W: f32 = 44.0;
 pub const SLATE_H: f32 = 42.0;
 pub const FOOT_H: f32 = 34.0;
-pub const OPTIONS_H: f32 = 26.0;
-pub const RULE_STRIP_W: f32 = 14.0;
-pub const LIGHTBOX_W: f32 = 96.0;
 /// Every button, toggle, detent in a panel.
 pub const CTRL_H: f32 = 28.0;
+/// The canvas deck's options row: its tallest control, because a stock
+/// button stands a point over `CTRL_H` on `button_padding` (the Body row is
+/// 17). The canvas takes what is left below this, so no tool may outgrow it.
+pub const OPTIONS_H: f32 = CTRL_H + 2.0;
+pub const RULE_STRIP_W: f32 = 14.0;
+pub const LIGHTBOX_W: f32 = 96.0;
 /// The words a hand-painted control carries: the Panel role.
 const CTRL_TEXT: f32 = Role::Panel.size();
 /// The icon in a hand-painted control, on the size the masks are cut at.
 const ICON: f32 = 16.0;
 /// A detent's ring takes this much of the control's left.
 const DETENT_W: f32 = 22.0;
+/// The gap between the sheet head's rows, down from `item_spacing`: the
+/// sheet's density is the one panel density that does not change.
+pub const SHEET_GAP: f32 = 2.0;
+/// From a text field's edge to its words.
+const FIELD_INSET: i8 = 6;
+/// A latch's checkbox.
+const LATCH_BOX: f32 = 16.0;
+/// From a latch's left to its words.
+const LATCH_TEXT_X: f32 = LATCH_BOX + 6.0;
+/// A docked pane's inner margin. `window_margin` is a float's; a pane keeps
+/// the room it always had, because the sheet's rows live in it.
+const PANE_MARGIN: i8 = 6;
 
 // The radii (spec 2.6). Paper is square; a stadium takes half its height.
 pub const R_DIALOG: u8 = 14;
@@ -325,7 +338,7 @@ pub fn mono_semibold() -> FontFamily {
     FontFamily::Name("plex-mono-semibold".into())
 }
 
-/// Plex Mono: file patterns only, at 12 ([`mono_font`]).
+/// Plex Mono: file patterns only, at 12 ([`mono_font`], [`pattern_field`]).
 pub fn mono() -> FontFamily {
     FontFamily::Name("mono".into())
 }
@@ -508,11 +521,22 @@ pub fn float_ground(ui: &Ui, rect: egui::Rect) {
     painter.rect_filled(rect, R_FLOAT, ISLAND);
 }
 
-/// A layer's identity dot. The paper white takes an `INK3` ring, because
-/// paper and island are close.
+/// How far apart two opaque colours read: WCAG's ratio, 1 to 21.
+pub fn contrast(a: Color32, b: Color32) -> f32 {
+    let lum = |c: Color32| {
+        let l = egui::Rgba::from(c);
+        0.2126 * l.r() + 0.7152 * l.g() + 0.0722 * l.b()
+    };
+    let (a, b) = (lum(a), lum(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+/// A layer's identity dot, shown on an island or in a field. One too close
+/// to either ground takes an `INK3` ring: stored chips stay what they are, so
+/// the dot is what has to stay findable.
 pub fn identity_dot(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32) {
     painter.circle_filled(center, radius, color);
-    if color == PAPER || color.to_array() == CHIP_PAPER {
+    if [ISLAND, WELL].iter().any(|ground| contrast(color, *ground) < 1.5) {
         painter.circle_stroke(center, radius, Stroke::new(1.0, INK3));
     }
 }
@@ -529,16 +553,51 @@ pub fn note_mark(painter: &egui::Painter, center: Pos2, ink: Color32) {
 /// A word over the picture, on an island of its own: no ink holds on every
 /// painted ground. Returns the word's rect.
 pub fn picture_tag(painter: &egui::Painter, at: Pos2, word: &str) -> egui::Rect {
-    let galley = painter.layout_no_wrap(word.to_owned(), Role::Small.font(), AO);
+    let galley = painter.layout_no_wrap(word.to_owned(), Role::Small.font(), INK2);
     let rect = egui::Rect::from_min_size(at, galley.size());
     painter.rect_filled(rect.expand2(Vec2::new(6.0, 2.0)), R_CONTROL, ISLAND);
-    painter.galley(at, galley, AO);
+    painter.galley(at, galley, INK2);
     rect
+}
+
+/// [`picture_tag`] centred on `at`, in panel type: a note the hand reads
+/// while it works.
+pub fn picture_note(painter: &egui::Painter, at: Pos2, word: &str) -> egui::Rect {
+    let galley = painter.layout_no_wrap(word.to_owned(), Role::Panel.font(), INK2);
+    let rect = egui::Align2::CENTER_CENTER.anchor_size(at, galley.size());
+    painter.rect_filled(rect.expand2(Vec2::new(8.0, 3.0)), R_CONTROL, ISLAND);
+    painter.galley(rect.min, galley, INK2);
+    rect
+}
+
+/// A row of exactly `size`, whatever goes in it. Its contents can neither
+/// push what sits under it nor paint out of it: `allocate_ui_with_layout`
+/// takes the height of what it holds, so a row that shares its space with a
+/// canvas moves the canvas by whatever was armed.
+pub fn fixed_row<R>(ui: &mut Ui, size: Vec2, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let layout = egui::Layout::left_to_right(egui::Align::Center);
+    let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(layout));
+    row.shrink_clip_rect(rect);
+    add(&mut row)
+}
+
+/// Menus do not scroll, so a row off the window is a row out of reach. A menu
+/// of `rows` too long for the window at a panel's height stands at a sheet
+/// row's, a point of gap under what every menu stood at before the new look.
+pub fn fit_menu(ui: &mut Ui, rows: usize) {
+    let spacing = ui.spacing();
+    let tall = rows as f32 * (CTRL_H + spacing.item_spacing.y) + spacing.menu_margin.sum().y;
+    if tall > ui.ctx().content_rect().height() {
+        ui.spacing_mut().interact_size.y = ROW_H;
+        ui.spacing_mut().item_spacing.y = SHEET_GAP;
+    }
 }
 
 /// The dock in the look: tab bars on the desk, the current tab on its island.
 pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     let mut dock = egui_dock::Style::from_egui(style);
+    dock.tab.tab_body.inner_margin = egui::Margin::same(PANE_MARGIN);
     dock.tab_bar.bg_fill = DESK;
     dock.tab_bar.hline_color = RULE;
     let quiet = [&mut dock.tab.inactive, &mut dock.tab.inactive_with_kb_focus, &mut dock.tab.hovered];
@@ -633,11 +692,77 @@ fn at_rest(ui: &Ui, rest: Color32) -> Color32 {
     if ui.is_enabled() { rest } else { INK }
 }
 
+/// A painted control's ground: `fill`, or none inside a disabled scope.
+fn ground_of(ui: &Ui, fill: Color32) -> Color32 {
+    if ui.is_enabled() { fill } else { Color32::TRANSPARENT }
+}
+
 // ---------------------------------------------------------------------------
 // Affordances (spec 2.8). Fills and inks by state; small controls carry no
 // strokes, because a stroke per chip costs vertices the performance gate
 // counts. Nothing else in the app may present a control.
 // ---------------------------------------------------------------------------
+
+/// The ring's weight, and how far it stands off the control.
+const FOCUS_RING: f32 = 2.0;
+
+/// Keyboard focus, on whatever holds it. egui lends a focused widget its
+/// pressed look and paints nothing around a hand-painted one, so the ring
+/// (spec 2.8) goes round the focused widget once per pass, from here: no
+/// control can forget it. `dress` installs this. A field's own edge keeps
+/// `selection.stroke` (spec 2.9); the ring stands outside it.
+pub struct FocusRing;
+
+impl egui::Plugin for FocusRing {
+    fn debug_name(&self) -> &'static str {
+        "plate::FocusRing"
+    }
+
+    fn on_end_pass(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let Some(id) = ctx.memory(|m| m.focused()) else {
+            return;
+        };
+        // The rect, not `read_response`: that replays the widget's response,
+        // and a click elsewhere this pass surrenders focus just given to it.
+        let Some(widget) = ctx.viewport(|v| v.this_pass.widgets.get(id).copied()) else {
+            return;
+        };
+        // What the clip leaves of it: a focused widget may be scrolled away,
+        // or laid out off screen to keep its keys.
+        if !widget.interact_rect.is_positive() {
+            return;
+        }
+        let radius = R_CONTROL + (2.0 * FOCUS_RING) as u8;
+        ctx.layer_painter(widget.layer_id).rect_stroke(
+            widget.interact_rect.expand(FOCUS_RING),
+            radius,
+            Stroke::new(FOCUS_RING, BLUE),
+            StrokeKind::Outside,
+        );
+    }
+}
+
+/// A small painted toggle's face (the sheet's column and track chips): no
+/// edge, the `WELL` ground, and a wash with its own ink while on. `on` is
+/// that wash and ink; `None` is a chip with no on state, or one that is off.
+pub fn chip_face(
+    ui: &Ui,
+    r: egui::Rect,
+    resp: &Response,
+    words: &str,
+    on: Option<(Color32, Color32)>,
+) {
+    let (fill, ink) = match on {
+        Some(lit) => lit,
+        None if resp.hovered() => (HOVER, INK),
+        None => (WELL, INK2),
+    };
+    let p = ui.painter();
+    p.rect_filled(r.shrink(1.0), R_SHEET, ground_of(ui, fill));
+    let font = FontId::new(10.0, FontFamily::Proportional);
+    p.text(r.center(), egui::Align2::CENTER_CENTER, words, font, at_rest(ui, ink));
+}
 
 /// DETENT — a radio position. An `INK3` ring; a filled blue disc when this
 /// position is armed. Mutually exclusive with its neighbours; clicking an
@@ -666,9 +791,9 @@ fn detent_inked(ui: &mut Ui, armed: bool, label: &str, dim: bool) -> Response {
             snap(rect.left() + DETENT_W * 0.5, ppp),
             snap(rect.center().y, ppp),
         );
-        p.circle_stroke(c, 6.0, Stroke::new(1.0, INK3));
+        p.circle_stroke(c, 6.0, Stroke::new(1.0, at_rest(ui, INK3)));
         if armed {
-            p.circle_filled(c, 3.5, TALLY);
+            p.circle_filled(c, 3.5, at_rest(ui, TALLY));
         }
         let rest = at_rest(ui, if dim { INK3 } else { INK2 });
         let ink = if armed || resp.hovered() { STRUCK } else { rest };
@@ -685,12 +810,17 @@ fn detent_inked(ui: &mut Ui, armed: bool, label: &str, dim: bool) -> Response {
     describe(resp, "DETENT detent", label)
 }
 
-/// LATCH — an independent on/off. A filled blue bar seats into the control's
-/// left edge while latched. Clicking toggles.
+/// The width a [`latch`] takes, for a row that places latches by hand.
+pub fn latch_width(ui: &Ui, label: &str) -> f32 {
+    LATCH_TEXT_X + text_width(ui, label, CTRL_TEXT) + 8.0
+}
+
+/// LATCH — an independent on/off, drawn as the checkbox it is: a 16 pt box
+/// with an `INK3` edge, blue with a white tick while latched. Clicking
+/// toggles.
 pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
-    let text_w = text_width(ui, label, CTRL_TEXT);
     let (rect, mut resp) =
-        ui.allocate_exact_size(Vec2::new(6.0 + 6.0 + text_w + 8.0, CTRL_H), Sense::click());
+        ui.allocate_exact_size(Vec2::new(latch_width(ui, label), CTRL_H), Sense::click());
     if resp.clicked() {
         *on = !*on;
         // Callers gate saves on .changed(), as they do for checkboxes.
@@ -699,33 +829,36 @@ pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let ppp = ui.ctx().pixels_per_point();
-        let bar = egui::Rect::from_min_max(
-            Pos2::new(snap(rect.left(), ppp), snap(rect.top() + 5.0, ppp)),
-            Pos2::new(snap(rect.left() + 4.0, ppp), snap(rect.bottom() - 5.0, ppp)),
+        let tick_box = egui::Rect::from_min_size(
+            Pos2::new(snap(rect.left(), ppp), snap(rect.center().y - LATCH_BOX * 0.5, ppp)),
+            Vec2::splat(LATCH_BOX),
         );
-        if *on {
-            p.rect_filled(bar, CornerRadius::same(2), TALLY);
+        let solid = *on && ui.is_enabled();
+        if solid {
+            p.rect_filled(tick_box, R_SHEET, TALLY);
         } else {
-            p.rect_stroke(
-                bar,
-                CornerRadius::same(2),
-                Stroke::new(1.0, INK3),
-                StrokeKind::Inside,
-            );
+            let edge = if resp.hovered() { LEGEND } else { at_rest(ui, INK3) };
+            p.rect_stroke(tick_box, R_SHEET, Stroke::new(1.0, edge), StrokeKind::Inside);
+        }
+        if *on {
+            let at = |x: f32, y: f32| tick_box.min + Vec2::new(x, y);
+            let tick = vec![at(3.5, 8.0), at(6.5, 11.0), at(12.5, 5.0)];
+            p.add(Shape::line(tick, Stroke::new(2.0, if solid { ON_FILL } else { INK })));
         }
         let ink = if *on || resp.hovered() {
             STRUCK
         } else {
             at_rest(ui, LEGEND)
         };
-        label_at(ui, rect.left() + 12.0, rect.center().y, label, CTRL_TEXT, ink);
+        label_at(ui, rect.left() + LATCH_TEXT_X, rect.center().y, label, CTRL_TEXT, ink);
     }
     speak(&resp, egui::WidgetType::Checkbox, Some(*on), label);
     describe(resp, "LATCH latch", label)
 }
 
 /// A filled control's ground and content by state: `WELL` at rest, `HOVER`
-/// under the hand, `PRESSED` held. The icon rests in `INK2`.
+/// under the hand, `PRESSED` held. The icon rests in `INK2`. Nothing filled
+/// here reads a disabled scope; the painter dims it.
 pub fn filled(resp: &Response) -> (Color32, Color32) {
     if resp.is_pointer_button_down_on() {
         (PRESSED, INK)
@@ -760,10 +893,10 @@ pub fn tool_button(
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let (ground, rest) = filled(&resp);
-        let (fill, ink, words) = if armed {
+        let (fill, ink, words) = if armed && ui.is_enabled() {
             (TALLY, ON_FILL, ON_FILL)
         } else {
-            (ground, at_rest(ui, rest), STRUCK)
+            (ground_of(ui, ground), at_rest(ui, rest), STRUCK)
         };
         p.rect_filled(rect, R_CONTROL, fill);
         let icon_rect = egui::Rect::from_center_size(
@@ -813,10 +946,10 @@ pub fn tool_latch(
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let (ground, rest) = filled(&resp);
-        let (fill, ink, words) = if *on {
+        let (fill, ink, words) = if *on && ui.is_enabled() {
             (BLUE_WASH, BLUE_DEEP, BLUE_DEEP)
         } else {
-            (ground, at_rest(ui, rest), STRUCK)
+            (ground_of(ui, ground), at_rest(ui, rest), STRUCK)
         };
         p.rect_filled(rect, R_CONTROL, fill);
         let icon_rect = egui::Rect::from_center_size(
@@ -904,14 +1037,14 @@ pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response 
         p.rect_stroke(
             well,
             R_SHEET,
-            Stroke::new(1.0, INK3),
+            Stroke::new(1.0, at_rest(ui, INK3)),
             StrokeKind::Outside,
         );
         if armed {
             p.rect_stroke(
                 well.expand(3.0),
                 R_INPUT,
-                Stroke::new(2.0, TALLY),
+                Stroke::new(2.0, at_rest(ui, TALLY)),
                 StrokeKind::Outside,
             );
         } else if resp.hovered() {
@@ -958,17 +1091,17 @@ pub fn rail(
             Pos2::new(snap(rect.left(), ppp), snap(rect.center().y - 4.0, ppp)),
             Pos2::new(snap(rect.right(), ppp), snap(rect.center().y + 4.0, ppp)),
         );
-        p.rect_filled(track, 4, WELL);
+        p.rect_filled(track, 4, ground_of(ui, WELL));
         let t = ((*value - lo) / span).clamp(0.0, 1.0);
         if t > 0.0 {
             let mut fill = track;
             fill.max.x = snap(track.left() + track.width() * t, ppp);
-            p.rect_filled(fill.shrink(1.0), 3, TALLY);
+            p.rect_filled(fill.shrink(1.0), 3, at_rest(ui, TALLY));
         }
         p.rect_stroke(
             track,
             4,
-            Stroke::new(1.0, if resp.hovered() { LEGEND } else { INK3 }),
+            Stroke::new(1.0, if resp.hovered() { LEGEND } else { at_rest(ui, INK3) }),
             StrokeKind::Inside,
         );
         // The handle: an ink bar the eye can find at any fill level.
@@ -985,15 +1118,17 @@ pub fn rail(
     resp
 }
 
-/// FIELD — a value the animator sets and reads: anything that edits one
-/// (a `DragValue`, a `TextEdit`) keeps its behaviour and takes the field's
-/// `WELL` and its `INK3` edge, with the corners of an input. The FACE comes
-/// from `drag_value_text_style`.
+/// FIELD — a value the animator sets and reads: a `DragValue` keeps its
+/// behaviour and takes the field's `WELL` and its `INK3` edge, with the
+/// corners of an input. The FACE comes from `drag_value_text_style`. Words go
+/// through [`text_field`], which also makes the height. The edge lives here
+/// and not on `widgets.inactive`, which would stroke every button.
 pub fn field(ui: &mut Ui, widget: impl egui::Widget) -> Response {
+    let edge = Stroke::new(1.0, at_rest(ui, INK3));
     let saved = ui.visuals().widgets.clone();
     let w = &mut ui.visuals_mut().widgets;
     for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
-        state.bg_stroke = Stroke::new(1.0, INK3);
+        state.bg_stroke = edge;
         state.corner_radius = CornerRadius::same(R_INPUT);
     }
     w.inactive.weak_bg_fill = WELL;
@@ -1002,6 +1137,37 @@ pub fn field(ui: &mut Ui, widget: impl egui::Widget) -> Response {
     let r = ui.add(widget);
     ui.visuals_mut().widgets = saved;
     r
+}
+
+/// [`field`] that takes no input while `enabled` is false.
+pub fn field_if(ui: &mut Ui, enabled: bool, widget: impl egui::Widget) -> Response {
+    ui.add_enabled_ui(enabled, |ui| field(ui, widget)).inner
+}
+
+/// FIELD for words: a `TextEdit` at its row's control height (the panel's 28,
+/// or the sheet head's row), text centred. egui takes a `TextEdit`'s height
+/// from its font and margin (`min_size` is width only), so the margin is what
+/// makes it.
+pub fn text_field(ui: &mut Ui, edit: egui::TextEdit<'_>) -> Response {
+    fitted_field(ui, edit, Role::Panel.font())
+}
+
+/// [`text_field`] for a file pattern, in the one face that lines its `####`
+/// up (spec 2.5).
+pub fn pattern_field(ui: &mut Ui, edit: egui::TextEdit<'_>) -> Response {
+    fitted_field(ui, edit, mono_font())
+}
+
+fn fitted_field(ui: &mut Ui, edit: egui::TextEdit<'_>, font: FontId) -> Response {
+    let height = ui.spacing().interact_size.y;
+    let spare = (height - ui.fonts_mut(|f| f.row_height(&font))).max(0.0);
+    let margin = egui::Margin {
+        left: FIELD_INSET,
+        right: FIELD_INSET,
+        top: (spare * 0.5).ceil() as i8,
+        bottom: (spare * 0.5).floor() as i8,
+    };
+    field(ui, edit.font(font).margin(margin))
 }
 
 /// METER — a read-only fill (export progress, and anything else that
@@ -1021,14 +1187,14 @@ pub fn meter(ui: &mut Ui, frac: Option<f32>, w: f32) {
         Pos2::new(snap(rect.left(), ppp), snap(rect.center().y - 5.0, ppp)),
         Pos2::new(snap(rect.right(), ppp), snap(rect.center().y + 5.0, ppp)),
     );
-    p.rect_filled(track, 5, WELL);
+    p.rect_filled(track, 5, ground_of(ui, WELL));
     match frac {
         Some(f) => {
             let t = f.clamp(0.0, 1.0);
             if t > 0.0 {
                 let mut fill = track;
                 fill.max.x = snap(track.left() + track.width() * t, ppp);
-                p.rect_filled(fill.shrink(1.0), 4, TALLY);
+                p.rect_filled(fill.shrink(1.0), 4, at_rest(ui, TALLY));
             }
         }
         None => {
@@ -1042,12 +1208,12 @@ pub fn meter(ui: &mut Ui, frac: Option<f32>, w: f32) {
                 Pos2::new((x + bw).min(track.right()), track.bottom() - 1.0),
             );
             if band.width() > 0.0 {
-                p.rect_filled(band, 4, TALLY);
+                p.rect_filled(band, 4, at_rest(ui, TALLY));
             }
             ui.ctx().request_repaint();
         }
     }
-    p.rect_stroke(track, 5, Stroke::new(1.0, INK3), StrokeKind::Inside);
+    p.rect_stroke(track, 5, Stroke::new(1.0, at_rest(ui, INK3)), StrokeKind::Inside);
 }
 
 /// How long DANGER must be held before it fires.
@@ -1063,8 +1229,10 @@ pub fn danger(ui: &mut Ui, label: &str) -> bool {
 
 /// DANGER with what it destroys said in plain words on hover. Every DANGER
 /// says "hold" there: a first-time hand clicks, and a click does nothing.
+/// The words paint in sentence case; `label` stays the control's spoken name.
 pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
-    let text_w = text_width(ui, label, CTRL_TEXT);
+    let words = sentence(&label.to_lowercase());
+    let text_w = text_width(ui, &words, CTRL_TEXT);
     let (rect, resp) = ui.allocate_exact_size(
         Vec2::new(8.0 + text_w + 6.0 + CTRL_H, CTRL_H),
         Sense::click_and_drag(),
@@ -1109,13 +1277,14 @@ pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
             p.rect_filled(rect, R_CONTROL, RED);
             ON_FILL
         } else {
+            let rest = at_rest(ui, RED);
             if resp.hovered() {
                 p.rect_filled(rect, R_CONTROL, RED_WASH);
             }
-            p.rect_stroke(rect, R_CONTROL, Stroke::new(1.0, RED), StrokeKind::Inside);
-            RED
+            p.rect_stroke(rect, R_CONTROL, Stroke::new(1.0, rest), StrokeKind::Inside);
+            rest
         };
-        label_at(ui, rect.left() + 8.0, rect.center().y, label, CTRL_TEXT, ink);
+        label_at(ui, rect.left() + 8.0, rect.center().y, &words, CTRL_TEXT, ink);
         // The filling ring, seated in the square right slot.
         let c = Pos2::new(rect.right() - CTRL_H * 0.5, rect.center().y);
         if progress > 0.0 {
@@ -1364,7 +1533,7 @@ mod tests {
 
     #[test]
     fn aulook_tokens_are_the_table() {
-        let table: [(Color32, [u8; 3]); 18] = [
+        let table: [(Color32, [u8; 3]); 19] = [
             (DESK, [0xD3, 0xD5, 0xD8]),
             (ISLAND, [0xF6, 0xF7, 0xF8]),
             (WELL, [0xE8, 0xEA, 0xED]),
@@ -1383,6 +1552,7 @@ mod tests {
             (STEEL, [0x2A, 0x2E, 0x34]),
             (STEEL_INK, [0xE6, 0xE8, 0xEB]),
             (RESULT, [0x80, 0x80, 0x80]),
+            (SHADOW, [0x14, 0x18, 0x1F]),
         ];
         for (token, [r, g, b]) in table {
             assert_eq!(token.to_array(), [r, g, b, 255]);

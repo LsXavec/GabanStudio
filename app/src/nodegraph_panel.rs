@@ -371,7 +371,8 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_width(260.0);
                 crate::plate::legend(ui, "add node");
-                let field = ui.add(
+                let field = crate::plate::text_field(
+                    ui,
                     egui::TextEdit::singleline(&mut menu.query)
                         .hint_text("type a node — name, category or alias")
                         .desired_width(f32::INFINITY),
@@ -483,16 +484,16 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
 
 fn kind_color(kind: &NodeKind) -> Color32 {
     match kind {
-        NodeKind::DrawingSource { .. } => crate::plate::BLUE,
+        NodeKind::DrawingSource { .. } => crate::plate::LEGEND,
         NodeKind::Solid { .. } => crate::plate::LEGEND,
         NodeKind::ImageSource { .. } => crate::plate::STRUCK,
         // AUDIT [28]: these two hues are in no ratified palette. Node
-        // identity comes from tokens now — Legend for an operation, blue
-        // for the one that composites (continuity), as elsewhere.
-        NodeKind::Transform { .. } | NodeKind::Effect { .. } | NodeKind::Camera { .. } => {
-            crate::plate::LEGEND
-        }
-        NodeKind::Blend { .. } => crate::plate::BLUE,
+        // identity comes from tokens now — Legend for an operation. Blue is
+        // the selected node's and the output's, and no kind's (spec 2.2).
+        NodeKind::Transform { .. }
+        | NodeKind::Effect { .. }
+        | NodeKind::Camera { .. }
+        | NodeKind::Blend { .. } => crate::plate::LEGEND,
         // GM16: a generator makes the cut's own picture, as an image does;
         // GM17: so do a 3D model and another app's frames.
         NodeKind::Generator { .. } | NodeKind::Model3D { .. } | NodeKind::ImageSequence { .. } => {
@@ -915,10 +916,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                     changed = true;
                 }
                 let mut a = rgba[3];
-                if ui
-                    .add(egui::DragValue::new(&mut a).range(0..=255).prefix("a "))
-                    .changed()
-                {
+                if crate::plate::field(ui, egui::DragValue::new(&mut a).range(0..=255).prefix("a ")).changed() {
                     rgba[3] = a;
                     changed = true;
                 }
@@ -932,33 +930,33 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 // Static values edit only while UNBOUND — a bound param is
                 // driven by its X-sheet column (shown disabled, not hidden:
                 // UI-STABILITY law).
-                changed |= ui
-                    .add_enabled(
-                        binds.tx.is_none(),
-                        egui::DragValue::new(&mut translate.0).prefix("x "),
-                    )
-                    .changed();
-                changed |= ui
-                    .add_enabled(
-                        binds.ty.is_none(),
-                        egui::DragValue::new(&mut translate.1).prefix("y "),
-                    )
-                    .changed();
-                changed |= ui
-                    .add_enabled(
-                        binds.scale.is_none(),
-                        egui::DragValue::new(scale)
-                            .range(0.01..=20.0)
-                            .speed(0.01)
-                            .prefix("s "),
-                    )
-                    .changed();
-                changed |= ui
-                    .add_enabled(
-                        binds.rotate.is_none(),
-                        egui::DragValue::new(rotate_deg).suffix("°"),
-                    )
-                    .changed();
+                changed |= crate::plate::field_if(
+                    ui,
+                    binds.tx.is_none(),
+                    egui::DragValue::new(&mut translate.0).prefix("x "),
+                )
+                .changed();
+                changed |= crate::plate::field_if(
+                    ui,
+                    binds.ty.is_none(),
+                    egui::DragValue::new(&mut translate.1).prefix("y "),
+                )
+                .changed();
+                changed |= crate::plate::field_if(
+                    ui,
+                    binds.scale.is_none(),
+                    egui::DragValue::new(scale)
+                        .range(0.01..=20.0)
+                        .speed(0.01)
+                        .prefix("s "),
+                )
+                .changed();
+                changed |= crate::plate::field_if(
+                    ui,
+                    binds.rotate.is_none(),
+                    egui::DragValue::new(rotate_deg).suffix("°"),
+                )
+                .changed();
                 // Bind each param to an X-sheet parameter column (the C1
                 // camera model): "static" unbinds; "+ new" creates a fresh
                 // column and binds it in one click.
@@ -1079,8 +1077,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 })
                 .response
                 .on_hover_text("only these layer roles render: the shadow pass, the highlight pass, paint only, lines only");
-                changed |= ui
-                    .checkbox(absorb_trace, "iro-tore (absorb trace lines)")
+                changed |= crate::plate::latch(ui, absorb_trace, "iro-tore (absorb trace lines)")
                     .on_hover_text(
                         "the shadow and highlight trace lines take the paint colour under them \
                          (or the nearest within 3 px)",
@@ -1129,9 +1126,11 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 // the field lets go (Enter or a click away): one undo step.
                 let draft = ui.id().with(("sequence pattern", id));
                 let mut text = ui.data(|d| d.get_temp::<String>(draft)).unwrap_or_else(|| pattern.clone());
-                let r = ui
-                    .add(egui::TextEdit::singleline(&mut text).hint_text("renders/shot_####.png"))
-                    .on_hover_text("the files' name, # for the frame number (zero-padded to the #s)");
+                let r = crate::plate::pattern_field(
+                    ui,
+                    egui::TextEdit::singleline(&mut text).hint_text("renders/shot_####.png"),
+                )
+                .on_hover_text("the files' name, # for the frame number (zero-padded to the #s)");
                 if r.changed() {
                     ui.data_mut(|d| d.insert_temp(draft, text.clone()));
                 }
@@ -1152,26 +1151,22 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 {
                     state.graph_ui.sequence_pick = Some(id);
                 }
-                changed |= ui
-                    .add(egui::DragValue::new(first).prefix("first file "))
+                changed |= crate::plate::field(ui, egui::DragValue::new(first).prefix("first file "))
                     .on_hover_text("the number of the file shown at the 'at frame' frame")
                     .changed();
                 // The sheet counts frames from 1; the node stores from 0.
                 let mut at = *offset as i64 + 1;
-                if ui
-                    .add(egui::DragValue::new(&mut at).prefix("at frame ").range(-99_999..=99_999))
+                if crate::plate::field(ui, egui::DragValue::new(&mut at).prefix("at frame ").range(-99_999..=99_999))
                     .on_hover_text("the sheet frame (from 1) that shows the first file")
                     .changed()
                 {
                     *offset = (at - 1) as i32;
                     changed = true;
                 }
-                changed |= ui
-                    .checkbox(hold_last, "hold last")
+                changed |= crate::plate::latch(ui, hold_last, "hold last")
                     .on_hover_text("a missing file shows the nearest earlier one (the last frame holds)")
                     .changed();
-                changed |= ui
-                    .checkbox(fit, "fit to frame")
+                changed |= crate::plate::latch(ui, fit, "fit to frame")
                     .on_hover_text(
                         "a file of another size than the frame is scaled to fit it, centred; off, it sits \
                          at its own size from the top-left",

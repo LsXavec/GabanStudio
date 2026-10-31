@@ -123,12 +123,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                                     chip_changed = Some((ri, old, role.color));
                                     model_changed = true;
                                 }
-                                if ui
-                                    .add(
-                                        egui::TextEdit::singleline(&mut role.name)
-                                            .desired_width(72.0),
-                                    )
-                                    .changed()
+                                if plate::text_field(
+                                    ui,
+                                    egui::TextEdit::singleline(&mut role.name).desired_width(72.0),
+                                )
+                                .changed()
                                 {
                                     model_changed = true;
                                 }
@@ -200,7 +199,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     state.palette_edit = em;
     if state.palette_edit {
         ui.horizontal(|ui| {
-            ui.add(
+            plate::text_field(
+                ui,
                 egui::TextEdit::singleline(&mut state.palette_new_name)
                     .hint_text("character name…")
                     .desired_width(110.0),
@@ -249,7 +249,7 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
             let mut close = false;
             match renaming.as_mut().filter(|(at, _)| *at == vi) {
                 Some((_, text)) => {
-                    let r = ui.add(egui::TextEdit::singleline(text).desired_width(72.0));
+                    let r = plate::text_field(ui, egui::TextEdit::singleline(text).desired_width(72.0));
                     if r.lost_focus() {
                         // Enter or a click away renames; Esc keeps the name.
                         if !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -300,7 +300,8 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
     }
     let mut name: String = ui.data_mut(|d| d.get_temp(name_id).unwrap_or_default());
     ui.horizontal(|ui| {
-        ui.add(
+        plate::text_field(
+            ui,
             egui::TextEdit::singleline(&mut name)
                 .hint_text("variant name… (evening)")
                 .desired_width(110.0),

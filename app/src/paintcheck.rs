@@ -216,9 +216,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         if pc.use_range {
             // Shown 1-based, like the sheet.
             let (mut a, mut b) = (pc.range.0 + 1, pc.range.1 + 1);
-            ui.add(egui::DragValue::new(&mut a).range(1..=frames));
+            plate::field(ui, egui::DragValue::new(&mut a).range(1..=frames));
             ui.label("to");
-            ui.add(egui::DragValue::new(&mut b).range(a..=frames));
+            plate::field(ui, egui::DragValue::new(&mut b).range(a..=frames));
             pc.range = (a - 1, b.max(a) - 1);
         }
     });
@@ -232,7 +232,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         ui.label(egui::RichText::new("holes from").color(plate::legend_dim()))
             .on_hover_text(HOLES);
         let mut px = state.paintcheck.min_px;
-        ui.add(egui::DragValue::new(&mut px).range(1..=10_000).suffix(" px"))
+        plate::field(ui, egui::DragValue::new(&mut px).range(1..=10_000).suffix(" px"))
             .on_hover_text(HOLES);
         state.paintcheck.min_px = px;
     });
@@ -687,7 +687,7 @@ mod tests {
         h.key(egui::Key::F1);
         h.editor_mut().help.sheet_query = "refill".into();
         h.run();
-        assert!(h.has("Canvas gestures"), "{}", h.describe());
+        assert!(h.has(crate::vocab::CANVAS_GESTURES), "{}", h.describe());
         assert!(h.has_text_containing("refill the clicked flat"), "{}", h.describe());
         // Quick start says them with this keymap's fill key.
         h.perform(Action::QuickStart);

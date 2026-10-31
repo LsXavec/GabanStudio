@@ -81,7 +81,7 @@ fn row(
             ui.label(egui::RichText::new(a).color(plate::legend_dim()));
         }
         if saved {
-            plate::legend(ui, "saved").on_hover_text("the file on disk is this state");
+            plate::legend(ui, crate::vocab::SAVED_STATE).on_hover_text("the file on disk is this state");
         }
     });
 }

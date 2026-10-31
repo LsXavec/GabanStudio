@@ -449,7 +449,8 @@ fn card(
         .typing
         .entry(at.cut)
         .or_insert_with(|| p.assignee.clone());
-    let r = ui.add(
+    let r = plate::text_field(
+        ui,
         egui::TextEdit::singleline(text)
             .hint_text("assignee")
             .desired_width(CARD_W - 24.0),
@@ -564,15 +565,15 @@ pub fn note_window(ctx: &egui::Context, state: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.label("frame");
                 let mut shown = form.frame + 1;
-                if ui
-                    .add(egui::DragValue::new(&mut shown).range(1..=frames.max(1)))
+                if plate::field(ui, egui::DragValue::new(&mut shown).range(1..=frames.max(1)))
                     .on_hover_text("the frame the note is about")
                     .changed()
                 {
                     form.frame = shown.saturating_sub(1);
                 }
             });
-            let r = ui.add(
+            let r = plate::text_field(
+                ui,
                 egui::TextEdit::singleline(&mut form.text)
                     .id(egui::Id::new(NOTE_ID))
                     .hint_text("what to fix")
@@ -642,7 +643,8 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.label("no target");
             }
         }
-        let r = ui.add(
+        let r = plate::text_field(
+            ui,
             egui::TextEdit::singleline(&mut state.board.target)
                 .hint_text("target MM:SS+FF")
                 .desired_width(110.0),

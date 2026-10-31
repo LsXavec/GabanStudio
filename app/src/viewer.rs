@@ -320,17 +320,20 @@ pub fn ui(
             painter.add(egui::Shape::closed_line(pts, g));
         }
     }
-    // The latches ride on the island: the neutral grey around the paper is
-    // too close to their words to carry them.
-    let row = Rect::from_min_size(rect.left_bottom() + vec2(4.0, -34.0), vec2(216.0, 34.0));
-    ui.painter().rect_filled(row, crate::plate::R_CONTROL, crate::plate::ISLAND);
-    let at = Rect::from_min_size(rect.left_bottom() + vec2(8.0, -30.0), vec2(80.0, crate::plate::CTRL_H));
+    // The latches ride on a float their own size: the neutral grey around the
+    // paper is too close to their words to carry them. Each latch ends in
+    // the 8 pt the float starts with.
+    let safe_w = crate::plate::latch_width(ui, "safe");
+    let look_w = crate::plate::latch_width(ui, "final look");
+    let row = Rect::from_min_size(rect.left_bottom() + vec2(4.0, -34.0), vec2(8.0 + safe_w + look_w, 34.0));
+    crate::plate::float_ground(ui, row);
+    let at = Rect::from_min_size(row.min + vec2(8.0, 4.0), vec2(safe_w, crate::plate::CTRL_H));
     ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
         crate::plate::latch(ui, &mut vs.safe, "safe")
             .on_hover_text("action safe (93%) and title safe (90%) over the composite")
     });
     // GM11: the delivery's look, beside it (a fixed slot: nothing moves).
-    let at = Rect::from_min_size(rect.left_bottom() + vec2(96.0, -30.0), vec2(120.0, crate::plate::CTRL_H));
+    let at = Rect::from_min_size(row.min + vec2(8.0 + safe_w, 4.0), vec2(look_w, crate::plate::CTRL_H));
     ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
         crate::plate::latch(ui, final_look, "final look").on_hover_text(
             "the composite as the master delivers it: no rough, reference or correction \

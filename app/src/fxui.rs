@@ -405,9 +405,11 @@ fn specs_ui(
             // go of the keyboard (a click away) or on Ctrl+Enter, which
             // also lets go: one undo step per edit.
             (ParamKind::Text { .. }, FxValue::Text { mut text }) => {
-                let r = ui
-                    .add(egui::TextEdit::multiline(&mut text).desired_rows(2).desired_width(f32::INFINITY))
-                    .on_hover_text(format!("{} Click away or press Ctrl+Enter to apply.", spec.help));
+                let r = crate::plate::field(
+                    ui,
+                    egui::TextEdit::multiline(&mut text).desired_rows(2).desired_width(f32::INFINITY),
+                )
+                .on_hover_text(format!("{} Click away or press Ctrl+Enter to apply.", spec.help));
                 if r.changed() {
                     state.graph_ui.fx.live = Some((id, key.to_string(), FxValue::Text { text: text.clone() }));
                 }

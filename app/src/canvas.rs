@@ -2181,7 +2181,7 @@ impl CanvasView {
         painter.text(
             pos2(rect.left() + 8.0, rect.bottom() - 9.0),
             egui::Align2::LEFT_CENTER,
-            p.name.to_uppercase(),
+            plate::sentence(&p.name),
             egui::FontId::new(9.5, plate::semibold()),
             name_ink,
         );
@@ -2401,7 +2401,7 @@ impl CanvasView {
                     ui.painter().text(
                         hr.center(),
                         egui::Align2::CENTER_CENTER,
-                        h.chars().take(6).collect::<String>().to_uppercase(),
+                        plate::sentence(&h.chars().take(6).collect::<String>()),
                         egui::FontId::new(8.0, plate::semibold()),
                         plate::LEGEND,
                     );
@@ -2856,9 +2856,9 @@ impl CanvasView {
                 .on_hover_text("each ghost farther away keeps this much of the one before");
             vline(ui, "behind · ahead", format!("{} · {}", cfg.before, cfg.after));
             ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut cfg.before).range(0..=OnionCfg::MAX_DEPTH))
+                plate::field(ui, egui::DragValue::new(&mut cfg.before).range(0..=OnionCfg::MAX_DEPTH))
                     .on_hover_text("ghosts behind (0–5)");
-                ui.add(egui::DragValue::new(&mut cfg.after).range(0..=OnionCfg::MAX_DEPTH))
+                plate::field(ui, egui::DragValue::new(&mut cfg.after).range(0..=OnionCfg::MAX_DEPTH))
                     .on_hover_text("ghosts ahead (0–5)");
             });
             ui.horizontal_wrapped(|ui| {
@@ -2990,7 +2990,7 @@ impl CanvasView {
                     // The chart editor: any count of marks, even or closing
                     // up toward one key; then drag a mark on the chart.
                     vline(ui, "marks", self.chart_count.to_string());
-                    ui.add(egui::DragValue::new(&mut self.chart_count).range(1..=crate::doc::CHART_MAX_MARKS))
+                    plate::field(ui, egui::DragValue::new(&mut self.chart_count).range(1..=crate::doc::CHART_MAX_MARKS))
                         .on_hover_text("how many inbetweens the chart asks for (1–15)");
                     ui.horizontal_wrapped(|ui| {
                         for spacing in crate::doc::ChartSpacing::ALL {
@@ -3168,7 +3168,8 @@ impl CanvasView {
         value_line(ui, "library", format!("{}", presets.len()));
         ui.add_space(2.0);
         if presets.len() > 6 {
-            ui.add(
+            plate::text_field(
+                ui,
                 egui::TextEdit::singleline(&mut self.brush_search)
                     .desired_width(168.0)
                     .hint_text("search brushes"),
@@ -3527,7 +3528,8 @@ impl CanvasView {
             // destructive command does not sit in the tool strip
             // dressed like a mode switch.)
             } else {
-                ui.add(
+                plate::field(
+                    ui,
                     egui::Slider::new(&mut self.brush_width, 0.5..=16.0)
                         .text("brush")
                         .fixed_decimals(1),
@@ -3577,11 +3579,10 @@ impl CanvasView {
         // above — the armed tool's sub-elements land here and nowhere else.
         if full_deck {
             let full = vec2(ui.available_width(), plate::OPTIONS_H);
-            ui.allocate_ui_with_layout(
+            plate::fixed_row(
+                ui,
                 full,
-                egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    ui.set_min_size(full);
                     match self.tool {
                         CanvasTool::Select => {
                             plate::legend(ui, "select");
@@ -4595,24 +4596,16 @@ impl CanvasView {
             paint_paper_image(&painter, &xf, id, plate::UNTINTED);
             // Painted overlay tag (zero layout impact) so the mode is never
             // ambiguous — this view looks like art, not like a mode.
-            let tag = painter.text(
+            let tag = plate::picture_tag(
+                &painter,
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
-                egui::Align2::LEFT_TOP,
                 "composite view",
-                egui::FontId::proportional(12.0),
-                plate::LEGEND, // Legend: the app speaking
             );
             if composite_pending {
                 // GM9: the lamp, and in words — an FX render is pending
                 // (the last result shows until it lands).
-                painter.circle_filled(pos2(tag.right() + 8.0, tag.center().y), 4.0, crate::plate::TALLY);
-                painter.text(
-                    pos2(tag.right() + 16.0, tag.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    "rendering FX…",
-                    egui::FontId::proportional(12.0),
-                    crate::plate::LEGEND,
-                );
+                painter.circle_filled(pos2(tag.right() + 12.0, tag.center().y), 4.0, crate::plate::TALLY);
+                plate::picture_tag(&painter, pos2(tag.right() + 24.0, tag.top()), "rendering FX…");
             }
         }
         if let Some(note) = composite_note {
@@ -4874,13 +4867,10 @@ impl CanvasView {
             && state.current_drawing().is_none()
             && self.current.is_empty()
         {
-            painter.text(
+            plate::picture_note(
+                &painter,
                 paper_rect.center(),
-                egui::Align2::CENTER_CENTER,
                 "empty cell — draw to create a new drawing here",
-                egui::FontId::proportional(15.0),
-                plate::LEGEND,
-                // Legend
             );
         }
 
@@ -4910,21 +4900,17 @@ impl CanvasView {
         // Playback indicator as a canvas OVERLAY (painted, zero layout impact
         // — a toolbar label here used to reflow the row and shift the view).
         if self.flip_held {
-            painter.text(
+            plate::picture_note(
+                &painter,
                 pos2(rect.center().x, rect.top() + 16.0),
-                egui::Align2::CENTER_CENTER,
-                "FLIP — previous drawing (release R)",
-                egui::FontId::proportional(13.0),
-                plate::LEGEND, // Legend: the app speaking
+                "Flip — previous drawing (release R)",
             );
         }
         if state.view.playing {
-            painter.text(
+            plate::picture_note(
+                &painter,
                 pos2(rect.center().x, rect.top() + 16.0),
-                egui::Align2::CENTER_CENTER,
-                "PLAYING — space to stop",
-                egui::FontId::proportional(13.0),
-                plate::LEGEND, // Legend: the app speaking
+                "Playing — space to stop",
             );
         }
         // GM6: shift & trace rests the pen — the paper says so (the Tally

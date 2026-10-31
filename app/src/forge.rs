@@ -137,13 +137,13 @@ fn forge_body(
     // ---- FOUNDATION row: name, start-from, arm, save.
     let mut changed = false;
     ui.horizontal(|ui| {
-        changed |= ui
-            .add(
-                egui::TextEdit::singleline(&mut forge.draft.name)
-                    .desired_width(120.0)
-                    .hint_text("brush name"),
-            )
-            .changed();
+        changed |= plate::text_field(
+            ui,
+            egui::TextEdit::singleline(&mut forge.draft.name)
+                .desired_width(120.0)
+                .hint_text("brush name"),
+        )
+        .changed();
         if ui
             .button("from armed")
             .on_hover_text("load the armed brush into the forge as a draft")

@@ -1011,7 +1011,7 @@ impl crate::Editor {
             .collapsible(false)
             .show(ctx, |ui| {
                 plate::surface(ui);
-                plate::legend(ui, "kuchipaku (lip flap)").on_hover_text(
+                plate::legend(ui, crate::vocab::LIP_FLAP_TITLE).on_hover_text(
                     "the mouth column follows the dialogue's level: closed, half or open on each frame",
                 );
                 egui::Grid::new("lip_flap").num_columns(2).show(ui, |ui| {
@@ -1063,17 +1063,17 @@ impl crate::Editor {
                     ui.horizontal(|ui| {
                         let mut a = form.from + 1;
                         let mut b = form.to + 1;
-                        ui.add(egui::DragValue::new(&mut a).range(1..=last + 1).prefix("in "));
-                        ui.add(egui::DragValue::new(&mut b).range(1..=last + 1).prefix("out "));
+                        plate::field(ui, egui::DragValue::new(&mut a).range(1..=last + 1).prefix("in "));
+                        plate::field(ui, egui::DragValue::new(&mut b).range(1..=last + 1).prefix("out "));
                         form.from = a - 1;
                         form.to = (b - 1).max(form.from);
                     });
                     ui.end_row();
                     ui.label("half at").on_hover_text("the level (of the line's peak) that opens the mouth half");
-                    ui.add(egui::Slider::new(&mut form.lo, 0.01..=0.95).fixed_decimals(2));
+                    plate::field(ui, egui::Slider::new(&mut form.lo, 0.01..=0.95).fixed_decimals(2));
                     ui.end_row();
                     ui.label("open at").on_hover_text("the level (of the line's peak) that opens the mouth wide");
-                    ui.add(egui::Slider::new(&mut form.hi, 0.05..=1.0).fixed_decimals(2));
+                    plate::field(ui, egui::Slider::new(&mut form.hi, 0.05..=1.0).fixed_decimals(2));
                     ui.end_row();
                 });
                 form.hi = form.hi.max(form.lo + 0.01).min(1.0);
@@ -1744,8 +1744,8 @@ mod tests {
         let mut h = EditorHarness::with_state(s);
         assert_eq!(h.perform(Action::LipFlap), Performed::Done);
         h.run();
-        // The legend (plate legends read in capitals) in its own window.
-        assert!(h.has("Lip flap") && h.has("Kuchipaku (lip flap)"), "{}", h.describe());
+        // The legend in its own window.
+        assert!(h.has("Lip flap") && h.has(crate::vocab::LIP_FLAP_TITLE), "{}", h.describe());
         let form = h.editor().lip_form.as_ref().expect("the window's form");
         assert_eq!(form.track, 0, "the dialogue track");
         assert_eq!(form.mouths, [Some(ds[0]), Some(ds[1]), Some(ds[2])]);

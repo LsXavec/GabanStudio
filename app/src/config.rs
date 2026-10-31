@@ -3060,7 +3060,7 @@ pub fn settings_window(
                         (SettingsCategory::Pen, "pen / tablet"),
                         (SettingsCategory::Layers, "layers"),
                         (SettingsCategory::Brushes, "brushes"),
-                        (SettingsCategory::UiFeatures, "ui features"),
+                        (SettingsCategory::UiFeatures, "UI features"),
                         (SettingsCategory::Layout, "layout"),
                         (SettingsCategory::Session, "session"),
                         (SettingsCategory::Plugins, "plugins"),
@@ -3245,19 +3245,20 @@ pub fn connect_window(
             ui.add_space(6.0);
             ui.horizontal(|ui| {
             ui.label("Room address");
-            ui.add(
-            egui::TextEdit::singleline(addr)
+            crate::plate::text_field(
+                ui,
+                egui::TextEdit::singleline(addr)
                         .hint_text("host:port")
                         .desired_width(180.0),
                 );
             });
             ui.horizontal(|ui| {
             ui.label("2FA code");
-            let r = ui.add(
-            egui::TextEdit::singleline(code)
+            let r = crate::plate::text_field(
+                ui,
+                egui::TextEdit::singleline(code)
                         .hint_text("000000")
-                        .desired_width(90.0)
-                        .font(egui::TextStyle::Monospace),
+                        .desired_width(90.0),
                 );
                 code.retain(|c| c.is_ascii_digit());
                 code.truncate(6);
@@ -3333,7 +3334,7 @@ fn layout_page(
     );
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        ui.text_edit_singleline(name_buf);
+        crate::plate::text_field(ui, egui::TextEdit::singleline(name_buf));
         let name = name_buf.trim().to_string();
         if ui.button("save current as").clicked() && !name.is_empty() {
             *act = Some(LayoutAct::Save(name));
@@ -3407,21 +3408,23 @@ fn session_page(
     let mut changed = false;
     ui.horizontal(|ui| {
         ui.label("Your name");
-        changed |= ui
-            .add(egui::TextEdit::singleline(&mut config.session.username).desired_width(180.0))
-            .on_hover_text("the name other artists see on your cursor")
-            .changed();
+        changed |= crate::plate::text_field(
+            ui,
+            egui::TextEdit::singleline(&mut config.session.username).desired_width(180.0),
+        )
+        .on_hover_text("the name other artists see on your cursor")
+        .changed();
     });
     ui.horizontal(|ui| {
         ui.label("Room key");
-        changed |= ui
-            .add(
-                egui::TextEdit::singleline(&mut config.session.api_key)
-                    .desired_width(280.0)
-                    .password(false),
-            )
-            .on_hover_text("the room's API key — the host generates it; a guest pastes it here")
-            .changed();
+        changed |= crate::plate::text_field(
+            ui,
+            egui::TextEdit::singleline(&mut config.session.api_key)
+                .desired_width(280.0)
+                .password(false),
+        )
+        .on_hover_text("the room's API key — the host generates it; a guest pastes it here")
+        .changed();
     });
     // ENROLLMENT — shown whenever this machine holds a room secret,
     // hosting or not: you enroll in Authy BEFORE you open the room, and
@@ -3436,14 +3439,12 @@ fn session_page(
         );
         ui.horizontal(|ui| {
             ui.label("Secret");
-            changed |= ui
-                .add(
-                    egui::TextEdit::singleline(&mut config.session.totp_secret)
-                        .desired_width(280.0)
-                        .font(egui::TextStyle::Monospace),
-                )
-                .on_hover_text("type this into Authy as a manual-entry account")
-                .changed();
+            changed |= crate::plate::text_field(
+                ui,
+                egui::TextEdit::singleline(&mut config.session.totp_secret).desired_width(280.0),
+            )
+            .on_hover_text("type this into Authy as a manual-entry account")
+            .changed();
         });
         if let Some((code, secs)) = crate::net::current_code(config.session.totp_secret.trim()) {
             ui.horizontal(|ui| {
@@ -3571,12 +3572,12 @@ fn session_page(
         // it HERE, beside the button that uses it).
         ui.horizontal(|ui| {
             ui.label("Host address");
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut config.session.last_addr)
-                        .desired_width(180.0)
-                        .hint_text("192.168.1.23 or host:port"),
-                )
+            if crate::plate::text_field(
+                ui,
+                egui::TextEdit::singleline(&mut config.session.last_addr)
+                    .desired_width(180.0)
+                    .hint_text("192.168.1.23 or host:port"),
+            )
                 .on_hover_text(
                     "the host's IP (they run ipconfig) — port 41100 is                      assumed unless you add :port",
                 )
@@ -3629,12 +3630,12 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
     crate::plate::legend(ui, "updates");
     ui.horizontal(|ui| {
         ui.label("GitHub repo");
-        if ui
-            .add(
-                egui::TextEdit::singleline(&mut config.update_repo)
-                    .desired_width(220.0)
-                    .hint_text("owner/repo"),
-            )
+        if crate::plate::text_field(
+            ui,
+            egui::TextEdit::singleline(&mut config.update_repo)
+                .desired_width(220.0)
+                .hint_text("owner/repo"),
+        )
             .on_hover_text(
                 "the repo whose LATEST RELEASE is the published build — \
                  empty turns update checks off",
@@ -3813,7 +3814,8 @@ pub(crate) fn general_page(
     let mut typing = false;
     ui.horizontal(|ui| {
         ui.label("ffmpeg location");
-        let r = ui.add(
+        let r = crate::plate::text_field(
+            ui,
             egui::TextEdit::singleline(&mut config.render.ffmpeg)
                 .hint_text("empty: beside the app, PATH, winget")
                 .desired_width(240.0),
@@ -3861,7 +3863,8 @@ pub(crate) fn general_page(
     }
     ui.horizontal(|ui| {
         ui.label("render output folder");
-        let r = ui.add(
+        let r = crate::plate::text_field(
+            ui,
             egui::TextEdit::singleline(&mut config.render.out_dir)
                 .hint_text("empty: render/ beside the project")
                 .desired_width(240.0),
@@ -3880,7 +3883,7 @@ pub(crate) fn general_page(
         let held_id = ui.make_persistent_id("gm8_ui_scale_held");
         let committed = config.ui.scale.clamp(*UI_SCALE_RANGE.start(), *UI_SCALE_RANGE.end());
         let mut pct = ui.data(|d| d.get_temp::<u32>(held_id)).unwrap_or(committed);
-        let r = ui.add(egui::Slider::new(&mut pct, UI_SCALE_RANGE).step_by(10.0).suffix("%"));
+        let r = crate::plate::field(ui, egui::Slider::new(&mut pct, UI_SCALE_RANGE).step_by(10.0).suffix("%"));
         if r.dragged() || r.is_pointer_button_down_on() {
             ui.data_mut(|d| d.insert_temp(held_id, pct));
         } else {
@@ -3906,18 +3909,16 @@ pub(crate) fn general_page(
 }
 
 fn ui_features_page(ui: &mut egui::Ui, config: &mut Config) {
-    crate::plate::legend(ui, "ui features");
+    crate::plate::legend(ui, "UI features");
     ui.separator();
     let mut changed = false;
-    changed |= ui
-        .checkbox(&mut config.ui.lock_positions, "Lock UI positions")
+    changed |= crate::plate::latch(ui, &mut config.ui.lock_positions, "Lock UI positions")
         .on_hover_text(
             "freeze the pane layout: no dragging, splitting, or closing \
              windows until unlocked. The arrangement itself is kept.",
         )
         .changed();
-    changed |= ui
-        .checkbox(&mut config.ui.exact_descriptions, "Exact UI descriptions")
+    changed |= crate::plate::latch(ui, &mut config.ui.exact_descriptions, "Exact UI descriptions")
         .on_hover_text(
             "every control's hover names its kind, label and source, and the \
              x-sheet gains a pointer inspector — useful for asking for edits \
@@ -3970,7 +3971,7 @@ fn performance_page(
             ui.label("V-Sync")
                     .on_hover_text("Sync to the monitor's refresh. Off = lowest latency.");
                     ui.horizontal(|ui| {
-                    changed |= ui.checkbox(&mut p.vsync, "").changed();
+                    changed |= crate::plate::latch(ui, &mut p.vsync, "").changed();
                     ui.label(egui::RichText::new("(applies after restart)").color(crate::plate::legend_dim()));
                 });
                 ui.end_row();
@@ -4023,17 +4024,18 @@ fn performance_page(
             .show(ui, |ui| {
             ui.label("Max FPS while painting")
                     .on_hover_text("Caps idle redraws. Playback still runs at the project frame rate.");
-                    changed |= ui
-                    .add(egui::Slider::new(&mut p.fps_cap, 30..=240).suffix(" fps"))
+                    changed |= crate::plate::field(ui, egui::Slider::new(&mut p.fps_cap, 30..=240).suffix(" fps"))
                     .changed();
                     ui.end_row();
                     ui.label("Show FPS overlay");
-                    changed |= ui.checkbox(&mut p.show_fps, "").changed();
+                    changed |= crate::plate::latch(ui, &mut p.show_fps, "").changed();
                     ui.end_row();
                     ui.label("Undo history limit")
                     .on_hover_text("Max undo steps kept in memory. 0 = unlimited.");
-                    changed |= ui
-                    .add(egui::DragValue::new(&mut p.undo_limit).range(0..=100_000).speed(5))
+                    changed |= crate::plate::field(
+                        ui,
+                        egui::DragValue::new(&mut p.undo_limit).range(0..=100_000).speed(5),
+                    )
                     .changed();
                     ui.end_row();
                     // GM12: playback's memory and its scrub latch.
@@ -4041,8 +4043,8 @@ fn performance_page(
                         "Megabytes of composited frames RAM preview may hold; past it the least \
                          recently used go first.",
                     );
-                    changed |= ui
-                    .add(
+                    changed |= crate::plate::field(
+                        ui,
                         egui::Slider::new(&mut p.ram_preview_mb, 256..=32_768)
                             .logarithmic(true)
                             .suffix(" MB"),
@@ -4051,7 +4053,7 @@ fn performance_page(
                     ui.end_row();
                     ui.label("Audio scrub")
                     .on_hover_text("A stopped playhead's move sounds one frame of the cut's mix.");
-                    changed |= ui.checkbox(&mut p.scrub_audio, "").changed();
+                    changed |= crate::plate::latch(ui, &mut p.scrub_audio, "").changed();
                     ui.end_row();
             });
     });
@@ -4066,18 +4068,18 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
     // page opened on an orphaned control.
     {
         let mut changed = false;
-        changed |= ui
-            .checkbox(
-                &mut config.pen.native_tablet,
-                "Native tablet backend (Windows Ink) — applies after restart",
-            )
-            .on_hover_text(
-                "Direct RealTimeStylus pen input (Krita-grade). If the app \
-                 crashes with this on, launch with ANIMSTUDIO_NO_TABLET=1 to \
-                 force it off, then untick here. Fallback = the standard \
-                 pen-touch path.",
-            )
-            .changed();
+        changed |= crate::plate::latch(
+            ui,
+            &mut config.pen.native_tablet,
+            "Native tablet backend (Windows Ink) — applies after restart",
+        )
+        .on_hover_text(
+            "Direct RealTimeStylus pen input (Krita-grade). If the app \
+             crashes with this on, launch with ANIMSTUDIO_NO_TABLET=1 to \
+             force it off, then untick here. Fallback = the standard \
+             pen-touch path.",
+        )
+        .changed();
         if changed {
             config.save();
         }
@@ -4322,16 +4324,18 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                             .monospace()
                             .color(crate::plate::legend_dim()),
                         );
-                        changed |= ui
-                            .add(egui::TextEdit::singleline(&mut p.name).desired_width(130.0))
-                            .changed();
-                        changed |= ui
-                            .add(
-                                egui::DragValue::new(&mut p.size_px)
-                                    .range(1.0..=300.0)
-                                    .suffix(" px"),
-                            )
-                            .changed();
+                        changed |= crate::plate::text_field(
+                            ui,
+                            egui::TextEdit::singleline(&mut p.name).desired_width(130.0),
+                        )
+                        .changed();
+                        changed |= crate::plate::field(
+                            ui,
+                            egui::DragValue::new(&mut p.size_px)
+                                .range(1.0..=300.0)
+                                .suffix(" px"),
+                        )
+                        .changed();
                         // AUDIT [12]: the smallest target in the row,
                         // beside the size field being dragged.
                         if crate::plate::danger(ui, "DELETE PRESET") {
@@ -4341,11 +4345,9 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                     ui.horizontal(|ui| {
                         ui.add_space(34.0);
                         ui.spacing_mut().slider_width = 70.0;
-                        changed |= ui
-                            .add(egui::Slider::new(&mut p.flow, 0.05..=1.0).text("flow"))
+                        changed |= crate::plate::field(ui, egui::Slider::new(&mut p.flow, 0.05..=1.0).text("flow"))
                             .changed();
-                        changed |= ui
-                            .add(egui::Slider::new(&mut p.opacity, 0.05..=1.0).text("opacity"))
+                        changed |= crate::plate::field(ui, egui::Slider::new(&mut p.opacity, 0.05..=1.0).text("opacity"))
                             .changed();
                         // AUDIT [24]: these named struct fields, not
                         // what the hand controls.
@@ -4366,16 +4368,14 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                             })
                             .on_hover_text("tilting the pen lightens the stroke (native ink pen)")
                             .changed();
-                        changed |= ui
-                            .checkbox(&mut p.tilt_shape, "tilt shape")
+                        changed |= crate::plate::latch(ui, &mut p.tilt_shape, "tilt shape")
                             .on_hover_text(
                                 "the stamp flattens and turns with the pen's lean (native ink pen)",
                             )
                             .changed();
                         // Optional fixed colour.
                         let mut has_color = p.color.is_some();
-                        if ui
-                            .checkbox(&mut has_color, "colour")
+                        if crate::plate::latch(ui, &mut has_color, "colour")
                             .on_hover_text("preset sets the brush colour when applied")
                             .changed()
                         {

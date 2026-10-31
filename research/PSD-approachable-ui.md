@@ -1562,6 +1562,19 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 13. GIF speed and quality on big frames.
 14. Final review of step names and order, especially Plan and Effects.
 
+**AU2 notes.** Choices the build made where this document was silent or spoke twice. None needs a device; they are here so the Lead sees them once.
+
+- `lighttable_onion_tints_are_unchanged` cannot pass unedited, as AU2's gate says. 2.4 aliases `AO` to `INK3` and `LEGEND` to `INK2`, and the test asserted those names at their old values. Its two lines now read `PENCIL_AO` and `PENCIL_LEGEND`. All four pinned values are unchanged.
+- The Timing sheet's head, from the key row to the chips, stands at `ROW_H` 18, not Panel 28, under "Timing sheet row density: Unchanged" and AU2's "no layout change". At 28 it cost the grid two rows. Whole rows now equal base at 1600×900 (Draw 15, Edit 19, Layout 14, InkPaint 12) and at 1280×720 (9, 12, 8, 7).
+- Menus stand at Panel 28 with 2.6's gap, except a menu too long for the window at that height, which stands at `ROW_H` with `SHEET_GAP` (`plate::fit_menu`), because menus do not scroll. Today that is only Sheet: 34 rows need 1100 pt at 28 and take 690 at 18. Without the rule it lost 5, 8 and 11 rows at 1600×900, 1280×800 and 1280×720, where base lost none. AU11's shorter menus may retire the rule.
+- Focus: 2.9's `selection.stroke` stays the edge of a focused field, and 2.8's ring stands 2 pt outside that edge. Both show.
+- A stock `Button` stands 29: the Body row's 17 plus 2.6's `button_padding` 6 twice, a point over Panel 28. Both numbers are this document's, so neither moved. The canvas options row is `OPTIONS_H` 30 to hold it.
+- The layer strip's rename field keeps the strip's 20 pt row.
+- Every stock `ui.checkbox`, 11 of them, became `plate::latch`: with no stroke and radius 8, the style rounds a stock box to a pale `WELL` disc.
+- The contrast audit reads a word's section colour, so a word painted by hand in a disabled scope is audited undimmed. The disabled look is checked apart, on each fill.
+- The legend budget was 8; AU2 moved 9.
+- `vocab` still holds the pencil words `ATARI`, `GENGA` and `SHUSEI` in capitals. Nothing reads them, the tiles paint sentence case, and AU12 owns the words.
+
 ---
 
 ## 14 Part map
