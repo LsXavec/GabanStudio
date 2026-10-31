@@ -25,7 +25,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, shared: b
     // Row 0 is the start, row n the step n. Only the rows on screen are
     // built: a long session costs nothing per frame.
     let rows = state.engine.history_len() + 1;
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show_rows(ui, plate::CTRL_H, rows, |ui, range| {
             for n in range {
@@ -42,6 +42,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, shared: b
                 row(ui, n, &e.label, Some(who), e.applied, pos == n, at_saved, &mut jump);
             }
         });
+    plate::note_viewport(ui, scroll.inner_rect);
     let Some(n) = jump.filter(|n| *n != pos) else {
         return;
     };

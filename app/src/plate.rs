@@ -56,6 +56,22 @@ pub const TALLY: Color32 = Color32::from_rgb(239, 194, 74);
 /// The canvas material. Not a UI token; listed so the number lives here.
 pub const PAPER: Color32 = Color32::from_rgb(242, 238, 230);
 
+// AU1: what the audits in `measure.rs` read a shape's colours against. The
+// plate is the one place a colour may be spelled, and that holds for tests.
+/// The quietest ink the approachable look allows; held to 3.0, not 4.5.
+#[cfg(test)]
+pub const INK3: Color32 = Color32::from_rgb(0x70, 0x76, 0x7F);
+/// A text section's "use the shape's fallback colour" sentinel.
+#[cfg(test)]
+pub const SECTION_PLACEHOLDER: Color32 = Color32::PLACEHOLDER;
+/// The seeded fixtures' inks and grounds.
+#[cfg(test)]
+pub const SEED_WHITE: Color32 = Color32::WHITE;
+#[cfg(test)]
+pub const SEED_BLACK: Color32 = Color32::BLACK;
+#[cfg(test)]
+pub const SEED_GREY: Color32 = Color32::from_gray(128);
+
 /// Exact UI descriptions (Settings → UI Features): when set, every plate
 /// control's hover names its kind + label + source, so the owner can ask
 /// for edits by an element's true name. Set once per frame from config.
@@ -1049,6 +1065,52 @@ pub fn surface_alpha(ui: &mut Ui, alpha: u8) {
         ui.painter()
             .image(tex.id(), rect, uv, Color32::from_white_alpha(alpha));
     }
+}
+
+/// AU1: a `ScrollArea` reports its viewport here, because egui gives no
+/// other way to find one. The clip audit reads the list (`note_viewport`
+/// sits after every scroll area, a rule test holds that); it exists only
+/// under test.
+#[cfg_attr(not(test), allow(unused_variables))]
+pub fn note_viewport(ui: &Ui, inner: egui::Rect) {
+    #[cfg(test)]
+    {
+        let view = Viewport { rect: inner, margin: ui.visuals().clip_rect_margin };
+        let pass = ui.ctx().cumulative_pass_nr();
+        ui.ctx().data_mut(|d| {
+            let seen = d.get_temp_mut_or_default::<Viewports>(egui::Id::new("plate_viewports"));
+            if seen.pass != pass {
+                *seen = Viewports { pass, views: Vec::new() };
+            }
+            seen.views.push(view);
+        });
+    }
+}
+
+/// A scroll viewport: its inner rect, and how far past it egui lets the
+/// content's clip run (`clip_rect_margin`, on the scrolled axes).
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub struct Viewport {
+    pub rect: egui::Rect,
+    pub margin: f32,
+}
+
+/// One pass's registered viewports.
+#[cfg(test)]
+#[derive(Clone, Default)]
+struct Viewports {
+    pass: u64,
+    views: Vec<Viewport>,
+}
+
+/// The viewports the last finished pass registered.
+#[cfg(test)]
+pub fn viewports(ctx: &egui::Context) -> Vec<Viewport> {
+    let last = ctx.cumulative_pass_nr().wrapping_sub(1);
+    ctx.data_mut(|d| d.get_temp::<Viewports>(egui::Id::new("plate_viewports")))
+        .filter(|seen| seen.pass == last)
+        .map_or_else(Vec::new, |seen| seen.views)
 }
 
 // ---------------------------------------------------------------------------

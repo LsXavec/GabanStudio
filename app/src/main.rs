@@ -26,6 +26,8 @@ mod kpp;
 mod brushbank;
 mod kritares;
 mod manga_tools;
+#[cfg(test)]
+mod measure;
 mod menus;
 mod net;
 mod newproject;
@@ -53,6 +55,7 @@ mod uishot;
 mod update;
 mod view3d;
 mod viewer;
+mod vocab;
 mod welcome;
 mod workspace;
 mod worksafe;
@@ -3076,6 +3079,10 @@ impl Editor {
             // GM8: the first run of a Quick start step's verb ticks it.
             welcome::tick(&mut self.quick_start, action);
         }
+        #[cfg(test)]
+        if out == Performed::Ignored {
+            self.ignored.push(action);
+        }
         out
     }
 
@@ -4264,6 +4271,13 @@ struct Editor {
     /// GM3: where each pane was drawn this frame — the pane under the
     /// pointer picks which shortcuts apply.
     pane_rects: Vec<(Pane, egui::Rect)>,
+    /// AU1: every action `perform` answered `Ignored`, however it ran (a
+    /// key, a click, the palette). The journey `Recorder` reads it.
+    #[cfg(test)]
+    pub ignored: Vec<Action>,
+    /// AU1: this frame's graph view. The GPU shots wait on it.
+    #[cfg(test)]
+    pub dbg_graph: viewer::GraphView,
     /// GM8: the Quick start steps done this session (the App ORs them
     /// into `config.ui.quick_start`).
     pub quick_start: [bool; 5],
@@ -4635,6 +4649,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                     // The preview fills the pane: its rect is the drawing
                     // area the layout probe measures here.
                     self.canvas.dbg_rect = ui.available_rect_before_wrap();
+                    self.canvas.dbg_layer = ui.layer_id();
                     let vs = self.viewers.entry(u8::MAX).or_default();
                     viewer::ui(ui, self.state, self.graph, vs, self.final_look);
                 } else {
@@ -4704,7 +4719,7 @@ impl EditorTabs<'_> {
             }
         });
         ui.separator();
-        egui::ScrollArea::vertical()
+        let scroll = egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for (i, p) in self.presets.iter().enumerate() {
@@ -4727,6 +4742,7 @@ impl EditorTabs<'_> {
                     ui.label(egui::RichText::new("no presets — save one above").color(plate::legend_dim()));
                 }
             });
+        plate::note_viewport(ui, scroll.inner_rect);
     }
 }
 
@@ -4761,6 +4777,29 @@ impl Editor {
             self.state.view.line_guard = matches!(st, Stage::InkPaint);
             self.state.status = format!("room: {}", st.name());
         }
+    }
+
+    /// PSD-cel-layers Stage 4: the current ROOM's stack becomes the new-cel
+    /// template (held-stack clone still wins inside doc), and the strip gets
+    /// the pickable list. AU1: moved out of the App, so a Rig under a shipped
+    /// boot arms exactly what the App arms; `seen` is the caller's own memory
+    /// of the room it last armed.
+    fn arm_room(&mut self, layers_cfg: &LayersConfig, seen: &mut &'static str) {
+        let room_key = stage_key(self.stage);
+        let stack = layers_cfg.stack_for_room(room_key);
+        // Entering a room arms its stack's working layer (shiage →
+        // color, LO → rough), the way a room re-arms its tool. Never
+        // under a live pen.
+        if *seen != room_key && !self.canvas.stroke_active() {
+            *seen = room_key;
+            let (n, r) = stack.armed();
+            self.state.view.active_layer = n;
+            self.state.view.active_role = r;
+        }
+        self.state.new_cel_active = stack.armed();
+        self.state.new_cel_template = stack.layers.clone();
+        self.state.stack_current = stack.name.clone();
+        self.state.stacks = layers_cfg.all_stacks();
     }
 
     fn from_form(
@@ -4846,6 +4885,10 @@ impl Editor {
             palette: cmdpal::Palette::default(),
             help: menus::HelpWindows::default(),
             pane_rects: Vec::new(),
+            #[cfg(test)]
+            ignored: Vec::new(),
+            #[cfg(test)]
+            dbg_graph: viewer::GraphView::Off,
             quick_start: [false; 5],
             project_form: None,
         }
@@ -4928,6 +4971,10 @@ impl Editor {
             palette: cmdpal::Palette::default(),
             help: menus::HelpWindows::default(),
             pane_rects: Vec::new(),
+            #[cfg(test)]
+            ignored: Vec::new(),
+            #[cfg(test)]
+            dbg_graph: viewer::GraphView::Off,
             quick_start: [false; 5],
             project_form: None,
         }
@@ -5972,24 +6019,8 @@ impl eframe::App for App {
                 net::Session::Idle => None,
             };
             editor.update_tag = self.update_ready.as_ref().map(|(t, _, _)| t.clone());
-            // PSD-cel-layers Stage 4: the current ROOM's stack becomes the
-            // new-cel template (held-stack clone still wins inside doc),
-            // and the strip gets the pickable list.
             let room_key = stage_key(editor.stage);
-            let stack = layers_cfg.stack_for_room(room_key);
-            // Entering a room arms its stack's working layer (shiage →
-            // color, LO → rough), the way a room re-arms its tool. Never
-            // under a live pen.
-            if self.stack_room_seen != room_key && !editor.canvas.stroke_active() {
-                self.stack_room_seen = room_key;
-                let (n, r) = stack.armed();
-                editor.state.view.active_layer = n;
-                editor.state.view.active_role = r;
-            }
-            editor.state.new_cel_active = stack.armed();
-            editor.state.new_cel_template = stack.layers.clone();
-            editor.state.stack_current = stack.name.clone();
-            editor.state.stacks = layers_cfg.all_stacks();
+            editor.arm_room(&layers_cfg, &mut self.stack_room_seen);
             // GM6: the onion and light table settings live in the config.
             editor.canvas.onion = self.config.onion.sane();
             editor.canvas.light_table = self.config.light_table;
@@ -6657,16 +6688,28 @@ impl ProbeRoom {
         }
     }
 
+    /// Into this room the way its button or verb goes (AU1: the audits walk
+    /// the same rooms).
+    fn enter(self, editor: &mut Editor) {
+        match self {
+            ProbeRoom::Stage(st) => editor.enter_room(st),
+            ProbeRoom::Forge => {
+                editor.dock = Pane::forge_dock();
+                editor.stage = None;
+            }
+            ProbeRoom::Layout3d => {
+                editor.perform(Action::Layout3dRoom);
+            }
+        }
+    }
+
     fn probe(self, ppp: f32) -> ProbeRun {
         match self {
             ProbeRoom::Stage(st) => probe_run(st, ppp),
-            ProbeRoom::Forge => probe_run_in(ppp, 100, Pane::Canvas, |editor| {
-                editor.dock = Pane::forge_dock();
-                editor.stage = None;
-            }),
-            ProbeRoom::Layout3d => probe_run_in(ppp, 100, Pane::View3D, |editor| {
-                editor.perform(Action::Layout3dRoom);
-            }),
+            ProbeRoom::Forge => probe_run_in(ppp, 100, Pane::Canvas, |editor| self.enter(editor)),
+            ProbeRoom::Layout3d => {
+                probe_run_in(ppp, 100, Pane::View3D, |editor| self.enter(editor))
+            }
         }
     }
 }
@@ -8365,6 +8408,10 @@ impl Editor {
             } else {
                 viewer::GraphView::NoGpu
             };
+        }
+        #[cfg(test)]
+        {
+            self.dbg_graph = graph;
         }
 
         // Feed + drive the floating OS viewer window. The texture id stays

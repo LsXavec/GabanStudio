@@ -173,7 +173,7 @@ impl crate::Editor {
                 self.palette.selected = 0;
             }
             ui.separator();
-            egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
+            let scroll = egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                 if rows.is_empty() {
                     ui.label(egui::RichText::new("no command matches").color(plate::legend_dim()));
                 }
@@ -212,6 +212,7 @@ impl crate::Editor {
                     });
                 }
             });
+            plate::note_viewport(ui, scroll.inner_rect);
         });
         if resp.should_close() {
             self.palette.open = false;

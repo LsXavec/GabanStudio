@@ -1002,7 +1002,7 @@ pub fn wait(state: &mut AppState, ctx: &egui::Context) {
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     poll(state, ui.ctx());
     let ffmpeg = state.render_queue.ffmpeg_path();
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             plate::legend(ui, "render queue (delivery)");
@@ -1290,6 +1290,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 state.render_queue.show_folder = show;
             }
         });
+    plate::note_viewport(ui, scroll.inner_rect);
 }
 
 fn preset_help(p: &Preset) -> String {

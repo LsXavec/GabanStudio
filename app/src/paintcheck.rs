@@ -309,7 +309,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     // Only the rows in view are built (a brushed cut can list thousands).
     let mut go = None;
     let row = ui.spacing().interact_size.y;
-    egui::ScrollArea::vertical().auto_shrink([false, true]).show_rows(
+    let scroll = egui::ScrollArea::vertical().auto_shrink([false, true]).show_rows(
         ui,
         row,
         found.len(),
@@ -324,6 +324,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             }
         },
     );
+    plate::note_viewport(ui, scroll.inner_rect);
     if let Some(f) = go.and_then(|i| state.paintcheck.findings.as_ref()?.get(i).cloned()) {
         jump(state, canvas, &f);
     }

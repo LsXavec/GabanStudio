@@ -256,7 +256,7 @@ impl crate::Editor {
                 });
                 ui.separator();
                 let rows = sheet_rows(binds, &help.sheet_query);
-                egui::ScrollArea::vertical().show(ui, |ui| {
+                let scroll = egui::ScrollArea::vertical().show(ui, |ui| {
                     let mut group = None;
                     for (a, chord) in rows {
                         if group != Some(a.group()) {
@@ -286,6 +286,7 @@ impl crate::Editor {
                         });
                     }
                 });
+                plate::note_viewport(ui, scroll.inner_rect);
             });
         let ticks = self.quick_start;
         let mut show_me = None;

@@ -57,7 +57,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     // GM7 CHIP PICK: one ringed pot — the active chip, else the first pot
     // of the brush colour (two pots sharing a colour never both ring).
     let ring = state.ringed_chip(canvas.brush_color);
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if let Some(ch) = state.palettes.characters.get_mut(ci) {
@@ -157,6 +157,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                 }
             }
         });
+    plate::note_viewport(ui, scroll.inner_rect);
     if let Some(ri) = remove_role {
         state.palettes.characters[ci].roles.remove(ri);
         // GM13: the variants stay aligned to the model.

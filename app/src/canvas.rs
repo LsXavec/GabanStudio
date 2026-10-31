@@ -902,6 +902,9 @@ pub struct CanvasView {
     /// The canvas area rect of the last frame — read by the headless layout
     /// probe (ANIMSTUDIO_PROBE) to detect ANY movement of the drawing area.
     pub dbg_rect: Rect,
+    /// AU1: the layer `dbg_rect` lives on — the paper-share audit's "is this
+    /// the canvas" (`layer_id_at` names a layer, never a widget).
+    pub dbg_layer: egui::LayerId,
     /// Set once a real pressure pen (Touch with force > 0) is seen. After that,
     /// the mouse-drawing fallback is disabled so Windows' synthesized pen→mouse
     /// clicks (e.g. from a fast light double-tap) can't paint flat-pressure blobs.
@@ -1109,6 +1112,7 @@ impl CanvasView {
             eye_hsv: [0.0, 0.0, 0.0],
             eye_sync_rgb: [0, 0, 0],
             dbg_rect: Rect::NOTHING,
+            dbg_layer: egui::LayerId::background(),
             seen_pen: false,
             native_active: false,
             stroke_from_mouse: false,
@@ -3198,7 +3202,7 @@ impl CanvasView {
             );
         }
         let mut arm: Option<BrushPreset> = None;
-        egui::ScrollArea::vertical()
+        let scroll = egui::ScrollArea::vertical()
             .id_salt("brush_library")
             .max_height(240.0)
             .show(ui, |ui| {
@@ -3321,6 +3325,7 @@ impl CanvasView {
                     ui.add_space(4.0);
                 }
             });
+        plate::note_viewport(ui, scroll.inner_rect);
         if let Some(p) = arm {
             self.apply_preset(&p);
         }
@@ -3834,6 +3839,7 @@ impl CanvasView {
         // ---- Canvas area --------------------------------------------------
         let rect = ui.available_rect_before_wrap();
         self.dbg_rect = rect;
+        self.dbg_layer = ui.layer_id();
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         self.clipboard_events(ui, rect, state);
@@ -5298,6 +5304,7 @@ impl CanvasView {
                                     .id_salt("lightbox_scroll")
                                     .max_height(panel.height())
                                     .show(aui, |aui| self.lightbox_rail_ui(aui, state));
+                                plate::note_viewport(aui, out.inner_rect);
                                 self.light_content_h = out.content_size.y.max(50.0);
                             },
                         );
@@ -9622,7 +9629,7 @@ mod camview_tests {
 /// GM20: painting on the extended paper — the tools and the canvas's layer
 /// rect over a paper wider than the frame (3000×1080 at x −540).
 #[cfg(test)]
-mod extpaper_tests {
+pub(crate) mod extpaper_tests {
     use super::*;
     use crate::config::Action;
     use crate::paint::{LayerRect, layer_rect, memory_text};
@@ -9643,7 +9650,7 @@ mod extpaper_tests {
     }
 
     /// Commit opaque `rgba` texels at the given frame pixels to the armed layer.
-    fn paint_texels(state: &mut AppState, texels: &[(i32, i32)], rgba: [f32; 4]) {
+    pub(crate) fn paint_texels(state: &mut AppState, texels: &[(i32, i32)], rgba: [f32; 4]) {
         let t = TILE as i32;
         let mut map: std::collections::BTreeMap<(i32, i32), Vec<u16>> = Default::default();
         if let Some(have) = state.active_layer_tiles() {
@@ -9725,6 +9732,84 @@ mod extpaper_tests {
         h.step();
         h.input_mut().modifiers = Modifiers::NONE;
         h.step();
+    }
+
+    #[test]
+    fn auseam_stroke_signal_vector_route() {
+        let mut h = EditorHarness::new();
+        let c = h.editor().canvas.dbg_rect.center();
+        let path = [c, c + vec2(30.0, 0.0), c + vec2(60.0, 10.0)];
+        h.drag_path(&path);
+        assert_eq!(h.state().strokes_done, 1, "on its own cel");
+        // A frame with no cel of its own: the stroke makes one, the other arm.
+        h.state_mut().goto(40);
+        h.drag_path(&path);
+        assert_eq!(h.state().strokes_done, 2, "on a new cel");
+        let ink: usize = h.state().cut().drawings.iter().map(|d| d.strokes.len()).sum();
+        assert_eq!(ink, 2, "the counter counted what landed");
+        // Refused at pen down: nothing landed, nothing counted.
+        h.perform(Action::ToggleColumnLocked);
+        let seq = h.state().refusal_seq;
+        h.drag_path(&path);
+        assert_ne!(h.state().refusal_seq, seq);
+        assert_eq!(h.state().strokes_done, 2);
+    }
+
+    #[test]
+    fn auseam_stroke_signal_raster_route() {
+        let mut state = wide_state();
+        paint_texels(&mut state, &ring(0, 0, 9, 9), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(state.strokes_done, 1, "on its own cel");
+        state.goto(40);
+        paint_texels(&mut state, &ring(20, 20, 29, 29), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(state.strokes_done, 2, "on a new cel");
+        // An eraser stroke on a frame with no cel: nothing lands.
+        state.goto(80);
+        let slot = state.active_slot_resolved().expect("an armed layer");
+        assert!(state.commit_raster(Vec::new(), slot).is_none());
+        assert_eq!(state.strokes_done, 2);
+    }
+
+    #[test]
+    fn auseam_stroke_signal_skips_fill_and_paste() {
+        let mut state = wide_state();
+        paint_texels(&mut state, &ring(400, 400, 600, 600), [0.1, 0.1, 0.1, 1.0]);
+        let done = state.strokes_done;
+        let (mut h, xf) = fill_rig(state);
+        click(&mut h, xf.paper_to_screen(pos2(500.5, 500.5)), Modifiers::NONE);
+        let state = &mut h.state_mut().1;
+        assert!(texel(state, 500, 500)[3] > 0.99, "filled: {}", state.status);
+        assert_eq!(state.strokes_done, done, "a fill is no stroke");
+        // A paste on the frame's own cel lands through the region edit.
+        let square = [(395.0, 395.0), (605.0, 395.0), (605.0, 605.0), (395.0, 605.0)];
+        assert!(state.copy_pixels(&square), "{}", state.status);
+        state.goto(40);
+        state.new_drawing_at_frame();
+        state.paste_pixels();
+        assert!(texel(state, 500, 500)[3] > 0.99, "pasted: {}", state.status);
+        assert_eq!(state.strokes_done, done, "own cel");
+        // One on a frame with no cel lands the way a raster stroke does.
+        state.goto(80);
+        let cels = state.cut().drawings.len();
+        state.paste_pixels();
+        assert_eq!(state.cut().drawings.len(), cels + 1, "{}", state.status);
+        assert_eq!(state.strokes_done, done, "`land_raster`, not `commit_raster`");
+    }
+
+    /// The real route: a pen stamped on the GPU, read back at pen-up.
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn auseam_stroke_signal_on_a_real_device() {
+        let mut h = EditorHarness::with_gpu(wide_state());
+        h.run_frames(4);
+        assert!(h.editor().canvas.raster, "a paint layer is up");
+        let tiles = |h: &EditorHarness| h.state().active_layer_tiles().map_or(0, |t| t.len());
+        assert_eq!(tiles(&h), 0);
+        let c = h.editor().canvas.dbg_rect.center();
+        h.drag_path(&[c, c + vec2(40.0, 0.0), c + vec2(80.0, 12.0)]);
+        h.run_frames(8);
+        assert_eq!(h.state().strokes_done, 1, "{}", h.state().status);
+        assert!(tiles(&h) > 0, "the stroke came back from the device");
     }
 
     #[test]

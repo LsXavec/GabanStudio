@@ -464,7 +464,7 @@ pub fn ui(
 ) -> Option<WelcomeAction> {
     let mut out = None;
     plate::surface(ui);
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    let scroll = egui::ScrollArea::vertical().show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.heading("Gaban Studio");
             // GM19: the tabs sit in the heading's row, so the Start tab's
@@ -608,6 +608,7 @@ pub fn ui(
             "off: start-up opens the New Project form; Settings ▸ General turns it back on",
         );
     });
+    plate::note_viewport(ui, scroll.inner_rect);
     out
 }
 

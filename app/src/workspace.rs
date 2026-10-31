@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use egui_dock::{DockState, NodeIndex};
 
+use crate::vocab;
+
 /// One dockable UI element. The document underneath is shared; panes are
 /// windows onto it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
@@ -100,25 +102,25 @@ impl Pane {
     pub fn title(&self) -> String {
         match self {
             Pane::Canvas => "Canvas".into(),
-            Pane::XSheet => "X-Sheet".into(),
-            Pane::Layers => "Cel Layers".into(),
+            Pane::XSheet => vocab::TIMING_SHEET.into(),
+            Pane::Layers => vocab::LAYERS.into(),
             Pane::Brush => "Brush".into(),
-            Pane::Presets => "Presets".into(),
-            Pane::Forge => "Brush Forge".into(),
+            Pane::Presets => vocab::BRUSHES.into(),
+            Pane::Forge => vocab::BRUSH_MAKER.into(),
             Pane::Palette => "Palette".into(),
-            Pane::NodeGraph => "Node Graph".into(),
+            Pane::NodeGraph => vocab::EFFECTS_GRAPH.into(),
             Pane::History => "History".into(),
-            Pane::Curves => "Curves".into(),
+            Pane::Curves => vocab::MOTION_CURVES.into(),
             Pane::PaintCheck => "Nuri check (paint check)".into(),
-            Pane::RenderQueue => "Render Queue".into(),
+            Pane::RenderQueue => vocab::EXPORT_QUEUE.into(),
             // GM15: the studio's words first (D7), as the Window menu says
             // them.
             Pane::Board => "Shinkō board (cut board)".into(),
             Pane::Episode => "Henshū timeline (episode)".into(),
             Pane::View3D => "View3D — 3D LO (layout)".into(),
             Pane::Manga => "Manga (pages)".into(),
-            Pane::Viewer(0) => "Viewer".into(),
-            Pane::Viewer(n) => format!("Viewer {}", n + 1),
+            Pane::Viewer(0) => vocab::RESULT.into(),
+            Pane::Viewer(n) => format!("{} {}", vocab::RESULT, n + 1),
         }
     }
 }
@@ -166,12 +168,12 @@ impl Stage {
     /// industry loanword in Japanese — レイアウト — so it stands alone.)
     pub fn name(self) -> &'static str {
         match self {
-            Stage::Layout => "layout",
-            Stage::Drawing => "genga (drawing)",
-            Stage::InkPaint => "shiage (ink & paint)",
-            Stage::Composite => "satsuei (composite)",
-            Stage::Edit => "henshū (edit)",
-            Stage::Manga => "manga (pages)",
+            Stage::Layout => vocab::STEP_PLAN,
+            Stage::Drawing => vocab::STEP_DRAW,
+            Stage::InkPaint => vocab::STEP_COLOR,
+            Stage::Composite => vocab::STEP_EFFECTS,
+            Stage::Edit => vocab::STEP_TIMING,
+            Stage::Manga => vocab::STEP_MANGA,
         }
     }
 
@@ -199,6 +201,18 @@ impl Stage {
         }
     }
 
+    /// AU1: the classic draw room; presets tabbed behind the layer strip
+    /// (each drawing pass keeps its own pencil). `dock()` for now; this
+    /// keeps the recipe when the shipped Drawing dock moves on.
+    pub fn dock_with_sheet() -> DockState<Pane> {
+        let mut ds = DockState::new(vec![Pane::Canvas]);
+        let tree = ds.main_surface_mut();
+        let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.24, vec![Pane::XSheet]);
+        tree.split_below(rail, 0.62, vec![Pane::Layers, Pane::Presets, Pane::Forge]);
+        tree.split_above(canvas, 0.11, vec![Pane::Brush]);
+        ds
+    }
+
     /// The stage's opinionated default layout.
     /// (fraction = share of the top/left child of the split.)
     pub fn dock(self) -> DockState<Pane> {
@@ -214,16 +228,7 @@ impl Stage {
                 tree.split_above(canvas, 0.11, vec![Pane::Brush]);
                 ds
             }
-            Stage::Drawing => {
-                // The classic draw room; presets tabbed behind the layer
-                // strip (each drawing pass keeps its own pencil).
-                let mut ds = DockState::new(vec![Pane::Canvas]);
-                let tree = ds.main_surface_mut();
-                let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.24, vec![Pane::XSheet]);
-                tree.split_below(rail, 0.62, vec![Pane::Layers, Pane::Presets, Pane::Forge]);
-                tree.split_above(canvas, 0.11, vec![Pane::Brush]);
-                ds
-            }
+            Stage::Drawing => Stage::dock_with_sheet(),
             Stage::InkPaint => {
                 // Edit canvas + live composite viewer SIDE BY SIDE (the A2
                 // motivation), palette under the viewer — GM7: the nuri

@@ -3138,7 +3138,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
     });
     ui.separator();
     let capturing_action = capturing.as_ref().map(|c| c.action);
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    let scroll = egui::ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("keybind_grid")
             .num_columns(4)
             .striped(true)
@@ -3204,6 +3204,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                 }
             });
     });
+    crate::plate::note_viewport(ui, scroll.inner_rect);
 }
 
 /// Settings -> UI Features: behaviour of the shell itself.
@@ -3954,7 +3955,7 @@ fn performance_page(
     }
     ui.separator();
     let mut changed = false;
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    let scroll = egui::ScrollArea::vertical().show(ui, |ui| {
     let p = &mut config.perf;
     ui.strong("Canvas Acceleration");
     ui.add_space(4.0);
@@ -4050,6 +4051,7 @@ fn performance_page(
                     ui.end_row();
             });
     });
+    crate::plate::note_viewport(ui, scroll.inner_rect);
     if changed {
         config.save();
     }
@@ -4301,7 +4303,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
     ui.add_space(8.0);
     let mut changed = false;
     let mut remove: Option<usize> = None;
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .max_height(340.0)
         .show(ui, |ui| {
             for (i, p) in config.presets.iter_mut().enumerate() {
@@ -4388,6 +4390,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                 });
             }
         });
+    crate::plate::note_viewport(ui, scroll.inner_rect);
     if let Some(i) = remove {
         config.presets.remove(i);
         changed = true;

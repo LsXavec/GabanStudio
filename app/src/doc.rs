@@ -473,6 +473,10 @@ pub struct AppState {
     /// says mirrors need a fresh snapshot after history rewrites.
     pub history_dirty: bool,
     pub refusal_seq: u32,
+    /// AU1: finished pen strokes, the ONE signal for both routes (the vector
+    /// `commit_stroke` and the raster `commit_raster`). A fill or a paste is
+    /// not a stroke.
+    pub strokes_done: u64,
     /// SESSION generation stamp: bumps on every reported commit and on
     /// undo/redo — the host's cheap "the document moved" signal (the
     /// engine's history is private, and rightly so).
@@ -674,6 +678,7 @@ impl AppState {
             refusal: String::new(),
             history_dirty: false,
             refusal_seq: 0,
+            strokes_done: 0,
             doc_gen: 0,
             saved_rev: 0,
             meta_dirty: false,
@@ -772,6 +777,7 @@ impl AppState {
             refusal: String::new(),
             history_dirty: false,
             refusal_seq: 0,
+            strokes_done: 0,
             doc_gen: 0,
             saved_rev: engine.revision(),
             meta_dirty: false,
@@ -1050,6 +1056,9 @@ impl AppState {
                 let r = self
                     .engine
                     .apply("draw", vec![Command::AddStroke { at, id, stroke }]);
+                if r.is_ok() {
+                    self.strokes_done = self.strokes_done.wrapping_add(1);
+                }
                 self.report(r, "stroke");
             }
             None => {
@@ -1079,6 +1088,7 @@ impl AppState {
                 );
                 if r.is_ok() {
                     self.view.selected_drawing = Some(id);
+                    self.strokes_done = self.strokes_done.wrapping_add(1);
                 }
                 self.report(r, "new drawing");
             }
@@ -1133,6 +1143,20 @@ impl AppState {
     /// is added — each as ONE undo step. Returns (drawing, layer) on a
     /// successful commit; None means nothing landed (canvas must re-sync).
     pub fn commit_raster(
+        &mut self,
+        new_tiles: Vec<(TileCoord, Arc<TileData>)>,
+        slot: usize,
+    ) -> Option<(DrawingId, LayerId)> {
+        let landed = self.land_raster(new_tiles, slot);
+        if landed.is_some() {
+            self.strokes_done = self.strokes_done.wrapping_add(1);
+        }
+        landed
+    }
+
+    /// AU1: `commit_raster`'s body, the part a paste shares (a paste lands
+    /// the same way and is not a stroke).
+    fn land_raster(
         &mut self,
         new_tiles: Vec<(TileCoord, Arc<TileData>)>,
         slot: usize,
@@ -2250,7 +2274,7 @@ impl AppState {
                 .into_iter()
                 .filter_map(|(c, _, after)| after.map(|t| (c, t)))
                 .collect();
-        self.commit_raster(tiles, slot);
+        self.land_raster(tiles, slot);
     }
 
     /// WHOLE-CEL composite of a drawing's visible layers (bottom→top slices +

@@ -470,9 +470,10 @@ enum Edit {
 /// `koma_armed`: the canvas holds the panel tool (its latch shows it).
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, koma_armed: bool) {
     let mut edit = None;
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| pane(ui, state, koma_armed, &mut edit));
+    plate::note_viewport(ui, scroll.inner_rect);
     let Some(edit) = edit else {
         return;
     };

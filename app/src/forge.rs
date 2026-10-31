@@ -81,11 +81,12 @@ pub fn ui(
 ) {
     // Its own tab (owner's amendment) — the pane IS the forge.
     ui.add_space(4.0);
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             forge_body(ui, forge, presets, presets_dirty, canvas, status);
         });
+    plate::note_viewport(ui, scroll.inner_rect);
 }
 
 #[allow(clippy::too_many_arguments)]

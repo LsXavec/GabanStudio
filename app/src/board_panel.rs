@@ -318,7 +318,7 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     ui.separator();
     let fps = state.engine.project.fps;
     let mut open: Option<CutId> = None;
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .id_salt("board_cards")
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -358,6 +358,7 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
                 }
             });
         });
+    plate::note_viewport(ui, scroll.inner_rect);
     if let Some(cut) = open {
         state.goto_cut(scene_id, cut);
     }
@@ -711,7 +712,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
     let mut open: Option<CutId> = None;
     let mut dropped: Option<(usize, f32)> = None;
     let (current, frame) = (state.at().cut, state.view.frame);
-    egui::ScrollArea::horizontal().id_salt("episode_blocks").show(ui, |ui| {
+    let scroll = egui::ScrollArea::horizontal().id_salt("episode_blocks").show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
             for (i, (id, name, frames)) in blocks.iter().enumerate() {
@@ -763,6 +764,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
             }
         });
     });
+    plate::note_viewport(ui, scroll.inner_rect);
     if let Some((from, x)) = dropped {
         let to = rects
             .iter()

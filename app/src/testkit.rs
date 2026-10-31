@@ -12,12 +12,15 @@
 use std::path::Path;
 
 use eframe::egui;
+use eframe::egui_wgpu::{RenderState, RendererOptions};
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
+use egui_kittest::wgpu::{WgpuTestRenderer, create_render_state, default_wgpu_setup};
 
 use crate::canvas::CanvasTool;
 use crate::config::{self, Action, Config};
 use crate::doc::AppState;
+use crate::newproject::NewProjectForm;
 use crate::workspace::{Stage, Workspace, Workspaces};
 use crate::{AppRequest, Editor, Notes, Performed, shortcuts};
 
@@ -28,6 +31,11 @@ pub const CTRL: egui::Modifiers = egui::Modifiers {
     command: true,
     ..egui::Modifiers::NONE
 };
+
+/// A wgpu device with no window and no surface. Only ignored tests reach it.
+fn gpu() -> RenderState {
+    create_render_state(default_wgpu_setup(), RendererOptions::PREDICTABLE)
+}
 
 /// A primary-button press (or release) at `pos`.
 fn primary(pos: egui::Pos2, pressed: bool) -> egui::Event {
@@ -55,6 +63,16 @@ pub struct Rig {
     /// tablet thread's place (empty = no tablet, as before).
     pub pen: Vec<crate::PenSample>,
     dressed: bool,
+    /// AU1: the boot this rig started under; a rebuilt editor keeps it.
+    boot: Boot,
+    /// AU1: arm rooms the way the App does. Off under `Boot::Frozen`: today's
+    /// Rig never arms, and tests about something else depend on that.
+    arms: bool,
+    /// AU1: the room last armed (the App keeps its own).
+    stack_room_seen: &'static str,
+    /// AU1: a test's seeded fault, painted over the editor every frame so the
+    /// audits have something to catch.
+    pub seed: Option<Box<dyn FnMut(&mut egui::Ui)>>,
 }
 
 impl Rig {
@@ -70,6 +88,9 @@ impl Rig {
         }
         self.notes.say(&mut self.editor);
         let pen = std::mem::take(&mut self.pen);
+        if self.arms {
+            self.editor.arm_room(&self.config.layers, &mut self.stack_room_seen);
+        }
         let Rig { editor, config, .. } = self;
         let mut presets_dirty = false;
         // GM6: the onion and light table settings, fed as the App feeds them.
@@ -93,6 +114,9 @@ impl Rig {
             None,
             &config.keybinds,
         );
+        if let Some(seed) = &mut self.seed {
+            seed(ui);
+        }
         // GM2: the shell's outbox and autosave interval, as the App wires them.
         self.requests.append(&mut self.editor.requests);
         if let Some(on) = self.editor.scrub_request.take() {
@@ -132,10 +156,24 @@ impl Rig {
     }
 }
 
+/// AU1: how a harness starts (the spec's three boots). `Frozen` keeps today's
+/// behaviour for every test about something else, so a change of default
+/// cannot disturb it; `Shipped` is a fresh install past its first launch;
+/// `FirstRun` is that first launch. The last two are one boot until the
+/// Start float lands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Boot {
+    Frozen,
+    Shipped,
+    FirstRun,
+}
+
 /// The whole editor on a 1280×800 screen.
 pub struct EditorHarness {
     h: Harness<'static, Rig>,
     dir: tempfile::TempDir,
+    /// The device a GPU harness rebuilds its editor on; None is the suite.
+    rs: Option<RenderState>,
 }
 
 impl EditorHarness {
@@ -153,13 +191,50 @@ impl EditorHarness {
     /// Over a data dir the test prepared (a bad config.json, say): config
     /// and workspaces load from it exactly as the app loads them.
     pub fn with_dir(state: AppState, dir: tempfile::TempDir) -> Self {
+        Self::build(state, dir, Boot::Frozen, None)
+    }
+
+    /// The editor over a real wgpu device with no window: a paint layer, a
+    /// compositor, real raster strokes. Only ignored tests call this; the
+    /// suite stays free of a GPU device.
+    pub fn with_gpu(state: AppState) -> Self {
+        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::Frozen, Some(gpu()))
+    }
+
+    /// A blank document on a fresh install, past its first launch.
+    pub fn as_shipped() -> Self {
+        Self::with_state_shipped(NewProjectForm::default().new_state())
+    }
+
+    /// What a fresh install's first launch shows.
+    pub fn as_first_run() -> Self {
+        let state = NewProjectForm::default().new_state();
+        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::FirstRun, None)
+    }
+
+    pub fn with_state_shipped(state: AppState) -> Self {
+        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::Shipped, None)
+    }
+
+    /// A blank document over a data dir the test prepared.
+    pub fn with_dir_shipped(dir: tempfile::TempDir) -> Self {
+        Self::build(NewProjectForm::default().new_state(), dir, Boot::Shipped, None)
+    }
+
+    pub fn with_gpu_shipped(state: AppState) -> Self {
+        Self::build(state, tempfile::tempdir().expect("temp data dir"), Boot::Shipped, Some(gpu()))
+    }
+
+    /// THE FUNNEL: every constructor ends here, so no test can start outside
+    /// the boot rule.
+    fn build(state: AppState, dir: tempfile::TempDir, boot: Boot, rs: Option<RenderState>) -> Self {
         let (config, config_notes) = Config::load_from(dir.path());
-        let editor = Editor::from_state(state, None, Some(dir.path()));
+        let editor = Editor::from_state(state, rs.as_ref(), Some(dir.path()));
         let mut notes = Notes::default();
         for n in config_notes {
             notes.push(n);
         }
-        let rig = Rig {
+        let mut rig = Rig {
             editor,
             config,
             notes,
@@ -167,16 +242,57 @@ impl EditorHarness {
             requests: Vec::new(),
             pen: Vec::new(),
             dressed: false,
+            boot,
+            arms: true,
+            stack_room_seen: "",
+            seed: None,
         };
-        let h = Harness::builder()
+        if boot == Boot::Frozen {
+            Self::frozen(&mut rig);
+        }
+        let builder = Harness::builder()
             .with_size(egui::vec2(1280.0, 800.0))
             .with_pixels_per_point(1.0)
             .with_max_steps(12)
-            .with_wait_for_pending_images(false)
-            .build_ui_state(|ui, rig: &mut Rig| rig.frame(ui), rig);
-        let mut me = Self { h, dir };
+            .with_wait_for_pending_images(false);
+        let builder = match &rs {
+            Some(rs) => builder.renderer(WgpuTestRenderer::from_render_state(rs.clone())),
+            None => builder,
+        };
+        let h = builder.build_ui_state(|ui, rig: &mut Rig| rig.frame(ui), rig);
+        let mut me = Self { h, dir, rs };
         me.run();
         me
+    }
+
+    /// Everything the frozen boot holds still, in one place. Written into the
+    /// rig before its first frame. Later parts add a line each time a default
+    /// moves.
+    fn frozen(rig: &mut Rig) {
+        rig.config.ui.lock_positions = false;
+        rig.arms = false;
+    }
+
+    /// A new editor over `state` in this harness's data dir and on its
+    /// device, the way the App swaps documents: the rig, and so the boot it
+    /// started under, stays.
+    pub fn rebuild_editor(&mut self, state: AppState) {
+        let rs = self.rs.clone();
+        let dir = self.dir.path().to_path_buf();
+        self.h.state_mut().editor = Editor::from_state(state, rs.as_ref(), Some(&dir));
+    }
+
+    pub fn boot(&self) -> Boot {
+        self.h.state().boot
+    }
+
+    /// AU1: the harness itself: the audits read its frame output.
+    pub fn kit(&self) -> &Harness<'static, Rig> {
+        &self.h
+    }
+
+    pub fn kit_mut(&mut self) -> &mut Harness<'static, Rig> {
+        &mut self.h
     }
 
     pub fn with_ppp(mut self, ppp: f32) -> Self {
@@ -822,6 +938,7 @@ fn describe_tree<S>(h: &Harness<'_, S>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::Pane;
 
     // ---- the harness itself ----
 
@@ -1166,10 +1283,9 @@ mod tests {
         h.wait(5.0);
         assert!(!h.has(&said), "the notice never left");
         // A rebuilt editor re-reads workspaces.json; the note is not new.
-        let dir = h.data_dir().to_path_buf();
         let mut state = AppState::new_project("again", 1920, 1080, 24, 300.0);
         state.new_drawing_at_frame();
-        h.rig_mut().editor = Editor::from_state(state, None, Some(&dir));
+        h.rebuild_editor(state);
         h.run();
         assert!(h.state().refusal.is_empty(), "said again: {:?}", h.state().refusal);
     }
@@ -1252,17 +1368,31 @@ mod tests {
     // ---- source ratchets ----
 
     fn sources() -> Vec<(String, String)> {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        sources_under(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+    }
+
+    /// Every `.rs` under `root`, named from `root` with forward slashes. AU1:
+    /// the folder is flat today; a later subfolder stays under the ratchets.
+    fn sources_under(root: &Path) -> Vec<(String, String)> {
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "rs") {
-                let name = path.file_name().unwrap().to_string_lossy().into_owned();
-                out.push((name, std::fs::read_to_string(&path).unwrap()));
+        let mut dirs = vec![root.to_path_buf()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let name = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+                    out.push((name, std::fs::read_to_string(&path).unwrap()));
+                }
             }
         }
         out.sort();
         out
+    }
+
+    fn source(name: &str) -> String {
+        sources().into_iter().find(|(n, _)| n == name).unwrap().1
     }
 
     #[test]
@@ -1846,5 +1976,331 @@ mod tests {
     #[test]
     fn ship_probe_forge_room() {
         probe_holds_still(crate::ProbeRoom::Forge);
+    }
+
+    // ---- AU1: the test seams ----
+
+    /// The `impl EditorHarness` block.
+    fn harness_impl() -> String {
+        let kit = source("testkit.rs").replace("\r\n", "\n");
+        let from = kit.find(concat!("impl Editor", "Harness {")).unwrap();
+        let len = kit[from..].find("\n}\n").unwrap();
+        kit[from..from + len].to_string()
+    }
+
+    #[test]
+    fn auseam_every_constructor_goes_through_the_funnel() {
+        let body = harness_impl();
+        assert_eq!(body.matches(concat!("Harness", "::builder()")).count(), 1, "one builder");
+        let builds = concat!("Editor", "::from_state(");
+        assert_eq!(body.matches(builds).count(), 2, "`build` and `rebuild_editor` alone");
+        let mut constructors = 0;
+        for piece in body.split("\n    pub fn ").skip(1) {
+            let sig = piece.lines().next().unwrap();
+            if sig.ends_with("-> Self {") && !sig.contains("self") {
+                constructors += 1;
+                let fn_body = piece.split("\n    }\n").next().unwrap();
+                let funnel = [concat!("Self", "::build("), concat!("Self", "::with_")];
+                assert!(funnel.iter().any(|f| fn_body.contains(f)), "{sig} skips the funnel");
+            }
+        }
+        assert!(constructors >= 9, "found only {constructors}");
+        // And what the funnel does with each, live. The two GPU constructors
+        // read the same way in the text above; the suite opens no device.
+        let blank = || NewProjectForm::default().new_state();
+        let dir = || tempfile::tempdir().unwrap();
+        for (h, boot) in [
+            (EditorHarness::new(), Boot::Frozen),
+            (EditorHarness::with_state(blank()), Boot::Frozen),
+            (EditorHarness::with_dir(blank(), dir()), Boot::Frozen),
+            (EditorHarness::new().with_ppp(1.5), Boot::Frozen),
+            (EditorHarness::as_shipped(), Boot::Shipped),
+            (EditorHarness::with_state_shipped(blank()), Boot::Shipped),
+            (EditorHarness::with_dir_shipped(dir()), Boot::Shipped),
+            (EditorHarness::as_first_run(), Boot::FirstRun),
+        ] {
+            assert_eq!(h.boot(), boot);
+            assert_eq!(h.rig().arms, boot != Boot::Frozen);
+        }
+    }
+
+    /// Today's Drawing recipe, spelled out: `dock()` will move on, and what
+    /// the frozen boot holds must not.
+    fn todays_drawing_recipe() -> egui_dock::DockState<Pane> {
+        let mut ds = egui_dock::DockState::new(vec![Pane::Canvas]);
+        let tree = ds.main_surface_mut();
+        let root = egui_dock::NodeIndex::root();
+        let [canvas, rail] = tree.split_left(root, 0.24, vec![Pane::XSheet]);
+        tree.split_below(rail, 0.62, vec![Pane::Layers, Pane::Presets, Pane::Forge]);
+        tree.split_above(canvas, 0.11, vec![Pane::Brush]);
+        ds
+    }
+
+    #[test]
+    fn auseam_frozen_boot_is_todays_recipe() {
+        // An install that locked its positions moves nothing under this boot.
+        let dir = tempfile::tempdir().unwrap();
+        let mut saved = Config::default();
+        saved.ui.lock_positions = true;
+        saved.save_to(dir.path()).unwrap();
+        let mut h = EditorHarness::with_dir(NewProjectForm::default().new_state(), dir);
+        assert!(!h.rig().config.ui.lock_positions, "positions unlocked");
+        let dock = |d: &egui_dock::DockState<Pane>| serde_json::to_value(d).unwrap();
+        h.editor_mut().enter_room(Stage::Drawing);
+        assert_eq!(dock(&h.editor().dock), dock(&todays_drawing_recipe()));
+        assert_eq!(dock(&Stage::dock_with_sheet()), dock(&todays_drawing_recipe()));
+        assert_eq!(dock(&Stage::Drawing.dock()), dock(&Stage::dock_with_sheet()), "equal for now");
+        h.run();
+        assert!(h.editor().pane_rects.iter().any(|(p, _)| *p == Pane::XSheet), "the sheet is on");
+        // No room arms: the rooms' stacks never reach the document.
+        let before = what_is_armed(&h);
+        h.editor_mut().enter_room(Stage::InkPaint);
+        h.run_frames(3);
+        assert_eq!(what_is_armed(&h), before);
+        assert!(h.state().stacks.is_empty());
+        assert_eq!(h.rig().stack_room_seen, "");
+    }
+
+    #[test]
+    fn auseam_with_state_is_frozen_too() {
+        let blank = || NewProjectForm::default().new_state();
+        let mut h = EditorHarness::with_state(blank());
+        assert_eq!(h.boot(), Boot::Frozen);
+        assert!(!h.rig().arms && !h.rig().config.ui.lock_positions);
+        // A rebuilt editor keeps the boot it was started under, either way.
+        h.rebuild_editor(blank());
+        h.run_frames(2);
+        assert_eq!(h.boot(), Boot::Frozen);
+        assert!(h.state().stacks.is_empty());
+        let mut shipped = EditorHarness::as_shipped();
+        shipped.rebuild_editor(blank());
+        shipped.run_frames(2);
+        assert_eq!(shipped.boot(), Boot::Shipped);
+        assert!(!shipped.state().stacks.is_empty(), "armed after the rebuild");
+    }
+
+    #[test]
+    fn auseam_sources_walk_is_recursive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        std::fs::write(dir.path().join("top.rs"), "top").unwrap();
+        std::fs::write(dir.path().join("a/b/deep.rs"), "deep").unwrap();
+        std::fs::write(dir.path().join("a/skip.txt"), "not rust").unwrap();
+        let found = sources_under(dir.path());
+        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["a/b/deep.rs", "top.rs"]);
+        assert_eq!(found[0].1, "deep");
+        // Today's flat names stay what the ratchets call them.
+        assert!(sources().iter().any(|(n, _)| n == "main.rs"));
+    }
+
+    /// The suite's size, in `#[test]`s and assert uses across `sources()`.
+    /// Each part raises these to its own count; none lowers them.
+    const TEST_FLOOR: usize = 485;
+    const ASSERT_FLOOR: usize = 2972;
+
+    fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
+        let test = concat!("#[", "test]");
+        let asserts = [concat!("assert", "!("), concat!("assert", "_eq!("), concat!("assert", "_ne!(")];
+        let (mut tests, mut uses) = (0, 0);
+        for (_, text) in files {
+            tests += text.matches(test).count();
+            uses += asserts.iter().map(|a| text.matches(a).count()).sum::<usize>();
+        }
+        (tests, uses)
+    }
+
+    #[test]
+    fn auseam_assert_floor_holds() {
+        let planted = concat!(
+            "#[", "test] fn a() { assert", "!(x); assert", "_eq!(y, z); assert", "_ne!(y, z); }"
+        );
+        assert_eq!(suite_counts(&[("a.rs".into(), planted.into())]), (1, 3), "the counter counts");
+        let files = sources();
+        let (tests, uses) = suite_counts(&files);
+        println!("tests {tests} (floor {TEST_FLOOR}), asserts {uses} (floor {ASSERT_FLOOR})");
+        assert!(tests >= TEST_FLOOR, "tests fell to {tests}, under {TEST_FLOOR}");
+        assert!(uses >= ASSERT_FLOOR, "asserts fell to {uses}, under {ASSERT_FLOOR}");
+        // Near enough the count to bite: losing one big test file falls through.
+        let (_, big) = files.iter().map(|f| (suite_counts(std::slice::from_ref(f)).1, f)).max().unwrap();
+        let rest: Vec<_> = files.iter().filter(|f| f.0 != big.0).cloned().collect();
+        let (fewer, less) = suite_counts(&rest);
+        assert!(fewer < TEST_FLOOR && less < ASSERT_FLOOR, "the floors are too far down");
+    }
+
+    #[test]
+    fn auseam_vocab_table_is_pinned() {
+        use crate::vocab::TABLE;
+        assert!(TABLE.len() >= 53, "section 3 has 53 rows: {}", TABLE.len());
+        let files = sources();
+        let declared = files.iter().find(|(n, _)| n == "vocab.rs").unwrap();
+        let rows = declared.1.lines().filter(|l| l.starts_with("pub const ")).count();
+        assert_eq!(rows, TABLE.len() + 1, "every constant is pinned; TABLE is the other line");
+        let elsewhere: Vec<String> = files
+            .iter()
+            .filter(|(n, _)| n != "vocab.rs")
+            .map(|(_, text)| text.to_lowercase())
+            .collect();
+        for (name, value, today) in TABLE {
+            assert_eq!(value, today, "{name} moved: a word flips in its own part");
+            let word = today.to_lowercase();
+            let reads = format!("vocab::{name}").to_lowercase();
+            assert!(
+                elsewhere.iter().any(|t| t.contains(&word) || t.contains(&reads)),
+                "{name}: {today:?} is on no screen"
+            );
+        }
+    }
+
+    /// The block as the App held it at 8e61baf, its one App field passed in:
+    /// `Editor::arm_room` is held to it.
+    fn todays_block(editor: &mut Editor, layers_cfg: &config::LayersConfig, seen: &mut &'static str) {
+        let room_key = crate::stage_key(editor.stage);
+        let stack = layers_cfg.stack_for_room(room_key);
+        if *seen != room_key && !editor.canvas.stroke_active() {
+            *seen = room_key;
+            let (n, r) = stack.armed();
+            editor.state.view.active_layer = n;
+            editor.state.view.active_role = r;
+        }
+        editor.state.new_cel_active = stack.armed();
+        editor.state.new_cel_template = stack.layers.clone();
+        editor.state.stack_current = stack.name.clone();
+        editor.state.stacks = layers_cfg.all_stacks();
+    }
+
+    fn what_is_armed(h: &EditorHarness) -> String {
+        let s = h.state();
+        format!(
+            "{:?}",
+            (
+                &s.view.active_layer,
+                &s.view.active_role,
+                &s.new_cel_active,
+                &s.new_cel_template,
+                &s.stack_current,
+                &s.stacks,
+            )
+        )
+    }
+
+    #[test]
+    fn auseam_arm_room_matches_todays_block() {
+        let (mut moved, mut kept) = (EditorHarness::new(), EditorHarness::new());
+        let layers = moved.rig().config.layers.clone();
+        let (mut seen_moved, mut seen_kept) = ("", "");
+        for room in crate::PROBE_ROOMS {
+            for _twice in 0..2 {
+                room.enter(moved.editor_mut());
+                room.enter(kept.editor_mut());
+                moved.editor_mut().arm_room(&layers, &mut seen_moved);
+                todays_block(kept.editor_mut(), &layers, &mut seen_kept);
+                assert_eq!(what_is_armed(&moved), what_is_armed(&kept), "{room:?}");
+                assert_eq!(seen_moved, seen_kept, "{room:?}");
+                // Someone picks another working layer: a room re-entered
+                // while `seen` holds it must leave that choice alone.
+                moved.state_mut().view.active_layer = "picked".into();
+                kept.state_mut().view.active_layer = "picked".into();
+            }
+        }
+        // Under a live pen the working layer holds, and the tail still runs.
+        moved.editor_mut().enter_room(Stage::Drawing);
+        kept.editor_mut().enter_room(Stage::Drawing);
+        for h in [&mut moved, &mut kept] {
+            h.run();
+            let c = h.editor().canvas.dbg_rect.center();
+            h.press_and_move(c, c + egui::vec2(40.0, 0.0), 4);
+            assert!(h.editor().canvas.stroke_active());
+            h.state_mut().view.active_layer = "under the pen".into();
+            h.state_mut().stack_current.clear();
+        }
+        let (mut seen_moved, mut seen_kept) = ("elsewhere", "elsewhere");
+        moved.editor_mut().arm_room(&layers, &mut seen_moved);
+        todays_block(kept.editor_mut(), &layers, &mut seen_kept);
+        assert_eq!(what_is_armed(&moved), what_is_armed(&kept));
+        assert_eq!((seen_moved, seen_kept), ("elsewhere", "elsewhere"), "not armed under a pen");
+        assert_eq!(moved.state().view.active_layer, "under the pen");
+        assert!(!moved.state().stack_current.is_empty(), "the template is the room's");
+    }
+
+    #[test]
+    fn auseam_app_holds_no_arming_block() {
+        let main = source("main.rs").replace("\r\n", "\n");
+        let arm = main.find(concat!("fn arm", "_room(")).expect("Editor::arm_room");
+        let end = arm + main[arm..].find("\n    }\n").unwrap();
+        let outside = |needle: &str| {
+            main.match_indices(needle).filter(|(at, _)| !(arm..end).contains(at)).count()
+        };
+        for writes in [
+            concat!("stack_for", "_room("),
+            concat!("new_cel", "_active ="),
+            concat!("new_cel", "_template ="),
+            concat!("stack", "_current ="),
+        ] {
+            assert_eq!(outside(writes), 0, "{writes} belongs in arm_room");
+        }
+        let call = concat!(".arm", "_room(&layers_cfg, &mut self.stack_room_seen)");
+        assert_eq!(main.matches(call).count(), 1, "the App arms through it, once a frame");
+    }
+
+    #[test]
+    fn auseam_rig_arms_unless_frozen() {
+        let room = crate::stage_key(Some(Stage::InkPaint));
+        let blank = || NewProjectForm::default().new_state();
+        let mut shipped = EditorHarness::with_state_shipped(blank());
+        let mut frozen = EditorHarness::with_state(blank());
+        let before = what_is_armed(&frozen);
+        for h in [&mut shipped, &mut frozen] {
+            h.editor_mut().enter_room(Stage::InkPaint);
+            h.run_frames(3);
+        }
+        // As the App arms: the room's stack, its working layer, the strip's list.
+        let want = shipped.rig().config.layers.stack_for_room(room);
+        let s = shipped.state();
+        assert_eq!(s.stack_current, want.name);
+        assert_eq!(format!("{:?}", s.view.active_role), format!("{:?}", want.armed().1));
+        assert_eq!(s.view.active_layer, want.armed().0);
+        assert_eq!(shipped.rig().stack_room_seen, room);
+        assert_ne!(what_is_armed(&shipped), before);
+        // The Rig under the frozen boot never did, and tests depend on it.
+        assert_eq!(what_is_armed(&frozen), before);
+        assert_eq!(frozen.rig().stack_room_seen, "");
+    }
+
+    /// `ScrollArea`s with no note after them. A note closes the latest open
+    /// area, so nested ones read right.
+    fn unregistered_scrolls(text: &str) -> usize {
+        let (area, note) = (concat!("ScrollArea", "::"), concat!("note_", "viewport("));
+        let mut marks: Vec<(usize, bool)> = text.match_indices(area).map(|(at, _)| (at, true)).collect();
+        marks.extend(text.match_indices(note).map(|(at, _)| (at, false)));
+        marks.sort();
+        let (mut open, mut strays) = (0usize, 0);
+        for (_, opens) in marks {
+            match (opens, open) {
+                (true, _) => open += 1,
+                (false, 0) => strays += 1,
+                (false, _) => open -= 1,
+            }
+        }
+        open + strays
+    }
+
+    #[test]
+    fn auseam_every_scroll_area_is_registered() {
+        let one_left = concat!(
+            "ScrollArea", "::vertical().show(ui, f); ScrollArea", "::both().show(ui, g); ",
+            "plate::note_", "viewport(ui, r);"
+        );
+        assert_eq!(unregistered_scrolls(one_left), 1, "the counter counts");
+        let mut sites = 0;
+        for (name, text) in sources() {
+            // The plate defines the note; measure's own test leaves one out.
+            if name == "plate.rs" || name == "measure.rs" {
+                continue;
+            }
+            assert_eq!(unregistered_scrolls(&text), 0, "{name}: add plate::note_viewport");
+            sites += text.matches(concat!("note_", "viewport(")).count();
+        }
+        assert!(sites >= 19, "the spec's 19 sites, found {sites}");
     }
 }

@@ -1,0 +1,193 @@
+area	1440000
+row	34	25	1	1
+row	38	25	1	1
+row	43	25	1	1
+row	49	25	1	1
+row	57	25	1	1
+row	34	25	1	1
+row	84	34	1	1
+row	84	34	1	1
+row	84	34	1	1
+row	84	34	1	1
+row	84	34	1	1
+row	47	25	1	1
+row	61	25	1	1
+row	42	25	1	1
+row	36	12	0	1
+row	166	15	0	1
+row	34	12	0	1
+row	65	14	0	1
+row	152	14	0	1
+row	27	22	1	1
+row	27	22	1	1
+row	27	22	1	1
+row	27	22	1	1
+row	27	22	1	1
+row	40	18	1	1
+row	26	14	0	1
+row	43	22	1	1
+row	26	22	1	1
+row	30	22	1	1
+row	22	22	1	0
+row	49	22	1	1
+row	40	14	0	1
+row	116	15	0	1
+row	77	24	1	1
+row	24	24	1	1
+row	24	22	1	1
+row	24	24	1	1
+row	88	44	1	1
+row	88	44	1	1
+row	88	44	1	1
+row	56	44	1	1
+row	67	26	1	1
+row	49	26	1	1
+row	78	26	1	1
+row	55	26	1	1
+row	63	26	1	1
+row	96	26	1	1
+row	40	18	1	1
+row	26	26	1	1
+row	26	26	1	1
+row	26	26	1	1
+row	26	26	1	1
+row	56	12	0	1
+row	40	18	1	1
+row	71	22	1	1
+row	62	12	0	1
+row	40	18	1	1
+row	203	14	0	1
+row	1191	659	1	1
+row	81	24	1	1
+row	24	24	1	1
+row	24	22	1	1
+row	24	24	1	1
+row	50	12	0	1
+row	41	22	1	1
+row	27	22	1	1
+row	26	18	1	1
+row	89	12	0	1
+row	44	18	1	1
+row	20	14	0	1
+row	81	12	0	1
+row	56	19	1	1
+row	55	18	1	1
+row	40	18	1	1
+row	20	18	1	1
+row	20	18	1	1
+row	368	316	1	1
+row	44	316	1	1
+row	54	14	1	1
+row	10	316	0	1
+row	93	24	1	1
+row	24	24	1	1
+row	79	24	1	1
+row	24	24	1	1
+row	102	24	1	1
+row	24	24	1	1
+row	24	22	1	1
+row	24	24	1	1
+row	62	12	0	1
+row	15	18	1	1
+row	36	18	1	1
+row	196	12	0	1
+row	3	779	1	1
+row	380	3	1	1
+text	10	file
+text	10	edit
+text	10	view
+text	10	sheet
+text	13	project
+text	9	cut
+text	10	untitled
+text	9	CUT01 · 48f · 24.000 · 1920×1080
+text	12	レイアウト
+text	6	LAYOUT
+text	13	原画
+text	6	GENGA
+text	14	仕上げ
+text	6	SHIAGE
+text	13	撮影
+text	6	SATSUEI
+text	14	編集
+text	8	HENSHŪ
+text	7	room
+text	10	window
+text	13	help
+text	7	ARMED
+text	9	— · col A · line · brush
+text	7	v0.5.0
+text	8	REDO · UNDO
+text	8	P 0.00  0.00–0.00    0%
+text	8	1
+text	10	/ 48
+text	11	loop
+text	9	in
+text	8	out
+text	1	—
+text	5	×
+text	9	scrub
+text	8	24.000
+text	10	dropped 0
+text	11	room: genga (drawing)
+text	8	Canvas
+text	7	ATARI
+text	8	1
+text	7	GENGA
+text	8	2
+text	7	SHUSEI
+text	8	3
+text	7	ERASER
+text	9	select
+text	9	fill
+text	9	lasso fill
+text	9	lock
+text	8	comp
+text	9	line
+text	7	HARDNESS
+text	8	85%
+text	9	aliased
+text	7	STABILIZER
+text	8	0
+text	10	brush edits → hover the canvas's right edge
+text	14	empty cell — draw to create a new drawing here
+text	9	X-Sheet
+text	7	COLUMNS
+text	8	A
+text	11	key
+text	9	SHAKU (LENGTH)
+text	8	48
+text	8	2+0
+text	9	MEMO (SERIFU)
+text	11	serifu / action
+text	11	library
+text	8	A
+text	6	memo
+text	7	Cel
+text	7	H
+text	7	L
+text	8	1
+text	8	2
+text	8	3
+text	8	4
+text	8	5
+text	8	6
+text	8	7
+text	8	8
+text	8	9
+text	8	10
+text	8	11
+text	8	12
+text	8	13
+text	8	14
+text	8	15
+text	8	16
+text	8	17
+text	5	18
+text	11	Cel Layers
+text	8	Presets
+text	11	Brush Forge
+text	7	CEL LAYERS
+text	7	+
+text	9	stack
+text	9	held/empty frame — a new cel gets line · color

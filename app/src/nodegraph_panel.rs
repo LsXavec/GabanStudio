@@ -384,7 +384,7 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                     menu.sel = 0;
                 }
                 ui.separator();
-                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                let scroll = egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                     if rows.is_empty() {
                         ui.label(egui::RichText::new("no node matches").color(crate::plate::legend_dim()));
                     }
@@ -405,6 +405,7 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                         });
                     }
                 });
+                crate::plate::note_viewport(ui, scroll.inner_rect);
                 // GM8: the whole graph from the sheet, where graphs are made
                 // (a graph shaped by hand is asked about first, DANGER).
                 ui.separator();

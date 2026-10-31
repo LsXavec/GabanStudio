@@ -837,7 +837,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     let range = state.sheet_range();
     let frame_count = state.frame_count();
     ui.spacing_mut().item_spacing.y = 0.0;
-    egui::ScrollArea::vertical()
+    let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         // GM14: following the cursor jumps at once — the next frame lays
         // out the cursor's row, so the typed entry never drops out.
@@ -1413,6 +1413,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 ui.ctx().request_repaint();
             }
         });
+    plate::note_viewport(ui, scroll.inner_rect);
 }
 
 /// GM12: the shown sound track's header row (when the cut has sound): the
