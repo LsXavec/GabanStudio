@@ -93,6 +93,9 @@ pub const PLACE_MAX: f32 = 140.0;
 pub const GROUP_GAP: f32 = 16.0;
 /// The foot: under this the rarer transport folds behind one `…` (spec 4.4).
 pub const FOLD: f32 = 1040.0;
+/// From here the full transport's Sound key has room for its words beside
+/// the Say line's floor; from the fold to here it is its icon.
+pub const SOUND_WORDS: f32 = 1160.0;
 
 /// The menus collapse at this window width.
 pub fn narrow(width: f32, off_spine: bool) -> bool {

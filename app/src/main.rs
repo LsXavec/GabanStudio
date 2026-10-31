@@ -4610,7 +4610,9 @@ fn visible_panes(dock: &DockState<Pane>) -> Vec<Pane> {
 }
 
 /// What the Loop latch means, on either transport.
-const LOOP_CARD: &str = "off = playback stops at the end of the loop range (or the cut)";
+fn loop_card() -> String {
+    format!("Loop off: playback stops at the end of the loop range or the {}.", vocab::SHOT)
+}
 
 /// A transport key: its name and its card read the chord it has now, so a
 /// rebound key never leaves the band out of date (AU5).
@@ -4620,6 +4622,16 @@ fn transport_key(ui: &mut egui::Ui, icon: Icon, word: &str, action: Action) -> e
         None => word.to_string(),
     };
     menus::hover_tip(plate::band_key_named(ui, icon, &name), action, "")
+}
+
+/// A band key's card in 4.5's shape, `Name (chord) — help`, with the band's
+/// own word for the name and the chord it has now.
+fn chord_card(resp: egui::Response, word: &str, action: Action, what: String) -> egui::Response {
+    let ctx = resp.ctx.clone();
+    plate::hover_card(resp, || match menus::chord_label(&ctx, action) {
+        Some(chord) => format!("{word} ({chord}) — {what}"),
+        None => format!("{word} — {what}"),
+    })
 }
 
 /// Renders each pane by borrowing the editor's parts (disjoint fields, so the
@@ -7547,7 +7559,6 @@ impl Editor {
                 self.band_right(ui, full, fold);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     self.band_left(ui, full, fold);
-                    ui.separator();
                     self.say_line(ui);
                 });
             });
@@ -7644,9 +7655,9 @@ impl Editor {
     /// The `…` under the fold width: the rarer half of either transport.
     fn fold_menu(&mut self, ui: &mut egui::Ui, full: bool) {
         let card = if full {
-            "first and last frame, the loop range and the sound"
+            "First and last frame, the loop range and the sound."
         } else {
-            "ghost frames and speed"
+            "Ghost frames and speed."
         };
         let more = ui.menu_button("…", |ui| {
             if full {
@@ -7657,10 +7668,11 @@ impl Editor {
                 ui.horizontal(|ui| self.loop_keys(ui));
                 ui.horizontal(|ui| self.sound_keys(ui));
             } else {
-                ui.horizontal(|ui| {
-                    self.ghost_key(ui);
-                    self.speed_key(ui);
-                });
+                self.ghost_key(ui);
+                // The rows stand here: a popover opened from inside this one
+                // would shut both on its first click.
+                plate::legend(ui, "Speed");
+                self.speed_rows(ui);
             }
         });
         if more.inner.is_none() {
@@ -7699,9 +7711,9 @@ impl Editor {
         let count = self.state.frame_count();
         let mut f1 = self.state.view.frame + 1;
         // The cut's facts ride the counter's card (AU3).
-        let facts = format!("current frame — type or drag\n{}", self.cut_facts());
+        let facts = format!("Current frame: type or drag.\n{}", self.cut_facts());
         if plate::field(ui, egui::DragValue::new(&mut f1).range(1..=count))
-            .on_hover_text(facts)
+            .card(facts)
             .changed()
             && !self.canvas.stroke_active()
         {
@@ -7724,7 +7736,9 @@ impl Editor {
         let resp = plate::field(ui, field);
         plate::speak(&resp, egui::WidgetType::TextEdit, None, "frame number");
         let gone = resp.lost_focus();
-        let typed = gone && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // The Enter that ends the number is spent here: over the strip the
+        // chord dispatch after the panels would read it as `TypeIntoCell`.
+        let typed = gone && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         if !gone {
             if !resp.has_focus() {
                 resp.request_focus();
@@ -7737,7 +7751,7 @@ impl Editor {
         }
         match words.trim().parse::<u32>() {
             Ok(frame) if frame >= 1 => self.state.goto(frame - 1),
-            _ => self.state.refuse("type a frame number"),
+            _ => self.state.refuse("Type a frame number."),
         }
     }
 
@@ -7745,7 +7759,7 @@ impl Editor {
     fn ghost_key(&mut self, ui: &mut egui::Ui) {
         let mut on = self.state.view.onion;
         let name = "Ghost frames toggle";
-        let key = plate::band_latch(ui, &mut on, Icon::Comp, vocab::GHOST_FRAMES, name);
+        let key = plate::band_latch(ui, &mut on, Icon::Ghosts, vocab::GHOST_FRAMES, name);
         if menus::hover_tip(key, Action::ToggleOnion, "").changed() {
             self.invoke(Action::ToggleOnion, ui.ctx());
         }
@@ -7756,21 +7770,19 @@ impl Editor {
         let key = plate::band_action(ui, Icon::Speed, "Speed", "Speed");
         let popup = egui::Popup::menu(&key);
         if popup.show(|ui| self.speed_rows(ui)).is_none() {
-            key.card("How long each drawing holds, and whether the shot loops.");
+            key.card(format!("How long each drawing holds, and whether the {} loops.", vocab::SHOT));
         }
     }
 
+    /// One of three, and the fact on each row. Loop stands apart: it is on
+    /// or off whatever the speed.
     fn speed_rows(&mut self, ui: &mut egui::Ui) {
         let now = strip::speed_of(&self.state);
         for (word, step) in [("Fast", 1), ("Medium", 2), ("Slow", 3)] {
-            let mut on = now == Some(step);
-            let card = match step {
-                1 => "One frame per drawing.".to_string(),
-                n => format!("{n} frames per drawing."),
-            };
-            if plate::latch(ui, &mut on, word).card(card).clicked() {
+            let fact = if step == 1 { "1 frame each".to_string() } else { format!("{step} frames each") };
+            if plate::detent_fact(ui, now == Some(step), word, &fact, "Medium").clicked() {
                 if self.canvas.stroke_active() {
-                    self.state.refuse("refused — finish the stroke first");
+                    self.state.refuse(doc::FINISH_STROKE);
                 } else {
                     self.state.set_speed(step);
                 }
@@ -7778,7 +7790,7 @@ impl Editor {
         }
         ui.separator();
         let mut lp = self.state.view.loop_playback;
-        plate::latch(ui, &mut lp, "Loop").card(LOOP_CARD);
+        plate::latch(ui, &mut lp, vocab::LOOP).card(loop_card());
         self.state.view.loop_playback = lp;
     }
 
@@ -7794,9 +7806,7 @@ impl Editor {
                         .size(10.5)
                         .color(plate::STRUCK),
                 )
-                .on_hover_text(
-                    "download the published build and relaunch — your session                      carries over exactly like a dev-loop restart",
-                )
+                .card("Download the published build and relaunch. Your session carries over.")
                 .clicked()
             {
                 self.request_update = true;
@@ -7844,12 +7854,24 @@ impl Editor {
         }
         let now = ui.input(|i| i.time);
         let (rage, age) = (now - self.refusal_since, now - self.status_since);
-        if rage < 4.0 && !self.state.refusal.is_empty() {
-            plate::refusal(ui, &self.state.refusal);
-        } else if age < 4.0 && !self.state.status.is_empty() {
-            let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
-            plate::say(ui, &self.state.status, ink);
+        let refusing = rage < 4.0 && !self.state.refusal.is_empty();
+        let saying = age < 4.0 && !self.state.status.is_empty();
+        // The rule stands only beside words, and its room stays either way.
+        let (rule, _) = ui.allocate_exact_size(egui::vec2(6.0, plate::CHROME_H), egui::Sense::hover());
+        if refusing || saying {
+            let ink = ui.visuals().widgets.noninteractive.bg_stroke;
+            ui.painter().vline(rule.center().x, rule.y_range(), ink);
         }
+        // The action button's end of the lane stays free for it (spec 8.2).
+        let words = egui::vec2((ui.available_width() - plate::SAY_ACTION).max(0.0), plate::CHROME_H);
+        ui.allocate_ui_with_layout(words, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            if refusing {
+                plate::refusal(ui, &self.state.refusal);
+            } else if saying {
+                let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
+                plate::say(ui, &self.state.status, ink);
+            }
+        });
     }
 
     /// AU3: the Timing sheet button: one click, remembered in Draw. Absent
@@ -7862,17 +7884,22 @@ impl Editor {
         }
         let draw = self.stage == Some(Stage::Drawing);
         let shown = self.dock.find_tab(&Pane::XSheet).is_some();
+        let word = vocab::SHEET_BUTTON;
         let key = if draw {
             let mut on = shown;
             let name = if shown { vocab::HIDE_TIMING_SHEET } else { vocab::SHOW_TIMING_SHEET };
-            plate::band_latch(ui, &mut on, Icon::Sheet, vocab::SHEET_BUTTON, name).on_hover_text(name)
+            plate::band_latch(ui, &mut on, Icon::Sheet, word, name)
         } else {
-            let name = vocab::SHOW_TIMING_SHEET;
-            plate::band_action(ui, Icon::Sheet, vocab::SHEET_BUTTON, name).on_hover_text(name)
+            plate::band_action(ui, Icon::Sheet, word, vocab::SHOW_TIMING_SHEET)
         };
+        let key = key.card(if draw && shown {
+            format!("Hides the {word}.")
+        } else {
+            format!("Shows the {word} for exact frame work.")
+        });
         if key.clicked() {
             if self.canvas.stroke_active() {
-                self.state.refuse("refused — finish the stroke first");
+                self.state.refuse(doc::FINISH_STROKE);
             } else if draw {
                 self.switch_sheet(shown);
             } else {
@@ -7920,21 +7947,24 @@ impl Editor {
     /// Loop, on the full transport's row at any width.
     fn loop_latch(&mut self, ui: &mut egui::Ui) {
         let mut lp = self.state.view.loop_playback;
-        plate::latch(ui, &mut lp, "loop").on_hover_text(LOOP_CARD);
+        plate::latch(ui, &mut lp, vocab::LOOP).card(loop_card());
         self.state.view.loop_playback = lp;
     }
 
     /// The loop range, on the row or in the `…` when the window is narrow.
     fn loop_keys(&mut self, ui: &mut egui::Ui) {
-        // GM12: the loop range — "in" and "out" mark the
-        // playhead; × plays the whole cut again. Every
-        // slot keeps its width whatever it reads (D7).
-        let start = playback::transport_key(ui, "in", "loop in", 26.0);
-        if menus::hover_tip(start, Action::LoopIn, "").clicked() {
+        // GM12: the loop range: the two keys mark the playhead and × plays
+        // the whole shot again. Every slot keeps its width whatever it
+        // reads (D7).
+        let shot = vocab::SHOT;
+        let start = playback::transport_key(ui, vocab::LOOP_START, vocab::LOOP_START, 66.0);
+        let said = "Playback starts on this frame.".to_string();
+        if chord_card(start, vocab::LOOP_START, Action::LoopIn, said).clicked() {
             self.invoke(Action::LoopIn, ui.ctx());
         }
-        let end = playback::transport_key(ui, "out", "loop out", 30.0);
-        if menus::hover_tip(end, Action::LoopOut, "").clicked() {
+        let end = playback::transport_key(ui, vocab::LOOP_END, vocab::LOOP_END, 60.0);
+        let said = "Playback ends on this frame.".to_string();
+        if chord_card(end, vocab::LOOP_END, Action::LoopOut, said).clicked() {
             self.invoke(Action::LoopOut, ui.ctx());
         }
         let range = self.state.loop_range();
@@ -7943,11 +7973,15 @@ impl Editor {
             None => "—".to_string(),
         };
         playback::readout(ui, &text, 64.0, plate::LEGEND)
-            .on_hover_text("this cut's loop range (— = none: the whole cut plays)");
+            .card(format!("The loop range, first frame to last. A dash means the whole {shot} plays."));
         let clear = ui.add_enabled_ui(range.is_some(), |ui| {
             let key = playback::transport_key(ui, "×", "clear loop range", 22.0);
-            menus::hover_tip(key, Action::ClearLoop, "")
-                .on_disabled_hover_text("this cut has no loop range")
+            if range.is_some() {
+                let said = format!("The whole {shot} plays again.");
+                chord_card(key, "Clear the loop range", Action::ClearLoop, said)
+            } else {
+                key.card(format!("This {shot} has no loop range to clear."))
+            }
         });
         if clear.inner.clicked() {
             self.invoke(Action::ClearLoop, ui.ctx());
@@ -7955,17 +7989,21 @@ impl Editor {
     }
 
     /// The sound and the rate. Right to left on the row, left to right in
-    /// the `…`: the slots read the same.
+    /// the `…`: the slots read the same. Just over the fold the words would
+    /// take the Say line under its floor (spec 4.4): there the key is its
+    /// icon, and the name and the card keep them.
     fn sound_keys(&mut self, ui: &mut egui::Ui) {
-        ui.label(
-            egui::RichText::new(format!("{:.3}", self.state.fps() as f32))
-                .monospace()
-                .size(11.0)
-                .color(plate::LEGEND),
-        );
+        let (fps, shot, word) = (self.state.fps(), vocab::SHOT, vocab::SOUND_WHILE_DRAGGING);
+        playback::readout(ui, &format!("{fps} {}", vocab::FPS), 48.0, plate::LEGEND)
+            .card(format!("This {shot} plays {fps} frames each second."));
         let mut scrub = self.scrub_audio;
-        let key = plate::latch(ui, &mut scrub, "scrub");
-        if menus::hover_tip(key, Action::ToggleScrub, "").changed() {
+        let key = if (steps::FOLD..steps::SOUND_WORDS).contains(&ui.ctx().content_rect().width()) {
+            plate::band_latch(ui, &mut scrub, Icon::Sound, "", word)
+        } else {
+            plate::latch(ui, &mut scrub, word)
+        };
+        let said = "Dragging or stepping a stopped playhead plays that frame's sound.".to_string();
+        if chord_card(key, word, Action::ToggleScrub, said).changed() {
             self.scrub_audio = scrub;
             self.scrub_request = Some(scrub);
         }
@@ -8002,7 +8040,7 @@ impl Editor {
         // held frame's number, so a stop lands on the run's first frame.
         let playing = self.state.view.playing;
         if self.was_playing && !playing && !self.sheet_on_screen() && !self.canvas.stroke_active() {
-            self.state.settle_on_run_start();
+            self.state.settle_after_stop();
         }
         self.was_playing = playing;
         // GM7 CHIP PICK: the active chip lasts while the brush holds its

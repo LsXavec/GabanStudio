@@ -100,6 +100,14 @@ pub const LOCK_TRACK: &str = "lock column";
 pub const NEXT_DRAWING: &str = "Next key";
 pub const PREVIOUS_DRAWING: &str = "Previous key";
 
+// The full transport's words (spec 4.4). They arrived with the band: the old
+// `scrub`, `in` and `out` stay Search aliases.
+pub const SOUND_WHILE_DRAGGING: &str = "Sound while dragging";
+pub const FPS: &str = "fps";
+pub const LOOP: &str = "Loop";
+pub const LOOP_START: &str = "Loop start";
+pub const LOOP_END: &str = "Loop end";
+
 // Legends a test reads back, as the plate paints them.
 pub const APP_NAME: &str = "Gaban Studio";
 pub const SAVED_STATE: &str = "Saved";
@@ -180,6 +188,11 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("LOCK_TRACK", LOCK_TRACK, "lock column"),
     ("NEXT_DRAWING", NEXT_DRAWING, "Next key"),
     ("PREVIOUS_DRAWING", PREVIOUS_DRAWING, "Previous key"),
+    ("SOUND_WHILE_DRAGGING", SOUND_WHILE_DRAGGING, "Sound while dragging"),
+    ("FPS", FPS, "fps"),
+    ("LOOP", LOOP, "Loop"),
+    ("LOOP_START", LOOP_START, "Loop start"),
+    ("LOOP_END", LOOP_END, "Loop end"),
     ("APP_NAME", APP_NAME, "Gaban Studio"),
     ("SAVED_STATE", SAVED_STATE, "Saved"),
     ("HORIZON_Y", HORIZON_Y, "Horizon Y"),

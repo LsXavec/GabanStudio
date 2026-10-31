@@ -231,7 +231,7 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             .id(id)
             .desired_width(44.0),
     )
-    .on_hover_text(
+    .card(
         "the cut's length: frames (60) or seconds+frames (2+12) — Enter sets it, one undo step",
     );
     ui.label(
@@ -273,7 +273,7 @@ fn memo_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             .desired_width(130.0)
             .hint_text("serifu / action"),
     )
-    .on_hover_text("this frame's memo: dialogue (serifu) and action notes — one undo step");
+    .card("this frame's memo: dialogue (serifu) and action notes — one undo step");
     if resp.lost_focus() {
         let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
         // The field's own Enter, not the sheet's Type-into-cell key.
@@ -370,7 +370,7 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
                 .font(egui::FontId::monospace(11.0))
                 .text_color(plate::STRUCK),
         )
-        .on_hover_text(
+        .card(
             "type a drawing name (x = empty; a digit over the sheet starts it): Enter enters it \
              and moves down, Tab moves right",
         );
@@ -444,7 +444,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 if cresp.clicked() && gesture_safe {
                     state.step_cut(fwd);
                 }
-                cresp.on_hover_text(hover);
+                cresp.card(hover);
                 if !fwd {
                     // The cut's identity field sits between the chevrons.
                     let cname = state.cut().name.clone();
@@ -558,7 +558,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
         ui.menu_button("key", |ui| {
             if ui
                 .button("new drawing")
-                .on_hover_text("create + expose at the current frame")
+                .card("create + expose at the current frame")
                 .clicked()
             {
                 state.new_drawing_at_frame();
@@ -566,7 +566,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             }
             if ui
                 .button("expose selected")
-                .on_hover_text("expose the selected library drawing here")
+                .card("expose the selected library drawing here")
                 .clicked()
             {
                 state.expose_selected();
@@ -632,7 +632,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             } else {
             let resp = ui
                     .selectable_label(state.view.selected_drawing == Some(id), &name)
-                    .on_hover_text(
+                    .card(
                     "click: select — double-click: rename — right-click: kind, pin, remove",
                     );
                     resp.context_menu(|ui| {
@@ -643,7 +643,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     let pinned = state.view.light.is_pinned(id);
                     if ui
                         .button(if pinned { "unpin from light table" } else { "pin to light table" })
-                        .on_hover_text(
+                        .card(
                         "ghost this drawing on the light table on every frame \
                          (Ao, the light table's opacity) — display only, never \
                          exported, never on the sheet",
@@ -736,7 +736,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             egui::FontId::proportional(12.0),
             plate::LEGEND,
         );
-        resp.on_hover_text("serifu (dialogue) and action notes — edit in the memo field above");
+        resp.card("serifu (dialogue) and action notes — edit in the memo field above");
     });
     // GM14: each column's kind badge (a click steps Cel → BG → Book →
     // Ref) and its hide and lock toggles — the GM5 verbs, per column.
@@ -779,7 +779,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     1 => "hide or show the column: a hidden column is left out of every composite",
                     _ => "lock or unlock the column: a locked column refuses paint and sheet edits",
                 };
-                if resp.on_hover_text(hover).clicked() && gesture_safe {
+                if resp.card(hover).clicked() && gesture_safe {
                     header_edit = Some((col.id, what));
                 }
             }
@@ -1318,14 +1318,14 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                         None,
                         &format!("retake note at frame {}", f + 1),
                     );
-                    resp.on_hover_ui(|ui| {
-                        plate::legend(ui, &format!("retake notes, frame {}", f + 1));
+                    plate::hover_card(resp, || {
+                        let mut card = format!("retake notes, frame {}", f + 1);
                         for n in notes {
                             let who = if n.author.is_empty() { "?" } else { &n.author };
                             let how = if n.resolved { "resolved" } else { "open" };
-                            let ink = if n.resolved { plate::LEGEND } else { plate::AKA };
-                            ui.label(egui::RichText::new(format!("{} — {who} · {how}", n.text)).color(ink));
+                            card.push_str(&format!("\n{} — {who} · {how}", n.text));
                         }
+                        card
                     });
                 }
             }
@@ -1425,7 +1425,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         let (mark, note) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
         plate::note_mark(ui.painter(), mark.center(), plate::LEGEND);
         plate::speak(&note, egui::WidgetType::Label, None, "♪");
-        note.on_hover_text("the sound track the waveform column shows");
+        note.card("the sound track the waveform column shows");
         let picker = egui::ComboBox::from_id_salt("sheet_track")
             .selected_text(track_name(cut, t))
             .show_ui(ui, |ui| {
@@ -1435,7 +1435,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             });
         picker
             .response
-            .on_hover_text("the track this header shows — right-click to remove it")
+            .card("the track this header shows — right-click to remove it")
             .context_menu(|ui| {
                 plate::surface(ui);
                 if plate::danger_hint(ui, "REMOVE TRACK", "removes this track and its sound (undo restores it)")
@@ -1470,7 +1470,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             });
             plate::chip_face(ui, r, &resp, if what == 0 { "M" } else { "S" }, lit);
             plate::speak(&resp, egui::WidgetType::Checkbox, Some(on), name);
-            if resp.on_hover_text(hover).clicked() && gesture_safe {
+            if resp.card(hover).clicked() && gesture_safe {
                 let mut next = now.clone();
                 if what == 0 {
                     next.mute = !next.mute;
@@ -1509,7 +1509,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         ];
         for (r, name, hover) in fields {
             plate::speak(&r, egui::WidgetType::DragValue, None, name);
-            let r = r.on_hover_text(hover);
+            let r = r.card(hover);
             if r.dragged() {
                 dragging = true;
             }
@@ -1631,7 +1631,7 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
                     editable,
                     egui::Button::selectable(state.param_interp == interp, label),
                 )
-                .on_hover_text(hint)
+                .card(hint)
                 .clicked()
             {
                 state.param_interp = interp;
@@ -1640,7 +1640,7 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
         let key_label = if existing.is_some() { "set key" } else { "key" };
         if ui
             .add_enabled(editable, egui::Button::new(key_label))
-            .on_hover_text("one undo step")
+            .card("one undo step")
             .clicked()
         {
             // GM14: a Bezier key keeps its handles (the curves pane's);
@@ -1657,7 +1657,7 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
         }
         if ui
             .add_enabled(editable && existing.is_some(), egui::Button::new("clear"))
-            .on_hover_text("remove this key")
+            .card("remove this key")
             .clicked()
         {
             state.set_param_key(pid, None);
@@ -1754,7 +1754,7 @@ fn continuation_handles(
                 id,
                 Sense::click_and_drag(),
             )
-            .on_hover_text(
+            .card(
                 "hold handle — drag out: the hold ends HERE · right-click: \
                  stow (retracts like a tape measure — the hold runs on to the \
                  next key or the sheet's end)",
@@ -1884,7 +1884,7 @@ pub(crate) fn cell_menu(
     crate::board_panel::note_latches(ui, state, at, Some(frame));
     if ui
         .button("add retake note…")
-        .on_hover_text(crate::config::Action::AddRetakeNote.help())
+        .card(crate::config::Action::AddRetakeNote.help())
         .clicked()
     {
         state.board.open_note(at, frame);
@@ -1909,7 +1909,7 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
     ui.horizontal(|ui| {
         let down = ui.add_enabled(panel.cut > 1, egui::Button::new("−"));
         plate::speak(&down, egui::WidgetType::Button, None, "panel cut number down");
-        if down.on_hover_text("this panel goes to the cut before").clicked() {
+        if down.card("this panel goes to the cut before").clicked() {
             state.set_panel_cut(panel.drawing, Some(panel.cut - 1));
         }
         let mut n = match state.sheet_ui.panel_edit {
@@ -1917,7 +1917,7 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
             _ => panel.cut,
         };
         let r = plate::field(ui, egui::DragValue::new(&mut n).range(1..=999).update_while_editing(false))
-            .on_hover_text("the cut this panel belongs to: drag, or click and type");
+            .card("the cut this panel belongs to: drag, or click and type");
         if r.drag_stopped() {
             if let Some((_, live)) = state.sheet_ui.panel_edit.take() {
                 state.set_panel_cut(panel.drawing, Some(live));
@@ -1931,7 +1931,7 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
         }
         let up = ui.button("+");
         plate::speak(&up, egui::WidgetType::Button, None, "panel cut number up");
-        if up.on_hover_text("this panel goes to the next cut").clicked() {
+        if up.card("this panel goes to the next cut").clicked() {
             state.set_panel_cut(panel.drawing, Some(panel.cut + 1));
         }
     });
@@ -1939,7 +1939,7 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
     ui.label(egui::RichText::new(format!("cut {} — {how}", panel.cut)).color(plate::legend_dim()));
     if ui
         .add_enabled(set, egui::Button::new("clear (use panel order)"))
-        .on_hover_text("the panel's cut number is its order on the column again")
+        .card("the panel's cut number is its order on the column again")
         .clicked()
     {
         state.set_panel_cut(panel.drawing, None);

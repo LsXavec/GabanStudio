@@ -946,7 +946,7 @@ fn audock_band_lanes_keep_apart() {
             let wide = h.ctx().content_rect().width() >= steps::FOLD;
             let last = if wide { "clear loop range" } else { "…" };
             let left = points(&h, last).right();
-            let lane = if wide { "scrub" } else { vocab::HIDE_TIMING_SHEET };
+            let lane = if wide { vocab::SOUND_WHILE_DRAGGING } else { vocab::HIDE_TIMING_SHEET };
             let right = points(&h, lane).left();
             assert!(left <= right, "{last} runs into the right lane at {w}×{tall} at {stored}");
             assert_eq!(h.has("first frame (Home)"), wide);
@@ -958,7 +958,15 @@ fn audock_band_lanes_keep_apart() {
     window(&mut h, 832.0, 640.0, 1.0);
     h.click("…");
     settle(&mut h);
-    for key in ["first frame (Home)", "last frame (End)", "loop in", "loop out", "clear loop range", "scrub"] {
+    let foldable = [
+        "first frame (Home)",
+        "last frame (End)",
+        vocab::LOOP_START,
+        vocab::LOOP_END,
+        "clear loop range",
+        vocab::SOUND_WHILE_DRAGGING,
+    ];
+    for key in foldable {
         assert!(h.has(key), "{key} in the fold\n{}", h.describe());
     }
 }
@@ -981,11 +989,15 @@ fn audock_long_refusal_stays_in_its_lane() {
         let clip = measure::clip_here(&h, Scope::Chrome);
         assert_eq!((clip.clipped, clip.outside), (0, 0), "{w}: {:?}", clip.found);
     }
-    // Elided, its hover has every word.
+    // Elided, its hover has every word. The label's own galley keeps them all
+    // too, so the card is the second string. The refusal is raised again: the
+    // sizes above have used up its four seconds.
+    h.state_mut().refuse(LONG);
+    h.run();
     h.hover(LONG);
-    h.run_frames(3);
+    h.wait(plate::CARD_DELAY + 0.05);
     let words = measure::reading(&h).texts;
-    assert!(words.iter().any(|(_, t)| t == LONG), "the whole refusal in its hover");
+    assert_eq!(words.iter().filter(|(_, t)| t == LONG).count(), 2, "the whole refusal in its hover");
 }
 
 const MENUS: [&str; 9] = ["file", "edit", "view", "sheet", "cut", "project", vocab::STEP, "window", "help"];

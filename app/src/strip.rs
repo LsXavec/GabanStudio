@@ -6,14 +6,16 @@
 //! a press on anything that also senses clicks loses its capture to egui's
 //! long touch at 0.817 s under a pen.
 
-use anim_core::ids::CutId;
+use std::collections::HashMap;
+
+use anim_core::ids::{CutId, DrawingId};
 use anim_core::xsheet::Exposure;
 use eframe::egui;
 use egui::accesskit;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
-use crate::doc::AppState;
-use crate::plate;
+use crate::doc::{AppState, FINISH_STROKE};
+use crate::plate::{self, Card};
 use crate::rail::STRIP_H;
 
 /// The steel bar across the top of the strip.
@@ -33,8 +35,11 @@ const DEFAULT_FLOOR: f32 = 8.0;
 const NARROWEST: f32 = 6.0;
 /// A sheet this wide carries its number.
 const NUMBERED: f32 = 16.0;
-/// A sheet this wide says `Used twice`; a narrower one marks it.
-const WORDED: f32 = 64.0;
+/// A sheet this wide says `Used twice` beside its number; a narrower one
+/// marks it.
+const WORDED: f32 = 100.0;
+/// The row a sheet's number and badge stand on, clear of the peg hole.
+const SHEET_ROW: f32 = 20.0;
 /// The census counts at most this many sheets (spec 7.2).
 pub const CENSUS_CAP: usize = 12;
 
@@ -78,15 +83,23 @@ fn span(sheet: &Sheet) -> String {
     }
 }
 
-/// Each drawing's number on the strip, in the order it first appears; a
-/// drawing exposed again keeps its number.
-fn numbered(sheets: &[Sheet]) -> Vec<(anim_core::ids::DrawingId, u32)> {
-    let mut seen: Vec<(anim_core::ids::DrawingId, u32)> = Vec::new();
+/// One drawing on the strip: its number, in the order it first appears, and
+/// how many sheets show it.
+#[derive(Clone, Copy, Default)]
+struct Tally {
+    number: u32,
+    uses: u32,
+}
+
+/// Every drawing on the track, read once a frame: a drawing exposed again
+/// keeps its number.
+fn tally(sheets: &[Sheet]) -> HashMap<DrawingId, Tally> {
+    let mut seen: HashMap<DrawingId, Tally> = HashMap::new();
     for sheet in sheets {
-        if let Exposure::Drawing(id) = sheet.shows
-            && !seen.iter().any(|(d, _)| *d == id)
-        {
-            seen.push((id, seen.len() as u32 + 1));
+        if let Exposure::Drawing(id) = sheet.shows {
+            let next = seen.len() as u32 + 1;
+            let entry = seen.entry(id).or_insert(Tally { number: next, uses: 0 });
+            entry.uses += 1;
         }
     }
     seen
@@ -119,6 +132,18 @@ enum Grip {
     Sheet { from: u32 },
     /// A sheet's right edge: a drag sets its length.
     Edge { from: u32, len: u32 },
+}
+
+impl Grip {
+    /// The run this grip holds is still there: an undo or a paste under the
+    /// hand can take it away.
+    fn stands(self, sheets: &[Sheet]) -> bool {
+        match self {
+            Grip::Bar => true,
+            Grip::Sheet { from } => sheets.iter().any(|s| s.from == from),
+            Grip::Edge { from, len } => sheets.iter().any(|s| s.from == from && s.len == len),
+        }
+    }
 }
 
 /// A press in progress: egui's own tap would need a click sense.
@@ -183,16 +208,21 @@ impl Strip {
         self.rect
     }
 
-    fn grip_at(sheets: &[Sheet], ruler: Ruler, top: f32, at: Pos2) -> Grip {
+    /// What a press at `at` takes hold of. The gap under the sheets is
+    /// nothing: the scrollbar stands over it.
+    fn grip_at(sheets: &[Sheet], ruler: Ruler, top: f32, at: Pos2) -> Option<Grip> {
         if at.y < top + BAR_H {
-            return Grip::Bar;
+            return Some(Grip::Bar);
+        }
+        if at.y >= top + BAR_H + SHEET_H {
+            return None;
         }
         let frame = ruler.frame(at.x);
-        match sheets.iter().find(|s| frame < s.from + s.len) {
+        Some(match sheets.iter().find(|s| frame < s.from + s.len) {
             Some(s) if at.x >= ruler.x(s.from + s.len) - EDGE => Grip::Edge { from: s.from, len: s.len },
             Some(s) => Grip::Sheet { from: s.from },
             None => Grip::Bar,
-        }
+        })
     }
 
     /// The length an edge drag asks for, with the pointer at `here`.
@@ -201,16 +231,18 @@ impl Strip {
     }
 
     /// One frame's input. A press and its release can land in one frame on
-    /// a slow one, so the raw events drive it, in order.
+    /// a slow one, so the raw events drive it, in order. A press counts only
+    /// when the surface is what the pointer is on: `hovered` and not
+    /// `contains_pointer`, which is also true over the scrollbar on top of it.
     fn input(
         &mut self,
         ui: &mut Ui,
         state: &mut AppState,
         resp: &egui::Response,
+        sheets: &[Sheet],
         ruler: Ruler,
         gesture_safe: bool,
     ) {
-        let sheets = sheets(state);
         let (time, pointer, stayed) = ui.input(|i| (i.time, i.pointer.latest_pos(), i.pointer.primary_down()));
         let buttons: Vec<(Pos2, bool)> = ui.input(|i| {
             let events = i.events.iter().filter_map(|e| match e {
@@ -221,10 +253,16 @@ impl Strip {
             });
             events.collect()
         });
+        // Before the buttons: a release this frame must not write onto a run
+        // an undo or a paste has taken since the last one.
+        if self.press.is_some_and(|p| !p.grip.stands(sheets)) {
+            self.press = None;
+        }
         for (at, pressed) in buttons {
             if pressed {
-                if resp.contains_pointer() {
-                    let grip = Self::grip_at(&sheets, ruler, resp.rect.top(), at);
+                if resp.hovered()
+                    && let Some(grip) = Self::grip_at(sheets, ruler, resp.rect.top(), at)
+                {
                     self.press = Some(Press { at, since: time, grip, moved: false, held: false });
                 }
             } else if let Some(press) = self.press.take() {
@@ -256,10 +294,11 @@ impl Strip {
             }
         }
         // Right click, as the sheet's cells take it.
-        if resp.contains_pointer()
+        if resp.hovered()
             && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
             && let Some(at) = pointer
-            && let Grip::Sheet { from } | Grip::Edge { from, .. } = Self::grip_at(&sheets, ruler, resp.rect.top(), at)
+            && let Some(Grip::Sheet { from } | Grip::Edge { from, .. }) =
+                Self::grip_at(sheets, ruler, resp.rect.top(), at)
         {
             self.open_menu(ui, resp, from, at);
         }
@@ -284,7 +323,7 @@ impl Strip {
             return;
         }
         if !gesture_safe {
-            state.refuse("refused — finish the stroke first");
+            state.refuse(FINISH_STROKE);
             return;
         }
         match press.grip {
@@ -309,12 +348,17 @@ impl Strip {
         let (Grip::Edge { from, len }, Some(here)) = (press.grip, here) else {
             return sheets;
         };
+        // A paste in the same frame can take the run, as an undo can.
+        if !press.grip.stands(&sheets) {
+            return sheets;
+        }
         let to = Self::pulled(&press, len, here, scale);
+        let shift = to as i64 - len as i64;
         for sheet in &mut sheets {
             if sheet.from == from {
                 sheet.len = to;
             } else if sheet.from > from {
-                sheet.from = sheet.from + to - len;
+                sheet.from = (sheet.from as i64 + shift).max(0) as u32;
             }
         }
         sheets
@@ -325,15 +369,17 @@ impl Strip {
         let wide = (count as f32 * scale).max(ui.available_width());
         let (rect, resp) = ui.allocate_exact_size(vec2(wide, STRIP_H), Sense::drag());
         let ruler = Ruler { left: rect.left(), scale, last: count - 1 };
-        self.input(ui, state, &resp, ruler, gesture_safe);
+        let (runs, made) = (sheets(state), state.engine.position());
+        self.input(ui, state, &resp, &runs, ruler, gesture_safe);
         crate::xsheet_panel::clipboard_events(ui, state, gesture_safe);
-        // An edit above may have changed the cut's length.
+        // An edit above may have changed the runs and the cut's length.
+        let runs = if state.engine.position() == made { runs } else { sheets(state) };
         let ruler = Ruler { last: state.frame_count() - 1, ..ruler };
         let here = ui.input(|i| i.pointer.latest_pos());
-        let sheets = self.live(sheets(state), here, scale);
-        let hovered = here.filter(|_| resp.contains_pointer());
+        let sheets = self.live(runs, here, scale);
+        let hovered = here.filter(|_| resp.hovered());
         let top = rect.top() + BAR_H;
-        let under = hovered.filter(|p| p.y >= top).map(|p| ruler.frame(p.x));
+        let under = hovered.filter(|p| (top..top + SHEET_H).contains(&p.y)).map(|p| ruler.frame(p.x));
         let sheet = under.and_then(|f| sheets.iter().find(|s| f < s.from + s.len).copied());
         self.under = sheet.map(|s| s.from);
         if let (Some(s), Some(p)) = (sheet, hovered)
@@ -342,13 +388,14 @@ impl Strip {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
         self.follow(ui, state, rect, ruler);
-        paint(ui, state, rect, ruler, &sheets);
-        speak_sheets(ui, state, &resp, ruler, top, &sheets);
+        let drawings = tally(&sheets);
+        paint(ui, state, rect, ruler, &sheets, &drawings, self.under);
+        speak_sheets(ui, state, &resp, ruler, top, &sheets, &drawings);
         if self.press.is_none()
             && self.menu.is_none()
             && let Some(s) = sheet
         {
-            let words = card(state, &sheets, &s);
+            let words = card(state, &drawings, &s);
             plate::card_above(resp.clone(), pos2(ruler.x(s.from), rect.top()), || words);
         }
         self.menu_ui(state, &resp);
@@ -395,16 +442,32 @@ fn tap(state: &mut AppState, from: u32) {
     state.select_cells((column, from), column, from);
 }
 
-/// A sheet's hover card: its drawing's name, its frames and, for a drawing
-/// exposed twice, that.
-fn card(state: &AppState, sheets: &[Sheet], sheet: &Sheet) -> String {
+/// What the strip's sheet is called: its number and its frames.
+fn sheet_name(drawings: &HashMap<DrawingId, Tally>, sheet: &Sheet) -> String {
     let frames = span(sheet);
     match sheet.shows {
-        Exposure::Empty => format!("Empty, {frames}"),
+        Exposure::Empty => format!("Empty sheet, {frames}"),
+        Exposure::Drawing(id) => format!("Drawing {}, {frames}", number_of(drawings, id)),
+    }
+}
+
+fn number_of(drawings: &HashMap<DrawingId, Tally>, id: DrawingId) -> u32 {
+    drawings.get(&id).map_or(0, |t| t.number)
+}
+
+/// A sheet's hover card: the number and the frames it shows, its drawing's
+/// own name in the middle, and how a sheet's edge works.
+fn card(state: &AppState, drawings: &HashMap<DrawingId, Tally>, sheet: &Sheet) -> String {
+    let frames = span(sheet);
+    let hint = "Drag the right edge to make it longer or shorter.";
+    match sheet.shows {
+        Exposure::Empty => format!("{}\n{hint}", sheet_name(drawings, sheet)),
         Exposure::Drawing(id) => {
-            let name = state.cut().drawing(id).map_or("Drawing", |d| d.name.as_str());
-            let twice = sheets.iter().filter(|s| s.shows == sheet.shows).count() > 1;
-            format!("{name}, {frames}{}", if twice { "\nUsed twice" } else { "" })
+            let number = number_of(drawings, id);
+            let name = state.cut().drawing(id).map_or("", |d| d.name.as_str());
+            let used = drawings.get(&id).is_some_and(|t| t.uses > 1);
+            let twice = if used { "\nUsed twice" } else { "" };
+            format!("Drawing {number} ({name}), {frames}{twice}\n{hint}")
         }
     }
 }
@@ -430,10 +493,17 @@ fn sheet_rect(ruler: Ruler, top: f32, sheet: &Sheet) -> Rect {
 
 /// Each sheet on screen is one accessible control (spec 7.2): the surface
 /// alone would be one large widget.
-fn speak_sheets(ui: &mut Ui, state: &mut AppState, resp: &egui::Response, ruler: Ruler, top: f32, sheets: &[Sheet]) {
+fn speak_sheets(
+    ui: &mut Ui,
+    state: &mut AppState,
+    resp: &egui::Response,
+    ruler: Ruler,
+    top: f32,
+    sheets: &[Sheet],
+    drawings: &HashMap<DrawingId, Tally>,
+) {
     let ppp = ui.ctx().pixels_per_point();
     let clip = ui.clip_rect();
-    let numbers = numbered(sheets);
     for sheet in sheets {
         let rect = sheet_rect(ruler, top, sheet);
         if !rect.intersects(clip) {
@@ -442,13 +512,7 @@ fn speak_sheets(ui: &mut Ui, state: &mut AppState, resp: &egui::Response, ruler:
         plate::note_strip_sheet(ui, rect);
         let id = resp.id.with(("sheet", sheet.from));
         let at = rect.intersect(clip);
-        let name = match sheet.shows {
-            Exposure::Empty => format!("Empty sheet, {}", span(sheet)),
-            Exposure::Drawing(d) => {
-                let number = numbers.iter().find(|(id, _)| *id == d).map_or(0, |(_, n)| *n);
-                format!("Drawing {number}, {}", span(sheet))
-            }
-        };
+        let name = sheet_name(drawings, sheet);
         ui.ctx().accesskit_node_builder(id, |node| {
             node.set_role(accesskit::Role::Button);
             node.set_label(name);
@@ -466,14 +530,23 @@ fn speak_sheets(ui: &mut Ui, state: &mut AppState, resp: &egui::Response, ruler:
     }
 }
 
-fn paint(ui: &Ui, state: &AppState, rect: Rect, ruler: Ruler, sheets: &[Sheet]) {
+fn paint(
+    ui: &Ui,
+    state: &AppState,
+    rect: Rect,
+    ruler: Ruler,
+    sheets: &[Sheet],
+    drawings: &HashMap<DrawingId, Tally>,
+    under: Option<u32>,
+) {
     let painter = ui.painter();
     let clip = ui.clip_rect();
     let bar = Rect::from_min_size(rect.min, vec2(rect.width(), BAR_H));
     painter.rect_filled(bar, 0.0, plate::STEEL);
     let fps = state.fps();
     let seen = ruler.frame(clip.left())..=ruler.frame(clip.right()).saturating_add(1);
-    // The second ticks; a label wherever the last one leaves it room.
+    // The second ticks, white; a label in the bar's own ink wherever the
+    // last one leaves it room.
     let mut free = f32::MIN;
     for frame in seen {
         if crate::runs::rule_tier(frame, fps) != Some(2) || frame == 0 {
@@ -484,7 +557,7 @@ fn paint(ui: &Ui, state: &AppState, rect: Rect, ruler: Ruler, sheets: &[Sheet]) 
         if x >= free {
             let words = format!("{} s", frame / fps.max(1));
             let font = FontId::proportional(12.0);
-            let label = painter.text(pos2(x + 3.0, bar.center().y), Align2::LEFT_CENTER, words, font, plate::ON_FILL);
+            let label = painter.text(pos2(x + 3.0, bar.center().y), Align2::LEFT_CENTER, words, font, plate::STEEL_INK);
             free = label.right() + 6.0;
         }
     }
@@ -496,17 +569,23 @@ fn paint(ui: &Ui, state: &AppState, rect: Rect, ruler: Ruler, sheets: &[Sheet]) 
     }
     let top = bar.bottom();
     let frame = state.view.frame;
-    let numbers = numbered(sheets);
     for sheet in sheets {
         let at = sheet_rect(ruler, top, sheet);
         if !at.intersects(clip) {
             continue;
         }
-        paint_sheet(painter, at, sheet, sheets, &numbers);
+        paint_sheet(painter, at, sheet, drawings, under == Some(sheet.from));
         if frame >= sheet.from && frame < sheet.from + sheet.len {
             let round = CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 };
             painter.rect_stroke(at, round, Stroke::new(2.0, plate::BLUE_DEEP), StrokeKind::Inside);
+            edge_grip(painter, at);
         }
+    }
+    let cut = state.cut();
+    if cut.xsheet.columns.len() > 1
+        && let Some(column) = cut.xsheet.column(state.view.active_column)
+    {
+        track_chip(ui, pos2(clip.right() - 4.0, bar.center().y), &column.name);
     }
     // Over everything: the playhead, its cap in a white ring.
     let x = ruler.x(frame) + ruler.scale * 0.5;
@@ -514,57 +593,78 @@ fn paint(ui: &Ui, state: &AppState, rect: Rect, ruler: Ruler, sheets: &[Sheet]) 
     painter.line_segment([pos2(x, bar.top()), pos2(x, foot)], Stroke::new(2.0, plate::BLUE_DEEP));
     let cap = pos2(x, bar.top() + 6.0);
     painter.circle(cap, 4.5, plate::BLUE_DEEP, Stroke::new(1.5, plate::ON_FILL));
-    let cut = state.cut();
-    if cut.xsheet.columns.len() > 1
-        && let Some(column) = cut.xsheet.column(state.view.active_column)
-    {
-        track_chip(painter, pos2(clip.left() + 4.0, bar.center().y), &column.name);
+}
+
+/// From the second track, the strip says which one it shows: at the visible
+/// bar's right end, where the playhead's cap does not start. `at` is the
+/// chip's right end.
+fn track_chip(ui: &Ui, at: Pos2, name: &str) {
+    let painter = ui.painter();
+    let font = FontId::proportional(12.0);
+    let galley = painter.layout_no_wrap(name.to_string(), font, plate::INK);
+    let size = vec2(galley.size().x + 10.0, 14.0);
+    let chip = Rect::from_min_size(at - vec2(size.x, 7.0), size);
+    painter.rect_filled(chip, plate::R_SHEET, plate::PAPER);
+    painter.galley(pos2(chip.left() + 5.0, chip.center().y - galley.size().y * 0.5), galley, plate::INK);
+    // Hover only: a press here is still the bar's.
+    let spoken = format!("Track {name}");
+    let resp = ui.interact(chip, ui.id().with("track_chip"), Sense::hover());
+    plate::speak(&resp, egui::WidgetType::Label, None, &spoken);
+    resp.card(format!("The strip shows {spoken}."));
+}
+
+/// The current sheet's edge says it can be pulled: two short ticks, where
+/// they leave its number room.
+fn edge_grip(painter: &egui::Painter, at: Rect) {
+    if at.width() < 2.0 * NUMBERED {
+        return;
+    }
+    let ink = Stroke::new(1.0, plate::BLUE_DEEP);
+    let (mid, right) = (at.center().y, at.right() - 5.0);
+    for x in [right, right - 3.0] {
+        painter.line_segment([pos2(x, mid - 5.0), pos2(x, mid + 5.0)], ink);
     }
 }
 
-/// From the second track, the strip says which one it shows.
-fn track_chip(painter: &egui::Painter, at: Pos2, name: &str) {
-    let font = FontId::proportional(12.0);
-    let galley = painter.layout_no_wrap(name.to_string(), font, plate::INK);
-    let chip = Rect::from_min_size(at - vec2(0.0, 7.0), vec2(galley.size().x + 10.0, 14.0));
-    painter.rect_filled(chip, plate::R_SHEET, plate::PAPER);
-    painter.galley(pos2(chip.left() + 5.0, chip.center().y - galley.size().y * 0.5), galley, plate::INK);
-}
-
-fn paint_sheet(painter: &egui::Painter, at: Rect, sheet: &Sheet, sheets: &[Sheet], numbers: &[(anim_core::ids::DrawingId, u32)]) {
+fn paint_sheet(painter: &egui::Painter, at: Rect, sheet: &Sheet, drawings: &HashMap<DrawingId, Tally>, under: bool) {
+    let round = CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 };
     let Exposure::Drawing(id) = sheet.shows else {
+        if under {
+            painter.rect_filled(at, round, plate::HOVER);
+        }
         dashed(painter, at);
         return;
     };
-    let round = CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 };
-    painter.rect_filled(at, round, plate::PAPER);
+    // The sheet under the pointer is the one Delete takes: it shows.
+    painter.rect_filled(at, round, if under { plate::HOVER } else { plate::PAPER });
     painter.circle_filled(pos2(at.center().x, at.top() + 6.0), 2.5, plate::DESK);
-    let twice = sheets.iter().filter(|s| s.shows == sheet.shows).count() > 1;
+    let twice = drawings.get(&id).is_some_and(|t| t.uses > 1);
+    let worded = twice && at.width() >= WORDED;
     if at.width() >= NUMBERED {
-        let number = numbers.iter().find(|(d, _)| *d == id).map_or(0, |(_, n)| *n);
-        // The badge's words stand under the number, so it climbs to clear them.
-        let drop = if twice && at.width() >= WORDED { 15.0 } else { 22.0 };
-        let middle = pos2(at.center().x, at.top() + drop);
-        painter.text(middle, Align2::CENTER_CENTER, number.to_string(), FontId::proportional(14.0), plate::INK2);
+        // Beside the badge's words when they show, in the middle when not.
+        let (x, align) = if worded { (at.left() + 8.0, Align2::LEFT_CENTER) } else { (at.center().x, Align2::CENTER_CENTER) };
+        let font = FontId::proportional(14.0);
+        painter.text(pos2(x, at.top() + SHEET_ROW), align, number_of(drawings, id).to_string(), font, plate::INK2);
     }
     if twice {
-        twice_badge(painter, at);
+        twice_badge(painter, at, worded);
     }
 }
 
-/// `Used twice`, or its mark where the words do not fit.
-fn twice_badge(painter: &egui::Painter, at: Rect) {
-    if at.width() >= WORDED {
-        let font = FontId::proportional(12.0);
-        painter.text(at.center_bottom() - vec2(0.0, 2.0), Align2::CENTER_BOTTOM, "Used twice", font, plate::BLUE_DEEP);
+/// `Used twice`, on the number's row, or its mark where the words do not fit.
+fn twice_badge(painter: &egui::Painter, at: Rect, worded: bool) {
+    if worded {
+        let (font, end) = (FontId::proportional(12.0), pos2(at.right() - 12.0, at.top() + SHEET_ROW));
+        painter.text(end, Align2::RIGHT_CENTER, "Used twice", font, plate::BLUE_DEEP);
     } else {
-        painter.circle_filled(at.right_bottom() - vec2(6.0, 6.0), 2.5, plate::BLUE_DEEP);
+        painter.circle_filled(at.right_bottom() - vec2(6.0, 5.0), 2.5, plate::BLUE_DEEP);
     }
 }
 
-/// An empty run's outline, dashed so it never reads as a sheet of paper.
+/// An empty run's outline, dashed so it never reads as a sheet of paper, and
+/// inside the current sheet's 2 pt outline so it still shows there.
 fn dashed(painter: &egui::Painter, at: Rect) {
-    let at = at.shrink(1.0);
+    let at = at.shrink(3.5);
     let path = [at.left_top(), at.right_top(), at.right_bottom(), at.left_bottom(), at.left_top()];
     let ink: Color32 = plate::INK3;
     painter.extend(egui::Shape::dashed_line(&path, Stroke::new(1.0, ink), 4.0, 3.0));

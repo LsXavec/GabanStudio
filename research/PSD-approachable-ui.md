@@ -472,6 +472,10 @@ None added. Floats are `fade_in(false)`. Nothing slides, bounces or pulses. A fl
 | Shiage (full) | Full paint | Stack name |
 | H, L | Eye and lock icons, spoken `Hide track`, `Lock track` | |
 | Next key, Previous key | Next drawing, Previous drawing | `NextKey`, `PrevKey` |
+| scrub | Sound while dragging | `ToggleScrub` |
+| in, out | Loop start, Loop end | `LoopIn`, `LoopOut` |
+| loop | Loop | `ToggleLoop` |
+| 24.000 | fps, as `24 fps` | `fps` |
 
 **Kept:** select, fill, eraser, fit. Key pose, Breakdown and Inbetween stay, inside `Mark as ▸` only.
 
@@ -574,7 +578,7 @@ The rail is also hidden in Plan's Preview, in 3D and in Brush maker.
 - **What moves.** The full-band latch only fills reserved slots, so nothing moves. `strip_open` grows the band from 36 to 92, so the pane loses 56 pt and Fit refits the paper once (`canvas.rs:3847`). That happens only when a document opens or on Add drawing, never during a stroke, because `AddDrawingAfter` is `stroke_guarded`. No rail or transport control moves.
 - `dropped` shows only when above 0.
 - `Timing sheet` is absent in Plan and Timing, where the sheet is part of the recipe. In Draw it switches the recipe. In Color, Effects, Export and off-spine places it opens the sheet as a pane.
-- Under 1040 pt, First, Last, Loop start, Loop end, Sound, fps, Ghost frames and Speed fold into a `…` popover, and the Quick Start dots hide. Play, the counter, Add drawing and Timing sheet never fold. The Say line's floor is 240 pt. A sentence that does not fit one 14 pt line wraps to two 12 pt lines inside the 36-tall row, and its action button never shrinks. The narrowest effective sizes are 832×520 (1024×640 at 150%), 853×533 (1280×800 at 150%), 924×520 (1280×720 at 150%) and 1092×614 (1366×768 at 125%). At 832 the lane is about 328 pt. `ausay_every_hint_fits_at_the_smallest_sizes` holds this.
+- Under 1040 pt, First, Last, Loop start, Loop end, Sound, fps, Ghost frames and Speed fold into a `…` popover, and the Quick Start dots hide. Play, the counter, Add drawing and Timing sheet never fold. From 1040 to 1160 pt the full transport's Sound while dragging is its icon, its name and card keeping the words. The Say line's floor is 240 pt. A sentence that does not fit one 14 pt line wraps to two 12 pt lines inside the 36-tall row, and its action button never shrinks. The narrowest effective sizes are 832×520 (1024×640 at 150%), 853×533 (1280×800 at 150%), 924×520 (1280×720 at 150%) and 1092×614 (1366×768 at 125%). At 832 the lane is about 328 pt. `ausay_every_hint_fits_at_the_smallest_sizes` holds this.
 
 **Foot items.** REDO·UNDO goes to the top buttons. The room lamp stays in the top row only during a LAN session (`main.rs:7174-7192`). Relaunch stays. Version goes to About. The pressure note (`main.rs:7216-7218`) becomes a hint.
 
@@ -1154,8 +1158,8 @@ The strip is a second view of the same exposures. It reads `Column::runs(0, fram
 |---|---|
 | Tap | `select_cells` and `goto` the run start |
 | Drag on the bar | Scrub |
-| Drag a sheet's right edge (last 8 pt) | `sheet_ops::hold_delta` and `SetFrameCount`, committed once on release |
-| Add drawing (the band's button, Alt+A) | `AddDrawing`, `InsertFrames { frame: run_end + 1, count: run_len }`, `SetCell`, `goto`, one undo. New hold equals the hold of the cell before. On an empty run, uniform |
+| Drag a sheet's right edge (last 8 pt) | `sheet_ops::hold_delta` and `SetFrameCount`, committed once on release. The last sheet's end is the cut's end, so that edge is `SetFrameCount` alone unless another track holds the cut longer (AU5 notes) |
+| Add drawing (the band's button, Alt+A) | `AddDrawing`, `InsertFrames { frame: run_end + 1, count: run_len }`, `SetCell`, `goto`, one undo. New hold equals the hold of the cell before. On an empty run, uniform. One drawing across the whole cut takes the next frame for one frame instead, and the cut stands (AU5 notes) |
 | Speed | Popover: Fast 1 frame per drawing, Medium 2, Slow 3, plus Loop toggle. `retime_range` and `SetFrameCount`, one undo |
 | Right click or long-press | `cell_menu` and `kind_menu`, now `pub(crate)` |
 | Ctrl+C, X, V over the strip | Same clipboard, `pub(crate)` |
@@ -1596,6 +1600,18 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - The hover card replaced stock tooltips on the rail and in the floats, and on the two layer functions the Layers float shares with the sheet. The sheet's own tooltips stay for AU5, and menu rows stay stock.
 - `set_width` is only a floor: the `More` fold widened a float by 16, the fold's indent over a slider set to the body's width, so the fold now sets `slider_width` to its own width.
 - No shot shows the second OS window: the headless harness takes the embedded branch, so `aurail_both_canvas_hosts_call_one_overlay` proves the path and item 4 stays the real check.
+
+**AU5 notes.** Choices the build made where this document was silent or spoke twice. None needs a device.
+
+- Add drawing on one drawing across the whole cut. A first stroke on a blank 48-frame cut holds for 48 frames, a hold nobody chose, and 7.2's rule copied it: hold 48, cut 96, `Frame 49 of 96`. Now the new drawing takes the next frame for one frame, the rest of the cut stays and goes empty, the cut stands and it is one undo: `[1, 1, 46]`, `Frame 2 of 48`. From frame 10 it gives `[10, 1, 37]`, and from the cut's last frame `[48, 1]`, cut 49. After that the track has a rhythm and 7.2's rule holds again. `[48, 1]` from frame 1, `[1, 47]`, and shrinking the cut were weighed: the first still jumps 47 frames, the second makes a held drawing nobody asked for, and the third throws frames away.
+- The last sheet's edge has no later key for `hold_delta` to move. It refuses to lengthen a tail, and a shortened tail would leave a stale empty key past the cut's end. So that edge is `SetFrameCount` alone, one undo, unless another track holds the cut longer: then it goes through `hold_delta`, the rest of the run goes empty and the cut stands. `SetFrameCount` has no lock of its own, so the strip's verbs refuse a locked track themselves, in the sheet's words.
+- 4.4's Sound while dragging and the Say line's 240 floor collide just over the fold: the lane was 132 at 1040 and 184 at 1092. From 1040 to 1160 the key is its speaker icon, its spoken name and card keeping the words. The lane now stands 251 at 1040 and 252 at 1160, its two tightest.
+- 4.4's foot words for the full transport had no row in Section 3, so AU12's flip would have missed them. They have rows now and live in `vocab`; `scrub`, `in` and `out` stay aliases. The test migration budget had no line for them either: they moved the pins of 3 older tests (2 in `playback.rs`, 1 in `audock_tests.rs`), reason `label`, which stand inside the ceiling of 157.
+- A card never rises after a click until the pointer moves, as a stock tooltip never does. A `Tooltip` layer stands in egui's hit test, so a card rising beside a key just clicked lay over the next key and took its press. A disabled key wears a card too, by `contains_pointer`: egui never calls it hovered. What stays: a pen landing in the same frame on a key under a card that a plain rest raised loses that press, as under a stock tooltip.
+- The hover card replaced the stock tooltips on the band, the strip and the Timing sheet's own controls. An elided Say line carries the rest of its words on a card, so `plate::say` turns off the label's own tooltip.
+- Delete takes the sheet under the pointer, not the selected one, by 7.2 and the Rejected review notes. The sheet under the pointer lights, so the aim shows, and the cursor goes with the Delete.
+- Sheet numbers and `Used twice` stand on one row, clear of the peg hole by 2 pt. The bar's labels take `STEEL_INK`; its second ticks stay white, as 7.2 and the Steel row say.
+- The Say line's action slot is 92 pt, `plate::SAY_ACTION`: the longest action word at control size, its pad and the gap. Its rule stands only beside words, and its 6 pt stay either way, so no slot moves.
 
 ---
 

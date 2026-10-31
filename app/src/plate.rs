@@ -594,7 +594,14 @@ fn card_at(
 ) -> Response {
     let ctx = resp.ctx.clone();
     let id = resp.id.with(salt);
-    if !resp.hovered() || resp.is_pointer_button_down_on() {
+    // A click is no rest, as with a stock tooltip: a card rising beside the
+    // key just clicked would lie over the next one and take its press, since
+    // a Tooltip layer stands in egui's hit test. The pointer moves on first.
+    let clicked = ctx.input(|i| i.pointer.time_since_last_click() < i.pointer.time_since_last_movement() + 0.1);
+    // egui never calls a disabled widget hovered, and that is the key with
+    // something to explain.
+    let rests = resp.hovered() || (!resp.enabled() && resp.contains_pointer());
+    if !rests || resp.is_pointer_button_down_on() || clicked {
         ctx.data_mut(|d| d.remove_temp::<f64>(id));
         return resp;
     }
@@ -901,10 +908,13 @@ pub fn value(ui: &mut Ui, text: &str) -> Response {
 /// The Say line's one size, and the smaller one its second row asks for.
 pub const SAY_TEXT: f32 = 14.0;
 pub const SAY_SMALL: f32 = 12.0;
+/// The lane's right end, held for a hint's action button (spec 8.2): the
+/// longest of its words at control size, its pad and the gap before it.
+pub const SAY_ACTION: f32 = 92.0;
 
 /// The Say line's words (spec 4.4): one line, or two smaller ones inside the
-/// row when one will not hold them. What two cannot hold stops on a `…`; the
-/// hover has the rest.
+/// row when one will not hold them. What two cannot hold stops on a `…`; its
+/// card has the rest.
 pub fn say(ui: &mut Ui, words: &str, ink: Color32) -> Response {
     let wide = ui.available_width();
     let size = if text_width(ui, words, SAY_TEXT) <= wide { SAY_TEXT } else { SAY_SMALL };
@@ -916,11 +926,13 @@ pub fn say(ui: &mut Ui, words: &str, ink: Color32) -> Response {
         ..egui::text::TextWrapping::default()
     };
     let galley = ui.fonts_mut(|f| f.layout_job(job));
-    ui.add(egui::Label::new(galley))
+    let elided = galley.elided;
+    let resp = ui.add(egui::Label::new(galley).show_tooltip_when_elided(false));
+    if elided { resp.card(words) } else { resp }
 }
 
 /// A refusal: the wash, red words and a mark, so it never rests on colour.
-/// Long words stop at the end of the lane; the hover has the rest.
+/// Long words stop at the end of the lane; the card has the rest.
 pub fn refusal(ui: &mut Ui, words: &str) -> Response {
     egui::Frame::new()
         .fill(RED_WASH)
@@ -1031,12 +1043,27 @@ pub fn detent_dim(ui: &mut Ui, armed: bool, label: &str) -> Response {
     detent_inked(ui, armed, label, true)
 }
 
+/// A [`detent`] with its fact on the row, in the quieter ink: `word` says
+/// what it is and `fact` what that means. The row is one control, named
+/// `word`, and `widest`, the group's longest word, holds the facts in line.
+pub fn detent_fact(ui: &mut Ui, armed: bool, word: &str, fact: &str, widest: &str) -> Response {
+    let fact_x = DETENT_W + 4.0 + text_width(ui, widest, CTRL_TEXT) + 12.0;
+    let width = fact_x + text_width(ui, fact, CTRL_TEXT) + 8.0;
+    let (rect, resp) = detent_sized(ui, armed, word, false, width);
+    if ui.is_rect_visible(rect) {
+        label_at(ui, rect.left() + fact_x, rect.center().y, fact, CTRL_TEXT, at_rest(ui, INK3));
+    }
+    resp
+}
+
 fn detent_inked(ui: &mut Ui, armed: bool, label: &str, dim: bool) -> Response {
-    let text_w = text_width(ui, label, CTRL_TEXT);
-    let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(DETENT_W + 4.0 + text_w + 8.0, CTRL_H),
-        Sense::click(),
-    );
+    let width = DETENT_W + 4.0 + text_width(ui, label, CTRL_TEXT) + 8.0;
+    detent_sized(ui, armed, label, dim, width).1
+}
+
+/// A detent `width` wide: the rect its face took, and the control.
+fn detent_sized(ui: &mut Ui, armed: bool, label: &str, dim: bool, width: f32) -> (egui::Rect, Response) {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let ppp = ui.ctx().pixels_per_point();
@@ -1060,7 +1087,7 @@ fn detent_inked(ui: &mut Ui, armed: bool, label: &str, dim: bool) -> Response {
         );
     }
     speak(&resp, egui::WidgetType::SelectableLabel, Some(armed), label);
-    describe(resp, "DETENT detent", label)
+    (rect, describe(resp, "DETENT detent", label))
 }
 
 /// The width a [`latch`] takes, for a row that places latches by hand.

@@ -240,6 +240,8 @@ pub const OUTSIDE_PAPER: &str = "outside the paper: Cut ▸ Paper size… extend
 /// on, as `AppState::no_own_cel_reason` says them.
 pub const HELD_FRAME: &str = "This frame holds an earlier drawing. Go to its first frame, or add a drawing here.";
 pub const BLANK_FRAME: &str = "This frame has no drawing yet. Draw here first.";
+/// AU5: the strip and the band while the pen is down.
+pub const FINISH_STROKE: &str = "Finish your stroke first.";
 
 /// GM20: a tool used on the paper past a capped painting window (a paper
 /// wider or taller than the GPU paints) — the Aka lane.
@@ -478,6 +480,9 @@ pub struct AppState {
     /// says mirrors need a fresh snapshot after history rewrites.
     pub history_dirty: bool,
     pub refusal_seq: u32,
+    /// AU5: a run that reached its end settled on this frame (R19), and Play
+    /// from it still rewinds, as Play from the last frame does.
+    pub played_out: Option<u32>,
     /// AU1: finished pen strokes, the ONE signal for every route (the vector
     /// `commit_stroke`, the raster `commit_raster`, and a guest's streamed
     /// stroke at pen-up, which the host commits). A fill, a paste and a
@@ -684,6 +689,7 @@ impl AppState {
             refusal: String::new(),
             history_dirty: false,
             refusal_seq: 0,
+            played_out: None,
             strokes_done: 0,
             doc_gen: 0,
             saved_rev: 0,
@@ -783,6 +789,7 @@ impl AppState {
             refusal: String::new(),
             history_dirty: false,
             refusal_seq: 0,
+            played_out: None,
             strokes_done: 0,
             doc_gen: 0,
             saved_rev: engine.revision(),
@@ -2512,42 +2519,72 @@ impl AppState {
         last.map_or(1, |(_, held)| *held)
     }
 
+    /// `report` with a sentence for the Say line: `verb` is what a refusal
+    /// says did not happen.
+    fn report_said(&mut self, r: anim_core::error::Result<()>, said: &str, verb: &str) {
+        let landed = r.is_ok();
+        self.report(r, verb);
+        if landed {
+            self.status = said.into();
+        }
+    }
+
+    /// The strip's verbs refuse a locked track in the sheet's words. True
+    /// when refused. `SetFrameCount` has no lock of its own to catch it.
+    fn refuse_locked_track(&mut self) -> bool {
+        let locked = self.active_column_def().locked;
+        if locked {
+            self.refuse("refused — this column is locked");
+        }
+        locked
+    }
+
     /// `Add drawing`: a blank drawing right after the run under the cursor,
     /// holding as long as that run, the cursor on it, in one undo step. What
-    /// follows ripples and the cut grows. True when it landed.
+    /// follows ripples and the cut grows. One drawing across the whole cut
+    /// never chose that hold, so the new one takes the next frame for one
+    /// frame, the rest of the cut stays and goes empty, and nothing doubles.
+    /// True when it landed.
     pub fn add_drawing_after(&mut self) -> bool {
+        if self.refuse_locked_track() {
+            return false;
+        }
         let Some((from, len, shows)) = self.run_at(self.view.frame) else {
             self.refuse("refused — this cut has no track to add a drawing to");
             return false;
         };
-        let (frame, count) = (from + len, self.hold_to_copy(from, len, shows));
+        let length = self.frame_count();
+        let open = len == length && len > 1 && matches!(shows, Exposure::Drawing(_));
+        let next = self.view.frame + 1;
+        let (frame, count) = if open { (next, 1) } else { (from + len, self.hold_to_copy(from, len, shows)) };
+        // Inside the open run the frames are there already.
+        let inside = open && next < length;
         let at = self.at();
+        let column = self.view.active_column;
         let name = self.next_drawing_name();
         let id = self.engine.alloc_drawing_id();
         let layers = self.new_cel_layers();
         let index = self.cut().drawings.len();
-        let r = self.engine.apply(
-            "add drawing",
-            vec![
-                Command::AddDrawing { at, id, index, name, strokes: vec![], layers },
-                Command::InsertFrames { at, frame, count },
-                Command::SetCell {
-                    at,
-                    column: self.view.active_column,
-                    frame,
-                    key: Some(Exposure::Drawing(id)),
-                },
-            ],
-        );
+        let mut cmds = vec![Command::AddDrawing { at, id, index, name, strokes: vec![], layers }];
+        if !inside {
+            cmds.push(Command::InsertFrames { at, frame, count });
+        }
+        cmds.push(Command::SetCell { at, column, frame, key: Some(Exposure::Drawing(id)) });
+        if inside && next + 1 < length {
+            cmds.push(Command::SetCell { at, column, frame: next + 1, key: Some(Exposure::Empty) });
+        }
+        let r = self.engine.apply("add drawing", cmds);
         let landed = r.is_ok();
         if landed {
-            for _ in 0..count {
-                self.ripple_loop(frame, true);
+            if !inside {
+                for _ in 0..count {
+                    self.ripple_loop(frame, true);
+                }
             }
             self.view.selected_drawing = Some(id);
             self.goto(frame);
         }
-        self.report(r, "drawing added");
+        self.report_said(r, "Drawing added.", "add drawing");
         landed
     }
 
@@ -2564,6 +2601,9 @@ impl AppState {
     /// frames, the cut takes the new length and the cursor stays on its
     /// run, in one undo step.
     pub fn set_speed(&mut self, step: u32) {
+        if self.refuse_locked_track() {
+            return;
+        }
         let (at, column, count) = (self.at(), self.view.active_column, self.frame_count());
         let Some(col) = self.cut().xsheet.column(column) else {
             return;
@@ -2587,19 +2627,23 @@ impl AppState {
             cmds.push(Command::SetFrameCount { at, frames });
         }
         if cmds.is_empty() {
-            self.status = "already at that speed".into();
+            self.status = "Already at that speed.".into();
             return;
         }
         let r = self.engine.apply("speed", cmds);
         if r.is_ok() {
             self.goto(here);
         }
-        self.report(r, "speed set");
+        let each = if step == 1 { "1 frame".to_string() } else { format!("{step} frames") };
+        self.report_said(r, &format!("All drawings set to {each} each."), "speed");
     }
 
     /// The strip's sheet edge: the run at `frame` becomes `frames` long,
     /// later keys ripple and the cut follows, in one undo step.
     pub fn set_run_length(&mut self, frame: u32, frames: u32) {
+        if self.refuse_locked_track() {
+            return;
+        }
         let Some((from, len, _)) = self.run_at(frame) else {
             return;
         };
@@ -2613,8 +2657,13 @@ impl AppState {
         if delta == 0 {
             return;
         }
-        // The last run has no key after it: the cut's length is its length.
-        let tail = from + len == count;
+        // The last run has no key after it: the cut's length is its length,
+        // and `hold_delta` cannot grow it. Shortened, it would leave a key
+        // past the cut's end. Only a cut another track holds longer needs
+        // that key, to end the run inside the cut.
+        let end = (count as i64 + delta) as u32;
+        let frames = self.length_for(end);
+        let tail = from + len == count && (delta > 0 || frames == end);
         let built = if tail {
             Ok(vec![])
         } else {
@@ -2624,7 +2673,6 @@ impl AppState {
             Ok(cmds) => cmds,
             Err(e) => return self.report(Err(e), "hold"),
         };
-        let frames = self.length_for((count as i64 + delta) as u32);
         if frames != count {
             cmds.push(Command::SetFrameCount { at, frames });
         }
@@ -2635,7 +2683,7 @@ impl AppState {
         if r.is_ok() {
             self.goto(self.view.frame);
         }
-        self.report(r, "hold set");
+        self.report_said(r, "Hold set.", "hold");
     }
 
     /// R19: the playhead rests on the first frame of its run, so a person
@@ -2644,6 +2692,14 @@ impl AppState {
         if let Some((from, ..)) = self.run_at(self.view.frame) {
             self.view.frame = from;
         }
+    }
+
+    /// R19 at a stop. A run that reached its end is remembered: the frame it
+    /// settles on is no longer the last one, and Play still has to rewind.
+    pub fn settle_after_stop(&mut self) {
+        let ended = self.view.frame >= self.run_range(self.view.frame).1;
+        self.settle_on_run_start();
+        self.played_out = ended.then_some(self.view.frame);
     }
 
     /// Spec 8.2: why this frame cannot be worked on as a drawing of its own.
@@ -3839,6 +3895,7 @@ impl AppState {
     pub fn goto(&mut self, frame: u32) {
         self.view.frame = frame.min(self.frame_count() - 1);
         self.view.play_acc = 0.0;
+        self.played_out = None;
     }
     pub fn step(&mut self, delta: i64) {
         let n = self.frame_count() as i64;
@@ -3853,8 +3910,10 @@ impl AppState {
         // making the play press feel dead (and silently disarming the
         // playback the user thought they started). GM12: the end of the
         // run's range — the loop range's last frame rewinds to its first.
+        // AU5: so does the run start such a run settled on (R19).
         let (lo, hi) = self.run_range(self.view.frame);
-        if self.view.playing && self.view.frame >= hi {
+        let ended = self.played_out.take() == Some(self.view.frame);
+        if self.view.playing && (self.view.frame >= hi || ended) {
             self.view.frame = lo;
         }
         self.view.play_acc = 0.0;

@@ -836,7 +836,7 @@ pub(crate) fn transport_key(ui: &mut egui::Ui, text: &str, name: &str, w: f32) -
         rect.center(),
         egui::Align2::CENTER_CENTER,
         text,
-        egui::FontId::monospace(11.0),
+        plate::Role::Small.font(),
         plate::INK,
     );
     plate::speak(&resp, egui::WidgetType::Button, None, name);
@@ -850,7 +850,7 @@ pub(crate) fn readout(ui: &mut egui::Ui, text: &str, w: f32, ink: egui::Color32)
         rect.left_center() + egui::vec2(2.0, 0.0),
         egui::Align2::LEFT_CENTER,
         text,
-        egui::FontId::monospace(11.0),
+        plate::Role::Small.font(),
         ink,
     );
     plate::speak(&resp, egui::WidgetType::Label, None, text);
@@ -1573,7 +1573,7 @@ mod tests {
         // On by default, from the config; the latch shows it.
         assert!(h.rig().config.perf.scrub_audio);
         assert!(h.editor().scrub_audio);
-        assert_eq!(h.node_toggled("scrub"), Some(true), "{}", h.describe());
+        assert_eq!(h.node_toggled(crate::vocab::SOUND_WHILE_DRAGGING), Some(true), "{}", h.describe());
         // A stopped step sounds one frame of the frame landed on.
         h.state_mut().step(1);
         h.run_frames(1);
@@ -1588,7 +1588,7 @@ mod tests {
         h.run_frames(1);
         assert_eq!(h.editor().last_snippet, None);
         // The latch turns it on again.
-        h.click("scrub");
+        h.click(crate::vocab::SOUND_WHILE_DRAGGING);
         assert!(h.rig().config.perf.scrub_audio);
         assert!(h.editor().scrub_audio);
         // A run under the sound's clock that ends (loop off, range 3–6)
@@ -1679,24 +1679,30 @@ mod tests {
 
     #[test]
     fn playback_transport_slots_hold_still_when_the_loop_range_is_set() {
+        use crate::vocab::{HIDE_TIMING_SHEET, LOOP_END, LOOP_START, SOUND_WHILE_DRAGGING};
         let mut h = EditorHarness::new();
-        let (scrub, sheet) = (h.rect("scrub"), h.rect(crate::vocab::HIDE_TIMING_SHEET));
+        // The clear key stands right after the range: the one slot of the
+        // left lane the readout's width can push.
+        let slots = |h: &EditorHarness| {
+            ["clear loop range", SOUND_WHILE_DRAGGING, HIDE_TIMING_SHEET].map(|name| h.rect(name))
+        };
+        let still = slots(&h);
         assert!(h.has("—"), "the range slot reads — while unset\n{}", h.describe());
         assert_eq!(h.node_enabled("clear loop range"), Some(false));
         h.state_mut().goto(4);
-        h.click("loop in");
+        h.click(LOOP_START);
         assert_eq!(h.state().loop_range(), Some((4, 47)));
         assert!(h.has("5–48"), "{}", h.describe());
         assert_eq!(h.node_enabled("clear loop range"), Some(true));
         // D7: nothing after the range moved under the pointer.
-        assert_eq!(h.rect("scrub"), scrub);
-        assert_eq!(h.rect(crate::vocab::HIDE_TIMING_SHEET), sheet);
+        assert_eq!(slots(&h), still);
         h.state_mut().goto(9);
-        h.click("loop out");
+        h.click(LOOP_END);
         assert_eq!(h.state().loop_range(), Some((4, 9)));
+        assert_eq!(slots(&h), still);
         h.click("clear loop range");
         assert_eq!(h.state().loop_range(), None);
-        assert_eq!(h.rect("scrub"), scrub);
+        assert_eq!(slots(&h), still);
     }
 
     #[test]

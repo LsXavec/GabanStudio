@@ -147,6 +147,18 @@ const MASKS: &[(Icon, &str, &[u8], &[u8])] = &[
         mask_bytes!("layers", 24),
         mask_bytes!("layers", 48),
     ),
+    (
+        Icon::Ghosts,
+        "ghosts",
+        mask_bytes!("ghosts", 24),
+        mask_bytes!("ghosts", 48),
+    ),
+    (
+        Icon::Sound,
+        "sound",
+        mask_bytes!("sound", 24),
+        mask_bytes!("sound", 48),
+    ),
 ];
 
 /// Decode a white-alpha PNG mask into a texture, cached per-Context. The
@@ -226,6 +238,10 @@ pub enum Icon {
     Flip,
     /// Stacked sheets on the slant — the Layers float.
     Layers,
+    /// A solid sheet with a faded one either side — Ghost frames.
+    Ghosts,
+    /// A speaker and its waves — sound while dragging.
+    Sound,
     /// Three dots — what a popover keeps.
     Dots,
     /// A cross — a float's close key.
@@ -454,6 +470,18 @@ pub fn paint(p: &Painter, rect: Rect, ink: Color32, icon: Icon) {
             p.add(Shape::closed_line(vec![at(0.5, 0.08), at(0.92, 0.32), at(0.5, 0.56), at(0.08, 0.32)], s));
             p.add(Shape::line(vec![at(0.12, 0.62), at(0.5, 0.84), at(0.88, 0.62)], s));
         }
+        Icon::Ghosts => {
+            p.rect_stroke(Rect::from_min_max(at(0.3, 0.08), at(0.7, 0.92)), 1.0, s, StrokeKind::Middle);
+            let faded = Stroke::new(w, ink.gamma_multiply(0.5));
+            p.line_segment([at(0.08, 0.22), at(0.08, 0.78)], faded);
+            p.line_segment([at(0.92, 0.22), at(0.92, 0.78)], faded);
+        }
+        Icon::Sound => {
+            let horn = vec![at(0.16, 0.4), at(0.31, 0.4), at(0.5, 0.23), at(0.5, 0.77), at(0.31, 0.6), at(0.16, 0.6)];
+            p.add(Shape::closed_line(horn, s));
+            p.add(Shape::line(vec![at(0.65, 0.38), at(0.7, 0.5), at(0.65, 0.62)], s));
+            p.add(Shape::line(vec![at(0.76, 0.27), at(0.85, 0.5), at(0.76, 0.73)], s));
+        }
         Icon::Dots => {
             for x in [0.2f32, 0.5, 0.8] {
                 p.circle_filled(at(x, 0.5), r.width() * 0.08, ink);
@@ -486,17 +514,18 @@ pub fn paint(p: &Painter, rect: Rect, ink: Color32, icon: Icon) {
             }
         }
         Icon::StepBack => {
-            p.add(Shape::convex_polygon(
-                vec![at(0.8, 0.12), at(0.18, 0.5), at(0.8, 0.88)],
-                ink,
-                Stroke::NONE,
+            // A thin chevron and a bar: one frame, never Play's solid shape.
+            p.rect_filled(Rect::from_min_max(at(0.76, 0.14), at(0.9, 0.86)), 0.0, ink);
+            p.add(Shape::line(
+                vec![at(0.6, 0.14), at(0.24, 0.5), at(0.6, 0.86)],
+                Stroke::new(w * 1.6, ink),
             ));
         }
         Icon::StepFwd => {
-            p.add(Shape::convex_polygon(
-                vec![at(0.2, 0.12), at(0.82, 0.5), at(0.2, 0.88)],
-                ink,
-                Stroke::NONE,
+            p.rect_filled(Rect::from_min_max(at(0.1, 0.14), at(0.24, 0.86)), 0.0, ink);
+            p.add(Shape::line(
+                vec![at(0.4, 0.14), at(0.76, 0.5), at(0.4, 0.86)],
+                Stroke::new(w * 1.6, ink),
             ));
         }
         Icon::SkipBack => {
