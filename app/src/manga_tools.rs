@@ -66,12 +66,16 @@ impl Default for MangaState {
     }
 }
 
+/// AU9: what the page worker hands back: how many files, and the report made
+/// from them on its side of the channel.
+pub type PagesOut = Result<(usize, Option<crate::render_queue::Landed>), String>;
+
 /// GM18: the book's pages on their way out — rendered and written off the
 /// UI thread (NEVER-DO 6); the status line says what was written.
 pub struct PageExport {
     /// The folder they go into.
     pub dir: PathBuf,
-    pub rx: std::sync::mpsc::Receiver<Result<Vec<PathBuf>, String>>,
+    pub rx: std::sync::mpsc::Receiver<PagesOut>,
 }
 
 /// GM18: the panel tool's drag, in page px: where it was pressed, where

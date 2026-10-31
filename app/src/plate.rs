@@ -955,14 +955,37 @@ pub fn refusal(ui: &mut Ui, words: &str) -> Response {
         .inner_margin(egui::Margin::symmetric(8, 1))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let (mark, _) = ui.allocate_exact_size(Vec2::new(10.0, 16.0), Sense::hover());
-            let mark = egui::Rect::from_center_size(mark.center(), Vec2::splat(7.0));
-            let ink = Stroke::new(1.5, RED);
-            ui.painter().line_segment([mark.left_top(), mark.right_bottom()], ink);
-            ui.painter().line_segment([mark.right_top(), mark.left_bottom()], ink);
+            refusal_mark(ui);
             say(ui, words, RED)
         })
         .inner
+}
+
+fn refusal_mark(ui: &mut Ui) {
+    let (mark, _) = ui.allocate_exact_size(Vec2::new(10.0, 16.0), Sense::hover());
+    let mark = egui::Rect::from_center_size(mark.center(), Vec2::splat(7.0));
+    let ink = Stroke::new(1.5, RED);
+    ui.painter().line_segment([mark.left_top(), mark.right_bottom()], ink);
+    ui.painter().line_segment([mark.right_top(), mark.left_bottom()], ink);
+}
+
+/// AU9: a failure that stays on screen: a [`refusal`]'s wash, mark and red
+/// words, each word of them however many lines that takes, and what can be
+/// done about it under them.
+pub fn failure(ui: &mut Ui, words: &str, then: impl FnOnce(&mut Ui)) {
+    egui::Frame::new()
+        .fill(RED_WASH)
+        .corner_radius(R_CONTROL)
+        .inner_margin(egui::Margin::symmetric(CARD_PAD as i8, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                refusal_mark(ui);
+                ui.add(egui::Label::new(egui::RichText::new(words).color(RED)).wrap());
+            });
+            then(ui);
+        });
 }
 
 /// How wide a hint's action button stands.
@@ -1526,15 +1549,15 @@ pub fn choice_card(ui: &mut Ui, label: &str, tall: f32) -> Response {
 }
 
 /// AU9: the one choice a screen leads with: a [`choice_card`] in solid blue,
-/// white words on it.
-pub fn primary_card(ui: &mut Ui, label: &str, tall: f32) -> Response {
+/// white words on it, in `role`'s size.
+pub fn primary_card(ui: &mut Ui, label: &str, tall: f32, role: Role) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), tall), Sense::click());
     if ui.is_rect_visible(rect) {
         let fill = if resp.hovered() { BLUE_DEEP } else { BLUE };
         let p = ui.painter();
         p.rect_filled(rect, R_CONTROL, fill);
         let at = Pos2::new(rect.left() + CARD_PAD, rect.center().y);
-        p.text(at, egui::Align2::LEFT_CENTER, label, Role::Card.font(), ON_FILL);
+        p.text(at, egui::Align2::LEFT_CENTER, label, role.font(), ON_FILL);
     }
     speak(&resp, egui::WidgetType::Button, None, label);
     describe(resp, "CARD primary_card", label)
@@ -1588,6 +1611,18 @@ pub fn ghost_row(ui: &mut Ui, label: &str, width: f32, open: Option<bool>) -> Re
     }
     speak(&resp, egui::WidgetType::Button, open, label);
     describe(resp, "ACTION ghost_row", label)
+}
+
+/// AU9: a [`ghost_row`] with a ground at rest: one action among plain words,
+/// which a ghost would leave reading as one more of them.
+pub fn filled_row(ui: &mut Ui, label: &str, width: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = filled(&resp);
+        row_words(ui, rect, label, 0.0, fill, ink);
+    }
+    speak(&resp, egui::WidgetType::Button, None, label);
+    describe(resp, "ACTION filled_row", label)
 }
 
 /// AU6: a [`ghost_row`] with a dim note at its right end, which the row's

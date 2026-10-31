@@ -2381,7 +2381,7 @@ impl App {
                                 let rs = self.render_state.as_ref();
                                 let mut ed =
                                     Editor::boot(st, rs, self.data_dir.as_deref(), &self.config.ui);
-                                ed.stage = self.editor.as_ref().and_then(|o| o.stage);
+                                ed.stage = self.editor.as_ref().and_then(Editor::stage_kept);
                                 ed.canvas.engine_changed();
                                 ed.state.status = "live from the host".into();
                                 self.editor = Some(ed);
@@ -3173,7 +3173,11 @@ impl Editor {
             Action::PaperSize => self.paper_form = Some(PaperForm::of(&self.state)),
             // GM11: the delivery jobs' pane, and the composite viewers'
             // final look (a view: the document is untouched).
-            Action::ShowRenderQueue => self.open_pane(Pane::RenderQueue),
+            // AU9: this asks for the queue itself, so its fold opens with it.
+            Action::ShowRenderQueue => {
+                self.open_pane(Pane::RenderQueue);
+                self.state.render_queue.panel.unfold();
+            }
             // GM15: the editorial's panes; the Episode job (the queue comes
             // forward with it); the retake note window on this frame.
             Action::ShowCutBoard => self.open_pane(Pane::Board),
@@ -3608,9 +3612,13 @@ impl Editor {
                 None => *out = Performed::App(AppRequest::ExportPages),
             },
             // AU9: the save dialog is the shell's; the job then runs on the
-            // queue's worker.
+            // queue's worker. Video's search has its first answer here if the
+            // menu has not asked yet: no dialog for a job that could only fail.
             Action::ExportGif => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Gif)),
-            Action::ExportMp4 => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Mp4)),
+            Action::ExportMp4 => match s.render_queue.ffmpeg_path() {
+                Some(_) => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Mp4)),
+                None => s.refuse(format!("refused — {}", export_step::NO_FFMPEG)),
+            },
             Action::ExportPngSequence => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Png)),
             Action::ExportStill => *out = Performed::App(AppRequest::ExportTo(render_queue::ExportKind::Still)),
             // The stroke latches its rulers at pen-down: a flip mid-stroke
@@ -4864,8 +4872,8 @@ struct EditorTabs<'a> {
     /// AU3: the current recipe's panes while Lock UI positions is on, which
     /// keep their place; a panel opened by hand keeps its close control.
     locked: &'a [Pane],
-    /// AU9: as [`Editor::more_default`].
-    more_default: bool,
+    /// AU9: what the Export panel reads from the Editor.
+    export_view: export_step::View,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -4922,10 +4930,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 curves_panel::ui(ui, self.state, gesture_safe)
             }
             Pane::PaintCheck => paintcheck::ui(ui, self.state, self.canvas),
-            Pane::RenderQueue => {
-                let more = self.more_default;
-                render_queue::ui(ui, self.state, |ui, state| export_step::ui(ui, state, more));
-            }
+            Pane::RenderQueue => render_queue::ui(ui, self.state, &self.export_view),
             Pane::Board => {
                 let gesture_safe = !self.canvas.stroke_active();
                 board_panel::ui_board(ui, self.state, gesture_safe)
@@ -5110,6 +5115,11 @@ impl Editor {
         if st == Stage::Export {
             return self.enter_export();
         }
+        // AU9: the step Export was entered from is there as it was left: a
+        // look at the result costs nothing, whichever way out is taken.
+        if self.export_from.as_ref().is_some_and(|(from, _)| *from == Some(st)) {
+            return self.leave_export();
+        }
         self.dock = self.recipe(st);
         if self.canvas.apply_view(&st.view(), &mut self.state) {
             self.stage = Some(st);
@@ -5136,7 +5146,6 @@ impl Editor {
         } else {
             let left = std::mem::replace(&mut self.dock, dock);
             self.export_from = Some((self.stage, left));
-            self.state.render_queue.panel.back_to = self.place_here();
         }
         self.stage = Some(Stage::Export);
         self.say.exported = None;
@@ -5146,6 +5155,28 @@ impl Editor {
     /// AU9: where the person is, as the top row names it.
     fn place_here(&self) -> String {
         self.stage.map_or_else(|| self.place.clone(), |st| st.name().to_string())
+    }
+
+    /// AU9: the Export panel's reading of the Editor. The way back is worked
+    /// out here each frame, so a document swapped under the step cannot take
+    /// its name with it.
+    fn export_view(&self) -> export_step::View {
+        let back = (self.stage == Some(Stage::Export)).then(|| match &self.export_from {
+            Some((Some(st), _)) => st.name().to_string(),
+            Some((None, _)) => self.place.clone(),
+            None => Stage::Drawing.name().to_string(),
+        });
+        export_step::View { back, more_default: self.more_default, range: self.export_range }
+    }
+
+    /// AU9: the step a new Editor carries across a session's join: never
+    /// Export, whose way back and whose dock stay with this Editor.
+    fn stage_kept(&self) -> Option<Stage> {
+        match (self.stage, &self.export_from) {
+            (Some(Stage::Export), Some((from, _))) => *from,
+            (Some(Stage::Export), None) => Some(Stage::Drawing),
+            (stage, _) => stage,
+        }
     }
 
     /// AU9: `Back to Draw`: the step it came from, as it was left. Nothing was
@@ -5902,7 +5933,6 @@ impl Editor {
         kind: render_queue::ExportKind,
         path: &std::path::Path,
     ) {
-        self.state.render_queue.panel.done = None;
         self.start_export(ctx, kind, path, false);
     }
 
@@ -5933,14 +5963,23 @@ impl Editor {
         };
         if queue_forward {
             self.open_pane(Pane::RenderQueue);
+            self.state.render_queue.panel.unfold();
+        } else {
+            self.state.render_queue.queue.jobs[i].asked = Some(kind);
         }
         render_queue::start(&mut self.state, ctx);
         let job = &self.state.render_queue.queue.jobs[i];
-        self.state.status = format!(
-            "queued {} ({}) — the render queue renders it while you work",
-            job.label,
-            job.preset().name
-        );
+        self.state.status = if queue_forward {
+            format!(
+                "queued {} ({}) — the render queue renders it while you work",
+                job.label,
+                job.preset().name
+            )
+        } else if kind == render_queue::ExportKind::Png {
+            format!("Exporting {} pictures…", job.total())
+        } else {
+            format!("Exporting {}…", dest.file_name().unwrap_or_default().display())
+        };
     }
 
     /// GM3: may this action run now? Err says why not, in the artist's
@@ -8663,6 +8702,7 @@ impl Editor {
                         if ui.button("Other formats…").on_hover_text(Action::RoomExport.help()).clicked() {
                             ui.close();
                             self.invoke(Action::RoomExport, ui.ctx());
+                            self.state.render_queue.panel.unfold();
                         }
                         ui.separator();
                         // GM11: every export is a render queue job, rendered
@@ -9425,6 +9465,7 @@ impl Editor {
         self.canvas.strip_closed = self.strip_closed();
         self.canvas.sheet_shown = panes.contains(&Pane::XSheet);
         self.canvas.empty_cell_hint = self.say.empty_cell_due(&self.state);
+        let export_view = self.export_view();
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -9447,7 +9488,7 @@ impl Editor {
             full_band: self.full_band,
             layers_docked,
             locked: if ui_lock { &self.held } else { &[] },
-            more_default: self.more_default,
+            export_view,
         };
         let dock_style = dock_style(ui.style().as_ref(), &self.dock);
         let dock_rect = ui.available_rect_before_wrap();

@@ -1565,6 +1565,7 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 12. Decision: add the Quick ring (contract in 6.1)?
 13. GIF speed and quality on big frames.
 14. Final review of step names and order, especially Plan and Effects.
+15. `Show in folder` on a file whose path has a space: Explorer opens on that folder with the file picked out. `auexport_a_path_with_a_space_is_its_own_argument` proves the arguments; only this check proves Explorer reads them.
 
 **AU2 notes.** Choices the build made where this document was silent or spoke twice. None needs a device; they are here so the Lead sees them once.
 
@@ -1656,6 +1657,17 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - `More options` starts open on the frozen boot (1.5.2) and closed on a shipped one. Under the frozen boot the panel pushes the queue below the fold, so the tests that press its controls scroll to them first (`h.scroll_to`, reason `reach`). Storing the fold in `ui.panel_more` stays with the Panels part.
 - A document from the New Project form's blank has no composite, so its Result reads 8.4's `Nothing to show yet.` with `Set up standard composite` beside working choices: the export falls back to the flattened sheet. Every template and every Start card builds the composite, so this is that one route. The Result keeps 8.4's words there.
 - A job in the panel's list is named `ball.gif` when a person chose that name, else `CUT03, GIF`, so it never says the same words as the checkbox or the queue's row below it (1.5 rule 9).
+- 5.5's pinned list is the pane's foot, a bottom panel outside its scrolling, with `Stop export` and `More options`, so they hold in any pane down to AU15's 280×220. The list takes at most `JOBS_SHARE` of the pane and scrolls past that. The queue's own panel still opens in the scrolling above the foot, so opening the fold scrolls to it: in a short pane nothing else would show that the press worked.
+- An export that failed stands in that list until the next one starts, in red words on `RED_WASH`: `That export did not finish: <reason>.`, with the reason as the job gave it. One stands at a time, because `Try again` is one spoken name, and the queue's own list keeps each job's failure. `Try again` re-asks the same choice (`Job::asked`), so only the panel's route has it: an old row's range is the queue form's to know. A stopped job is no failure.
+- A book's pages are no queue job, and they end the same way. The worker returns their paths, and the card reads `Exported 8 pages` with their summed size. Its file is the first page, not the folder: `Open file` needs a file, and `Show in folder` picks that page out in its folder. `Writing the pages…` stands in the list while they go, so `Nothing waiting.` never lies.
+- The worker reads the finished files and sends what it found inside `Progress::Done`, so `poll` takes one message, no frame stats a sequence (NEVER-DO 6), and no frame's `poll` can fall between the report and the end of the job.
+- `File ▸ Export`'s frame range and the panel's choices are one route, and `augif_still_job_writes_one_named_file` pins that the range holds, so the panel keeps it. It is said under the choices, `Frames 5 to 8 only, as File ▸ Export says.`, and the choices' help no longer promises the whole animation.
+- On the panel's route the lane says `Exporting ball.gif…` while a job runs, where the old rows keep `queued CUT01 …`. A plain finish clears the remark in either place the report lands, so the lane never sits beside the Done card saying `rendered CUT01`.
+- The lead choice is solid only in the Export step, where no pill is the primary. Elsewhere the pane adds no solid blue. The Timing step's screen holds 5 solid blue rects with or without the pane: the pill, the transport's `Loop` and `Sound while dragging` latches and two opacity sliders' fills, all older than this part. Those are the transport's own and no part owes them yet.
+- The Exported row is exempt from `hints_seen`: it is news, not a lesson, and AU10 sets that mask to `u32::MAX` for an upgrader.
+- `Editor::export_from` holds the way back, so a session join that swaps the document keeps its name. A new Editor does not carry `Export` across a boot (`Editor::stage_kept`): it stands in the step the person came from. Pressing that step's pill is `Back to` by another name, and restores the dock as it was left.
+- The Transparent latch reads `Transparent background (PNG picture)`, because only a still takes it and it stands behind the same fold as every format. Art no drawing holds counts for 5.5's table when it reaches the Result (`Offer::of`); a page's `Solid` is paper, and `has_art` itself stays as the Say table reads it.
+- A harness frame is a quarter of a second, so a dwell's four seconds end in 16 frames: `say-exporting` starts its job after the shot's own `arrive`, or the picture shows the hint that follows the remark.
 
 ---
 

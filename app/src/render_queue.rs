@@ -6,7 +6,8 @@
 //! Progress per job; Stop lands after the current frame; a finished job
 //! offers "show folder". The same frame loop runs the windowless batch
 //! render (`animstudio --render`, main.rs). AU9: the pane opens on the Export
-//! panel (`export_step`); all of this stands under its `More options`.
+//! panel (`export_step`); all of this stands under its `More options`. A job's
+//! finished files are read on its worker too, and reach the shell as a message.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ use eframe::egui;
 
 use crate::config::RenderConfig;
 use crate::doc::AppState;
+use crate::export_step::{Ask, Failed, View};
 use crate::plate;
 
 /// The worker's answer for a job the artist stopped (not a failure).
@@ -75,6 +77,10 @@ pub struct Job {
     /// AU8: [`Self::pattern`] is the name a person chose in the save dialog,
     /// not a pattern: the GIF or the still lands under it as it stands.
     pub exact_name: bool,
+    /// AU9: the plain choice this job answers, which `Try again` asks once
+    /// more. None for a job the queue's own form or an old menu row made: only
+    /// they know their range.
+    pub asked: Option<ExportKind>,
 }
 
 impl Job {
@@ -331,7 +337,7 @@ impl JobSpec {
             let columns = cut.xsheet.columns.iter().filter(|c| cut.column_renders(c.id));
             drawings.extend(columns.filter_map(|c| c.resolve(local)).map(|drawing| (which, drawing)));
         }
-        Landing { files, one_file, drawings: drawings.len(), fps: self.fps }
+        Landing { files, one_file, noun: "picture", drawings: drawings.len(), fps: self.fps }
     }
 
     fn frame(&self, f: u32) -> Image {
@@ -554,11 +560,13 @@ fn render_gif(
 }
 
 /// The worker's messages: a frame is out, what the job could not read (just
-/// before it ends, when anything), or the job ended.
+/// before it ends, when anything), or the job ended, with its finished files
+/// as the disk has them when it ended well. One message, so no frame's `poll`
+/// can come between the two.
 pub enum Progress {
     Frame,
     Warnings(Vec<String>),
-    Done(Result<usize, String>),
+    Done(Result<usize, String>, Option<Landed>),
 }
 
 /// Run a job on its own thread (it owns its snapshot).
@@ -582,7 +590,10 @@ pub fn spawn(
         if !warnings.is_empty() {
             let _ = tx.send(Progress::Warnings(warnings));
         }
-        let _ = tx.send(Progress::Done(result));
+        // AU9: the files are read here: a sequence is one stat a frame, and
+        // a shell that read them would keep the pen waiting (NEVER-DO 6).
+        let landed = result.as_ref().ok().and_then(|n| landed_files(&spec.landing(), *n));
+        let _ = tx.send(Progress::Done(result, landed));
         if let Some(c) = &ctx {
             c.request_repaint();
         }
@@ -597,29 +608,32 @@ struct Worker {
     /// Said with the finished job (cels whose legacy vector strokes no
     /// render includes, as v0.3's exports said).
     note: String,
-    landing: Landing,
 }
 
-/// AU9: what a running job expects to leave behind.
-#[derive(Debug, Clone)]
+/// AU9: what a finished job, or a book's pages, left behind.
+#[derive(Debug)]
 struct Landing {
     /// The one file, or a sequence's frames in order.
     files: Vec<PathBuf>,
     one_file: bool,
+    /// What a sequence calls one of its files.
+    noun: &'static str,
     drawings: usize,
     fps: u32,
 }
 
-/// AU9: a job that finished with its file on disk. The sizes are read from
-/// the finished file and the rest is the job's, so a line made from this
-/// cannot be an estimate. `poll` makes one and `Editor::say_outcomes` takes
-/// it: that is what ticks Quick Start's last slot, on any route.
+/// AU9: an export that finished with its files on disk. The sizes are read
+/// from the finished files and the rest is the job's, so a line made from this
+/// cannot be an estimate. The worker makes one and `Editor::say_outcomes`
+/// takes it: that is what ticks Quick Start's last slot, on any route.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Landed {
-    /// What `Open file` opens: the one file, or a sequence's first picture.
+    /// What `Open file` opens: the one file, or a sequence's first picture, or
+    /// a book's first page.
     pub file: PathBuf,
-    /// `ball.gif`, or `12 pictures` for a sequence.
+    /// `ball.gif`, or `12 pictures` for a sequence, or `8 pages` for a book.
     pub name: String,
+    /// 0 for a book's pages, which do not count them.
     pub drawings: usize,
     /// Frames rendered.
     pub frames: usize,
@@ -631,16 +645,27 @@ pub struct Landed {
 }
 
 impl Landed {
-    /// `12 drawings, 1.0 s, 184 KB`. One frame has no duration to give.
+    /// `12 drawings, 1.0 s, 184 KB`. One frame has no duration to give, and a
+    /// book's pages have no drawings to count.
     pub fn line(&self) -> String {
-        let drawings = match self.drawings {
-            1 => "1 drawing".to_string(),
-            n => format!("{n} drawings"),
-        };
-        match self.frames {
-            0 | 1 => format!("{drawings}, {}", size_words(self.bytes)),
-            n => format!("{drawings}, {:.1} s, {}", n as f32 / self.fps.max(1) as f32, size_words(self.bytes)),
+        let mut parts = Vec::new();
+        match self.drawings {
+            0 => {}
+            1 => parts.push("1 drawing".to_string()),
+            n => parts.push(format!("{n} drawings")),
         }
+        if self.frames > 1 {
+            parts.push(format!("{:.1} s", self.frames as f32 / self.fps.max(1) as f32));
+        }
+        parts.push(size_words(self.bytes));
+        parts.join(", ")
+    }
+
+    /// A book's pages as `export_pages` wrote them. Its worker asks, as a
+    /// job's does: a book is one stat a page.
+    pub fn pages(files: &[PathBuf]) -> Option<Landed> {
+        let plan = Landing { files: files.to_vec(), one_file: false, noun: "page", drawings: 0, fps: 0 };
+        landed_files(&plan, 0)
     }
 }
 
@@ -655,9 +680,10 @@ pub fn size_words(bytes: u64) -> String {
     }
 }
 
-/// AU9: a finished job's files, read from the disk. None when one of them is
-/// missing: a file that is not there cannot be reported.
-fn landed_files(plan: &Landing, frames: usize, plain: bool) -> Option<Landed> {
+/// AU9: finished files, read from the disk, off the UI thread. None when one
+/// of them is missing: a file that is not there cannot be reported. Plain
+/// until the shell, which holds the job's note, says otherwise.
+fn landed_files(plan: &Landing, frames: usize) -> Option<Landed> {
     let mut bytes = 0;
     for file in &plan.files {
         bytes += std::fs::metadata(file).ok()?.len();
@@ -665,10 +691,10 @@ fn landed_files(plan: &Landing, frames: usize, plain: bool) -> Option<Landed> {
     let file = plan.files.first()?.clone();
     let name = match plan.files.len() {
         _ if plan.one_file => file.file_name()?.to_string_lossy().into_owned(),
-        1 => "1 picture".to_string(),
-        n => format!("{n} pictures"),
+        1 => format!("1 {}", plan.noun),
+        n => format!("{n} {}s", plan.noun),
     };
-    Some(Landed { file, name, drawings: plan.drawings, frames, fps: plan.fps, bytes, plain })
+    Some(Landed { file, name, drawings: plan.drawings, frames, fps: plan.fps, bytes, plain: true })
 }
 
 impl Drop for Worker {
@@ -896,6 +922,7 @@ fn push_job(
         done: 0,
         episode: false,
         exact_name: false,
+        asked: None,
     });
     Some(q.jobs.len() - 1)
 }
@@ -948,6 +975,7 @@ pub fn add_episode_job(state: &mut AppState, scene: anim_core::ids::SceneId) -> 
         done: 0,
         episode: true,
         exact_name: false,
+        asked: None,
     });
     true
 }
@@ -1049,8 +1077,10 @@ pub fn export_job(
     Some(i)
 }
 
-/// Start the queue (a no-op while a job renders).
+/// Start the queue (a no-op while a job renders). AU9: what the last export
+/// left in the panel stands until now.
 pub fn start(state: &mut AppState, ctx: &egui::Context) {
+    state.render_queue.panel.clear_outcome();
     if let Some(i) = state.render_queue.queue.start_next() {
         launch(state, i, ctx);
     }
@@ -1098,11 +1128,7 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
             )
         };
         let Some(mut spec) = spec.map(|s| s.with_base_dir(state.project_dir())) else {
-            match state
-                .render_queue
-                .queue
-                .finish(i, Err("its cut is gone".into()))
-            {
+            match end_job(state, i, Err("its cut is gone".into())) {
                 Some(next) => {
                     i = next;
                     continue;
@@ -1123,7 +1149,6 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
             n => format!(" ({n} cel(s) carry legacy vector strokes — not included)"),
         };
         let ffmpeg = state.render_queue.ffmpeg_path();
-        let landing = spec.landing();
         let cancel = Arc::new(AtomicBool::new(false));
         let rx = spawn(spec, ffmpeg, cancel.clone(), Some(ctx.clone()));
         state.render_queue.worker = Some(Worker {
@@ -1131,30 +1156,30 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
             rx,
             cancel,
             note,
-            landing,
         });
         return;
     }
 }
 
 /// Take the worker's progress (every frame, the pane shown or not). Never
-/// waits.
+/// waits, and only reads messages: a finished job's files were read on its
+/// worker.
 pub fn poll(state: &mut AppState, ctx: &egui::Context) {
     let Some(w) = &state.render_queue.worker else {
         return;
     };
     let job = w.job;
-    let note = w.note.clone();
-    let landing = w.landing.clone();
     let mut finished = None;
     let mut frames = 0;
     let mut warnings = Vec::new();
+    let mut landed = None;
     loop {
         match w.rx.try_recv() {
             Ok(Progress::Frame) => frames += 1,
             Ok(Progress::Warnings(w)) => warnings = w,
-            Ok(Progress::Done(r)) => {
+            Ok(Progress::Done(r, l)) => {
                 finished = Some(r);
+                landed = l;
                 break;
             }
             Err(TryRecvError::Empty) => break,
@@ -1168,7 +1193,7 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
         state.render_queue.queue.frame_done(job);
     }
     let Some(result) = finished else { return };
-    state.render_queue.worker = None;
+    let note = state.render_queue.worker.take().map(|w| w.note.clone()).unwrap_or_default();
     let label = state
         .render_queue
         .queue
@@ -1189,17 +1214,26 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
         };
         state.status = format!("{} — {first}{more}", state.status);
     }
-    land(state, &landing, &result, note.is_empty() && warnings.is_empty());
-    if let Some(next) = state.render_queue.queue.finish(job, result) {
+    let plain = note.is_empty() && warnings.is_empty();
+    state.render_queue.landed.extend(landed.map(|l| Landed { plain, ..l }));
+    if let Some(next) = end_job(state, job, result) {
         launch(state, next, ctx);
     }
 }
 
-/// AU9: a job that ended well reports its file, once it is on disk.
-fn land(state: &mut AppState, landing: &Landing, result: &Result<usize, String>, plain: bool) {
-    if let Ok(frames) = result {
-        state.render_queue.landed.extend(landed_files(landing, *frames, plain));
+/// AU9: the worker's answer for job `i`, as [`Queue::finish`] takes it, and
+/// the panel's row when it failed. A job stopped on purpose is no failure.
+fn end_job(state: &mut AppState, i: usize, result: Result<usize, String>) -> Option<usize> {
+    let rq = &mut state.render_queue;
+    match &result {
+        Err(why) if why != CANCELLED => {
+            let asked = rq.queue.jobs.get(i).and_then(|j| j.asked);
+            let again = asked.map(|kind| Ask::App(crate::AppRequest::ExportTo(kind)));
+            rq.panel.failed = Some(Failed { why: why.clone(), again });
+        }
+        _ => {}
     }
+    rq.queue.finish(i, result)
 }
 
 /// Tests: block until the running job ends (no sleep, no clock).
@@ -1209,17 +1243,15 @@ pub fn wait(state: &mut AppState, ctx: &egui::Context) {
         let w = state.render_queue.worker.as_ref().unwrap();
         let msg =
             w.rx.recv()
-                .unwrap_or(Progress::Done(Err("worker gone".into())));
+                .unwrap_or(Progress::Done(Err("worker gone".into()), None));
         let job = w.job;
         match msg {
             Progress::Frame => state.render_queue.queue.frame_done(job),
             Progress::Warnings(w) => state.note_render_warnings(w),
-            Progress::Done(r) => {
-                let landing = state.render_queue.worker.take().map(|w| w.landing.clone());
-                if let Some(landing) = landing {
-                    land(state, &landing, &r, true);
-                }
-                if let Some(next) = state.render_queue.queue.finish(job, r) {
+            Progress::Done(r, landed) => {
+                state.render_queue.landed.extend(landed);
+                state.render_queue.worker = None;
+                if let Some(next) = end_job(state, job, r) {
                     launch(state, next, ctx);
                 }
             }
@@ -1227,21 +1259,32 @@ pub fn wait(state: &mut AppState, ctx: &egui::Context) {
     }
 }
 
-/// The pane. AU9: `top` is the Export panel, in the same scrolling; it answers
-/// whether `More options` is open, and the new-job form over the job list
-/// stands under it.
-pub fn ui(
-    ui: &mut egui::Ui,
-    state: &mut AppState,
-    top: impl FnOnce(&mut egui::Ui, &mut AppState) -> bool,
-) {
+/// Tests and shots: a GIF of `file` running, `done` frames in, with no thread
+/// behind it, for as long as the answer is kept and until it says otherwise.
+#[cfg(test)]
+pub fn held_job(state: &mut AppState, file: &Path, done: usize) -> std::sync::mpsc::Sender<Progress> {
+    let i = export_job(state, ExportKind::Gif, file, None).expect("a job");
+    assert_eq!(state.render_queue.queue.start_next(), Some(i));
+    state.render_queue.queue.jobs[i].done = done;
+    let (tx, rx) = channel();
+    state.render_queue.worker = Some(Worker { job: i, rx, cancel: Arc::default(), note: String::new() });
+    tx
+}
+
+/// The pane. AU9: the Export panel's foot comes first and stands at the pane's
+/// foot whatever the pane's height, its choices lead the scrolling above it,
+/// and the new-job form over the job list follows them while `More options`
+/// is open.
+pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
     poll(state, ui.ctx());
     let ffmpeg = state.render_queue.ffmpeg_path();
+    let open = crate::export_step::foot(ui, state, view);
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .content_margin(crate::export_step::RING_ROOM)
         .show(ui, |ui| {
-            if !top(ui, state) {
+            crate::export_step::ui(ui, state, view, open);
+            if !open {
                 return;
             }
             plate::legend(ui, &format!("{} (delivery)", crate::vocab::EXPORT_QUEUE));
@@ -1498,6 +1541,7 @@ pub fn ui(
                     .clicked()
                 {
                     state.render_queue.queue.clear_finished();
+                    state.render_queue.panel.failed = None;
                 }
             });
             if state.render_queue.queue.jobs.is_empty() {
@@ -1645,6 +1689,7 @@ mod tests {
             done: 0,
             episode: false,
             exact_name: false,
+            asked: None,
         }
     }
 
@@ -1760,15 +1805,17 @@ mod tests {
         let sp = spec(&s, "Master PNG 16-bit", dir.path());
         let rx = spawn(sp, None, Arc::new(AtomicBool::new(false)), None);
         let mut frames = 0;
-        let result = loop {
+        let (result, landed) = loop {
             match rx.recv().unwrap() {
                 Progress::Frame => frames += 1,
                 Progress::Warnings(w) => panic!("nothing to warn of: {w:?}"),
-                Progress::Done(r) => break r,
+                Progress::Done(r, landed) => break (r, landed),
             }
         };
         assert_eq!(result, Ok(3));
         assert_eq!(frames, 3);
+        let landed = landed.expect("the worker read what it wrote");
+        assert_eq!((landed.name.as_str(), landed.frames, landed.plain), ("3 pictures", 3, true));
         let names = files(dir.path());
         assert_eq!(names.len(), 3, "{names:?}");
         let (size, depth, px) = png16(&dir.path().join(&names[0]), 10, 6);

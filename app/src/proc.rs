@@ -37,14 +37,32 @@ pub fn open_file(file: &std::path::Path) {
     show_folder(file);
 }
 
+/// AU9: Explorer's words for a file picked out in its folder. The path stands
+/// as an argument of its own: glued to `/select,`, one with a space would be
+/// quoted whole and Explorer would open somewhere else.
+fn select_args(file: &std::path::Path) -> [&std::ffi::OsStr; 2] {
+    [std::ffi::OsStr::new("/select,"), file.as_os_str()]
+}
+
 /// AU9: `Show in folder`: the folder, with the file picked out where the
 /// system can do that. Reached only through `AppRequest::ShowInFolder`.
 pub fn show_in_folder(file: &std::path::Path) {
     if cfg!(windows) {
-        let mut select = std::ffi::OsString::from("/select,");
-        select.push(file);
-        let _ = command("explorer").arg(select).spawn();
+        let _ = command("explorer").args(select_args(file)).spawn();
     } else if let Some(dir) = file.parent() {
         show_folder(dir);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::Path;
+
+    #[test]
+    fn auexport_a_path_with_a_space_is_its_own_argument() {
+        let file = Path::new("C:/My Work/ball one.gif");
+        let args = super::select_args(file);
+        assert_eq!(args, [OsStr::new("/select,"), file.as_os_str()]);
     }
 }

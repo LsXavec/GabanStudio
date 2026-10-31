@@ -4267,11 +4267,13 @@ impl AppState {
             self.refuse(format!("refused — {why}"));
             return;
         }
+        self.render_queue.panel.clear_outcome();
         let project = self.engine.project.clone();
         let (scene, opts, out) = (self.at().scene, self.manga.export, dir.to_path_buf());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(anim_core::deliver::export_pages(&project, scene, &out, &opts));
+            let written = anim_core::deliver::export_pages(&project, scene, &out, &opts);
+            let _ = tx.send(written.map(|files| (files.len(), crate::render_queue::Landed::pages(&files))));
             if let Some(ctx) = repaint {
                 ctx.request_repaint();
             }
@@ -4307,10 +4309,19 @@ impl AppState {
         }
     }
 
-    fn pages_written(&mut self, dir: &std::path::Path, got: Result<Vec<PathBuf>, String>) {
+    /// AU9: pages end as a job does: a report made from the files, or a
+    /// failure that stays with the same choice again.
+    fn pages_written(&mut self, dir: &std::path::Path, got: crate::manga_tools::PagesOut) {
         match got {
-            Ok(files) => self.status = format!("{} page file(s) written into {}", files.len(), dir.display()),
-            Err(e) => self.refuse(format!("refused — the pages were not written ({e})")),
+            Ok((count, landed)) => {
+                self.status = format!("{count} page file(s) written into {}", dir.display());
+                self.render_queue.landed.extend(landed);
+            }
+            Err(e) => {
+                self.refuse(format!("refused — the pages were not written ({e})"));
+                let again = Some(crate::export_step::Ask::Do(crate::config::Action::ExportPages));
+                self.render_queue.panel.failed = Some(crate::export_step::Failed { why: e, again });
+            }
         }
     }
 

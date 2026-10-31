@@ -658,8 +658,9 @@ fn queue_moments(dir: &Path) {
 
 /// AU9: the Export panel as a person meets it, on a shipped boot and a PC with
 /// no ffmpeg: each document's choices, Show me's ring, a Done card, the fold
-/// open; and the lane's report from another step.
-const EXPORT: [(&str, u32, u32); 16] = [
+/// open, a job on its way, one that failed, the pane holding its foot in the
+/// Effects step; and the lane's words from another step, during and after.
+const EXPORT: [(&str, u32, u32); 28] = [
     ("export-animation", 1600, 900),
     ("export-animation-1280", 1280, 800),
     ("export-ring", 1600, 900),
@@ -676,6 +677,18 @@ const EXPORT: [(&str, u32, u32); 16] = [
     ("say-exported-1280", 1280, 800),
     ("export-file-menu", 1600, 900),
     ("export-file-menu-1280", 1280, 800),
+    ("export-running", 1600, 900),
+    ("export-running-1280", 1280, 800),
+    ("export-failed", 1600, 900),
+    ("export-failed-1280", 1280, 800),
+    ("export-comic", 1600, 900),
+    ("export-comic-1280", 1280, 800),
+    ("export-comic-done", 1600, 900),
+    ("export-comic-done-1280", 1280, 800),
+    ("export-effects", 1600, 900),
+    ("export-effects-1280", 1280, 800),
+    ("say-exporting", 1600, 900),
+    ("say-exporting-1280", 1280, 800),
 ];
 
 fn export_owed() -> Vec<(String, u32, u32)> {
@@ -701,39 +714,67 @@ fn bouncing(frames: u32) -> AppState {
 }
 
 fn export_moments(dir: &Path) {
-    use crate::render_queue::ExportKind;
+    use crate::render_queue::{self, ExportKind};
     let work = tempfile::tempdir().expect("a temp folder");
     let file = work.path().join("ball.gif");
+    let wall = work.path().join("wall");
+    std::fs::write(&wall, b"a file, not a folder").expect("a file");
     let room = ProbeRoom::Stage(Stage::Export);
     for (state, w, height) in EXPORT {
         let size = egui::vec2(w as f32, height as f32);
+        let comic = state.contains("comic");
         let mut h = match state {
-            _ if state.contains("no-art") => EditorHarness::with_gpu_ready(),
+            _ if state.contains("no-art") || comic => EditorHarness::with_gpu_ready(),
             _ if state.contains("one-frame") => EditorHarness::with_gpu_shipped(bouncing(1)),
             _ => EditorHarness::with_gpu_shipped(bouncing(12)),
         };
         h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
         h.kit_mut().set_size(size);
         h.run_frames(4);
+        if comic {
+            h.answer_start(crate::welcome::WelcomeAction::Template(crate::templates::COMIC));
+            h.run_frames(4);
+            let ink: Vec<(i32, i32)> = (120..420).flat_map(|x| (120..140).map(move |y| (x, y))).collect();
+            crate::canvas::extpaper_tests::paint_texels(h.state_mut(), &ink, [0.1, 0.1, 0.12, 1.0]);
+        }
         let ctx = h.ctx();
-        // These two are about staying where the person stands.
+        // These are about staying where the person stands.
         let stays = state.starts_with("say-") || state.contains("file-menu");
         if state.contains("ring") {
             h.editor_mut().show_me(crate::welcome::EXPORT_STEP);
+        } else if state.contains("effects") {
+            h.editor_mut().enter_room(Stage::Composite);
+            h.run_frames(4);
+            assert_eq!(h.perform(crate::config::Action::ShowRenderQueue), crate::Performed::Done);
         } else if !stays {
             room.enter(h.editor_mut());
         }
-        if state.contains("done") || state.starts_with("say-") {
+        if comic && state.contains("done") {
+            h.state_mut().begin_page_export(work.path(), None);
+            h.state_mut().wait_page_export();
+        } else if state.contains("failed") {
+            h.editor_mut().export_to(&ctx, ExportKind::Gif, &wall.join("ball.gif"));
+            h.run_export_to_end();
+        } else if state.contains("done") || state.contains("exported") {
             h.editor_mut().export_to(&ctx, ExportKind::Gif, &file);
             h.run_export_to_end();
         }
+        // A job that stands still for its picture: the sender holds it open.
+        let moving = state.contains("running") || state.contains("effects");
+        let _held = moving.then(|| render_queue::held_job(h.state_mut(), &file, 5));
         arrive(&mut h, room);
         if state.contains("more") {
             h.click(crate::export_step::MORE_OPTIONS);
             h.run_frames(4);
         }
-        // The machine's last remark has its dwell first.
-        h.wait(4.2);
+        // The machine's last remark has its dwell first, but for the one
+        // picture of the remark itself. That starts here: a harness frame is a
+        // quarter of a second, so `arrive` alone outlasts the four it stands.
+        if state.contains("exporting") {
+            h.editor_mut().export_to(&ctx, ExportKind::Gif, &file);
+        } else {
+            h.wait(4.2);
+        }
         if state.contains("file-menu") {
             h.click("file");
             h.run_frames(4);
@@ -742,6 +783,11 @@ fn export_moments(dir: &Path) {
             assert!(h.has(crate::config::Action::ExportGif.label()), "{state} shows its rows");
         }
         h.shot(size, &dir.join(format!("{state}.png")));
+        if state.contains("exporting") {
+            let said = h.painted_text().iter().any(|words| words == "Exporting ball.gif…");
+            assert!(said, "{state} shows its remark: {:?}", h.painted_text());
+            h.run_export_to_end();
+        }
     }
 }
 
@@ -780,14 +826,53 @@ fn auexport_shots_owe_every_moment_at_both_sizes() {
     let owed = export_owed();
     let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
     assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
-    let moments = ["export-animation", "export-ring", "export-one-frame", "export-no-art", "export-done", "export-more", "say-exported", "export-file-menu"];
+    let moments = [
+        "export-animation",
+        "export-ring",
+        "export-one-frame",
+        "export-no-art",
+        "export-done",
+        "export-more",
+        "say-exported",
+        "export-file-menu",
+        "export-running",
+        "export-failed",
+        "export-comic",
+        "export-comic-done",
+        "export-effects",
+        "say-exporting",
+    ];
     for moment in moments {
         assert!(owed.contains(&(format!("{moment}.png"), 1600, 900)), "{moment} at 1600");
         assert!(owed.contains(&(format!("{moment}-1280.png"), 1280, 800)), "{moment} at 1280");
     }
+    let elsewhere = say_owed().into_iter().chain(start_owed()).chain(strip_owed()).chain(rail_owed()).chain(queue_owed());
+    assert!(elsewhere.into_iter().all(|o| !names.contains(o.0.as_str())), "no name is another group's");
+}
+
+/// Only the ignored pass writes the Export step's shots, so this holds it to
+/// them: it takes every one, then checks the folder, and the check misses any
+/// one of them, which is what `shots-after/` gets a copy of.
+#[test]
+fn auexport_the_ignored_pass_owes_the_export_shots() {
     let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
     let taken = pass.find("export_moments(&dir);").expect("it takes them");
-    assert!(taken < pass.find("check_shots(&dir, &export_owed())").expect("it checks them"));
+    let checked = pass.find("check_shots(&dir, &export_owed())").expect("it checks them");
+    assert!(taken < checked, "taken, then checked");
+    let dir = tempfile::tempdir().unwrap();
+    let owed = export_owed();
+    assert_eq!(owed.len(), 28);
+    for (name, w, h) in &owed {
+        tiny_png(&dir.path().join(name), *w, *h);
+    }
+    assert_eq!(check_shots(dir.path(), &owed), Ok(()));
+    for (name, w, h) in &owed {
+        let file = dir.path().join(name);
+        std::fs::remove_file(&file).unwrap();
+        let missing = check_shots(dir.path(), &owed);
+        assert!(missing.is_err_and(|e| e.starts_with(name.as_str())), "{name} not there");
+        tiny_png(&file, *w, *h);
+    }
 }
 
 #[test]

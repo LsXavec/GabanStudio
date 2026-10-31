@@ -381,7 +381,9 @@ pub fn read(
             *seen |= hint.bit;
         }
     }
-    let due = |hint: &&Hint| *seen & hint.bit == 0 && hint.applies(f);
+    // The Exported row is news, not a lesson: no seen bit silences it, not
+    // even an upgrader's whole mask.
+    let due = |hint: &&Hint| (hint.bit == EXPORTED || *seen & hint.bit == 0) && hint.applies(f);
     HINTS.iter().filter(due).find_map(|hint| hint.spoken(f, &chord))
 }
 
@@ -581,21 +583,26 @@ impl Editor {
     }
 
     /// The files that reached the disk since the last reading (spec 8.3 ticks
-    /// only on one). In the Export step the Done card reports; elsewhere the
-    /// lane does, and at once: a plain finish has nothing to say that the
-    /// report does not, so the remark gives way. With hints off there is no
-    /// report and no button, and the remark stays.
+    /// only on one). In the Export step the Done card reports, if the step's
+    /// dock still has the pane to hold one; elsewhere the lane does, and at
+    /// once: a plain finish has nothing to say that the report does not, so
+    /// the remark gives way. With hints off the lane has no report and no
+    /// button, and the remark stays.
     fn say_landed(&mut self) -> bool {
         let landed = std::mem::take(&mut self.state.render_queue.landed);
         let exported = !landed.is_empty();
         self.quick_start[welcome::EXPORT_STEP] |= exported;
+        let card = self.stage == Some(Stage::Export) && visible_panes(&self.dock).contains(&Pane::RenderQueue);
         for file in landed {
-            if self.stage == Some(Stage::Export) {
+            if !card && self.say.off {
+                continue;
+            }
+            if file.plain {
+                self.state.status.clear();
+            }
+            if card {
                 self.state.render_queue.panel.done = Some(file);
-            } else if !self.say.off {
-                if file.plain {
-                    self.state.status.clear();
-                }
+            } else {
                 self.say.exported = Some(file);
             }
         }
