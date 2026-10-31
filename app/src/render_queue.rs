@@ -30,7 +30,8 @@ use crate::plate;
 pub const CANCELLED: &str = "stopped";
 
 /// What a video preset says when no ffmpeg was found.
-pub const NEEDS_FFMPEG: &str = "needs ffmpeg (ffmpeg.org); image sequences work without it";
+pub const NEEDS_FFMPEG: &str =
+    "video needs ffmpeg (ffmpeg.org); GIF, stills and image sequences work without it";
 
 /// Where a job stands.
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +70,9 @@ pub struct Job {
     /// GM15: an Episode job — every cut of `at.scene` back to back, one
     /// sequence or one video (`at.cut` is the scene's first cut).
     pub episode: bool,
+    /// AU8: [`Self::pattern`] is the name a person chose in the save dialog,
+    /// not a pattern: the GIF or the still lands under it as it stands.
+    pub exact_name: bool,
 }
 
 impl Job {
@@ -196,6 +200,8 @@ pub struct JobSpec {
     /// GM17: the project's folder (relative ImageSequence frames) and what
     /// the job could not read, reported once when it ends.
     pub env: Arc<anim_core::export::RenderEnv>,
+    /// AU8: as [`Job::exact_name`].
+    pub exact_name: bool,
 }
 
 impl JobSpec {
@@ -239,6 +245,7 @@ impl JobSpec {
             mixdown: true,
             episode: Some(ep),
             env: Arc::default(),
+            exact_name: false,
         })
     }
     /// The job for cut `at` of `project` over `frames` (None = the whole
@@ -284,6 +291,17 @@ impl JobSpec {
             mixdown: true,
             episode: None,
             env: Arc::default(),
+            exact_name: false,
+        })
+    }
+
+    /// AU8: where a GIF or a still lands: the name chosen in the dialog, else
+    /// the pattern's, named as a video is.
+    fn lands_at(&self, ext: &str) -> PathBuf {
+        self.out.join(if self.exact_name {
+            format!("{}.{ext}", self.pattern)
+        } else {
+            deliver::video_name(&self.pattern, &self.slate.names, ext)
         })
     }
 
@@ -363,9 +381,8 @@ pub fn render_job(
         if cancel.load(Ordering::Relaxed) {
             return Err(CANCELLED.into());
         }
-        let name = deliver::video_name(&spec.pattern, &spec.slate.names, format.ext());
         let f = spec.frames.0;
-        deliver::write_frame(&spec.out.join(name), &spec.frame(f), format, spec.law)?;
+        deliver::write_frame(&spec.lands_at(format.ext()), &spec.frame(f), format, spec.law)?;
         tick(f);
         return Ok(1);
     }
@@ -487,10 +504,7 @@ fn render_gif(
         px.flat_map(anim_core::export::straight_rgba8).collect()
     };
     let (w, h) = spec.preset.out_size(spec.size.0, spec.size.1);
-    let out = spec
-        .out
-        .join(deliver::video_name(&spec.pattern, &spec.slate.names, "gif"));
-    let mut writer = GifWriter::new(&out, w, h)?;
+    let mut writer = GifWriter::new(&spec.lands_at("gif"), w, h)?;
     for f in gif::sample_frames(spec.frames.0, spec.frames.1) {
         if cancel.load(Ordering::Relaxed) {
             return Err(CANCELLED.into());
@@ -752,13 +766,15 @@ fn push_job(
     pattern: String,
 ) -> Option<usize> {
     let p = PRESETS[preset.min(PRESETS.len() - 1)];
-    // AU8: one picture of a whole cut means the one on screen.
-    let here = state.view.frame;
+    // AU8: one picture of a whole cut means the one on screen; a cut that is
+    // not on screen has no playhead, so its first frame, as the batch render.
+    let here = if at == state.at() { state.view.frame } else { 0 };
     let frames = if p.one_file { frames.or(Some((here, here))) } else { frames };
     let cut = state.engine.project.cut(at.scene, at.cut)?;
     let span = frames_of(&p, resolve(cut.frame_count, frames));
     let label = match frames {
         None => cut.name.clone(),
+        Some(_) if span.0 == span.1 => format!("{} · {}", cut.name, span.0 + 1),
         Some(_) => format!("{} · {}–{}", cut.name, span.0 + 1, span.1 + 1),
     };
     let mixdown = state.render_queue.draft.mixdown;
@@ -777,6 +793,7 @@ fn push_job(
         state: JobState::Queued,
         done: 0,
         episode: false,
+        exact_name: false,
     });
     Some(q.jobs.len() - 1)
 }
@@ -802,16 +819,23 @@ pub fn add_episode_job(state: &mut AppState, scene: anim_core::ids::SceneId) -> 
     };
     let total = anim_core::board::trt_frames(state.engine.project.scene(scene).expect("found above"));
     let d = state.render_queue.draft.clone();
+    // AU8: a one-file preset takes one picture, and the words count that.
+    let p = PRESETS[d.preset.min(PRESETS.len() - 1)];
+    let span = frames_of(&p, (0, (total.max(1) - 1) as u32));
+    let frames = match span.1 - span.0 + 1 {
+        1 => "1 frame".to_string(),
+        n => format!("{n} frames"),
+    };
     let name = state.engine.project.scene(scene).map_or("", |s| s.name.as_str());
-    let label = format!("episode {name} · {total} frames");
+    let label = format!("episode {name} · {frames}");
     // Said where it went (Render episode brings the queue forward).
-    state.status = format!("episode {name} queued: {total} frames — see the Render Queue");
+    state.status = format!("episode {name} queued: {frames} — see the Render Queue");
     let q = &mut state.render_queue.queue;
     q.push(Job {
         at: CutRef { scene, cut: first },
         label,
         frames: None,
-        span: (0, (total.max(1) - 1) as u32),
+        span,
         preset: d.preset,
         burn_ins: d.burn_ins,
         half: d.half,
@@ -821,6 +845,7 @@ pub fn add_episode_job(state: &mut AppState, scene: anim_core::ids::SceneId) -> 
         state: JobState::Queued,
         done: 0,
         episode: true,
+        exact_name: false,
     });
     true
 }
@@ -879,9 +904,10 @@ impl ExportKind {
 
 /// File ▸ Export…'s job for the current cut over `frames` (None = the
 /// whole cut): a PNG sequence into the folder `dest` named by the form's
-/// pattern, or an MP4 or GIF at the file `dest` (its folder; its name as the
-/// pattern), or the same for a still of the current frame, whatever `frames`
-/// says. No burn-ins, as v0.3's exports had none. The job's index.
+/// pattern, or an MP4 at the file `dest` (its folder; its name as the
+/// pattern), or a GIF at exactly that file, or a still of the current frame
+/// at exactly that file, whatever `frames` says. No burn-ins, as v0.3's
+/// exports had none. The job's index.
 pub fn export_job(
     state: &mut AppState,
     kind: ExportKind,
@@ -899,7 +925,7 @@ pub fn export_job(
     };
     let frames = if kind == ExportKind::Still { None } else { frames };
     let at = state.at();
-    push_job(
+    let i = push_job(
         state,
         at,
         frames,
@@ -908,7 +934,12 @@ pub fn export_job(
         false,
         out,
         pattern,
-    )
+    )?;
+    // AU8: the Done card and Open file name the file a person chose, so it has
+    // to land there: a stem like `ball_` is a name, not a pattern to tidy.
+    let one_file = matches!(kind, ExportKind::Gif | ExportKind::Still);
+    state.render_queue.queue.jobs[i].exact_name = one_file && dest.file_stem().is_some();
+    Some(i)
 }
 
 /// Start the queue (a no-op while a job renders).
@@ -976,6 +1007,7 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
             spec.preset.scale = 0.5;
         }
         spec.mixdown = job.mixdown;
+        spec.exact_name = job.exact_name;
         state.render_queue.queue.jobs[i].span = spec.frames;
         let note = match anim_core::export::vector_stroke_cels(&spec.cut) {
             0 => String::new(),
@@ -1161,7 +1193,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 ui.label("sound");
                 plate::latch(ui, &mut d.mixdown, "mixdown WAV").on_hover_text(
                     "an image sequence also writes the range's sound mix as a WAV beside \
-                     its frames (a video carries its sound either way)",
+                     its frames (a video carries its sound either way; a GIF or a still \
+                     has none)",
                 );
             });
             ui.horizontal(|ui| {
@@ -1178,7 +1211,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 plate::pattern_field(ui, egui::TextEdit::singleline(&mut d.pattern).desired_width(220.0))
                     .on_hover_text(
                         "{project} {scene} {cut} {frame} {frame:04}; an image sequence \
-                         whose pattern has no frame gets _{frame:04}",
+                         whose pattern has no frame gets _{frame:04}; a GIF or a still \
+                         has no frame number, so a second one of the same cut replaces \
+                         the first",
                     );
             });
             let at = state.at();
@@ -1186,7 +1221,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             ui.horizontal_wrapped(|ui| {
                 if ui
                     .button("+ this cut")
-                    .on_hover_text("the whole current cut (its length when the job starts)")
+                    .on_hover_text(
+                        "the whole current cut (its length when the job starts); a still \
+                         takes the frame on screen",
+                    )
                     .clicked()
                 {
                     add_job(state, at, None);
@@ -1232,7 +1270,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                     .button("+ episode")
                     .on_hover_text(
                         "every cut of this scene in order as one sequence or one video, \
-                         their sound end to end",
+                         their sound end to end; a still takes the first frame",
                     )
                     .clicked()
                 {
@@ -1291,7 +1329,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 }
                 if ui
                     .button("+ frames")
-                    .on_hover_text("this cut, those frames only")
+                    .on_hover_text("this cut, those frames only; a still takes the first of them")
                     .clicked()
                 {
                     let r = state.render_queue.draft.range;
@@ -1374,7 +1412,7 @@ fn preset_help(p: &Preset) -> String {
         Format::Png16 => "PNG, 16 bits a channel",
         Format::Tiff16 => "TIFF, 16 bits a channel",
         Format::Exr => "OpenEXR half float, scene-linear",
-        Format::Png8 if p.one_file => "one PNG of one frame",
+        Format::Png8 if p.one_file => "one PNG of the frame on screen",
         Format::Png8 => "PNG, 8 bits a channel",
         Format::Gif => "animated GIF, looping, no sound",
         Format::Video(Codec::H264) => "H.264 MP4 (ffmpeg)",
@@ -1476,6 +1514,7 @@ mod tests {
             state: JobState::Queued,
             done: 0,
             episode: false,
+            exact_name: false,
         }
     }
 
@@ -2506,6 +2545,8 @@ mod tests {
         assert!(add_job(&mut s, at, None));
         let spans: Vec<_> = s.render_queue.queue.jobs.iter().map(|j| (j.span, j.total())).collect();
         assert_eq!(spans, [((4, 4), 1), ((1, 1), 1), ((5, 5), 1)]);
+        let labels: Vec<_> = s.render_queue.queue.jobs.iter().map(|j| j.label.as_str()).collect();
+        assert_eq!(labels, ["CUT01 · 5", "CUT01 · 2", "CUT01 · 6"], "one frame, one number");
         // The batch render has no playhead: the first frame.
         let p = Preset::named("Still PNG").unwrap();
         let cli = JobSpec::new(
@@ -2531,6 +2572,196 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ep.frames, (0, 0), "an Episode job too");
+    }
+
+    #[test]
+    fn augif_a_still_of_another_cut_is_its_first_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = keyed(6, 24, &[(0, BLUE), (3, RED)]);
+        let here = s.at();
+        s.new_cut(here.scene);
+        let other = s.at();
+        assert_ne!(other, here, "two cuts");
+        s.goto_cut(here.scene, here.cut);
+        s.render_queue.draft.preset = preset_at("Still PNG");
+        s.render_queue.draft.out = dir.path().display().to_string();
+        s.view.frame = 4;
+        // The playhead is a place in the cut on screen, and nowhere in the other.
+        s.render_queue.draft.picked = vec![here, other];
+        assert_eq!(add_picked(&mut s), 2);
+        assert!(add_job(&mut s, other, None));
+        let jobs = &s.render_queue.queue.jobs;
+        let spans: Vec<_> = jobs.iter().map(|j| (j.at, j.span, j.frames)).collect();
+        assert_eq!(
+            spans,
+            [
+                (here, (4, 4), Some((4, 4))),
+                (other, (0, 0), Some((0, 0))),
+                (other, (0, 0), Some((0, 0)))
+            ]
+        );
+        assert_eq!(jobs[1].label, "CUT02 · 1");
+    }
+
+    #[test]
+    fn augif_an_episode_still_says_one_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = shot();
+        let at = s.at();
+        s.new_cut(at.scene);
+        s.goto_cut(at.scene, at.cut);
+        s.render_queue.draft.out = dir.path().display().to_string();
+        let total = anim_core::board::trt_frames(s.engine.project.scene(at.scene).unwrap());
+        assert!(total > 12, "two cuts: {total}");
+        // The status and the row say what the job renders.
+        s.render_queue.draft.preset = preset_at("GIF");
+        assert!(add_episode_job(&mut s, at.scene));
+        let j = &s.render_queue.queue.jobs[0];
+        assert_eq!(
+            (j.label.as_str(), j.span, j.total()),
+            (format!("episode SC01 · {total} frames").as_str(), (0, total as u32 - 1), total as usize)
+        );
+        assert_eq!(s.status, format!("episode SC01 queued: {total} frames — see the Render Queue"));
+        s.render_queue.draft.preset = preset_at("Still PNG");
+        assert!(add_episode_job(&mut s, at.scene));
+        let j = &s.render_queue.queue.jobs[1];
+        assert_eq!((j.label.as_str(), j.span, j.total()), ("episode SC01 · 1 frame", (0, 0), 1));
+        assert_eq!(s.status, "episode SC01 queued: 1 frame — see the Render Queue");
+    }
+
+    #[test]
+    fn augif_a_fast_cut_ends_on_its_last_frame() {
+        // At 60 fps the middle frame has 1 cs, so the third comes too soon for
+        // an image of its own. It is the shot's end, so it takes the middle's.
+        let dir = tempfile::tempdir().unwrap();
+        let s = keyed(3, 60, &[(0, BLUE), (1, RED), (2, GREEN)]);
+        let sp = spec(&s, "GIF", dir.path());
+        let none = AtomicBool::new(false);
+        assert_eq!(render_job(&sp, None, &none, &mut |_| {}), Ok(3));
+        let g = gif_file(&dir.path().join("show_SC01_CUT01.gif"));
+        assert_eq!(g.delays(), [2, 3]);
+        assert_eq!(g.frames[0].rgb, rgb(&sp.frame(0)));
+        assert_eq!(g.frames[1].rgb, rgb(&sp.frame(2)), "the last frame, not the one before it");
+    }
+
+    #[test]
+    fn augif_export_to_lands_on_the_name_chosen() {
+        // The Done card and Open file name what the save dialog gave, so the
+        // file lands there: nothing trimmed, nothing read as a token.
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = EditorHarness::with_state(shot());
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        let ctx = h.ctx();
+        let names = [
+            (ExportKind::Gif, "ball_.gif"),
+            (ExportKind::Gif, "take-.gif"),
+            (ExportKind::Gif, "{cut} {frame}.gif"),
+            (ExportKind::Still, "picture_.png"),
+            (ExportKind::Still, "{frame}.png"),
+            (ExportKind::Still, "v1.2.png"),
+        ];
+        for (i, (kind, name)) in names.into_iter().enumerate() {
+            let path = dir.path().join(name);
+            h.editor_mut().export_to(&ctx, kind, &path);
+            h.run_export_to_end();
+            assert!(path.is_file(), "{name}: {:?}", files(dir.path()));
+            assert_eq!(files(dir.path()).len(), i + 1, "{name}: {:?}", files(dir.path()));
+        }
+        assert_eq!(gif_file(&dir.path().join("ball_.gif")).delays(), [33, 34, 33]);
+        // A video's name and a sequence's folder are what they were.
+        let mut s = shot();
+        let mp4 = export_job(&mut s, ExportKind::Mp4, &dir.path().join("ball_.mp4"), None).unwrap();
+        let png = export_job(&mut s, ExportKind::Png, dir.path(), None).unwrap();
+        let jobs = &s.render_queue.queue.jobs;
+        assert_eq!((jobs[mp4].exact_name, jobs[png].exact_name), (false, false));
+    }
+
+    /// The Lead's rule for saved data, against a file from before the GIF:
+    /// `tests/fixtures/before-gif.animproj` was written by the store at 445624a,
+    /// the commit under this part, and it is `keyed(6, 12, [(0, BLUE), (3, RED)])`
+    /// by hand. It opens, renders both new kinds, and neither the project, the
+    /// file nor the config moves. Action and Pane are
+    /// `aulook_what_was_left_out_stays_out`'s, CanvasTool, the room keys and the
+    /// stacks `aurail_saved_data_stands`'s, the ui section `aulook_config_shape_stands`'s.
+    #[test]
+    fn augif_saved_data_stands() {
+        fn file_schema(file: &Path) -> Vec<(String, Option<String>)> {
+            let db = rusqlite::Connection::open(file).unwrap();
+            let mut q = db.prepare("SELECT name, sql FROM sqlite_master ORDER BY name").unwrap();
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            rows.collect::<Result<Vec<_>, _>>().unwrap()
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("old.animproj");
+        std::fs::copy(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../crates/anim-core/tests/fixtures/before-gif.animproj"),
+            &file,
+        )
+        .unwrap();
+        let old = std::fs::read(&file).unwrap();
+        let mut h = EditorHarness::with_state(AppState::load_from(file.clone()).unwrap());
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        h.state_mut().view.frame = 4;
+        let config = serde_json::to_value(&h.rig().config).unwrap();
+        let project = h.state_mut().snapshot_project();
+        let ctx = h.ctx();
+        let (gif, still) = (dir.path().join("old.gif"), dir.path().join("old.png"));
+        h.editor_mut().export_to(&ctx, ExportKind::Gif, &gif);
+        h.run_export_to_end();
+        h.editor_mut().export_to(&ctx, ExportKind::Still, &still);
+        h.run_export_to_end();
+        let g = gif_file(&gif);
+        assert_eq!(g.delays(), [25, 25], "two drawings, three frames each at 12 fps");
+        assert_eq!(g.frames[0].rgb[6 * 64 + 10], [0, 0, 128]);
+        assert_eq!(g.frames[1].rgb[6 * 64 + 10], [255, 0, 0]);
+        assert_eq!(png8(&still, 10, 6).1, [255, 0, 0, 255], "frame 5 is the second drawing");
+        assert!(h.state_mut().snapshot_project() == project, "the project did not move");
+        assert_eq!(serde_json::to_value(&h.rig().config).unwrap(), config, "nor the config");
+        assert!(!h.state().is_dirty(), "an export changes nothing to save");
+        assert!(std::fs::read(&file).unwrap() == old, "nor the file it came from");
+        // Read and saved again by this code: that file, to the byte.
+        let again = dir.path().join("again.animproj");
+        anim_core::store::save(&anim_core::store::load(&file).unwrap(), &again).unwrap();
+        assert_eq!(file_schema(&again), file_schema(&file), "the same tables, the same columns");
+        assert!(std::fs::read(&again).unwrap() == old, "the same file");
+        let db = rusqlite::Connection::open(&again).unwrap();
+        let version: String = db
+            .query_row("SELECT value FROM meta WHERE key = 'schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, "11", "the .animproj format stands");
+    }
+
+    #[test]
+    fn augif_the_words_say_what_a_gif_and_a_still_make() {
+        // Settings and the pane say this on a PC with no ffmpeg, and it greys
+        // out only video: the sentence must not send a beginner off for it.
+        assert!(NEEDS_FFMPEG.starts_with("video needs ffmpeg"), "{NEEDS_FFMPEG}");
+        for word in ["GIF", "stills", "image sequences"] {
+            assert!(NEEDS_FFMPEG.contains(word), "{word}: {NEEDS_FFMPEG}");
+        }
+        let mut h = EditorHarness::with_state(small());
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
+        h.run();
+        for (widget, words) in [
+            ("Still PNG", "one PNG of the frame on screen"),
+            ("mixdown WAV", "a video carries its sound either way; a GIF or a still has none"),
+            ("+ this cut", "the whole current cut"),
+            ("+ this cut", "a still takes the frame on screen"),
+            ("+ episode", "a still takes the first frame"),
+            ("+ frames", "a still takes the first of them"),
+        ] {
+            h.hover(widget);
+            h.wait(1.0);
+            assert!(h.has_text_containing(words), "{widget}: {words}\n{}", h.describe());
+        }
+        // The pattern's field has no name of its own: the pointer, by hand.
+        let field = h.rect("file names").right_center() + egui::vec2(40.0, 0.0);
+        h.kit_mut().input_mut().events.push(egui::Event::PointerMoved(field));
+        h.run();
+        h.wait(1.0);
+        let words = "a GIF or a still has no frame number, so a second one of the same cut replaces the first";
+        assert!(h.has_text_containing(words), "{}", h.describe());
     }
 
     #[test]

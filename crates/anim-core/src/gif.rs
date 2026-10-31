@@ -19,8 +19,10 @@ use weezl::encode::Encoder;
 pub const PALETTE_FRAMES: u32 = 16;
 
 /// The fewest hundredths a picture stays up. Viewers run anything shorter at
-/// 10, so a shot past 50 fps shows fewer pictures and keeps its running time
-/// (the last picture rounds up to this, so at most this much over).
+/// 10, so a GIF holds at most 50 pictures a second: past 50 fps some frames get
+/// no image, the first and the last always do, and the running time stands.
+/// Only the last picture rounds up to this, so a shot runs at most this much
+/// over, except that two pictures can never run under twice this.
 pub const MIN_DELAY_CS: u32 = 2;
 
 const MAX_COLOURS: usize = 256;
@@ -183,8 +185,14 @@ pub struct GifWriter {
     hist: Vec<Cell>,
     table: Option<Table>,
     /// The picture in hand: its palette indices and how long it has lasted.
-    /// It is written when a different one arrives, so a hold is one image.
+    /// It moves on when a different one arrives, so a hold is one image.
     held: Option<(Vec<u8>, u32)>,
+    /// The image before it, not in the file yet, so the last frame can still
+    /// join it. None while `held` is the file's first image.
+    behind: Option<(Vec<u8>, u32)>,
+    /// The last frame pushed, when it came too soon after `held` to get an
+    /// image. If nothing follows it, [`Self::finish`] still ends the file on it.
+    too_soon: Option<Vec<u8>>,
 }
 
 impl GifWriter {
@@ -206,6 +214,8 @@ impl GifWriter {
             hist: vec![Cell::default(); 1 << 16],
             table: None,
             held: None,
+            behind: None,
+            too_soon: None,
         })
     }
 
@@ -227,7 +237,8 @@ impl GifWriter {
 
     /// The next frame, lasting `delay_cs` hundredths. The same picture as the
     /// one in hand adds to its time, and so does any picture while the one in
-    /// hand is under [`MIN_DELAY_CS`].
+    /// hand is under [`MIN_DELAY_CS`], which then gets no image unless it turns
+    /// out to be the last frame.
     pub fn push_frame(&mut self, rgba: &[u8], delay_cs: u32) -> Result<(), String> {
         self.check(rgba)?;
         if self.table.is_none() {
@@ -243,21 +254,43 @@ impl GifWriter {
             .map(|p| table.nearest(cell_of(on_white(p)), hist))
             .collect();
         match &mut self.held {
-            Some((held, cs)) if *held == indices || *cs < MIN_DELAY_CS => *cs += delay_cs,
+            Some((held, cs)) if *held == indices => {
+                *cs += delay_cs;
+                self.too_soon = None;
+            }
+            Some((_, cs)) if *cs < MIN_DELAY_CS => {
+                *cs += delay_cs;
+                self.too_soon = Some(indices);
+            }
             _ => {
-                self.write_held()?;
-                self.held = Some((indices, delay_cs));
+                self.too_soon = None;
+                let shown = self.held.replace((indices, delay_cs));
+                if let Some((image, cs)) = std::mem::replace(&mut self.behind, shown) {
+                    self.write_image(&image, cs)?;
+                }
             }
         }
         Ok(())
     }
 
-    /// Write the last picture and land the file.
+    /// Write the last pictures and land the file. A file always ends on the
+    /// last frame: one that came too soon takes the place and the time of the
+    /// picture in hand, unless that picture is the first frame, which stays too.
     pub fn finish(mut self) -> Result<(), String> {
-        if self.held.is_none() {
+        let Some((held, cs)) = self.held.take() else {
             return Err(format!("{}: a GIF with no frame", self.path.display()));
+        };
+        let end = match (self.behind.take(), self.too_soon.take()) {
+            (behind, None) => behind.into_iter().chain([(held, cs)]).collect(),
+            (None, Some(last)) => {
+                vec![(held, MIN_DELAY_CS), (last, cs.saturating_sub(MIN_DELAY_CS))]
+            }
+            (Some((image, shown)), Some(last)) if image == last => vec![(last, shown + cs)],
+            (Some(behind), Some(last)) => vec![behind, (last, cs)],
+        };
+        for (image, cs) in end {
+            self.write_image(&image, cs)?;
         }
-        self.write_held()?;
         self.put(&[0x3B])?;
         let flushed = self.out.take().map_or(Ok(()), |mut out| out.flush());
         flushed
@@ -305,15 +338,12 @@ impl GifWriter {
         Ok(())
     }
 
-    /// The picture in hand as an image: LZW in sub-blocks of 255, repeated
-    /// when its time will not fit one delay field.
-    fn write_held(&mut self) -> Result<(), String> {
-        let Some((indices, cs)) = self.held.take() else {
-            return Ok(());
-        };
+    /// One picture as an image: LZW in sub-blocks of 255, repeated when its
+    /// time will not fit one delay field.
+    fn write_image(&mut self, indices: &[u8], cs: u32) -> Result<(), String> {
         let code_size = self.table.as_ref().expect("the header set it").code_size;
         let lzw = Encoder::new(BitOrder::Lsb, code_size)
-            .encode(&indices)
+            .encode(indices)
             .map_err(|e| format!("write {}: {e}", self.path.display()))?;
         let (w, h) = self.size;
         let mut image = vec![0x2C, 0, 0, 0, 0];

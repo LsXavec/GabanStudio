@@ -609,23 +609,37 @@ fn queue_owed() -> Vec<(String, u32, u32)> {
     QUEUE.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
 }
 
-fn queue_moments(dir: &Path) {
-    let room = ProbeRoom::Stage(Stage::Composite);
-    let mut h = EditorHarness::with_gpu(crate::sample::build_sample());
-    // No ffmpeg, the search's answer faked: the row a beginner's PC shows.
+/// The room the queue's tab is shot in.
+const QUEUE_ROOM: ProbeRoom = ProbeRoom::Stage(Stage::Composite);
+
+/// No ffmpeg, the search's answer faked: the row a beginner's PC shows.
+fn queue_ready(h: &mut EditorHarness) {
     h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
     let gif = anim_core::deliver::PRESETS.iter().position(|p| p.name == "GIF");
     h.state_mut().render_queue.draft.preset = gif.expect("the GIF preset");
+}
+
+/// What `state` shows, a frame short of showing it.
+fn queue_screen(h: &mut EditorHarness, state: &str, size: egui::Vec2) {
+    h.kit_mut().set_size(size);
+    if state.contains("room") {
+        QUEUE_ROOM.enter(h.editor_mut());
+        let tab = h.editor().dock.find_tab(&crate::Pane::RenderQueue).expect("the queue's tab");
+        let _ = h.editor_mut().dock.set_active_tab(tab);
+    } else {
+        h.editor_mut().dock = egui_dock::DockState::new(vec![crate::Pane::RenderQueue]);
+    }
+}
+
+fn queue_moments(dir: &Path) {
+    let mut h = EditorHarness::with_gpu(crate::sample::build_sample());
+    queue_ready(&mut h);
     for (state, w, height) in QUEUE {
         let size = egui::vec2(w as f32, height as f32);
-        h.kit_mut().set_size(size);
+        queue_screen(&mut h, state, size);
         if state.contains("room") {
-            room.enter(h.editor_mut());
-            let tab = h.editor().dock.find_tab(&crate::Pane::RenderQueue).expect("the queue's tab");
-            let _ = h.editor_mut().dock.set_active_tab(tab);
-            arrive(&mut h, room);
+            arrive(&mut h, QUEUE_ROOM);
         } else {
-            h.editor_mut().dock = egui_dock::DockState::new(vec![crate::Pane::RenderQueue]);
             h.run_frames(4);
         }
         h.shot(size, &dir.join(format!("{state}.png")));
@@ -671,6 +685,49 @@ fn augif_shots_owe_the_queue_row_at_both_sizes() {
     }
     let elsewhere = say_owed().into_iter().chain(start_owed()).chain(strip_owed()).chain(rail_owed());
     assert!(elsewhere.into_iter().all(|o| !names.contains(o.0.as_str())), "no name is another group's");
+}
+
+/// The screens those shots are of, with no device: the words for no ffmpeg, GIF
+/// armed, and every preset's chip inside the window, at both sizes.
+#[test]
+fn augif_queue_shots_show_the_row_they_name() {
+    let mut h = EditorHarness::with_state(crate::sample::build_sample());
+    queue_ready(&mut h);
+    for (state, w, height) in QUEUE {
+        let size = egui::vec2(w as f32, height as f32);
+        queue_screen(&mut h, state, size);
+        h.run_frames(4);
+        assert!(h.has_text_containing(crate::render_queue::NEEDS_FFMPEG), "{state}\n{}", h.describe());
+        assert_eq!(h.node_toggled("GIF"), Some(true), "{state}: the armed chip\n{}", h.describe());
+        for p in anim_core::deliver::PRESETS {
+            let chip = h.rect(p.name);
+            assert!(chip.right() <= size.x && chip.bottom() <= size.y, "{state}, {}: {chip:?}", p.name);
+        }
+    }
+}
+
+/// Only the ignored pass writes the queue's shots, so this holds it to them: it
+/// takes all four, then checks the folder, and the check misses any one of them.
+#[test]
+fn augif_the_ignored_pass_owes_the_queue_shots() {
+    let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
+    let taken = pass.find("queue_moments(&dir);").expect("it takes them");
+    let checked = pass.find("check_shots(&dir, &queue_owed())").expect("it checks them");
+    assert!(taken < checked, "taken, then checked");
+    let dir = tempfile::tempdir().unwrap();
+    let owed = queue_owed();
+    assert_eq!(owed.len(), 4);
+    for (name, w, h) in &owed {
+        tiny_png(&dir.path().join(name), *w, *h);
+    }
+    assert_eq!(check_shots(dir.path(), &owed), Ok(()));
+    for (name, w, h) in &owed {
+        let file = dir.path().join(name);
+        std::fs::remove_file(&file).unwrap();
+        let missing = check_shots(dir.path(), &owed);
+        assert!(missing.is_err_and(|e| e.starts_with(name.as_str())), "{name} not there");
+        tiny_png(&file, *w, *h);
+    }
 }
 
 #[test]

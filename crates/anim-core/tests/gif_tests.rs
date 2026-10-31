@@ -49,6 +49,28 @@ fn running_time_cs(frames: u32, fps: u32) -> u32 {
     (frames as f64 * 100.0 / fps as f64 + 0.5).floor() as u32
 }
 
+/// The images a shot of all-different frames leaves, each its frame and its
+/// delay: a new image once the one in hand has had the floor, the first frame
+/// always, and a file that ends on the last frame.
+fn thinned(delays: &[u32]) -> Vec<(u32, u32)> {
+    let floor = gif::MIN_DELAY_CS;
+    let mut images: Vec<(u32, u32)> = Vec::new();
+    for (i, &cs) in delays.iter().enumerate() {
+        match images.last_mut() {
+            Some((_, time)) if *time < floor => *time += cs,
+            _ => images.push((i as u32, cs)),
+        }
+    }
+    let last = delays.len() as u32 - 1;
+    if images.len() == 1 && last > 0 {
+        let time = images[0].1;
+        images = vec![(0, floor), (last, time.saturating_sub(floor))];
+    } else {
+        images.last_mut().unwrap().0 = last;
+    }
+    images.into_iter().map(|(f, cs)| (f, cs.max(floor))).collect()
+}
+
 #[test]
 fn augif_header_and_loop_block() {
     let bytes = written(4, 3, &[(flat(4, 3, [10, 20, 30]), 5), (flat(4, 3, [200, 100, 50]), 7)]);
@@ -309,20 +331,31 @@ fn augif_a_long_hold_fits_the_delay_field() {
 fn augif_a_fast_shot_keeps_its_running_time() {
     // The formula alone gives delays of 0 and 1 past 50 fps, and viewers run
     // those at 10 cs. So a picture stays up at least 2 cs, the first frame is
-    // still the first, and the shot's running time stands: only the last
-    // picture can have banked less than the floor, so at most one floor over.
+    // still the first, the last still the last, and the shot's running time
+    // stands: only the last picture can have banked less than the floor, so
+    // at most one floor over.
     let colour = |i: u32| [(i * 37 % 256) as u8, (i * 91 % 256) as u8, (i * 53 % 256) as u8];
-    for fps in [51, 60, 100, 101, 120, 240] {
+    let fast = |fps: u32| -> Gif {
         let n = fps * 2;
         let shot: Vec<(Vec<u8>, u32)> =
             (0..n).map(|i| (flat(2, 2, colour(i)), gif::delay_cs(i, fps))).collect();
-        let g = decoded(2, 2, &shot);
+        decoded(2, 2, &shot)
+    };
+    for fps in [51, 60, 100, 101, 120, 240] {
+        let n = fps * 2;
+        let g = fast(fps);
         let over = g.duration_cs() - 200;
         assert!(over <= gif::MIN_DELAY_CS, "2.0 s at {fps} fps ran {over} cs over");
         assert!(g.delays().iter().all(|&d| d >= gif::MIN_DELAY_CS as u16), "{fps}: {:?}", g.delays());
         assert_eq!(g.frames[0].rgb[0], colour(0), "{fps}");
+        assert_eq!(g.frames.last().unwrap().rgb[0], colour(n - 1), "{fps}: the last frame, exact");
     }
     assert_eq!(gif::MIN_DELAY_CS, 2);
+    // A GIF holds at most 50 pictures a second, so past 50 fps the count is
+    // the floor's and not the shot's. It is exact all the same.
+    assert_eq!(fast(60).delays(), [2, 3].repeat(40), "80 pictures of 120 frames");
+    assert_eq!(fast(100).delays(), [2; 100], "100 of 200");
+    assert_eq!(fast(120).delays(), [2; 100], "100 of 240");
     // At 50 fps and under nothing is thinned: every drawing shows, and the
     // running time is exact.
     let shot: Vec<(Vec<u8>, u32)> = (0..100).map(|i| (flat(2, 2, colour(i)), gif::delay_cs(i, 50))).collect();
@@ -334,6 +367,85 @@ fn augif_a_fast_shot_keeps_its_running_time() {
     assert_eq!(gif::delay_cs(0, 240), 0);
     let g = decoded(2, 2, &[(flat(2, 2, [1, 2, 3]), 0)]);
     assert_eq!(g.delays(), [2]);
+}
+
+#[test]
+fn augif_the_last_frame_is_never_thinned_away() {
+    let (a, b, c) = (flat(2, 2, [200, 0, 0]), flat(2, 2, [0, 200, 0]), flat(2, 2, [0, 0, 200]));
+    let shown = |g: &Gif| -> Vec<[u8; 3]> { g.frames.iter().map(|f| f.rgb[0]).collect() };
+    let (ra, rb, rc) = ([200, 0, 0], [0, 200, 0], [0, 0, 200]);
+    // 60 fps: B has 1 cs, so C comes too soon. C takes B's place and its time.
+    let g = decoded(2, 2, &[(a.clone(), 2), (b.clone(), 1), (c.clone(), 2)]);
+    assert_eq!((shown(&g), g.delays()), (vec![ra, rc], vec![2, 3]));
+    // The picture before it is the same one: one image, no two alike side by side.
+    let g = decoded(2, 2, &[(a.clone(), 2), (b.clone(), 1), (a.clone(), 2)]);
+    assert_eq!((shown(&g), g.delays()), (vec![ra], vec![5]));
+    // The picture in hand is the first frame, so both stay. Two pictures cannot
+    // run under twice the floor, however short the shot.
+    let g = decoded(2, 2, &[(a.clone(), 1), (b.clone(), 1)]);
+    assert_eq!((shown(&g), g.delays()), (vec![ra, rb], vec![2, 2]));
+    let g = decoded(2, 2, &[(a.clone(), 0), (b.clone(), 1)]);
+    assert_eq!((shown(&g), g.delays()), (vec![ra, rb], vec![2, 2]), "two frames at 240 fps");
+    let g = decoded(2, 2, &[(a.clone(), 1), (b.clone(), 4)]);
+    assert_eq!((shown(&g), g.delays()), (vec![ra, rb], vec![2, 3]), "the time stands");
+    // It came back to the picture in hand: that is the last frame, and nothing
+    // is owed. Too soon in the middle of a shot, a frame just has no image.
+    let g = decoded(2, 2, &[(a.clone(), 1), (b.clone(), 1), (a.clone(), 1)]);
+    assert_eq!((shown(&g), g.delays()), (vec![ra], vec![3]));
+    let g = decoded(2, 2, &[(a.clone(), 2), (b.clone(), 1), (c.clone(), 2), (a.clone(), 2)]);
+    assert_eq!((shown(&g), g.delays()), (vec![ra, rb, ra], vec![2, 3, 2]));
+    // A hold stays a hold past 50 fps: 120 frames at 120 fps, three drawings.
+    let drawings: Vec<(Vec<u8>, u32)> = (0..120)
+        .map(|i| ([&a, &b, &c][i as usize / 40].clone(), gif::delay_cs(i, 120)))
+        .collect();
+    let g = decoded(2, 2, &drawings);
+    assert_eq!((shown(&g), g.delays()), (vec![ra, rb, rc], vec![33, 34, 33]));
+}
+
+/// Every rate the New Project form offers, at the lengths that catch a shot's
+/// two ends. At 50 fps and under every frame gets its image and its delay. Past
+/// that the file holds what the floor lets it, and always both ends.
+#[test]
+fn augif_every_speed_keeps_its_first_and_last_frame() {
+    let colour = |i: u32| {
+        [
+            (i & 7) * 36 + 3,
+            ((i >> 3) & 7) * 36 + 5,
+            ((i >> 6) & 3) * 80 + 7,
+        ]
+        .map(|v| v as u8)
+    };
+    let check = |n: u32, fps: u32| {
+        let times = delays(n, fps);
+        let shot: Vec<(Vec<u8>, u32)> = (0..n).map(|i| (flat(1, 1, colour(i)), times[i as usize])).collect();
+        let g = decoded(1, 1, &shot);
+        let at = format!("{n} frames at {fps} fps");
+        let want = thinned(&times);
+        let shown: Vec<[u8; 3]> = g.frames.iter().map(|f| f.rgb[0]).collect();
+        assert_eq!(shown, want.iter().map(|w| colour(w.0)).collect::<Vec<_>>(), "{at}");
+        assert_eq!(g.delays(), want.iter().map(|w| w.1 as u16).collect::<Vec<_>>(), "{at}");
+        assert_eq!((shown[0], shown[shown.len() - 1]), (colour(0), colour(n - 1)), "{at}");
+        if fps <= 50 {
+            assert_eq!(g.frames.len(), n as usize, "{at}: nothing thinned");
+            assert_eq!(g.delays(), times.iter().map(|&t| t as u16).collect::<Vec<_>>(), "{at}");
+            assert_eq!(g.duration_cs(), running_time_cs(n, fps), "{at}");
+        }
+        let (floor, images) = (gif::MIN_DELAY_CS, g.frames.len() as u32);
+        assert!(g.delays().iter().all(|&d| d as u32 >= floor), "{at}: {:?}", g.delays());
+        let ceiling = (running_time_cs(n, fps) + floor).max(images.min(2) * floor);
+        assert!(g.duration_cs() <= ceiling, "{at} ran {}, ceiling {ceiling}", g.duration_cs());
+    };
+    for fps in 1..=240 {
+        for n in 1..=7 {
+            check(n, fps);
+        }
+    }
+    let rates = [12, 24, 30, 48, 50, 51, 59, 60, 61, 66, 67, 75, 99, 100, 101, 119, 120, 121, 144, 199, 200, 201, 240];
+    for fps in rates {
+        for n in [fps - 1, fps, fps + 1, fps * 2 + 1] {
+            check(n, fps);
+        }
+    }
 }
 
 #[test]

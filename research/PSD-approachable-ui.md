@@ -1636,6 +1636,16 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - Another document is no outcome. `Say::new_document` drops the stroke, fill and node counts when the document is replaced, so opening one neither ticks nor answers anything.
 - `paper_under_chrome` reads 924 at 832×520 with the Timing sheet on, with or without a hint: the rail over a sheet-up paper. It stood before this part, the sweeps run with the sheet off, and it is in the same family as the AU4 note on art under the rail. Nothing was changed. The fit test holds it level with and without a hint.
 
+**AU8 notes.** Choices the build made where this document was silent or spoke twice. None needs a device.
+
+- Past 50 fps a GIF cannot hold every frame, so the gate's `frame count` reads there as the count the delay floor leaves, not the cut's. Viewers run a delay of 0 or 1 cs at 10 cs, so a picture stays up at least `gif::MIN_DELAY_CS` (2 cs) and a second holds at most 50 pictures. Every frame kept would mean a shot playing about five times too slow. 120 frames at 60 fps are 80 images, 200 at 100 fps and 240 at 120 fps are 100, each pinned exactly. The first and the last frame are always in the file and the running time stands to within one floor. At 50 fps and under every frame keeps its image and its delay. `augif_every_speed_keeps_its_first_and_last_frame` holds this at every rate the New Project form offers, 1 to 240.
+- A file of two pictures cannot run under twice the floor, so two frames at 240 fps run 4 cs, not 1. The first and the last frame come before the running time there, the one place it gives.
+- A one-file preset asked for a whole cut takes the frame on screen in the cut on screen. Another cut has no playhead, so it takes its first frame, as the batch render does, and a range or an episode takes its first. The row, the status and the hover cards count that one frame.
+- A GIF or a still from File ▸ Export lands on the name the save dialog gave, as it stands (`Job::exact_name`, `JobSpec::lands_at`): `ball_.gif` stays `ball_.gif`, and `{cut}` is not a token there. Build items 3 and 4's `video_name` is the queue's route, for a pattern, and stands. `export_job`'s existing kinds are on the must-not-change list, so an MP4 keeps its route and `ball_.mp4` lands as `ball.mp4`. AU9's Done card reads the name from the job for that reason, not from the dialog.
+- The queue's GIF or still of one cut has no frame number, so a second one replaces the first. This keeps build items 3 and 4's naming, and the `file names` card says so. It is the Lead's to change: a frame number in the name would need a change to this document.
+- Every part's shots land in `.work/gaban-ui/shots/<part>/` by the workflow's command, and in `shots-after/`, the folder 1.5 rule 6 names, by a copy of that run.
+- `crates/anim-core/tests/fixtures/before-gif.animproj` is a real file from before this part, written by the store at the commit under it. `augif_saved_data_stands` opens it and renders both new kinds, and the project, the file and the config do not move.
+
 ---
 
 ## 14 Part map
