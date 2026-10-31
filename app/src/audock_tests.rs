@@ -973,7 +973,8 @@ fn audock_band_lanes_keep_apart() {
 
 #[test]
 fn audock_long_refusal_stays_in_its_lane() {
-    const LONG: &str = "refused — this refusal is long enough to run past the sheet button";
+    const LONG: &str = "refused — this refusal is long enough to run past the sheet button, and then on past \
+                        the end of the second of its two rows, where only a card can hold the rest of it";
     let mut h = EditorHarness::with_state_shipped(sample::build_sample());
     for w in [1600.0, 1040.0, 1024.0, 832.0] {
         window(&mut h, w, 640.0, 1.0);

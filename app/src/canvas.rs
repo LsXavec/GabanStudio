@@ -83,6 +83,10 @@ fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
 /// tap with NO real pressure sample makes essentially nothing (not a fat blob);
 /// a deliberate dot comes from the pressure you actually apply.
 const START_SEED: f32 = 0.0;
+
+/// AU7: the empty cell's line, and its size (spec 8.4).
+pub(crate) const EMPTY_CELL_LINE: &str = "Draw to add a drawing here";
+pub(crate) const EMPTY_CELL_TEXT: f32 = 15.0;
 /// Minimum screen-space distance between committed samples — banks a
 /// decelerating pen onto one point instead of stacking overlapping AA
 /// segments. Screen space = constant physical dead-zone (Krita Scalable Distance).
@@ -850,6 +854,11 @@ pub struct CanvasView {
     pub(crate) strip_closed: bool,
     /// AU4: the sheet is on screen: the rule's mirror stands beside it.
     pub(crate) sheet_shown: bool,
+    /// AU7: the empty cell's line is due: hints on, its once-only bit unset,
+    /// and the document holds a drawing. The host sets it before `ui`.
+    pub(crate) empty_cell_hint: bool,
+    /// AU7: that line painted this frame.
+    pub(crate) dbg_empty_line: bool,
     /// Refusal edge-flash bookkeeping (seq last seen + when).
     flash_seq: u32,
     flash_since: f64,
@@ -1114,6 +1123,8 @@ impl CanvasView {
             hand_held: false,
             strip_closed: false,
             sheet_shown: false,
+            empty_cell_hint: false,
+            dbg_empty_line: false,
             flash_seq: 0,
             flash_since: -10.0,
             onion: OnionCfg::default(),
@@ -2131,6 +2142,12 @@ impl CanvasView {
     /// AU6: what `Check your pen` reads off the last stroke. It came in as a
     /// mouse, or its samples never carried force, or at least one did. A tap
     /// has no Move sample to read at all, so it says nothing either way.
+    /// AU7: the canvas line, an edit view's (spec 8.4). A raster canvas and a
+    /// vector one read alike here.
+    pub(crate) fn empty_line_due(&self, state: &AppState) -> bool {
+        self.empty_cell_hint && !state.view.playing && state.current_drawing().is_none() && self.current.is_empty()
+    }
+
     pub(crate) fn pen_verdict(&self) -> crate::welcome::PenCheck {
         use crate::welcome::PenCheck;
         if self.stroke_from_mouse {
@@ -4805,18 +4822,12 @@ impl CanvasView {
             crate::manga_tools::paint_page(ui, &painter, state, &page, &to_screen, armed, self.koma.as_ref());
         }
 
-        // Empty-cell hint (vector mode only).
-        if edit_view
-            && !self.raster
-            && !state.view.playing
-            && state.current_drawing().is_none()
-            && self.current.is_empty()
-        {
-            plate::picture_note(
-                &painter,
-                paper_rect.center(),
-                "empty cell — draw to create a new drawing here",
-            );
+        // AU7: the one thing that paints on the paper (spec 8.4), on a cell
+        // with no art to cover. `Editor::say_read` says when it is due.
+        self.dbg_empty_line = edit_view && self.empty_line_due(state);
+        if self.dbg_empty_line {
+            let font = egui::FontId::proportional(EMPTY_CELL_TEXT);
+            painter.text(paper_rect.center(), egui::Align2::CENTER_CENTER, EMPTY_CELL_LINE, font, plate::INK2);
         }
 
         // GM6: the key's spacing chart (タイミング指示) where the key animator
@@ -6224,7 +6235,7 @@ impl CanvasView {
             state.status = "the loop enclosed nothing".into();
             return;
         }
-        state.commit_region_edit("lasso fill", did, LayerId(kl), diff);
+        state.commit_fill("lasso fill", did, LayerId(kl), diff);
         self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
     }
 
@@ -6388,9 +6399,55 @@ impl CanvasView {
             state.status = "fill made no change".into();
             return;
         }
-        state.commit_region_edit("flood fill", did, LayerId(kl), diff);
+        state.commit_fill("flood fill", did, LayerId(kl), diff);
         // The engine changed under the displayed texture — resync from truth.
         self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
+    }
+
+    /// Every route's pen-down guards: the top-first slot a stroke lands on,
+    /// or None with the refusal said. `raster`: the stroke is a raster one.
+    pub(crate) fn slot_at_pen_down(&self, raster: bool, state: &mut AppState) -> Option<usize> {
+        // GUARD: composite view is a review mode — a stroke would land on the
+        // active layer while the canvas shows the graph's output (possibly
+        // transformed or not even including that layer). Refuse + hint, same
+        // pattern as the hidden-layer guard.
+        if self.composite_view {
+            // AUDIT [7]: the pen is his primary instrument — its refusal
+            // must reach the Aka lane and flash the canvas edge, exactly
+            // as the mouse path and the hidden-layer guard already do.
+            state.refuse("refused — composite view is read-only (C to edit)");
+            return None;
+        }
+        if self.is_guest && !self.guest_ready {
+            state.refuse("refused — the host's file is still arriving");
+            return None;
+        }
+        // GM5: a locked column refuses at pen-down, before any ink (raster
+        // or vector) — never a whole stroke drawn, then dropped.
+        if state.refuse_if_column_locked() {
+            return None;
+        }
+        // GUARD (CSP behavior): never paint into a layer you can't see.
+        if raster && state.active_layer_props().is_some_and(|p| !p.visible) {
+            state.refuse(format!(
+                "refused — layer '{}' is hidden (A to switch, or click its eye)",
+                state.active_layer_name()
+            ));
+            return None;
+        }
+        if raster && state.refuse_if_locked() {
+            return None;
+        }
+        // UNARMED (defect 16): the tracked layer name is absent on this
+        // cel — no layer receives ink; refuse instead of misrouting.
+        let slot = state.active_slot_resolved();
+        if slot.is_none() {
+            state.refuse(format!(
+                "refused — no '{}' layer on this cel (pick one in Cel Layers)",
+                state.view.active_layer
+            ));
+        }
+        slot
     }
 
     /// Begin a stroke at `pos` (shared by the native tablet path and the egui
@@ -6407,44 +6464,7 @@ impl CanvasView {
         if !rect.contains(pos) {
             return false;
         }
-        // GUARD: composite view is a review mode — a stroke would land on the
-        // active layer while the canvas shows the graph's output (possibly
-        // transformed or not even including that layer). Refuse + hint, same
-        // pattern as the hidden-layer guard.
-        if self.composite_view {
-            // AUDIT [7]: the pen is his primary instrument — its refusal
-            // must reach the Aka lane and flash the canvas edge, exactly
-            // as the mouse path and the hidden-layer guard already do.
-            state.refuse("refused — composite view is read-only (C to edit)");
-            return false;
-        }
-        if self.is_guest && !self.guest_ready {
-            state.refuse("refused — the host's file is still arriving");
-            return false;
-        }
-        // GM5: a locked column refuses at pen-down, before any ink (raster
-        // or vector) — never a whole stroke drawn, then dropped.
-        if state.refuse_if_column_locked() {
-            return false;
-        }
-        // GUARD (CSP behavior): never paint into a layer you can't see.
-        if self.raster && state.active_layer_props().is_some_and(|p| !p.visible) {
-            state.refuse(format!(
-                "refused — layer '{}' is hidden (A to switch, or click its eye)",
-                state.active_layer_name()
-            ));
-            return false;
-        }
-        if self.raster && state.refuse_if_locked() {
-            return false;
-        }
-        // UNARMED (defect 16): the tracked layer name is absent on this
-        // cel — no layer receives ink; refuse instead of misrouting.
-        let Some(resolved_slot) = state.active_slot_resolved() else {
-            state.refuse(format!(
-                "refused — no '{}' layer on this cel (pick one in Cel Layers)",
-                state.view.active_layer
-            ));
+        let Some(resolved_slot) = self.slot_at_pen_down(self.raster, state) else {
             return false;
         };
         let p0 = force.filter(|f| *f > 0.0).unwrap_or(START_SEED);

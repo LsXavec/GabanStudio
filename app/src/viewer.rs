@@ -15,6 +15,7 @@ use anim_core::deliver::{self, Purpose, RenderOpts};
 use eframe::egui;
 use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 
+use crate::config::Action;
 use crate::doc::AppState;
 
 /// What the shared per-frame graph execution produced — every consumer
@@ -202,6 +203,10 @@ pub struct ViewerView {
     pub safe: bool,
     /// GM10: the safe frames drawn this frame, in frame pixels.
     pub(crate) drawn_safe: Option<anim_core::camera::SafeFrames>,
+    /// AU7: a stroke tried on the Plan preview, which takes none (spec 5.3).
+    pub(crate) tried: bool,
+    /// AU7: the verb an empty state's button asked for.
+    pub(crate) asked: Option<Action>,
 }
 
 impl Default for ViewerView {
@@ -211,21 +216,53 @@ impl Default for ViewerView {
             pan: egui::Vec2::ZERO,
             safe: false,
             drawn_safe: None,
+            tried: false,
+            asked: None,
         }
+    }
+}
+
+/// AU7: the Result's empty state (spec 8.4).
+pub const NOTHING_TO_SHOW: &str = "Nothing to show yet.";
+const SET_UP_COMPOSITE: &str = "Set up standard composite";
+/// AU7: the Plan preview's.
+pub const NOTHING_HERE: &str = "Nothing here yet.";
+
+/// AU7: an empty view: its sentence, and the one way on under it.
+fn empty_state(ui: &mut egui::Ui, rect: Rect, words: &str, button: &str, verb: Action, vs: &mut ViewerView) {
+    let gap = crate::plate::CTRL_H * 0.5 + 2.0;
+    ui.painter_at(rect).text(
+        rect.center() - vec2(0.0, gap),
+        egui::Align2::CENTER_BOTTOM,
+        words,
+        egui::FontId::proportional(14.0),
+        crate::plate::LEGEND,
+    );
+    // Measured in the Ui's own font: the plain panel tests dress none.
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let wide = ui.fonts_mut(|f| f.layout_no_wrap(button.to_string(), font, crate::plate::LEGEND).size().x) + 24.0;
+    let at = Rect::from_center_size(rect.center() + vec2(0.0, 6.0), vec2(wide, crate::plate::CTRL_H));
+    if ui.put(at, egui::Button::new(button)).clicked() {
+        vs.asked = Some(verb);
     }
 }
 
 /// `final_look` is the shared [`FinalLook`] latch: its deck control sits
 /// beside "safe", and `graph` is the final look's frame while it is on.
+/// `plan`: this view is the Plan step's preview.
 pub fn ui(
     ui: &mut egui::Ui,
     state: &AppState,
     graph: GraphView,
     vs: &mut ViewerView,
     final_look: &mut bool,
+    plan: bool,
 ) {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
+    if plan && (response.drag_started() || response.clicked()) {
+        vs.tried = true;
+    }
     let painter = ui.painter_at(rect);
     let paper_w = state.engine.project.width as f32;
     let paper_h = state.engine.project.height as f32;
@@ -260,6 +297,7 @@ pub fn ui(
         Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
     painter.rect_filled(rect, 0, crate::plate::RESULT);
     painter.rect_filled(paper_rect, 0, crate::plate::PAPER);
+    let bare_plan = plan && !state.has_art();
     let hint = |painter: &egui::Painter, msg: &str| {
         painter.text(
             rect.center(),
@@ -297,15 +335,19 @@ pub fn ui(
                 );
             }
         }
-        GraphView::NoOutput | GraphView::Off => hint(
-            &painter,
-            "no graph output — wire an Output node in the Node Graph pane",
-        ),
+        GraphView::NoOutput | GraphView::Off => {
+            if !bare_plan {
+                empty_state(ui, rect, NOTHING_TO_SHOW, SET_UP_COMPOSITE, Action::BuildComposite, vs);
+            }
+        }
         GraphView::EvalFailed => hint(
             &painter,
             "the graph failed to evaluate — check the Node Graph pane",
         ),
         GraphView::NoGpu => hint(&painter, "GPU unavailable — the viewer needs wgpu"),
+    }
+    if bare_plan {
+        empty_state(ui, rect, NOTHING_HERE, crate::say::GO_TO_DRAW, Action::RoomDrawing, vs);
     }
     // GM10: the safe frames over the composite, from the camera module (the
     // canvas's safe toggle draws the same rects); the pane's latch turns
@@ -356,12 +398,12 @@ mod tests {
         let mut vs = ViewerView::default();
         let mut fin = false;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin)
+            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin, false)
         });
         assert_eq!(vs.drawn_safe, None, "off by default");
         vs.safe = true;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin)
+            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin, false)
         });
         assert_eq!(vs.drawn_safe, Some(anim_core::camera::safe_frames(w, fh)));
     }

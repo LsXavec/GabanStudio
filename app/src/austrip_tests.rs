@@ -8,6 +8,7 @@ use egui_kittest::kittest::Queryable;
 
 use crate::config::{self, Action};
 use crate::doc::{AppState, BLANK_FRAME, HELD_FRAME};
+use crate::say::{Spoken, Verb};
 use crate::strip::{self, Sheet, Strip};
 use crate::testkit::{EditorHarness, PanelHarness};
 use crate::workspace::Stage;
@@ -1408,11 +1409,11 @@ fn card(h: &EditorHarness) -> Option<Rect> {
 fn band_census(h: &EditorHarness, top: f32) -> Vec<(String, Pos2)> {
     use egui::accesskit::Role;
     use egui_kittest::kittest::NodeT;
-    fn walk(n: egui_kittest::Node<'_>, top: f32, skip: &str, ppp: f32, out: &mut Vec<(String, Pos2)>) {
+    fn walk(n: egui_kittest::Node<'_>, top: f32, skip: [&str; 2], ppp: f32, out: &mut Vec<(String, Pos2)>) {
         let ak = n.accesskit_node();
         let keys = [Role::Button, Role::CheckBox, Role::RadioButton, Role::SpinButton, Role::Label];
         let name = ak.label().or_else(|| ak.value()).unwrap_or_default();
-        let reads = ak.role() == Role::Label && (name.starts_with("/ ") || name == skip);
+        let reads = ak.role() == Role::Label && (name.starts_with("/ ") || skip.contains(&name.as_str()));
         if let Some(at) = ak.bounding_box().filter(|_| keys.contains(&ak.role()) && !reads) {
             let at = pos2((at.x0 + at.x1) as f32 * 0.5 / ppp, (at.y0 + at.y1) as f32 * 0.5 / ppp);
             if at.y >= top {
@@ -1422,7 +1423,8 @@ fn band_census(h: &EditorHarness, top: f32) -> Vec<(String, Pos2)> {
         n.children().for_each(|c| walk(c, top, skip, ppp, out));
     }
     let mut out = Vec::new();
-    walk(h.kit().root(), top, &h.state().status, h.ctx().pixels_per_point(), &mut out);
+    let hint = h.editor().say.hint.as_ref().map_or("", |s| s.words.as_str());
+    walk(h.kit().root(), top, [&h.state().status, hint], h.ctx().pixels_per_point(), &mut out);
     out
 }
 
@@ -1622,8 +1624,11 @@ fn austrip_speed_rows_say_what_they_set() {
     assert_eq!(h.state().status, "All drawings set to 3 frames each.");
 }
 
-/// Spec 8.2: AU7's action button has its end of the lane already: the words,
-/// a remark's or a refusal's, stop short of it.
+/// Spec 8.2: the action button has its end of the lane: a remark stops short
+/// of the slot, and a hint's words stop short of the button that stands there.
+/// AU7: no button stands beside a refusal, which outranks every hint, and its
+/// gate needs the slot for the longest ones at 832: a refusal stops at the
+/// lane's end, with no button in it.
 #[test]
 fn austrip_say_words_leave_the_action_slot_free() {
     const LONG: &str = "this remark is long enough to run the whole lane and on past where a button would stand";
@@ -1639,10 +1644,21 @@ fn austrip_say_words_leave_the_action_slot_free() {
     h.state_mut().status = LONG.into();
     settle(&mut h);
     assert!(points(&h, LONG).right() <= slot, "{:?} past {slot}", points(&h, LONG));
+    let verb = Verb::GoToDraw;
+    let name = format!("{} (say line)", verb.label());
+    let spoken = Spoken { bit: None, words: LONG.into(), verb: Some(verb) };
+    h.editor_mut().say.pin = Some(spoken);
+    h.wait(4.2);
+    settle(&mut h);
+    let button = points(&h, &name);
+    assert!(points(&h, LONG).right() <= button.left(), "{:?} past {button:?}", points(&h, LONG));
+    assert!(button.right() <= points(&h, "Add drawing (band)").left(), "{button:?}");
     let words = format!("refused — {LONG}");
     h.state_mut().refuse(words.clone());
     settle(&mut h);
-    assert!(points(&h, &words).right() <= slot, "{:?} past {slot}", points(&h, &words));
+    assert!(!h.has(&name), "a refusal outranks the hint, and its button");
+    let lane = points(&h, "Add drawing (band)").left();
+    assert!(points(&h, &words).right() <= lane, "{:?} past {lane}", points(&h, &words));
 }
 
 /// The rule beside the Say line stands only with words beside it, and takes
@@ -1651,6 +1667,7 @@ fn austrip_say_words_leave_the_action_slot_free() {
 fn austrip_say_rule_stands_only_beside_words() {
     let mut h = strip_up(&[4, 4]);
     h.state_mut().status.clear();
+    h.rig_mut().config.ui.hints_off = true;
     settle(&mut h);
     let (left, right) = (points(&h, "Frame 1 of 8").right(), points(&h, "Add drawing (band)").left());
     let row = points(&h, "play (Space)").y_range();
@@ -1873,7 +1890,10 @@ fn austrip_saved_vocabulary_is_additive() {
     let ui = serde_json::to_value(UiConfig::default()).unwrap();
     let mut keys: Vec<_> = ui.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
-    let shape = ["exact_descriptions", "lock_positions", "quick_start", "scale", "sheet_in_draw", "show_welcome", "whats_new_seen"];
+    let shape = [
+        "exact_descriptions", "hints_off", "hints_seen", "lock_positions", "quick_start", "scale", "sheet_in_draw",
+        "show_welcome", "whats_new_seen",
+    ];
     assert_eq!(keys, shape);
     // A strip's edits are plain exposures: the file takes them as it stands.
     let mut s = timed(&[3, 2, 4]);
@@ -1951,9 +1971,10 @@ fn austrip_left_out_stays_out() {
     settle(&mut h);
     assert_eq!(holds(h.state()), [4, 2, 6]);
     assert_eq!(steps(&h), was, "a sheet's body is no handle");
-    // Hints: at rest the Say lane is empty.
+    // Hints off: at rest the Say lane is empty.
     h.state_mut().status.clear();
     h.state_mut().refusal.clear();
+    h.rig_mut().config.ui.hints_off = true;
     settle(&mut h);
     let (left, right) = (points(&h, "Frame 1 of 12").right(), points(&h, "Add drawing (band)").left());
     let row = points(&h, "play (Space)");

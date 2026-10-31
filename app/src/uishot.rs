@@ -18,6 +18,7 @@ use crate::floats::Float;
 use crate::measure::room_tag;
 use crate::newproject::NewProjectForm;
 use crate::plate;
+use crate::say::{Spoken, Verb};
 use crate::testkit::EditorHarness;
 use crate::viewer::GraphView;
 use crate::workspace::Stage;
@@ -527,6 +528,72 @@ fn start_float(dir: &Path) {
     }
 }
 
+/// AU7: the lane as it teaches: a hint with its button and dots, under the
+/// fold, beside the sheet, and the longest sentence with `Fix it`; each empty
+/// step; the empty cell's line; and Export's queue.
+const SAY: [(&str, u32, u32); 14] = [
+    ("say-hint", 1600, 900),
+    ("say-hint-1280", 1280, 800),
+    ("say-hint-fold", 832, 520),
+    ("say-sheet", 1280, 800),
+    ("say-fix-fold", 832, 520),
+    ("say-plan", 1600, 900),
+    ("say-plan-1280", 1280, 800),
+    ("say-timing", 1600, 900),
+    ("say-color", 1600, 900),
+    ("say-effects", 1600, 900),
+    ("say-effects-1280", 1280, 800),
+    ("say-empty-cell", 1600, 900),
+    ("say-empty-cell-1280", 1280, 800),
+    ("say-export", 1600, 900),
+];
+
+fn say_owed() -> Vec<(String, u32, u32)> {
+    SAY.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn say_moments(dir: &Path) {
+    let mut shots = SAY.iter().map(|(state, w, h)| (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32)));
+    let mut shoot = |h: &mut EditorHarness, room: ProbeRoom| {
+        let (name, size) = shots.next().expect("a shot owed");
+        h.kit_mut().set_size(size);
+        arrive(h, room);
+        // The machine's last remark has its dwell first.
+        h.wait(4.2);
+        h.shot(size, &name);
+    };
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    let mut h = EditorHarness::with_gpu_ready();
+    for _ in 0..3 {
+        shoot(&mut h, draw);
+    }
+    h.editor_mut().show_sheet();
+    shoot(&mut h, draw);
+    h.click(crate::vocab::HIDE_TIMING_SHEET);
+    let verb = Some(Verb::Fix(Action::NewDrawing));
+    h.editor_mut().say.pin = Some(Spoken { bit: None, words: crate::doc::HELD_FRAME.into(), verb });
+    shoot(&mut h, draw);
+    h.editor_mut().say.pin = None;
+    for stage in [Stage::Layout, Stage::Layout, Stage::Edit, Stage::InkPaint, Stage::Composite, Stage::Composite] {
+        let room = ProbeRoom::Stage(stage);
+        room.enter(h.editor_mut());
+        shoot(&mut h, room);
+    }
+    drop(h);
+    let mut s = NewProjectForm::default().new_state();
+    s.set_cut_length(6);
+    s.goto(3);
+    s.new_drawing_at_frame();
+    s.goto(0);
+    let mut h = EditorHarness::with_gpu_shipped(s);
+    draw.enter(h.editor_mut());
+    for _ in 0..2 {
+        shoot(&mut h, draw);
+    }
+    h.editor_mut().show_me(crate::welcome::EXPORT_STEP);
+    shoot(&mut h, ProbeRoom::Stage(Stage::Edit));
+}
+
 #[test]
 #[ignore = "needs a GPU adapter and UISHOT_DIR; writes PNGs"]
 fn uishot_rooms() {
@@ -549,6 +616,21 @@ fn uishot_rooms() {
     check_shots(&dir, &strip_owed()).expect("the strip's moments");
     start_float(&dir);
     check_shots(&dir, &start_owed()).expect("the Start float's moments");
+    say_moments(&dir);
+    check_shots(&dir, &say_owed()).expect("what the Say line teaches");
+}
+
+#[test]
+fn ausay_shots_owe_the_lane_and_each_empty_step() {
+    let owed = say_owed();
+    let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
+    for state in ["say-hint", "say-plan", "say-effects", "say-empty-cell"] {
+        assert!(names.contains(format!("{state}.png").as_str()), "{state} at 1600");
+        assert!(names.contains(format!("{state}-1280.png").as_str()), "{state} at 1280");
+    }
+    let elsewhere = strip_owed().into_iter().chain(start_owed()).chain(shipped_owed()).chain(rail_owed());
+    assert!(elsewhere.into_iter().all(|o| !names.contains(o.0.as_str())), "no name is another group's");
 }
 
 #[test]

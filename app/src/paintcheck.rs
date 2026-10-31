@@ -267,6 +267,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     }
     let pc = &state.paintcheck;
     let Some(found) = pc.findings.as_ref() else {
+        if !pc.busy() {
+            ui.label(egui::RichText::new("Run a check to find unpainted gaps.").color(plate::legend_dim()));
+        }
         return;
     };
     // The list is the checked cut's: elsewhere its columns mean nothing.

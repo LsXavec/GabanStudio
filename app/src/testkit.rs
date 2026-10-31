@@ -141,6 +141,7 @@ impl Rig {
         editor.scrub_audio = config.perf.scrub_audio;
         editor.state.ram.set_cap_mb(config.perf.ram_preview_mb);
         editor.show_start = config.ui.show_welcome;
+        editor.say.feed(&config.ui);
         editor.ui(
             ui,
             &config.pen,
@@ -175,7 +176,9 @@ impl Rig {
         if let Some(on) = lock {
             self.config.ui.lock_positions = on;
         }
-        if let (true, Some(dir)) = (show.is_some() || lock.is_some(), &self.editor.data_dir) {
+        // AU7: Hints, and what the Say line has taught.
+        let taught = self.editor.say.store(&mut self.config.ui);
+        if let (true, Some(dir)) = (show.is_some() || lock.is_some() || taught, &self.editor.data_dir) {
             self.config.save_to(dir).expect("the rig's config saves");
         }
         // GM4: the OPTIONS row's stabilizer level, saved as the App saves it.
@@ -370,6 +373,7 @@ impl EditorHarness {
     fn frozen(config: &mut Config) {
         config.ui.lock_positions = false;
         config.ui.sheet_in_draw = true;
+        config.ui.hints_off = true;
     }
 
     /// A new editor over `state` in this harness's data dir and on its
@@ -2890,22 +2894,23 @@ mod tests {
         assert_eq!(
             keys(&config["ui"]),
             [
-                "exact_descriptions", "lock_positions", "quick_start", "scale", "sheet_in_draw", "show_welcome",
-                "whats_new_seen",
+                "exact_descriptions", "hints_off", "hints_seen", "lock_positions", "quick_start", "scale",
+                "sheet_in_draw", "show_welcome", "whats_new_seen",
             ]
         );
     }
 
     /// AU2's leave-out list: no renames, no menu moves, no new Actions. The
-    /// parts that make them (AU3, AU4, AU5, AU6, AU10, AU11) re-pin this and say
-    /// so in their commit bodies. AU4 brought the rail and `CanvasOptions`, AU5
-    /// `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew` and `ToggleLockPositions`.
+    /// parts that make them (AU3, AU4, AU5, AU6, AU7, AU10, AU11) re-pin this and
+    /// say so in their commit bodies. AU4 brought the rail and `CanvasOptions`,
+    /// AU5 `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew` and
+    /// `ToggleLockPositions`, AU7 `ToggleHints`.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (159, 0x28b3fca773c7dd4d), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (160, 0x4caad31a7b7dfe50), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }

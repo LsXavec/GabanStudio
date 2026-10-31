@@ -158,12 +158,9 @@ pub fn form_ui(
     // Struck values, one clear verb. (Repaint sweep 2026-08-18.)
     plate::legend(ui, "new cut");
     ui.label(
-        egui::RichText::new(
-            "The paper you will draw on, and how fast it plays. \
-             Both are fixed once the cut is created.",
-        )
-        .size(11.5)
-        .color(plate::LEGEND),
+        egui::RichText::new("The paper you will draw on, and how fast it plays.")
+            .size(11.5)
+            .color(plate::LEGEND),
     );
     ui.add_space(12.0);
     egui::Grid::new("new_project_grid")

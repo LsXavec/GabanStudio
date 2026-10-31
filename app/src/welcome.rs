@@ -35,51 +35,60 @@ const RECENT_ROWS: usize = 2;
 /// What a step's "Show me" does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShowMe {
+    /// An undoable demo circle, on this frame (spec 8.3).
+    Circle,
+    /// The next circle: on a drawing of its own, past the first frame.
+    NextCircle,
     Perform(Action),
-    /// Do it when the cut allows (a charted key for inbetweens), else open
-    /// the room where it is set up.
-    Try(Action, Stage),
+    /// Playback, unless it already runs.
+    Play,
     /// The editing room with its render queue forward (GM11: every export
-    /// is a queue job, File ▸ Export…'s too).
+    /// is a queue job, File ▸ Export…'s too). AU9 makes it the Export step.
     Export,
 }
 
 pub struct Step {
     pub label: &'static str,
-    /// The Action whose first run ticks the step (None: ticked elsewhere —
-    /// the export when a render queue job starts).
+    /// The Action that ticks the step. The others tick on outcomes, in
+    /// `Editor::say_outcomes`: a finished stroke, playback, a queued export.
     pub ticks_on: Option<Action>,
     pub show_me: ShowMe,
 }
 
 pub const STEPS: [Step; 5] = [
     Step {
-        label: "Make a new drawing",
-        ticks_on: Some(Action::NewDrawing),
-        show_me: ShowMe::Perform(Action::NewDrawing),
+        label: "Draw something",
+        ticks_on: None,
+        show_me: ShowMe::Circle,
     },
     Step {
-        label: "Mark it Key",
-        ticks_on: Some(Action::KindKey),
-        show_me: ShowMe::Perform(Action::KindKey),
+        label: "Add a drawing",
+        ticks_on: Some(Action::AddDrawingAfter),
+        show_me: ShowMe::Perform(Action::AddDrawingAfter),
     },
     Step {
-        label: "Make an inbetween",
-        ticks_on: Some(Action::MakeInbetweens),
-        show_me: ShowMe::Try(Action::MakeInbetweens, Stage::Drawing),
+        label: "Draw the next pose",
+        ticks_on: None,
+        show_me: ShowMe::NextCircle,
     },
     Step {
-        label: "Play",
-        ticks_on: Some(Action::PlayPause),
-        show_me: ShowMe::Perform(Action::PlayPause),
+        label: "Play it",
+        ticks_on: None,
+        show_me: ShowMe::Play,
     },
     Step {
-        label: "Export",
+        label: "Export a file",
         ticks_on: None,
         show_me: ShowMe::Export,
     },
 ];
 
+/// The drawing steps' ticks: a finished stroke ticks the first, and one past
+/// the first frame ticks the third as well (spec 8.3).
+pub const FIRST_STROKE: usize = 0;
+pub const NEXT_POSE: usize = 2;
+/// Ticked when playback runs.
+pub const PLAY_STEP: usize = 3;
 /// The export step (ticked when a render queue job starts).
 pub const EXPORT_STEP: usize = 4;
 
@@ -113,18 +122,23 @@ pub fn checklist_ui(
                 plate::legend_dim()
             }));
             ui.label(format!("{}. {}", i + 1, step.label));
-            if let Some(chord) = step.ticks_on.and_then(|a| crate::cmdpal::chord_of(binds, a)) {
+            let verb = match step.show_me {
+                ShowMe::Perform(a) => Some(a),
+                ShowMe::Play => Some(Action::PlayPause),
+                _ => None,
+            };
+            if let Some(chord) = verb.and_then(|a| crate::cmdpal::chord_of(binds, a)) {
                 ui.label(egui::RichText::new(chord).color(plate::legend_dim()));
             }
             if ui
                 .small_button("Show me")
                 .on_hover_text(match step.show_me {
+                    ShowMe::Circle => "draws a circle on this frame; Undo takes it back".into(),
+                    ShowMe::NextCircle => "draws the next circle on a drawing of its own".into(),
                     ShowMe::Perform(a) => format!("does it: {}", a.label()),
-                    ShowMe::Try(a, st) => {
-                        format!("does it: {} (or opens the {} room)", a.label(), st.name())
-                    }
+                    ShowMe::Play => format!("does it: {}", Action::PlayPause.label()),
                     ShowMe::Export => {
-                        "opens the edit room's render queue (File ▸ Export… adds a job too)".into()
+                        "opens the edit room's render queue (File ▸ Export… adds a job too)".to_string()
                     }
                 })
                 .clicked()
@@ -766,7 +780,7 @@ pub fn ui(
             }
             if ui
                 .button("Settings…")
-                .on_hover_text("theme, UI scale, pen and shortcuts — before the first cut")
+                .on_hover_text("UI scale, pen and shortcuts")
                 .clicked()
             {
                 out = Some(WelcomeAction::Settings);
@@ -775,7 +789,7 @@ pub fn ui(
         ui.add_space(8.0);
         section(ui, "Recent files");
         if w.cards.is_empty() {
-            ui.label(egui::RichText::new("nothing yet").color(plate::legend_dim()));
+            ui.label(egui::RichText::new("Nothing yet").color(plate::legend_dim()));
         }
         ui.horizontal_wrapped(|ui| {
             for i in 0..w.cards.len() {
@@ -1230,6 +1244,9 @@ mod tests {
         let state = crate::doc::AppState::new_project("qs", 640, 360, 24, 300.0);
         let mut h = crate::testkit::EditorHarness::with_state(state);
         assert_eq!(h.perform(Action::NewDrawing), crate::Performed::Done);
+        h.run();
+        assert_eq!(h.editor().quick_start, [false; 5], "AU7: a drawing is no stroke yet");
+        crate::canvas::extpaper_tests::paint_texels(h.state_mut(), &[(9, 9)], [0.0, 0.0, 0.0, 1.0]);
         h.run();
         assert_eq!(h.editor().quick_start, [true, false, false, false, false]);
         // The ticks survive a config round trip.

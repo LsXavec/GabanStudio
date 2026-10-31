@@ -44,6 +44,7 @@ mod rail;
 mod render_queue;
 mod runs;
 mod sample;
+mod say;
 mod shortcuts;
 mod stabilizer;
 mod steps;
@@ -57,6 +58,8 @@ mod tidy_tests;
 mod audock_tests;
 #[cfg(test)]
 mod aurail_tests;
+#[cfg(test)]
+mod ausay_tests;
 #[cfg(test)]
 mod austart_tests;
 #[cfg(test)]
@@ -2354,6 +2357,7 @@ impl App {
                                 ed.state = st;
                                 ed.state.view.frame = frame;
                                 ed.canvas.engine_changed();
+                                ed.say.new_document();
                                 ed.state.status = "live from the host".into();
                             } else {
                                 let rs = self.render_state.as_ref();
@@ -3053,6 +3057,7 @@ impl Editor {
             self.palette.note_run(action);
             // GM8: the first run of a Quick start step's verb ticks it.
             welcome::tick(&mut self.quick_start, action);
+            self.say.added |= action == Action::AddDrawingAfter;
         }
         #[cfg(test)]
         if out == Performed::Ignored {
@@ -3111,6 +3116,8 @@ impl Editor {
             }
             // AU6: the shell stores it, as Settings does.
             Action::ToggleLockPositions => self.lock_request = Some(!self.ui_lock),
+            // AU7: and this.
+            Action::ToggleHints => self.say.hints_request = Some(self.say.off),
             // GM10: the cut's paper window (its "set paper" is the edit).
             Action::PaperSize => self.paper_form = Some(PaperForm::of(&self.state)),
             // GM11: the delivery jobs' pane, and the composite viewers'
@@ -3675,6 +3682,7 @@ impl Editor {
             | Action::WelcomeScreen
             | Action::WhatsNew
             | Action::ToggleLockPositions
+            | Action::ToggleHints
             | Action::PaperSize
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
@@ -3737,6 +3745,7 @@ fn is_chrome(action: Action) -> bool {
             | Action::WelcomeScreen
             | Action::WhatsNew
             | Action::ToggleLockPositions
+            | Action::ToggleHints
             | Action::PaperSize
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
@@ -4314,6 +4323,8 @@ struct Editor {
     start_waiting: Option<welcome::Welcome>,
     /// AU6: `strokes_done` when last looked at. A change is a finished stroke.
     strokes_seen: u64,
+    /// AU7: the Say line's teaching (`say.rs`).
+    pub say: say::Say,
     /// AU6: `config.ui.show_welcome`, fed by the shell like the lock, and the
     /// float's latch asking the shell to store it.
     pub show_start: bool,
@@ -4870,7 +4881,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                     self.canvas.dbg_layer = ui.layer_id();
                     self.canvas.dbg_preview = true;
                     let vs = self.viewers.entry(u8::MAX).or_default();
-                    viewer::ui(ui, self.state, self.graph, vs, self.final_look);
+                    viewer::ui(ui, self.state, self.graph, vs, self.final_look, true);
                 } else {
                     self.canvas.ui(
                         ui,
@@ -4899,7 +4910,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             }
             Pane::Viewer(id) => {
                 let vs = self.viewers.entry(*id).or_default();
-                viewer::ui(ui, self.state, self.graph, vs, self.final_look);
+                viewer::ui(ui, self.state, self.graph, vs, self.final_look, false);
             }
         }
     }
@@ -5216,6 +5227,7 @@ impl Editor {
     /// Copy the remembered fields in, and rebuild the dock when the recipe
     /// then differs.
     fn apply_ui(&mut self, ui: &config::UiConfig) {
+        self.say.feed(ui);
         let changed = self.sheet_in_draw != ui.sheet_in_draw;
         self.sheet_in_draw = ui.sheet_in_draw;
         if changed && let Some(st @ Stage::Drawing) = self.stage {
@@ -5338,6 +5350,7 @@ impl Editor {
             start: None,
             start_waiting: None,
             strokes_seen: 0,
+            say: say::Say::default(),
             show_start: true,
             show_start_request: None,
             shell_asks: false,
@@ -5444,6 +5457,7 @@ impl Editor {
             start: None,
             start_waiting: None,
             strokes_seen: 0,
+            say: say::Say::default(),
             show_start: true,
             show_start_request: None,
             shell_asks: false,
@@ -5464,31 +5478,23 @@ impl Editor {
         }
     }
 
-    /// GM8: "Show me" on Quick start step `i`: do the step, or open its room.
-    /// Marking a key on an empty cell draws the drawing first (step 2 right
-    /// after opening a cut).
+    /// GM8: "Show me" on Quick start step `i` (AU7: spec 8.3): do the step.
+    /// The export's waits for AU9: it opens the queue, and the Say line holds
+    /// the sentence until a job starts.
     pub(crate) fn show_me(&mut self, i: usize) -> Performed {
         match welcome::STEPS.get(i).map(|s| s.show_me) {
-            Some(welcome::ShowMe::Perform(a)) => {
-                if a == Action::KindKey && self.state.current_drawing().is_none() {
-                    self.perform(Action::NewDrawing);
-                }
-                self.perform(a)
-            }
-            Some(welcome::ShowMe::Try(a, st)) => {
-                if self.can_perform(a).is_ok() {
-                    self.perform(a)
-                } else {
-                    self.enter_room(st);
-                    Performed::Done
-                }
-            }
+            Some(welcome::ShowMe::Circle) => self.demo_circle(),
+            Some(welcome::ShowMe::NextCircle) => self.next_circle(),
+            Some(welcome::ShowMe::Perform(a)) => self.perform(a),
+            Some(welcome::ShowMe::Play) if self.state.view.playing => Performed::Done,
+            Some(welcome::ShowMe::Play) => self.perform(Action::PlayPause),
             Some(welcome::ShowMe::Export) => {
                 self.enter_room(Stage::Edit);
                 self.open_pane(Pane::RenderQueue);
-                self.state.status = "export: the render queue — pick a preset, \"+ this cut\", \
-                                     then Start (File ▸ Export… adds a job too)"
-                    .into();
+                self.say.export_asked = true;
+                if self.say.off {
+                    self.state.status = say::QUEUE_WORDS.into();
+                }
                 Performed::Done
             }
             None => Performed::Ignored,
@@ -5990,6 +5996,7 @@ impl Editor {
             Action::ToggleRulerSnap => Some(self.state.manga.snap),
             Action::PanelTool => Some(self.canvas.tool == canvas::CanvasTool::Panel),
             Action::ToggleLockPositions => Some(self.ui_lock),
+            Action::ToggleHints => Some(!self.say.off),
             _ => None,
         }
     }
@@ -6114,6 +6121,7 @@ impl Editor {
             self.last_autosave_at = None;
             self.start = None;
             self.start_waiting = None;
+            self.say.new_document();
         }
     }
 
@@ -6561,6 +6569,7 @@ impl eframe::App for App {
             editor.scrub_audio = self.config.perf.scrub_audio;
             editor.state.ram.set_cap_mb(self.config.perf.ram_preview_mb);
             editor.show_start = self.config.ui.show_welcome;
+            editor.say.feed(&self.config.ui);
             editor.shell_asks = !self.recovery.is_empty() || self.new_form.is_some();
             editor.ui(
                 ui,
@@ -6589,6 +6598,10 @@ impl eframe::App for App {
             }
             if let Some(on) = editor.lock_request.take() {
                 self.config.ui.lock_positions = on;
+                self.config.save();
+            }
+            // AU7: Hints, and what the Say line has taught.
+            if editor.say.store(&mut self.config.ui) {
                 self.config.save();
             }
             // Stage 4: the strip's stack requests (the App owns config).
@@ -7903,8 +7916,8 @@ impl Editor {
     }
 
     /// THE SAY LINE (spec 8.2): one reserved lane and one voice, a refusal
-    /// first and the machine's last remark after it. AU7's hints come third,
-    /// and their action button will stand at the lane's right end.
+    /// first, the machine's last remark after it, and what `say.rs` picked
+    /// third, its action button at the lane's right end.
     fn say_line(&mut self, ui: &mut egui::Ui) {
         // REFUSAL: the machine overruled the hand. Dwells 4s; a repeat of
         // the same refusal re-flashes.
@@ -7941,22 +7954,58 @@ impl Editor {
         let (rage, age) = (now - self.refusal_since, now - self.status_since);
         let refusing = rage < 4.0 && !self.state.refusal.is_empty();
         let saying = age < 4.0 && !self.state.status.is_empty();
-        // The rule stands only beside words, and its room stays either way.
-        let (rule, _) = ui.allocate_exact_size(egui::vec2(6.0, plate::CHROME_H), egui::Sense::hover());
+        // Whatever waits behind a dwell comes up when it ends, with no event.
         if refusing || saying {
+            let dwell = if refusing { 4.0 - rage } else { 4.0 - age };
+            ui.ctx().request_repaint_after_secs(dwell as f32);
+        }
+        let hint = if refusing || saying { None } else { self.say.hint.clone() };
+        // The rule stands only beside words, and its room stays either way.
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let (rule, _) = ui.allocate_exact_size(egui::vec2(6.0, plate::CHROME_H), egui::Sense::hover());
+        if refusing || saying || hint.is_some() {
             let ink = ui.visuals().widgets.noninteractive.bg_stroke;
             ui.painter().vline(rule.center().x, rule.y_range(), ink);
         }
         // The action button's end of the lane stays free for it (spec 8.2).
-        let words = egui::vec2((ui.available_width() - plate::SAY_ACTION).max(0.0), plate::CHROME_H);
+        // Where no dots stand a hint gets back what its own button leaves,
+        // and words with no button beside them have the lane: a refusal
+        // outranks every hint, and its longest words need all of it at 832.
+        let lane = ui.available_rect_before_wrap();
+        let verb = hint.as_ref().and_then(|h| h.verb);
+        let fold = ui.ctx().content_rect().width() < steps::FOLD;
+        let dots = !fold && !refusing && lane.width() >= plate::SAY_DOTS_LANE;
+        let spare = match verb {
+            _ if dots => plate::SAY_ACTION + plate::SAY_DOTS,
+            Some(verb) => plate::say_action_width(ui, verb.label()) + 6.0,
+            None if refusing || hint.is_some() => 0.0,
+            None => plate::SAY_ACTION,
+        };
+        let words = egui::vec2((lane.width() - spare).max(0.0), plate::CHROME_H);
         ui.allocate_ui_with_layout(words, egui::Layout::left_to_right(egui::Align::Center), |ui| {
             if refusing {
                 plate::refusal(ui, &self.state.refusal);
             } else if saying {
                 let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
                 plate::say(ui, &self.state.status, ink);
+            } else if let Some(hint) = &hint {
+                plate::say(ui, &hint.words, plate::LEGEND);
             }
         });
+        if let Some(bit) = hint.as_ref().and_then(|h| h.bit) {
+            self.say.shown = Some(bit);
+        }
+        let row = egui::Rect::from_min_max(egui::pos2(lane.left(), rule.top()), egui::pos2(lane.right(), rule.bottom()));
+        // Spec 8.3: the place, in dots. Painted: no control, no words.
+        self.say.dots_painted = dots && !self.say.off && self.quick_start.iter().any(|done| !done);
+        if self.say.dots_painted {
+            plate::say_dots(ui, row, &self.quick_start);
+        }
+        if let Some(verb) = verb
+            && plate::say_action(ui, row, verb.label()).card(verb.card()).clicked()
+        {
+            self.say_act(verb, ui.ctx());
+        }
     }
 
     /// AU3: the Timing sheet button: one click, remembered in Draw. Absent
@@ -8157,6 +8206,7 @@ impl Editor {
                     w.pen_said = pen != w.pen;
                     w.pen = pen;
                     self.lift_check_line();
+                    self.say.check_line = true;
                 }
                 None => self.start = None,
             }
@@ -8386,9 +8436,7 @@ impl Editor {
                     self.menu_item(ui, Action::Open);
                     ui.menu_button("Open Recent", |ui| {
                         if self.recent_shown.is_empty() {
-                            ui.label(
-                                egui::RichText::new("no recent files").color(plate::legend_dim()),
-                            );
+                            ui.label(egui::RichText::new("Nothing yet").color(plate::legend_dim()));
                         }
                         for (p, present) in self.recent_shown.clone() {
                             // Cut files repeat across episode folders
@@ -9171,8 +9219,7 @@ impl Editor {
                     }
                     viewer::GraphView::NoOutput | viewer::GraphView::Off => {
                         sh.tex = None;
-                        sh.hint =
-                            "no graph output — wire an Output node in the Node Graph pane".into();
+                        sh.hint = viewer::NOTHING_TO_SHOW.into();
                     }
                     viewer::GraphView::EvalFailed => {
                         sh.tex = None;
@@ -9196,6 +9243,7 @@ impl Editor {
         let layers_docked = panes.contains(&Pane::Layers);
         self.canvas.strip_closed = self.strip_closed();
         self.canvas.sheet_shown = panes.contains(&Pane::XSheet);
+        self.canvas.empty_cell_hint = self.say.empty_cell_due(&self.state);
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -9265,7 +9313,13 @@ impl Editor {
         if std::mem::take(&mut self.canvas.request_brush_maker) {
             self.open_brush_maker();
         }
+        // AU7: and a viewer's empty state.
+        let asked: Vec<Action> = self.viewers.values_mut().filter_map(|v| v.asked.take()).collect();
+        for action in asked {
+            self.invoke(action, ui.ctx());
+        }
         self.start_ui(ui.ctx(), dock_rect);
+        self.say_read(ui.ctx());
 
         // Phase 5 step 2: the canvas in its own OS window. Tabs' borrows of
         // state/canvas/paint end above, so this can borrow them fresh.

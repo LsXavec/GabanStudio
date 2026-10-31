@@ -922,6 +922,10 @@ pub const SAY_SMALL: f32 = 12.0;
 /// The lane's right end, held for a hint's action button (spec 8.2): the
 /// longest of its words at control size, its pad and the gap before it.
 pub const SAY_ACTION: f32 = 92.0;
+/// Spec 8.3's five dots: the room they take, and the narrowest lane that
+/// keeps the longest sentence on its two rows beside them.
+pub const SAY_DOTS: f32 = 56.0;
+pub const SAY_DOTS_LANE: f32 = 410.0;
 
 /// The Say line's words (spec 4.4): one line, or two smaller ones inside the
 /// row when one will not hold them. What two cannot hold stops on a `…`; its
@@ -959,6 +963,45 @@ pub fn refusal(ui: &mut Ui, words: &str) -> Response {
             say(ui, words, RED)
         })
         .inner
+}
+
+/// How wide a hint's action button stands.
+pub fn say_action_width(ui: &Ui, words: &str) -> f32 {
+    text_width(ui, words, CTRL_TEXT) + 16.0
+}
+
+/// The action button of a Say line hint, at the right end of `row`: a filled
+/// control, never solid blue, because a hint is not the screen's main action.
+/// It is spoken apart from the Help window's rows and a pane's own button.
+pub fn say_action(ui: &mut Ui, row: egui::Rect, words: &str) -> Response {
+    let wide = say_action_width(ui, words);
+    let rect = egui::Rect::from_center_size(row.center(), Vec2::new(wide, CTRL_H));
+    let rect = rect.translate(Vec2::X * (row.right() - rect.right()));
+    let resp = ui.allocate_rect(rect, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, _) = filled(&resp);
+        ui.painter().rect_filled(rect, R_CONTROL, fill);
+        label_at(ui, rect.left() + 8.0, rect.center().y, words, CTRL_TEXT, INK);
+    }
+    speak(&resp, egui::WidgetType::Button, None, &format!("{words} (say line)"));
+    describe(resp, "ACTION say_action", words)
+}
+
+/// The five dots (spec 8.3), left of the action's end of `row`: filled to
+/// where the person has reached, and the next one ringed.
+pub fn say_dots(ui: &Ui, row: egui::Rect, ticks: &[bool; 5]) {
+    let (step, radius) = (9.0, 3.0);
+    let first = row.right() - SAY_ACTION - SAY_DOTS + radius + 4.0;
+    let next = ticks.iter().position(|done| !done);
+    for (i, done) in ticks.iter().enumerate() {
+        let at = Pos2::new(first + step * i as f32, row.center().y);
+        let ink = if *done || next == Some(i) { TALLY } else { INK3 };
+        if *done {
+            ui.painter().circle_filled(at, radius, ink);
+        } else {
+            ui.painter().circle_stroke(at, radius - 0.5, Stroke::new(1.0, ink));
+        }
+    }
 }
 
 /// A painted control's content at rest: `rest`, or `INK` inside a disabled

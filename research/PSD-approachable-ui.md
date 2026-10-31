@@ -1613,6 +1613,21 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - Sheet numbers and `Used twice` stand on one row, clear of the peg hole by 2 pt. The bar's labels take `STEEL_INK`; its second ticks stay white, as 7.2 and the Steel row say.
 - The Say line's action slot is 92 pt, `plate::SAY_ACTION`: the longest action word at control size, its pad and the gap. Its rule stands only beside words, and its 6 pt stay either way, so no slot moves.
 
+**AU7 notes.** Choices the build made where this document was silent or spoke twice. None needs a device.
+
+- A refusal takes the whole lane. With the slot held for it, the lane at 832 is 332, about 230 stayed for words, the refusal's pill took 30, and `This frame holds an earlier drawing` elided, against this part's gate. No button can stand beside a refusal, because it outranks every hint, so it needs no slot. A hint keeps its own button's width and 6, and a hint with no button keeps the lane. The slot of 92 still holds for the machine's remarks. `austrip_say_words_leave_the_action_slot_free` moved with this, reason `reach`, and now also asserts a hint's words stop at a real button.
+- The fold's floor falls short of this part's gate only where the gate does not ask. 832×520 and 853×533 hold fully. At 1040 with the Timing sheet on, the lane is its floor of 252, and the longest words elide beside a whole button, their card holding the rest: the Plan sentence, the ghost sentence, the held reason and the three longest refusals. The fit test skips the elide count at that one size and keeps the button's check.
+- The dots hide under the fold, as 8.3 says, and also in a lane under 410 (`plate::SAY_DOTS_LANE`), during a refusal, and after the fifth tick. The lane under 410 is 1040 to about 1200 with the Timing sheet on, where 56 pt of dots would cost words.
+- The empty cell's bit. 8.4 sets it at the first finished stroke, but a blank document's first stroke makes its first drawing, before the line has ever stood, so the line would never show. The first finished stroke after the line has painted sets it.
+- `Next: add a drawing.` waits for the strip. With the strip closed, a Picture start's arrangement, the row does not apply, so a person who chose Picture is not told to animate. The ready paper has the strip open and is unchanged.
+- Timing, Color and Effects with nothing to do say their sentence from `say::EMPTY_STEPS`, not from the hint table. They use no bit, so they stay for as long as they are true, and they stay with Hints off, with no button. Their `Go to Draw` points backward, the only way on from an empty step. 8.2's rule reads on the hint table, where no row does.
+- `Show me` on Export, until AU9: the Timing step with the queue open, and the lane holds `Pick a preset, press + this cut, then press Start.` until the queue is busy. That is a row 8.2 does not list, bit 15, because a remark would fade before it was answered. With Hints off it is a plain remark.
+- A stroke tried on the Plan preview gets the hint once. After that, or with Hints off, the same sentence comes as a remark and starts its dwell again, so it always gets an answer.
+- The lane's button speaks `<words> (say line)`, so a view's own `Go to Draw` keeps the plain name beside it (1.5 rule 9), and it wears a card, as every band control does.
+- `Show me`'s circle ticks at once as well as on the next frame, because the Help window's row starts from a screen with no frame to come. A stroke in flight refuses it, in the pen's words.
+- Another document is no outcome. `Say::new_document` drops the stroke, fill and node counts when the document is replaced, so opening one neither ticks nor answers anything.
+- `paper_under_chrome` reads 924 at 832×520 with the Timing sheet on, with or without a hint: the rail over a sheet-up paper. It stood before this part, the sweeps run with the sheet off, and it is in the same family as the AU4 note on art under the rail. Nothing was changed. The fit test holds it level with and without a hint.
+
 ---
 
 ## 14 Part map

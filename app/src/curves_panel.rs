@@ -505,13 +505,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         .collect();
     if params.is_empty() {
         plate::legend(ui, "curves");
-        ui.label(
-            egui::RichText::new(
-                "no param columns yet — bind one from a Transform node's parameter in the node \
-                 graph (+ new column)",
-            )
-            .color(plate::legend_dim()),
-        );
+        ui.label(egui::RichText::new("Animate a value to see its curve here").color(plate::legend_dim()));
         return;
     }
     let full = ui.available_rect_before_wrap();

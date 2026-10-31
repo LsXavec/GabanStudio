@@ -12,7 +12,7 @@ use anim_core::command::{Command, CutRef};
 use anim_core::ids::*;
 use anim_core::model::{CelLayer, LayerProps};
 use anim_core::model::{Cut, Stroke};
-use anim_core::raster::{TileCoord, TileData, TileDiff};
+use anim_core::raster::{TILE, TILE_LEN, TileCoord, TileData, TileDiff, f16_bits_to_f32, f32_to_f16_bits};
 use anim_core::sheet_ops;
 use anim_core::xsheet::{Column, ColumnDef, ColumnKind, Exposure, ParamColumn, ParamKey};
 
@@ -233,6 +233,50 @@ pub const CHART_PRESETS: &[(&str, &[f32], &str)] = &[
 /// GM6: the most marks the chart editor makes (inbetweens between two keys).
 pub const CHART_MAX_MARKS: usize = 15;
 
+/// AU7: a ring as tiles, on the CPU: the demo circle (spec 8.3). `rgba` is the
+/// colour as the brush stores it; a tile holds it premultiplied, soft at both
+/// edges by a texel.
+pub fn ring_tiles(center: [f32; 2], radius: f32, width: f32, rgba: [f32; 4]) -> BTreeMap<TileCoord, Arc<TileData>> {
+    let (t, reach) = (TILE as i32, radius + width * 0.5 + 1.0);
+    let span = |c: f32| (c - reach).floor() as i32..=(c + reach).ceil() as i32;
+    let mut tiles: BTreeMap<TileCoord, Vec<u16>> = BTreeMap::new();
+    for y in span(center[1]) {
+        for x in span(center[0]) {
+            let off = (x as f32 + 0.5 - center[0]).hypot(y as f32 + 0.5 - center[1]) - radius;
+            let cover = (width * 0.5 + 0.5 - off.abs()).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                continue;
+            }
+            let tile = tiles.entry((x.div_euclid(t), y.div_euclid(t))).or_insert_with(|| vec![0; TILE_LEN]);
+            let at = ((y.rem_euclid(t) * t + x.rem_euclid(t)) * 4) as usize;
+            let alpha = rgba[3] * cover;
+            for c in 0..3 {
+                tile[at + c] = f32_to_f16_bits(rgba[c] * alpha);
+            }
+            tile[at + 3] = f32_to_f16_bits(alpha);
+        }
+    }
+    tiles.into_iter().map(|(c, v)| (c, Arc::new(TileData::from_vec(v)))).collect()
+}
+
+fn drawing_has_art(d: &anim_core::model::Drawing) -> bool {
+    !d.strokes.is_empty() || d.layers.iter().any(|l| !l.raster.tiles.is_empty())
+}
+
+/// `top` over `under`, both premultiplied.
+fn tile_over(top: &TileData, under: &TileData) -> Arc<TileData> {
+    let mut out = under.rgba.to_vec();
+    for (px, src) in out.chunks_exact_mut(4).zip(top.rgba.chunks_exact(4)) {
+        let keep = 1.0 - f16_bits_to_f32(src[3]);
+        if keep < 1.0 {
+            for c in 0..4 {
+                px[c] = f32_to_f16_bits(f16_bits_to_f32(src[c]) + f16_bits_to_f32(px[c]) * keep);
+            }
+        }
+    }
+    Arc::new(TileData::from_vec(out))
+}
+
 /// GM20: a fill, refill or replace clicked off the paper (the Aka lane).
 pub const OUTSIDE_PAPER: &str = "outside the paper: Cut ▸ Paper size… extends it";
 
@@ -242,6 +286,9 @@ pub const HELD_FRAME: &str = "This frame holds an earlier drawing. Go to its fir
 pub const BLANK_FRAME: &str = "This frame has no drawing yet. Draw here first.";
 /// AU5: the strip and the band while the pen is down.
 pub const FINISH_STROKE: &str = "Finish your stroke first.";
+/// AU7: the canvas's refusal, by name, because one Action answers it
+/// (`say::fix_of`). The pen route says it itself, and stays as it stood.
+pub const READ_ONLY_VIEW: &str = "refused — composite view is read-only (C to edit)";
 
 /// GM20: a tool used on the paper past a capped painting window (a paper
 /// wider or taller than the GPU paints) — the Aka lane.
@@ -488,6 +535,8 @@ pub struct AppState {
     /// stroke at pen-up, which the host commits). A fill, a paste and a
     /// stroke that changed nothing are not strokes.
     pub strokes_done: u64,
+    /// AU7: fills that landed, the signal the Color step's hint reads.
+    pub fills_done: u64,
     /// SESSION generation stamp: bumps on every reported commit and on
     /// undo/redo — the host's cheap "the document moved" signal (the
     /// engine's history is private, and rightly so).
@@ -691,6 +740,7 @@ impl AppState {
             refusal_seq: 0,
             played_out: None,
             strokes_done: 0,
+            fills_done: 0,
             doc_gen: 0,
             saved_rev: 0,
             meta_dirty: false,
@@ -698,7 +748,7 @@ impl AppState {
             untitled_group,
             active_character: 0,
             palette_edit: false,
-            status: "new project — draw on the canvas to create frame 1".into(),
+            status: String::new(),
             positioned_holds: HashSet::new(),
             palettes: Default::default(),
             palette_new_name: String::new(),
@@ -791,6 +841,7 @@ impl AppState {
             refusal_seq: 0,
             played_out: None,
             strokes_done: 0,
+            fills_done: 0,
             doc_gen: 0,
             saved_rev: engine.revision(),
             meta_dirty: false,
@@ -902,6 +953,17 @@ impl AppState {
             Some(Exposure::Drawing(d)) => Some(d),
             _ => None,
         }
+    }
+
+    /// AU7: this cut holds art: a stroke or a painted tile on any drawing.
+    pub fn has_art(&self) -> bool {
+        self.cut().drawings.iter().any(drawing_has_art)
+    }
+
+    /// AU7: this frame has a drawing of its own, with nothing on it.
+    pub fn blank_here(&self) -> bool {
+        let own = self.own_key_drawing().and_then(|id| self.cut().drawing(id));
+        own.is_some_and(|d| !drawing_has_art(d))
     }
 
     /// GM5: the exposure under the sheet cursor — its key frame and the
@@ -1153,6 +1215,16 @@ impl AppState {
         }
     }
 
+    /// AU7: a fill's commit, and the signal the Color step's hint reads (a
+    /// fill is no stroke).
+    pub fn commit_fill(&mut self, label: &str, id: DrawingId, layer: LayerId, diff: TileDiff) {
+        let seq = self.refusal_seq;
+        self.commit_region_edit(label, id, layer, diff);
+        if self.refusal_seq == seq {
+            self.fills_done = self.fills_done.wrapping_add(1);
+        }
+    }
+
     /// Flatten of the DISPLAYED drawing's visible layers — the fill tool's
     /// "cel" reference: line art bounds a fill no matter which layer it
     /// lands on (the shiage workflow).
@@ -1182,6 +1254,18 @@ impl AppState {
             self.strokes_done = self.strokes_done.wrapping_add(1);
         }
         landed
+    }
+
+    /// AU7: the demo circle: a ring over the layer at `slot`, by the route a
+    /// finished raster stroke takes. An empty cell gets its drawing as a
+    /// stroke makes one; either way it is one undo and the stroke signal.
+    pub fn commit_ring(&mut self, center: [f32; 2], radius: f32, width: f32, rgba: [f32; 4], slot: usize) -> bool {
+        let mut tiles = self.commit_target_tiles(slot);
+        for (coord, ring) in ring_tiles(center, radius, width, rgba) {
+            let top = tiles.get(&coord).map_or_else(|| ring.clone(), |under| tile_over(&ring, under));
+            tiles.insert(coord, top);
+        }
+        self.commit_raster(tiles.into_iter().collect(), slot).is_some()
     }
 
     /// AU1: `commit_raster`'s body, the part a paste shares (a paste lands
@@ -5377,7 +5461,7 @@ impl AppState {
         match result {
             Ok(diff) => {
                 let label = if all { "replace colour" } else { "refill" };
-                self.commit_region_edit(label, did, layer, diff);
+                self.commit_fill(label, did, layer, diff);
             }
             Err(RR::OffPaper) => self.refuse_off_area(seed),
             Err(RR::Bare) => self.refuse("nothing to refill — no paint there (a plain fill paints bare paper)"),

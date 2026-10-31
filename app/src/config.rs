@@ -153,6 +153,8 @@ pub enum Action {
     WhatsNew,
     /// AU6: Lock UI positions, from the View menu.
     ToggleLockPositions,
+    /// AU7: the Say line's hints and the Quick Start dots, on or off.
+    ToggleHints,
     /// GM10: Cut ▸ Paper size… — the sheet the camera pans over.
     PaperSize,
     /// GM11: Window ▸ Render Queue — the delivery jobs, on a worker.
@@ -458,6 +460,7 @@ impl Action {
         Action::OpenSample,
         Action::WhatsNew,
         Action::ToggleLockPositions,
+        Action::ToggleHints,
         Action::PaperSize,
         Action::ShowRenderQueue,
         Action::ToggleFinalLook,
@@ -622,6 +625,7 @@ impl Action {
             Action::OpenSample => "Open the sample cut",
             Action::WhatsNew => "What's New",
             Action::ToggleLockPositions => "Lock UI positions",
+            Action::ToggleHints => "Hints",
             Action::PaperSize => "Paper size…",
             Action::ShowRenderQueue => "Render Queue (delivery)",
             Action::ToggleFinalLook => "Final look (delivery)",
@@ -710,7 +714,7 @@ impl Action {
             NewProject => "Start a new project (asks first about unsaved work).",
             CommandPalette => "Search every command by name and run it.",
             ShortcutSheet => "List every shortcut, grouped and searchable.",
-            QuickStart => "The first five minutes: draw, mark a key, inbetween, play, export.",
+            QuickStart => "The first five minutes: draw, add a drawing, draw the next pose, play, export.",
             About => "Version and credits.",
             History => "Every step so far; click one to go back or forward to it.",
             Settings => "Shortcuts, pen, performance and the rest.",
@@ -792,6 +796,7 @@ impl Action {
             OpenSample => "Open the sample cut to learn on (unsaved work is asked about first).",
             WhatsNew => "Show what this release brings, in the Start panel.",
             ToggleLockPositions => "Keep the panels where they are: tabs stop dragging and the step's panels stay open.",
+            ToggleHints => "Show or hide the teaching sentences and the Quick Start dots; turning them on starts them again.",
             PaperSize => "Set the cut's paper: the sheet the camera pans over, larger than the frame for BG pans and hiki slides.",
             ShowRenderQueue => "Open the render queue: delivery jobs (PNG16, TIFF16, EXR, ProRes, line test) rendered on a worker.",
             ToggleFinalLook => "Show the composite as the master delivers it: no rough, reference or correction layers, rendered on a worker.",
@@ -875,7 +880,7 @@ impl Action {
             | MangaRoom => Group::Room,
             ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue | ShowCutBoard
             | ShowEpisode | RenderEpisode => Group::Window,
-            CommandPalette | ShortcutSheet | QuickStart | About | WhatsNew => Group::Help,
+            CommandPalette | ShortcutSheet | QuickStart | About | WhatsNew | ToggleHints => Group::Help,
         }
     }
 
@@ -996,6 +1001,7 @@ impl Action {
             WelcomeScreen => "File/Welcome screen…",
             OpenSample => "File/Open the sample cut",
             WhatsNew => "Help/What's New",
+            ToggleHints => "Help/Hints",
             ToggleLockPositions => "View/Lock UI positions",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
@@ -1127,6 +1133,7 @@ impl Action {
             OpenSample => &["sample", "demo", "example", "tutorial"],
             WhatsNew => &["release notes", "changes", "changelog"],
             ToggleLockPositions => &["lock panels", "freeze layout", "lock layout"],
+            ToggleHints => &["tips", "teaching", "tutorial hints"],
             PaperSize => &["paper", "hiki", "BG pan", "pan paper", "kami", "BG sheet"],
             // GM5: the sheet verbs by the words a timing sheet uses.
             InsertFrames => &["insert frames", "add frame", "open a frame"],
@@ -1627,7 +1634,7 @@ impl Action {
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
-            | WhatsNew | ToggleLockPositions
+            | WhatsNew | ToggleLockPositions | ToggleHints
             | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels | ReloadSequences
             | Underlay3d | CanvasOptions | GoToFrame => None,
         }
@@ -2572,6 +2579,14 @@ pub struct UiConfig {
     /// `Editor.sheet_in_draw` mirrors it (see `Editor::boot`).
     #[serde(default)]
     pub sheet_in_draw: bool,
+    /// AU7: the hints already answered, one bit each (see `say::HINTS`).
+    /// Each is once-only, never timed. `Editor.hints_seen` mirrors it.
+    #[serde(default)]
+    pub hints_seen: u32,
+    /// AU7: no hints, no dots and no action button; the chrome stays as it
+    /// is. Back on, `hints_seen` clears and they start again.
+    #[serde(default)]
+    pub hints_off: bool,
 }
 
 impl Default for UiConfig {
@@ -2584,7 +2599,20 @@ impl Default for UiConfig {
             lock_positions: false,
             exact_descriptions: false,
             sheet_in_draw: false,
+            hints_seen: 0,
+            hints_off: false,
         }
+    }
+}
+
+impl UiConfig {
+    /// AU7: the one switch, from Help or Settings. On again, the hints start
+    /// again (spec 8.5).
+    pub fn set_hints(&mut self, on: bool) {
+        if on && self.hints_off {
+            self.hints_seen = 0;
+        }
+        self.hints_off = !on;
     }
 }
 
@@ -3972,6 +4000,14 @@ fn ui_features_page(ui: &mut egui::Ui, config: &mut Config) {
              by an element's true name.",
         )
         .changed();
+    let mut hints = !config.ui.hints_off;
+    if crate::plate::latch(ui, &mut hints, "Hints")
+        .on_hover_text(Action::ToggleHints.help())
+        .changed()
+    {
+        config.ui.set_hints(hints);
+        changed = true;
+    }
     if changed {
         config.save();
     }

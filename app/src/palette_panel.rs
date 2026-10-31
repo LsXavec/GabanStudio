@@ -18,6 +18,9 @@ use crate::doc::AppState;
 use crate::palette::{CharacterPalette, ColorRole};
 use crate::plate;
 
+/// AU7: the empty board, naming the two controls under it.
+pub(crate) const NO_CHARACTERS: &str = "No characters yet. Turn on edit model, then + character.";
+
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     ui.add_space(4.0);
 
@@ -40,7 +43,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         }
     });
     if n_chars == 0 {
-        ui.label(egui::RichText::new("no characters yet — latch EDIT MODEL and add one").color(plate::legend_dim()));
+        ui.label(egui::RichText::new(NO_CHARACTERS).color(plate::legend_dim()));
     }
     recolour_offer_ui(ui, state);
     ui.add_space(4.0);
