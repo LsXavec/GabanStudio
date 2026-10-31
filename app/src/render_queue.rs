@@ -1005,7 +1005,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            plate::legend(ui, "render queue (delivery)");
+            plate::legend(ui, &format!("{} (delivery)", crate::vocab::EXPORT_QUEUE));
             ui.separator();
             ui.label("preset");
             ui.horizontal_wrapped(|ui| {
@@ -1616,7 +1616,7 @@ mod tests {
             .expect("a Render Queue tab");
         let _ = h.editor_mut().dock.set_active_tab(tab);
         h.run_frames(2);
-        assert!(h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+        assert!(h.has_text_containing(crate::vocab::EXPORT_QUEUE), "{}", h.describe());
         assert!(h.has_text_containing(NEEDS_FFMPEG), "{}", h.describe());
         assert_eq!(h.node_enabled("Master PNG 16-bit"), Some(true));
         assert_eq!(h.node_enabled("EXR half (linear)"), Some(true));
@@ -1852,19 +1852,19 @@ mod tests {
         h.perform(a);
         h.run();
         assert!(h.editor().dock.find_tab(&Pane::RenderQueue).is_some());
-        assert!(h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+        assert!(h.has_text_containing(crate::vocab::EXPORT_QUEUE), "{}", h.describe());
         // The edit room's queue sits behind the node graph; the chord
         // brings it forward.
         h.perform(Action::RoomEdit);
         h.run();
-        assert!(!h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+        assert!(!h.has_text_containing(crate::vocab::EXPORT_QUEUE), "{}", h.describe());
         let ctrl_shift = egui::Modifiers {
             shift: true,
             ..crate::testkit::CTRL
         };
         h.key_mods(ctrl_shift, egui::Key::E);
         assert_eq!(h.performed().last().map(|p| p.0), Some(a));
-        assert!(h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+        assert!(h.has_text_containing(crate::vocab::EXPORT_QUEUE), "{}", h.describe());
     }
 
     #[test]
@@ -1932,7 +1932,7 @@ mod tests {
         h.run();
         assert_eq!(h.state().render_queue.queue.jobs[0].state, JobState::Done);
         assert_eq!(files(dir.path()).len(), 3);
-        assert!(h.has_text_containing("RENDER QUEUE"), "{}", h.describe());
+        assert!(h.has_text_containing(crate::vocab::EXPORT_QUEUE), "{}", h.describe());
         // MP4 video…: H.264 review into the file's folder, named by it,
         // over the menu's range.
         let mp4 = dir.path().join("take2.mp4");

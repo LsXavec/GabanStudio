@@ -1,19 +1,15 @@
-//! The plate — the app's entire colour, spacing and affordance vocabulary.
+//! The plate — the app's entire colour, type, spacing and affordance
+//! vocabulary, in the one look research/PSD-approachable-ui.md section 2 pins.
 //!
-//! Governed by research/PSD-editor-repaint.md (gate passed 2026-08-17; root:
-//! the repaint never changes what the document contains or how the pen
-//! reaches it). Design law: research/DESIGN-SPEC-editor-ui.md §2–§3.
-//!
-//! The direction in one line: everything the APPLICATION says is PLATE —
-//! engraved, quiet, permanent (Legend ink on Graphite); everything the
-//! ANIMATOR made or armed is PENCIL — brighter, in the trade's own pencil
-//! colours (Struck, Ao, Aka, Tally). No colour is permitted to mean
-//! "important", only one specific thing. This module is the only place a
-//! UI colour may be defined; a `Color32::from_rgb` literal anywhere else
-//! in the app's chrome is a bug with a name.
+//! The direction in one line: a neutral desk, white paper, one steel peg bar,
+//! everything else quiet, so the art is the only saturated thing in the
+//! window. Tokens are named by role, not by material. This module is the only
+//! place a UI colour may be defined; a `Color32::from_rgb` literal anywhere
+//! else in the app's chrome is a bug with a name. State is never colour
+//! alone: a refusal is words plus a mark, current is a wash plus deep ink,
+//! armed is a filled shape.
 
-// Phase 0 declares the full vocabulary; Phases 1–2 consume it. Remove this
-// allow when Phase 2 (the Rule) lands — anything still dead then IS dead.
+// Later parts of the look read tokens this one only declares.
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,41 +22,91 @@ use egui::{
 };
 
 // ---------------------------------------------------------------------------
-// Tokens (§2.1). Eight, no more. Names from the printed X-sheet: the plate
-// carries engraved legend; the animator strikes it in pencil.
+// Tokens (spec 2.2). Named by role. `aulook_tokens_are_the_table` pins them.
 // ---------------------------------------------------------------------------
 
-/// The plate. Every panel, bar, rail, chrome surface. Warm-neutral (olive,
-/// not blue-black) so it reads as anodized surround and does not fight Paper.
-pub const GRAPHITE: Color32 = Color32::from_rgb(26, 27, 24);
-/// The one darker step. Recessed DATA fields only (sheet grid, layer list,
-/// library, frame field). There is no third grey step — raised/hover is made
-/// with a Legend rule or Tally, never with more grey.
-pub const WELL: Color32 = Color32::from_rgb(14, 15, 13);
-/// The engraved printing ink. Every word and rule the APP authors.
-pub const LEGEND: Color32 = Color32::from_rgb(139, 141, 131);
-/// The bright fill of the engraving. Facts the ANIMATOR authored or reads:
-/// drawing names, values, the filename.
-pub const STRUCK: Color32 = Color32::from_rgb(228, 225, 214);
-/// The blue pencil (ao-enpitsu — does not photograph). ONE meaning:
-/// continuity and scaffold. Hold rules, the ghost BEHIND, construction.
-/// NEVER a selection.
-pub const AO: Color32 = Color32::from_rgb(83, 137, 196);
-/// The red pencil (the sakkan's correction). ONE meaning: this overrules
-/// your hand — refusal, destruction, contradiction. Always text or a 1px
-/// edge, never a fill. Never a configuration (the Warning Law, §3).
-pub const AKA: Color32 = Color32::from_rgb(228, 82, 47);
-/// The lamp. The ONLY colour meaning CURRENT / ARMED. Always a fill, notch
-/// or dot — never text.
-pub const TALLY: Color32 = Color32::from_rgb(239, 194, 74);
-/// The canvas material. Not a UI token; listed so the number lives here.
-pub const PAPER: Color32 = Color32::from_rgb(242, 238, 230);
+/// The window, top row, band, tab bars and the canvas's pasteboard.
+pub const DESK: Color32 = Color32::from_rgb(0xD3, 0xD5, 0xD8);
+/// Docked panels, rail, floats, menus, the step island.
+pub const ISLAND: Color32 = Color32::from_rgb(0xF6, 0xF7, 0xF8);
+/// Fields, a filled button at rest, a ghost button under the hand.
+pub const WELL: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xED);
+/// A filled button under the hand, a hovered row.
+pub const HOVER: Color32 = Color32::from_rgb(0xE0, 0xE3, 0xE7);
+/// A filled button pressed.
+pub const PRESSED: Color32 = Color32::from_rgb(0xCD, 0xD1, 0xD6);
+/// The paper and the strip's sheets. Screen-only: exports never read it.
+pub const PAPER: Color32 = Color32::from_rgb(0xFF, 0xFF, 0xFF);
+/// Primary text.
+pub const INK: Color32 = Color32::from_rgb(0x1E, 0x22, 0x27);
+/// Secondary text, icons at rest.
+pub const INK2: Color32 = Color32::from_rgb(0x4C, 0x52, 0x5B);
+/// The quietest ink the look allows; held to 3.0, not 4.5. Dim words outside
+/// a disabled scope, a field's edge, a swatch's ring, a page outline on paper.
+pub const INK3: Color32 = Color32::from_rgb(0x70, 0x76, 0x7F);
+/// Decorative hairlines only.
+pub const RULE: Color32 = Color32::from_rgb(0xBF, 0xC3, 0xC8);
+/// Armed tool fill, the one primary, the focus ring, links.
+pub const BLUE: Color32 = Color32::from_rgb(0x1F, 0x5F, 0xBF);
+/// A primary under the hand, current words, selected text, the playhead.
+pub const BLUE_DEEP: Color32 = Color32::from_rgb(0x18, 0x4C, 0x9A);
+/// The current step, a selected row.
+pub const BLUE_WASH: Color32 = Color32::from_rgb(0xDC, 0xE8, 0xF9);
+/// Refusal words, a danger fill.
+pub const RED: Color32 = Color32::from_rgb(0xB9, 0x2D, 0x1C);
+/// The refusal pill.
+pub const RED_WASH: Color32 = Color32::from_rgb(0xFB, 0xE5, 0xE1);
+/// The peg bar, and paper turned dark for the miss check.
+pub const STEEL: Color32 = Color32::from_rgb(0x2A, 0x2E, 0x34);
+/// Peg bar labels.
+pub const STEEL_INK: Color32 = Color32::from_rgb(0xE6, 0xE8, 0xEB);
+/// The surround of the Result pane only, so a colour judgement sees neutral
+/// grey.
+pub const RESULT: Color32 = Color32::from_rgb(0x80, 0x80, 0x80);
+/// The shadow colour, with the alphas of [`visuals`] and [`dialog_frame`].
+pub const SHADOW: Color32 = Color32::from_rgb(0x14, 0x18, 0x1F);
+/// White on a solid fill: armed, primary, danger.
+pub const ON_FILL: Color32 = Color32::WHITE;
+
+// The old names, as aliases until the alias retirement (spec 2.4), so the
+// uses across the app do not all move at once. They flip light and dark:
+// `GRAPHITE` was a dark ink on pale paper and is a pale surface now, so a
+// mark on paper never reads one of these.
+pub const GRAPHITE: Color32 = ISLAND;
+pub const LEGEND: Color32 = INK2;
+pub const STRUCK: Color32 = INK;
+pub const AO: Color32 = INK3;
+pub const AKA: Color32 = RED;
+pub const TALLY: Color32 = BLUE;
+
+// Document colours. The trade's pencils are what a document shows and stores,
+// so they keep their values through any change of look: the swatch board, the
+// presets' inks, the ghosts' tints and the layer roles read these.
+/// The blue pencil.
+pub const PENCIL_AO: Color32 = Color32::from_rgb(83, 137, 196);
+/// The red pencil.
+pub const PENCIL_AKA: Color32 = Color32::from_rgb(228, 82, 47);
+/// The grey the ghost AHEAD is tinted from.
+pub const PENCIL_LEGEND: Color32 = Color32::from_rgb(139, 141, 131);
+/// The pale ink a colour-less brush specimen shows in.
+pub const PENCIL_STRUCK: Color32 = Color32::from_rgb(228, 225, 214);
+
+// `LayerProps.chip` is stored in the document, and a stored chip is matched
+// to its ring by value, so these are frozen: a token moving must not change
+// what gets stored, nor stop an old document's ring matching.
+pub const CHIP_STRUCK: [u8; 4] = [228, 225, 214, 255];
+pub const CHIP_LEGEND: [u8; 4] = [139, 141, 131, 255];
+pub const CHIP_PAPER: [u8; 4] = [242, 238, 230, 255];
+pub const CHIP_AO: [u8; 4] = [83, 137, 196, 255];
+pub const CHIP_AKA: [u8; 4] = [228, 82, 47, 255];
+
+/// What a disabled scope dims to. egui's 0.5 leaves `INK` at 2.87 on `DESK`;
+/// at this value `INK` holds 3.0 on all three fills and `INK2` still does
+/// not, so content inside a disabled scope is always `INK` (spec 2.3).
+pub const DISABLED_ALPHA: f32 = 0.65;
 
 // AU1: what the audits in `measure.rs` read a shape's colours against. The
 // plate is the one place a colour may be spelled, and that holds for tests.
-/// The quietest ink the approachable look allows; held to 3.0, not 4.5.
-#[cfg(test)]
-pub const INK3: Color32 = Color32::from_rgb(0x70, 0x76, 0x7F);
 /// A text section's "use the shape's fallback colour" sentinel.
 #[cfg(test)]
 pub const SECTION_PLACEHOLDER: Color32 = Color32::PLACEHOLDER;
@@ -121,42 +167,48 @@ fn describe(resp: Response, kind: &str, label: &str) -> Response {
     }
 }
 
-// Derived alphas. No new hues are permitted — these are the eight tokens at
-// specified transparencies (spec §2.1), used for disabled states, the time
-// rules, and the current row's ground.
+// Derived colours. No new hues are permitted: each one is a token, opaque or
+// at a set transparency, used for the time rules and the current row's
+// ground. Text is opaque, so its contrast never depends on what is behind it.
 
-/// Disabled controls.
+/// Secondary words: opaque `INK2`. A stroke, frame or grip reads
+/// [`hairline`].
 #[inline]
 pub fn legend_dim() -> Color32 {
-    Color32::from_rgba_unmultiplied(139, 141, 131, 115)
+    INK2
 }
-/// Beat rule (every 6 frames), 1 device px.
+/// A decorative stroke, frame or grip. Carries no information alone.
+#[inline]
+pub fn hairline() -> Color32 {
+    RULE
+}
+/// Beat rule (every 6 frames), 1 device px. Decorative.
 #[inline]
 pub fn rule_beat() -> Color32 {
-    Color32::from_rgba_unmultiplied(139, 141, 131, 56)
+    alpha(INK2, 56)
 }
-/// Half-second rule (every 12 frames), 1 device px.
+/// Half-second rule (every 12 frames), 1 device px. Decorative.
 #[inline]
 pub fn rule_half() -> Color32 {
-    Color32::from_rgba_unmultiplied(139, 141, 131, 102)
+    alpha(INK2, 102)
 }
 /// Second rule (every 24 frames), 2 device px.
 #[inline]
 pub fn rule_sec() -> Color32 {
     LEGEND
 }
-/// The current row's ground inside the Well. Replaces the old saturated
-/// navy slab entirely: there is one "current" and it is amber.
+/// The current row's ground, over whatever the row already holds: the blue
+/// at the wash's strength, so the cells' marks still read through it.
 #[inline]
 pub fn tally_well() -> Color32 {
-    Color32::from_rgba_unmultiplied(239, 194, 74, 36)
+    alpha(BLUE, 36)
 }
 /// GM20: the veil over paper the GPU does not paint (past a capped
-/// painting window): Graphite through the sheet, so the strip reads as
-/// paper out of reach — not desk, and not a warning.
+/// painting window): steel through the sheet, so the strip reads as paper
+/// out of reach — not desk, and not a warning.
 #[inline]
 pub fn paper_veil() -> Color32 {
-    Color32::from_rgba_unmultiplied(26, 27, 24, 110)
+    alpha(STEEL, 110)
 }
 /// GM22: the tint that draws a picture as it is at `opacity` (0..=1): the
 /// canvas's 3D underlay, faded under the drawing.
@@ -170,11 +222,11 @@ pub fn faded(opacity: f32) -> Color32 {
 pub fn alpha(token: Color32, a: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(token.r(), token.g(), token.b(), a)
 }
-/// GM19: Legend two-thirds of the way over Graphite, opaque — the node
-/// graph's idle pins and wires, which must hide what they cross.
+/// GM19: the node graph's idle pins and wires, opaque, which must hide what
+/// they cross.
 #[inline]
 pub fn legend_muted() -> Color32 {
-    Color32::from_rgb(100, 102, 94)
+    INK3
 }
 
 // Neutral contrast (GM19). Black and white mean nothing here: they are how a
@@ -223,8 +275,24 @@ pub const FOOT_H: f32 = 34.0;
 pub const OPTIONS_H: f32 = 26.0;
 pub const RULE_STRIP_W: f32 = 14.0;
 pub const LIGHTBOX_W: f32 = 96.0;
-/// Every button, toggle, detent.
-pub const CTRL_H: f32 = 22.0;
+/// Every button, toggle, detent in a panel.
+pub const CTRL_H: f32 = 28.0;
+/// The words a hand-painted control carries: the Panel role.
+const CTRL_TEXT: f32 = Role::Panel.size();
+/// The icon in a hand-painted control, on the size the masks are cut at.
+const ICON: f32 = 16.0;
+/// A detent's ring takes this much of the control's left.
+const DETENT_W: f32 = 22.0;
+
+// The radii (spec 2.6). Paper is square; a stadium takes half its height.
+pub const R_DIALOG: u8 = 14;
+pub const R_FLOAT: u8 = 12;
+pub const R_MENU: u8 = 10;
+pub const R_CONTROL: u8 = 8;
+pub const R_INPUT: u8 = 6;
+pub const R_SHEET: u8 = 4;
+/// A stadium: egui clamps a radius to half the shape's height.
+pub const R_PILL: u8 = 64;
 
 /// The pixel-snapping law. Every rule, notch, dot and 1px edge is snapped;
 /// unsnapped hairlines shimmer under scroll at ppp 1.25 and this direction
@@ -242,32 +310,80 @@ pub fn device_px(n: f32, ppp: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// The type plate (§2.2). IBM Plex, four static cuts + the JP Bold, installed
-// once at boot. Static instances, not variable — determinism at 9.5pt beats
-// an axis nobody drags. Tabular figures are structurally unavailable (epaint
-// shapes with an empty feature list), so every digit column is Mono by law.
+// Type (spec 2.5). IBM Plex Sans only, sentence case everywhere, no
+// letterspacing. Static cuts, installed once at boot; the Japanese face stays
+// in every stack because studio words appear in hover cards and aliases.
 // ---------------------------------------------------------------------------
 
-/// The SemiBold engraving cut (panel titles, legends, the current sheet row).
+/// The SemiBold cut (headings, legends, step names, the current sheet row).
 pub fn semibold() -> FontFamily {
     FontFamily::Name("plex-sans-semibold".into())
 }
 
-/// The SemiBold mono cut (the frame counter — the app's only large type).
+/// The SemiBold mono cut (the frame counter).
 pub fn mono_semibold() -> FontFamily {
     FontFamily::Name("plex-mono-semibold".into())
 }
 
+/// Plex Mono: file patterns only, at 12 ([`mono_font`]).
+pub fn mono() -> FontFamily {
+    FontFamily::Name("mono".into())
+}
+
+/// A file pattern's face.
+pub fn mono_font() -> FontId {
+    FontId::new(12.0, mono())
+}
+
+/// The type roles, and the only sizes the look has.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    /// The Start float's heading.
+    Title,
+    /// Start cards, the Done card's heading.
+    Card,
+    /// Float and dialog headings.
+    Heading,
+    /// Menu words, band words.
+    Chrome,
+    /// Step pills.
+    Step,
+    /// `TextStyle::Body` and `Button`, panel text.
+    Panel,
+    /// The floor: rail captions, peg bar labels.
+    Small,
+}
+
+impl Role {
+    pub const fn size(self) -> f32 {
+        match self {
+            Role::Title => 24.0,
+            Role::Card => 20.0,
+            Role::Heading => 16.0,
+            Role::Chrome | Role::Step => 14.0,
+            Role::Panel => 13.0,
+            Role::Small => 12.0,
+        }
+    }
+
+    pub fn font(self) -> FontId {
+        let face = match self {
+            Role::Title | Role::Card | Role::Heading | Role::Step => semibold(),
+            Role::Chrome | Role::Panel | Role::Small => FontFamily::Proportional,
+        };
+        FontId::new(self.size(), face)
+    }
+}
+
 /// Install the Plex stack and the type scale. Proportional = Plex Sans
-/// Regular; Monospace = Plex Mono Medium; two named families carry the
-/// SemiBold cuts. IBM Plex Sans JP Bold (GM16: the whole face, the
-/// engine's lettering static, no longer a subset) rides second in every
-/// family so 原画 falls through per-glyph automatically; egui's default
+/// Regular; Monospace = Plex Mono Medium; named families carry the SemiBold
+/// cuts and the file patterns' face. IBM Plex Sans JP Bold (GM16: the whole
+/// face, the engine's lettering static, no longer a subset) rides second in
+/// every family so 原画 falls through per-glyph automatically; egui's default
 /// fonts stay at the tail so an unexpected glyph degrades to a drawn shape,
 /// never tofu.
 pub fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(font_definitions());
-    install_type_scale(ctx);
 }
 
 /// The Plex stack as egui font definitions (what [`install_fonts`] sets;
@@ -287,14 +403,18 @@ pub fn font_definitions() -> egui::FontDefinitions {
             "plex-mono-sb",
             &include_bytes!("../assets/fonts/IBMPlexMono-SemiBold.ttf")[..],
         ),
-        // GM16: the whole JP Bold, the generators' lettering face — one
-        // copy of its bytes for the UI and the burn-in alike (D16).
-        ("plex-jp", anim_core::text::PLEX_SANS_JP),
     ] {
         fonts
             .font_data
             .insert(name.to_owned(), egui::FontData::from_static(bytes).into());
     }
+    // GM16: the whole JP Bold, the generators' lettering face — one copy of
+    // its bytes for the UI and the burn-in alike (D16). Half of its 2 em
+    // height is line gap, and epaint centres a fallback's height on the
+    // row's 1.3 em: unseated, 原画 rides 0.495 em over Plex Sans's baseline.
+    let seated = egui::FontTweak { y_offset_factor: 0.495, ..Default::default() };
+    let jp = egui::FontData::from_static(anim_core::text::PLEX_SANS_JP).tweak(seated);
+    fonts.font_data.insert("plex-jp".to_owned(), jp.into());
 
     // GM16: egui's Hack closes the proportional tail too — of the whole
     // stack only it draws ▾ and ▸ (the menus' marks; genui_glyph_coverage).
@@ -309,84 +429,178 @@ pub fn font_definitions() -> egui::FontDefinitions {
     let prop = fonts.families.get_mut(&FontFamily::Proportional).unwrap();
     prop.insert(0, "plex-sans".to_owned());
     prop.insert(1, "plex-jp".to_owned());
-    let mono = fonts.families.get_mut(&FontFamily::Monospace).unwrap();
-    mono.insert(0, "plex-mono".to_owned());
-    mono.insert(1, "plex-jp".to_owned());
+    let tail = fonts.families.get_mut(&FontFamily::Monospace).unwrap();
+    tail.insert(0, "plex-mono".to_owned());
+    tail.insert(1, "plex-jp".to_owned());
     let mut sb = vec!["plex-sans-sb".to_owned(), "plex-jp".to_owned()];
     sb.extend(default_prop);
     fonts.families.insert(semibold(), sb);
     let mut msb = vec!["plex-mono-sb".to_owned(), "plex-jp".to_owned()];
-    msb.extend(default_mono);
+    msb.extend(default_mono.clone());
     fonts.families.insert(mono_semibold(), msb);
+    let mut pattern = vec!["plex-mono".to_owned(), "plex-jp".to_owned()];
+    pattern.extend(default_mono);
+    fonts.families.insert(mono(), pattern);
     fonts
 }
 
-fn install_type_scale(ctx: &egui::Context) {
-    // The type scale (§2.2): body/buttons 11.5, engraved small 9.5, digit
-    // columns Mono 11. Heading maps to the SemiBold cut so any stray
-    // heading-styled text lands on the engraving face, not a bigger Regular.
-    ctx.all_styles_mut(|style| {
-        use egui::TextStyle;
-        // Debug-build red boxes on unaligned text read as Aka refusals —
-        // red that is not Aka is a colour-law violation. Off.
-        // egui's debug field exists only in debug builds.
-        #[cfg(debug_assertions)]
-        {
-            style.debug.show_unaligned = false;
-        }
-        style
-            .text_styles
-            .insert(TextStyle::Body, FontId::new(11.5, FontFamily::Proportional));
-        style.text_styles.insert(
-            TextStyle::Button,
-            FontId::new(11.5, FontFamily::Proportional),
-        );
-        style
-            .text_styles
-            .insert(TextStyle::Small, FontId::new(9.5, FontFamily::Proportional));
-        style.text_styles.insert(
-            TextStyle::Monospace,
-            FontId::new(11.0, FontFamily::Monospace),
-        );
-        style
-            .text_styles
-            .insert(TextStyle::Heading, FontId::new(13.0, semibold()));
-        // AUDIT [9]: editable numbers drew in Plex Sans (the Button
-        // style). Digits get read in columns and compared — Mono by law.
-        style.drag_value_text_style = TextStyle::Monospace;
-    });
+/// The app's one `egui::Style`: the visuals, the type scale and the spacing.
+/// `dress` writes it into both theme slots, so Windows Light mode cannot fall
+/// back to stock egui.
+pub fn style() -> egui::Style {
+    use egui::TextStyle;
+    let mut style = egui::Style { visuals: visuals(), ..Default::default() };
+    // Debug-build red boxes on unaligned text read as refusals. Off.
+    // egui's debug field exists only in debug builds.
+    #[cfg(debug_assertions)]
+    {
+        style.debug.show_unaligned = false;
+    }
+    let scale = &mut style.text_styles;
+    scale.insert(TextStyle::Body, Role::Panel.font());
+    scale.insert(TextStyle::Button, Role::Panel.font());
+    scale.insert(TextStyle::Small, Role::Small.font());
+    scale.insert(TextStyle::Monospace, Role::Panel.font());
+    scale.insert(TextStyle::Heading, Role::Heading.font());
+    style.drag_value_text_style = TextStyle::Body;
+
+    let s = &mut style.spacing;
+    s.button_padding = Vec2::new(10.0, 6.0);
+    s.item_spacing = Vec2::new(6.0, 4.0);
+    s.window_margin = egui::Margin::same(12);
+    s.menu_margin = egui::Margin::same(6);
+    s.indent = 16.0;
+    s.interact_size.y = CTRL_H;
+    // Eleven rows at a control's height: a combo opens whole, not to a fold.
+    s.combo_height = 352.0;
+
+    style.interaction.selectable_labels = false;
+    style.interaction.tooltip_delay = 0.35;
+    style
+}
+
+/// The top row's and the band's frame: the desk itself, with no rule.
+pub fn desk_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::side_top_panel(style).fill(DESK)
+}
+
+/// A dialog's frame. Floats and the rail take [`visuals`]'s window shadow.
+pub fn dialog_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::window(style).corner_radius(R_DIALOG).shadow(egui::epaint::Shadow {
+        offset: [0, 12],
+        blur: 40,
+        spread: 0,
+        color: alpha(SHADOW, 71),
+    })
+}
+
+/// The paper's own shadow on the pasteboard (spec 2.6).
+pub fn paper_shadow(rect: egui::Rect) -> Shape {
+    let shadow = egui::epaint::Shadow { offset: [0, 2], blur: 10, spread: 0, color: alpha(SHADOW, 41) };
+    Shape::from(shadow.as_shape(rect, CornerRadius::ZERO))
+}
+
+/// A hand-painted float's ground (a fold-out over the canvas): the island,
+/// with the window's corners and shadow.
+pub fn float_ground(ui: &Ui, rect: egui::Rect) {
+    let painter = ui.painter();
+    painter.add(ui.visuals().window_shadow.as_shape(rect, CornerRadius::same(R_FLOAT)));
+    painter.rect_filled(rect, R_FLOAT, ISLAND);
+}
+
+/// A layer's identity dot. The paper white takes an `INK3` ring, because
+/// paper and island are close.
+pub fn identity_dot(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32) {
+    painter.circle_filled(center, radius, color);
+    if color == PAPER || color.to_array() == CHIP_PAPER {
+        painter.circle_stroke(center, radius, Stroke::new(1.0, INK3));
+    }
+}
+
+/// The sound track's note, drawn: the JP face's ♪ hangs under the line.
+pub fn note_mark(painter: &egui::Painter, center: Pos2, ink: Color32) {
+    let foot = Pos2::new(center.x + 1.5, center.y + 3.0);
+    let top = Pos2::new(foot.x, center.y - 5.0);
+    painter.circle_filled(Pos2::new(center.x - 0.5, foot.y), 2.5, ink);
+    painter.line_segment([foot, top], Stroke::new(1.0, ink));
+    painter.line_segment([top, Pos2::new(center.x + 5.0, center.y - 2.5)], Stroke::new(1.0, ink));
+}
+
+/// A word over the picture, on an island of its own: no ink holds on every
+/// painted ground. Returns the word's rect.
+pub fn picture_tag(painter: &egui::Painter, at: Pos2, word: &str) -> egui::Rect {
+    let galley = painter.layout_no_wrap(word.to_owned(), Role::Small.font(), AO);
+    let rect = egui::Rect::from_min_size(at, galley.size());
+    painter.rect_filled(rect.expand2(Vec2::new(6.0, 2.0)), R_CONTROL, ISLAND);
+    painter.galley(at, galley, AO);
+    rect
+}
+
+/// The dock in the look: tab bars on the desk, the current tab on its island.
+pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
+    let mut dock = egui_dock::Style::from_egui(style);
+    dock.tab_bar.bg_fill = DESK;
+    dock.tab_bar.hline_color = RULE;
+    let quiet = [&mut dock.tab.inactive, &mut dock.tab.inactive_with_kb_focus, &mut dock.tab.hovered];
+    for tab in quiet {
+        tab.bg_fill = DESK;
+        tab.text_color = INK2;
+        tab.outline_color = DESK;
+    }
+    dock.tab.hovered.text_color = INK;
+    let lit = [
+        &mut dock.tab.active,
+        &mut dock.tab.focused,
+        &mut dock.tab.active_with_kb_focus,
+        &mut dock.tab.focused_with_kb_focus,
+    ];
+    for tab in lit {
+        tab.bg_fill = ISLAND;
+        tab.text_color = INK;
+        tab.outline_color = RULE;
+    }
+    dock.tab.tab_body.stroke = Stroke::NONE;
+    dock
 }
 
 // ---------------------------------------------------------------------------
-// Type roles (§2.2) — the two inks as text helpers.
+// Words: the two inks as text helpers.
 // ---------------------------------------------------------------------------
 
-/// Engraved caps — panel titles, column heads, group legends. UPPERCASE,
-/// 9.5pt, +0.9 letterspacing, Legend ink. The plate speaking.
+/// A legend's words in sentence case: the first letter up and the rest as
+/// written, so a name or an abbreviation inside keeps its capitals.
+pub fn sentence(text: &str) -> String {
+    let mut letters = text.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => String::new(),
+    }
+}
+
+/// Panel titles, column heads, group legends: sentence case, 12 pt SemiBold,
+/// `INK2`.
 pub fn legend(ui: &mut Ui, text: &str) -> Response {
     let mut job = LayoutJob::default();
     job.append(
-        &text.to_uppercase(),
+        &sentence(text),
         0.0,
         TextFormat {
-            font_id: FontId::new(9.5, semibold()),
+            font_id: FontId::new(Role::Small.size(), semibold()),
             color: LEGEND,
-            extra_letter_spacing: 0.9,
             ..Default::default()
         },
     );
     ui.label(job)
 }
 
-/// A value the animator authored or is reading — mono, 11pt, Struck ink.
-/// The pencil speaking.
+/// A value the animator authored or is reading: Panel type, `INK`.
 pub fn value(ui: &mut Ui, text: &str) -> Response {
     let mut job = LayoutJob::default();
     job.append(
         text,
         0.0,
         TextFormat {
-            font_id: FontId::new(11.0, FontFamily::Monospace),
+            font_id: Role::Panel.font(),
             color: STRUCK,
             ..Default::default()
         },
@@ -394,12 +608,38 @@ pub fn value(ui: &mut Ui, text: &str) -> Response {
     ui.label(job)
 }
 
+/// A refusal: the wash, red words and a mark, so it never rests on colour.
+pub fn refusal(ui: &mut Ui, words: &str) -> Response {
+    egui::Frame::new()
+        .fill(RED_WASH)
+        .corner_radius(R_PILL)
+        .inner_margin(egui::Margin::symmetric(8, 2))
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let (mark, _) = ui.allocate_exact_size(Vec2::new(10.0, 16.0), Sense::hover());
+            let mark = egui::Rect::from_center_size(mark.center(), Vec2::splat(7.0));
+            let ink = Stroke::new(1.5, RED);
+            ui.painter().line_segment([mark.left_top(), mark.right_bottom()], ink);
+            ui.painter().line_segment([mark.right_top(), mark.left_bottom()], ink);
+            ui.label(egui::RichText::new(words).color(RED))
+        })
+        .inner
+}
+
+/// A painted control's content at rest: `rest`, or `INK` inside a disabled
+/// scope, where the scope does the dimming and a dimmer ink would fall under
+/// its floor (spec 2.3).
+fn at_rest(ui: &Ui, rest: Color32) -> Color32 {
+    if ui.is_enabled() { rest } else { INK }
+}
+
 // ---------------------------------------------------------------------------
-// Affordances (§6 defect 3). Six controls, three behaviours — so exactly
-// three presentations, and nothing else in the app may present a control.
+// Affordances (spec 2.8). Fills and inks by state; small controls carry no
+// strokes, because a stroke per chip costs vertices the performance gate
+// counts. Nothing else in the app may present a control.
 // ---------------------------------------------------------------------------
 
-/// DETENT — a radio position. A Legend ring; a filled Tally disc when this
+/// DETENT — a radio position. An `INK3` ring; a filled blue disc when this
 /// position is armed. Mutually exclusive with its neighbours; clicking an
 /// armed detent does nothing (the caller simply sets the same value again).
 pub fn detent(ui: &mut Ui, armed: bool, label: &str) -> Response {
@@ -414,34 +654,30 @@ pub fn detent_dim(ui: &mut Ui, armed: bool, label: &str) -> Response {
 }
 
 fn detent_inked(ui: &mut Ui, armed: bool, label: &str, dim: bool) -> Response {
-    let text_w = text_width(ui, label, 11.5);
+    let text_w = text_width(ui, label, CTRL_TEXT);
     let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(CTRL_H + 4.0 + text_w + 8.0, CTRL_H),
+        Vec2::new(DETENT_W + 4.0 + text_w + 8.0, CTRL_H),
         Sense::click(),
     );
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let ppp = ui.ctx().pixels_per_point();
         let c = Pos2::new(
-            snap(rect.left() + CTRL_H * 0.5, ppp),
+            snap(rect.left() + DETENT_W * 0.5, ppp),
             snap(rect.center().y, ppp),
         );
-        let rest = if dim { legend_dim() } else { LEGEND };
-        p.circle_stroke(c, 5.0, Stroke::new(1.0, rest));
+        p.circle_stroke(c, 6.0, Stroke::new(1.0, INK3));
         if armed {
-            p.circle_filled(c, 3.0, TALLY);
+            p.circle_filled(c, 3.5, TALLY);
         }
-        let ink = if armed || resp.hovered() {
-            STRUCK
-        } else {
-            rest
-        };
+        let rest = at_rest(ui, if dim { INK3 } else { INK2 });
+        let ink = if armed || resp.hovered() { STRUCK } else { rest };
         label_at(
             ui,
-            rect.left() + CTRL_H + 4.0,
+            rect.left() + DETENT_W + 4.0,
             rect.center().y,
             label,
-            11.5,
+            CTRL_TEXT,
             ink,
         );
     }
@@ -449,10 +685,10 @@ fn detent_inked(ui: &mut Ui, armed: bool, label: &str, dim: bool) -> Response {
     describe(resp, "DETENT detent", label)
 }
 
-/// LATCH — an independent on/off. A Tally bar seats into the control's left
-/// edge while latched. Clicking toggles.
+/// LATCH — an independent on/off. A filled blue bar seats into the control's
+/// left edge while latched. Clicking toggles.
 pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
-    let text_w = text_width(ui, label, 11.5);
+    let text_w = text_width(ui, label, CTRL_TEXT);
     let (rect, mut resp) =
         ui.allocate_exact_size(Vec2::new(6.0 + 6.0 + text_w + 8.0, CTRL_H), Sense::click());
     if resp.clicked() {
@@ -464,33 +700,44 @@ pub fn latch(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
         let p = ui.painter();
         let ppp = ui.ctx().pixels_per_point();
         let bar = egui::Rect::from_min_max(
-            Pos2::new(snap(rect.left(), ppp), snap(rect.top() + 3.0, ppp)),
-            Pos2::new(snap(rect.left() + 3.0, ppp), snap(rect.bottom() - 3.0, ppp)),
+            Pos2::new(snap(rect.left(), ppp), snap(rect.top() + 5.0, ppp)),
+            Pos2::new(snap(rect.left() + 4.0, ppp), snap(rect.bottom() - 5.0, ppp)),
         );
         if *on {
-            p.rect_filled(bar, CornerRadius::ZERO, TALLY);
+            p.rect_filled(bar, CornerRadius::same(2), TALLY);
         } else {
             p.rect_stroke(
                 bar,
-                CornerRadius::ZERO,
-                Stroke::new(1.0, LEGEND),
+                CornerRadius::same(2),
+                Stroke::new(1.0, INK3),
                 StrokeKind::Inside,
             );
         }
         let ink = if *on || resp.hovered() {
             STRUCK
         } else {
-            LEGEND
+            at_rest(ui, LEGEND)
         };
-        label_at(ui, rect.left() + 12.0, rect.center().y, label, 11.5, ink);
+        label_at(ui, rect.left() + 12.0, rect.center().y, label, CTRL_TEXT, ink);
     }
     speak(&resp, egui::WidgetType::Checkbox, Some(*on), label);
     describe(resp, "LATCH latch", label)
 }
 
-/// DETENT with a painted icon — a tool position. The armed position carries
-/// a Tally bar seated under the control (the lamp lit under a pressed key);
-/// icon and label step from Legend to Struck. Larger targets than bare text
+/// A filled control's ground and content by state: `WELL` at rest, `HOVER`
+/// under the hand, `PRESSED` held. The icon rests in `INK2`.
+pub fn filled(resp: &Response) -> (Color32, Color32) {
+    if resp.is_pointer_button_down_on() {
+        (PRESSED, INK)
+    } else if resp.hovered() {
+        (HOVER, INK)
+    } else {
+        (WELL, INK2)
+    }
+}
+
+/// DETENT with a painted icon — a tool position. The armed position is the
+/// solid blue shape with white content. Larger targets than bare text
 /// (owner's amendment: sparse space is spent on bigger controls). `label`
 /// is the painted caption (empty = icon only); `name` is what the control
 /// answers to (empty = the caption).
@@ -504,57 +751,35 @@ pub fn tool_button(
     let text_w = if label.is_empty() {
         0.0
     } else {
-        text_width(ui, label, 11.5) + 5.0
+        text_width(ui, label, CTRL_TEXT) + 5.0
     };
     let (rect, resp) = ui.allocate_exact_size(
-        Vec2::new(8.0 + 15.0 + text_w + 8.0, CTRL_H + 4.0),
+        Vec2::new(8.0 + ICON + text_w + 8.0, CTRL_H),
         Sense::click(),
     );
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        let ppp = ui.ctx().pixels_per_point();
-        let ink = if armed || resp.hovered() {
-            STRUCK
+        let (ground, rest) = filled(&resp);
+        let (fill, ink, words) = if armed {
+            (TALLY, ON_FILL, ON_FILL)
         } else {
-            LEGEND
+            (ground, at_rest(ui, rest), STRUCK)
         };
-        // Seated on the Well (owner's audit 2026-08-17): every control sits
-        // IN the plate like the pencil slots do, never floats on chrome.
-        p.rect_filled(rect, CornerRadius::ZERO, WELL);
-        p.rect_stroke(
-            rect,
-            CornerRadius::ZERO,
-            Stroke::new(
-                1.0,
-                if resp.hovered() && !armed {
-                    LEGEND
-                } else {
-                    legend_dim()
-                },
-            ),
-            StrokeKind::Inside,
-        );
+        p.rect_filled(rect, R_CONTROL, fill);
         let icon_rect = egui::Rect::from_center_size(
-            Pos2::new(rect.left() + 8.0 + 7.5, rect.center().y - 1.0),
-            Vec2::splat(15.0),
+            Pos2::new(rect.left() + 8.0 + ICON * 0.5, rect.center().y),
+            Vec2::splat(ICON),
         );
         crate::icons::paint(p, icon_rect, ink, icon);
         if !label.is_empty() {
             label_at(
                 ui,
-                rect.left() + 8.0 + 15.0 + 5.0,
-                rect.center().y - 1.0,
+                rect.left() + 8.0 + ICON + 5.0,
+                rect.center().y,
                 label,
-                11.5,
-                ink,
+                CTRL_TEXT,
+                words,
             );
-        }
-        if armed {
-            let bar = egui::Rect::from_min_max(
-                Pos2::new(snap(rect.left() + 2.0, ppp), snap(rect.bottom() - 3.0, ppp)),
-                Pos2::new(snap(rect.right() - 2.0, ppp), snap(rect.bottom(), ppp)),
-            );
-            p.rect_filled(bar, CornerRadius::ZERO, TALLY);
         }
     }
     let name = tool_name(name, label, icon);
@@ -562,9 +787,9 @@ pub fn tool_button(
     describe(resp, "DETENT tool_button", label)
 }
 
-/// LATCH with a painted icon — independent on/off; Tally bar on the LEFT
-/// edge while latched (never confusable with the detent's bottom lamp).
-/// `label` and `name` as for [`tool_button`].
+/// LATCH with a painted icon — independent on/off. Latched takes the wash
+/// with deep ink: at most one tool is solid blue on screen, and any number
+/// of latches can be on. `label` and `name` as for [`tool_button`].
 pub fn tool_latch(
     ui: &mut Ui,
     on: &mut bool,
@@ -575,10 +800,10 @@ pub fn tool_latch(
     let text_w = if label.is_empty() {
         0.0
     } else {
-        text_width(ui, label, 11.5) + 5.0
+        text_width(ui, label, CTRL_TEXT) + 5.0
     };
     let (rect, mut resp) = ui.allocate_exact_size(
-        Vec2::new(6.0 + 15.0 + text_w + 8.0, CTRL_H + 4.0),
+        Vec2::new(8.0 + ICON + text_w + 8.0, CTRL_H),
         Sense::click(),
     );
     if resp.clicked() {
@@ -587,47 +812,26 @@ pub fn tool_latch(
     }
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        let ppp = ui.ctx().pixels_per_point();
-        let ink = if *on || resp.hovered() {
-            STRUCK
+        let (ground, rest) = filled(&resp);
+        let (fill, ink, words) = if *on {
+            (BLUE_WASH, BLUE_DEEP, BLUE_DEEP)
         } else {
-            LEGEND
+            (ground, at_rest(ui, rest), STRUCK)
         };
-        // Seated on the Well, same law as tool_button.
-        p.rect_filled(rect, CornerRadius::ZERO, WELL);
-        p.rect_stroke(
-            rect,
-            CornerRadius::ZERO,
-            Stroke::new(
-                1.0,
-                if resp.hovered() && !*on {
-                    LEGEND
-                } else {
-                    legend_dim()
-                },
-            ),
-            StrokeKind::Inside,
-        );
-        if *on {
-            let bar = egui::Rect::from_min_max(
-                Pos2::new(snap(rect.left(), ppp), snap(rect.top() + 2.0, ppp)),
-                Pos2::new(snap(rect.left() + 3.0, ppp), snap(rect.bottom() - 2.0, ppp)),
-            );
-            p.rect_filled(bar, CornerRadius::ZERO, TALLY);
-        }
+        p.rect_filled(rect, R_CONTROL, fill);
         let icon_rect = egui::Rect::from_center_size(
-            Pos2::new(rect.left() + 6.0 + 7.5, rect.center().y),
-            Vec2::splat(15.0),
+            Pos2::new(rect.left() + 8.0 + ICON * 0.5, rect.center().y),
+            Vec2::splat(ICON),
         );
         crate::icons::paint(p, icon_rect, ink, icon);
         if !label.is_empty() {
             label_at(
                 ui,
-                rect.left() + 6.0 + 15.0 + 5.0,
+                rect.left() + 8.0 + ICON + 5.0,
                 rect.center().y,
                 label,
-                11.5,
-                ink,
+                CTRL_TEXT,
+                words,
             );
         }
     }
@@ -636,38 +840,38 @@ pub fn tool_latch(
     describe(resp, "LATCH tool_latch", label)
 }
 
-/// A momentary action with a painted icon (no armed state — fires on click).
+/// A momentary action with a painted icon (no armed state — fires on click):
+/// a ghost, no fill at rest, `WELL` under the hand, the wash while pressed.
 pub fn icon_button(ui: &mut Ui, icon: crate::icons::Icon, label: &str, hover: &str) -> Response {
     let text_w = if label.is_empty() {
         0.0
     } else {
-        text_width(ui, label, 11.5) + 5.0
+        text_width(ui, label, CTRL_TEXT) + 5.0
     };
     let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(6.0 + 15.0 + text_w + 6.0, CTRL_H), Sense::click());
+        ui.allocate_exact_size(Vec2::new(6.0 + ICON + text_w + 6.0, CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        let ink = if resp.hovered() { STRUCK } else { LEGEND };
-        // Seated on the Well, same law as every control (owner's audit).
-        p.rect_filled(rect, CornerRadius::ZERO, WELL);
-        p.rect_stroke(
-            rect,
-            CornerRadius::ZERO,
-            Stroke::new(1.0, if resp.hovered() { LEGEND } else { legend_dim() }),
-            StrokeKind::Inside,
-        );
+        let (fill, ink) = if resp.is_pointer_button_down_on() {
+            (BLUE_WASH, BLUE_DEEP)
+        } else if resp.hovered() {
+            (WELL, STRUCK)
+        } else {
+            (Color32::TRANSPARENT, at_rest(ui, LEGEND))
+        };
+        p.rect_filled(rect, R_CONTROL, fill);
         let icon_rect = egui::Rect::from_center_size(
-            Pos2::new(rect.left() + 6.0 + 7.5, rect.center().y),
-            Vec2::splat(15.0),
+            Pos2::new(rect.left() + 6.0 + ICON * 0.5, rect.center().y),
+            Vec2::splat(ICON),
         );
         crate::icons::paint(p, icon_rect, ink, icon);
         if !label.is_empty() {
             label_at(
                 ui,
-                rect.left() + 6.0 + 15.0 + 5.0,
+                rect.left() + 6.0 + ICON + 5.0,
                 rect.center().y,
                 label,
-                11.5,
+                CTRL_TEXT,
                 ink,
             );
         }
@@ -686,35 +890,34 @@ pub fn icon_button(ui: &mut Ui, icon: crate::icons::Icon, label: &str, hover: &s
     describe(resp, "ACTION icon_button", label)
 }
 
-/// A colour swatch seated in a Well recess (§6 defect 5): an 18×18 painted
-/// fill with a 1px Legend edge; the armed swatch is ringed in Tally. The hit
-/// target is larger than the well (the owner's amendment). It answers to
+/// A colour swatch: an 18×18 fill with its `INK3` ring, so a pale colour
+/// still has an edge on an island; the armed swatch is ringed in blue. The
+/// hit target is larger than the fill (the owner's amendment). It answers to
 /// "colour well: <name>" (the role or colour name; empty = the hex value),
 /// so a palette's wells are told apart by name, not position.
 pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(CTRL_H + 4.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let well = egui::Rect::from_center_size(rect.center(), Vec2::splat(18.0));
-        p.rect_filled(well.expand(2.0), CornerRadius::ZERO, WELL);
-        p.rect_filled(well, CornerRadius::ZERO, color);
+        p.rect_filled(well, R_SHEET, color);
         p.rect_stroke(
             well,
-            CornerRadius::ZERO,
-            Stroke::new(1.0, LEGEND),
+            R_SHEET,
+            Stroke::new(1.0, INK3),
             StrokeKind::Outside,
         );
         if armed {
             p.rect_stroke(
-                well.expand(2.0),
-                CornerRadius::ZERO,
+                well.expand(3.0),
+                R_INPUT,
                 Stroke::new(2.0, TALLY),
                 StrokeKind::Outside,
             );
         } else if resp.hovered() {
             p.rect_stroke(
-                well.expand(2.0),
-                CornerRadius::ZERO,
+                well.expand(3.0),
+                R_INPUT,
                 Stroke::new(1.0, STRUCK),
                 StrokeKind::Outside,
             );
@@ -731,10 +934,9 @@ pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response 
 
 /// RAIL — a bounded value the hand drags (the plate's fourth and last
 /// control kind, added 2026-08-18 under the sweetening room). A Well
-/// track with a 1px Legend edge, filled Tally from the left to the
-/// handle, so 0 and full are always visible. egui's own slider rail is
-/// invisible under our Visuals (its track paints in widgets.inactive
-/// .bg_fill = GRAPHITE, with bg_stroke NONE) — this replaces it.
+/// track with its `INK3` edge, filled blue from the left to the handle, so
+/// 0 and full are always visible. egui's own slider rail is invisible under
+/// our Visuals (its track is a bare Well on an island) — this replaces it.
 /// Returns true while the value is being changed.
 pub fn rail(
     ui: &mut Ui,
@@ -756,54 +958,58 @@ pub fn rail(
             Pos2::new(snap(rect.left(), ppp), snap(rect.center().y - 4.0, ppp)),
             Pos2::new(snap(rect.right(), ppp), snap(rect.center().y + 4.0, ppp)),
         );
-        p.rect_filled(track, CornerRadius::ZERO, WELL);
+        p.rect_filled(track, 4, WELL);
         let t = ((*value - lo) / span).clamp(0.0, 1.0);
         if t > 0.0 {
             let mut fill = track;
             fill.max.x = snap(track.left() + track.width() * t, ppp);
-            p.rect_filled(fill.shrink(1.0), CornerRadius::ZERO, TALLY);
+            p.rect_filled(fill.shrink(1.0), 3, TALLY);
         }
         p.rect_stroke(
             track,
-            CornerRadius::ZERO,
-            Stroke::new(1.0, if resp.hovered() { LEGEND } else { legend_dim() }),
+            4,
+            Stroke::new(1.0, if resp.hovered() { LEGEND } else { INK3 }),
             StrokeKind::Inside,
         );
-        // The handle: a struck bar the eye can find at any fill level.
+        // The handle: an ink bar the eye can find at any fill level.
         let hx = snap(track.left() + track.width() * t, ppp);
         p.rect_filled(
             egui::Rect::from_min_max(
-                Pos2::new(hx - 1.5, rect.center().y - 7.0),
-                Pos2::new(hx + 1.5, rect.center().y + 7.0),
+                Pos2::new(hx - 2.0, rect.center().y - 7.0),
+                Pos2::new(hx + 2.0, rect.center().y + 7.0),
             ),
-            CornerRadius::ZERO,
+            2,
             STRUCK,
         );
     }
     resp
 }
 
-/// FIELD — an editable number. DragValue keeps its drag-and-type
-/// behaviour; this only dresses it, because a number the animator sets
-/// and reads is a fact they authored (Struck), not the plate's voice.
-/// The FACE comes from `drag_value_text_style` set in `install_fonts`.
-pub fn field(ui: &mut Ui, dv: egui::DragValue<'_>) -> Response {
-    let saved_inactive = ui.visuals().widgets.inactive.fg_stroke.color;
-    let saved_hovered = ui.visuals().widgets.hovered.fg_stroke.color;
-    ui.visuals_mut().widgets.inactive.fg_stroke.color = STRUCK;
-    ui.visuals_mut().widgets.hovered.fg_stroke.color = STRUCK;
-    let r = ui.add(dv);
-    ui.visuals_mut().widgets.inactive.fg_stroke.color = saved_inactive;
-    ui.visuals_mut().widgets.hovered.fg_stroke.color = saved_hovered;
+/// FIELD — a value the animator sets and reads: anything that edits one
+/// (a `DragValue`, a `TextEdit`) keeps its behaviour and takes the field's
+/// `WELL` and its `INK3` edge, with the corners of an input. The FACE comes
+/// from `drag_value_text_style`.
+pub fn field(ui: &mut Ui, widget: impl egui::Widget) -> Response {
+    let saved = ui.visuals().widgets.clone();
+    let w = &mut ui.visuals_mut().widgets;
+    for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+        state.bg_stroke = Stroke::new(1.0, INK3);
+        state.corner_radius = CornerRadius::same(R_INPUT);
+    }
+    w.inactive.weak_bg_fill = WELL;
+    w.hovered.weak_bg_fill = WELL;
+    w.active.weak_bg_fill = WELL;
+    let r = ui.add(widget);
+    ui.visuals_mut().widgets = saved;
     r
 }
 
 /// METER — a read-only fill (export progress, and anything else that
 /// reports how far along a machine is). Same material as RAIL: a Well
-/// track with a 1px Legend edge and a Tally fill; the count rides
-/// BESIDE it in Struck mono, never inside the bar where the fill
-/// swallows it. Indeterminate work passes `None`, which sweeps a short
-/// Tally band instead of faking a percentage.
+/// track with its `INK3` edge and a blue fill; the count rides BESIDE it
+/// in ink, never inside the bar where the fill swallows it. Indeterminate
+/// work passes `None`, which sweeps a short blue band instead of faking a
+/// percentage.
 pub fn meter(ui: &mut Ui, frac: Option<f32>, w: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 14.0), Sense::hover());
     if !ui.is_rect_visible(rect) {
@@ -815,14 +1021,14 @@ pub fn meter(ui: &mut Ui, frac: Option<f32>, w: f32) {
         Pos2::new(snap(rect.left(), ppp), snap(rect.center().y - 5.0, ppp)),
         Pos2::new(snap(rect.right(), ppp), snap(rect.center().y + 5.0, ppp)),
     );
-    p.rect_filled(track, CornerRadius::ZERO, WELL);
+    p.rect_filled(track, 5, WELL);
     match frac {
         Some(f) => {
             let t = f.clamp(0.0, 1.0);
             if t > 0.0 {
                 let mut fill = track;
                 fill.max.x = snap(track.left() + track.width() * t, ppp);
-                p.rect_filled(fill.shrink(1.0), CornerRadius::ZERO, TALLY);
+                p.rect_filled(fill.shrink(1.0), 4, TALLY);
             }
         }
         None => {
@@ -836,26 +1042,21 @@ pub fn meter(ui: &mut Ui, frac: Option<f32>, w: f32) {
                 Pos2::new((x + bw).min(track.right()), track.bottom() - 1.0),
             );
             if band.width() > 0.0 {
-                p.rect_filled(band, CornerRadius::ZERO, TALLY);
+                p.rect_filled(band, 4, TALLY);
             }
             ui.ctx().request_repaint();
         }
     }
-    p.rect_stroke(
-        track,
-        CornerRadius::ZERO,
-        Stroke::new(1.0, legend_dim()),
-        StrokeKind::Inside,
-    );
+    p.rect_stroke(track, 5, Stroke::new(1.0, INK3), StrokeKind::Inside);
 }
 
 /// How long DANGER must be held before it fires.
 const DANGER_HOLD_S: f64 = 0.35;
 
-/// DANGER — a destructive command. Aka 1px edge, and it does not fire on a
-/// click: it fires after a ~350ms press-and-hold, during which a Tally ring
-/// fills beside the label. Releasing early cancels. Returns true exactly
-/// once, at the moment the hold completes.
+/// DANGER — a destructive command. A red edge and red words, and it does not
+/// fire on a click: it fires after a ~350ms press-and-hold, during which the
+/// red fills and a white ring closes beside the label. Releasing early
+/// cancels. Returns true exactly once, at the moment the hold completes.
 pub fn danger(ui: &mut Ui, label: &str) -> bool {
     danger_hint(ui, label, "")
 }
@@ -863,7 +1064,7 @@ pub fn danger(ui: &mut Ui, label: &str) -> bool {
 /// DANGER with what it destroys said in plain words on hover. Every DANGER
 /// says "hold" there: a first-time hand clicks, and a click does nothing.
 pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
-    let text_w = text_width(ui, label, 11.5);
+    let text_w = text_width(ui, label, CTRL_TEXT);
     let (rect, resp) = ui.allocate_exact_size(
         Vec2::new(8.0 + text_w + 6.0 + CTRL_H, CTRL_H),
         Sense::click_and_drag(),
@@ -904,18 +1105,17 @@ pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
     }
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        p.rect_stroke(
-            rect,
-            CornerRadius::ZERO,
-            Stroke::new(1.0, AKA),
-            StrokeKind::Inside,
-        );
-        let ink = if resp.hovered() || held {
-            STRUCK
+        let ink = if held {
+            p.rect_filled(rect, R_CONTROL, RED);
+            ON_FILL
         } else {
-            LEGEND
+            if resp.hovered() {
+                p.rect_filled(rect, R_CONTROL, RED_WASH);
+            }
+            p.rect_stroke(rect, R_CONTROL, Stroke::new(1.0, RED), StrokeKind::Inside);
+            RED
         };
-        label_at(ui, rect.left() + 8.0, rect.center().y, label, 11.5, ink);
+        label_at(ui, rect.left() + 8.0, rect.center().y, label, CTRL_TEXT, ink);
         // The filling ring, seated in the square right slot.
         let c = Pos2::new(rect.right() - CTRL_H * 0.5, rect.center().y);
         if progress > 0.0 {
@@ -927,9 +1127,9 @@ pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
                     Pos2::new(c.x + 6.0 * a.cos(), c.y + 6.0 * a.sin())
                 })
                 .collect();
-            p.add(Shape::line(pts, Stroke::new(2.0, TALLY)));
+            p.add(Shape::line(pts, Stroke::new(2.0, ink)));
         } else {
-            p.circle_stroke(c, 6.0, Stroke::new(1.0, legend_dim()));
+            p.circle_stroke(c, 6.0, Stroke::new(1.0, ink));
         }
     }
     let _ = if hint.is_empty() {
@@ -941,130 +1141,74 @@ pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// The base Visuals — the single site (main.rs) applies this once.
+// The base Visuals — `style` carries them into both theme slots.
 // ---------------------------------------------------------------------------
 
-/// The app's egui Visuals, derived entirely from the tokens above. Square
-/// corners everywhere (the direction has no friendly radius); Graphite
-/// chrome; Well for recessed data; selection is Tally, never a blue.
+/// The app's egui Visuals, derived entirely from the tokens above (spec 2.9).
 pub fn visuals() -> egui::Visuals {
-    let mut v = egui::Visuals::dark();
-    v.panel_fill = GRAPHITE;
-    v.window_fill = GRAPHITE;
+    let mut v = egui::Visuals::light();
+    v.panel_fill = ISLAND;
+    v.window_fill = ISLAND;
     v.extreme_bg_color = WELL;
     v.faint_bg_color = WELL;
     v.code_bg_color = WELL;
+    v.hyperlink_color = BLUE;
+    v.warn_fg_color = RED;
+    v.error_fg_color = RED;
 
-    // AUDIT [4]: selection.stroke.color is what egui paints a selected
-    // widget's TEXT with — pointing it at TALLY turned six panels' worth
-    // of selected labels amber, which is exactly what the colour law
-    // forbids (Tally is a lamp, never text). The selection now reads as
-    // a Tally GROUND under a Struck label; the lamp stays a lamp.
-    v.selection.bg_fill = tally_well();
-    v.selection.stroke = Stroke::new(1.0, STRUCK);
-    v.hyperlink_color = STRUCK;
-    v.warn_fg_color = AKA;
-    v.error_fg_color = AKA;
-    v.window_stroke = Stroke::new(1.0, legend_dim());
+    // selection.stroke.color is what egui paints a selected widget's text
+    // with, so a selection reads as deep ink on the wash.
+    v.selection.bg_fill = BLUE_WASH;
+    v.selection.stroke = Stroke::new(1.0, BLUE_DEEP);
+    v.window_stroke = Stroke::NONE;
+    v.disabled_alpha = DISABLED_ALPHA;
+    v.weak_text_color = Some(INK3);
 
-    // The two-ink test, applied to widget text: at rest the app speaks in
-    // Legend; a control under the hand (hovered/active/open) steps to Struck.
-    v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, LEGEND);
-    v.widgets.inactive.fg_stroke = Stroke::new(1.0, LEGEND);
-    v.widgets.hovered.fg_stroke = Stroke::new(1.2, STRUCK);
-    v.widgets.active.fg_stroke = Stroke::new(1.2, STRUCK);
-    v.widgets.open.fg_stroke = Stroke::new(1.2, STRUCK);
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = ISLAND;
+    w.noninteractive.weak_bg_fill = ISLAND;
+    w.noninteractive.fg_stroke = Stroke::new(1.0, INK);
+    w.noninteractive.bg_stroke = Stroke::new(1.0, RULE);
+    w.inactive.bg_fill = WELL;
+    w.inactive.weak_bg_fill = WELL;
+    w.inactive.fg_stroke = Stroke::new(1.0, INK);
+    w.inactive.bg_stroke = Stroke::NONE;
+    w.hovered.bg_fill = HOVER;
+    w.hovered.weak_bg_fill = HOVER;
+    w.hovered.fg_stroke = Stroke::new(1.0, INK);
+    w.hovered.bg_stroke = Stroke::NONE;
+    w.active.bg_fill = PRESSED;
+    w.active.weak_bg_fill = PRESSED;
+    w.active.fg_stroke = Stroke::new(1.0, INK);
+    w.active.bg_stroke = Stroke::NONE;
+    w.open.bg_fill = BLUE_WASH;
+    w.open.weak_bg_fill = BLUE_WASH;
+    w.open.fg_stroke = Stroke::new(1.0, BLUE_DEEP);
+    w.open.bg_stroke = Stroke::NONE;
 
-    // No third grey: rest state sits flush on the plate; hover is announced
-    // by a Legend rule (edge), press by the Well step — never by more grey.
-    v.widgets.noninteractive.bg_fill = GRAPHITE;
-    v.widgets.noninteractive.weak_bg_fill = GRAPHITE;
-    v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, legend_dim());
-    v.widgets.inactive.bg_fill = GRAPHITE;
-    v.widgets.inactive.weak_bg_fill = GRAPHITE;
-    v.widgets.inactive.bg_stroke = Stroke::NONE;
-    v.widgets.hovered.bg_fill = GRAPHITE;
-    v.widgets.hovered.weak_bg_fill = GRAPHITE;
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0, LEGEND);
-    v.widgets.active.bg_fill = WELL;
-    v.widgets.active.weak_bg_fill = WELL;
-    v.widgets.active.bg_stroke = Stroke::new(1.0, LEGEND);
-    v.widgets.open.bg_fill = WELL;
-    v.widgets.open.weak_bg_fill = WELL;
-    v.widgets.open.bg_stroke = Stroke::new(1.0, LEGEND);
-
-    // Square. Everywhere. The engraved feel comes from type, rules and the
-    // Well step — not radius, not bevels, not shadows.
-    let square = CornerRadius::ZERO;
-    v.widgets.noninteractive.corner_radius = square;
-    v.widgets.inactive.corner_radius = square;
-    v.widgets.hovered.corner_radius = square;
-    v.widgets.active.corner_radius = square;
-    v.widgets.open.corner_radius = square;
-    v.window_corner_radius = square;
-    v.menu_corner_radius = square;
-    v.popup_shadow = egui::epaint::Shadow::NONE;
-    v.window_shadow = egui::epaint::Shadow::NONE;
+    let control = CornerRadius::same(R_CONTROL);
+    w.noninteractive.corner_radius = control;
+    w.inactive.corner_radius = control;
+    w.hovered.corner_radius = control;
+    w.active.corner_radius = control;
+    w.open.corner_radius = control;
+    v.window_corner_radius = CornerRadius::same(R_FLOAT);
+    v.menu_corner_radius = CornerRadius::same(R_MENU);
+    v.window_shadow = egui::epaint::Shadow { offset: [0, 6], blur: 24, spread: 0, color: alpha(SHADOW, 41) };
+    v.popup_shadow = egui::epaint::Shadow { offset: [0, 4], blur: 16, spread: 0, color: alpha(SHADOW, 46) };
     v
 }
 
-// ---------------------------------------------------------------------------
-// The material (owner's amendment, 2026-08-17): panels sit on a procedurally
-// generated Graphite grain — our own seeded texture from `iconforge`, opaque,
-// ±4 levels of relief, hue preserved. Material, never a new colour.
-// ---------------------------------------------------------------------------
-
-const PLATE_GRAIN_PNG: &[u8] = include_bytes!("../assets/tex/plate_grain.png");
-/// The grain tile's edge length in texels (see iconforge).
-const GRAIN_TILE: f32 = 256.0;
-
-fn grain_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let key = egui::Id::new("plate_grain");
-    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(key)) {
-        return Some(tex);
-    }
-    let decoder = png::Decoder::new(std::io::Cursor::new(PLATE_GRAIN_PNG));
-    let mut reader = decoder.read_info().ok()?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
-    let info = reader.next_frame(&mut buf).ok()?;
-    if info.color_type != png::ColorType::Rgba {
-        return None;
-    }
-    let image = egui::ColorImage::from_rgba_unmultiplied(
-        [info.width as usize, info.height as usize],
-        &buf[..info.buffer_size()],
-    );
-    let tex = ctx.load_texture(
-        "plate_grain",
-        image,
-        egui::TextureOptions {
-            wrap_mode: egui::TextureWrapMode::Repeat,
-            ..egui::TextureOptions::LINEAR
-        },
-    );
-    ctx.data_mut(|d| d.insert_temp(key, tex.clone()));
-    Some(tex)
-}
-
-/// Lay the plate's grain down as this pane's ground. Call FIRST in a pane's
-/// ui, before any content; everything else paints over it. Tiles in device
-/// space (uv from rect size) so the grain never stretches.
+/// Lay the island down as this pane's ground. Call FIRST in a pane's ui,
+/// before any content; everything else paints over it.
 pub fn surface(ui: &mut Ui) {
     surface_alpha(ui, 255);
 }
 
-/// The grain at partial opacity — the brush rail's ground (owner
+/// The island at partial opacity — the brush rail's ground (owner
 /// 2026-08-17): the toolbar is present without covering the paper.
-pub fn surface_alpha(ui: &mut Ui, alpha: u8) {
-    let rect = ui.max_rect();
-    if let Some(tex) = grain_texture(ui.ctx()) {
-        let uv = egui::Rect::from_min_max(
-            Pos2::new(rect.left() / GRAIN_TILE, rect.top() / GRAIN_TILE),
-            Pos2::new(rect.right() / GRAIN_TILE, rect.bottom() / GRAIN_TILE),
-        );
-        ui.painter()
-            .image(tex.id(), rect, uv, Color32::from_white_alpha(alpha));
-    }
+pub fn surface_alpha(ui: &mut Ui, opacity: u8) {
+    ui.painter().rect_filled(ui.max_rect(), CornerRadius::ZERO, alpha(ISLAND, opacity));
 }
 
 /// AU1: a `ScrollArea` reports its viewport here, because egui gives no
@@ -1208,14 +1352,50 @@ mod tests {
     #[test]
     fn the_palette_is_exactly_the_ratified_one() {
         // The spec's hex values, transcribed independently of the constants.
-        assert_eq!(GRAPHITE, Color32::from_rgb(0x1A, 0x1B, 0x18));
-        assert_eq!(WELL, Color32::from_rgb(0x0E, 0x0F, 0x0D));
-        assert_eq!(LEGEND, Color32::from_rgb(0x8B, 0x8D, 0x83));
-        assert_eq!(STRUCK, Color32::from_rgb(0xE4, 0xE1, 0xD6));
-        assert_eq!(AO, Color32::from_rgb(0x53, 0x89, 0xC4));
-        assert_eq!(AKA, Color32::from_rgb(0xE4, 0x52, 0x2F));
-        assert_eq!(TALLY, Color32::from_rgb(0xEF, 0xC2, 0x4A));
-        assert_eq!(PAPER, Color32::from_rgb(0xF2, 0xEE, 0xE6));
+        assert_eq!(GRAPHITE, Color32::from_rgb(0xF6, 0xF7, 0xF8));
+        assert_eq!(WELL, Color32::from_rgb(0xE8, 0xEA, 0xED));
+        assert_eq!(LEGEND, Color32::from_rgb(0x4C, 0x52, 0x5B));
+        assert_eq!(STRUCK, Color32::from_rgb(0x1E, 0x22, 0x27));
+        assert_eq!(AO, Color32::from_rgb(0x70, 0x76, 0x7F));
+        assert_eq!(AKA, Color32::from_rgb(0xB9, 0x2D, 0x1C));
+        assert_eq!(TALLY, Color32::from_rgb(0x1F, 0x5F, 0xBF));
+        assert_eq!(PAPER, Color32::from_rgb(0xFF, 0xFF, 0xFF));
+    }
+
+    #[test]
+    fn aulook_tokens_are_the_table() {
+        let table: [(Color32, [u8; 3]); 18] = [
+            (DESK, [0xD3, 0xD5, 0xD8]),
+            (ISLAND, [0xF6, 0xF7, 0xF8]),
+            (WELL, [0xE8, 0xEA, 0xED]),
+            (HOVER, [0xE0, 0xE3, 0xE7]),
+            (PRESSED, [0xCD, 0xD1, 0xD6]),
+            (PAPER, [0xFF, 0xFF, 0xFF]),
+            (INK, [0x1E, 0x22, 0x27]),
+            (INK2, [0x4C, 0x52, 0x5B]),
+            (INK3, [0x70, 0x76, 0x7F]),
+            (RULE, [0xBF, 0xC3, 0xC8]),
+            (BLUE, [0x1F, 0x5F, 0xBF]),
+            (BLUE_DEEP, [0x18, 0x4C, 0x9A]),
+            (BLUE_WASH, [0xDC, 0xE8, 0xF9]),
+            (RED, [0xB9, 0x2D, 0x1C]),
+            (RED_WASH, [0xFB, 0xE5, 0xE1]),
+            (STEEL, [0x2A, 0x2E, 0x34]),
+            (STEEL_INK, [0xE6, 0xE8, 0xEB]),
+            (RESULT, [0x80, 0x80, 0x80]),
+        ];
+        for (token, [r, g, b]) in table {
+            assert_eq!(token.to_array(), [r, g, b, 255]);
+        }
+        // The old names read the new roles until the alias retirement.
+        assert_eq!([GRAPHITE, LEGEND, STRUCK, AO, AKA, TALLY], [ISLAND, INK2, INK, INK3, RED, BLUE]);
+        // The derived colours, each a token opaque or at a set transparency.
+        assert_eq!([legend_dim(), hairline(), rule_sec(), legend_muted()], [INK2, RULE, INK2, INK3]);
+        assert_eq!([rule_beat(), rule_half()], [alpha(INK2, 56), alpha(INK2, 102)]);
+        assert_eq!([tally_well(), paper_veil()], [alpha(BLUE, 36), alpha(STEEL, 110)]);
+        // The radii and the disabled scope's dimming.
+        assert_eq!([R_DIALOG, R_FLOAT, R_MENU, R_CONTROL, R_INPUT, R_SHEET], [14, 12, 10, 8, 6, 4]);
+        assert_eq!(visuals().disabled_alpha, 0.65);
     }
 
     /// GM16: the characters of every string and char literal in `src`

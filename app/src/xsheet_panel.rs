@@ -357,7 +357,7 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
         let x = cell.left() + 2.0;
         ui.painter().line_segment(
             [pos2(x, cell.top() + 4.0), pos2(x, cell.bottom() - 4.0)],
-            egui::Stroke::new(1.0, plate::legend_dim()),
+            egui::Stroke::new(1.0, plate::INK3),
         );
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell));
@@ -432,28 +432,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             ] {
                 let (cr, cresp) = ui.allocate_exact_size(vec2(44.0, 26.0), Sense::click());
                 let p = ui.painter();
-                p.rect_filled(cr, 0.0, plate::WELL);
-                p.rect_stroke(
-                    cr,
-                    0.0,
-                    egui::Stroke::new(
-                        1.0,
-                        if cresp.hovered() {
-                            plate::LEGEND
-                        } else {
-                            plate::legend_dim()
-                        },
-                    ),
-                    egui::StrokeKind::Inside,
-                );
+                let (fill, ink) = plate::filled(&cresp);
+                p.rect_filled(cr, plate::R_CONTROL, fill);
                 crate::icons::paint(
                     p,
                     Rect::from_center_size(cr.center(), vec2(16.0, 16.0)),
-                    if cresp.hovered() {
-                        plate::STRUCK
-                    } else {
-                        plate::LEGEND
-                    },
+                    ink,
                     icon,
                 );
                 if cresp.clicked() && gesture_safe {
@@ -731,13 +715,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
         }
         if has_audio {
             let (rect, _) = ui.allocate_exact_size(vec2(AUDIO_COL_W, ROW_H), Sense::hover());
-            ui.painter().text(
-                rect.left_center(),
-                egui::Align2::LEFT_CENTER,
-                "♪",
-                egui::FontId::proportional(12.0),
-                plate::LEGEND,
-            );
+            plate::note_mark(ui.painter(), rect.left_center() + vec2(16.0, 0.0), plate::LEGEND);
         }
         // GM14: the memo/dialogue row beside the sheet.
         let (rect, resp) = ui.allocate_exact_size(vec2(MEMO_COL_W, ROW_H), Sense::hover());
@@ -784,7 +762,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 p.rect_stroke(
                     r.shrink(1.0),
                     0.0,
-                    egui::Stroke::new(1.0, if on { ink } else { plate::legend_dim() }),
+                    egui::Stroke::new(1.0, if on { ink } else { plate::hairline() }),
                     egui::StrokeKind::Inside,
                 );
                 p.text(
@@ -866,7 +844,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
 
                 // Row background: playhead > second marks > default.
                 let is_current = frame == state.view.frame;
-                // ONE current, amber ground; time boundaries are drawn
+                // ONE current, blue ground; time boundaries are drawn
                 // as RULES in the post-pass, not as tints on rows (a tint
                 // sits a row off from sixty years of paper habit).
                 if is_current {
@@ -1003,7 +981,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     Some((cols, f0, f1)) if (*f0..*f1).contains(&frame) => {
                         for c in cols {
                             if let Some(ci) = col_ids.iter().position(|x| x == c) {
-                                painter.rect_filled(cell_of(ci), 0.0, plate::AO.gamma_multiply(0.22));
+                                painter.rect_filled(cell_of(ci), 0.0, plate::TALLY.gamma_multiply(0.22));
                             }
                         }
                     }
@@ -1335,7 +1313,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                         pos2(x, ctop + *f as f32 * ROW_H + 2.0),
                         vec2(NOTE_TICK_W, ROW_H - 4.0),
                     );
-                    sheet_painter.rect_filled(tick, 0.0, if open { plate::AKA } else { plate::legend_dim() });
+                    sheet_painter.rect_filled(tick, 0.0, if open { plate::AKA } else { plate::INK3 });
                     let resp = ui.interact(tick.expand(2.0), ui.id().with(("note_tick", *f)), Sense::hover());
                     plate::speak(
                         &resp,
@@ -1447,7 +1425,10 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     let mut remove = false;
     let cut = state.cut();
     ui.horizontal_wrapped(|ui| {
-        plate::legend(ui, "♪").on_hover_text("the sound track the waveform column shows");
+        let (mark, note) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
+        plate::note_mark(ui.painter(), mark.center(), plate::LEGEND);
+        plate::speak(&note, egui::WidgetType::Label, None, "♪");
+        note.on_hover_text("the sound track the waveform column shows");
         let picker = egui::ComboBox::from_id_salt("sheet_track")
             .selected_text(track_name(cut, t))
             .show_ui(ui, |ui| {
@@ -1495,7 +1476,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             p.rect_stroke(
                 r.shrink(1.0),
                 0.0,
-                egui::Stroke::new(1.0, if on { ink } else { plate::legend_dim() }),
+                egui::Stroke::new(1.0, if on { ink } else { plate::hairline() }),
                 egui::StrokeKind::Inside,
             );
             p.text(
@@ -2015,22 +1996,19 @@ fn truncate_name(name: &str) -> String {
 // ghosts (onion). Every change is ONE SetCelLayerProps — one undo step —
 // and always clone-and-modify (NEVER-DO 1: a definition is never lost).
 
-/// Identity inks the card offers: the plate's own tokens (spec §3 — no
-/// hue outside them; Tally is the armed lamp, never identity).
+/// Identity inks the card offers: the frozen chips, because a stored chip is
+/// matched to its ring by value (no hue outside them; blue is the armed lamp,
+/// never identity).
 fn identity_swatches() -> [(&'static str, [u8; 4]); 7] {
-    let c = |col: egui::Color32| col.to_array();
-    let dim = |col: egui::Color32| {
-        let [r, g, b, _] = col.to_array();
-        [r, g, b, 150]
-    };
+    let dim = |[r, g, b, _]: [u8; 4]| [r, g, b, 150];
     [
-        ("struck", c(plate::STRUCK)),
-        ("legend", c(plate::LEGEND)),
-        ("paper", c(plate::PAPER)),
-        ("ao", c(plate::AO)),
-        ("ao, dim", dim(plate::AO)),
-        ("aka", c(plate::AKA)),
-        ("aka, dim", dim(plate::AKA)),
+        ("struck", plate::CHIP_STRUCK),
+        ("legend", plate::CHIP_LEGEND),
+        ("paper", plate::CHIP_PAPER),
+        ("ao", plate::CHIP_AO),
+        ("ao, dim", dim(plate::CHIP_AO)),
+        ("aka", plate::CHIP_AKA),
+        ("aka, dim", dim(plate::CHIP_AKA)),
     ]
 }
 
@@ -2038,12 +2016,12 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
     use anim_core::model::LayerRole;
     ui.set_min_width(220.0);
     plate::legend(ui, "layer card");
-    ui.label(
-        egui::RichText::new(&props.name)
-            .size(12.5)
-            .strong()
-            .color(props_chip_color(props)),
-    );
+    // The identity ink is a fill beside the name, never the name's own ink.
+    ui.horizontal(|ui| {
+        let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
+        plate::identity_dot(ui.painter(), dot.center(), 3.5, props_chip_color(props));
+        ui.label(egui::RichText::new(&props.name).size(12.5).strong().color(plate::STRUCK));
+    });
     ui.label(
         egui::RichText::new("double-click the name in the strip to rename")
             .size(10.0)
@@ -2059,8 +2037,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
         let on = props.role == *role;
         ui.horizontal(|ui| {
             let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
-            ui.painter()
-                .circle_filled(dot.center(), 3.5, role_chip_color(*role));
+            plate::identity_dot(ui.painter(), dot.center(), 3.5, role_chip_color(*role));
             if plate::detent(ui, on, role.label()).clicked() && !on {
                 let name = if props.name == props.role.default_name() {
                     role.default_name().to_string()
@@ -2098,11 +2075,12 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
             let (r, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::click());
             ui.painter()
                 .circle_filled(r.center(), 6.0, crate::plate::chip(rgba));
+            ui.painter().circle_stroke(r.center(), 6.0, egui::Stroke::new(1.0, plate::INK3));
             if props.chip == Some(rgba) {
                 ui.painter().circle_stroke(
                     r.center(),
                     7.5,
-                    egui::Stroke::new(1.0, plate::STRUCK),
+                    egui::Stroke::new(1.5, plate::TALLY),
                 );
             }
             if resp.on_hover_text(label).clicked() && props.chip != Some(rgba) {
@@ -2177,8 +2155,12 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // PSD-cel-layers: the menu lists ROLES, top of the pipeline
             // first; each lands at its role's rank (custom: above active).
             for role in anim_core::model::LayerRole::ALL.iter().rev().skip(1) {
-                let text = egui::RichText::new(role.label()).color(role_chip_color(*role));
-                if ui.button(text).clicked() {
+                let picked = ui.horizontal(|ui| {
+                    let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
+                    plate::identity_dot(ui.painter(), dot.center(), 3.5, role_chip_color(*role));
+                    ui.button(role.label()).clicked()
+                });
+                if picked.inner {
                     state.layer_add_role(*role);
                     ui.close();
                 }
@@ -2314,7 +2296,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             let lock_color = if props.locked {
                 plate::STRUCK
             } else {
-                plate::legend_dim()
+                plate::INK3
             };
             let (lock_rect, lock_resp) = ui.allocate_exact_size(vec2(16.0, 18.0), Sense::click());
             plate::speak(
@@ -2354,8 +2336,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 None,
                 &format!("layer colour {name}"),
             );
-            ui.painter()
-                .circle_filled(dot_rect.center(), 4.0, props_chip_color(&props));
+            plate::identity_dot(ui.painter(), dot_rect.center(), 4.0, props_chip_color(&props));
             let dot_resp = dot_resp.on_hover_text(format!(
                 "{} — click: define this layer",
                 props.role.label()
@@ -2504,7 +2485,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     // gesture-safe guard the keybinds use — never under a live stroke.
     ui.add_space(4.0);
     ui.separator();
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         // LINE GUARD: arming-only protection for the line layer (shiage;
         // defaults ON in the Finishing room). A guard, not a lock.
         let mut lg = state.view.line_guard;
@@ -3071,5 +3052,21 @@ mod gm14_minimums {
         assert!(curves >= 5, "{curves} curves_* tests");
         let sheet = tests_named(include_str!("xsheet_panel.rs"), "sheetui_");
         assert!(sheet >= 5, "{sheet} sheetui_* tests");
+    }
+
+    /// `LayerProps.chip` stores these, and a stored chip finds its ring by
+    /// value: the look moving the tokens must not move them.
+    #[test]
+    fn aulook_identity_swatches_keep_todays_values() {
+        let want: [(&str, [u8; 4]); 7] = [
+            ("struck", [228, 225, 214, 255]),
+            ("legend", [139, 141, 131, 255]),
+            ("paper", [242, 238, 230, 255]),
+            ("ao", [83, 137, 196, 255]),
+            ("ao, dim", [83, 137, 196, 150]),
+            ("aka", [228, 82, 47, 255]),
+            ("aka, dim", [228, 82, 47, 150]),
+        ];
+        assert_eq!(super::identity_swatches(), want);
     }
 }

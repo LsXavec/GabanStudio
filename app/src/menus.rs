@@ -150,7 +150,7 @@ impl crate::Editor {
         if action == Action::ClipToPanels && self.state.page_hand_built().is_some() {
             ui.painter().rect_stroke(
                 resp.rect,
-                egui::CornerRadius::ZERO,
+                plate::R_CONTROL,
                 egui::Stroke::new(1.0, plate::AKA),
                 egui::StrokeKind::Inside,
             );
@@ -246,6 +246,7 @@ impl crate::Editor {
     pub(crate) fn help_windows(&mut self, ctx: &egui::Context, binds: &[Binding]) {
         let help = &mut self.help;
         egui::Window::new("Keyboard shortcuts")
+            .frame(plate::dialog_frame(&ctx.global_style()))
             .open(&mut help.sheet)
             .default_size([460.0, 560.0])
             .show(ctx, |ui| {
@@ -291,6 +292,7 @@ impl crate::Editor {
         let ticks = self.quick_start;
         let mut show_me = None;
         egui::Window::new("Quick start")
+            .frame(plate::dialog_frame(&ctx.global_style()))
             .open(&mut help.quick_start)
             .default_width(420.0)
             .show(ctx, |ui| {
@@ -337,13 +339,14 @@ impl crate::Editor {
                 }
             });
         egui::Window::new("About Gaban Studio")
+            .frame(plate::dialog_frame(&ctx.global_style()))
             .open(&mut help.about)
             .default_width(320.0)
             .show(ctx, |ui| {
                 plate::surface(ui);
                 // Latin, as the legends are (GM16: the embedded JP face is
                 // whole now, so 画版 would draw too).
-                plate::legend(ui, "gaban studio");
+                plate::legend(ui, "Gaban Studio");
                 plate::value(ui, &format!("version {}", env!("CARGO_PKG_VERSION")));
                 ui.label(
                     "A node-graph 2D animation studio, layout to delivery: draw, time, paint, \

@@ -157,7 +157,8 @@ impl crate::Editor {
         let id = egui::Id::new("cmdpal");
         let area = egui::Modal::default_area(id.with("area"))
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 72.0));
-        let resp = egui::Modal::new(id).area(area).show(ctx, |ui| {
+        let frame = plate::dialog_frame(&ctx.global_style());
+        let resp = egui::Modal::new(id).area(area).frame(frame).show(ctx, |ui| {
             ui.set_width(560.0);
             plate::legend(ui, "command palette");
             let field = ui.add(
@@ -534,6 +535,7 @@ mod tests {
             if in_lightbox {
                 h.point_at(edge);
                 h.wait(0.5);
+                h.scroll_to(button);
             }
             let chord = chord_of(&binds, action).expect("bound");
             // "Name (chord) — help", the registry's own line.
@@ -784,7 +786,7 @@ mod tests {
         h.state_mut().undo_to(1);
         h.perform(Action::History);
         h.run();
-        let (mark, row3) = (h.rect("SAVED"), h.rect("3. draw"));
+        let (mark, row3) = (h.rect("Saved"), h.rect("3. draw"));
         assert!(
             (mark.center().y - row3.center().y).abs() < 2.0,
             "the saved mark sits on row 3: {mark:?} vs {row3:?}"
@@ -864,6 +866,6 @@ mod tests {
         // The About window says its name in glyphs the embedded font has.
         h.perform(Action::About);
         h.run();
-        assert!(h.has("GABAN STUDIO"), "{}", h.describe());
+        assert!(h.has("Gaban Studio"), "{}", h.describe());
     }
 }

@@ -483,16 +483,16 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
 
 fn kind_color(kind: &NodeKind) -> Color32 {
     match kind {
-        NodeKind::DrawingSource { .. } => crate::plate::AO,
+        NodeKind::DrawingSource { .. } => crate::plate::BLUE,
         NodeKind::Solid { .. } => crate::plate::LEGEND,
         NodeKind::ImageSource { .. } => crate::plate::STRUCK,
         // AUDIT [28]: these two hues are in no ratified palette. Node
-        // identity comes from tokens now — Legend for an operation, Ao
+        // identity comes from tokens now — Legend for an operation, blue
         // for the one that composites (continuity), as elsewhere.
         NodeKind::Transform { .. } | NodeKind::Effect { .. } | NodeKind::Camera { .. } => {
             crate::plate::LEGEND
         }
-        NodeKind::Blend { .. } => crate::plate::AO,
+        NodeKind::Blend { .. } => crate::plate::BLUE,
         // GM16: a generator makes the cut's own picture, as an image does;
         // GM17: so do a 3D model and another app's frames.
         NodeKind::Generator { .. } | NodeKind::Model3D { .. } | NodeKind::ImageSequence { .. } => {
@@ -642,7 +642,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             &painter,
             out_pin_pos(fv),
             ptr,
-            crate::plate::AO,
+            crate::plate::TALLY,
         );
     }
 
@@ -653,16 +653,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         let selected = state.selected_node == Some(nv.id);
         let is_output = output_node == Some(nv.id);
         let body = crate::plate::GRAPHITE;
-        // AUDIT [39]: square, like every other surface in the app.
-        painter.rect_filled(nv.rect, 0, body);
+        painter.rect_filled(nv.rect, crate::plate::R_CONTROL, body);
+        // The kind's ground: its ink at the wash's strength, so the title
+        // holds on every kind.
         painter.rect_filled(
             Rect::from_min_size(nv.rect.left_top(), vec2(NODE_W, TITLE_H)),
-            4,
-            kind_color(&nv.kind).gamma_multiply(0.55),
+            egui::CornerRadius { nw: crate::plate::R_CONTROL, ne: crate::plate::R_CONTROL, sw: 0, se: 0 },
+            kind_color(&nv.kind).gamma_multiply(0.2),
         );
         painter.rect_stroke(
             nv.rect,
-            4,
+            crate::plate::R_CONTROL,
             Stroke::new(
                 if selected { 2.0 } else { 1.0 },
                 // Selection is TALLY — the one colour meaning current/armed
@@ -756,7 +757,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             op,
             PIN_R,
             if op_resp.hovered() {
-                crate::plate::AO
+                crate::plate::TALLY
             } else {
                 crate::plate::LEGEND
             },
@@ -792,7 +793,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 ip,
                 PIN_R,
                 if ip_resp.hovered() {
-                    crate::plate::AO
+                    crate::plate::TALLY
                 } else if nv.inputs[pin].is_some() {
                     crate::plate::STRUCK
                 } else {
@@ -845,7 +846,7 @@ fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             // own would grow it, and the graph below would shift.
             ui.painter().rect_stroke(
                 button.rect,
-                egui::CornerRadius::ZERO,
+                crate::plate::R_CONTROL,
                 Stroke::new(1.0, crate::plate::AKA),
                 egui::StrokeKind::Inside,
             );
@@ -871,6 +872,10 @@ fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
 /// Selected node's parameters, edited through SetNodeKind (undoable).
 fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal_wrapped(|ui| {
+        // A button's height with or without a selection: the graph under the
+        // row stays put when a node's controls come in.
+        let button = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+        ui.set_min_height(button);
         let Some(id) = state.selected_node else {
             // GM9: the add verb said by its chord in this keymap.
             let add = crate::menus::chord_label(ui.ctx(), crate::config::Action::AddNode)

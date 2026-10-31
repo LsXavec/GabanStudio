@@ -182,7 +182,12 @@ fn main() -> eframe::Result<()> {
 /// The plate visuals and the Plex type stack — the app, the layout probe
 /// and the testkit all draw with the same dressing.
 fn dress(ctx: &egui::Context) {
-    ctx.set_visuals(plate::visuals());
+    // One look: the same style in both slots under a pinned theme, so
+    // Windows Light mode cannot fall back to stock egui.
+    let style = plate::style();
+    ctx.set_theme(egui::Theme::Light);
+    ctx.set_style_of(egui::Theme::Light, style.clone());
+    ctx.set_style_of(egui::Theme::Dark, style);
     plate::install_fonts(ctx);
     // GM4: Ctrl+= / Ctrl+- / Ctrl+0 are the canvas's zoom verbs (D6
     // Actions); egui's own UI zoom would swallow those keys first.
@@ -288,9 +293,9 @@ fn run_cli_job(
     result
 }
 
-/// A slate room tab (spec §4.2): kanji over romaji caps, framed, all four
-/// identical in structure; the active room is lit by the Tally lamp. `name`
-/// is the room's house label (romaji + English, D7) — what it answers to.
+/// A slate room tab (spec §4.2): kanji over romaji caps, all four identical
+/// in structure; the active room takes the wash with deep ink. `name` is the
+/// room's house label (romaji + English, D7) — what it answers to.
 fn slate_tab(
     ui: &mut egui::Ui,
     active: bool,
@@ -298,7 +303,7 @@ fn slate_tab(
     romaji: &str,
     name: &str,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(84.0, 34.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(72.0, 34.0), egui::Sense::click());
     // The painted tab still answers to a name (AccessKit, D7).
     resp.widget_info(|| {
         egui::WidgetInfo::selected(
@@ -310,25 +315,14 @@ fn slate_tab(
     });
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
-        p.rect_filled(rect, 0.0, plate::WELL);
-        p.rect_stroke(
-            rect,
-            0.0,
-            egui::Stroke::new(
-                1.0,
-                if resp.hovered() && !active {
-                    plate::LEGEND
-                } else {
-                    plate::legend_dim()
-                },
-            ),
-            egui::StrokeKind::Inside,
-        );
-        let ink = if active || resp.hovered() {
-            plate::STRUCK
+        let (fill, ink) = if active {
+            (plate::BLUE_WASH, plate::BLUE_DEEP)
+        } else if resp.hovered() {
+            (plate::HOVER, plate::STRUCK)
         } else {
-            plate::LEGEND
+            (plate::WELL, plate::LEGEND)
         };
+        p.rect_filled(rect, plate::R_CONTROL, fill);
         p.text(
             egui::pos2(rect.center().x, rect.top() + 11.0),
             egui::Align2::CENTER_CENTER,
@@ -343,13 +337,6 @@ fn slate_tab(
             egui::FontId::new(8.5, plate::semibold()),
             ink,
         );
-        if active {
-            let bar = egui::Rect::from_min_max(
-                egui::pos2(rect.left() + 2.0, rect.bottom() - 3.0),
-                egui::pos2(rect.right() - 2.0, rect.bottom()),
-            );
-            p.rect_filled(bar, 0.0, plate::TALLY);
-        }
     }
     resp
 }
@@ -2709,6 +2696,7 @@ impl App {
         let Some(offer) = self.recovery.first_mut() else { return };
         let (now, offset) = self.recovery_clock;
         let choice = egui::Modal::new(egui::Id::new("gm2_recovery"))
+            .frame(plate::dialog_frame(&ctx.global_style()))
             .show(ctx, |ui| worksafe::recovery_ui(ui, offer, now, offset))
             .inner;
         let Some(choice) = choice else { return };
@@ -4730,12 +4718,16 @@ impl EditorTabs<'_> {
                     } else {
                         "· ".into()
                     };
-                    let mut text =
-                        egui::RichText::new(format!("{hotkey}{}  {:.0}px", p.name, p.size_px));
-                    if let Some(c) = p.color {
-                        text = text.color(plate::chip([c[0], c[1], c[2], 255]));
-                    }
-                    if ui.button(text).on_hover_text("apply preset").clicked() {
+                    // The words stay ink; the pencil's colour rides on a dot.
+                    let text = format!("{hotkey}{}  {:.0}px", p.name, p.size_px);
+                    let row = ui.horizontal(|ui| {
+                        let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), egui::Sense::hover());
+                        if let Some(c) = p.color {
+                            plate::identity_dot(ui.painter(), dot.center(), 3.5, plate::chip([c[0], c[1], c[2], 255]));
+                        }
+                        ui.button(text).on_hover_text("apply preset").clicked()
+                    });
+                    if row.inner {
                         self.canvas.apply_preset(p);
                         self.state.status = format!("brush: {}", p.name);
                     }
@@ -5025,6 +5017,7 @@ impl Editor {
         let mut convert = false;
         let law = self.state.engine.project.color_law;
         egui::Window::new("Project settings")
+            .frame(plate::dialog_frame(&ctx.global_style()))
             .open(&mut open)
             .default_width(340.0)
             .collapsible(false)
@@ -5117,6 +5110,7 @@ impl Editor {
         let mut open = true;
         let mut set = false;
         egui::Window::new("Paper size")
+            .frame(plate::dialog_frame(&ctx.global_style()))
             .open(&mut open)
             .default_width(320.0)
             .collapsible(false)
@@ -5659,7 +5653,8 @@ impl Editor {
             return;
         };
         let mut choice = None;
-        egui::Modal::new(egui::Id::new("gm8_auto_comp")).show(ctx, |ui| {
+        let frame = plate::dialog_frame(&ctx.global_style());
+        egui::Modal::new(egui::Id::new("gm8_auto_comp")).frame(frame).show(ctx, |ui| {
             plate::legend(ui, "build composite from sheet");
             ui.label(format!("Replace the node graph ({n} nodes)? Undo brings it back."));
             ui.label(
@@ -5698,7 +5693,8 @@ impl Editor {
             return;
         };
         let mut choice = None;
-        egui::Modal::new(egui::Id::new("gm13_satsuei")).show(ctx, |ui| {
+        let frame = plate::dialog_frame(&ctx.global_style());
+        egui::Modal::new(egui::Id::new("gm13_satsuei")).frame(frame).show(ctx, |ui| {
             plate::legend(ui, "build satsuei graph");
             ui.label(format!(
                 "Replace this hand-built graph ({n} nodes) with the satsuei chain? Undo brings it back."
@@ -5739,7 +5735,8 @@ impl Editor {
             return;
         }
         let mut choice = None;
-        egui::Modal::new(egui::Id::new("gm7_convert_colours")).show(ctx, |ui| {
+        let frame = plate::dialog_frame(&ctx.global_style());
+        egui::Modal::new(egui::Id::new("gm7_convert_colours")).frame(frame).show(ctx, |ui| {
             plate::legend(ui, "convert colours to sRGB");
             ui.label("Store this project's colours as exact sRGB chips?");
             for step in [
@@ -5792,7 +5789,8 @@ impl Editor {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "this untitled project".into());
         let mut choice = None;
-        egui::Modal::new(egui::Id::new("gm2_save_changes")).show(ctx, |ui| {
+        let frame = plate::dialog_frame(&ctx.global_style());
+        egui::Modal::new(egui::Id::new("gm2_save_changes")).frame(frame).show(ctx, |ui| {
             plate::legend(ui, "save changes");
             ui.label("Save changes?");
             ui.label(
@@ -6404,7 +6402,8 @@ impl eframe::App for App {
                 .anchor(egui::Align2::RIGHT_TOP, [-10.0, 96.0])
                 .show(ui.ctx(), |ui| {
                     egui::Frame::new()
-                        .fill(plate::shade(160))
+                        .fill(plate::ISLAND)
+                        .corner_radius(plate::R_CONTROL)
                         .inner_margin(4.0)
                         .show(ui, |ui| {
                             ui.label(
@@ -6475,7 +6474,8 @@ impl App {
         if over_cut {
             let ctx = ui.ctx().clone();
             let room = ctx.content_rect();
-            let modal = egui::Modal::new(egui::Id::new("gm8_welcome")).show(&ctx, |ui| {
+            let frame = plate::dialog_frame(&ctx.global_style());
+            let modal = egui::Modal::new(egui::Id::new("gm8_welcome")).frame(frame).show(&ctx, |ui| {
                 ui.set_width((room.width() - 120.0).clamp(320.0, 980.0));
                 ui.set_max_height((room.height() - 120.0).max(240.0));
                 welcome::ui(ui, &mut w, &mut show, &ticks, binds)
@@ -6558,6 +6558,7 @@ impl App {
         let mut action = None;
         if has_editor {
             egui::Window::new("New Project")
+                .frame(plate::dialog_frame(ui.style()))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -6571,9 +6572,7 @@ impl App {
                 plate::surface(ui);
                 ui.vertical_centered(|ui| {
                     ui.add_space(80.0);
-                    egui::Frame::new()
-                        .fill(plate::WELL)
-                        .stroke(egui::Stroke::new(1.0, plate::legend_dim()))
+                    plate::dialog_frame(ui.style())
                         .inner_margin(24.0)
                         .show(ui, |ui| {
                             ui.set_max_width(440.0);
@@ -7403,29 +7402,19 @@ impl Editor {
         }
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.play_tick(dt);
-        egui::Panel::top("top_bar").show(ui, |ui| {
-            plate::surface(ui);
-            // Owner's directive (2026-08-17): the bar read small. One size
-            // class up, scoped to this panel only — 13pt controls, taller
-            // hit targets, wider breathing room. The global scale is law
-            // elsewhere; the bar is the one surface read from arm's length.
+        egui::Panel::top("top_bar").frame(plate::desk_frame(ui.style())).show_separator_line(false).show(ui, |ui| {
+            // Owner's directive (2026-08-17): the bar read small. The Chrome
+            // role, scoped to this panel only, with wider breathing room:
+            // the bar is the one surface read from arm's length.
             {
-                use egui::{FontFamily, FontId, TextStyle};
+                use egui::TextStyle;
                 let st = ui.style_mut();
-                st.text_styles
-                    .insert(TextStyle::Body, FontId::new(13.0, FontFamily::Proportional));
-                st.text_styles.insert(
-                    TextStyle::Button,
-                    FontId::new(13.0, FontFamily::Proportional),
-                );
-                st.text_styles.insert(
-                    TextStyle::Monospace,
-                    FontId::new(12.5, FontFamily::Monospace),
-                );
-                st.spacing.button_padding = egui::vec2(8.0, 4.0);
-                st.spacing.interact_size.y = 24.0;
+                st.text_styles.insert(TextStyle::Body, plate::Role::Chrome.font());
+                st.text_styles.insert(TextStyle::Button, plate::Role::Chrome.font());
                 st.spacing.item_spacing.x = 8.0;
                 st.spacing.icon_width = 18.0;
+                // The whole row holds at 1280 wide: nothing falls off the end.
+                st.spacing.button_padding.x = 6.0;
             }
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -8154,8 +8143,7 @@ impl Editor {
 
         // THE FOOT (spec §4.1): transport is GLOBAL state, bolted to the
         // chassis — a tape deck's motor is never on a removable reel.
-        egui::Panel::bottom("status_bar").show(ui, |ui| {
-            plate::surface(ui);
+        egui::Panel::bottom("status_bar").frame(plate::desk_frame(ui.style())).show_separator_line(false).show(ui, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -8197,8 +8185,7 @@ impl Editor {
                         // stops being the one number that cannot be typed into.
                         let count = self.state.frame_count();
                         let mut f1 = self.state.view.frame + 1;
-                        if ui
-                            .add(egui::DragValue::new(&mut f1).range(1..=count))
+                        if plate::field(ui, egui::DragValue::new(&mut f1).range(1..=count))
                             .on_hover_text("current frame — type or drag")
                             .changed()
                             && !gesture
@@ -8269,7 +8256,7 @@ impl Editor {
                         playback::readout(ui, &dropped, 96.0, ink)
                             .on_hover_text("frames passed over to keep up with the sound");
                         ui.separator();
-                        // REFUSAL lane (Aka): the machine overruled the hand.
+                        // REFUSAL lane: the machine overruled the hand.
                         // Dwells 4s; a repeat of the same refusal re-flashes.
                         if self.state.refusal_seq != self.refusal_seen_seq {
                             self.refusal_seen_seq = self.state.refusal_seq;
@@ -8295,22 +8282,21 @@ impl Editor {
                         }
                         let rage = ui.input(|i| i.time) - self.refusal_since;
                         if rage < 4.0 && !self.state.refusal.is_empty() {
-                            ui.label(egui::RichText::new(&self.state.refusal).color(plate::AKA));
+                            plate::refusal(ui, &self.state.refusal);
                             ui.separator();
                         }
                         // CHATTER lane: the machine's last remark, decaying — a
                         // stale "painted" must never train the eye to ignore this.
+                        // A step down to the quietest ink, not a fade: text is
+                        // opaque, so it never falls under its floor on the way out.
                         if self.state.status != self.status_seen {
                             self.status_seen = self.state.status.clone();
                             self.status_since = ui.input(|i| i.time);
                         }
                         let age = ui.input(|i| i.time) - self.status_since;
                         if age < 4.0 && !self.state.status.is_empty() {
-                            let fade = (1.0 - ((age - 3.0).max(0.0)) as f32).clamp(0.0, 1.0);
-                            ui.label(
-                                egui::RichText::new(&self.state.status)
-                                    .color(plate::LEGEND.gamma_multiply(fade)),
-                            );
+                            let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
+                            ui.label(egui::RichText::new(&self.state.status).color(ink));
                         }
                     });
                 });
@@ -8469,7 +8455,7 @@ impl Editor {
             pane_rects: &mut self.pane_rects,
         };
         tabs.pane_rects.clear();
-        let mut dock_style = egui_dock::Style::from_egui(ui.style().as_ref());
+        let mut dock_style = plate::dock_style(ui.style().as_ref());
         // egui_dock clamps every divider so each side keeps `separator.extra`
         // pixels — the DEFAULT IS 175px, which silently blocked collapsing
         // panes (e.g. the Brush band above the canvas). 26px keeps the tab bar

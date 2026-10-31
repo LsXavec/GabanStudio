@@ -135,23 +135,16 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
     }
     let paper_rect =
         Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
+    painter.rect_filled(rect, 0, crate::plate::RESULT);
     painter.rect_filled(paper_rect, 0, crate::plate::PAPER);
-    painter.rect_stroke(
-        paper_rect,
-        2,
-        egui::Stroke::new(1.0, crate::plate::legend_dim()),
-        egui::StrokeKind::Outside,
-    );
     match s.tex {
         Some(id) => {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             painter.image(id, paper_rect, uv, crate::plate::UNTINTED);
-            painter.text(
+            crate::plate::picture_tag(
+                &painter,
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
-                egui::Align2::LEFT_TOP,
                 "🎬 composite (OS window)",
-                egui::FontId::proportional(12.0),
-                crate::plate::alpha(crate::plate::AO, 200),
             );
         }
         None => {

@@ -829,26 +829,15 @@ impl RamPreview {
 /// to `name` (D7: a key never moves under the pointer).
 pub(crate) fn transport_key(ui: &mut egui::Ui, text: &str, name: &str, w: f32) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, plate::CTRL_H), egui::Sense::click());
-    let ink = if !ui.is_enabled() {
-        plate::legend_dim()
-    } else if resp.hovered() {
-        plate::STRUCK
-    } else {
-        plate::LEGEND
-    };
+    let (fill, _) = plate::filled(&resp);
     let p = ui.painter();
-    p.rect_stroke(
-        rect.shrink(2.0),
-        0.0,
-        egui::Stroke::new(1.0, plate::legend_dim()),
-        egui::StrokeKind::Inside,
-    );
+    p.rect_filled(rect.shrink(2.0), plate::R_CONTROL, fill);
     p.text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         text,
         egui::FontId::monospace(11.0),
-        ink,
+        plate::INK,
     );
     plate::speak(&resp, egui::WidgetType::Button, None, name);
     resp
@@ -1016,6 +1005,7 @@ impl crate::Editor {
         let cut = s.cut();
         let last = cut.frame_count.max(1) - 1;
         egui::Window::new("Lip flap")
+            .frame(plate::dialog_frame(&ctx.global_style()))
             .open(&mut open)
             .default_width(360.0)
             .collapsible(false)
@@ -1104,7 +1094,7 @@ impl crate::Editor {
                     let top = rect.bottom() - v * rect.height();
                     let ink = match m {
                         Mouth::Open => plate::LEGEND,
-                        Mouth::Half => plate::legend_dim(),
+                        Mouth::Half => plate::INK3,
                         Mouth::Closed => plate::rule_beat(),
                     };
                     p.rect_filled(
@@ -1755,7 +1745,7 @@ mod tests {
         assert_eq!(h.perform(Action::LipFlap), Performed::Done);
         h.run();
         // The legend (plate legends read in capitals) in its own window.
-        assert!(h.has("Lip flap") && h.has("KUCHIPAKU (LIP FLAP)"), "{}", h.describe());
+        assert!(h.has("Lip flap") && h.has("Kuchipaku (lip flap)"), "{}", h.describe());
         let form = h.editor().lip_form.as_ref().expect("the window's form");
         assert_eq!(form.track, 0, "the dialogue track");
         assert_eq!(form.mouths, [Some(ds[0]), Some(ds[1]), Some(ds[2])]);

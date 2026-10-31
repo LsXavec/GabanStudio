@@ -1690,4 +1690,353 @@ mod tests {
         let contrast = text_contrast_audit(&mut h);
         assert!(contrast.checked + contrast.unknown.len() > 0, "{contrast:?}");
     }
+
+    // ---- the look (spec section 2) ----
+
+    /// What a style paints with. A `Style` holds a formatter that compares by
+    /// pointer, so two built apart are never `==`.
+    fn look_of(s: &egui::Style) -> impl PartialEq + std::fmt::Debug + use<> {
+        (s.visuals.clone(), s.text_styles.clone(), s.spacing.clone(), s.drag_value_text_style.clone())
+    }
+
+    /// A fixture with the app's fonts, which go live on the next pass.
+    fn dressed(mut paint: impl FnMut(&mut egui::Ui) + 'static) -> Harness<'static> {
+        let mut first = true;
+        fixture(move |ui| {
+            if std::mem::take(&mut first) {
+                plate::install_fonts(ui.ctx());
+            } else {
+                ui.set_style(plate::style());
+                paint(ui);
+            }
+        })
+    }
+
+    #[test]
+    fn aulook_theme_is_pinned_in_both_slots() {
+        let ctx = egui::Context::default();
+        crate::dress(&ctx);
+        assert_eq!(ctx.options(|o| o.theme_preference), egui::ThemePreference::Light);
+        let (light, dark) = (ctx.style_of(egui::Theme::Light), ctx.style_of(egui::Theme::Dark));
+        assert_eq!(light.visuals.panel_fill, plate::ISLAND);
+        assert_eq!(look_of(&light), look_of(&dark), "one style in both slots");
+        assert_eq!(look_of(&light), look_of(&plate::style()), "and it is the plate's");
+    }
+
+    /// The boot pins Light, and kittest's own window says Dark: whatever the
+    /// system says, the editor comes up in the one style.
+    #[test]
+    fn aulook_system_light_gives_the_same_style() {
+        let under = |theme| {
+            let mut h = blank_drawing();
+            h.kit_mut().input_mut().system_theme = Some(theme);
+            h.run_frames(3);
+            h.ctx().global_style()
+        };
+        let (light, dark) = (under(egui::Theme::Light), under(egui::Theme::Dark));
+        assert_eq!(light.visuals.panel_fill, plate::ISLAND);
+        assert_eq!(look_of(&light), look_of(&dark), "the system theme changes nothing");
+    }
+
+    /// Light and Dark system themes paint the same pixels (148,629 of them
+    /// differed before the pin).
+    #[test]
+    #[ignore = "needs a GPU adapter"]
+    fn aulook_system_theme_paints_the_same_pixels() {
+        let shot = |theme| {
+            let mut h = EditorHarness::with_gpu(crate::sample::build_sample());
+            h.kit_mut().input_mut().system_theme = Some(theme);
+            h.kit_mut().set_size(vec2(1600.0, 900.0));
+            h.run_frames(30);
+            h.kit_mut().render().expect("headless render")
+        };
+        let (light, dark) = (shot(egui::Theme::Light), shot(egui::Theme::Dark));
+        assert_eq!(light.dimensions(), dark.dimensions());
+        let diff = light.pixels().zip(dark.pixels()).filter(|(a, b)| a != b).count();
+        assert_eq!(diff, 0, "pixels that differ between the system themes");
+    }
+
+    /// The table in spec 2.3: ink, the opacity it is painted at, ground, the
+    /// ratio the table gives, the floor (0 for a decorative pair).
+    #[test]
+    fn aulook_contrast_pairs_hold() {
+        use plate::{
+            BLUE, BLUE_DEEP, BLUE_WASH, DESK, HOVER, INK, INK2, INK3, ISLAND, ON_FILL, PAPER, PRESSED, RED,
+            RED_WASH, RULE, STEEL, STEEL_INK, WELL,
+        };
+        let rows = [
+            (INK, 1.0, DESK, 10.87, 4.5),
+            (INK2, 1.0, DESK, 5.36, 4.5),
+            (INK3, 1.0, DESK, 3.11, 3.0),
+            (INK, 1.0, ISLAND, 14.91, 4.5),
+            (INK2, 1.0, ISLAND, 7.35, 4.5),
+            (INK3, 1.0, ISLAND, 4.27, 3.0),
+            (INK, 1.0, WELL, 13.27, 4.5),
+            (INK2, 1.0, WELL, 6.54, 4.5),
+            (INK3, 1.0, WELL, 3.80, 3.0),
+            (INK, 1.0, HOVER, 12.42, 4.5),
+            (INK2, 1.0, HOVER, 6.12, 4.5),
+            (INK, 1.0, PRESSED, 10.42, 4.5),
+            (INK2, 1.0, PRESSED, 5.14, 4.5),
+            (INK, 1.0, PAPER, 15.99, 4.5),
+            (INK2, 1.0, PAPER, 7.88, 4.5),
+            (ON_FILL, 1.0, BLUE, 6.09, 4.5),
+            (ON_FILL, 1.0, BLUE_DEEP, 8.27, 4.5),
+            (BLUE, 1.0, ISLAND, 5.68, 4.5),
+            (BLUE, 1.0, PAPER, 6.09, 3.0),
+            (BLUE, 1.0, DESK, 4.14, 3.0),
+            (BLUE_DEEP, 1.0, BLUE_WASH, 6.68, 4.5),
+            (INK, 1.0, BLUE_WASH, 12.91, 4.5),
+            (BLUE_DEEP, 1.0, DESK, 5.62, 3.0),
+            (BLUE_DEEP, 1.0, PAPER, 8.27, 3.0),
+            (plate::RED, 1.0, ISLAND, 5.67, 4.5),
+            (RED, 1.0, DESK, 4.13, 3.0),
+            (RED, 1.0, RED_WASH, 5.04, 4.5),
+            (ON_FILL, 1.0, RED, 6.08, 4.5),
+            (STEEL_INK, 1.0, STEEL, 11.12, 4.5),
+            (ON_FILL, 1.0, STEEL, 13.65, 3.0),
+            (STEEL, 1.0, DESK, 9.28, 3.0),
+            // Non-text: the input's edge, the dashed sheet, the manga outline.
+            (INK3, 1.0, ISLAND, 4.27, 3.0),
+            (INK3, 1.0, WELL, 3.80, 3.0),
+            (INK3, 1.0, PAPER, 4.58, 3.0),
+            (INK3, 1.0, DESK, 3.11, 3.0),
+            (INK3, 1.0, PAPER, 4.58, 3.0),
+            // Disabled content, at `disabled_alpha`.
+            (INK, plate::DISABLED_ALPHA, ISLAND, 4.88, 3.0),
+            (INK, plate::DISABLED_ALPHA, WELL, 4.65, 3.0),
+            (INK, plate::DISABLED_ALPHA, DESK, 4.26, 3.0),
+            // Decorative: they carry no information alone.
+            (RULE, 1.0, ISLAND, 1.65, 0.0),
+            (WELL, 1.0, ISLAND, 1.12, 0.0),
+            (ISLAND, 1.0, DESK, 1.37, 0.0),
+            (PAPER, 1.0, DESK, 1.47, 0.0),
+            (HOVER, 1.0, ISLAND, 1.20, 0.0),
+        ];
+        assert_eq!(rows.len(), 44);
+        for (i, (ink, opacity, ground, table, floor)) in rows.into_iter().enumerate() {
+            let under = effective(ground, 1.0, [0.0; 3]);
+            let got = ratio(effective(ink, opacity, under), under);
+            assert!(got >= floor, "row {i}: {got:.2} under {floor}");
+            assert!((got - table).abs() < 0.01, "row {i}: {got:.3}, the table says {table}");
+        }
+    }
+
+    /// A blank document and the sample, in every room.
+    fn in_every_room(mut look: impl FnMut(&str, &mut EditorHarness)) {
+        let docs = [("blank", NewProjectForm::default().new_state()), ("sample", crate::sample::build_sample())];
+        for (doc, state) in docs {
+            let mut h = EditorHarness::with_state(state);
+            h.kit_mut().set_size(vec2(1600.0, 900.0));
+            for room in PROBE_ROOMS {
+                room.enter(h.editor_mut());
+                settle(&mut h);
+                look(&format!("{doc} {}", room_tag(room)), &mut h);
+            }
+        }
+    }
+
+    /// The recovery dialog in its frame: it hangs off the App, which no
+    /// harness holds.
+    fn recovery_contrast() -> Contrast {
+        use crate::worksafe::{Autosave, Recovery, RunningRecord, recovery_ui};
+        let now = 1_000_000;
+        let mut offer = Recovery {
+            record_path: "running-7-1.json".into(),
+            record: RunningRecord { pid: 7, open: Some("Cut 12.animproj".into()), autosave: None, started: 1 },
+            autosaves: vec![Autosave { path: "a.animproj".into(), at: now - 30 }],
+            selected: 0,
+        };
+        let h = dressed(move |ui| {
+            ground(ui, plate::DESK);
+            plate::dialog_frame(ui.style()).show(ui, |ui| recovery_ui(ui, &mut offer, now, 0));
+        });
+        contrast_of(&h.output().shapes)
+    }
+
+    #[test]
+    fn aulook_painted_text_contrast_holds_everywhere() {
+        let mut failed = Vec::new();
+        let (mut checked, mut unread) = (0, 0);
+        let mut add = |at: &str, c: Contrast| {
+            checked += c.checked;
+            unread += c.unknown.len();
+            failed.extend(c.failures.into_iter().map(|f| format!("{at}: {f}")));
+        };
+        in_every_room(|at, h| add(at, text_contrast_audit(h)));
+        let mut h = EditorHarness::with_state(crate::sample::build_sample());
+        h.kit_mut().set_size(vec2(1600.0, 900.0));
+        h.editor_mut().enter_room(Stage::Drawing);
+        settle(&mut h);
+        for menu in ["file", "edit", "view", "sheet", "cut", "project", "room", "window", "help"] {
+            h.click(menu);
+            add(menu, text_contrast_audit(&mut h));
+            h.click(menu);
+        }
+        h.perform(Action::CommandPalette);
+        add("the palette", text_contrast_audit(&mut h));
+        h.perform(Action::CommandPalette);
+        h.perform(Action::ShortcutSheet);
+        add("the F1 sheet", text_contrast_audit(&mut h));
+        h.perform(Action::ShortcutSheet);
+        h.editor_mut().leave = Some(crate::Leave::Open);
+        add("the save prompt", text_contrast_audit(&mut h));
+        add("recovery", recovery_contrast());
+        println!("audit: {checked} sections read, {unread} on no known ground");
+        assert!(checked > 2000, "the audit read {checked} sections");
+        assert!(failed.is_empty(), "{} under their floor:\n{}", failed.len(), failed.join("\n"));
+    }
+
+    /// A real `Button`, disabled on `fill`, with the look at `alpha`.
+    fn disabled_on(fill: Color32, alpha: f32) -> Contrast {
+        contrast_fixture(move |ui| {
+            let mut style = plate::style();
+            style.visuals.disabled_alpha = alpha;
+            ui.set_style(style);
+            ground(ui, fill);
+            ui.add_enabled(false, egui::Button::new("Not now"));
+        })
+    }
+
+    #[test]
+    fn aulook_disabled_button_holds_on_each_fill() {
+        for fill in [plate::ISLAND, plate::WELL, plate::DESK] {
+            let held = disabled_on(fill, plate::DISABLED_ALPHA);
+            assert_eq!(held.checked, 1, "the button's words: {held:?}");
+            assert!(held.failures.is_empty(), "{:?}: {held:?}", fill.to_array());
+            let stock = disabled_on(fill, 0.5);
+            assert_eq!(stock.checked, 1, "the button's words: {stock:?}");
+            assert_eq!(stock.failures.len(), 1, "egui's 0.5 on {:?}: {stock:?}", fill.to_array());
+        }
+    }
+
+    #[test]
+    fn aulook_no_translucent_ink_on_text() {
+        assert_eq!((plate::legend_dim().a(), plate::legend_muted().a()), (255, 255));
+        let mut read = 0;
+        in_every_room(|at, h| {
+            for (t, _) in texts_of(&h.kit().output().shapes) {
+                let job = &t.galley.job;
+                for s in &job.sections {
+                    let colour = s.format.color;
+                    let colour = if colour == plate::SECTION_PLACEHOLDER { t.fallback_color } else { colour };
+                    let ink = t.override_text_color.unwrap_or(colour);
+                    let words = &job.text[s.byte_range.start.0..s.byte_range.end.0];
+                    // The one transparency text takes is a disabled scope's.
+                    let dimmed = plate::INK.gamma_multiply(plate::DISABLED_ALPHA);
+                    assert!(ink.a() == 255 || ink == dimmed, "{at}: {words:?} in {ink:?}");
+                    read += 1;
+                }
+            }
+        });
+        assert!(read > 1500, "read {read} sections");
+    }
+
+    #[test]
+    fn aulook_type_roles_are_the_table() {
+        use egui::{FontFamily, TextStyle};
+        use plate::{Role, semibold};
+        let regular = FontFamily::Proportional;
+        let roles = [
+            (Role::Title, 24.0, semibold()),
+            (Role::Card, 20.0, semibold()),
+            (Role::Heading, 16.0, semibold()),
+            (Role::Chrome, 14.0, regular.clone()),
+            (Role::Step, 14.0, semibold()),
+            (Role::Panel, 13.0, regular.clone()),
+            (Role::Small, 12.0, regular),
+        ];
+        for (role, size, face) in roles {
+            assert_eq!(role.font(), FontId::new(size, face), "{role:?}");
+        }
+        let style = plate::style();
+        let of = |s: TextStyle| style.text_styles[&s].clone();
+        assert_eq!(of(TextStyle::Body), Role::Panel.font());
+        assert_eq!(of(TextStyle::Button), Role::Panel.font());
+        assert_eq!(of(TextStyle::Small), Role::Small.font());
+        assert_eq!(of(TextStyle::Heading), Role::Heading.font());
+        assert_eq!(plate::mono_font(), FontId::new(12.0, plate::mono()));
+    }
+
+    #[test]
+    fn aulook_legend_is_sentence_case() {
+        let h = dressed(|ui| {
+            for legend in ["render queue", "VP 1", "horizon Y"] {
+                plate::legend(ui, legend);
+            }
+        });
+        let shapes = &h.output().shapes;
+        let words: Vec<&str> = texts_of(shapes).iter().map(|(t, _)| t.galley.job.text.as_str()).collect();
+        assert_eq!(words, ["Render queue", "VP 1", "Horizon Y"]);
+        assert_eq!(plate::sentence(""), "", "an empty legend stays empty");
+    }
+
+    #[test]
+    fn aulook_kanji_sit_on_the_latin_line() {
+        let h = dressed(|ui| {
+            ui.label("H原");
+        });
+        let shapes = &h.output().shapes;
+        let texts = texts_of(shapes);
+        let (text, _) = texts.iter().find(|(t, _)| t.galley.job.text == "H原").expect("the label");
+        let glyphs = &text.galley.rows[0].glyphs;
+        let middle = |c: char| {
+            let g = glyphs.iter().find(|g| g.chr == c).expect("the glyph");
+            g.pos.y + g.uv_rect.offset.y + g.uv_rect.size.y * 0.5
+        };
+        let apart = (middle('H') - middle('原')).abs();
+        assert!(apart < 1.5, "H and 原 sit {apart} pt apart");
+    }
+
+    #[test]
+    fn aulook_top_row_fits_at_1280() {
+        let mut h = EditorHarness::with_state(crate::sample::build_sample());
+        h.kit_mut().set_size(vec2(1280.0, 800.0));
+        settle(&mut h);
+        let right = h.rect("help").right();
+        assert!(right <= 1280.0, "the last menu ends at {right}");
+    }
+
+    #[test]
+    fn aulook_render_section_survives_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.render.ffmpeg = "C:/tools/ffmpeg.exe".into();
+        config.render.out_dir = "D:/renders".into();
+        config.save_to(dir.path()).unwrap();
+        let (back, notes) = crate::config::Config::load_from(dir.path());
+        assert!(notes.is_empty(), "nothing reset: {notes:?}");
+        assert_eq!(back.render, config.render);
+    }
+
+    /// What 0.5.0 wrote, built by hand: a golden is never a real config, so
+    /// it holds no `api_key` and no `totp_secret`.
+    #[test]
+    fn aulook_v050_config_golden_loads() {
+        use crate::config::{self, Config};
+        let dir = tempfile::tempdir().unwrap();
+        let golden = serde_json::json!({
+            "perf": {
+                "vsync": true, "frame_latency": "Throughput", "canvas_filter": "Nearest",
+                "fps_cap": 60, "show_fps": true, "undo_limit": 200
+            },
+            "ui": {
+                "scale": 125, "show_welcome": false, "quick_start": [true, true, false, false, false],
+                "whats_new_seen": "0.5.0", "lock_positions": true, "exact_descriptions": true
+            },
+            "session": { "username": "lancer", "host_port": 7878, "last_addr": "", "require_key": false },
+            "update_repo": "someone/else",
+            "render": { "ffmpeg": "C:/tools/ffmpeg.exe", "out_dir": "D:/renders" }
+        });
+        assert!(!golden.to_string().contains("api_key") && !golden.to_string().contains("totp_secret"));
+        std::fs::write(config::config_path_in(dir.path()), golden.to_string()).unwrap();
+        let (got, notes) = Config::load_from(dir.path());
+        assert!(notes.is_empty(), "nothing reset: {notes:?}");
+        assert_eq!(got.ui.scale, 125);
+        assert_eq!(got.ui.quick_start, [true, true, false, false, false]);
+        assert_eq!(got.ui.whats_new_seen, "0.5.0");
+        assert!(!got.ui.show_welcome && got.ui.lock_positions && got.ui.exact_descriptions);
+        assert_eq!((got.session.api_key.as_str(), got.session.totp_secret.as_str()), ("", ""));
+        assert_eq!((got.render.ffmpeg.as_str(), got.render.out_dir.as_str()), ("C:/tools/ffmpeg.exe", "D:/renders"));
+    }
 }

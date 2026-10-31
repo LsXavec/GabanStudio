@@ -2131,7 +2131,7 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
             dyn_size: true,
             dyn_opacity: true,
             min_size: 0.15,
-            color: Some([83, 137, 196, 255]), // ao
+            color: Some(crate::plate::PENCIL_AO.to_array()), // ao
             tilt_size: true,
             tilt_opacity: true,
             tilt_shape: true,
@@ -2171,7 +2171,7 @@ pub fn pencil_box_presets() -> [BrushPreset; 3] {
             dyn_size: true,
             dyn_opacity: true,
             min_size: 0.2,
-            color: Some([228, 82, 47, 255]), // aka
+            color: Some(crate::plate::PENCIL_AKA.to_array()), // aka
             tilt_size: true,
             tilt_opacity: false,
             tilt_shape: true,
@@ -2698,6 +2698,7 @@ fn section_name(key: &str) -> &'static str {
         "presets" => "brush presets",
         "onion" => "onion skin",
         "light_table" => "light table",
+        "render" => "render",
         _ => "settings",
     }
 }
@@ -2841,6 +2842,7 @@ impl Config {
         read_section(map, "layers", &mut self.layers, dropped);
         read_section(map, "onion", &mut self.onion, dropped);
         read_section(map, "light_table", &mut self.light_table, dropped);
+        read_section(map, "render", &mut self.render, dropped);
         if let Some(v) = map.get("presets") {
             match read_list::<BrushPreset>(v, ("brush preset", "brush presets"), dropped) {
                 Some(list) => self.presets = list,
@@ -3033,6 +3035,7 @@ pub fn settings_window(
         }
     }
     egui::Window::new("Settings")
+        .frame(crate::plate::dialog_frame(&ctx.global_style()))
         .open(open)
         .resizable(true)
         .default_size([640.0, 560.0])
@@ -3161,7 +3164,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                         .and_then(|b| b.chords().find_map(|c| config.conflict(action, c)));
                     let btn = egui::Button::new(text).min_size(egui::vec2(160.0, 0.0));
                     let btn = if is_capturing {
-                        btn.fill(crate::plate::tally_well())
+                        btn.fill(crate::plate::BLUE_WASH)
                     } else if clash.is_some() {
                         btn.fill(crate::plate::WELL)
                             .stroke(egui::Stroke::new(1.0, crate::plate::AKA))
@@ -3226,6 +3229,7 @@ pub fn connect_window(
     let mut out = None;
     let mut close = false;
     egui::Window::new("Join a room")
+        .frame(crate::plate::dialog_frame(&ctx.global_style()))
         .collapsible(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -4437,7 +4441,7 @@ fn pressure_curve_editor(ui: &mut egui::Ui, curve: &mut PressureCurve) -> bool {
     painter.rect_stroke(
         rect,
         4,
-        egui::Stroke::new(1.0, crate::plate::legend_dim()),
+        egui::Stroke::new(1.0, crate::plate::hairline()),
         egui::StrokeKind::Inside,
     );
     for i in 1..4 {

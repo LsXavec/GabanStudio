@@ -554,6 +554,7 @@ pub fn note_window(ctx: &egui::Context, state: &mut AppState) {
     let (mut open, mut add, mut cancel) = (true, false, false);
     let form = state.board.note.as_mut().expect("checked above");
     egui::Window::new("Retake note")
+        .frame(plate::dialog_frame(&ctx.global_style()))
         .open(&mut open)
         .default_width(300.0)
         .collapsible(false)
@@ -721,12 +722,16 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
                 let r = r.on_hover_text(format!("{name} · {} — drag to move it", length_sk(*frames, fps)));
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
                 let painter = ui.painter();
-                let fill = if *id == current { plate::AO } else { plate::WELL };
-                painter.rect_filled(rect, 2.0, fill);
+                let (fill, ink) = if *id == current {
+                    (plate::BLUE_WASH, plate::BLUE_DEEP)
+                } else {
+                    (plate::WELL, plate::STRUCK)
+                };
+                painter.rect_filled(rect, plate::R_SHEET, fill);
                 if state.board.drag == Some(i) {
                     painter.rect_stroke(
                         rect,
-                        2.0,
+                        plate::R_SHEET,
                         egui::Stroke::new(2.0, plate::TALLY),
                         egui::StrokeKind::Inside,
                     );
@@ -738,7 +743,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
                     egui::Align2::LEFT_TOP,
                     name,
                     egui::FontId::proportional(11.0),
-                    plate::STRUCK,
+                    ink,
                 );
                 if *id == current && *frames > 0 {
                     let x = rect.left() + rect.width() * frame.min(*frames) as f32 / *frames as f32;

@@ -642,7 +642,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
     if hand.is_some() {
         ui.painter().rect_stroke(
             clip.rect,
-            egui::CornerRadius::ZERO,
+            plate::R_CONTROL,
             egui::Stroke::new(1.0, plate::AKA),
             egui::StrokeKind::Inside,
         );
@@ -688,7 +688,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
         const LINES: &str = "The screen's line count, lines per inch along its angle (20 to 120).";
         const TURN: &str = "The dot rows' angle, degrees (0 to 180).";
         ui.horizontal(|ui| {
-            plate::legend(ui, "lpi").on_hover_text(LINES);
+            plate::legend(ui, "LPI").on_hover_text(LINES);
             let (r, x) = held_field(ui, &mut state.manga.held, "tone lpi", lpi, 20.0..=120.0, 0.5, "");
             r.on_hover_text(LINES);
             if let Some(x) = x {
@@ -729,7 +729,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
                          horizon moves the horizon with it.";
     for (k, vp) in rulers.vps.iter().enumerate().take(VP_KEYS.len()) {
         ui.horizontal(|ui| {
-            plate::legend(ui, &format!("vp {}", k + 1)).on_hover_text(PLACE);
+            plate::legend(ui, &format!("VP {}", k + 1)).on_hover_text(PLACE);
             let [kx, ky] = VP_KEYS[k];
             let (r, x) = held_field(ui, &mut state.manga.held, kx, vp[0], -1.0e6..=1.0e6, 1.0, "");
             r.on_hover_text(PLACE);
@@ -746,7 +746,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
     if let Some(h) = rulers.horizon {
         const LEVEL: &str = "The horizon's height, page px from the top; the points on it move with it.";
         ui.horizontal(|ui| {
-            plate::legend(ui, "horizon y").on_hover_text(LEVEL);
+            plate::legend(ui, "horizon Y").on_hover_text(LEVEL);
             let (r, y) = held_field(ui, &mut state.manga.held, "horizon y", h, -1.0e6..=1.0e6, 1.0, "");
             r.on_hover_text(LEVEL);
             if let Some(y) = y {
@@ -832,7 +832,7 @@ fn page_thumb(
         let stroke = if Some(i) == selected {
             egui::Stroke::new(2.0, plate::TALLY)
         } else {
-            egui::Stroke::new(1.0, plate::GRAPHITE)
+            egui::Stroke::new(1.0, plate::INK3)
         };
         p.add(egui::Shape::closed_line(pts, stroke));
     }
@@ -876,8 +876,8 @@ pub fn paint_page(
     }
     let pt = |p: [f32; 2]| to_screen(egui::pos2(p[0], p[1]));
     let closed = |q: &[egui::Pos2]| q.iter().chain(q.first()).copied().collect::<Vec<_>>();
-    let dim = egui::Stroke::new(1.0, plate::legend_dim());
-    let ao = egui::Stroke::new(1.0, plate::AO);
+    let dim = egui::Stroke::new(1.0, plate::INK3);
+    let ao = egui::Stroke::new(1.0, plate::PENCIL_AO);
     let tally = egui::Stroke::new(1.0, plate::TALLY);
     let [bleed, trim, inner] = guide_outlines(page, to_screen);
     painter.extend(egui::Shape::dashed_line(&closed(&bleed), dim, 6.0, 4.0));
@@ -915,7 +915,7 @@ pub fn paint_page(
             plate::speak(&resp, egui::WidgetType::Label, None, "horizon");
         }
     }
-    let faint = egui::Stroke::new(1.0, plate::AO.gamma_multiply(0.35));
+    let faint = egui::Stroke::new(1.0, plate::PENCIL_AO.gamma_multiply(0.35));
     let aims = [[0.0, 0.0], [w / 2.0, 0.0], [w, 0.0], [w, h / 2.0], [w, h], [w / 2.0, h], [0.0, h], [0.0, h / 2.0]];
     for (k, vp) in rulers.vps.iter().enumerate() {
         for a in aims {
@@ -984,6 +984,31 @@ mod tests {
         templates::ALL.iter().position(|t| t.name == name).expect("the template")
     }
 
+    /// The panel outline is a mark on paper: a surface token would vanish on
+    /// the white sheet, and this one holds the non-text floor.
+    #[test]
+    fn aulook_manga_page_outline_shows_on_paper() {
+        use crate::measure::{effective, ratio};
+        use egui::epaint::ColorMode;
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(300.0, 400.0)).build_ui(|ui| {
+            let page = Page::b5();
+            let panels = vec![page.first_panel()];
+            page_thumb(ui, &page, &panels, None, egui::vec2(240.0, 320.0));
+        });
+        h.run_steps(2);
+        let outlines: Vec<egui::Color32> = (h.output().shapes.iter())
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Path(p) if p.closed => Some(p.stroke.color.clone()),
+                _ => None,
+            })
+            .filter_map(|c| if let ColorMode::Solid(c) = c { Some(c) } else { None })
+            .collect();
+        assert_eq!(outlines, [plate::LEGEND, plate::LEGEND, plate::INK3], "the trim, the inner frame, the panel");
+        let paper = effective(plate::PAPER, 1.0, [0.0; 3]);
+        let got = ratio(effective(plate::INK3, 1.0, paper), paper);
+        assert!(got >= 3.0, "INK3 on PAPER: {got:.2}");
+    }
+
     /// The editor on a fresh Manga B5 book, in its room.
     fn b5() -> EditorHarness {
         let mut h = EditorHarness::new();
@@ -1005,7 +1030,7 @@ mod tests {
         let h = b5();
         assert_eq!(h.editor().stage, Some(Stage::Manga));
         for label in [
-            "MANGA (PAGES)",
+            "Manga (pages)",
             "New page",
             "panel 1",
             "Split across",
@@ -1265,7 +1290,7 @@ mod tests {
         let before = Rulers::of(h.state().cut());
         assert_eq!(before.vps.len(), 1);
         assert!(h.has("VP1") && h.has("horizon"), "the page guides name the handles\n{}", h.describe());
-        assert!(h.has("VP 1") && h.has("HORIZON Y"), "and the pane places them by number");
+        assert!(h.has("VP 1") && h.has("Horizon Y"), "and the pane places them by number");
         // The guides latch hides them; the panel tool shows them again.
         h.scroll_to("page guides");
         h.click("page guides");

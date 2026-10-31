@@ -124,7 +124,7 @@ fn forge_body(
         p.rect_stroke(
             rect,
             0.0,
-            egui::Stroke::new(1.0, plate::legend_dim()),
+            egui::Stroke::new(1.0, plate::hairline()),
             egui::StrokeKind::Inside,
         );
         resp.on_hover_text(
@@ -385,7 +385,7 @@ fn curve_row(
             p.rect_stroke(
                 rect,
                 0.0,
-                egui::Stroke::new(1.0, plate::legend_dim()),
+                egui::Stroke::new(1.0, plate::hairline()),
                 egui::StrokeKind::Inside,
             );
             if c.points.len() < 2 {
@@ -508,9 +508,10 @@ fn specimen(
     }
     // Ink on transparent, over nothing — the pane paints Paper beneath.
     let mut px = Vec::with_capacity(w * h * 4);
+    let [r, g, b, _] = plate::INK.to_array();
     for a in alpha {
         let a8 = (a.clamp(0.0, 1.0) * 255.0) as u8;
-        px.extend_from_slice(&[26, 27, 24, a8]);
+        px.extend_from_slice(&[r, g, b, a8]);
     }
     egui::ColorImage::from_rgba_unmultiplied([w, h], &px)
 }

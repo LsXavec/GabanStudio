@@ -258,13 +258,8 @@ pub fn ui(
     }
     let paper_rect =
         Rect::from_min_max(to_screen(pos2(0.0, 0.0)), to_screen(pos2(paper_w, paper_h)));
+    painter.rect_filled(rect, 0, crate::plate::RESULT);
     painter.rect_filled(paper_rect, 0, crate::plate::PAPER);
-    painter.rect_stroke(
-        paper_rect,
-        2,
-        egui::Stroke::new(1.0, crate::plate::legend_dim()),
-        egui::StrokeKind::Outside,
-    );
     let hint = |painter: &egui::Painter, msg: &str| {
         painter.text(
             rect.center(),
@@ -278,31 +273,27 @@ pub fn ui(
         GraphView::Ready(id) | GraphView::Rendering(id) => {
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             painter.image(id, paper_rect, uv, crate::plate::UNTINTED);
-            let tag = painter.text(
+            let tag = crate::plate::picture_tag(
+                &painter,
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
-                egui::Align2::LEFT_TOP,
                 if *final_look {
                     "🎬 final look"
                 } else {
                     "🎬 composite"
                 },
-                egui::FontId::proportional(12.0),
-                crate::plate::alpha(crate::plate::AO, 200),
             );
             if matches!(graph, GraphView::Rendering(_)) {
                 // GM9: the lamp, and in words — an FX render is pending
                 // (GM11: or the final look's CPU frame).
-                painter.circle_filled(pos2(tag.right() + 8.0, tag.center().y), 4.0, crate::plate::TALLY);
-                painter.text(
-                    pos2(tag.right() + 16.0, tag.center().y),
-                    egui::Align2::LEFT_CENTER,
+                painter.circle_filled(pos2(tag.right() + 14.0, tag.center().y), 4.0, crate::plate::TALLY);
+                crate::plate::picture_tag(
+                    &painter,
+                    pos2(tag.right() + 28.0, tag.top()),
                     if *final_look {
                         "rendering final look…"
                     } else {
                         "rendering FX…"
                     },
-                    egui::FontId::proportional(12.0),
-                    crate::plate::LEGEND,
                 );
             }
         }
@@ -323,19 +314,23 @@ pub fn ui(
         .safe
         .then(|| anim_core::camera::safe_frames(paper_w as u32, paper_h as u32));
     if let Some(s) = vs.drawn_safe {
-        let g = egui::Stroke::new(1.0, crate::plate::AO);
+        let g = egui::Stroke::new(1.0, crate::plate::PENCIL_AO);
         for r in [s.action, s.title] {
             let pts = r.corners().iter().map(|&(x, y)| to_screen(pos2(x, y))).collect();
             painter.add(egui::Shape::closed_line(pts, g));
         }
     }
-    let at = Rect::from_min_size(rect.left_bottom() + vec2(8.0, -28.0), vec2(80.0, 22.0));
+    // The latches ride on the island: the neutral grey around the paper is
+    // too close to their words to carry them.
+    let row = Rect::from_min_size(rect.left_bottom() + vec2(4.0, -34.0), vec2(216.0, 34.0));
+    ui.painter().rect_filled(row, crate::plate::R_CONTROL, crate::plate::ISLAND);
+    let at = Rect::from_min_size(rect.left_bottom() + vec2(8.0, -30.0), vec2(80.0, crate::plate::CTRL_H));
     ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
         crate::plate::latch(ui, &mut vs.safe, "safe")
             .on_hover_text("action safe (93%) and title safe (90%) over the composite")
     });
     // GM11: the delivery's look, beside it (a fixed slot: nothing moves).
-    let at = Rect::from_min_size(rect.left_bottom() + vec2(96.0, -28.0), vec2(120.0, 22.0));
+    let at = Rect::from_min_size(rect.left_bottom() + vec2(96.0, -30.0), vec2(120.0, crate::plate::CTRL_H));
     ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
         crate::plate::latch(ui, final_look, "final look").on_hover_text(
             "the composite as the master delivers it: no rough, reference or correction \

@@ -687,7 +687,7 @@ mod tests {
         h.key(egui::Key::F1);
         h.editor_mut().help.sheet_query = "refill".into();
         h.run();
-        assert!(h.has("CANVAS GESTURES"), "{}", h.describe());
+        assert!(h.has("Canvas gestures"), "{}", h.describe());
         assert!(h.has_text_containing("refill the clicked flat"), "{}", h.describe());
         // Quick start says them with this keymap's fill key.
         h.perform(Action::QuickStart);

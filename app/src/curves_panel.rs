@@ -155,9 +155,9 @@ pub struct CurvesState {
 fn ink(i: usize) -> egui::Color32 {
     [
         plate::STRUCK,
-        plate::AO,
-        plate::LEGEND,
-        plate::AO.gamma_multiply(0.6),
+        plate::PENCIL_AO,
+        plate::INK3,
+        plate::PENCIL_AO.gamma_multiply(0.6),
         plate::STRUCK.gamma_multiply(0.6),
     ][i % 5]
 }

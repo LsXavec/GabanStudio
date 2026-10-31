@@ -6640,8 +6640,8 @@ mod lighttable_tests {
     fn lighttable_onion_tints_are_unchanged() {
         assert_eq!(ONION_BEHIND_TINT, [160, 195, 232]);
         assert_eq!(ONION_AHEAD_TINT, [205, 206, 199]);
-        assert_eq!(plate::AO.to_array(), [83, 137, 196, 255]);
-        assert_eq!(plate::LEGEND.to_array(), [139, 141, 131, 255]);
+        assert_eq!(plate::PENCIL_AO.to_array(), [83, 137, 196, 255]);
+        assert_eq!(plate::PENCIL_LEGEND.to_array(), [139, 141, 131, 255]);
     }
 
     #[test]
