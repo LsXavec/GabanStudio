@@ -48,6 +48,8 @@ mod testkit;
 #[cfg(test)]
 mod tidy_tests;
 mod uidump;
+#[cfg(test)]
+mod uishot;
 mod update;
 mod view3d;
 mod viewer;

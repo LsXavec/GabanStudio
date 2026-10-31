@@ -185,6 +185,17 @@ impl EditorHarness {
         self
     }
 
+    /// The editor at this size in points, as a PNG: wgpu with no window and
+    /// no surface. Only the ignored `uishot` tests call this; the suite
+    /// stays free of a GPU device.
+    pub fn shot(&mut self, size: egui::Vec2, path: &Path) {
+        self.h.set_size(size);
+        self.run();
+        self.h.step();
+        let image = self.h.render().expect("headless render");
+        image.save(path).expect("write the shot");
+    }
+
     /// Run until egui stops asking for an immediate repaint (bounded; a
     /// live playhead keeps asking, which is not an error here).
     pub fn run(&mut self) {

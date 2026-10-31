@@ -48,7 +48,7 @@ windows-sys = { version = "0.59", features = [
 naga = { version = "29", features = ["wgsl-in"] }
 # The headless UI testkit (GM1, testkit.rs): AccessKit queries with no
 # window, no wgpu device and no audio device.
-egui_kittest = { version = "0.35", default-features = false }
+egui_kittest = { version = "0.35", default-features = false, features = ["wgpu"] }
 tempfile = "3"
 # GM2: the save-keeps-unknown-tables test plants a table the build does not
 # know (same version anim-core links; already in the lock file).
