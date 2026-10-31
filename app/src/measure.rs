@@ -304,6 +304,16 @@ impl Reading {
             }
             rows
         });
+        let mut rows = rows;
+        // AU5: the strip is one surface, and each sheet on it is a control
+        // (spec 7.2), up to the cap.
+        let sheets = crate::plate::strip_sheets(ctx);
+        rows.extend(sheets.iter().take(crate::strip::CENSUS_CAP).map(|at| Row {
+            w: at.width().round_ties_even(),
+            h: at.height().round_ties_even(),
+            focus: true,
+            enabled: true,
+        }));
         let mut texts = Vec::new();
         for (t, clip) in texts_of(shapes) {
             let at = t.visual_bounding_rect().intersect(clip.intersect(window));

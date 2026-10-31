@@ -107,6 +107,10 @@ pub enum Action {
     // GM14: typing on the sheet cursor's cell, and the curves pane's verbs
     // (the pane, its framing, the selected keys' interpolation and handles).
     TypeIntoCell,
+    // AU5: the next drawing, held as long as this one, and the counter's
+    // typed frame.
+    AddDrawingAfter,
+    GoToFrame,
     ShowCurves,
     FrameCurves,
     InterpHold,
@@ -416,6 +420,8 @@ impl Action {
         Action::PasteCells,
         Action::PasteCellsInsert,
         Action::TypeIntoCell,
+        Action::AddDrawingAfter,
+        Action::GoToFrame,
         Action::ShowCurves,
         Action::FrameCurves,
         Action::InterpHold,
@@ -576,6 +582,8 @@ impl Action {
             Action::PasteCells => "Paste cells",
             Action::PasteCellsInsert => "Paste cells (insert)",
             Action::TypeIntoCell => "Type into cell",
+            Action::AddDrawingAfter => "Add drawing",
+            Action::GoToFrame => "Go to frame…",
             Action::ShowCurves => "Curves (graph editor)",
             Action::FrameCurves => "Frame curves",
             Action::InterpHold => "Key interpolation: hold",
@@ -738,6 +746,8 @@ impl Action {
             TypeIntoCell => {
                 "Type a drawing name into the sheet cursor's cell (a digit over the sheet starts it too)."
             }
+            AddDrawingAfter => "Add a blank drawing after this one, held as long as this one.",
+            GoToFrame => "Type a frame number and jump to it.",
             ShowCurves => "Open the Curves pane: param columns (camera moves) as curves over frames, keys to drag.",
             FrameCurves => "Fit the curves view to the selected keys, or every curve when none is selected.",
             InterpHold => "The selected keys hold their value until the next key: a jump, no motion between.",
@@ -837,6 +847,7 @@ impl Action {
             }
             PlayPause | NextFrame | PrevFrame | FirstFrame | LastFrame | ToggleLoop | LoopIn
             | LoopOut | ClearLoop | ToggleScrub | RamPreview | PlayEpisode => Group::Playback,
+            AddDrawingAfter | GoToFrame => Group::Sheet,
             PrevKey | NextKey | NewDrawing | ClearFrameKey | RemoveColumn | InsertFrames
             | DeleteFrames | HoldPlus | HoldMinus | RetimeOnes | RetimeTwos | RetimeThrees
             | Reverse | ColumnKindCel | ColumnKindBg | ColumnKindBook | ColumnKindRef
@@ -930,6 +941,9 @@ impl Action {
             PasteCells => "Sheet/Paste cells",
             PasteCellsInsert => "Sheet/Paste cells (insert)",
             TypeIntoCell => "Sheet/Type into cell",
+            AddDrawingAfter => "Sheet/Add drawing",
+            // The Sheet menu is full at a 720 window (aulook_menus_stay_on_the_window).
+            GoToFrame => "View/Go to frame…",
             // GM14: the curves pane's key verbs, a submenu each (the pane's
             // right-click menu runs the same verbs).
             InterpHold => "Sheet/Key interpolation/hold",
@@ -1121,6 +1135,8 @@ impl Action {
             PasteCellsInsert => &["paste insert", "cells", "clipboard"],
             // GM14: the graph editor by the names other studios give it.
             TypeIntoCell => &["enter cell", "type drawing", "cell entry"],
+            AddDrawingAfter => &["next drawing", "new cel after", "add cel"],
+            GoToFrame => &["jump to frame", "frame number", "counter"],
             ShowCurves => &["graph editor", "f-curve", "curves", "camera move"],
             FrameCurves => &["fit curves", "graph editor", "frame all"],
             InterpHold | InterpLinear | InterpEase | InterpEaseIn | InterpEaseOut
@@ -1457,6 +1473,7 @@ impl Action {
             // the next frame here, so the curves framing key is Shift+F (the
             // pane itself also frames on a bare F under the pointer).
             TypeIntoCell => Some(k("Enter")),
+            AddDrawingAfter => Some(alt("A")),
             FrameCurves => Some(Chord {
                 shift: true,
                 ..k("F")
@@ -1597,7 +1614,7 @@ impl Action {
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
             | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels | ReloadSequences
-            | Underlay3d | CanvasOptions => None,
+            | Underlay3d | CanvasOptions | GoToFrame => None,
         }
     }
 }

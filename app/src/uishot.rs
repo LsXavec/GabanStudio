@@ -7,10 +7,13 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anim_core::command::Command;
+use anim_core::xsheet::Exposure;
 use eframe::egui;
 
 use crate::canvas::CanvasTool;
 use crate::config::{Action, SettingsCategory};
+use crate::doc::AppState;
 use crate::floats::Float;
 use crate::measure::room_tag;
 use crate::newproject::NewProjectForm;
@@ -391,6 +394,81 @@ fn rail_and_floats(dir: &Path) {
     moments(&mut h, dir);
 }
 
+/// AU5: what the strip and the band show on a timed shot: the strip itself at
+/// both sizes, the Speed popover, a sheet's card and its menu, and at the
+/// narrowest size the fold and a sentence that wraps.
+const STRIP: [(&str, u32, u32); 7] = [
+    ("strip-plain", 1600, 900),
+    ("strip-plain-1280", 1280, 800),
+    ("strip-speed", 1600, 900),
+    ("strip-card", 1280, 800),
+    ("strip-menu", 1280, 800),
+    ("strip-fold", 832, 520),
+    ("strip-say", 832, 520),
+];
+
+fn strip_owed() -> Vec<(String, u32, u32)> {
+    STRIP.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+/// Seven drawings on mixed holds, a gap, and one drawing exposed twice.
+fn timed_shot() -> AppState {
+    let mut s = NewProjectForm::default().new_state();
+    s.set_cut_length(32);
+    for frame in [0, 4, 6, 12, 14, 22, 26] {
+        s.goto(frame);
+        s.new_drawing_at_frame();
+    }
+    let (at, column, first) = (s.at(), s.view.active_column, crate::strip::sheets(&s)[0].shows);
+    let gap = Command::SetCell { at, column, frame: 12, key: Some(Exposure::Empty) };
+    let twice = Command::SetCell { at, column, frame: 22, key: Some(first) };
+    s.engine.apply("shot", vec![gap, twice]).expect("two cells");
+    s.goto(6);
+    s
+}
+
+fn strip_moments(dir: &Path) {
+    let mut h = EditorHarness::with_gpu_shipped(timed_shot());
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    let shots: Vec<_> = STRIP
+        .iter()
+        .map(|(state, w, h)| (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32)))
+        .collect();
+    let mut shots = shots.into_iter();
+    let mut next = |h: &mut EditorHarness| {
+        let (name, size) = shots.next().expect("a shot owed");
+        h.kit_mut().set_size(size);
+        arrive(h, draw);
+        (name, size)
+    };
+    for _ in 0..2 {
+        let (name, size) = next(&mut h);
+        h.shot(size, &name);
+    }
+    let (name, size) = next(&mut h);
+    h.click("Speed");
+    h.shot(size, &name);
+    h.key(egui::Key::Escape);
+    let (name, size) = next(&mut h);
+    h.hover("Drawing 3, frames 7 to 12");
+    h.wait(1.0);
+    h.shot(size, &name);
+    let (name, size) = next(&mut h);
+    let at = h.rect("Drawing 3, frames 7 to 12").center();
+    h.right_click_pos(at);
+    h.shot(size, &name);
+    h.key(egui::Key::Escape);
+    let (name, size) = next(&mut h);
+    h.click("…");
+    h.shot(size, &name);
+    h.key(egui::Key::Escape);
+    let (name, size) = next(&mut h);
+    let paper = h.editor().canvas.dbg_rect.center();
+    h.point_at(paper);
+    h.state_mut().refuse("refused — this sentence runs past the end of the narrow lane, and so it wraps to two rows");
+    h.shot(size, &name);
+}
+
 #[test]
 #[ignore = "needs a GPU adapter and UISHOT_DIR; writes PNGs"]
 fn uishot_rooms() {
@@ -409,6 +487,19 @@ fn uishot_rooms() {
     check_shots(&dir, &shipped_owed()).expect("what only a shipped editor shows");
     rail_and_floats(&dir);
     check_shots(&dir, &rail_owed()).expect("the rail's tiers and every float");
+    strip_moments(&dir);
+    check_shots(&dir, &strip_owed()).expect("the strip's moments");
+}
+
+#[test]
+fn austrip_shots_owe_the_strip_and_the_fold() {
+    let owed = strip_owed();
+    let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
+    let narrow = owed.iter().filter(|o| o.1 < 1040).count();
+    assert_eq!((owed.len(), narrow), (STRIP.len(), 2), "the fold and the wrap stand at the narrowest");
+    let elsewhere = shipped_owed().into_iter().chain(rail_owed());
+    assert!(elsewhere.into_iter().all(|o| !names.contains(o.0.as_str())), "no name is another group's");
 }
 
 #[test]

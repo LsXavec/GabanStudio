@@ -214,6 +214,8 @@ fn aurail_reference_height_ignores_the_strip_latch() {
     assert_eq!(rail::reference(584.0, false), 584.0);
     for tall in [900.0, 600.0, 420.0] {
         let mut h = drawn();
+        // The sample opens with the strip up: this reads the latch closing.
+        h.editor_mut().strip_open = false;
         window(&mut h, 1280.0, tall, 1.0);
         let closed = rail_controls(&h);
         let pane = h.editor().canvas.dbg_rect;

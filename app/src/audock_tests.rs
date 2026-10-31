@@ -843,6 +843,9 @@ fn audock_bar_and_band_icons_stand_twenty() {
         assert_eq!(icon.size(), vec2(plate::BAR_ICON, plate::BAR_ICON), "{key}");
     }
     // The transport's keys are drawn, not cut: they stand on the same number.
+    // Five of them stand only with the sheet up (spec 4.4).
+    h.editor_mut().show_sheet();
+    settle(&mut h);
     for key in ["first frame (Home)", "previous frame (S)", "play (Space)", "next frame (F)", "last frame (End)"] {
         assert_eq!(points(&h, key).width(), 6.0 + plate::BAR_ICON + 6.0, "{key}");
     }
@@ -935,13 +938,16 @@ fn audock_chrome_clip_audit_passes() {
 #[test]
 fn audock_band_lanes_keep_apart() {
     let mut h = EditorHarness::with_state_shipped(sample::build_sample());
+    // The full transport is the longer one, and it stands with the sheet up.
+    h.editor_mut().show_sheet();
     for (w, tall) in SIZES {
         for stored in PROBE_SCALES {
             window(&mut h, w, tall, stored);
             let wide = h.ctx().content_rect().width() >= steps::FOLD;
-            let last = if wide { "dropped 0" } else { "…" };
+            let last = if wide { "clear loop range" } else { "…" };
             let left = points(&h, last).right();
-            let right = points(&h, vocab::SHOW_TIMING_SHEET).left();
+            let lane = if wide { "scrub" } else { vocab::HIDE_TIMING_SHEET };
+            let right = points(&h, lane).left();
             assert!(left <= right, "{last} runs into the right lane at {w}×{tall} at {stored}");
             assert_eq!(h.has("first frame (Home)"), wide);
             assert!(h.has("play (Space)"), "Play never folds");

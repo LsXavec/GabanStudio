@@ -236,6 +236,11 @@ pub const CHART_MAX_MARKS: usize = 15;
 /// GM20: a fill, refill or replace clicked off the paper (the Aka lane).
 pub const OUTSIDE_PAPER: &str = "outside the paper: Cut ▸ Paper size… extends it";
 
+/// AU5 (spec 8.2): the two frames a fill, a refill or a transform cannot work
+/// on, as `AppState::no_own_cel_reason` says them.
+pub const HELD_FRAME: &str = "This frame holds an earlier drawing. Go to its first frame, or add a drawing here.";
+pub const BLANK_FRAME: &str = "This frame has no drawing yet. Draw here first.";
+
 /// GM20: a tool used on the paper past a capped painting window (a paper
 /// wider or taller than the GPU paints) — the Aka lane.
 pub const PAST_WINDOW: &str = "past this GPU's painting window: Cut ▸ Paper size… shows it";
@@ -2474,6 +2479,183 @@ impl AppState {
             self.view.selected_drawing = Some(id);
         }
         self.report(r, "new drawing");
+    }
+
+    // ---- AU5: the strip's verbs, on the active track's runs ----------------
+
+    /// The run of the active track over `frame`: its first frame, its
+    /// length and what it shows, as `Column::runs` cuts them.
+    pub fn run_at(&self, frame: u32) -> Option<(u32, u32, Exposure)> {
+        let column = self.cut().xsheet.column(self.view.active_column)?;
+        let mut from = 0;
+        for (shows, len) in column.runs(0, self.frame_count()) {
+            if frame < from + len {
+                return Some((from, len, shows));
+            }
+            from += len;
+        }
+        None
+    }
+
+    /// What the new drawing holds after the run at `frame`: the run's own
+    /// hold. An empty run is a gap, not a hold, so the track's rhythm goes
+    /// on: the last drawing's hold before it, 1 when there is none.
+    fn hold_to_copy(&self, from: u32, len: u32, shows: Exposure) -> u32 {
+        if matches!(shows, Exposure::Drawing(_)) {
+            return len;
+        }
+        let Some(column) = self.cut().xsheet.column(self.view.active_column) else {
+            return 1;
+        };
+        let runs = column.runs(0, from);
+        let last = runs.iter().rev().find(|(e, _)| matches!(e, Exposure::Drawing(_)));
+        last.map_or(1, |(_, held)| *held)
+    }
+
+    /// `Add drawing`: a blank drawing right after the run under the cursor,
+    /// holding as long as that run, the cursor on it, in one undo step. What
+    /// follows ripples and the cut grows. True when it landed.
+    pub fn add_drawing_after(&mut self) -> bool {
+        let Some((from, len, shows)) = self.run_at(self.view.frame) else {
+            self.refuse("refused — this cut has no track to add a drawing to");
+            return false;
+        };
+        let (frame, count) = (from + len, self.hold_to_copy(from, len, shows));
+        let at = self.at();
+        let name = self.next_drawing_name();
+        let id = self.engine.alloc_drawing_id();
+        let layers = self.new_cel_layers();
+        let index = self.cut().drawings.len();
+        let r = self.engine.apply(
+            "add drawing",
+            vec![
+                Command::AddDrawing { at, id, index, name, strokes: vec![], layers },
+                Command::InsertFrames { at, frame, count },
+                Command::SetCell {
+                    at,
+                    column: self.view.active_column,
+                    frame,
+                    key: Some(Exposure::Drawing(id)),
+                },
+            ],
+        );
+        let landed = r.is_ok();
+        if landed {
+            for _ in 0..count {
+                self.ripple_loop(frame, true);
+            }
+            self.view.selected_drawing = Some(id);
+            self.goto(frame);
+        }
+        self.report(r, "drawing added");
+        landed
+    }
+
+    /// The cut's length once the active track runs to `frames`: another
+    /// track's later keys stay inside it.
+    fn length_for(&self, frames: u32) -> u32 {
+        let active = self.view.active_column;
+        let others = self.cut().xsheet.columns.iter().filter(|c| c.id != active);
+        let last = others.filter_map(|c| c.last_key()).max();
+        frames.max(last.map_or(0, |l| l.saturating_add(1)))
+    }
+
+    /// The strip's Speed: every drawing on the active track holds `step`
+    /// frames, the cut takes the new length and the cursor stays on its
+    /// run, in one undo step.
+    pub fn set_speed(&mut self, step: u32) {
+        let (at, column, count) = (self.at(), self.view.active_column, self.frame_count());
+        let Some(col) = self.cut().xsheet.column(column) else {
+            return;
+        };
+        let new = col.retimed_runs(0, count, step);
+        let (mut from, mut here) = (0, 0);
+        for ((_, was), (_, now)) in col.runs(0, count).iter().zip(&new) {
+            if self.view.frame < from + was {
+                break;
+            }
+            from += was;
+            here += now;
+        }
+        let frames = self.length_for(new.iter().map(|r| r.1).sum());
+        let built = sheet_ops::retime_range(&self.engine.project, at, &[column], 0, count, step);
+        let mut cmds = match built {
+            Ok(cmds) => cmds,
+            Err(e) => return self.report(Err(e), "speed"),
+        };
+        if frames != count {
+            cmds.push(Command::SetFrameCount { at, frames });
+        }
+        if cmds.is_empty() {
+            self.status = "already at that speed".into();
+            return;
+        }
+        let r = self.engine.apply("speed", cmds);
+        if r.is_ok() {
+            self.goto(here);
+        }
+        self.report(r, "speed set");
+    }
+
+    /// The strip's sheet edge: the run at `frame` becomes `frames` long,
+    /// later keys ripple and the cut follows, in one undo step.
+    pub fn set_run_length(&mut self, frame: u32, frames: u32) {
+        let Some((from, len, _)) = self.run_at(frame) else {
+            return;
+        };
+        let (at, column, count) = (self.at(), self.view.active_column, self.frame_count());
+        let last = from + len - 1;
+        let mut delta = frames.max(1) as i64 - len as i64;
+        // A run of two keys of one drawing shortens as far as its last key.
+        if let Some((key, _)) = self.cut().xsheet.column(column).and_then(|c| c.exposure_at(last)) {
+            delta = delta.max(key as i64 - last as i64 - 1);
+        }
+        if delta == 0 {
+            return;
+        }
+        // The last run has no key after it: the cut's length is its length.
+        let tail = from + len == count;
+        let built = if tail {
+            Ok(vec![])
+        } else {
+            sheet_ops::hold_delta(&self.engine.project, at, column, last, delta as i32)
+        };
+        let mut cmds = match built {
+            Ok(cmds) => cmds,
+            Err(e) => return self.report(Err(e), "hold"),
+        };
+        let frames = self.length_for((count as i64 + delta) as u32);
+        if frames != count {
+            cmds.push(Command::SetFrameCount { at, frames });
+        }
+        if cmds.is_empty() {
+            return;
+        }
+        let r = self.engine.apply("hold", cmds);
+        if r.is_ok() {
+            self.goto(self.view.frame);
+        }
+        self.report(r, "hold set");
+    }
+
+    /// R19: the playhead rests on the first frame of its run, so a person
+    /// who stops and draws edits the drawing they see.
+    pub fn settle_on_run_start(&mut self) {
+        if let Some((from, ..)) = self.run_at(self.view.frame) {
+            self.view.frame = from;
+        }
+    }
+
+    /// Spec 8.2: why this frame cannot be worked on as a drawing of its own.
+    /// None when this frame has its own drawing.
+    pub fn no_own_cel_reason(&self) -> Option<&'static str> {
+        if self.own_key_drawing().is_some() {
+            None
+        } else if self.current_drawing().is_some() {
+            Some(HELD_FRAME)
+        } else {
+            Some(BLANK_FRAME)
+        }
     }
 
     /// Expose the selected library drawing at the current frame (a hold key).
@@ -5082,9 +5264,12 @@ impl AppState {
         if self.refuse_if_locked() {
             return;
         }
+        if let Some(why) = self.no_own_cel_reason() {
+            self.refuse(why);
+            return;
+        }
         let (Some(did), Some(layer)) = (self.own_key_drawing(), self.active_layer_id()) else {
-            self.status =
-                "held/blank frame — a refill edits a frame's OWN cel (draw here first)".into();
+            self.status = "no raster layer here to refill".into();
             return;
         };
         // GM20: the click and the region range over `area`, beyond the

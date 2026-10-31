@@ -1485,7 +1485,7 @@ mod tests {
     #[test]
     fn playback_audio_clock_leads_the_playhead_and_counts_dropped_frames() {
         let mut h = EditorHarness::with_state(sounding());
-        assert!(h.has("dropped 0"), "the slot always draws\n{}", h.describe());
+        assert!(!h.has("dropped 0"), "a clean run says nothing\n{}", h.describe());
         // The sound is playing (as a device would play it), the UI behind.
         let cursor = Arc::new(AtomicUsize::new(0));
         let key = sound_key(&h);
@@ -1680,7 +1680,7 @@ mod tests {
     #[test]
     fn playback_transport_slots_hold_still_when_the_loop_range_is_set() {
         let mut h = EditorHarness::new();
-        let (scrub, dropped) = (h.rect("scrub"), h.rect("dropped 0"));
+        let (scrub, sheet) = (h.rect("scrub"), h.rect(crate::vocab::HIDE_TIMING_SHEET));
         assert!(h.has("—"), "the range slot reads — while unset\n{}", h.describe());
         assert_eq!(h.node_enabled("clear loop range"), Some(false));
         h.state_mut().goto(4);
@@ -1690,7 +1690,7 @@ mod tests {
         assert_eq!(h.node_enabled("clear loop range"), Some(true));
         // D7: nothing after the range moved under the pointer.
         assert_eq!(h.rect("scrub"), scrub);
-        assert_eq!(h.rect("dropped 0"), dropped);
+        assert_eq!(h.rect(crate::vocab::HIDE_TIMING_SHEET), sheet);
         h.state_mut().goto(9);
         h.click("loop out");
         assert_eq!(h.state().loop_range(), Some((4, 9)));

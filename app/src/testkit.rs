@@ -194,6 +194,7 @@ impl Rig {
         let here = self.editor.shortcut_ctx(ui.ctx());
         for a in shortcuts::collect(ui.ctx(), &self.config.keybinds, here) {
             self.editor.presets.clone_from(&self.config.presets);
+            let a = self.editor.aimed(a, ui.ctx());
             let r = self.editor.perform(a);
             self.performed.push((a, r));
         }
@@ -2337,8 +2338,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 625;
-    const ASSERT_FLOOR: usize = 3646;
+    const TEST_FLOOR: usize = 665;
+    const ASSERT_FLOOR: usize = 3819;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");
@@ -2796,14 +2797,15 @@ mod tests {
     }
 
     /// AU2's leave-out list: no renames, no menu moves, no new Actions. The
-    /// parts that make them (AU3, AU4, AU10, AU11) re-pin this and say so in
-    /// their commit bodies. AU4 brought the rail and `CanvasOptions`.
+    /// parts that make them (AU3, AU4, AU5, AU10, AU11) re-pin this and say so
+    /// in their commit bodies. AU4 brought the rail and `CanvasOptions`, AU5
+    /// `AddDrawingAfter` and `GoToFrame`.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (155, 0x0f238c8af5891c36), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (157, 0xe0f8d4ef86144cd7), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }

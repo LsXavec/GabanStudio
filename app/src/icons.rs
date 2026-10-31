@@ -246,6 +246,8 @@ pub enum Icon {
     Pause,
     StepFwd,
     SkipFwd,
+    /// Speed: two chevrons going forward — how long each drawing holds.
+    Speed,
 }
 
 /// Paint `icon` centred in `rect` in one ink. Prefers the detailed forged
@@ -475,6 +477,12 @@ pub fn paint(p: &Painter, rect: Rect, ink: Color32, icon: Icon) {
         Icon::Pause => {
             for x in [0.22f32, 0.58] {
                 p.rect_filled(Rect::from_min_max(at(x, 0.12), at(x + 0.2, 0.88)), 0.0, ink);
+            }
+        }
+        Icon::Speed => {
+            for x in [0.1f32, 0.48] {
+                p.line_segment([at(x, 0.18), at(x + 0.36, 0.5)], s);
+                p.line_segment([at(x + 0.36, 0.5), at(x, 0.82)], s);
             }
         }
         Icon::StepBack => {

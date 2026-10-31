@@ -1696,11 +1696,11 @@ impl CanvasView {
         if state.refuse_if_locked() {
             return None;
         }
-        let Some(did) = state.own_key_drawing() else {
-            state.status =
-                "held/blank frame — a transform edits a frame's OWN cel (draw here first)".into();
+        if let Some(why) = state.no_own_cel_reason() {
+            state.refuse(why);
             return None;
-        };
+        }
+        let did = state.own_key_drawing()?;
         let (kd, kl, _) = state.active_layer_key();
         if kd != did.0 || kl == u64::MAX {
             state.status = "no raster layer here to transform".into();
@@ -5924,10 +5924,8 @@ impl CanvasView {
             if state.refuse_if_locked() {
                 return;
             }
-            if state.own_key_drawing().is_none() {
-                state.status =
-                    "held/blank frame — a fill edits a frame's OWN cel (draw here first)"
-                        .into();
+            if let Some(why) = state.no_own_cel_reason() {
+                state.refuse(why);
                 return;
             }
             self.lasso_pts.clear();
@@ -6302,9 +6300,11 @@ impl CanvasView {
         if state.refuse_if_locked() {
             return;
         }
+        if let Some(why) = state.no_own_cel_reason() {
+            state.refuse(why);
+            return;
+        }
         let Some(did) = state.own_key_drawing() else {
-            state.status =
-                "held/blank frame — a fill edits a frame's OWN cel (draw here first)".into();
             return;
         };
         let (kd, kl, _) = state.active_layer_key();
@@ -9395,6 +9395,18 @@ pub(crate) mod extpaper_tests {
         h.step();
         h.input_mut().modifiers = Modifiers::NONE;
         h.step();
+    }
+
+    /// Past the GPU gate a fill on a held frame says what the strip shows: a
+    /// run, not a gap.
+    #[test]
+    fn austrip_held_fill_refuses_with_the_held_sentence() {
+        let mut state = wide_state();
+        state.goto(2);
+        let (mut h, xf) = fill_rig(state);
+        let at = xf.paper_to_screen(pos2(960.0, 540.0));
+        click(&mut h, at, Modifiers::NONE);
+        assert_eq!(h.state().1.refusal, crate::doc::HELD_FRAME);
     }
 
     #[test]

@@ -169,7 +169,7 @@ fn publish_clipboard(ui: &egui::Ui, state: &mut AppState) {
 /// actions. A frame that also carries the chord's key leaves it to the
 /// action, so one press never acts twice. A paste lands the cells only
 /// when it carries the block's own text; other text is refused.
-fn clipboard_events(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+pub(crate) fn clipboard_events(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     publish_clipboard(ui, state);
     if !ui.rect_contains_pointer(ui.max_rect()) || ui.ctx().text_edit_focused() {
         return;
@@ -1860,7 +1860,12 @@ fn cell_popup(resp: &egui::Response) -> egui::Popup<'_> {
 /// Bg / Ref column the storyboard panel's cut number; and, on any row,
 /// the frame's retake notes (each resolved from here) and "add retake
 /// note…".
-fn cell_menu(ui: &mut egui::Ui, state: &mut AppState, column: Option<ColumnId>, frame: u32) {
+pub(crate) fn cell_menu(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    column: Option<ColumnId>,
+    frame: u32,
+) {
     if let Some(col) = column {
         match state.resolve_at(col, frame) {
             Some(drawing) => kind_menu(ui, state, drawing),
@@ -1944,7 +1949,11 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
 /// GM6: a context menu's drawing-kind entries (a cell's and the
 /// library's): genga (key), breakdown, douga (inbetween), unmarked — the
 /// drawing's own kind checked. A pick is one undo step.
-fn kind_menu(ui: &mut egui::Ui, state: &mut AppState, drawing: anim_core::ids::DrawingId) {
+pub(crate) fn kind_menu(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    drawing: anim_core::ids::DrawingId,
+) {
     use anim_core::model::DrawingKind;
     plate::legend(ui, "drawing kind");
     let now = state.cut().drawing_kind(drawing);

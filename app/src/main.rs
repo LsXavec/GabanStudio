@@ -47,6 +47,7 @@ mod sample;
 mod shortcuts;
 mod stabilizer;
 mod steps;
+mod strip;
 mod templates;
 #[cfg(test)]
 mod testkit;
@@ -56,6 +57,8 @@ mod tidy_tests;
 mod audock_tests;
 #[cfg(test)]
 mod aurail_tests;
+#[cfg(test)]
+mod austrip_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;
@@ -82,6 +85,7 @@ use egui_dock::{DockArea, DockState};
 use icons::Icon;
 use newproject::{FormAction, NewProjectForm};
 use paint::PaintLayer;
+use plate::Card;
 use std::time::Duration;
 use workspace::{Pane, Stage, Workspace, Workspaces};
 
@@ -3137,10 +3141,13 @@ impl Editor {
                 };
             }
             Action::FrameCurves => curves_panel::frame_stored(&mut self.state),
+            // AU5: Enter opens the sheet and starts typing in any place.
             Action::TypeIntoCell => {
-                self.open_pane(Pane::XSheet);
+                self.show_sheet();
                 self.state.sheet_ui.ask_entry();
             }
+            // AU5: the counter turns into a field for one frame number.
+            Action::GoToFrame => self.frame_entry = Some(String::new()),
             // GM9: the graph comes forward and opens its add-node menu on
             // its next frame (the node it adds is the edit).
             Action::AddNode => {
@@ -3365,6 +3372,13 @@ impl Editor {
         let s = &mut ed.state;
         match action {
             Action::PlayPause => s.toggle_play(),
+            // AU5: the strip opens on the drawing that needs it; the one
+            // refit that costs waits for the pen, this being guarded.
+            Action::AddDrawingAfter => {
+                if s.add_drawing_after() {
+                    ed.strip_open = true;
+                }
+            }
             Action::NextFrame => s.step(1),
             Action::PrevFrame => s.step(-1),
             Action::FirstFrame => s.goto(0),
@@ -3635,6 +3649,7 @@ impl Editor {
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
             | Action::TypeIntoCell
+            | Action::GoToFrame
             | Action::AddNode
             | Action::ShowCutBoard
             | Action::ShowEpisode
@@ -3694,6 +3709,7 @@ fn is_chrome(action: Action) -> bool {
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
             | Action::TypeIntoCell
+            | Action::GoToFrame
             | Action::AddNode
             // GM15: the editorial's panes, the queue's Episode job and the
             // note window — the document is untouched until its "add note".
@@ -3738,6 +3754,11 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::FirstFrame
             | Action::LastFrame
             | Action::NewDrawing
+            // AU5: the strip's add, the sheet coming up, and a jump: none
+            // lands under a live stroke.
+            | Action::AddDrawingAfter
+            | Action::TypeIntoCell
+            | Action::GoToFrame
             | Action::ClearCel
             | Action::ClearCelAll
             | Action::CycleCelLayer
@@ -4256,12 +4277,22 @@ struct Editor {
     pane_rects: Vec<(Pane, egui::Rect, egui::LayerId)>,
     /// AU4: who is open over the canvas. Not saved.
     floats: floats::Floats,
-    /// AU4: the strip's latch, for this session. AU5 sets it; the band and
-    /// the rail's reference height read it now.
+    /// AU4: the strip's latch, for this session: set when a document opens
+    /// with more than one frame and by Add drawing, and never cleared by
+    /// itself. The band and the rail's reference height read it.
     strip_open: bool,
     /// AU4: the full-band latch (spec R17): set by the second drawing and
     /// never cleared in a session. The rail's Flip reads it, AU5's band too.
     full_band: bool,
+    /// AU5: the simple timeline's gesture and scale. Not saved.
+    strip: strip::Strip,
+    /// AU5: the document the strip's latch and scale were set for, so a
+    /// frame added later never refits the paper under a stroke.
+    opened_doc: Option<String>,
+    /// AU5: playback was running last frame: a stop is seen as it happens.
+    was_playing: bool,
+    /// AU5: the frame number being typed, while the counter is a field.
+    frame_entry: Option<String>,
     /// AU1: every action `perform` answered `Ignored`, however it ran (a
     /// key, a click, the palette). The journey `Recorder` reads it.
     #[cfg(test)]
@@ -4576,6 +4607,19 @@ fn visible_panes(dock: &DockState<Pane>) -> Vec<Pane> {
         }
     }
     out
+}
+
+/// What the Loop latch means, on either transport.
+const LOOP_CARD: &str = "off = playback stops at the end of the loop range (or the cut)";
+
+/// A transport key: its name and its card read the chord it has now, so a
+/// rebound key never leaves the band out of date (AU5).
+fn transport_key(ui: &mut egui::Ui, icon: Icon, word: &str, action: Action) -> egui::Response {
+    let name = match menus::chord_label(ui.ctx(), action) {
+        Some(chord) => format!("{word} ({chord})"),
+        None => word.to_string(),
+    };
+    menus::hover_tip(plate::band_key_named(ui, icon, &name), action, "")
 }
 
 /// Renders each pane by borrowing the editor's parts (disjoint fields, so the
@@ -4902,6 +4946,41 @@ impl Editor {
         !self.strip_open && self.strip_room()
     }
 
+    /// AU5: the band's question: the sheet is on screen, so the transport
+    /// spreads out and the strip has nothing to add.
+    fn sheet_on_screen(&self) -> bool {
+        visible_panes(&self.dock).contains(&Pane::XSheet)
+    }
+
+    /// AU5: the one way a verb brings the Timing sheet up: Draw's own switch
+    /// in Draw, which the room remembers, and the pane anywhere else.
+    fn show_sheet(&mut self) {
+        if self.stage == Some(Stage::Drawing) && self.dock.find_tab(&Pane::XSheet).is_none() {
+            self.switch_sheet(false);
+        } else {
+            self.open_pane(Pane::XSheet);
+        }
+    }
+
+    /// AU5: Delete over the strip means the drawing under the pointer, never
+    /// a track. The one translation sits here, at chord dispatch and not in
+    /// `perform`, so the menu's Remove track still removes a track and a
+    /// rebound chord follows it (spec 7.2).
+    pub(crate) fn aimed(&mut self, action: Action, ctx: &egui::Context) -> Action {
+        let over = ctx.pointer_latest_pos().is_some_and(|p| self.strip.holds(p));
+        if action != Action::RemoveColumn || !over {
+            return action;
+        }
+        // The key sits on the run's first frame, whichever frame this is.
+        if !self.canvas.stroke_active() {
+            match self.strip.under() {
+                Some(from) => self.state.goto(from),
+                None => self.state.settle_on_run_start(),
+            }
+        }
+        Action::ClearFrameKey
+    }
+
     /// AU4: a drawing canvas stands somewhere this frame, for a float to
     /// open over: not Plan's preview, unless the OS window has it.
     fn canvas_shown(&self) -> bool {
@@ -5097,6 +5176,10 @@ impl Editor {
             floats: floats::Floats::default(),
             strip_open: false,
             full_band: false,
+            strip: strip::Strip::default(),
+            opened_doc: None,
+            was_playing: false,
+            frame_entry: None,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -5192,6 +5275,10 @@ impl Editor {
             floats: floats::Floats::default(),
             strip_open: false,
             full_band: false,
+            strip: strip::Strip::default(),
+            opened_doc: None,
+            was_playing: false,
+            frame_entry: None,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -6424,6 +6511,10 @@ impl eframe::App for App {
             }
             let ctx = ui.ctx().clone();
             for action in fired {
+                let action = match &mut self.editor {
+                    Some(ed) => ed.aimed(action, &ctx),
+                    None => action,
+                };
                 self.perform(&ctx, action);
             }
         }
@@ -7442,18 +7533,261 @@ impl Editor {
         self.sync_audio(dt);
     }
 
-    /// THE FOOT's right lane: the Timing sheet button, the room lamp and the
-    /// pen. Laid out FIRST from the row's right edge so a long chatter line
-    /// can never push it off the screen (the clipping the owner's frame_007
-    /// debug outlines caught).
-    fn foot_right(&mut self, ui: &mut egui::Ui, room: &Option<(String, Vec<String>)>) {
+    /// THE TRANSPORT ROW (spec 4.4): always the band's last 36, plain with
+    /// the sheet off screen and full with it on. The right lane is laid out
+    /// FIRST from the row's right edge so a long Say line can never push it
+    /// off the screen (the clipping the owner's frame_007 debug outlines
+    /// caught).
+    fn transport_row(&mut self, ui: &mut egui::Ui) {
+        let full = self.sheet_on_screen();
+        // Under the fold width the rarer keys wait behind one `…`.
+        let fold = ui.ctx().content_rect().width() < steps::FOLD;
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.band_right(ui, full, fold);
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    self.band_left(ui, full, fold);
+                    ui.separator();
+                    self.say_line(ui);
+                });
+            });
+        });
+    }
+
+    /// The band's right slots, last first. On a blank document the plain
+    /// ones wait in reserved slots, and arrive with the second drawing.
+    fn band_right(&mut self, ui: &mut egui::Ui, full: bool, fold: bool) {
         ui.add_space(8.0);
         self.sheet_button(ui);
+        self.relaunch_key(ui);
+        if full {
+            if !fold {
+                self.sound_keys(ui);
+            }
+        } else {
+            if !fold {
+                if self.full_band {
+                    self.speed_key(ui);
+                    self.ghost_key(ui);
+                } else {
+                    plate::band_slot(ui, "Speed");
+                    plate::band_slot(ui, vocab::GHOST_FRAMES);
+                }
+            }
+            let add = plate::band_action(ui, Icon::Plus, "Add drawing", "Add drawing (band)");
+            if menus::hover_tip(add, Action::AddDrawingAfter, "").clicked() {
+                self.invoke(Action::AddDrawingAfter, ui.ctx());
+            }
+        }
+        // GM12: frames passed over to keep up with the sound. A clean run
+        // says nothing.
+        if self.play_dropped > 0 {
+            let dropped = format!("dropped {}", self.play_dropped);
+            playback::readout(ui, &dropped, 96.0, plate::LEGEND)
+                .card("Frames passed over to keep up with the sound.");
+        }
+    }
+
+    /// The band's left slots: the transport, and the frame.
+    fn band_left(&mut self, ui: &mut egui::Ui, full: bool, fold: bool) {
+        let gesture = self.canvas.stroke_active();
+        let arrived = full || self.full_band;
+        if full && !fold {
+            self.first_frame_key(ui);
+        }
+        if !arrived {
+            plate::band_key_slot(ui);
+        } else if transport_key(ui, Icon::StepBack, "previous frame", Action::PrevFrame).clicked()
+            && !gesture
+        {
+            self.state.step(-1);
+        }
+        let (pi, word) = if self.state.view.playing {
+            (Icon::Pause, "stop")
+        } else {
+            (Icon::Play, "play")
+        };
+        if transport_key(ui, pi, word, Action::PlayPause).clicked() {
+            self.invoke(Action::PlayPause, ui.ctx());
+        }
+        if !arrived {
+            plate::band_key_slot(ui);
+        } else if transport_key(ui, Icon::StepFwd, "next frame", Action::NextFrame).clicked()
+            && !gesture
+        {
+            self.state.step(1);
+        }
+        if full && !fold {
+            self.last_frame_key(ui);
+        }
+        if self.frame_entry.is_some() {
+            self.frame_entry_ui(ui);
+        } else if full {
+            self.frame_field(ui);
+        } else {
+            self.counter(ui);
+        }
+        if full {
+            self.loop_latch(ui);
+        }
+        if fold {
+            if arrived {
+                self.fold_menu(ui, full);
+            } else {
+                plate::band_key_slot(ui);
+            }
+        } else if full {
+            self.loop_keys(ui);
+        }
+    }
+
+    /// The `…` under the fold width: the rarer half of either transport.
+    fn fold_menu(&mut self, ui: &mut egui::Ui, full: bool) {
+        let card = if full {
+            "first and last frame, the loop range and the sound"
+        } else {
+            "ghost frames and speed"
+        };
+        let more = ui.menu_button("…", |ui| {
+            if full {
+                ui.horizontal(|ui| {
+                    self.first_frame_key(ui);
+                    self.last_frame_key(ui);
+                });
+                ui.horizontal(|ui| self.loop_keys(ui));
+                ui.horizontal(|ui| self.sound_keys(ui));
+            } else {
+                ui.horizontal(|ui| {
+                    self.ghost_key(ui);
+                    self.speed_key(ui);
+                });
+            }
+        });
+        if more.inner.is_none() {
+            more.response.card(card);
+        }
+    }
+
+    /// The cut's facts, as the counter and the frame field carry them.
+    fn cut_facts(&self) -> String {
+        let project = &self.state.engine.project;
+        format!(
+            "{}, {} frames, {} fps, {}×{}",
+            self.state.cut().name,
+            self.state.frame_count(),
+            self.state.fps(),
+            project.width,
+            project.height,
+        )
+    }
+
+    /// The plain transport's counter: a tap types a frame (`GoToFrame`), and
+    /// its width holds while the frame rolls over (D7).
+    fn counter(&mut self, ui: &mut egui::Ui) {
+        let count = self.state.frame_count();
+        let words = format!("Frame {} of {count}", self.state.view.frame + 1);
+        let key = plate::counter_key(ui, &words, &format!("Frame {count} of {count}"));
+        if menus::hover_tip(key, Action::GoToFrame, &self.cut_facts()).clicked() {
+            self.invoke(Action::GoToFrame, ui.ctx());
+        }
+    }
+
+    /// The full transport's frame field. The one number an animator most
+    /// wants to type into stops being the one number that cannot be typed
+    /// into.
+    fn frame_field(&mut self, ui: &mut egui::Ui) {
+        let count = self.state.frame_count();
+        let mut f1 = self.state.view.frame + 1;
+        // The cut's facts ride the counter's card (AU3).
+        let facts = format!("current frame — type or drag\n{}", self.cut_facts());
+        if plate::field(ui, egui::DragValue::new(&mut f1).range(1..=count))
+            .on_hover_text(facts)
+            .changed()
+            && !self.canvas.stroke_active()
+        {
+            self.state.goto(f1 - 1);
+        }
+        ui.label(
+            egui::RichText::new(format!("/ {count}"))
+                .monospace()
+                .color(plate::LEGEND),
+        );
+    }
+
+    /// `GoToFrame`'s field, in the counter's place: Enter goes there, and
+    /// anything else leaves the frame where it was.
+    fn frame_entry_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(text) = &mut self.frame_entry else {
+            return;
+        };
+        let field = egui::TextEdit::singleline(text).id_salt("frame_entry").desired_width(72.0);
+        let resp = plate::field(ui, field);
+        plate::speak(&resp, egui::WidgetType::TextEdit, None, "frame number");
+        let gone = resp.lost_focus();
+        let typed = gone && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if !gone {
+            if !resp.has_focus() {
+                resp.request_focus();
+            }
+            return;
+        }
+        let words = self.frame_entry.take().unwrap_or_default();
+        if !typed || self.canvas.stroke_active() {
+            return;
+        }
+        match words.trim().parse::<u32>() {
+            Ok(frame) if frame >= 1 => self.state.goto(frame - 1),
+            _ => self.state.refuse("type a frame number"),
+        }
+    }
+
+    /// Ghost frames, on the plain transport's right.
+    fn ghost_key(&mut self, ui: &mut egui::Ui) {
+        let mut on = self.state.view.onion;
+        let name = "Ghost frames toggle";
+        let key = plate::band_latch(ui, &mut on, Icon::Comp, vocab::GHOST_FRAMES, name);
+        if menus::hover_tip(key, Action::ToggleOnion, "").changed() {
+            self.invoke(Action::ToggleOnion, ui.ctx());
+        }
+    }
+
+    /// Speed: its popover sets every drawing's hold at once, and the loop.
+    fn speed_key(&mut self, ui: &mut egui::Ui) {
+        let key = plate::band_action(ui, Icon::Speed, "Speed", "Speed");
+        let popup = egui::Popup::menu(&key);
+        if popup.show(|ui| self.speed_rows(ui)).is_none() {
+            key.card("How long each drawing holds, and whether the shot loops.");
+        }
+    }
+
+    fn speed_rows(&mut self, ui: &mut egui::Ui) {
+        let now = strip::speed_of(&self.state);
+        for (word, step) in [("Fast", 1), ("Medium", 2), ("Slow", 3)] {
+            let mut on = now == Some(step);
+            let card = match step {
+                1 => "One frame per drawing.".to_string(),
+                n => format!("{n} frames per drawing."),
+            };
+            if plate::latch(ui, &mut on, word).card(card).clicked() {
+                if self.canvas.stroke_active() {
+                    self.state.refuse("refused — finish the stroke first");
+                } else {
+                    self.state.set_speed(step);
+                }
+            }
+        }
         ui.separator();
-        // PSD-shipping: UPDATE READY — the published build moved past
-        // this one. Tally lamp; the click IS the relaunch (session
-        // carried like a dev-loop restart).
+        let mut lp = self.state.view.loop_playback;
+        plate::latch(ui, &mut lp, "Loop").card(LOOP_CARD);
+        self.state.view.loop_playback = lp;
+    }
+
+    /// PSD-shipping: UPDATE READY — the published build moved past this one.
+    /// Tally lamp; the click IS the relaunch (session carried like a dev-loop
+    /// restart).
+    fn relaunch_key(&mut self, ui: &mut egui::Ui) {
         if let Some(tag) = self.update_tag.clone() {
+            ui.separator();
             if ui
                 .button(
                     egui::RichText::new(format!("relaunch to update ({tag})"))
@@ -7470,35 +7804,51 @@ impl Editor {
             let (dot, _) =
                 ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
             ui.painter().circle_filled(dot.center(), 3.5, plate::TALLY);
-            ui.separator();
         }
-        // THE ROOM LAMP (session): being in a room is a
-        // CONFIGURATION — a plate fact, never Aka. It names
-        // the role and who is here, so the artist never opens
-        // Settings to answer "am I connected?".
-        {
-            if let Some((txt, names)) = &room {
-                ui.label(egui::RichText::new(txt).size(10.5).color(plate::STRUCK))
-                    .on_hover_text(if names.is_empty() {
-                        "no one else here yet".to_string()
-                    } else {
-                        format!("with: {}", names.join(", "))
-                    });
-                let _ = &txt;
-                // The lamp itself: Tally = live room.
-                let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                ui.painter().circle_filled(dot.center(), 3.5, plate::TALLY);
-                ui.separator();
+    }
+
+    /// THE SAY LINE (spec 8.2): one reserved lane and one voice, a refusal
+    /// first and the machine's last remark after it. AU7's hints come third,
+    /// and their action button will stand at the lane's right end.
+    fn say_line(&mut self, ui: &mut egui::Ui) {
+        // REFUSAL: the machine overruled the hand. Dwells 4s; a repeat of
+        // the same refusal re-flashes.
+        if self.state.refusal_seq != self.refusal_seen_seq {
+            self.refusal_seen_seq = self.state.refusal_seq;
+            self.refusal_since = ui.input(|i| i.time);
+        }
+        // A NOTICE (a reset config, a lost tablet) waits for the artist: the
+        // dwell starts at the first key or click after it shows, so it is
+        // never missed. (Raw events: a widget that consumed the key still
+        // saw the artist act.)
+        if self.notice_seq == Some(self.state.refusal_seq) {
+            let acted = ui.input(|i| {
+                i.pointer.any_pressed()
+                    || i.raw.events.iter().any(|e| {
+                        matches!(e, egui::Event::Key { pressed: true, .. })
+                    })
+            });
+            if acted {
+                self.notice_seq = None;
+            } else {
+                self.refusal_since = ui.input(|i| i.time);
             }
         }
-        // The pen, one word on the foot, its diagnostics under the hand.
-        let (diag, healthy, mouse_mode) = self.canvas.pressure_diag();
-        if mouse_mode {
-            ui.label(egui::RichText::new("mouse").color(plate::LEGEND))
-                .on_hover_text("input: mouse — no pressure");
-        } else {
-            let ink = if healthy { plate::STRUCK } else { plate::legend_dim() };
-            ui.label(egui::RichText::new("pen").color(ink)).on_hover_text(diag);
+        // CHATTER: the machine's last remark, decaying — a stale "painted"
+        // must never train the eye to ignore this. A step down to the
+        // quietest ink, not a fade: text is opaque, so it never falls under
+        // its floor on the way out.
+        if self.state.status != self.status_seen {
+            self.status_seen = self.state.status.clone();
+            self.status_since = ui.input(|i| i.time);
+        }
+        let now = ui.input(|i| i.time);
+        let (rage, age) = (now - self.refusal_since, now - self.status_since);
+        if rage < 4.0 && !self.state.refusal.is_empty() {
+            plate::refusal(ui, &self.state.refusal);
+        } else if age < 4.0 && !self.state.status.is_empty() {
+            let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
+            plate::say(ui, &self.state.status, ink);
         }
     }
 
@@ -7550,7 +7900,7 @@ impl Editor {
 
     /// The transport's first key: Home.
     fn first_frame_key(&mut self, ui: &mut egui::Ui) {
-        if plate::band_key(ui, Icon::SkipBack, "first frame (Home)").clicked()
+        if transport_key(ui, Icon::SkipBack, "first frame", Action::FirstFrame).clicked()
             && !self.canvas.stroke_active()
         {
             self.state.goto(0);
@@ -7559,7 +7909,7 @@ impl Editor {
 
     /// The transport's last key: End.
     fn last_frame_key(&mut self, ui: &mut egui::Ui) {
-        if plate::band_key(ui, Icon::SkipFwd, "last frame (End)").clicked()
+        if transport_key(ui, Icon::SkipFwd, "last frame", Action::LastFrame).clicked()
             && !self.canvas.stroke_active()
         {
             let last = self.state.frame_count() - 1;
@@ -7567,27 +7917,24 @@ impl Editor {
         }
     }
 
-    /// The loop, the sound and the rates: the transport past the frame
-    /// field, in the foot or in its `…` when the window is narrow.
-    fn transport_rest(&mut self, ui: &mut egui::Ui) {
+    /// Loop, on the full transport's row at any width.
+    fn loop_latch(&mut self, ui: &mut egui::Ui) {
         let mut lp = self.state.view.loop_playback;
-        plate::latch(ui, &mut lp, "loop").on_hover_text(
-            "off = playback stops at the end of the loop range (or the cut)",
-        );
+        plate::latch(ui, &mut lp, "loop").on_hover_text(LOOP_CARD);
         self.state.view.loop_playback = lp;
+    }
+
+    /// The loop range, on the row or in the `…` when the window is narrow.
+    fn loop_keys(&mut self, ui: &mut egui::Ui) {
         // GM12: the loop range — "in" and "out" mark the
         // playhead; × plays the whole cut again. Every
         // slot keeps its width whatever it reads (D7).
-        if playback::transport_key(ui, "in", "loop in", 26.0)
-            .on_hover_text("the loop range starts at this frame (Shift+I)")
-            .clicked()
-        {
+        let start = playback::transport_key(ui, "in", "loop in", 26.0);
+        if menus::hover_tip(start, Action::LoopIn, "").clicked() {
             self.invoke(Action::LoopIn, ui.ctx());
         }
-        if playback::transport_key(ui, "out", "loop out", 30.0)
-            .on_hover_text("the loop range ends at this frame (Shift+O)")
-            .clicked()
-        {
+        let end = playback::transport_key(ui, "out", "loop out", 30.0);
+        if menus::hover_tip(end, Action::LoopOut, "").clicked() {
             self.invoke(Action::LoopOut, ui.ctx());
         }
         let range = self.state.loop_range();
@@ -7598,36 +7945,30 @@ impl Editor {
         playback::readout(ui, &text, 64.0, plate::LEGEND)
             .on_hover_text("this cut's loop range (— = none: the whole cut plays)");
         let clear = ui.add_enabled_ui(range.is_some(), |ui| {
-            playback::transport_key(ui, "×", "clear loop range", 22.0)
-                .on_hover_text("clear the loop range (Alt+X)")
+            let key = playback::transport_key(ui, "×", "clear loop range", 22.0);
+            menus::hover_tip(key, Action::ClearLoop, "")
                 .on_disabled_hover_text("this cut has no loop range")
         });
         if clear.inner.clicked() {
             self.invoke(Action::ClearLoop, ui.ctx());
         }
-        let mut scrub = self.scrub_audio;
-        if plate::latch(ui, &mut scrub, "scrub")
-            .on_hover_text("on = a stopped playhead's move sounds one frame (Shift+S)")
-            .changed()
-        {
-            self.scrub_audio = scrub;
-            self.scrub_request = Some(scrub);
-        }
+    }
+
+    /// The sound and the rate. Right to left on the row, left to right in
+    /// the `…`: the slots read the same.
+    fn sound_keys(&mut self, ui: &mut egui::Ui) {
         ui.label(
             egui::RichText::new(format!("{:.3}", self.state.fps() as f32))
                 .monospace()
                 .size(11.0)
                 .color(plate::LEGEND),
         );
-        // GM12: frames passed over to keep up with the sound.
-        let dropped = format!("dropped {}", self.play_dropped);
-        let ink = if self.play_dropped > 0 {
-            plate::LEGEND
-        } else {
-            plate::legend_dim()
-        };
-        playback::readout(ui, &dropped, 96.0, ink)
-            .on_hover_text("frames passed over to keep up with the sound");
+        let mut scrub = self.scrub_audio;
+        let key = plate::latch(ui, &mut scrub, "scrub");
+        if menus::hover_tip(key, Action::ToggleScrub, "").changed() {
+            self.scrub_audio = scrub;
+            self.scrub_request = Some(scrub);
+        }
     }
 
     fn ui(
@@ -7642,8 +7983,28 @@ impl Editor {
         room: Option<(String, Vec<String>)>,
         binds: &[config::Binding],
     ) {
+        // AU5: from here, so the strip's entry in the band survives the dock.
+        self.pane_rects.clear();
+        self.strip.begin();
         // GM2: never lose work — close guard, save modal, title, autosave.
         self.worksafe_frame(ui.ctx());
+        // AU5: a document opened. The strip opens with it when it holds more
+        // than one frame, and its scale is worked out afresh. A frame added
+        // later opens nothing: that refit would land under a stroke.
+        if self.opened_doc.as_deref() != Some(self.state.untitled_group.as_str()) {
+            self.opened_doc = Some(self.state.untitled_group.clone());
+            self.strip_open |= self.state.frame_count() > 1;
+            self.strip.opened();
+        }
+        // The band's keys and the rail's Flip arrive on one frame.
+        self.full_band |= self.state.cut().drawings.len() > 1;
+        // AU5: the hold trap (R19): with the sheet off screen nothing shows a
+        // held frame's number, so a stop lands on the run's first frame.
+        let playing = self.state.view.playing;
+        if self.was_playing && !playing && !self.sheet_on_screen() && !self.canvas.stroke_active() {
+            self.state.settle_on_run_start();
+        }
+        self.was_playing = playing;
         // GM7 CHIP PICK: the active chip lasts while the brush holds its
         // colour (a wheel, preset or key that moves the brush clears it).
         self.state.sync_active_chip(self.canvas.brush_color);
@@ -8338,11 +8699,16 @@ impl Editor {
             // all-or-nothing; a live stroke keeps the old tool state (same
             // law as saved workspaces).
             let steps_width: f32 = steps::STEPS.iter().map(|s| plate::pill_width(ui, s.label)).sum();
-            let limit = dot.left() - steps::GROUP_GAP;
-            let room = limit - (menus_end + steps::GROUP_GAP) - steps_width;
+            // AU5: the room lamp stands here only during a session.
+            let lamp = egui::Rect::from_center_size(
+                dot.center() - egui::vec2(dot.width() + 2.0, 0.0),
+                dot.size(),
+            );
+            let limit = if room.is_some() { lamp.left() } else { dot.left() } - steps::GROUP_GAP;
+            let spare = limit - (menus_end + steps::GROUP_GAP) - steps_width;
             let place_width = place
                 .as_deref()
-                .map_or(0.0, |name| steps::place_width(plate::pill_width(ui, name), room));
+                .map_or(0.0, |name| steps::place_width(plate::pill_width(ui, name), spare));
             let steps_x = steps::island_x(window, menus_end, steps_width, place_width, limit);
             let island = egui::Rect::from_min_size(
                 egui::pos2(steps_x, row.top()),
@@ -8374,6 +8740,19 @@ impl Editor {
                     None => name,
                 };
                 plate::place_pill(&mut pills, name, place_width).on_hover_text(card);
+            }
+            // THE ROOM LAMP (session): being in a room is a CONFIGURATION — a
+            // plate fact, never Aka. It names the role and who is here, so
+            // the artist never opens Settings to answer "am I connected?".
+            if let Some((words, names)) = &room {
+                let key = ui.interact(lamp, ui.id().with("room_lamp"), egui::Sense::hover());
+                ui.painter().circle_filled(lamp.center(), 3.5, plate::TALLY);
+                plate::speak(&key, egui::WidgetType::Label, None, words);
+                let who = match names.as_slice() {
+                    [] => "no one else here yet".to_string(),
+                    names => format!("with: {}", names.join(", ")),
+                };
+                key.card(format!("{words}\n{who}"));
             }
             // GM2: the real dirty mark (revision vs saved + meta edits), not
             // "has undo history". A painted dot in reserved space, so it
@@ -8430,132 +8809,22 @@ impl Editor {
         // THE FOOT (spec §4.1): transport is GLOBAL state, bolted to the
         // chassis — a tape deck's motor is never on a removable reel.
         // AU4: the band's two exact heights (spec 4.4). The strip's 56 stand
-        // above the transport row, which is always the last 36; AU5 fills them.
-        let strip = if self.strip_open && self.strip_room() { rail::STRIP_H } else { 0.0 };
-        let band = egui::Panel::bottom("status_bar").exact_size(plate::BAND_H + strip);
+        // above the transport row, which is always the last 36.
+        let strip = self.strip_open && self.strip_room();
+        let rows = if strip { rail::STRIP_H } else { 0.0 };
+        let band = egui::Panel::bottom("status_bar").exact_size(plate::BAND_H + rows);
         band.frame(plate::desk_frame(ui.style())).show_separator_line(false).show(ui, |ui| {
-            ui.add_space(strip);
-            // Under the fold width the rarer keys wait behind one `…`.
-            let fold = ui.ctx().content_rect().width() < steps::FOLD;
-            ui.horizontal(|ui| {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    self.foot_right(ui, &room);
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        let gesture = self.canvas.stroke_active();
-                        if !fold {
-                            self.first_frame_key(ui);
-                        }
-                        if plate::band_key(ui, Icon::StepBack, "previous frame (S)").clicked()
-                            && !gesture
-                        {
-                            self.state.step(-1);
-                        }
-                        let (pi, ph) = if self.state.view.playing {
-                            (Icon::Pause, "stop (Space)")
-                        } else {
-                            (Icon::Play, "play (Space)")
-                        };
-                        if plate::band_key(ui, pi, ph).clicked() {
-                            self.invoke(Action::PlayPause, ui.ctx());
-                        }
-                        if plate::band_key(ui, Icon::StepFwd, "next frame (F)").clicked()
-                            && !gesture
-                        {
-                            self.state.step(1);
-                        }
-                        if !fold {
-                            self.last_frame_key(ui);
-                        }
-                        // The one number an animator most wants to type into
-                        // stops being the one number that cannot be typed into.
-                        let count = self.state.frame_count();
-                        let mut f1 = self.state.view.frame + 1;
-                        // The cut's facts ride the counter's card (AU3).
-                        let facts = format!(
-                            "current frame — type or drag\n{}, {count} frames, {} fps, {}×{}",
-                            self.state.cut().name,
-                            self.state.fps(),
-                            self.state.engine.project.width,
-                            self.state.engine.project.height,
-                        );
-                        if plate::field(ui, egui::DragValue::new(&mut f1).range(1..=count))
-                            .on_hover_text(facts)
-                            .changed()
-                            && !gesture
-                        {
-                            self.state.goto(f1 - 1);
-                        }
-                        ui.label(
-                            egui::RichText::new(format!("/ {count}"))
-                                .monospace()
-                                .color(plate::LEGEND),
-                        );
-                        if fold {
-                            ui.menu_button("…", |ui| {
-                                ui.horizontal(|ui| {
-                                    self.first_frame_key(ui);
-                                    self.last_frame_key(ui);
-                                });
-                                self.transport_rest(ui);
-                            })
-                            .response
-                            .on_hover_text("first and last frame, the loop range and the sound");
-                        } else {
-                            self.transport_rest(ui);
-                        }
-                        ui.separator();
-                        // REFUSAL lane: the machine overruled the hand.
-                        // Dwells 4s; a repeat of the same refusal re-flashes.
-                        if self.state.refusal_seq != self.refusal_seen_seq {
-                            self.refusal_seen_seq = self.state.refusal_seq;
-                            self.refusal_since = ui.input(|i| i.time);
-                        }
-                        // A NOTICE (a reset config, a lost tablet) waits for
-                        // the artist: the dwell starts at the first key or
-                        // click after it shows, so it is never missed. (Raw
-                        // events: a widget that consumed the key still saw
-                        // the artist act.)
-                        if self.notice_seq == Some(self.state.refusal_seq) {
-                            let acted = ui.input(|i| {
-                                i.pointer.any_pressed()
-                                    || i.raw.events.iter().any(|e| {
-                                        matches!(e, egui::Event::Key { pressed: true, .. })
-                                    })
-                            });
-                            if acted {
-                                self.notice_seq = None;
-                            } else {
-                                self.refusal_since = ui.input(|i| i.time);
-                            }
-                        }
-                        let rage = ui.input(|i| i.time) - self.refusal_since;
-                        // What a long refusal leaves of the lane may hold no
-                        // chatter.
-                        let lane_left = |ui: &egui::Ui| ui.available_width() >= 24.0;
-                        if rage < 4.0 && !self.state.refusal.is_empty() {
-                            plate::refusal(ui, &self.state.refusal);
-                            if lane_left(ui) {
-                                ui.separator();
-                            }
-                        }
-                        // CHATTER lane: the machine's last remark, decaying — a
-                        // stale "painted" must never train the eye to ignore this.
-                        // A step down to the quietest ink, not a fade: text is
-                        // opaque, so it never falls under its floor on the way out.
-                        if self.state.status != self.status_seen {
-                            self.status_seen = self.state.status.clone();
-                            self.status_since = ui.input(|i| i.time);
-                        }
-                        let age = ui.input(|i| i.time) - self.status_since;
-                        if age < 4.0 && !self.state.status.is_empty() && lane_left(ui) {
-                            let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
-                            let words = egui::RichText::new(&self.state.status).color(ink);
-                            // It stops at the right lane; its hover has the rest.
-                            ui.add(egui::Label::new(words).truncate());
-                        }
-                    });
-                });
-            });
+            if strip {
+                let size = egui::vec2(ui.available_width(), rows);
+                let rect = egui::Rect::from_min_size(ui.cursor().min, size);
+                let safe = !self.canvas.stroke_active();
+                let mut room = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                let at = strip::show(&mut room, &mut self.state, &mut self.strip, safe);
+                // The sheet's chords answer over the strip (spec 7.2).
+                self.pane_rects.push((Pane::XSheet, at, ui.layer_id()));
+                ui.add_space(rows);
+            }
+            self.transport_row(ui);
         });
 
         // The docking shell replaces the fixed left/central panels: panes are
@@ -8698,7 +8967,6 @@ impl Editor {
         let layers_docked = panes.contains(&Pane::Layers);
         self.canvas.strip_closed = self.strip_closed();
         self.canvas.sheet_shown = panes.contains(&Pane::XSheet);
-        self.full_band |= self.state.cut().drawings.len() > 1;
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -8722,7 +8990,6 @@ impl Editor {
             layers_docked,
             locked: if ui_lock { &self.held } else { &[] },
         };
-        tabs.pane_rects.clear();
         let dock_style = dock_style(ui.style().as_ref(), &self.dock);
         plate::note_dock(ui, ui.available_rect_before_wrap());
         // UI lock (Settings -> UI Features): the layout freezes — no tab

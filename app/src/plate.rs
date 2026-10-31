@@ -166,7 +166,7 @@ fn describe(resp: Response, kind: &str, label: &str) -> Response {
 pub(crate) fn exact_card(resp: Response, kind: &str, label: &str) -> Response {
     let over = resp.rect.left_top() - Vec2::new(0.0, 4.0);
     let words = || format!("[{kind} '{label}' · plate.rs]");
-    card_at(resp, "exact_card", egui::Align2::LEFT_BOTTOM, over, words)
+    card_at(resp, "exact_card", |_| (egui::Align2::LEFT_BOTTOM, over), words)
 }
 
 // Derived colours. No new hues are permitted: each one is a token, opaque or
@@ -548,10 +548,28 @@ pub const CARD_DELAY: f64 = 0.35;
 
 /// A hover card: at `Order::Tooltip`, and never interactable, so the pen
 /// passes through it while the floats below still block. `text` is built only
-/// once the card shows.
+/// once the card shows. It stands beside its control. Against the window's
+/// right edge it stands over or under instead: pushed back onto its control
+/// it would take the pointer from it, and blink.
 pub fn hover_card(resp: Response, text: impl FnOnce() -> String) -> Response {
-    let beside = resp.rect.right_top() + Vec2::new(8.0, 0.0);
-    card_at(resp, "hover_card", egui::Align2::LEFT_TOP, beside, text)
+    let (rect, room) = (resp.rect, resp.ctx.content_rect());
+    let place = move |wide: f32| {
+        let beside = rect.right_top() + Vec2::new(8.0, 0.0);
+        if beside.x + wide <= room.right() {
+            (egui::Align2::LEFT_TOP, beside)
+        } else if rect.center().y > room.center().y {
+            (egui::Align2::RIGHT_BOTTOM, rect.right_top() - Vec2::new(0.0, 8.0))
+        } else {
+            (egui::Align2::RIGHT_TOP, rect.right_bottom() + Vec2::new(0.0, 8.0))
+        }
+    };
+    card_at(resp, "hover_card", place, text)
+}
+
+/// A [`hover_card`] that stands on `at` and reads upward: the strip's, because
+/// a card beside one surface would cover the band it describes.
+pub fn card_above(resp: Response, at: Pos2, text: impl FnOnce() -> String) -> Response {
+    card_at(resp, "card_above", |_| (egui::Align2::LEFT_BOTTOM, at), text)
 }
 
 /// [`hover_card`] with its words ready, for a chain: what a float's controls
@@ -566,13 +584,12 @@ impl Card for Response {
     }
 }
 
-/// One card, by `salt`, so one control can wear two: `at` is the point of it
-/// `pivot` names.
+/// One card, by `salt`, so one control can wear two. `place` is told how wide
+/// its words came out, and names the corner of it that stands on which point.
 fn card_at(
     resp: Response,
     salt: &str,
-    pivot: egui::Align2,
-    at: Pos2,
+    place: impl FnOnce(f32) -> (egui::Align2, Pos2),
     text: impl FnOnce() -> String,
 ) -> Response {
     let ctx = resp.ctx.clone();
@@ -587,7 +604,12 @@ fn card_at(
         ctx.request_repaint_after_secs((CARD_DELAY - (now - since)) as f32);
         return resp;
     }
-    let frame = egui::Frame::popup(&ctx.global_style()).fill(ISLAND);
+    let words = text();
+    let style = ctx.global_style();
+    let frame = egui::Frame::popup(&style).fill(ISLAND);
+    let (font, limit) = (egui::TextStyle::Body.resolve(&style), style.spacing.tooltip_width);
+    let galley = ctx.fonts_mut(|f| f.layout(words.clone(), font, INK, limit));
+    let (pivot, at) = place(galley.size().x + frame.total_margin().sum().x);
     egui::Area::new(id)
         .order(egui::Order::Tooltip)
         .interactable(false)
@@ -598,7 +620,7 @@ fn card_at(
         .show(&ctx, |ui| {
             frame.show(ui, |ui| {
                 ui.set_max_width(ui.spacing().tooltip_width);
-                ui.label(text());
+                ui.label(words);
             });
         });
     resp
@@ -876,13 +898,34 @@ pub fn value(ui: &mut Ui, text: &str) -> Response {
     ui.label(job)
 }
 
+/// The Say line's one size, and the smaller one its second row asks for.
+pub const SAY_TEXT: f32 = 14.0;
+pub const SAY_SMALL: f32 = 12.0;
+
+/// The Say line's words (spec 4.4): one line, or two smaller ones inside the
+/// row when one will not hold them. What two cannot hold stops on a `…`; the
+/// hover has the rest.
+pub fn say(ui: &mut Ui, words: &str, ink: Color32) -> Response {
+    let wide = ui.available_width();
+    let size = if text_width(ui, words, SAY_TEXT) <= wide { SAY_TEXT } else { SAY_SMALL };
+    let format = egui::TextFormat::simple(FontId::proportional(size), ink);
+    let mut job = egui::text::LayoutJob::single_section(words.to_string(), format);
+    job.wrap = egui::text::TextWrapping {
+        max_width: wide,
+        max_rows: 2,
+        ..egui::text::TextWrapping::default()
+    };
+    let galley = ui.fonts_mut(|f| f.layout_job(job));
+    ui.add(egui::Label::new(galley))
+}
+
 /// A refusal: the wash, red words and a mark, so it never rests on colour.
 /// Long words stop at the end of the lane; the hover has the rest.
 pub fn refusal(ui: &mut Ui, words: &str) -> Response {
     egui::Frame::new()
         .fill(RED_WASH)
         .corner_radius(R_PILL)
-        .inner_margin(egui::Margin::symmetric(8, 2))
+        .inner_margin(egui::Margin::symmetric(8, 1))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let (mark, _) = ui.allocate_exact_size(Vec2::new(10.0, 16.0), Sense::hover());
@@ -890,7 +933,7 @@ pub fn refusal(ui: &mut Ui, words: &str) -> Response {
             let ink = Stroke::new(1.5, RED);
             ui.painter().line_segment([mark.left_top(), mark.right_bottom()], ink);
             ui.painter().line_segment([mark.right_top(), mark.left_bottom()], ink);
-            ui.add(egui::Label::new(egui::RichText::new(words).color(RED)).truncate())
+            say(ui, words, RED)
         })
         .inner
 }
@@ -1154,6 +1197,31 @@ pub fn band_latch(
     latch_sized(ui, on, icon, label, name, BAR_ICON)
 }
 
+/// The room a [`band_action`] or a [`band_latch`] called `label` stands in,
+/// held empty until it arrives (spec 4.4).
+pub fn band_slot(ui: &mut Ui, label: &str) {
+    ui.allocate_exact_size(latch_size(ui, label, BAR_ICON), Sense::hover());
+}
+
+/// The room a [`band_key`] stands in, held empty until it arrives.
+pub fn band_key_slot(ui: &mut Ui) {
+    ui.allocate_exact_size(Vec2::new(6.0 + BAR_ICON + 6.0, CHROME_H), Sense::hover());
+}
+
+/// The band's counter: its words in a ghost key as wide as `widest` reads,
+/// so a digit rolling over moves nothing (D7).
+pub fn counter_key(ui: &mut Ui, words: &str, widest: &str) -> Response {
+    let w = text_width(ui, widest, CTRL_TEXT) + 16.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, CHROME_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = ghost(ui, &resp);
+        ui.painter().rect_filled(rect, R_CONTROL, fill);
+        label_at(ui, rect.left() + 8.0, rect.center().y, words, CTRL_TEXT, ink);
+    }
+    speak(&resp, egui::WidgetType::Button, None, words);
+    describe(resp, "ACTION counter_key", words)
+}
+
 /// [`band_latch`]'s face on a plain action: as wide, never lit, and it
 /// answers as a button, because there is nothing to latch.
 pub fn band_action(ui: &mut Ui, icon: crate::icons::Icon, label: &str, name: &str) -> Response {
@@ -1239,12 +1307,20 @@ fn latch_face(
 /// A momentary action with a painted icon (no armed state — fires on click):
 /// a ghost, no fill at rest, `WELL` under the hand, the wash while pressed.
 pub fn icon_button(ui: &mut Ui, icon: crate::icons::Icon, label: &str, hover: &str) -> Response {
-    icon_button_sized(ui, icon, label, hover, ICON)
+    let resp = icon_button_sized(ui, icon, label, hover, ICON);
+    if hover.is_empty() { resp } else { resp.card(hover) }
 }
 
 /// A transport key: an [`icon_button`] at [`BAR_ICON`], with no caption.
 pub fn band_key(ui: &mut Ui, icon: crate::icons::Icon, hover: &str) -> Response {
-    icon_button_sized(ui, icon, "", hover, BAR_ICON)
+    let resp = icon_button_sized(ui, icon, "", hover, BAR_ICON);
+    if hover.is_empty() { resp } else { resp.card(hover) }
+}
+
+/// A [`band_key`] that says `name` and leaves its card to the caller, whose
+/// card reads the live chord.
+pub fn band_key_named(ui: &mut Ui, icon: crate::icons::Icon, name: &str) -> Response {
+    icon_button_sized(ui, icon, "", name, BAR_ICON)
 }
 
 fn icon_button_sized(
@@ -1287,7 +1363,6 @@ fn icon_button_sized(
         (true, true) => icon_name(icon),
     };
     speak(&resp, egui::WidgetType::Button, None, &name);
-    let resp = if hover.is_empty() { resp } else { resp.card(hover) };
     describe(resp, "ACTION icon_button", label)
 }
 
@@ -1813,6 +1888,14 @@ pub fn note_dock(ui: &Ui, rect: egui::Rect) {
     this_pass(ui.ctx(), |seen| seen.dock = Some(rect));
 }
 
+/// AU5: the strip is one surface, and each sheet on it counts as a control
+/// (spec 7.2), so it reports them to the census. Only under test.
+#[cfg_attr(not(test), allow(unused_variables))]
+pub fn note_strip_sheet(ui: &Ui, rect: egui::Rect) {
+    #[cfg(test)]
+    this_pass(ui.ctx(), |seen| seen.sheets.push(rect));
+}
+
 /// A scroll viewport: its inner rect, the farthest out a clip can sit on the
 /// sides that scroll (`clip_rect_margin` past the inner rect, for a
 /// `ScrollArea`), and which axes those are.
@@ -1832,6 +1915,7 @@ struct Viewports {
     views: Vec<Viewport>,
     bodies: Vec<egui::Rect>,
     dock: Option<egui::Rect>,
+    sheets: Vec<egui::Rect>,
 }
 
 #[cfg(test)]
@@ -1877,6 +1961,12 @@ pub fn pane_bodies(ctx: &egui::Context) -> Vec<egui::Rect> {
 #[cfg(test)]
 pub fn dock_rect(ctx: &egui::Context) -> Option<egui::Rect> {
     last_pass(ctx).dock
+}
+
+/// The strip's sheets on screen in the last finished pass.
+#[cfg(test)]
+pub fn strip_sheets(ctx: &egui::Context) -> Vec<egui::Rect> {
+    last_pass(ctx).sheets
 }
 
 // ---------------------------------------------------------------------------
