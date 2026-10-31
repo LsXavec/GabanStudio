@@ -232,14 +232,14 @@ impl crate::Editor {
     /// The registry-only menus: edit, view, sheet.
     pub(crate) fn plain_menus(&mut self, ui: &mut egui::Ui) {
         for (label, menu) in [("edit", "Edit"), ("view", "View"), ("sheet", "Sheet")] {
-            ui.menu_button(label, |ui| self.menu_items(ui, menu));
+            plate::menu_word(ui, label, |ui| self.menu_items(ui, menu));
         }
     }
 
     /// GM7: the project's own menu — its colour law (D8), said where the
     /// migration that changes it sits.
     pub(crate) fn project_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("project", |ui| {
+        plate::menu_word(ui, "project", |ui| {
             let law = self.state.engine.project.color_law.label();
             ui.label(egui::RichText::new(format!("colour law: {law}")).color(plate::legend_dim()));
             ui.separator();
@@ -248,7 +248,7 @@ impl crate::Editor {
     }
 
     pub(crate) fn help_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("help", |ui| self.menu_items(ui, "Help"));
+        plate::menu_word(ui, "help", |ui| self.menu_items(ui, "Help"));
     }
 
     /// The help windows, each when open.

@@ -296,6 +296,17 @@ fn uishot_rooms() {
 }
 
 #[test]
+fn audock_shots_owe_the_shipped_boot_too() {
+    let shipped = shipped_owed();
+    assert_eq!(shipped.len(), 8);
+    let names: BTreeSet<&str> = shipped.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), 8, "no two shots share a name: {names:?}");
+    assert!(shipped.iter().all(|o| o.0.starts_with("shipped-")), "{names:?}");
+    // The ignored pass checks all of these at once.
+    assert_eq!(shots_owed().len() + states_owed().len() + shipped.len(), 58);
+}
+
+#[test]
 fn aulook_shots_owe_every_state_at_both_sizes() {
     let owed = states_owed();
     assert_eq!(owed.len(), 2 * (MENUS.len() + STATES.len()));

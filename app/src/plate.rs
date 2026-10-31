@@ -282,6 +282,8 @@ pub const LIGHTBOX_W: f32 = 96.0;
 const CTRL_TEXT: f32 = Role::Panel.size();
 /// The icon in a hand-painted control, on the size the masks are cut at.
 const ICON: f32 = 16.0;
+/// The icons on the top row and the band (spec 2.7).
+pub const BAR_ICON: f32 = 20.0;
 /// A detent's ring takes this much of the control's left.
 const DETENT_W: f32 = 22.0;
 /// The gap between the sheet head's rows, down from `item_spacing`: the
@@ -668,6 +670,7 @@ pub fn value(ui: &mut Ui, text: &str) -> Response {
 }
 
 /// A refusal: the wash, red words and a mark, so it never rests on colour.
+/// Long words stop at the end of the lane; the hover has the rest.
 pub fn refusal(ui: &mut Ui, words: &str) -> Response {
     egui::Frame::new()
         .fill(RED_WASH)
@@ -680,7 +683,7 @@ pub fn refusal(ui: &mut Ui, words: &str) -> Response {
             let ink = Stroke::new(1.5, RED);
             ui.painter().line_segment([mark.left_top(), mark.right_bottom()], ink);
             ui.painter().line_segment([mark.right_top(), mark.left_bottom()], ink);
-            ui.label(egui::RichText::new(words).color(RED))
+            ui.add(egui::Label::new(egui::RichText::new(words).color(RED)).truncate())
         })
         .inner
 }
@@ -930,72 +933,135 @@ pub fn tool_latch(
     label: &str,
     name: &str,
 ) -> Response {
-    let text_w = if label.is_empty() {
-        0.0
-    } else {
-        text_width(ui, label, CTRL_TEXT) + 5.0
-    };
-    let (rect, mut resp) = ui.allocate_exact_size(
-        Vec2::new(8.0 + ICON + text_w + 8.0, CTRL_H),
-        Sense::click(),
-    );
+    latch_sized(ui, on, icon, label, name, ICON)
+}
+
+/// A [`tool_latch`] on the band, at [`BAR_ICON`].
+pub fn band_latch(
+    ui: &mut Ui,
+    on: &mut bool,
+    icon: crate::icons::Icon,
+    label: &str,
+    name: &str,
+) -> Response {
+    latch_sized(ui, on, icon, label, name, BAR_ICON)
+}
+
+/// [`band_latch`]'s face on a plain action: as wide, never lit, and it
+/// answers as a button, because there is nothing to latch.
+pub fn band_action(ui: &mut Ui, icon: crate::icons::Icon, label: &str, name: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(latch_size(ui, label, BAR_ICON), Sense::click());
+    if ui.is_rect_visible(rect) {
+        latch_face(ui, rect, &resp, false, icon, label, BAR_ICON);
+    }
+    let name = tool_name(name, label, icon);
+    speak(&resp, egui::WidgetType::Button, None, &name);
+    describe(resp, "ACTION band_action", label)
+}
+
+fn latch_sized(
+    ui: &mut Ui,
+    on: &mut bool,
+    icon: crate::icons::Icon,
+    label: &str,
+    name: &str,
+    size: f32,
+) -> Response {
+    let (rect, mut resp) = ui.allocate_exact_size(latch_size(ui, label, size), Sense::click());
     if resp.clicked() {
         *on = !*on;
         resp.mark_changed();
     }
     if ui.is_rect_visible(rect) {
-        let p = ui.painter();
-        let (ground, rest) = filled(&resp);
-        let (fill, ink, words) = if *on && ui.is_enabled() {
-            (BLUE_WASH, BLUE_DEEP, BLUE_DEEP)
-        } else {
-            (ground_of(ui, ground), at_rest(ui, rest), STRUCK)
-        };
-        p.rect_filled(rect, R_CONTROL, fill);
-        let icon_rect = egui::Rect::from_center_size(
-            Pos2::new(rect.left() + 8.0 + ICON * 0.5, rect.center().y),
-            Vec2::splat(ICON),
-        );
-        crate::icons::paint(p, icon_rect, ink, icon);
-        if !label.is_empty() {
-            label_at(
-                ui,
-                rect.left() + 8.0 + ICON + 5.0,
-                rect.center().y,
-                label,
-                CTRL_TEXT,
-                words,
-            );
-        }
+        latch_face(ui, rect, &resp, *on, icon, label, size);
     }
     let name = tool_name(name, label, icon);
     speak(&resp, egui::WidgetType::Checkbox, Some(*on), &name);
     describe(resp, "LATCH tool_latch", label)
 }
 
+/// A latch stands its icon at `size`, its caption and the pad either side.
+fn latch_size(ui: &Ui, label: &str, size: f32) -> Vec2 {
+    let text_w = if label.is_empty() {
+        0.0
+    } else {
+        text_width(ui, label, CTRL_TEXT) + 5.0
+    };
+    Vec2::new(8.0 + size + text_w + 8.0, CTRL_H)
+}
+
+fn latch_face(
+    ui: &Ui,
+    rect: egui::Rect,
+    resp: &Response,
+    on: bool,
+    icon: crate::icons::Icon,
+    label: &str,
+    size: f32,
+) {
+    let p = ui.painter();
+    let (ground, rest) = filled(resp);
+    let (fill, ink, words) = if on && ui.is_enabled() {
+        (BLUE_WASH, BLUE_DEEP, BLUE_DEEP)
+    } else {
+        (ground_of(ui, ground), at_rest(ui, rest), STRUCK)
+    };
+    p.rect_filled(rect, R_CONTROL, fill);
+    let icon_rect = egui::Rect::from_center_size(
+        Pos2::new(rect.left() + 8.0 + size * 0.5, rect.center().y),
+        Vec2::splat(size),
+    );
+    crate::icons::paint(p, icon_rect, ink, icon);
+    if !label.is_empty() {
+        label_at(
+            ui,
+            rect.left() + 8.0 + size + 5.0,
+            rect.center().y,
+            label,
+            CTRL_TEXT,
+            words,
+        );
+    }
+}
+
 /// A momentary action with a painted icon (no armed state — fires on click):
 /// a ghost, no fill at rest, `WELL` under the hand, the wash while pressed.
 pub fn icon_button(ui: &mut Ui, icon: crate::icons::Icon, label: &str, hover: &str) -> Response {
+    icon_button_sized(ui, icon, label, hover, ICON)
+}
+
+/// A transport key: an [`icon_button`] at [`BAR_ICON`], with no caption.
+pub fn band_key(ui: &mut Ui, icon: crate::icons::Icon, hover: &str) -> Response {
+    icon_button_sized(ui, icon, "", hover, BAR_ICON)
+}
+
+fn icon_button_sized(
+    ui: &mut Ui,
+    icon: crate::icons::Icon,
+    label: &str,
+    hover: &str,
+    size: f32,
+) -> Response {
     let text_w = if label.is_empty() {
         0.0
     } else {
         text_width(ui, label, CTRL_TEXT) + 5.0
     };
     let (rect, resp) =
-        ui.allocate_exact_size(Vec2::new(6.0 + ICON + text_w + 6.0, CTRL_H), Sense::click());
+        ui.allocate_exact_size(Vec2::new(6.0 + size + text_w + 6.0, CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let (fill, ink) = ghost(ui, &resp);
         p.rect_filled(rect, R_CONTROL, fill);
         let icon_rect = egui::Rect::from_center_size(
-            Pos2::new(rect.left() + 6.0 + ICON * 0.5, rect.center().y),
-            Vec2::splat(ICON),
+            Pos2::new(rect.left() + 6.0 + size * 0.5, rect.center().y),
+            Vec2::splat(size),
         );
         crate::icons::paint(p, icon_rect, ink, icon);
         if !label.is_empty() {
             label_at(
                 ui,
-                rect.left() + 6.0 + ICON + 5.0,
+                rect.left() + 6.0 + size + 5.0,
                 rect.center().y,
                 label,
                 CTRL_TEXT,
@@ -1069,38 +1135,66 @@ pub fn place_pill(ui: &mut Ui, name: &str, width: f32) -> Response {
     resp
 }
 
+/// The top row's menu words (specs 2.3 and 4.2): bare on the desk at rest,
+/// `WELL` under the hand, the wash while pressed. For the row's own style; a
+/// menu's popup reads the app's.
+pub fn bare_words(style: &mut egui::Style) {
+    let w = &mut style.visuals.widgets;
+    w.inactive.bg_fill = Color32::TRANSPARENT;
+    w.inactive.weak_bg_fill = Color32::TRANSPARENT;
+    w.hovered.bg_fill = WELL;
+    w.hovered.weak_bg_fill = WELL;
+    w.active.bg_fill = BLUE_WASH;
+    w.active.weak_bg_fill = BLUE_WASH;
+    w.active.fg_stroke = Stroke::new(1.0, BLUE_DEEP);
+}
+
+/// A menu on the top row, a word under [`bare_words`] that keeps the wash
+/// while its menu is open. Inside a menu (the narrow `Menu`) it is the
+/// ordinary row.
+pub fn menu_word<R>(ui: &mut Ui, word: &str, contents: impl FnOnce(&mut Ui) -> R) -> Response {
+    if egui::containers::menu::is_in_menu(ui) {
+        return ui.menu_button(word, contents).response;
+    }
+    let open = egui::Popup::is_id_open(ui.ctx(), ui.next_auto_id().with("popup"));
+    let word = egui::Button::new(word).selected(open);
+    egui::containers::menu::MenuButton::from_button(word).ui(ui, contents).0
+}
+
 /// An icon key on an island: a `PILL_H` square ghost. `name` is what it
-/// answers to and `hover` its tip; the top row's differ.
-pub fn island_key(ui: &mut Ui, icon: crate::icons::Icon, name: &str, hover: &str) -> Response {
+/// answers to; the caller gives it its tip.
+pub fn island_key(ui: &mut Ui, icon: crate::icons::Icon, name: &str) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(PILL_H), Sense::click());
     if ui.is_rect_visible(rect) {
         let (fill, ink) = ghost(ui, &resp);
         let p = ui.painter();
         p.rect_filled(rect, R_PILL, fill);
-        crate::icons::paint(p, egui::Rect::from_center_size(rect.center(), Vec2::splat(ICON)), ink, icon);
+        crate::icons::paint(p, egui::Rect::from_center_size(rect.center(), Vec2::splat(BAR_ICON)), ink, icon);
     }
     speak(&resp, egui::WidgetType::Button, None, name);
-    describe(resp.on_hover_text(hover), "ACTION island_key", name)
+    describe(resp, "ACTION island_key", name)
 }
 
 /// Search: a button in an input's clothes, or the bare lens when the row is
-/// narrow. It answers to `Search` both ways.
-pub fn search_key(ui: &mut Ui, wide: bool, hover: &str) -> Response {
+/// narrow. It answers to `Search` both ways, and the caller gives it its tip.
+pub fn search_key(ui: &mut Ui, wide: bool) -> Response {
     if !wide {
-        return island_key(ui, crate::icons::Icon::Search, "Search", hover);
+        return island_key(ui, crate::icons::Icon::Search, "Search");
     }
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(SEARCH_W, PILL_H), Sense::click());
     if ui.is_rect_visible(rect) {
-        let well = rect.shrink(2.0);
+        // A field's corners are square enough to need the room: this keeps
+        // them inside the island's round end.
+        let well = rect.with_max_x(rect.right() - 4.0).shrink(2.0);
         let (fill, ink) = filled(&resp);
         let p = ui.painter();
-        p.rect_filled(well, R_PILL, fill);
-        let lens = Pos2::new(well.left() + 10.0 + ICON * 0.5, well.center().y);
-        crate::icons::paint(p, egui::Rect::from_center_size(lens, Vec2::splat(ICON)), ink, crate::icons::Icon::Search);
-        label_at(ui, lens.x + ICON * 0.5 + 6.0, well.center().y, "Search", CTRL_TEXT, ink);
+        p.rect(well, R_INPUT, fill, Stroke::new(1.0, INK3), StrokeKind::Inside);
+        let lens = Pos2::new(well.left() + 10.0 + BAR_ICON * 0.5, well.center().y);
+        crate::icons::paint(p, egui::Rect::from_center_size(lens, Vec2::splat(BAR_ICON)), ink, crate::icons::Icon::Search);
+        label_at(ui, lens.x + BAR_ICON * 0.5 + 6.0, well.center().y, "Search", CTRL_TEXT, ink);
     }
     speak(&resp, egui::WidgetType::Button, None, "Search");
-    describe(resp.on_hover_text(hover), "ACTION search_key", "Search")
+    describe(resp, "ACTION search_key", "Search")
 }
 
 /// A ghost control's ground and content by state, as [`icon_button`] paints

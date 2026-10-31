@@ -149,8 +149,8 @@ impl Rig {
             self.config.perf.scrub_audio = on;
         }
         // AU3: the Timing sheet button's choice, saved as the App saves it.
-        if self.editor.sheet_in_draw != self.config.ui.sheet_in_draw {
-            self.config.ui.sheet_in_draw = self.editor.sheet_in_draw;
+        if let Some(on) = self.editor.sheet_request.take() {
+            self.config.ui.sheet_in_draw = on;
             if let Some(dir) = &self.editor.data_dir {
                 self.config.save_to(dir).expect("the rig's config saves");
             }

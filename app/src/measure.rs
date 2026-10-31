@@ -10,7 +10,7 @@
 #![allow(dead_code)]
 
 use eframe::egui;
-use egui::epaint::{ClippedShape, Shape, TextShape};
+use egui::epaint::{ClippedShape, RectShape, Shape, TextShape};
 use egui::{Color32, Context, LayerId, Pos2, Rect, Sense};
 
 use crate::config::Action;
@@ -392,6 +392,34 @@ impl Reading {
         }
         c
     }
+}
+
+/// The rects a frame paints, walked out of their `Vec`s.
+pub fn rects_of(shapes: &[ClippedShape]) -> Vec<RectShape> {
+    fn walk(shape: &Shape, out: &mut Vec<RectShape>) {
+        match shape {
+            Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            Shape::Rect(r) => out.push(r.clone()),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+    out
+}
+
+/// Where a frame's images stand: an icon cut from its masks is one.
+pub fn images_of(shapes: &[ClippedShape]) -> Vec<Rect> {
+    fn walk(shape: &Shape, out: &mut Vec<Rect>) {
+        match shape {
+            Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            Shape::Mesh(m) if !m.is_empty() => out.push(m.calc_bounds()),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+    out
 }
 
 /// The frame as it stands, read.
@@ -948,7 +976,7 @@ impl<'h> Recorder<'h> {
 
 #[cfg(test)]
 mod tests {
-    use egui::epaint::{ColorMode, RectShape};
+    use egui::epaint::ColorMode;
     use egui::{Align2, FontId, Label, pos2, vec2};
     use egui_kittest::Harness;
 
@@ -2099,20 +2127,6 @@ mod tests {
     }
 
     // ---- the review of the look: what a person sees of it ----
-
-    /// The rects a frame paints, walked out of their `Vec`s.
-    fn rects_of(shapes: &[ClippedShape]) -> Vec<RectShape> {
-        fn walk(shape: &Shape, out: &mut Vec<RectShape>) {
-            match shape {
-                Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
-                Shape::Rect(r) => out.push(r.clone()),
-                _ => {}
-            }
-        }
-        let mut out = Vec::new();
-        shapes.iter().for_each(|c| walk(&c.shape, &mut out));
-        out
-    }
 
     /// Every colour a frame lays down outside its words, fills and strokes.
     fn marks_of(shapes: &[ClippedShape]) -> Vec<Color32> {

@@ -1575,6 +1575,17 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - The legend budget was 8; AU2 moved 9.
 - `vocab` still holds the pencil words `ATARI`, `GENGA` and `SHUSEI` in capitals. Nothing reads them, the tiles paint sentence case, and AU12 owns the words.
 
+**AU3 notes.** Choices the build made where this document was silent or spoke twice. None needs a device.
+
+- A template's sheet is that project's. 5.3 says the button is remembered and the presets start sheet-on; AU3's item 4 says the field is copied into config. Copied whole, one TV anime HD project overwrote an explicit Hide and turned the sheet on for every later blank project. So `Editor.sheet_in_draw` carries the template's sheet, and only the button writes `ui.sheet_in_draw`, through `Editor.sheet_request`.
+- Reset layout off the spine returns to the arrangement the place opened with (`Editor.place_dock`). The place stays, so the pill, the lit step, the status and the dock agree. A dock off the spine with no place behind it goes to Draw.
+- The Timing sheet button is a latch in Draw only. In Color, Effects and off the spine it is a plain action, spoken `Show Timing sheet` and never lit, because a click there cannot hide the pane.
+- `add_pane` never joins the Canvas leaf. A click on the paper focuses that leaf, and a tab there would cover the paper.
+- The menu words take 2.6's `item_spacing`, 6, not a row of their own: 18 from word to word with the button's padding. `WIDE` and `WIDE_PLACE` did not move. The 32 pt that costs comes out of `room`: 81 at 1180, still over 72, so `3D layout` elides from 1180 to 1188 and shows whole from 1189, with the full name in its hover. AU11's narrower menus give it back.
+- Search's field takes `R_INPUT`, as an input does. Its right edge stands 6 inside the key, because a 6 pt corner 2 inside would break the island's round end by 1.3 pt. The key stays 141.
+- 2.7's band icons are the five transport keys as well as the Timing sheet button, so a transport key stands 32, not 28. They join the top row at `BAR_ICON` and the panels keep `ICON`.
+- The retired ARMED line also named the fill role (normal, shadow, highlight) while fill was armed, and 4.2 did not move that word anywhere. The Palette's ringed pot marks the role today, and AU4's `Drawing with` card owes its name, so AU4's item 7 now says so.
+
 ---
 
 ## 14 Part map
@@ -1790,7 +1801,7 @@ After this part Draw is canvas-first: paper at its full size, tools on a rail, d
 4. **Hand:** a held state like Space, cleared by any tool. **Flip:** momentary, `Sense::drag`, shown from the second drawing. **Size:** drag only, 48×84, true-size bubble, new `set_brush_px`, refused mid-stroke.
 5. **The Fill chooser and `Keep inside strokes`** per the deck table in 4.5. One `keep_inside_row` function is called from Brushes and from Tool options.
 6. **Retire** `canvas_tool_deck`, the left fold-out and the right hover rail as surfaces. Every row of `TODAY_DECK` gets its home, and that const lands with this step.
-7. `plate::hover_card` per 4.5. The rail and floats use it now. The band and strip join in AU5.
+7. `plate::hover_card` per 4.5. The rail and floats use it now. The band and strip join in AU5. The Brush card's `Drawing with` line carries the fill role's name while fill is armed, the one job of the ARMED line nothing else took (AU3 notes).
 8. `shortcut_ctx` keeps the layer: `pane_rects: Vec<(Pane, Rect, LayerId)>`. `let top = ctx.layer_id_at(p)`, then find `r.contains(p) && top == Some(*layer)`, with no `.rev()`, falling back to `dock.find_active_focused()`. Floats push entries: Layers as `Pane::Layers`, others as `Pane::Canvas`.
 9. `seen_pen` latches only on a pen Start on the canvas layer, not on any Touch event.
 10. Reach-ins go through one helper, so tests and the palette do not know where a control lives. Tests reach a float through `h.open_float(..)`. There is no test-only path in shipped code.

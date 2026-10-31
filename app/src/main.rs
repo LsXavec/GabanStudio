@@ -158,10 +158,7 @@ fn main() -> eframe::Result<()> {
         }),
     };
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1720.0, 960.0])
-            .with_min_inner_size([1024.0, 640.0])
-            .with_title("Gaban Studio"),
+        viewport: main_viewport(),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             surface,
             ..Default::default()
@@ -181,6 +178,14 @@ fn main() -> eframe::Result<()> {
             )))
         }),
     )
+}
+
+/// The main window. AU3: never under 1024×640, the smallest gated size.
+fn main_viewport() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_inner_size([1720.0, 960.0])
+        .with_min_inner_size([1024.0, 640.0])
+        .with_title("Gaban Studio")
 }
 
 /// The plate visuals and the Plex type stack — the app, the layout probe
@@ -3138,11 +3143,20 @@ impl Editor {
                 self.open_pane(Pane::NodeGraph);
                 self.state.graph_ui.ask_add_menu();
             }
-            Action::ResetLayout => {
-                let st = self.stage.unwrap_or(Stage::Drawing);
-                self.dock = self.recipe(st);
-                self.state.status = format!("layout reset: {}", st.name());
-            }
+            // AU3: Reset stays where it is: a step takes its recipe back, and
+            // a place off the spine the arrangement it opened with. The pill,
+            // the lit step, the status and the dock agree either way.
+            Action::ResetLayout => match (self.stage, &self.place_dock) {
+                (Some(st), _) => {
+                    self.dock = self.recipe(st);
+                    self.state.status = format!("layout reset: {}", st.name());
+                }
+                (None, Some(dock)) => {
+                    self.dock = dock.clone();
+                    self.state.status = format!("layout reset: {}", self.place);
+                }
+                (None, None) => self.enter_room(Stage::Drawing),
+            },
             Action::ZoomFit => self.canvas.fit_view(),
             // GM4: the view verbs move the view only, never the paper.
             Action::ZoomIn => self.canvas.zoom_in(),
@@ -4098,13 +4112,22 @@ struct Editor {
     /// room I'm working from", not "the layout is pixel-identical".
     stage: Option<Stage>,
     /// AU3: `ui.sheet_in_draw`, mirrored here because `enter_room` and
-    /// `from_state` see no config. The App and the Rig copy a change back.
+    /// `from_state` see no config. A template's sheet stays on this field,
+    /// for this project.
     sheet_in_draw: bool,
+    /// AU3: the Timing sheet button's choice, for the App and the Rig to
+    /// remember. Only the button asks.
+    sheet_request: Option<bool>,
     /// AU3: where the arrangement came from while `stage` is None: the
-    /// off-spine pill's name, and the panes it opened with (the lock keeps
-    /// those; a panel opened by hand keeps its close control).
+    /// off-spine pill's name, and the arrangement it opened with. Reset goes
+    /// back to it, and the lock keeps its panes (a panel opened by hand
+    /// keeps its close control).
     place: String,
-    place_panes: Vec<Pane>,
+    place_dock: Option<DockState<Pane>>,
+    /// AU3: the panes the lock holds, and the stage and sheet choice they
+    /// were read for. The dock asks every frame; the recipe changes rarely.
+    held: Vec<Pane>,
+    held_for: Option<(Option<Stage>, bool)>,
     /// Named, persisted workspaces (%APPDATA%/AnimStudio/workspaces.json).
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
@@ -4563,7 +4586,7 @@ struct EditorTabs<'a> {
     pane_rects: &'a mut Vec<(Pane, egui::Rect)>,
     /// AU3: the current recipe's panes while Lock UI positions is on, which
     /// keep their place; a panel opened by hand keeps its close control.
-    locked: Vec<Pane>,
+    locked: &'a [Pane],
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -4809,7 +4832,8 @@ impl Editor {
     }
 
     /// AU3: a template's project opens in the template's first step, its
-    /// Timing sheet on where the template starts it on.
+    /// Timing sheet on where the template starts it on. That is this
+    /// project's; the remembered choice is the button's alone.
     fn enter_template(&mut self, t: &templates::Template) {
         self.sheet_in_draw |= t.sheet_on;
         self.enter_room(t.room);
@@ -4819,7 +4843,8 @@ impl Editor {
     fn go_off_spine(&mut self, place: &str) {
         self.stage = None;
         self.place = place.to_string();
-        self.place_panes = self.dock.iter_all_tabs().map(|(_, t)| *t).collect();
+        self.place_dock = Some(self.dock.clone());
+        self.held_for = None;
     }
 
     /// AU3: what the off-spine pill says; None on the spine. Manga is a
@@ -4833,12 +4858,17 @@ impl Editor {
         }
     }
 
-    /// AU3: the panes Lock UI positions holds: the current recipe's.
-    fn locked_panes(&self) -> Vec<Pane> {
-        match self.stage {
-            Some(st) => self.recipe(st).iter_all_tabs().map(|(_, t)| *t).collect(),
-            None => self.place_panes.clone(),
+    /// AU3: the panes Lock UI positions holds: the current recipe's, or the
+    /// place's off the spine.
+    fn locked_panes(&mut self) -> &[Pane] {
+        let key = (self.stage, self.sheet_in_draw);
+        if self.held_for != Some(key) {
+            let dock = self.stage.map(|st| self.recipe(st));
+            let dock = dock.as_ref().or(self.place_dock.as_ref());
+            self.held = dock.map_or(Vec::new(), |d| d.iter_all_tabs().map(|(_, t)| *t).collect());
+            self.held_for = Some(key);
         }
+        &self.held
     }
 
     /// Every Editor is born through this or [`Editor::boot_form`].
@@ -4932,8 +4962,11 @@ impl Editor {
             dock: Stage::Drawing.dock(),
             stage: Some(Stage::Drawing),
             sheet_in_draw: false,
+            sheet_request: None,
             place: String::new(),
-            place_panes: Vec::new(),
+            place_dock: None,
+            held: Vec::new(),
+            held_for: None,
             status_seen: String::new(),
             status_since: 0.0,
             refusal_seen_seq: 0,
@@ -5021,8 +5054,11 @@ impl Editor {
             dock: Stage::Drawing.dock(),
             stage: Some(Stage::Drawing),
             sheet_in_draw: false,
+            sheet_request: None,
             place: String::new(),
-            place_panes: Vec::new(),
+            place_dock: None,
+            held: Vec::new(),
+            held_for: None,
             status_seen: String::new(),
             status_since: 0.0,
             refusal_seen_seq: 0,
@@ -5352,14 +5388,23 @@ impl Editor {
     }
 
     /// AU3: a pane with nowhere to tab in: split a dock of one leaf, else
-    /// join the focused leaf.
+    /// join the focused leaf. The Canvas leaf is never the one: a click on
+    /// the paper focuses it, and a tab there would cover the paper.
     fn add_pane(&mut self, pane: Pane) {
         let tree = self.dock.main_surface_mut();
         if tree.iter().filter(|n| n.is_leaf()).count() == 1 {
             tree.split_right(egui_dock::NodeIndex::root(), 0.70, vec![pane]);
-        } else {
-            tree.push_to_focused_leaf(pane);
+            return;
         }
+        let free = |n: &egui_dock::Node<Pane>| n.tabs().is_some_and(|t| !t.contains(&Pane::Canvas));
+        let leaf = tree
+            .focused_leaf()
+            .filter(|&i| free(&tree[i]))
+            .or_else(|| (0..tree.len()).map(egui_dock::NodeIndex).find(|&i| free(&tree[i])));
+        if let Some(leaf) = leaf {
+            tree.set_focused_node(leaf);
+        }
+        tree.push_to_focused_leaf(pane);
     }
 
     /// GM11: File ▸ Export…'s PNG sequence (`dest` a folder) or MP4 (`dest`
@@ -6142,11 +6187,6 @@ impl eframe::App for App {
             editor.update_tag = self.update_ready.as_ref().map(|(t, _, _)| t.clone());
             let room_key = stage_key(editor.stage);
             editor.arm_room(&layers_cfg, &mut self.stack_room_seen);
-            // AU3: a template that starts the sheet on is the same memory.
-            if editor.sheet_in_draw != self.config.ui.sheet_in_draw {
-                self.config.ui.sheet_in_draw = editor.sheet_in_draw;
-                self.config.save();
-            }
             // GM6: the onion and light table settings live in the config.
             editor.canvas.onion = self.config.onion.sane();
             editor.canvas.light_table = self.config.light_table;
@@ -6175,8 +6215,8 @@ impl eframe::App for App {
                 self.config.save();
             }
             // AU3: the Timing sheet button's choice, remembered.
-            if editor.sheet_in_draw != self.config.ui.sheet_in_draw {
-                self.config.ui.sheet_in_draw = editor.sheet_in_draw;
+            if let Some(on) = editor.sheet_request.take() {
+                self.config.ui.sheet_in_draw = on;
                 self.config.save();
             }
             // Stage 4: the strip's stack requests (the App owns config).
@@ -7374,24 +7414,24 @@ impl Editor {
     }
 
     /// AU3: the Timing sheet button: one click, remembered in Draw. Absent
-    /// in Plan and Timing, whose recipes hold the sheet; everywhere else it
-    /// opens the pane.
+    /// in Plan and Timing, whose recipes hold the sheet; everywhere else a
+    /// plain action that opens the pane, and never lit, because a click
+    /// there cannot hide it.
     fn sheet_button(&mut self, ui: &mut egui::Ui) {
         if matches!(self.stage, Some(Stage::Layout | Stage::Edit)) {
             return;
         }
         let draw = self.stage == Some(Stage::Drawing);
         let shown = self.dock.find_tab(&Pane::XSheet).is_some();
-        let name = if draw && shown {
-            vocab::HIDE_TIMING_SHEET
+        let key = if draw {
+            let mut on = shown;
+            let name = if shown { vocab::HIDE_TIMING_SHEET } else { vocab::SHOW_TIMING_SHEET };
+            plate::band_latch(ui, &mut on, Icon::Sheet, vocab::SHEET_BUTTON, name).on_hover_text(name)
         } else {
-            vocab::SHOW_TIMING_SHEET
+            let name = vocab::SHOW_TIMING_SHEET;
+            plate::band_action(ui, Icon::Sheet, vocab::SHEET_BUTTON, name).on_hover_text(name)
         };
-        let mut on = shown;
-        if plate::tool_latch(ui, &mut on, Icon::Sheet, vocab::SHEET_BUTTON, name)
-            .on_hover_text(name)
-            .clicked()
-        {
+        if key.clicked() {
             if self.canvas.stroke_active() {
                 self.state.refuse("refused — finish the stroke first");
             } else if draw {
@@ -7407,6 +7447,7 @@ impl Editor {
     /// goes and the rest of the arrangement stays.
     fn switch_sheet(&mut self, shown: bool) {
         self.sheet_in_draw = !shown;
+        self.sheet_request = Some(!shown);
         if same_shape(&self.dock, &Stage::Drawing.dock())
             || same_shape(&self.dock, &Stage::dock_with_sheet())
         {
@@ -7420,7 +7461,7 @@ impl Editor {
 
     /// The transport's first key: Home.
     fn first_frame_key(&mut self, ui: &mut egui::Ui) {
-        if plate::icon_button(ui, Icon::SkipBack, "", "first frame (Home)").clicked()
+        if plate::band_key(ui, Icon::SkipBack, "first frame (Home)").clicked()
             && !self.canvas.stroke_active()
         {
             self.state.goto(0);
@@ -7429,7 +7470,7 @@ impl Editor {
 
     /// The transport's last key: End.
     fn last_frame_key(&mut self, ui: &mut egui::Ui) {
-        if plate::icon_button(ui, Icon::SkipFwd, "", "last frame (End)").clicked()
+        if plate::band_key(ui, Icon::SkipFwd, "last frame (End)").clicked()
             && !self.canvas.stroke_active()
         {
             let last = self.state.frame_count() - 1;
@@ -7638,10 +7679,9 @@ impl Editor {
                 let st = ui.style_mut();
                 st.text_styles.insert(TextStyle::Body, plate::Role::Chrome.font());
                 st.text_styles.insert(TextStyle::Button, plate::Role::Chrome.font());
-                // Nine menus, the steps and the actions share the row.
-                st.spacing.item_spacing.x = 2.0;
                 st.spacing.icon_width = 18.0;
                 st.spacing.button_padding.x = 6.0;
+                plate::bare_words(st);
             }
             // THE TOP ROW (AU3, spec 4.2): the menus, the steps, the actions.
             let row = ui.max_rect();
@@ -7651,7 +7691,7 @@ impl Editor {
             let file_menu_was_open = std::mem::take(&mut self.file_menu_open);
             let mut menus = |ui: &mut egui::Ui| {
                 // File commands live in ONE detent.
-                ui.menu_button("file", |ui| {
+                plate::menu_word(ui, "file", |ui| {
                     // GM2: the recent files are checked on disk as the menu
                     // opens, not on every frame it stays open.
                     self.file_menu_open = true;
@@ -7838,7 +7878,7 @@ impl Editor {
                 // Scene/cut navigation (C2): the model always supported
                 // more than one, there was just no way to reach them.
                 // GM3: beside the sheet menu, in the spec's menu order.
-                ui.menu_button("cut", |ui| {
+                plate::menu_word(ui, "cut", |ui| {
                     self.menu_items(ui, "Cut");
                     ui.separator();
                     ui.label(
@@ -7962,7 +8002,7 @@ impl Editor {
                 });
 
                 // GM3: was "ws" — the rooms, then the saved arrangements.
-                ui.menu_button(vocab::STEP, |ui| {
+                plate::menu_word(ui, vocab::STEP, |ui| {
                     self.menu_items(ui, "Room");
                     ui.separator();
                     ui.label(egui::RichText::new("save current arrangement as:").color(plate::legend_dim()));
@@ -8099,7 +8139,7 @@ impl Editor {
                 });
                 // Open or bring forward each pane (a pane lives only while
                 // it's in the dock tree). GM3: was "panes".
-                ui.menu_button("window", |ui| {
+                plate::menu_word(ui, "window", |ui| {
                     for pane in Pane::ALL {
                         // The Brush window is RETIRED (owner 2026-08-17):
                         // its settings live on the canvas deck + right rail.
@@ -8203,7 +8243,7 @@ impl Editor {
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             if narrow {
-                strip.menu_button("Menu", |ui| menus(ui));
+                plate::menu_word(&mut strip, "Menu", |ui| menus(ui));
             } else {
                 menus(&mut strip);
             }
@@ -8294,18 +8334,17 @@ impl Editor {
                 (Action::Redo, Icon::Redo, "Redo (toolbar)"),
             ] {
                 let can = self.can_perform(action);
-                let tip = menus::tip(ui.ctx(), action);
-                let key = keys.add_enabled_ui(can.is_ok(), |ui| plate::island_key(ui, icon, name, &tip)).inner;
+                let key = keys.add_enabled_ui(can.is_ok(), |ui| plate::island_key(ui, icon, name)).inner;
                 let key = match can {
-                    Ok(()) => key,
+                    Ok(()) => menus::hover_tip(key, action, ""),
                     Err(why) => key.on_disabled_hover_text(why),
                 };
                 if key.clicked() {
                     self.invoke(action, ui.ctx());
                 }
             }
-            let tip = menus::tip(ui.ctx(), Action::CommandPalette);
-            if plate::search_key(&mut keys, !narrow, &tip).clicked() {
+            let search = plate::search_key(&mut keys, !narrow);
+            if menus::hover_tip(search, Action::CommandPalette, "").clicked() {
                 self.invoke(Action::CommandPalette, ui.ctx());
             }
         });
@@ -8324,8 +8363,7 @@ impl Editor {
                         if !fold {
                             self.first_frame_key(ui);
                         }
-                        if plate::icon_button(ui, Icon::StepBack, "", "previous frame (S)")
-                            .clicked()
+                        if plate::band_key(ui, Icon::StepBack, "previous frame (S)").clicked()
                             && !gesture
                         {
                             self.state.step(-1);
@@ -8335,10 +8373,10 @@ impl Editor {
                         } else {
                             (Icon::Play, "play (Space)")
                         };
-                        if plate::icon_button(ui, pi, "", ph).clicked() {
+                        if plate::band_key(ui, pi, ph).clicked() {
                             self.invoke(Action::PlayPause, ui.ctx());
                         }
-                        if plate::icon_button(ui, Icon::StepFwd, "", "next frame (F)").clicked()
+                        if plate::band_key(ui, Icon::StepFwd, "next frame (F)").clicked()
                             && !gesture
                         {
                             self.state.step(1);
@@ -8409,9 +8447,14 @@ impl Editor {
                             }
                         }
                         let rage = ui.input(|i| i.time) - self.refusal_since;
+                        // What a long refusal leaves of the lane may hold no
+                        // chatter.
+                        let lane_left = |ui: &egui::Ui| ui.available_width() >= 24.0;
                         if rage < 4.0 && !self.state.refusal.is_empty() {
                             plate::refusal(ui, &self.state.refusal);
-                            ui.separator();
+                            if lane_left(ui) {
+                                ui.separator();
+                            }
                         }
                         // CHATTER lane: the machine's last remark, decaying — a
                         // stale "painted" must never train the eye to ignore this.
@@ -8422,7 +8465,7 @@ impl Editor {
                             self.status_since = ui.input(|i| i.time);
                         }
                         let age = ui.input(|i| i.time) - self.status_since;
-                        if age < 4.0 && !self.state.status.is_empty() {
+                        if age < 4.0 && !self.state.status.is_empty() && lane_left(ui) {
                             let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
                             let words = egui::RichText::new(&self.state.status).color(ink);
                             // It stops at the right lane; its hover has the rest.
@@ -8566,7 +8609,9 @@ impl Editor {
             ui.ctx()
                 .request_repaint_of(floatwin::FloatViewer::viewport_id());
         }
-        let locked = if ui_lock { self.locked_panes() } else { Vec::new() };
+        if ui_lock {
+            self.locked_panes();
+        }
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -8584,7 +8629,7 @@ impl Editor {
             native_pen,
             float_canvas_open: self.float_canvas.open,
             pane_rects: &mut self.pane_rects,
-            locked,
+            locked: if ui_lock { &self.held } else { &[] },
         };
         tabs.pane_rects.clear();
         let dock_style = dock_style(ui.style().as_ref(), &self.dock);
