@@ -35,6 +35,9 @@ tobj = { version = "4", default-features = false }
 # GM18 (D16): page export — TIFF with its resolution tags and 1-bit mono,
 # which image does not write (tiff 0.11 is already locked under image).
 tiff = "0.11"
+# AU8: the GIF writer's LZW (0.1.12 is already locked under tiff; no gif crate
+# is fetched).
+weezl = "0.1"
 
 [dev-dependencies]
 # Tests forge legacy (schema v4/v5) project files directly to prove migration.

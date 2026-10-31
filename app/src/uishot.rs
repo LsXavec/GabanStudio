@@ -596,6 +596,42 @@ fn say_moments(dir: &Path) {
     shoot(&mut h, ProbeRoom::Stage(Stage::Edit));
 }
 
+/// AU8: the queue's preset row with its last two chips, wrapped: the tab in
+/// its room, where the pane is narrow, and the pane alone.
+const QUEUE: [(&str, u32, u32); 4] = [
+    ("queue-room", 1600, 900),
+    ("queue-room-1280", 1280, 800),
+    ("queue-pane", 1600, 900),
+    ("queue-pane-1280", 1280, 800),
+];
+
+fn queue_owed() -> Vec<(String, u32, u32)> {
+    QUEUE.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn queue_moments(dir: &Path) {
+    let room = ProbeRoom::Stage(Stage::Composite);
+    let mut h = EditorHarness::with_gpu(crate::sample::build_sample());
+    // No ffmpeg, the search's answer faked: the row a beginner's PC shows.
+    h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+    let gif = anim_core::deliver::PRESETS.iter().position(|p| p.name == "GIF");
+    h.state_mut().render_queue.draft.preset = gif.expect("the GIF preset");
+    for (state, w, height) in QUEUE {
+        let size = egui::vec2(w as f32, height as f32);
+        h.kit_mut().set_size(size);
+        if state.contains("room") {
+            room.enter(h.editor_mut());
+            let tab = h.editor().dock.find_tab(&crate::Pane::RenderQueue).expect("the queue's tab");
+            let _ = h.editor_mut().dock.set_active_tab(tab);
+            arrive(&mut h, room);
+        } else {
+            h.editor_mut().dock = egui_dock::DockState::new(vec![crate::Pane::RenderQueue]);
+            h.run_frames(4);
+        }
+        h.shot(size, &dir.join(format!("{state}.png")));
+    }
+}
+
 #[test]
 #[ignore = "needs a GPU adapter and UISHOT_DIR; writes PNGs"]
 fn uishot_rooms() {
@@ -620,6 +656,21 @@ fn uishot_rooms() {
     check_shots(&dir, &start_owed()).expect("the Start float's moments");
     say_moments(&dir);
     check_shots(&dir, &say_owed()).expect("what the Say line teaches");
+    queue_moments(&dir);
+    check_shots(&dir, &queue_owed()).expect("the queue's preset row");
+}
+
+#[test]
+fn augif_shots_owe_the_queue_row_at_both_sizes() {
+    let owed = queue_owed();
+    let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
+    for state in ["queue-room", "queue-pane"] {
+        assert!(owed.contains(&(format!("{state}.png"), 1600, 900)), "{state} at 1600");
+        assert!(owed.contains(&(format!("{state}-1280.png"), 1280, 800)), "{state} at 1280");
+    }
+    let elsewhere = say_owed().into_iter().chain(start_owed()).chain(strip_owed()).chain(rail_owed());
+    assert!(elsewhere.into_iter().all(|o| !names.contains(o.0.as_str())), "no name is another group's");
 }
 
 #[test]

@@ -18,6 +18,7 @@ use anim_core::deliver::{
     self, AudioIn, BurnIns, Codec, Format, Names, PRESETS, Preset, Purpose, Slate,
 };
 use anim_core::fx::Image;
+use anim_core::gif::{self, GifWriter};
 use anim_core::model::{Cut, Project};
 use eframe::egui;
 
@@ -165,6 +166,12 @@ pub fn resolve(frame_count: u32, frames: Option<(u32, u32)>) -> (u32, u32) {
     })
 }
 
+/// AU8: the frames `preset` renders of a resolved range: a one-file preset
+/// renders the first of them, never each over the last.
+fn frames_of(preset: &Preset, (a, b): (u32, u32)) -> (u32, u32) {
+    (a, if preset.one_file { a } else { b })
+}
+
 /// Everything a job renders from, taken when it starts (the cut is a
 /// snapshot: Arc'd tiles, cheap; a Final job's is filtered once here, not
 /// per frame).
@@ -218,7 +225,7 @@ impl JobSpec {
             law: project.color_law,
             size: (project.width, project.height),
             fps: project.fps,
-            frames: (0, total.max(1) - 1),
+            frames: frames_of(preset, (0, total.max(1) - 1)),
             preset: *preset,
             burn_ins,
             slate: Slate {
@@ -249,7 +256,7 @@ impl JobSpec {
     ) -> Option<JobSpec> {
         let scene = project.scene(at.scene)?;
         let cut = project.cut(at.scene, at.cut)?;
-        let frames = resolve(cut.frame_count, frames);
+        let frames = frames_of(preset, resolve(cut.frame_count, frames));
         let mut snapshot = cut.clone();
         if preset.purpose == Purpose::Final {
             deliver::retain_purpose(&mut snapshot, Purpose::Final);
@@ -347,6 +354,20 @@ pub fn render_job(
     if let Format::Video(codec) = format {
         let ffmpeg = ffmpeg.ok_or_else(|| NEEDS_FFMPEG.to_string())?;
         return render_video(spec, codec, ffmpeg, cancel, tick);
+    }
+    if format == Format::Gif {
+        return render_gif(spec, cancel, tick);
+    }
+    // AU8: one picture under the exact name, as a video is named; no WAV.
+    if spec.preset.one_file {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        let name = deliver::video_name(&spec.pattern, &spec.slate.names, format.ext());
+        let f = spec.frames.0;
+        deliver::write_frame(&spec.out.join(name), &spec.frame(f), format, spec.law)?;
+        tick(f);
+        return Ok(1);
     }
     // A pattern that does not name the frame gets `_{frame:04}`: one file
     // per frame, never each frame over the last.
@@ -449,6 +470,44 @@ fn render_video(
         s if s.success() => Ok(n),
         s => Err(format!("ffmpeg failed (exit {:?})", s.code())),
     }
+}
+
+/// AU8: a GIF job: no add-on, no sound. The palette comes first, from at most
+/// [`gif::PALETTE_FRAMES`] evenly spaced frames (only those render twice),
+/// then every frame goes to the writer with its share of the running time. A
+/// stopped job drops the writer, and with it the file.
+fn render_gif(
+    spec: &JobSpec,
+    cancel: &AtomicBool,
+    tick: &mut dyn FnMut(u32),
+) -> Result<usize, String> {
+    let rgba = |f: u32| -> Vec<u8> {
+        let img = spec.frame(f);
+        let px = img.px.chunks_exact(4);
+        px.flat_map(anim_core::export::straight_rgba8).collect()
+    };
+    let (w, h) = spec.preset.out_size(spec.size.0, spec.size.1);
+    let out = spec
+        .out
+        .join(deliver::video_name(&spec.pattern, &spec.slate.names, "gif"));
+    let mut writer = GifWriter::new(&out, w, h)?;
+    for f in gif::sample_frames(spec.frames.0, spec.frames.1) {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        writer.sample(&rgba(f))?;
+    }
+    let mut n = 0;
+    for f in spec.frames.0..=spec.frames.1 {
+        if cancel.load(Ordering::Relaxed) {
+            return Err(CANCELLED.into());
+        }
+        writer.push_frame(&rgba(f), gif::delay_cs(f - spec.frames.0, spec.fps))?;
+        n += 1;
+        tick(f);
+    }
+    writer.finish()?;
+    Ok(n)
 }
 
 /// The worker's messages: a frame is out, what the job could not read (just
@@ -692,8 +751,12 @@ fn push_job(
     out: PathBuf,
     pattern: String,
 ) -> Option<usize> {
+    let p = PRESETS[preset.min(PRESETS.len() - 1)];
+    // AU8: one picture of a whole cut means the one on screen.
+    let here = state.view.frame;
+    let frames = if p.one_file { frames.or(Some((here, here))) } else { frames };
     let cut = state.engine.project.cut(at.scene, at.cut)?;
-    let span = resolve(cut.frame_count, frames);
+    let span = frames_of(&p, resolve(cut.frame_count, frames));
     let label = match frames {
         None => cut.name.clone(),
         Some(_) => format!("{} · {}–{}", cut.name, span.0 + 1, span.1 + 1),
@@ -796,6 +859,10 @@ pub enum ExportKind {
     Png,
     /// One MP4 file (H.264, on white).
     Mp4,
+    /// AU8: one animated GIF (on white, no add-on).
+    Gif,
+    /// AU8: one PNG of the current frame (on white).
+    Still,
 }
 
 impl ExportKind {
@@ -803,6 +870,8 @@ impl ExportKind {
         let name = match self {
             ExportKind::Png => "PNG 8-bit",
             ExportKind::Mp4 => "H.264 review",
+            ExportKind::Gif => "GIF",
+            ExportKind::Still => "Still PNG",
         };
         PRESETS.iter().position(|p| p.name == name).unwrap_or(0)
     }
@@ -810,8 +879,9 @@ impl ExportKind {
 
 /// File ▸ Export…'s job for the current cut over `frames` (None = the
 /// whole cut): a PNG sequence into the folder `dest` named by the form's
-/// pattern, or an MP4 at the file `dest` (its folder; its name as the
-/// pattern). No burn-ins, as v0.3's exports had none. The job's index.
+/// pattern, or an MP4 or GIF at the file `dest` (its folder; its name as the
+/// pattern), or the same for a still of the current frame, whatever `frames`
+/// says. No burn-ins, as v0.3's exports had none. The job's index.
 pub fn export_job(
     state: &mut AppState,
     kind: ExportKind,
@@ -820,13 +890,14 @@ pub fn export_job(
 ) -> Option<usize> {
     let (out, pattern) = match kind {
         ExportKind::Png => (dest.to_path_buf(), state.render_queue.draft.pattern.clone()),
-        ExportKind::Mp4 => (
+        ExportKind::Mp4 | ExportKind::Gif | ExportKind::Still => (
             dest.parent().map(Path::to_path_buf).unwrap_or_default(),
             dest.file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| deliver::DEFAULT_PATTERN.into()),
         ),
     };
+    let frames = if kind == ExportKind::Still { None } else { frames };
     let at = state.at();
     push_job(
         state,
@@ -1013,11 +1084,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             ui.label("preset");
             ui.horizontal_wrapped(|ui| {
                 for (i, p) in PRESETS.iter().enumerate() {
-                    let usable = !p.format.is_video() || ffmpeg.is_some();
+                    let usable = !p.format.needs_ffmpeg() || ffmpeg.is_some();
                     let armed = state.render_queue.draft.preset == i;
+                    // In this Ui, not a scope: a scope would not wrap, and
+                    // the chips past the pane's edge could not be reached.
                     let r = ui
-                        .add_enabled_ui(usable, |ui| plate::detent(ui, armed, p.name))
-                        .inner
+                        .add_enabled(usable, |ui: &mut egui::Ui| plate::detent(ui, armed, p.name))
                         .on_hover_text(preset_help(p))
                         .on_disabled_hover_text(NEEDS_FFMPEG);
                     if r.clicked() && !armed {
@@ -1302,7 +1374,9 @@ fn preset_help(p: &Preset) -> String {
         Format::Png16 => "PNG, 16 bits a channel",
         Format::Tiff16 => "TIFF, 16 bits a channel",
         Format::Exr => "OpenEXR half float, scene-linear",
+        Format::Png8 if p.one_file => "one PNG of one frame",
         Format::Png8 => "PNG, 8 bits a channel",
+        Format::Gif => "animated GIF, looping, no sound",
         Format::Video(Codec::H264) => "H.264 MP4 (ffmpeg)",
         Format::Video(Codec::H265) => "H.265 MP4 (ffmpeg)",
         Format::Video(Codec::ProRes422Hq) => "ProRes 422 HQ QuickTime (ffmpeg)",
@@ -2139,5 +2213,431 @@ mod tests {
             crate::cli_exit(&args("CUT09", "c"), Some(data.path())),
             deliver::EXIT_FAILED
         );
+    }
+
+    // ---- AU8: the GIF and the still ----
+
+    const BLUE: [f32; 3] = [0.0, 0.0, 0.5];
+    const RED: [f32; 3] = [1.0, 0.0, 0.0];
+    const GREEN: [f32; 3] = [0.0, 1.0, 0.0];
+
+    /// A 64×36 project of `frames` frames at `fps`: each `(frame, ink)` is a new
+    /// drawing from that frame on, one block of flat ink.
+    fn keyed(frames: u32, fps: u32, keys: &[(u32, [f32; 3])]) -> AppState {
+        let mut s = AppState::new_project("show", 64, 36, fps, 72.0);
+        let at = s.at();
+        s.engine
+            .apply("len", vec![Command::SetFrameCount { at, frames }])
+            .expect("the length");
+        let column = s.view.active_column;
+        for (i, &(frame, [r, g, b])) in keys.iter().enumerate() {
+            let (d, l) = (s.engine.alloc_drawing_id(), s.engine.alloc_layer_id());
+            let mut px = vec![0u16; TILE_LEN];
+            for y in 4..12 {
+                for x in 8..20 {
+                    for (c, v) in [r, g, b, 1.0].into_iter().enumerate() {
+                        px[(y * TILE + x) * 4 + c] = f32_to_f16_bits(v);
+                    }
+                }
+            }
+            s.engine
+                .apply(
+                    "art",
+                    vec![
+                        Command::AddDrawing {
+                            at,
+                            id: d,
+                            index: i,
+                            name: format!("{}", i + 1),
+                            strokes: vec![],
+                            layers: vec![CelLayer::with_role(l, "line", LayerRole::Line)],
+                        },
+                        Command::PaintTiles {
+                            at,
+                            id: d,
+                            layer: l,
+                            diff: vec![((0, 0), None, Some(Arc::new(TileData::from_vec(px))))],
+                        },
+                        Command::SetCell {
+                            at,
+                            column,
+                            frame,
+                            key: Some(anim_core::xsheet::Exposure::Drawing(d)),
+                        },
+                    ],
+                )
+                .expect("the drawing");
+        }
+        s
+    }
+
+    fn shot() -> AppState {
+        keyed(12, 12, &[(0, BLUE), (4, RED), (8, GREEN)])
+    }
+
+    fn gif_file(path: &Path) -> crate::gif_decode::Gif {
+        crate::gif_decode::decode(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// A delivered frame as the file should show it.
+    fn rgb(img: &Image) -> Vec<[u8; 3]> {
+        let px = img.px.chunks_exact(4).map(anim_core::export::straight_rgba8);
+        px.map(|[r, g, b, _]| [r, g, b]).collect()
+    }
+
+    /// A written 8-bit PNG: its size and the pixel at (x, y).
+    fn png8(path: &Path, x: u32, y: u32) -> ((u32, u32), [u8; 4]) {
+        let file = std::fs::File::open(path).unwrap();
+        let mut reader = png::Decoder::new(std::io::BufReader::new(file)).read_info().unwrap();
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).unwrap();
+        assert_eq!((info.color_type, info.bit_depth), (png::ColorType::Rgba, png::BitDepth::Eight));
+        let i = ((y * info.width + x) * 4) as usize;
+        ((info.width, info.height), [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]])
+    }
+
+    fn preset_at(name: &str) -> usize {
+        PRESETS.iter().position(|p| p.name == name).unwrap()
+    }
+
+    #[test]
+    fn augif_job_finishes_in_a_temp_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shot();
+        let sp = spec(&s, "GIF", dir.path());
+        let none = AtomicBool::new(false);
+        let mut ticks = Vec::new();
+        let r = render_job(&sp, None, &none, &mut |f| ticks.push(f));
+        assert_eq!(r, Ok(12), "and no ffmpeg asked for");
+        assert_eq!(ticks, (0..12).collect::<Vec<u32>>(), "the progress counts every frame");
+        let name = "show_SC01_CUT01.gif";
+        assert_eq!(files(dir.path()), [name], "one file: no WAV, no part file");
+        let g = gif_file(&dir.path().join(name));
+        assert_eq!((g.size, g.loops), ((64, 36), Some(0)));
+        assert_eq!(g.delays(), [33, 34, 33], "three drawings, each held 4 frames at 12 fps");
+        assert_eq!(g.duration_cs(), 100, "1.0 s");
+        for (image, frame) in [(0, 0), (1, 5), (2, 11)] {
+            assert_eq!(g.frames[image].rgb, rgb(&sp.frame(frame)), "frame {frame}");
+        }
+        // On white, the ink exact: what a PNG of the same frame shows.
+        assert_eq!(g.frames[1].rgb[6 * 64 + 10], [255, 0, 0]);
+        assert_eq!(g.frames[1].rgb[30 * 64 + 40], [255, 255, 255]);
+        assert_eq!(g.frames[0].rgb[6 * 64 + 10], [0, 0, 128]);
+    }
+
+    #[test]
+    fn augif_still_job_writes_one_named_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = keyed(6, 24, &[(0, BLUE), (3, RED)]);
+        // A sequence of this cut would write a WAV beside its frames.
+        let at = s.at();
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../crates/anim-core/tests/fixtures/tone.wav"
+        ))
+        .unwrap();
+        let clip = anim_core::model::AudioClip::from_bytes("tone.wav", bytes).unwrap();
+        s.engine
+            .apply("sound", vec![Command::SetCutAudio { at, audio: Some(clip) }])
+            .expect("the sound");
+        let mut h = EditorHarness::with_state(s);
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        assert!(h.state().render_queue.draft.mixdown, "the latch is on");
+        h.state_mut().view.frame = 4;
+        // The menu's range is the animation's: the still is this frame.
+        h.editor_mut().export_range = Some((0, 1));
+        let ctx = h.ctx();
+        let path = dir.path().join("picture.png");
+        h.editor_mut().export_to(&ctx, ExportKind::Still, &path);
+        h.run_export_to_end();
+        let j = &h.state().render_queue.queue.jobs[0];
+        assert_eq!(
+            (j.preset().name, j.state.clone(), j.done, j.total(), j.span),
+            ("Still PNG", JobState::Done, 1, 1, (4, 4))
+        );
+        assert_eq!(files(dir.path()), ["picture.png"], "the exact name, and nothing beside it");
+        let (size, ink) = png8(&path, 10, 6);
+        assert_eq!((size, ink), ((64, 36), [255, 0, 0, 255]), "frame 5 is the second drawing");
+        assert_eq!(png8(&path, 40, 30).1, [255; 4], "on white");
+    }
+
+    #[test]
+    fn augif_export_to_runs_without_a_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = EditorHarness::with_state(shot());
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        let ctx = h.ctx();
+        let path = dir.path().join("ball.gif");
+        h.editor_mut().export_to(&ctx, ExportKind::Gif, &path);
+        assert!(h.state().render_queue.busy(), "export starts at once");
+        h.run_export_to_end();
+        assert!(h.rig().requests.is_empty(), "{:?}", h.rig().requests);
+        let j = h.state().render_queue.queue.jobs[0].clone();
+        assert_eq!(
+            (j.preset().name, j.state, j.done, j.frames, j.burn_ins),
+            ("GIF", JobState::Done, 12, None, BurnIns::NONE)
+        );
+        // The real poll reported it, as it does in the App.
+        assert_eq!(h.state().status, "rendered CUT01: 12 frame(s)");
+        assert_eq!(files(dir.path()), ["ball.gif"]);
+        assert_eq!(gif_file(&path).delays(), [33, 34, 33]);
+        // The File menu's range holds for a GIF, as for an MP4.
+        h.editor_mut().export_range = Some((4, 7));
+        let clip = dir.path().join("clip.gif");
+        h.editor_mut().export_to(&ctx, ExportKind::Gif, &clip);
+        h.run_export_to_end();
+        let g = gif_file(&clip);
+        assert_eq!(g.frames.len(), 1, "frames 5 to 8 are one drawing");
+        assert_eq!(g.frames[0].rgb[6 * 64 + 10], [255, 0, 0]);
+        assert_eq!(g.delays(), [33], "its time counts from the range's first frame");
+    }
+
+    #[test]
+    fn augif_stop_leaves_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shot();
+        let sp = spec(&s, "GIF", dir.path());
+        let name = dir.path().join("show_SC01_CUT01.gif");
+        std::fs::write(&name, b"an older export").unwrap();
+        // Stop lands after the frame in hand, and the older file stands.
+        let cancel = AtomicBool::new(false);
+        let mut ticks = 0;
+        let r = render_job(&sp, None, &cancel, &mut |_| {
+            ticks += 1;
+            cancel.store(ticks == 3, Ordering::Relaxed);
+        });
+        assert_eq!(r, Err(CANCELLED.to_string()));
+        assert_eq!(ticks, 3);
+        assert_eq!(std::fs::read(&name).unwrap(), b"an older export");
+        assert_eq!(files(dir.path()).len(), 1, "no part file: {:?}", files(dir.path()));
+        // Stopped while the palette is built: no frame ticks, no file.
+        std::fs::remove_file(&name).unwrap();
+        let stopped = AtomicBool::new(true);
+        assert_eq!(
+            render_job(&sp, None, &stopped, &mut |_| panic!("no frame")),
+            Err(CANCELLED.to_string())
+        );
+        assert!(files(dir.path()).is_empty(), "{:?}", files(dir.path()));
+    }
+
+    #[test]
+    fn augif_a_range_and_a_proxy_are_the_jobs_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = shot();
+        let p = Preset::named("GIF").unwrap();
+        let mut sp = JobSpec::new(
+            &s.engine.project,
+            s.at(),
+            Some((2, 5)),
+            p,
+            p.burn_ins,
+            dir.path().into(),
+            "{cut}_{frame:04}".into(),
+            "mika".into(),
+        )
+        .unwrap();
+        sp.preset.scale = 0.5;
+        let none = AtomicBool::new(false);
+        assert_eq!(render_job(&sp, None, &none, &mut |_| {}), Ok(4));
+        let names = files(dir.path());
+        assert_eq!(names, ["CUT01.gif"], "a video's name: no frame token left");
+        let g = gif_file(&dir.path().join("CUT01.gif"));
+        assert_eq!(g.size, (32, 18), "half size");
+        assert_eq!(g.delays(), [17, 16], "two frames of each drawing, from the range's start");
+    }
+
+    #[test]
+    fn augif_a_blank_cut_exports() {
+        // Nothing drawn is still a file: white paper, one image.
+        let dir = tempfile::tempdir().unwrap();
+        let s = keyed(4, 12, &[]);
+        let none = AtomicBool::new(false);
+        assert_eq!(render_job(&spec(&s, "GIF", dir.path()), None, &none, &mut |_| {}), Ok(4));
+        let g = gif_file(&dir.path().join("show_SC01_CUT01.gif"));
+        assert_eq!(g.frames.len(), 1);
+        assert_eq!(g.delays(), [33]);
+        assert!(g.frames[0].rgb.iter().all(|c| *c == [255, 255, 255]));
+        assert_eq!(render_job(&spec(&s, "Still PNG", dir.path()), None, &none, &mut |_| {}), Ok(1));
+        assert_eq!(png8(&dir.path().join("show_SC01_CUT01.png"), 0, 0).1, [255; 4]);
+    }
+
+    #[test]
+    fn augif_an_episode_is_one_gif() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = shot();
+        let at = s.at();
+        s.new_cut(at.scene);
+        s.goto_cut(at.scene, at.cut);
+        let total = anim_core::board::trt_frames(s.engine.project.scene(at.scene).unwrap());
+        assert!(total > 12, "two cuts: {total}");
+        let p = Preset::named("GIF").unwrap();
+        let sp = JobSpec::episode(
+            &s.engine.project,
+            at.scene,
+            p,
+            p.burn_ins,
+            dir.path().into(),
+            "reel".into(),
+            String::new(),
+        )
+        .unwrap();
+        let none = AtomicBool::new(false);
+        assert_eq!(render_job(&sp, None, &none, &mut |_| {}), Ok(total as usize));
+        assert_eq!(files(dir.path()), ["reel.gif"]);
+        let g = gif_file(&dir.path().join("reel.gif"));
+        let want = (total * 100 * 2 + 12) / (2 * 12);
+        assert_eq!(g.duration_cs() as usize, want as usize, "the two cuts end to end");
+    }
+
+    #[test]
+    fn augif_a_one_file_preset_is_one_frame_however_it_is_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = keyed(6, 24, &[(0, BLUE), (3, RED)]);
+        let at = s.at();
+        s.render_queue.draft.preset = preset_at("Still PNG");
+        s.render_queue.draft.out = dir.path().display().to_string();
+        s.view.frame = 4;
+        // The whole cut asked for: the playhead's frame, not six over one name.
+        assert!(add_job(&mut s, at, None));
+        // A range: its first frame.
+        assert!(add_job(&mut s, at, Some((1, 5))));
+        // The playhead past another length is kept inside the cut.
+        s.view.frame = 40;
+        assert!(add_job(&mut s, at, None));
+        let spans: Vec<_> = s.render_queue.queue.jobs.iter().map(|j| (j.span, j.total())).collect();
+        assert_eq!(spans, [((4, 4), 1), ((1, 1), 1), ((5, 5), 1)]);
+        // The batch render has no playhead: the first frame.
+        let p = Preset::named("Still PNG").unwrap();
+        let cli = JobSpec::new(
+            &s.engine.project,
+            at,
+            None,
+            p,
+            p.burn_ins,
+            dir.path().into(),
+            deliver::DEFAULT_PATTERN.into(),
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(cli.frames, (0, 0));
+        let ep = JobSpec::episode(
+            &s.engine.project,
+            at.scene,
+            p,
+            p.burn_ins,
+            dir.path().into(),
+            deliver::DEFAULT_PATTERN.into(),
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(ep.frames, (0, 0), "an Episode job too");
+    }
+
+    #[test]
+    fn augif_presets_work_in_the_pane_without_ffmpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = EditorHarness::with_state(keyed(6, 24, &[(0, BLUE), (3, RED)]));
+        h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+        h.state_mut().render_queue.draft.out = dir.path().display().to_string();
+        h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
+        h.run();
+        assert_eq!(h.node_enabled("GIF"), Some(true), "{}", h.describe());
+        assert_eq!(h.node_enabled("Still PNG"), Some(true));
+        assert_eq!(h.node_enabled("H.264 review"), Some(false), "an MP4 still takes ffmpeg");
+        h.click("GIF");
+        assert_eq!(h.state().render_queue.draft.preset, preset_at("GIF"), "{:?}", h.rect("GIF"));
+        h.click("+ this cut");
+        h.click("Start");
+        h.run_export_to_end();
+        assert_eq!(files(dir.path()), ["show_SC01_CUT01.gif"]);
+        h.state_mut().view.frame = 4;
+        h.click("Still PNG");
+        h.click("+ this cut");
+        h.click("Start");
+        h.run_export_to_end();
+        assert_eq!(files(dir.path()), ["show_SC01_CUT01.gif", "show_SC01_CUT01.png"]);
+        let (_, ink) = png8(&dir.path().join("show_SC01_CUT01.png"), 10, 6);
+        assert_eq!(ink, [255, 0, 0, 255], "the playhead's drawing");
+        assert_eq!(h.state().render_queue.queue.jobs[1].done, 1);
+        assert!(h.has("1/1"), "{}", h.describe());
+    }
+
+    #[test]
+    fn augif_every_preset_chip_is_in_reach() {
+        for size in [egui::vec2(1600.0, 900.0), egui::vec2(1280.0, 800.0)] {
+            // The whole pane: the row was one line, 1436 wide with no wrap.
+            let mut h = EditorHarness::with_state(small());
+            h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+            h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
+            h.kit_mut().set_size(size);
+            h.run();
+            for p in PRESETS {
+                let chip = h.rect(p.name);
+                assert!(chip.right() <= size.x, "{} at {size:?}: {chip:?}", p.name);
+            }
+            // The tab in its room, narrower: the new chips still answer.
+            h.perform(Action::RoomComposite);
+            h.run_frames(3);
+            let tab = h.editor().dock.find_tab(&Pane::RenderQueue).expect("the tab");
+            let _ = h.editor_mut().dock.set_active_tab(tab);
+            h.run_frames(2);
+            for name in ["GIF", "Still PNG"] {
+                h.click(name);
+                let armed = h.state().render_queue.draft.preset;
+                assert_eq!(armed, preset_at(name), "{name} at {size:?}: {:?}", h.rect(name));
+            }
+        }
+    }
+
+    #[test]
+    fn augif_the_edl_never_names_a_gif() {
+        let mut s = small();
+        for (preset, ext) in [
+            ("GIF", "mov"),
+            ("Still PNG", "mov"),
+            ("PNG 8-bit", "mov"),
+            ("H.264 review", "mp4"),
+            ("ProRes 422 HQ", "mov"),
+        ] {
+            s.render_queue.draft.preset = preset_at(preset);
+            assert_eq!(s.edl_ext(), ext, "{preset}");
+        }
+    }
+
+    #[test]
+    fn augif_batch_render_needs_no_ffmpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("show.animproj");
+        anim_core::store::save(&keyed(6, 24, &[(0, BLUE), (3, RED)]).engine.project, &file).unwrap();
+        let data = tempfile::tempdir().unwrap();
+        for (preset, frames, name) in
+            [("GIF", 6, "show_SC01_CUT01.gif"), ("Still PNG", 1, "show_SC01_CUT01.png")]
+        {
+            let out = dir.path().join(preset);
+            let args: Vec<String> = [
+                "--render",
+                &file.display().to_string(),
+                "--preset",
+                preset,
+                "--out",
+                &out.display().to_string(),
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let job = deliver::parse_cli(&args).unwrap();
+            assert_eq!(crate::run_cli_job(&job, Some(data.path())), Ok(frames), "{preset}");
+            assert_eq!(files(&out), [name], "{preset}");
+        }
+        assert_eq!(gif_file(&dir.path().join("GIF").join("show_SC01_CUT01.gif")).frames.len(), 2);
+    }
+
+    #[test]
+    fn augif_each_kind_has_its_preset() {
+        let name = |k: ExportKind| PRESETS[k.preset()].name;
+        assert_eq!(name(ExportKind::Png), "PNG 8-bit");
+        assert_eq!(name(ExportKind::Mp4), "H.264 review");
+        assert_eq!(name(ExportKind::Gif), "GIF");
+        assert_eq!(name(ExportKind::Still), "Still PNG");
     }
 }

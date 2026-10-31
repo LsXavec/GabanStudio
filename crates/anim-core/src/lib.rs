@@ -24,6 +24,7 @@ pub mod export;
 pub mod fill;
 pub mod fx;
 pub mod generator;
+pub mod gif;
 pub mod graph;
 pub mod ids;
 pub mod look;

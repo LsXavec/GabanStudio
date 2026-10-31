@@ -619,6 +619,8 @@ fn presets_cover_the_delivery_list() {
             "ProRes 4444 (alpha)",
             "DNxHR HQ",
             "Line test",
+            "GIF",
+            "Still PNG",
         ]
     );
     let p = |n: &str| Preset::named(n).unwrap();
@@ -629,7 +631,7 @@ fn presets_cover_the_delivery_list() {
     assert_eq!(p("Line test").purpose, Purpose::LineTest);
     assert_eq!(p("Master PNG 16-bit").purpose, Purpose::Final);
     assert!(PRESETS.iter().all(|p| p.scale == 1.0 || p.scale == 0.5));
-    assert_eq!(PRESETS.iter().filter(|p| !p.format.is_video()).count(), 5);
+    assert_eq!(PRESETS.iter().filter(|p| !p.format.is_video()).count(), 6);
     assert!(Preset::named("Master PNG 8-bit").is_none());
     // The line test as frames needs no ffmpeg: PNG 8-bit, black on white.
     let lt = p("Line test PNG");

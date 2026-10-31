@@ -575,13 +575,14 @@ pub fn write_exr(path: &Path, img: &Image, law: ColorLaw) -> Result<(), String> 
 }
 
 /// Write one frame in an image-sequence `format` (a video format is an
-/// error: video frames go to ffmpeg).
+/// error: video frames go to ffmpeg, GIF frames to [`crate::gif::GifWriter`]).
 pub fn write_frame(path: &Path, img: &Image, format: Format, law: ColorLaw) -> Result<(), String> {
     match format {
         Format::Png16 => write_png16(path, img),
         Format::Tiff16 => write_tiff16(path, img),
         Format::Exr => write_exr(path, img, law),
         Format::Png8 => write_png8(path, img),
+        Format::Gif => Err("a GIF frame goes to the GIF writer".into()),
         Format::Video(_) => Err("a video frame goes to ffmpeg, not to a file".into()),
     }
 }
@@ -906,6 +907,8 @@ pub enum Format {
     Exr,
     Png8,
     Video(Codec),
+    /// AU8: animated GIF, written in-house ([`crate::gif`]).
+    Gif,
 }
 
 impl Format {
@@ -915,10 +918,17 @@ impl Format {
             Format::Tiff16 => "tif",
             Format::Exr => "exr",
             Format::Video(c) => c.ext(),
+            Format::Gif => "gif",
         }
     }
 
+    /// One file for the whole range, not a file a frame.
     pub fn is_video(self) -> bool {
+        matches!(self, Format::Video(_) | Format::Gif)
+    }
+
+    /// AU8: whether it takes the ffmpeg add-on. A GIF does not.
+    pub fn needs_ffmpeg(self) -> bool {
         matches!(self, Format::Video(_))
     }
 }
@@ -977,6 +987,9 @@ pub struct Preset {
     pub purpose: Purpose,
     /// 1.0 or 0.5.
     pub scale: f32,
+    /// AU8: one picture under one exact name: a sequence's format, but one
+    /// frame, with no frame number and no WAV beside it.
+    pub one_file: bool,
 }
 
 const fn preset(
@@ -993,10 +1006,12 @@ const fn preset(
         burn_ins,
         purpose,
         scale: 1.0,
+        one_file: false,
     }
 }
 
 /// Every delivery preset, image sequences first (they need no ffmpeg).
+/// Append only: a job holds an index into this list.
 pub const PRESETS: &[Preset] = &[
     preset(
         "Master PNG 16-bit",
@@ -1076,6 +1091,12 @@ pub const PRESETS: &[Preset] = &[
         BurnIns::LINE_TEST,
         Purpose::LineTest,
     ),
+    // AU8: a beginner's two finished files, neither needing an add-on.
+    preset("GIF", Format::Gif, false, BurnIns::NONE, Purpose::View),
+    Preset {
+        one_file: true,
+        ..preset("Still PNG", Format::Png8, false, BurnIns::NONE, Purpose::View)
+    },
 ];
 
 impl Preset {

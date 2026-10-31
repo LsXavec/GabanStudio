@@ -406,6 +406,20 @@ impl EditorHarness {
         self.run();
     }
 
+    /// AU8: the running export to its end. Only the App polls the queue each
+    /// frame, so this drives the same `poll` until no worker is left, with a
+    /// ceiling so a stuck job fails instead of hanging the suite.
+    pub fn run_export_to_end(&mut self) {
+        let ctx = self.ctx();
+        let ceiling = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while self.state().render_queue.busy() {
+            crate::render_queue::poll(self.state_mut(), &ctx);
+            assert!(std::time::Instant::now() < ceiling, "the export never finished");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        self.run();
+    }
+
     /// AU1: the harness itself: the audits read its frame output.
     pub fn kit(&self) -> &Harness<'static, Rig> {
         &self.h

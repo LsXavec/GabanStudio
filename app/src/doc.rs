@@ -4501,10 +4501,11 @@ impl AppState {
 
     /// The extension an EDL event names each cut's render with: the draft
     /// preset's video container, else `mov` — an EDL event is one clip,
-    /// so a frame-sequence preset is conformed to the cut's video render.
+    /// so a frame-sequence or GIF preset is conformed to the cut's video
+    /// render.
     pub fn edl_ext(&self) -> &'static str {
         match anim_core::deliver::PRESETS.get(self.render_queue.draft.preset) {
-            Some(p) if p.format.is_video() => p.format.ext(),
+            Some(p) if p.format.needs_ffmpeg() => p.format.ext(),
             _ => "mov",
         }
     }

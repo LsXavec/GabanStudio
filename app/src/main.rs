@@ -57,6 +57,9 @@ mod tidy_tests;
 #[cfg(test)]
 mod audock_tests;
 #[cfg(test)]
+#[path = "../../crates/anim-core/tests/support/gif_decode.rs"]
+mod gif_decode;
+#[cfg(test)]
 mod aurail_tests;
 #[cfg(test)]
 mod ausay_tests;
@@ -5761,10 +5764,22 @@ impl Editor {
         tree.push_to_focused_leaf(pane);
     }
 
-    /// GM11: File ▸ Export…'s PNG sequence (`dest` a folder) or MP4 (`dest`
-    /// the file) — a render queue job for this cut over the menu's frame
-    /// range (None = the whole cut), the queue brought forward and started
-    /// (a job already rendering finishes first).
+    /// AU8: the seam behind the save dialog: what happens to the path a person
+    /// chose, so a test can end in a real file with no dialog.
+    pub(crate) fn export_to(
+        &mut self,
+        ctx: &egui::Context,
+        kind: render_queue::ExportKind,
+        path: &std::path::Path,
+    ) {
+        self.queue_export(ctx, kind, path);
+    }
+
+    /// GM11: File ▸ Export…'s PNG sequence (`dest` a folder), or its MP4, GIF
+    /// or still (`dest` the file) — a render queue job for this cut over the
+    /// menu's frame range (None = the whole cut; a still is the current
+    /// frame), the queue brought forward and started (a job already rendering
+    /// finishes first).
     pub(crate) fn queue_export(
         &mut self,
         ctx: &egui::Context,
@@ -8535,7 +8550,7 @@ impl Editor {
                         ui.separator();
 
                         // GM11: each picks where, then queues its job over
-                        // this range and starts the queue (Editor::queue_export).
+                        // this range and starts the queue (Editor::export_to).
                         if ui
                             .button("PNG sequence…")
                             .on_hover_text(
@@ -8551,7 +8566,7 @@ impl Editor {
                             }
                             if let Some(dir) = dlg.pick_folder() {
                                 let ctx = ui.ctx().clone();
-                                self.queue_export(&ctx, render_queue::ExportKind::Png, &dir);
+                                self.export_to(&ctx, render_queue::ExportKind::Png, &dir);
                             }
                         }
                         let ffmpeg = self.state.render_queue.ffmpeg_path().is_some();
@@ -8572,7 +8587,7 @@ impl Editor {
                             }
                             if let Some(path) = dlg.save_file() {
                                 let ctx = ui.ctx().clone();
-                                self.queue_export(&ctx, render_queue::ExportKind::Mp4, &path);
+                                self.export_to(&ctx, render_queue::ExportKind::Mp4, &path);
                             }
                         }
                         // GM15: the editorial's exports, written into the

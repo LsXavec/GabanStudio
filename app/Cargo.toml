@@ -53,6 +53,8 @@ tempfile = "3"
 # GM2: the save-keeps-unknown-tables test plants a table the build does not
 # know (same version anim-core links; already in the lock file).
 rusqlite = { version = "0.37", features = ["bundled"] }
+# AU8: the tests read a written GIF back through anim-core's test decoder.
+weezl = "0.1"
 
 [build-dependencies]
 winresource = "0.1.31"
