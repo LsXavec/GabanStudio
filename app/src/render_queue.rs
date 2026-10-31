@@ -561,6 +561,9 @@ pub struct RenderQueue {
     pub searches: u32,
     /// "show folder" asks the shell to open this.
     pub show_folder: Option<PathBuf>,
+    /// AU7: Show me sent someone here: the next frame scrolls `Start` up, so
+    /// the two buttons its sentence names are on screen.
+    pub reveal_start: bool,
 }
 
 impl RenderQueue {
@@ -1227,13 +1230,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             ui.horizontal(|ui| {
                 let rq = &state.render_queue;
                 let waiting = rq.queue.jobs.iter().any(|j| j.state == JobState::Queued);
-                if ui
+                let start_key = ui
                     .add_enabled(!rq.busy() && waiting, egui::Button::new("Start"))
                     .on_hover_text(
                         "render the queued jobs in order on a worker; you can keep drawing",
-                    )
-                    .clicked()
-                {
+                    );
+                if std::mem::take(&mut state.render_queue.reveal_start) {
+                    start_key.scroll_to_me(Some(egui::Align::BOTTOM));
+                }
+                if start_key.clicked() {
                     start(state, ui.ctx());
                 }
                 if ui

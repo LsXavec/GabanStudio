@@ -2139,15 +2139,15 @@ impl CanvasView {
         )
     }
 
-    /// AU6: what `Check your pen` reads off the last stroke. It came in as a
-    /// mouse, or its samples never carried force, or at least one did. A tap
-    /// has no Move sample to read at all, so it says nothing either way.
     /// AU7: the canvas line, an edit view's (spec 8.4). A raster canvas and a
     /// vector one read alike here.
     pub(crate) fn empty_line_due(&self, state: &AppState) -> bool {
         self.empty_cell_hint && !state.view.playing && state.current_drawing().is_none() && self.current.is_empty()
     }
 
+    /// AU6: what `Check your pen` reads off the last stroke. It came in as a
+    /// mouse, or its samples never carried force, or at least one did. A tap
+    /// has no Move sample to read at all, so it says nothing either way.
     pub(crate) fn pen_verdict(&self) -> crate::welcome::PenCheck {
         use crate::welcome::PenCheck;
         if self.stroke_from_mouse {

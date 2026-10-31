@@ -2626,11 +2626,6 @@ impl App {
             if let Some(dir) = ed.state.render_queue.show_folder.take() {
                 proc::show_folder(&dir);
             }
-            // GM8: a job rendering is the Quick start's export step, from
-            // File ▸ Export… or the queue's own Start.
-            if ed.state.render_queue.busy() {
-                ed.quick_start[welcome::EXPORT_STEP] = true;
-            }
             let mut recent_changed = match ed.recent_edit.take() {
                 Some(RecentEdit::Remove(p)) => {
                     self.config.session.recent.retain(|r| r != &p);
@@ -5492,8 +5487,11 @@ impl Editor {
                 self.enter_room(Stage::Edit);
                 self.open_pane(Pane::RenderQueue);
                 self.say.export_asked = true;
-                if self.say.off {
+                self.state.render_queue.reveal_start = true;
+                // With no row left to say it, the same sentence as a remark.
+                if self.say.off || self.say.seen & say::QUEUE != 0 {
                     self.state.status = say::QUEUE_WORDS.into();
+                    self.status_seen.clear();
                 }
                 Performed::Done
             }
@@ -7917,7 +7915,7 @@ impl Editor {
 
     /// THE SAY LINE (spec 8.2): one reserved lane and one voice, a refusal
     /// first, the machine's last remark after it, and what `say.rs` picked
-    /// third, its action button at the lane's right end.
+    /// third, its action button straight after its words.
     fn say_line(&mut self, ui: &mut egui::Ui) {
         // REFUSAL: the machine overruled the hand. Dwells 4s; a repeat of
         // the same refusal re-flashes.
@@ -7967,14 +7965,17 @@ impl Editor {
             let ink = ui.visuals().widgets.noninteractive.bg_stroke;
             ui.painter().vline(rule.center().x, rule.y_range(), ink);
         }
-        // The action button's end of the lane stays free for it (spec 8.2).
-        // Where no dots stand a hint gets back what its own button leaves,
-        // and words with no button beside them have the lane: a refusal
-        // outranks every hint, and its longest words need all of it at 832.
+        // The action button's room stays free for it (spec 8.2). Where no
+        // dots stand a hint gets back what its own button leaves, and words
+        // with no button beside them have the lane: a refusal outranks every
+        // hint, and its longest words need all of it at 832. The dots keep
+        // the lane's right end, past the longest words and their button, and
+        // a Picture start's closed strip has no animation for them to count.
         let lane = ui.available_rect_before_wrap();
         let verb = hint.as_ref().and_then(|h| h.verb);
         let fold = ui.ctx().content_rect().width() < steps::FOLD;
-        let dots = !fold && !refusing && lane.width() >= plate::SAY_DOTS_LANE;
+        let animating = !self.strip_closed() || self.full_band;
+        let dots = !fold && !refusing && animating && lane.width() >= plate::SAY_DOTS_LANE;
         let spare = match verb {
             _ if dots => plate::SAY_ACTION + plate::SAY_DOTS,
             Some(verb) => plate::say_action_width(ui, verb.label()) + 6.0,
@@ -7982,6 +7983,7 @@ impl Editor {
             None => plate::SAY_ACTION,
         };
         let words = egui::vec2((lane.width() - spare).max(0.0), plate::CHROME_H);
+        let mut words_end = lane.left();
         ui.allocate_ui_with_layout(words, egui::Layout::left_to_right(egui::Align::Center), |ui| {
             if refusing {
                 plate::refusal(ui, &self.state.refusal);
@@ -7989,22 +7991,23 @@ impl Editor {
                 let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
                 plate::say(ui, &self.state.status, ink);
             } else if let Some(hint) = &hint {
-                plate::say(ui, &hint.words, plate::LEGEND);
+                words_end = plate::say(ui, &hint.words, plate::LEGEND).rect.right();
             }
         });
-        if let Some(bit) = hint.as_ref().and_then(|h| h.bit) {
-            self.say.shown = Some(bit);
-        }
+        self.say.stands(hint.as_ref().and_then(|h| h.bit), now);
         let row = egui::Rect::from_min_max(egui::pos2(lane.left(), rule.top()), egui::pos2(lane.right(), rule.bottom()));
-        // Spec 8.3: the place, in dots. Painted: no control, no words.
+        // Spec 8.3: the place, in dots. Painted: no control, no words, and a
+        // card for whoever rests on them.
         self.say.dots_painted = dots && !self.say.off && self.quick_start.iter().any(|done| !done);
         if self.say.dots_painted {
-            plate::say_dots(ui, row, &self.quick_start);
+            let ticks = self.quick_start;
+            plate::hover_card(plate::say_dots(ui, row, &ticks), || say::place_words(&ticks));
         }
-        if let Some(verb) = verb
-            && plate::say_action(ui, row, verb.label()).card(verb.card()).clicked()
-        {
-            self.say_act(verb, ui.ctx());
+        if let Some(verb) = verb {
+            let beside = row.with_max_x(words_end + 6.0 + plate::say_action_width(ui, verb.label()));
+            if plate::say_action(ui, beside, verb.label()).card(verb.card()).clicked() {
+                self.say_act(verb, ui.ctx());
+            }
         }
     }
 

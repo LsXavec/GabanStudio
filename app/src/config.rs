@@ -2580,7 +2580,7 @@ pub struct UiConfig {
     #[serde(default)]
     pub sheet_in_draw: bool,
     /// AU7: the hints already answered, one bit each (see `say::HINTS`).
-    /// Each is once-only, never timed. `Editor.hints_seen` mirrors it.
+    /// Each is once-only, never timed. `Editor.say.seen` mirrors it.
     #[serde(default)]
     pub hints_seen: u32,
     /// AU7: no hints, no dots and no action button; the chrome stays as it
@@ -4000,17 +4000,20 @@ fn ui_features_page(ui: &mut egui::Ui, config: &mut Config) {
              by an element's true name.",
         )
         .changed();
-    let mut hints = !config.ui.hints_off;
-    if crate::plate::latch(ui, &mut hints, "Hints")
-        .on_hover_text(Action::ToggleHints.help())
-        .changed()
-    {
-        config.ui.set_hints(hints);
-        changed = true;
-    }
+    changed |= hints_row(ui, &mut config.ui);
     if changed {
         config.save();
     }
+}
+
+/// AU7: the Settings row of the one switch Help ▸ Hints turns (spec 8.5).
+pub(crate) fn hints_row(ui: &mut egui::Ui, config: &mut UiConfig) -> bool {
+    let mut hints = !config.hints_off;
+    let changed = crate::plate::latch(ui, &mut hints, "Hints").on_hover_text(Action::ToggleHints.help()).changed();
+    if changed {
+        config.set_hints(hints);
+    }
+    changed
 }
 
 fn performance_page(

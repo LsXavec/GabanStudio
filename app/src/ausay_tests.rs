@@ -1,6 +1,7 @@
 //! AU7: the Say line teaches, Quick Start ticks on outcomes and no step is
 //! silent (spec 8.2 to 8.5). The prefix is `ausay_`.
 
+use anim_core::command::Command;
 use anim_core::raster::{TILE, f16_bits_to_f32};
 use eframe::egui;
 use egui::{Rect, pos2, vec2};
@@ -163,7 +164,7 @@ fn ausay_hints_never_point_backward() {
     assert!(checked >= 4, "the sentences that name a step: {checked}");
     // The Quick Start chain speaks in its own order: each row needs what the
     // one before it taught.
-    let chain = [say::NEW_PAPER, say::ADD_DRAWING, say::NEXT_POSE, say::PLAY, say::SHARE];
+    let chain = [say::NEW_PAPER, say::ADD_DRAWING, say::NEXT_POSE, say::TWO_DRAWINGS, say::PLAY, say::SHARE];
     let order: Vec<usize> = chain.iter().map(|b| say::HINTS.iter().position(|r| r.bit == *b).expect("a row")).collect();
     assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
 }
@@ -183,7 +184,7 @@ fn ausay_a_hint_shows_once() {
     assert!(!h.state().has_art(), "the art went");
     assert_ne!(picked(&h).as_deref(), Some("Draw on the paper to begin."), "the lesson stayed");
 
-    // `passes`: shown, then the moment went.
+    // `passes`: shown, read, then the moment went.
     let mut h = EditorHarness::with_state_shipped(one_drawing_at(0));
     sized(&mut h, 1600.0, 900.0);
     quiet(&mut h);
@@ -191,13 +192,117 @@ fn ausay_a_hint_shows_once() {
     settle(&mut h);
     let held = "This drawing stays on screen for 6 frames.";
     assert_eq!(picked(&h).as_deref(), Some(held));
-    settle(&mut h);
+    h.wait(say::READ_SECS);
     h.state_mut().view.frame = 0;
     settle(&mut h);
     assert_ne!(h.editor().say.seen & say::HELD, 0);
     h.state_mut().view.frame = 3;
     settle(&mut h);
     assert_ne!(picked(&h).as_deref(), Some(held), "once");
+}
+
+/// A held frame, one frame at a time: a frame of the harness is a quarter of
+/// a second, so what happens here happens before anyone could read it.
+fn on_frame(h: &mut EditorHarness, frame: u32) {
+    h.state_mut().view.frame = frame;
+    h.run_frames(2);
+}
+
+/// Spec 8.2 and AU7's list: a sentence is not used up unread. Playback runs
+/// across a hold and says nothing, and a scrub past one leaves it to say.
+#[test]
+fn ausay_a_passing_row_waits_to_be_read() {
+    const HELD: &str = "This drawing stays on screen for 6 frames.";
+    let mut h = EditorHarness::with_state_shipped(one_drawing_at(0));
+    sized(&mut h, 1600.0, 900.0);
+    quiet(&mut h);
+    let lane = picked(&h);
+    assert_eq!(lane.as_deref(), Some("Next: add a drawing."));
+
+    // With the sheet off a stop lands on the run's first frame (AU5): no hold.
+    h.state_mut().view.playing = true;
+    on_frame(&mut h, 3);
+    h.state_mut().view.playing = false;
+    h.run_frames(2);
+    assert_eq!(h.state().view.frame, 0);
+    assert_eq!(picked(&h), lane);
+
+    // With it up, a stop stays where it lands.
+    h.editor_mut().show_sheet();
+    settle(&mut h);
+    h.state_mut().view.playing = true;
+    for frame in [1, 2, 3, 4, 5, 0, 3] {
+        on_frame(&mut h, frame);
+        assert_eq!(picked(&h), lane, "playback on frame {frame}");
+        assert_eq!(h.rig().config.ui.hints_seen & say::HELD, 0, "unspent on frame {frame}");
+    }
+    h.state_mut().view.playing = false;
+    on_frame(&mut h, 3);
+    assert_eq!(picked(&h).as_deref(), Some(HELD), "stopped on a hold, it speaks");
+    assert_eq!(h.editor().say.shown, Some(say::HELD), "on the lane");
+
+    // Scrubbed past: on the lane, and gone before it could be read.
+    on_frame(&mut h, 0);
+    h.run_frames(1);
+    assert_ne!(picked(&h).as_deref(), Some(HELD));
+    assert_eq!(h.rig().config.ui.hints_seen & say::HELD, 0, "unread");
+    on_frame(&mut h, 2);
+    assert_eq!(picked(&h).as_deref(), Some(HELD), "so it still has it to say");
+    // Coming back is a new reading, not the time since it first stood.
+    h.wait(say::READ_SECS + 1.0);
+    on_frame(&mut h, 0);
+    h.run_frames(1);
+    assert_ne!(h.rig().config.ui.hints_seen & say::HELD, 0, "it stood, so it was read");
+    on_frame(&mut h, 3);
+    assert_ne!(picked(&h).as_deref(), Some(HELD), "once");
+
+    // A row back on the lane starts its reading over.
+    let mut h = EditorHarness::with_state_shipped(one_drawing_at(0));
+    sized(&mut h, 1600.0, 900.0);
+    quiet(&mut h);
+    on_frame(&mut h, 3);
+    assert_eq!(h.editor().say.shown, Some(say::HELD));
+    on_frame(&mut h, 0);
+    h.wait(say::READ_SECS + 1.0);
+    on_frame(&mut h, 3);
+    on_frame(&mut h, 0);
+    h.run_frames(1);
+    assert_eq!(h.rig().config.ui.hints_seen & say::HELD, 0, "the time away was no reading");
+
+    // The table's own word, for both rows that pass on a frame.
+    let rows = [(Facts { twice: true, ..Facts::default() }, say::APPEARS_TWICE), (Facts { held: Some(6), ..Facts::default() }, say::HELD)];
+    for (on, bit) in rows {
+        let on = at_step(Stage::Drawing, on);
+        let mut seen = 0;
+        let playing = Facts { playing: true, stood: true, ..on.clone() };
+        assert_ne!(say::read(&playing, &mut seen, Some(bit), chord).and_then(|s| s.bit), Some(bit), "playback hides it");
+        assert_eq!(seen & bit, 0, "and spends nothing");
+        let elsewhere = at_step(Stage::Drawing, Facts::default());
+        let carried = Facts { playing: true, stood: true, ..elsewhere.clone() };
+        say::read(&carried, &mut seen, Some(bit), chord);
+        assert_eq!(seen & bit, 0, "playback carried it off");
+        say::read(&elsewhere, &mut seen, Some(bit), chord);
+        assert_eq!(seen & bit, 0, "it did not stand");
+        say::read(&Facts { stood: true, ..elsewhere }, &mut seen, Some(bit), chord);
+        assert_eq!(seen & bit, bit, "it stood, and the moment went");
+    }
+}
+
+/// `N` is how long the person sees it: a cut shortened under the next key
+/// ends first.
+#[test]
+fn ausay_a_held_sentence_counts_to_the_cut_end() {
+    let mut state = one_drawing_at(0);
+    state.set_cut_length(12);
+    state.goto(8);
+    state.new_drawing_at_frame();
+    state.set_cut_length(6);
+    state.goto(3);
+    let mut h = EditorHarness::with_state_shipped(state);
+    sized(&mut h, 1600.0, 900.0);
+    quiet(&mut h);
+    assert_eq!(h.state().exposure_here(), Some((0, Some(8))), "the next key stands past the end");
+    assert_eq!(picked(&h).as_deref(), Some("This drawing stays on screen for 6 frames."));
 }
 
 /// Spec 8.5: off means no hints, no dots and no action button, and nothing
@@ -252,6 +357,92 @@ fn ausay_hints_on_starts_again() {
     ui.hints_seen = 7;
     ui.set_hints(true);
     assert_eq!(ui.hints_seen, 7, "already on: nothing starts again");
+
+    // A row that passes: the one last on the lane is not said already.
+    let mut h = EditorHarness::with_state_shipped(one_drawing_at(0));
+    sized(&mut h, 1600.0, 900.0);
+    quiet(&mut h);
+    h.state_mut().view.frame = 3;
+    settle(&mut h);
+    h.wait(say::READ_SECS);
+    assert_eq!(h.editor().say.shown, Some(say::HELD));
+    h.perform(Action::ToggleHints);
+    settle(&mut h);
+    h.state_mut().view.frame = 0;
+    settle(&mut h);
+    h.perform(Action::ToggleHints);
+    settle(&mut h);
+    assert_eq!(h.rig().config.ui.hints_seen & say::HELD, 0, "back on, it was never read");
+    h.state_mut().view.frame = 3;
+    settle(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some("This drawing stays on screen for 6 frames."));
+
+    // The canvas line: a stroke answers it only once it stood again.
+    let mut h = empty_cell();
+    assert!(h.editor().canvas.dbg_empty_line);
+    h.perform(Action::ToggleHints);
+    settle(&mut h);
+    assert!(!h.editor().canvas.dbg_empty_line, "off, it goes");
+    h.state_mut().goto(3);
+    settle(&mut h);
+    h.perform(Action::ToggleHints);
+    settle(&mut h);
+    raster_line(&mut h);
+    assert_eq!(h.rig().config.ui.hints_seen & say::EMPTY_CELL, 0, "it has not stood since");
+    h.state_mut().goto(0);
+    settle(&mut h);
+    assert!(h.editor().canvas.dbg_empty_line, "so it comes back");
+}
+
+/// Spec 8.5: one switch, in Help ▸ Hints and in Settings. A frozen boot has it
+/// off, so a suite's chrome holds still; a shipped one has it on.
+#[test]
+fn ausay_hints_switch_stands_in_both_places() {
+    assert_eq!(Action::ToggleHints.label(), "Hints");
+    let mut h = ready();
+    quiet(&mut h);
+    assert!(h.editor().say.hint.is_some());
+    h.click("help");
+    h.click("Hints");
+    settle(&mut h);
+    assert!(h.rig().config.ui.hints_off, "the menu row turned it off");
+    assert_eq!(picked(&h), None);
+    h.click("help");
+    h.click("Hints");
+    settle(&mut h);
+    assert!(!h.rig().config.ui.hints_off, "and on");
+    assert!(picked(&h).is_some());
+
+    // The row Settings draws: the page saves, and a test has no data dir.
+    use egui_kittest::kittest::Queryable;
+    let start = UiConfig { hints_seen: 7, ..UiConfig::default() };
+    let mut kit = egui_kittest::Harness::new_ui_state(
+        |ui, config: &mut UiConfig| {
+            crate::config::hints_row(ui, config);
+        },
+        start,
+    );
+    kit.run();
+    kit.get_by_label("Hints").click();
+    kit.run();
+    assert!(kit.state().hints_off, "the row turned it off");
+    assert_eq!(kit.state().hints_seen, 7, "off keeps what was taught");
+    kit.get_by_label("Hints").click();
+    kit.run();
+    assert_eq!((kit.state().hints_off, kit.state().hints_seen), (false, 0), "on clears it");
+
+    // Every frozen boot holds them off.
+    let frozen = [
+        EditorHarness::new(),
+        EditorHarness::with_state(AppState::new_project("t", 64, 48, 24, 72.0)),
+        EditorHarness::with_dir(AppState::new_project("t", 64, 48, 24, 72.0), tempfile::tempdir().unwrap()),
+    ];
+    for h in &frozen {
+        assert!(h.rig().config.ui.hints_off);
+        assert!(h.editor().say.off, "the editor reads it");
+        assert_eq!(picked(h), None);
+    }
+    assert!(!ready().rig().config.ui.hints_off, "a shipped boot has them on");
 }
 
 /// Spec 8.2: a hint whose verb has no binding is not shown.
@@ -391,6 +582,7 @@ fn ausay_show_me_is_four_of_five() {
     settle(&mut h);
     assert_eq!(h.editor().quick_start, [true, true, true, false, false]);
     assert_eq!(h.state().strokes_done, 2, "two circles");
+    assert_eq!(h.state().cut().drawings.len(), 2, "two drawings already play");
     assert_ne!(h.editor_mut().show_me(3), Performed::Ignored);
     settle(&mut h);
     assert!(h.state().view.playing, "it plays");
@@ -413,6 +605,166 @@ fn ausay_show_me_is_four_of_five() {
     settle(&mut h);
     assert!(h.state().view.frame >= 1);
     assert!(h.editor().quick_start[2]);
+}
+
+/// One viewport, no dialog asked of the App and no float over the paper.
+#[track_caller]
+fn no_window(h: &EditorHarness) {
+    let windows = &h.kit().output().viewport_output;
+    assert!(windows.len() == 1 && windows.contains_key(&egui::ViewportId::ROOT));
+    assert!(h.rig().requests.is_empty(), "{:?}", h.rig().requests);
+    assert!(!h.editor().float_canvas.open);
+}
+
+/// A queue that can render here, with no encoder and into `dir`.
+fn queue_ready(h: &mut EditorHarness, dir: &std::path::Path) {
+    h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
+    h.state_mut().render_queue.draft.out = dir.display().to_string();
+}
+
+/// Spec 8.2 and 8.3: Show me alone walks a new document to the queue, and the
+/// lane has the next thing to say at every step until the fifth tick. The
+/// queue's own sentence takes it from there, by the buttons it names. Nothing
+/// on the way opens a window.
+#[test]
+fn ausay_show_me_walks_the_whole_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = ready();
+    queue_ready(&mut h, dir.path());
+    let play = crate::menus::chord_label(&h.ctx(), Action::PlayPause).expect("bound");
+    let walk = [
+        ("Draw on the paper to begin.".to_string(), [true, false, false, false, false]),
+        ("Next: add a drawing.".to_string(), [true, true, false, false, false]),
+        ("The ghost is your last drawing. Draw the next pose.".to_string(), [true, true, true, false, false]),
+        (format!("Add another drawing, or press {play} to play."), [true, true, true, true, false]),
+    ];
+    for (words, ticks) in walk {
+        quiet(&mut h);
+        assert_eq!(picked(&h).as_deref(), Some(words.as_str()));
+        assert!(says(&h, &words), "{:?}", h.painted_text());
+        h.click(SHOW_ME);
+        settle(&mut h);
+        no_window(&h);
+        assert_eq!(h.editor().quick_start, ticks, "after {words}");
+        assert!(picked(&h).is_some(), "the lane goes on from {words}");
+    }
+    assert!(h.state().view.playing, "the two-drawing row plays");
+    quiet(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some("Ready to share? Go to Export."), "while it plays");
+    h.state_mut().view.playing = false;
+    settle(&mut h);
+    quiet(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some("Ready to share? Go to Export."), "and after");
+    h.click(SHOW_ME);
+    settle(&mut h);
+    no_window(&h);
+    quiet(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS));
+    assert!(says(&h, say::QUEUE_WORDS), "{:?}", h.painted_text());
+    assert!(!h.editor().quick_start[EXPORT_STEP], "no file yet");
+    h.click("+ this cut");
+    settle(&mut h);
+    quiet(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "a job waiting is no job started");
+    h.click("Start");
+    settle(&mut h);
+    assert!(h.editor().quick_start[EXPORT_STEP], "the fifth tick");
+    assert_ne!(h.rig().config.ui.hints_seen & say::QUEUE, 0, "the queue's busy answered it");
+    assert_ne!(picked(&h).as_deref(), Some(say::QUEUE_WORDS));
+    no_window(&h);
+    let ctx = h.ctx();
+    crate::render_queue::wait(h.state_mut(), &ctx);
+    settle(&mut h);
+}
+
+/// AU7's note on Export: the sentence stands until the queue is busy, whatever
+/// else waits to be said; asked again with its row spent, it comes as a remark.
+#[test]
+fn ausay_export_sentence_stays_until_the_queue_is_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = ready();
+    queue_ready(&mut h, dir.path());
+    three_poses(&mut h);
+    quiet(&mut h);
+    let press = picked(&h).expect("a sentence");
+    assert!(press.starts_with("Press ") && press.ends_with(" to play."), "never played: {press}");
+    assert_ne!(h.editor_mut().show_me(EXPORT_STEP), Performed::Ignored);
+    settle(&mut h);
+    quiet(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "over the Play row");
+    h.state_mut().set_cut_length(6);
+    h.state_mut().view.frame = 4;
+    assert!(h.state().own_key_drawing().is_none(), "a held frame");
+    h.wait(30.0);
+    settle(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "over a frame's rows, and no timer takes it");
+
+    h.click("+ this cut");
+    settle(&mut h);
+    h.click("Start");
+    settle(&mut h);
+    assert_ne!(h.rig().config.ui.hints_seen & say::QUEUE, 0);
+    let ctx = h.ctx();
+    crate::render_queue::wait(h.state_mut(), &ctx);
+    settle(&mut h);
+    quiet(&mut h);
+    assert!(!h.state().render_queue.busy());
+    assert_ne!(picked(&h).as_deref(), Some(say::QUEUE_WORDS), "answered");
+
+    assert_ne!(h.editor_mut().show_me(EXPORT_STEP), Performed::Ignored);
+    settle(&mut h);
+    assert!(says(&h, say::QUEUE_WORDS), "a remark: {:?}", h.painted_text());
+
+    // It names what is on screen: both buttons, wherever the pane scrolled to.
+    for (w, tall) in [(1600.0, 900.0), (1280.0, 800.0)] {
+        let mut h = ready();
+        sized(&mut h, w, tall);
+        three_poses(&mut h);
+        assert_ne!(h.editor_mut().show_me(EXPORT_STEP), Performed::Ignored);
+        settle(&mut h);
+        let pane = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::RenderQueue).map(|(_, r, _)| *r);
+        let pane = pane.expect("the queue");
+        for button in ["+ this cut", "Start"] {
+            assert!(pane.contains_rect(h.rect(button)), "{w}: {button} {:?} in {pane:?}", h.rect(button));
+        }
+    }
+}
+
+/// Spec 8.3: the circle goes where a stroke's commit goes, and in a session
+/// that is the mirror a fill rides: its batch lands the same art on a guest's
+/// copy of the document. This reads the log the host streams; no two machines
+/// ran it. A guest with no file yet gets the pen's own refusal.
+#[test]
+fn ausay_a_circle_in_a_session_rides_the_mirror_a_fill_rides() {
+    fn paints(batches: &[Vec<Command>]) -> usize {
+        batches.iter().flatten().filter(|c| matches!(c, Command::PaintTiles { .. })).count()
+    }
+    let mut h = ready();
+    quiet(&mut h);
+    let mut guest = anim_core::Engine::new("guest");
+    guest.project = h.state().engine.project.clone();
+    h.state_mut().engine.mirror_log = true;
+    assert_ne!(h.editor_mut().show_me(0), Performed::Ignored);
+    settle(&mut h);
+    let circle = h.state_mut().engine.drain_applied();
+    assert_eq!(paints(&circle), 1, "one PaintTiles");
+    for batch in &circle {
+        guest.apply_mirror(batch).expect("the batch fits the guest's copy");
+    }
+    assert!(guest.project.scenes == h.state().engine.project.scenes, "the guest has what the host has");
+    assert!(h.state().has_art(), "and it is the circle");
+
+    let drawing = h.state().current_drawing().expect("the circle's drawing");
+    let layer = h.state().active_layer_id().expect("an armed layer");
+    h.state_mut().commit_fill("fill", drawing, layer, Vec::new());
+    assert_eq!(paints(&h.state_mut().engine.drain_applied()), 1, "the fill's log is the same one");
+
+    let mut h = ready();
+    quiet(&mut h);
+    h.editor_mut().canvas.is_guest = true;
+    assert_eq!(h.editor_mut().show_me(0), Performed::Ignored);
+    assert_eq!(h.state().refusal, "refused — the host's file is still arriving");
+    assert!(!h.state().has_art());
 }
 
 /// A cut with one drawing, and the cursor on a cell before it.
@@ -460,6 +812,24 @@ fn ausay_empty_cell_line_waits_for_a_first_drawing() {
     assert_ne!(h.editor().say.seen & say::EMPTY_CELL, 0, "a finished stroke sets it");
     assert!(!says(&h, EMPTY_CELL_LINE));
     assert!(!h.editor().canvas.dbg_empty_line);
+
+    // A drawing with no art yet: the lane is saying it, so the paper does not
+    // (spec 8.4: a screen carries a sentence once). Taught, the paper has it.
+    let mut state = AppState::new_project("t", 640, 480, 24, 72.0);
+    state.set_cut_length(6);
+    state.goto(3);
+    state.new_drawing_at_frame();
+    state.goto(0);
+    let mut h = EditorHarness::with_state_shipped(state);
+    sized(&mut h, 1600.0, 900.0);
+    quiet(&mut h);
+    assert!(!h.state().has_art() && h.state().current_drawing().is_none());
+    assert!(says(&h, "Draw on the paper to begin."));
+    assert!(!h.editor().canvas.dbg_empty_line && !says(&h, EMPTY_CELL_LINE), "{:?}", h.painted_text());
+    h.rig_mut().config.ui.hints_seen |= say::NEW_PAPER;
+    settle(&mut h);
+    assert!(h.editor().canvas.dbg_empty_line && says(&h, EMPTY_CELL_LINE), "{:?}", h.painted_text());
+    assert!(!says(&h, "Draw on the paper to begin."));
 }
 
 /// Spec 8.3: an outcome happens in a document. Another one's counts are no
@@ -516,16 +886,8 @@ fn ausay_no_step_is_silent() {
     // Plan, a stroke attempt: the hint first, then the same sentence as a
     // remark, every time.
     for off in [false, true] {
-        let mut h = ready();
-        if off {
-            h.perform(Action::ToggleHints);
-            settle(&mut h);
-        }
-        h.editor_mut().enter_room(Stage::Layout);
-        settle(&mut h);
-        quiet(&mut h);
-        let preview = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Canvas);
-        let at = preview.map(|(_, r, _)| r.center() - vec2(0.0, 80.0)).expect("the preview");
+        let mut h = in_plan(off);
+        let at = plan_preview(&h);
         for _ in 0..3 {
             h.drag_path(&[at, at + vec2(30.0, 0.0), at + vec2(60.0, 10.0)]);
             settle(&mut h);
@@ -533,6 +895,118 @@ fn ausay_no_step_is_silent() {
             quiet(&mut h);
         }
     }
+}
+
+/// A shipped editor on the Plan preview, its remarks gone.
+fn in_plan(off: bool) -> EditorHarness {
+    let mut h = ready();
+    if off {
+        h.perform(Action::ToggleHints);
+        settle(&mut h);
+    }
+    h.editor_mut().enter_room(Stage::Layout);
+    settle(&mut h);
+    quiet(&mut h);
+    h
+}
+
+/// A place on the preview clear of its empty state's button.
+fn plan_preview(h: &EditorHarness) -> egui::Pos2 {
+    let preview = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Canvas);
+    preview.map(|(_, r, _)| r.center() - vec2(0.0, 80.0)).expect("the preview")
+}
+
+/// A stroke tried is the drawing hand's drag. A tap, a double-click or a drag
+/// with another button is no attempt to draw, and asks nothing.
+#[test]
+fn ausay_plan_hears_only_a_stroke() {
+    let mut h = in_plan(false);
+    let at = plan_preview(&h);
+    let quiet_lane = picked(&h);
+    h.click_pos(at);
+    settle(&mut h);
+    h.click_pos(at);
+    h.click_pos(at);
+    settle(&mut h);
+    h.right_click_pos(at);
+    settle(&mut h);
+    h.middle_click_pos(at);
+    settle(&mut h);
+    for button in [egui::PointerButton::Secondary, egui::PointerButton::Middle] {
+        let event = |pos, pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE };
+        h.event(egui::Event::PointerMoved(at));
+        h.event(event(at, true));
+        h.run_frames(2);
+        h.event(egui::Event::PointerMoved(at + vec2(60.0, 10.0)));
+        h.run_frames(2);
+        h.event(event(at + vec2(60.0, 10.0), false));
+        settle(&mut h);
+    }
+    assert_eq!(picked(&h), quiet_lane, "no attempt");
+    assert!(!says(&h, say::PLAN_WORDS), "{:?}", h.painted_text());
+
+    h.drag_path(&[at, at + vec2(30.0, 0.0), at + vec2(60.0, 10.0)]);
+    settle(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some(say::PLAN_WORDS), "the drawing hand's drag is one");
+    // Pressed at once, the row was read: it needs no time on the lane.
+    h.click(LANE_GO_TO_DRAW);
+    settle(&mut h);
+    assert_eq!(h.editor().stage, Some(Stage::Drawing));
+    assert_ne!(h.rig().config.ui.hints_seen & say::PLAN, 0, "the press answered it");
+}
+
+/// Spec 8.4's Result: its sentence, and the button that answers it.
+#[test]
+fn ausay_result_empty_state_builds_the_composite() {
+    let mut h = EditorHarness::with_state_shipped(one_drawing_at(0));
+    sized(&mut h, 1600.0, 900.0);
+    h.editor_mut().enter_room(Stage::Composite);
+    settle(&mut h);
+    assert!(h.state().cut().graph.output.is_none(), "no output yet");
+    assert!(says(&h, crate::viewer::NOTHING_TO_SHOW), "{:?}", h.painted_text());
+    h.click("Set up standard composite");
+    settle(&mut h);
+    assert!(h.state().cut().graph.output.is_some(), "the button built it");
+    assert!(!says(&h, crate::viewer::NOTHING_TO_SHOW), "{:?}", h.painted_text());
+}
+
+/// Spec 8.4's Plan preview: its sentence, and the button that takes the
+/// person to the paper.
+#[test]
+fn ausay_plan_empty_state_goes_to_draw() {
+    let mut h = in_plan(false);
+    assert!(says(&h, crate::viewer::NOTHING_HERE), "{:?}", h.painted_text());
+    h.click(say::GO_TO_DRAW);
+    settle(&mut h);
+    assert_eq!(h.editor().stage, Some(Stage::Drawing));
+}
+
+/// Spec 8.4's Motion curves, with nothing keyed.
+#[test]
+fn ausay_curves_empty_state_says_what_fills_it() {
+    let mut h = ready();
+    h.perform(Action::ShowCurves);
+    settle(&mut h);
+    assert!(says(&h, "Animate a value to see its curve here"), "{:?}", h.painted_text());
+}
+
+/// Spec 8.4's Check paint, before a check has run.
+#[test]
+fn ausay_check_paint_empty_state_says_what_fills_it() {
+    let mut h = ready();
+    h.perform(Action::ShowPaintCheck);
+    settle(&mut h);
+    assert!(says(&h, "Run a check to find unpainted gaps."), "{:?}", h.painted_text());
+}
+
+/// Spec 8.4's Recent, on an install that has opened nothing.
+#[test]
+fn ausay_recent_empty_state_says_nothing_yet() {
+    let mut h = ready();
+    h.click("file");
+    h.hover("Open Recent ⏵");
+    settle(&mut h);
+    assert!(says(&h, "Nothing yet"), "{:?}", h.painted_text());
 }
 
 /// Spec AU7's list: 4 false sentences to 0, and the two stale ones.
@@ -554,6 +1028,41 @@ fn ausay_false_copy_is_gone() {
     assert!(crate::palette_panel::NO_CHARACTERS.contains("+ character"));
     // And the status a new project starts with is no teaching at all.
     assert_eq!(AppState::new_project("t", 64, 48, 24, 72.0).status, "");
+}
+
+/// AU7's list: the empty board's sentence is true where it stands: the latch
+/// it names is in the pane with it, then the button, and the board that comes
+/// of it keeps both on the pane's own screen.
+#[test]
+fn ausay_empty_palette_names_what_is_on_screen() {
+    fn palette(h: &EditorHarness) -> Rect {
+        h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Palette).map(|(_, r, _)| *r).expect("the board")
+    }
+    #[track_caller]
+    fn on_screen(h: &EditorHarness, name: &str) {
+        let (pane, control) = (palette(h), h.rect(name));
+        assert!(pane.contains_rect(control), "{name}: {control:?} in {pane:?}");
+    }
+    for (w, tall) in [(1600.0, 900.0), (1280.0, 800.0)] {
+        let mut h = ready();
+        sized(&mut h, w, tall);
+        h.editor_mut().enter_room(Stage::InkPaint);
+        settle(&mut h);
+        assert!(h.state().palettes.characters.is_empty());
+        assert!(says(&h, crate::palette_panel::NO_CHARACTERS), "{:?}", h.painted_text());
+        on_screen(&h, "edit model");
+        h.click("edit model");
+        settle(&mut h);
+        on_screen(&h, "+ character");
+        h.state_mut().palette_new_name = "Ana".into();
+        h.click("+ character");
+        settle(&mut h);
+        assert_eq!(h.state().palettes.characters.len(), 1, "the sentence's two steps made one");
+        assert!(!says(&h, crate::palette_panel::NO_CHARACTERS));
+        on_screen(&h, "edit model");
+        on_screen(&h, "+ character");
+        on_screen(&h, "REMOVE CHARACTER");
+    }
 }
 
 /// Spec 8.2 and AU7's list: a teaching sentence stays until it is answered,
@@ -735,10 +1244,8 @@ fn ausay_a_refusal_said_twice_stays_with_its_fix() {
     assert_ne!(picked(&h).as_deref(), Some(doc::HELD_FRAME), "once is no pattern");
     h.state_mut().refuse(doc::HELD_FRAME);
     settle(&mut h);
-    h.state_mut().refuse(doc::HELD_FRAME);
-    settle(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some(doc::HELD_FRAME), "twice is");
     quiet(&mut h);
-    assert_eq!(picked(&h).as_deref(), Some(doc::HELD_FRAME));
     assert!(h.has(FIX_IT));
     assert_eq!(say::fix_of(doc::HELD_FRAME), Some(Action::NewDrawing));
     assert_eq!(say::fix_of(doc::READ_ONLY_VIEW), Some(Action::ToggleCompositeView));
@@ -747,6 +1254,7 @@ fn ausay_a_refusal_said_twice_stays_with_its_fix() {
     h.click(FIX_IT);
     settle(&mut h);
     assert_ne!(picked(&h).as_deref(), Some(doc::HELD_FRAME), "answered");
+    assert_ne!(h.rig().config.ui.hints_seen & say::REFUSED_TWICE, 0, "the press read it");
 }
 
 /// Spec 8.2: three pen strokes with no pressure, and `Fix it` opens the pen
@@ -770,6 +1278,76 @@ fn ausay_a_flat_pen_is_said_after_three_strokes() {
     settle(&mut h);
     assert!(h.editor().request_settings_pen, "the pen page");
     assert_ne!(h.editor().say.seen & say::FLAT_PEN, 0, "and it is answered");
+
+    // Real strokes, through the pen's own route.
+    const FLAT: &str = "Your pen is drawing without pressure.";
+    let mut h = ready();
+    quiet(&mut h);
+    let from = paper_middle(&h);
+    flat_line(&mut h, from);
+    flat_line(&mut h, from + vec2(0.0, 20.0));
+    assert_eq!(h.state().strokes_done, 2, "two strokes landed");
+    quiet(&mut h);
+    assert_ne!(picked(&h).as_deref(), Some(FLAT), "two are no pattern");
+    flat_line(&mut h, from + vec2(0.0, 40.0));
+    quiet(&mut h);
+    assert_eq!(picked(&h).as_deref(), Some(FLAT), "three are");
+
+    // Show me's circle is nobody's pen: two flat lines and a circle are two.
+    let mut h = ready();
+    quiet(&mut h);
+    let from = paper_middle(&h);
+    flat_line(&mut h, from);
+    flat_line(&mut h, from + vec2(0.0, 20.0));
+    assert_ne!(h.editor_mut().show_me(0), Performed::Ignored);
+    settle(&mut h);
+    assert_eq!(h.state().strokes_done, 3, "the circle is a stroke to the document");
+    quiet(&mut h);
+    assert_ne!(picked(&h).as_deref(), Some(FLAT));
+
+    // A mouse never asks.
+    let mut h = ready();
+    quiet(&mut h);
+    for _ in 0..3 {
+        line(&mut h);
+    }
+    assert_eq!(h.state().strokes_done, 3);
+    quiet(&mut h);
+    assert_ne!(picked(&h).as_deref(), Some(FLAT));
+}
+
+/// A tablet's line whose samples never carry force.
+fn flat_line(h: &mut EditorHarness, from: egui::Pos2) {
+    h.pen_down(from);
+    h.pen_move_flat(from + vec2(-30.0, 0.0));
+    h.pen_move_flat(from + vec2(-60.0, 5.0));
+    h.pen_up(from + vec2(-60.0, 5.0));
+    settle(h);
+}
+
+/// `Check your pen` listens for the person's line. Show me's circle is not
+/// that line: it stands, its tick stands, and the check goes on listening.
+/// With no check asked, the circle ends the float as any stroke does.
+#[test]
+fn ausay_show_me_leaves_the_pen_check_listening() {
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1600.0, 900.0);
+    h.click("Check your pen");
+    settle(&mut h);
+    assert_eq!(h.editor().start.as_ref().map(|w| w.pen), Some(welcome::PenCheck::Waiting));
+    assert_ne!(h.editor_mut().show_me(0), Performed::Ignored);
+    settle(&mut h);
+    assert!(h.state().has_art(), "the circle stands");
+    assert!(h.editor().quick_start[welcome::FIRST_STROKE], "and so does its tick");
+    assert_eq!(h.editor().start.as_ref().map(|w| w.pen), Some(welcome::PenCheck::Waiting), "still listening");
+
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1600.0, 900.0);
+    assert!(h.editor().start.is_some());
+    assert_ne!(h.editor_mut().show_me(0), Performed::Ignored);
+    settle(&mut h);
+    assert!(h.editor().start.is_none(), "a finished stroke accepts the paper");
+    assert!(h.state().has_art());
 }
 
 /// Spec 8.3: five dots, no controls and no words; under the fold they hide,
@@ -790,4 +1368,79 @@ fn ausay_dots_show_the_place() {
     assert!(!h.editor().say.dots_painted, "under the fold");
     sized(&mut h, 1600.0, 900.0);
     assert!(h.editor().say.dots_painted);
+}
+
+/// The dots wear a card for whoever rests on them, in words, and a Picture
+/// start's closed strip has no animation for them to count.
+#[test]
+fn ausay_dots_card_says_the_place() {
+    assert_eq!(say::place_words(&[true, true, false, false, false]), "Quick Start: 2 of 5. Next: draw the next pose.");
+    assert_eq!(say::place_words(&[false; 5]), "Quick Start: 0 of 5. Next: draw something.");
+    let mut h = ready();
+    quiet(&mut h);
+    let band_left = h.rect("Add drawing (band)").left();
+    h.event(egui::Event::PointerMoved(egui::pos2(band_left - 24.0, h.rect("Add drawing (band)").center().y)));
+    h.run_frames(1);
+    h.wait(1.5);
+    assert!(says(&h, "Quick Start: 0 of 5. Next: draw something."), "{:?}", h.painted_text());
+
+    let mut h = ready();
+    h.editor_mut().strip_open = false;
+    h.editor_mut().full_band = false;
+    settle(&mut h);
+    assert!(h.editor().strip_closed(), "a Picture start's arrangement");
+    assert!(!h.editor().say.dots_painted, "the strip is closed");
+    h.editor_mut().strip_open = true;
+    settle(&mut h);
+    assert!(h.editor().say.dots_painted, "the strip came out");
+}
+
+/// Spec 8.2: a hint's button stands straight after its words, where the eye
+/// already is, and the dots keep the lane's far end clear of both.
+#[test]
+fn ausay_the_action_button_stands_after_its_words() {
+    let mut h = ready();
+    quiet(&mut h);
+    let words = h.rect("Draw on the paper to begin.");
+    let button = h.rect(SHOW_ME);
+    assert!((button.left() - words.right() - 6.0).abs() < 1.0, "{words:?} then {button:?}");
+    assert!(button.right() < h.rect("Add drawing (band)").left() - plate::SAY_DOTS, "{button:?}");
+}
+
+/// Spec 8.2's Effects row, in the words that are true until AU14's shelf: the
+/// graph is on screen, and the chord is the live one.
+#[test]
+fn ausay_effects_hint_names_what_the_step_has() {
+    let mut h = EditorHarness::with_state_shipped(one_drawing_at(0));
+    sized(&mut h, 1600.0, 900.0);
+    h.editor_mut().enter_room(Stage::Composite);
+    settle(&mut h);
+    quiet(&mut h);
+    assert!(visible_panes(&h.editor().dock).contains(&Pane::NodeGraph));
+    let chord_words = crate::menus::chord_label(&h.ctx(), Action::AddNode).expect("bound");
+    let words = format!("Press {chord_words} over the graph to add an effect.");
+    assert_eq!(picked(&h).as_deref(), Some(words.as_str()));
+    assert!(says(&h, &words), "{:?}", h.painted_text());
+}
+
+/// AU7's 16 named tests and its shots stand: the spec's list, read from the
+/// spec, against this file; and the shots' own list against what it owes.
+#[test]
+fn ausay_the_named_tests_exist() {
+    let spec = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../research/PSD-approachable-ui.md");
+    let spec = std::fs::read_to_string(spec).expect("the spec");
+    let part = spec.split("## AU7 Say line and Quick Start").nth(1).expect("the part");
+    let list = part.split("### Tests").nth(1).expect("its tests").split("### Gates").next().expect("a list");
+    let is_name = |word: &&str| word.starts_with("ausay_") && word.len() > 6 && !word.contains(' ');
+    let named: Vec<&str> = list.split('`').filter(is_name).collect();
+    assert_eq!(named.len(), 16, "{named:?}");
+    let lines: Vec<&str> = include_str!("ausay_tests.rs").lines().collect();
+    for name in named {
+        let test = format!("fn {name}() {{");
+        assert!(lines.windows(2).any(|pair| pair[0] == "#[test]" && pair[1] == test), "{name}");
+    }
+    let shots = include_str!("uishot.rs");
+    for shot in ["say-hint", "say-sheet", "say-fix-fold", "say-plan", "say-timing", "say-color", "say-effects", "say-empty-cell", "say-export"] {
+        assert!(shots.contains(&format!("(\"{shot}\", ")), "{shot}");
+    }
 }

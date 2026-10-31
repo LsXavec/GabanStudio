@@ -260,7 +260,9 @@ pub fn ui(
 ) {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
-    if plan && (response.drag_started() || response.clicked()) {
+    // A stroke tried is the drawing hand's drag: a tap or a double-click on the
+    // preview, or a drag with another button, is no attempt to draw.
+    if plan && response.drag_started_by(egui::PointerButton::Primary) {
         vs.tried = true;
     }
     let painter = ui.painter_at(rect);

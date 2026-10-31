@@ -1,7 +1,9 @@
 //! AU7: THE SAY LINE'S TEACHING (spec 8.2 to 8.5). One table, read once a
 //! frame: the first row that applies speaks, and it stays until it is
-//! answered. An answer lands in `ui.hints_seen`, so a row teaches once and
-//! nothing here runs on a timer. A row's bit is stored: it keeps its number.
+//! answered. An answer lands in `ui.hints_seen`, so a row teaches once. No
+//! timer takes a sentence off the lane: the one clock here, `READ_SECS`, only
+//! keeps a row nobody had time to read from counting as said. A row's bit is
+//! stored: it keeps its number.
 //!
 //! The lane's order stays `Editor::say_line`'s: a refusal, the machine's last
 //! remark, then what this file picks. Quick Start's ticks are read here too,
@@ -20,8 +22,10 @@ pub const FIX_IT: &str = "Fix it";
 
 /// The Plan preview's answer to a stroke, whether or not a hint can say it.
 pub const PLAN_WORDS: &str = "This step shows a preview. Drawing happens in Draw.";
-/// What the render queue asks of someone Show me sent there.
-pub const QUEUE_WORDS: &str = "Pick a preset, press + this cut, then press Start.";
+/// What the render queue asks of someone Show me sent there. Show me brings
+/// both buttons on screen (`reveal_start`); the presets above them keep their
+/// first choice unless the person picks another.
+pub const QUEUE_WORDS: &str = "Press + this cut, then press Start.";
 
 // The stored bits, one for each row of spec 8.2. 8 is AU9's `Exported ball.gif.`
 // and 13 is AU10's card on the return dot.
@@ -40,6 +44,7 @@ pub const HELD: u32 = 1 << 12;
 /// The canvas line's bit (spec 8.4).
 pub const EMPTY_CELL: u32 = 1 << 14;
 pub const QUEUE: u32 = 1 << 15;
+pub const TWO_DRAWINGS: u32 = 1 << 16;
 
 /// What a hint's button does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +123,8 @@ pub struct Facts {
     pub refused_twice: Option<String>,
     /// `ui.hints_seen`, as the frame began.
     pub seen: u32,
+    /// The row last on the lane stood long enough to read.
+    pub stood: bool,
     // ---- this frame's outcomes ----
     pub stroked: bool,
     pub added: bool,
@@ -142,7 +149,8 @@ pub struct Hint {
     pub steps: &'static [Stage],
     pub shows: fn(&Facts) -> bool,
     pub answered: fn(&Facts) -> bool,
-    /// Said for a moment: the moment passing answers it.
+    /// Said for a moment: the moment passing answers it, if it stood to be
+    /// read and playback did not carry it off.
     pub passes: bool,
 }
 
@@ -155,7 +163,7 @@ const DRAWING_ROOMS: &[Stage] = &[Stage::Drawing, Stage::Manga];
 const TRANSPORT: &[Stage] = &[Stage::Drawing, Stage::Edit];
 const ON_A_FRAME: &[Stage] = &[Stage::Drawing, Stage::Edit, Stage::InkPaint];
 
-pub const HINTS: [Hint; 13] = [
+pub const HINTS: [Hint; 14] = [
     Hint {
         bit: PLAN,
         words: Words::Plain(PLAN_WORDS),
@@ -174,6 +182,16 @@ pub const HINTS: [Hint; 13] = [
         answered: never,
         passes: true,
     },
+    // Asked for by name, so no row that only waits its turn stands in front.
+    Hint {
+        bit: QUEUE,
+        words: Words::Plain(QUEUE_WORDS),
+        verb: None,
+        steps: &[],
+        shows: |f| f.queue_up && f.export_asked,
+        answered: |f| f.exported,
+        passes: false,
+    },
     Hint {
         bit: FLAT_PEN,
         words: Words::Plain("Your pen is drawing without pressure."),
@@ -188,7 +206,7 @@ pub const HINTS: [Hint; 13] = [
         words: Words::Plain("This drawing appears twice. Changes show in both."),
         verb: None,
         steps: ON_A_FRAME,
-        shows: |f| f.twice,
+        shows: |f| f.twice && !f.playing,
         answered: never,
         passes: true,
     },
@@ -197,7 +215,7 @@ pub const HINTS: [Hint; 13] = [
         words: Words::Held,
         verb: None,
         steps: ON_A_FRAME,
-        shows: |f| f.held.is_some(),
+        shows: |f| f.held.is_some() && !f.playing,
         answered: never,
         passes: true,
     },
@@ -210,9 +228,10 @@ pub const HINTS: [Hint; 13] = [
         answered: |f| f.filled,
         passes: false,
     },
+    // Spec 8.2's own sentence comes with AU14's shelf, the thing it points at.
     Hint {
         bit: EFFECTS,
-        words: Words::Plain("Pick an effect to add it to the picture."),
+        words: Words::Chord("Press ", Action::AddNode, " over the graph to add an effect."),
         verb: None,
         steps: &[Stage::Composite],
         shows: |f| f.art,
@@ -247,6 +266,17 @@ pub const HINTS: [Hint; 13] = [
         answered: |f| f.stroked && f.frame >= 1,
         passes: false,
     },
+    // Spec 8.2's Play row waits for a third drawing, and Show me's own chain
+    // stops at two: without this one it would end here, with nothing said.
+    Hint {
+        bit: TWO_DRAWINGS,
+        words: Words::Chord("Add another drawing, or press ", Action::PlayPause, " to play."),
+        verb: Some(Verb::Show(welcome::PLAY_STEP)),
+        steps: TRANSPORT,
+        shows: |f| f.art && f.drawings == 2 && !f.blank && !f.playing,
+        answered: |f| f.playing,
+        passes: false,
+    },
     Hint {
         bit: PLAY,
         words: Words::Chord("Press ", Action::PlayPause, " to play."),
@@ -261,16 +291,7 @@ pub const HINTS: [Hint; 13] = [
         words: Words::Plain("Ready to share? Go to Export."),
         verb: Some(Verb::Show(welcome::EXPORT_STEP)),
         steps: TRANSPORT,
-        shows: |f| f.has_seen(PLAY) && f.drawings >= 2 && !f.playing && !f.queue_up,
-        answered: |f| f.exported,
-        passes: false,
-    },
-    Hint {
-        bit: QUEUE,
-        words: Words::Plain(QUEUE_WORDS),
-        verb: None,
-        steps: &[],
-        shows: |f| f.queue_up && f.export_asked,
+        shows: |f| f.has_seen(PLAY) && f.drawings >= 2 && !f.queue_up,
         answered: |f| f.exported,
         passes: false,
     },
@@ -347,7 +368,7 @@ pub fn read(
     chord: impl Fn(Action) -> Option<String>,
 ) -> Option<Spoken> {
     for hint in &HINTS {
-        let passed = hint.passes && shown == Some(hint.bit) && !hint.applies(f);
+        let passed = hint.passes && shown == Some(hint.bit) && f.stood && !f.playing && !hint.applies(f);
         if (hint.answered)(f) || passed {
             *seen |= hint.bit;
         }
@@ -361,6 +382,13 @@ pub fn empty_step(f: &Facts, hints_off: bool) -> Option<Spoken> {
     let row = EMPTY_STEPS.iter().find(|e| f.stage == Some(e.stage) && (e.applies)(f))?;
     let verb = (!hints_off).then_some(Verb::GoToDraw);
     Some(Spoken { bit: None, words: row.words.to_string(), verb })
+}
+
+/// The five dots' card: the place they show, in words.
+pub fn place_words(ticks: &[bool; 5]) -> String {
+    let done = ticks.iter().filter(|done| **done).count();
+    let next = ticks.iter().position(|done| !done).map_or("", |i| welcome::STEPS[i].label);
+    format!("Quick Start: {done} of 5. Next: {}.", next.to_lowercase())
 }
 
 /// What the Say line keeps between frames.
@@ -377,12 +405,19 @@ pub struct Say {
     pub hint: Option<Spoken>,
     /// The row last on the lane.
     pub shown: Option<u32>,
+    /// The row on the lane this frame, and when it came up.
+    standing: Option<u32>,
+    since: f64,
+    /// `shown` stood `READ_SECS`.
+    stood: bool,
     /// `AddDrawingAfter` ran since the last reading.
     pub added: bool,
     /// Show me sent the person to the queue.
     pub export_asked: bool,
     /// The stroke just read was `Check your pen`'s.
     pub check_line: bool,
+    /// The stroke just read was Show me's circle: no pen drew it.
+    circle: bool,
     /// The five dots painted this frame.
     pub dots_painted: bool,
     /// A sentence a test holds on the lane, whatever the document says.
@@ -407,11 +442,31 @@ pub struct Say {
 const FLAT_STROKES: u32 = 3;
 /// The demo circle's places along the paper, one a frame.
 const DEMO_STEPS: u32 = 8;
+/// How long a row that passes stands before its passing counts as read: long
+/// enough for its longest sentence. A floor on being used up, on the clock
+/// because egui paints no frames while nothing happens, and never a reason
+/// for a row to leave the lane.
+pub const READ_SECS: f64 = 2.0;
 
 impl Say {
-    /// The shell's config, each frame: the switch and the bits.
+    /// The shell's config, each frame: the switch and the bits. On again,
+    /// nothing the lane or the paper said before counts (spec 8.5).
     pub fn feed(&mut self, ui: &UiConfig) {
+        if self.off && !ui.hints_off {
+            (self.shown, self.standing, self.stood, self.line_shown) = (None, None, false, false);
+        }
         (self.off, self.seen) = (ui.hints_off, ui.hints_seen);
+    }
+
+    /// What the lane shows this frame, from the shell, with the time. A row
+    /// that leaves and comes back starts its reading again.
+    pub fn stands(&mut self, bit: Option<u32>, now: f64) {
+        if bit != self.standing {
+            (self.standing, self.since) = (bit, now);
+        }
+        if bit.is_some() {
+            (self.shown, self.stood) = (bit, now - self.since >= READ_SECS);
+        }
     }
 
     /// Another document: nothing that differs from the last one is an outcome.
@@ -434,9 +489,11 @@ impl Say {
     }
 
     /// `canvas.empty_cell_hint` (spec 8.4): on a blank document the Say line
-    /// says it instead.
+    /// says it instead, and on a drawing with no art it is still saying
+    /// `NEW_PAPER`: a screen carries a sentence once.
     pub fn empty_cell_due(&self, state: &doc::AppState) -> bool {
-        !self.off && self.seen & EMPTY_CELL == 0 && !state.cut().drawings.is_empty()
+        let said = state.has_art() || self.seen & NEW_PAPER != 0;
+        !self.off && self.seen & EMPTY_CELL == 0 && !state.cut().drawings.is_empty() && said
     }
 
     /// A refusal said twice running: a new word, an edit or another frame
@@ -490,12 +547,15 @@ impl Editor {
     fn say_outcomes(&mut self) -> (bool, bool) {
         let state = &self.state;
         let check_line = std::mem::take(&mut self.say.check_line);
+        let circle = std::mem::take(&mut self.say.circle);
         let stroked = self.say.strokes.is_some_and(|seen| seen != state.strokes_done) && !check_line;
         let filled = self.say.fills.is_some_and(|seen| seen != state.fills_done);
         (self.say.strokes, self.say.fills) = (Some(state.strokes_done), Some(state.fills_done));
         if stroked {
             self.tick_stroke();
             match self.canvas.pen_verdict() {
+                // The verdict is the last real stroke's, and the circle no pen's.
+                _ if circle => {}
                 PenCheck::NoPressure => self.say.flat_strokes += 1,
                 PenCheck::Works => {
                     self.say.flat_strokes = 0;
@@ -505,6 +565,7 @@ impl Editor {
             }
         }
         self.quick_start[welcome::PLAY_STEP] |= self.state.view.playing;
+        self.quick_start[welcome::EXPORT_STEP] |= self.state.render_queue.busy();
         (stroked, filled)
     }
 
@@ -545,7 +606,8 @@ impl Editor {
             ghost: state.view.onion,
             playing: state.view.playing,
             strip: !self.strip_closed() || self.full_band,
-            held: held.map(|(key, next)| next.unwrap_or(length) - key),
+            // A cut shortened under its next key ends first.
+            held: held.map(|(key, next)| next.unwrap_or(length).min(length).saturating_sub(key)),
             twice: shown.is_some_and(|d| keys(d) > 1),
             queue_up: visible_panes(&self.dock).contains(&Pane::RenderQueue),
             export_asked: self.say.export_asked,
@@ -553,6 +615,7 @@ impl Editor {
             flat_pen: self.say.flat_strokes >= FLAT_STROKES,
             refused_twice: (self.say.refusals >= 2).then(|| self.say.refusal.clone()),
             seen: self.say.seen,
+            stood: self.say.stood,
             stroked,
             added: std::mem::take(&mut self.say.added),
             filled,
@@ -563,7 +626,8 @@ impl Editor {
     }
 
     /// The action button, pressed. It runs what the Help window's rows run;
-    /// the two fixes have no outcome to wait for, so the press answers them.
+    /// only a Show me has an outcome to wait for, so the press answers the
+    /// rest, however quick it was: whoever pressed it read the row.
     pub(crate) fn say_act(&mut self, verb: Verb, ctx: &eframe::egui::Context) {
         match verb {
             Verb::Show(slot) => {
@@ -571,10 +635,14 @@ impl Editor {
             }
             Verb::GoToDraw => {
                 self.invoke(Action::RoomDrawing, ctx);
+                if self.say.standing == Some(PLAN) {
+                    self.say_answered(PLAN);
+                }
             }
             Verb::Fix(action) => {
                 self.invoke(action, ctx);
                 self.say.refusals = 0;
+                self.say_answered(REFUSED_TWICE);
             }
             Verb::PenPage => {
                 self.request_settings_pen = true;
@@ -613,6 +681,13 @@ impl Editor {
             return Performed::Ignored;
         }
         self.canvas.engine_changed();
+        self.say.circle = true;
+        // A check listening for a line is listening for the person's. This
+        // one stands, and the check goes on listening.
+        let heard = self.canvas.pen_verdict();
+        if self.start.as_ref().is_some_and(|w| w.pen.read(heard).is_some()) {
+            self.strokes_seen = self.state.strokes_done;
+        }
         // The Help window's row asks with no frame to come yet.
         self.tick_stroke();
         Performed::Done

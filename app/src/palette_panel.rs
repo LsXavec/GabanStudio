@@ -60,8 +60,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     // GM7 CHIP PICK: one ringed pot — the active chip, else the first pot
     // of the brush colour (two pots sharing a colour never both ring).
     let ring = state.ringed_chip(canvas.brush_color);
+    // AU7: the pots leave room for what stands under them, as last frame
+    // measured it, so the latch stays on the pane's own screen. With no
+    // character there is nothing to scroll, and it stands under the sentence
+    // that names it.
+    let under_id = ui.id().with("palette under the pots");
+    let under = ui.data(|d| d.get_temp::<f32>(under_id)).unwrap_or(0.0);
+    let room = if n_chars == 0 { 0.0 } else { (ui.available_height() - under).max(0.0) };
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
+        .max_height(room)
         .show(ui, |ui| {
             if let Some(ch) = state.palettes.characters.get_mut(ci) {
                 for (ri, role) in ch.roles.iter_mut().enumerate() {
@@ -187,6 +195,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     if armed_pot.is_some() {
         state.active_chip = armed_pot;
     }
+    let under_top = ui.cursor().top();
     if !state.palettes.characters.is_empty() {
         variants_ui(ui, state, ci);
     }
@@ -223,6 +232,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             state.active_chip = None;
             state.meta_dirty = true;
         }
+    }
+    let measured = ui.cursor().top() - under_top;
+    if (measured - under).abs() > 0.5 {
+        ui.data_mut(|d| d.insert_temp(under_id, measured));
+        ui.ctx().request_repaint();
     }
 }
 

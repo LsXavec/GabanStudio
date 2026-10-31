@@ -1635,11 +1635,11 @@ fn austrip_say_words_leave_the_action_slot_free() {
     let mut h = strip_up(&[4, 4]);
     h.kit_mut().set_size(vec2(832.0, 640.0));
     settle(&mut h);
-    // The slot holds the longest of 8.2's words as a band key: its 8 pt pad
-    // either side, and the gap before it.
+    // The slot holds the longest of 8.2's words as a band key: the 10 pt pad
+    // of every button either side, and the gap before it.
     let font = plate::Role::Panel.font();
     let word = h.ctx().fonts_mut(|f| f.layout_no_wrap("Go to Draw".to_string(), font, plate::ON_FILL).size().x);
-    assert!(plate::SAY_ACTION >= word + 16.0 + 6.0, "{} for a word of {word}", plate::SAY_ACTION);
+    assert!(plate::SAY_ACTION >= word + 20.0 + 6.0, "{} for a word of {word}", plate::SAY_ACTION);
     let slot = points(&h, "Add drawing (band)").left() - plate::SAY_ACTION;
     h.state_mut().status = LONG.into();
     settle(&mut h);
@@ -1651,6 +1651,7 @@ fn austrip_say_words_leave_the_action_slot_free() {
     h.wait(4.2);
     settle(&mut h);
     let button = points(&h, &name);
+    assert!((button.width() - (word + 20.0)).abs() < 1.0, "{button:?} for a word of {word}");
     assert!(points(&h, LONG).right() <= button.left(), "{:?} past {button:?}", points(&h, LONG));
     assert!(button.right() <= points(&h, "Add drawing (band)").left(), "{button:?}");
     let words = format!("refused — {LONG}");

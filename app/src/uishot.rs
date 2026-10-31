@@ -584,6 +584,8 @@ fn say_moments(dir: &Path) {
     s.set_cut_length(6);
     s.goto(3);
     s.new_drawing_at_frame();
+    // The canvas line waits for art, or the lane is saying the same thing.
+    crate::canvas::extpaper_tests::paint_texels(&mut s, &[(10, 10)], [0.0, 0.0, 0.0, 1.0]);
     s.goto(0);
     let mut h = EditorHarness::with_gpu_shipped(s);
     draw.enter(h.editor_mut());

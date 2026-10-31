@@ -919,8 +919,8 @@ pub fn value(ui: &mut Ui, text: &str) -> Response {
 /// The Say line's one size, and the smaller one its second row asks for.
 pub const SAY_TEXT: f32 = 14.0;
 pub const SAY_SMALL: f32 = 12.0;
-/// The lane's right end, held for a hint's action button (spec 8.2): the
-/// longest of its words at control size, its pad and the gap before it.
+/// The room held for a hint's action button (spec 8.2): the longest of its
+/// words at control size, its pad and the gap before it.
 pub const SAY_ACTION: f32 = 92.0;
 /// Spec 8.3's five dots: the room they take, and the narrowest lane that
 /// keeps the longest sentence on its two rows beside them.
@@ -967,12 +967,13 @@ pub fn refusal(ui: &mut Ui, words: &str) -> Response {
 
 /// How wide a hint's action button stands.
 pub fn say_action_width(ui: &Ui, words: &str) -> f32 {
-    text_width(ui, words, CTRL_TEXT) + 16.0
+    text_width(ui, words, CTRL_TEXT) + 2.0 * ui.spacing().button_padding.x
 }
 
-/// The action button of a Say line hint, at the right end of `row`: a filled
-/// control, never solid blue, because a hint is not the screen's main action.
-/// It is spoken apart from the Help window's rows and a pane's own button.
+/// The action button of a Say line hint, ending at the right end of `row`: a
+/// filled control, never solid blue, because a hint is not the screen's main
+/// action. It is spoken apart from the Help window's rows and a pane's own
+/// button.
 pub fn say_action(ui: &mut Ui, row: egui::Rect, words: &str) -> Response {
     let wide = say_action_width(ui, words);
     let rect = egui::Rect::from_center_size(row.center(), Vec2::new(wide, CTRL_H));
@@ -981,17 +982,18 @@ pub fn say_action(ui: &mut Ui, row: egui::Rect, words: &str) -> Response {
     if ui.is_rect_visible(rect) {
         let (fill, _) = filled(&resp);
         ui.painter().rect_filled(rect, R_CONTROL, fill);
-        label_at(ui, rect.left() + 8.0, rect.center().y, words, CTRL_TEXT, INK);
+        label_at(ui, rect.left() + ui.spacing().button_padding.x, rect.center().y, words, CTRL_TEXT, INK);
     }
     speak(&resp, egui::WidgetType::Button, None, &format!("{words} (say line)"));
     describe(resp, "ACTION say_action", words)
 }
 
-/// The five dots (spec 8.3), left of the action's end of `row`: filled to
-/// where the person has reached, and the next one ringed.
-pub fn say_dots(ui: &Ui, row: egui::Rect, ticks: &[bool; 5]) {
+/// The five dots (spec 8.3), at the right end of `row`: filled to where the
+/// person has reached, and the next one ringed. What comes back only hovers,
+/// and takes their whole slot, so a 6 pt dot needs no aim to wear a card.
+pub fn say_dots(ui: &Ui, row: egui::Rect, ticks: &[bool; 5]) -> Response {
     let (step, radius) = (9.0, 3.0);
-    let first = row.right() - SAY_ACTION - SAY_DOTS + radius + 4.0;
+    let first = row.right() - SAY_DOTS + radius + 4.0;
     let next = ticks.iter().position(|done| !done);
     for (i, done) in ticks.iter().enumerate() {
         let at = Pos2::new(first + step * i as f32, row.center().y);
@@ -1002,6 +1004,7 @@ pub fn say_dots(ui: &Ui, row: egui::Rect, ticks: &[bool; 5]) {
             ui.painter().circle_stroke(at, radius - 0.5, Stroke::new(1.0, ink));
         }
     }
+    ui.interact(row.with_min_x(row.right() - SAY_DOTS), ui.id().with("say dots"), Sense::hover())
 }
 
 /// A painted control's content at rest: `rest`, or `INK` inside a disabled
