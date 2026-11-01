@@ -172,6 +172,15 @@ These apply to every part.
 11. **One stroke signal.** The real app never calls `commit_stroke` for a brush stroke: `canvas.rs:7378-7381` returns first and the raster commit is `commit_raster` (`canvas.rs:4410`), while the harness forces `raster = false` (`canvas.rs:3820`) and only ever runs the vector route. So anything that reacts to a finished stroke reads one counter, `AppState.strokes_done`, which `Editor` compares once a frame. `commit_stroke` and `commit_raster` bump it on success. A paste is not a stroke: `paste_pixels` calls the private `land_raster` that `commit_raster` wraps. A fill is not a stroke. Every test of a stroke outcome runs both routes: vector through the harness, raster through `paint_texels` (`canvas.rs:9646`). One ignored `with_gpu` test runs a real stroke.
 12. **A journey with a refusal is a failed journey.** The `Recorder` fails the script, naming the step, if `refusal_seq` moves or a perform returns `Performed::Ignored`. Room arming runs in `Editor::arm_room` (5.3), so a Rig under a shipped boot arms exactly what the App arms.
 
+### 1.6 The Lead's feedback, 2026-10-31: read this before anything below
+
+`research/PSD-approachable-ui-feedback.md` ("the feedback spec") **wins over this document wherever they differ.** Every part from here on reads that file's sections 0 and 1 whole, as well as sections 0 and 1 of this document. The nine lessons are in `research/LESSONS-approachable-ui.md`.
+
+- Parts AU18 to AU28 have their `## AU<n>` section in the feedback spec, not here. Read the feedback spec's sections 2 to 5 where your section cites them.
+- AU11 to AU17 keep their `## AU<n>` section here, and also take the changes listed for them in the feedback spec's 1.11.
+- The build order is the plan file's `parts` array, which follows the feedback spec's 1.12. A part's prefix and minimum test count are in its `gate`.
+- The feedback spec was written at f3bb1dc. Keys and Hide tools has since landed at 0163db3, so what that part left for later is in its `left` list in the plan file.
+
 ---
 
 ## 2 Visual system
