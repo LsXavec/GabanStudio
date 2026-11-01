@@ -462,7 +462,7 @@ fn generator_reached(cut: &Cut, kind: GenKind) -> bool {
 /// The last words a person typed into the page. `Add text`'s stand-in is no
 /// one's words, and nor is the node's own default.
 fn words_on_page(cut: &Cut) -> bool {
-    let own = |text: &str| !text.trim().is_empty() && text != crate::manga_tools::TEXT_START && !text.starts_with("セリフ");
+    let own = |text: &str| !text.trim().is_empty() && text != crate::manga_tools::TEXT_START && text != "セリフ";
     let typed = |params: &anim_core::fx::FxParams| {
         params.0.values().any(|v| matches!(v, anim_core::fx::FxValue::Text { text, .. } if own(text)))
     };

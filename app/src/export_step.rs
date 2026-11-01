@@ -304,10 +304,11 @@ fn video_row(ui: &mut egui::Ui, state: &mut AppState) {
 
 /// AU22: `Mono` and its threshold, where a comic's pages go out: the very
 /// options the Manga pane's export rows read and write, so the two show one
-/// state. Off is the colour page: `in grey` stays the pane's.
+/// state. Off is the mode it stood over: `in grey` is set on the pane, and this
+/// row names it, since a latch has two faces for three modes.
 fn mono_row(ui: &mut egui::Ui, state: &mut AppState) {
     use anim_core::deliver::PageMode;
-    let o = &mut state.manga.export;
+    let manga_tools::MangaState { export: o, over_mono, .. } = &mut state.manga;
     let mut mono = o.mode == PageMode::Mono;
     let panel = &mut state.render_queue.panel;
     on_text_edge(ui, |ui| {
@@ -315,13 +316,21 @@ fn mono_row(ui: &mut egui::Ui, state: &mut AppState) {
             let latch = plate::latch(ui, &mut mono, vocab::MONO);
             plate::mark_row(&latch, Target::Named("export.page.mono"));
             if latch.card(manga_tools::MONO_CARD).changed() {
-                o.mode = if mono { PageMode::Mono } else { PageMode::Color };
+                if mono {
+                    *over_mono = o.mode;
+                }
+                o.mode = if mono { PageMode::Mono } else { *over_mono };
                 panel.ring = false;
             }
-            plate::legend(ui, "threshold").on_hover_text(manga_tools::THRESHOLD_CARD);
+            if o.mode == PageMode::Grey {
+                ui.label(egui::RichText::new(manga_tools::GREY_NOTE).color(plate::legend_dim()));
+            }
+            ui.add_enabled_ui(mono, |ui| ui.label(egui::RichText::new("Threshold").font(plate::Role::Panel.font())))
+                .inner
+                .on_hover_text(manga_tools::THRESHOLD_CARD);
             plate::field_if(ui, mono, egui::DragValue::new(&mut o.threshold).range(0.0..=1.0).speed(0.01).max_decimals(2))
                 .on_hover_text(manga_tools::THRESHOLD_CARD)
-                .on_disabled_hover_text("Mono only: colour keeps every tone.");
+                .on_disabled_hover_text("Mono only: color keeps every tone.");
         });
     });
 }

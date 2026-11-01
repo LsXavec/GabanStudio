@@ -1561,6 +1561,11 @@ impl CanvasView {
         if self.page_step { crate::doc::SEE_PAGE_ON } else { crate::doc::READ_ONLY_VIEW }
     }
 
+    /// AU22: the same, for a tool that only remarks on it.
+    fn view_remark(&self) -> &'static str {
+        if self.page_step { crate::doc::SEE_PAGE_ON } else { "Preview final is on: press C to edit" }
+    }
+
     /// GM20: the side the paint layer paints at most — the room's limit
     /// (`paint::room_limit` of the device's `max_texture_dimension_2d`).
     pub fn with_layer_limit(mut self, max_dim: u32) -> Self {
@@ -1936,7 +1941,7 @@ impl CanvasView {
         // gated) and misleading. Hint once on an attempted drag.
         if self.composite_view {
             if response.drag_started_by(egui::PointerButton::Primary) {
-                state.status = "Preview final is on: press C to edit".into();
+                state.status = self.view_remark().into();
             }
             return;
         }
@@ -4692,7 +4697,7 @@ impl CanvasView {
             let tag = plate::picture_tag(
                 &painter,
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
-                crate::vocab::PREVIEW_FINAL,
+                if self.page_step { crate::vocab::SEE_THE_PAGE } else { crate::vocab::PREVIEW_FINAL },
             );
             if composite_pending {
                 // GM9: the lamp, and in words — an FX render is pending
@@ -4952,11 +4957,17 @@ impl CanvasView {
 
         // GM18: a manga page's guides — its bleed edge, trim and inner
         // frame, its panels and rulers — and the panel tool's drag, over
-        // the art in either view.
+        // the art in either view. AU22: but for See the page, whose word is
+        // "how it prints": no line that will not print stands on it.
         if let Some(page) = anim_core::manga::Page::of(state.cut()) {
             let armed = self.tool == CanvasTool::Panel;
-            crate::manga_tools::paint_page(ui, &painter, state, &page, &to_screen, armed, self.koma.as_ref());
-            crate::manga_tools::paint_letters(&painter, state, &to_screen, self.letter.as_ref());
+            if edit_view || armed || !self.page_step {
+                crate::manga_tools::paint_page(ui, &painter, state, &page, &to_screen, armed, self.koma.as_ref());
+            }
+            if self.page_step {
+                let over = ui.input(|i| i.pointer.latest_pos()).map(&to_paper).map(|p| [p.x, p.y]);
+                crate::manga_tools::paint_letters(&painter, state, &to_screen, self.letter.as_ref(), !edit_view, over);
+            }
         }
 
         // AU7: the one thing that paints on the paper (spec 8.4), on a cell
@@ -6191,12 +6202,15 @@ impl CanvasView {
         }
     }
 
-    /// AU22: the selected generator's handle: a press within
-    /// [`crate::manga_tools::HANDLE_REACH`] of it on screen holds it, ahead of
-    /// the tool, and the generator moves once, by the paper delta, when the
-    /// drag lands (one undo step, [`crate::manga_tools::letter_moved`]); Esc
-    /// drops it. True while it has the pointer. The panel tool keeps its own
-    /// drags: a ruler's handle may stand under this one.
+    /// AU22: the Manga step's lettering has the pointer, ahead of the tool: a
+    /// press on the selected generator's handle, within
+    /// [`crate::manga_tools::HANDLE_REACH`] on screen, or with the Brush
+    /// anywhere on a balloon or words, holds it. A click selects what it lands
+    /// on, a drag selects and moves it, and it moves once, by the paper delta,
+    /// when the drag lands (one undo step,
+    /// [`crate::manga_tools::letter_moved`]); Esc drops it. True while it has
+    /// the pointer, so a Brush press there leaves no stray line. The panel tool
+    /// keeps its own drags, and Alt and Shift keep the Brush's.
     fn letter_input(
         &mut self,
         ui: &egui::Ui,
@@ -6206,23 +6220,28 @@ impl CanvasView {
     ) -> bool {
         use crate::manga_tools::{self, HANDLE_REACH, LetterDrag};
         let Some(k) = &mut self.letter else {
-            if self.tool == CanvasTool::Panel || self.pen_busy() {
+            let mods = ui.input(|i| i.modifiers);
+            if !self.page_step || self.tool == CanvasTool::Panel || self.pen_busy() || mods.alt || mods.shift {
                 return false;
             }
-            let Some(handle) = manga_tools::letter_handle(state) else {
-                return false;
-            };
             // From where the press landed, not where the drag was seen.
             let Some(at) = ui.input(|i| i.pointer.press_origin().or(i.pointer.latest_pos())) else {
                 return false;
             };
             let from = to_paper(at);
             let reach = HANDLE_REACH / self.xf.zoom.max(1e-6);
-            if (from.x - handle[0]).hypot(from.y - handle[1]) > reach || !response.hovered() && !response.dragged() {
+            let brush = self.tool == CanvasTool::Paint;
+            let held = manga_tools::letter_under(state, [from.x, from.y], reach, brush);
+            let Some(id) = held.filter(|_| response.hovered() || response.dragged()) else {
                 return false;
+            };
+            let grabbed = state.selected_node == Some(id);
+            ui.ctx().set_cursor_icon(if grabbed { egui::CursorIcon::Grab } else { egui::CursorIcon::PointingHand });
+            let dragged = response.drag_started_by(egui::PointerButton::Primary);
+            if dragged || response.clicked_by(egui::PointerButton::Primary) {
+                state.selected_node = Some(id);
             }
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
-            if response.drag_started_by(egui::PointerButton::Primary) {
+            if dragged {
                 self.letter = Some(LetterDrag { from: [from.x, from.y], to: [from.x, from.y] });
             }
             return true;
@@ -6482,7 +6501,7 @@ impl CanvasView {
             return;
         }
         if self.composite_view {
-            state.status = "Preview final is on: press C to edit".into();
+            state.status = self.view_remark().into();
             return;
         }
         // GM7 REFILL: Shift+click recolours the clicked flat (bounded by the

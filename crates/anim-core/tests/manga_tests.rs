@@ -677,6 +677,45 @@ fn manga_clip_to_panels_keeps_a_generator_added_by_hand() {
     assert_eq!(manga::page_graph_hand_built(&cut(&e)), Some(n));
 }
 
+/// The free generators of a rebuilt page, bottom first: it allocates them as
+/// it stacks them, and the graph reads by id.
+fn stacked(cut: &Cut) -> Vec<GenKind> {
+    let free = cut.graph.nodes().filter(|n| manga::is_free_generator(n));
+    free.map(|n| match n.kind {
+        NodeKind::Generator { generator, .. } => generator,
+        _ => panic!("no generator"),
+    })
+    .collect()
+}
+
+#[test]
+fn aupage_page_graph_keeps_the_stack_and_the_verbs_letter_it() {
+    let (mut e, at, _) = page_rig(vec![manga::rect_poly(PxRect { x: 0, y: 0, w: 64, h: 64 })], 2.0);
+    let cut = |e: &Engine| e.project.cut(at.scene, at.cut).unwrap().clone();
+    for kind in [GenKind::Text, GenKind::Balloon, GenKind::SpeedLines] {
+        let id = e.alloc_node_id();
+        e.apply("add", vec![Command::AddNode { at, id, kind: NodeKind::generator(kind) }]).unwrap();
+    }
+    // Clip to panels keeps the stack as it stands.
+    let c = cut(&e);
+    let cmds = manga::page_graph(&c, at, || e.alloc_node_id(), Vec::new(), 2.0);
+    e.apply("clip", cmds).unwrap();
+    assert_eq!(stacked(&cut(&e)), [GenKind::Text, GenKind::Balloon, GenKind::SpeedLines]);
+    // A verb's road prints lines under balloons under words, and is still the page.
+    let c = cut(&e);
+    let cmds = manga::lettered_page_graph(&c, at, || e.alloc_node_id(), Vec::new(), 2.0, &[]);
+    e.apply("verb", cmds).unwrap();
+    assert_eq!(stacked(&cut(&e)), [GenKind::SpeedLines, GenKind::Balloon, GenKind::Text]);
+    assert_eq!(manga::page_graph_hand_built(&cut(&e)), None);
+    // And it can leave one out.
+    let c = cut(&e);
+    let balloon = c.graph.nodes().find(|n| matches!(n.kind, NodeKind::Generator { generator: GenKind::Balloon, .. })).unwrap().id;
+    let cmds = manga::lettered_page_graph(&c, at, || e.alloc_node_id(), Vec::new(), 2.0, &[balloon]);
+    e.apply("remove", cmds).unwrap();
+    assert_eq!(stacked(&cut(&e)), [GenKind::SpeedLines, GenKind::Text]);
+    assert_eq!(manga::page_graph_hand_built(&cut(&e)), None);
+}
+
 #[test]
 fn manga_old_files_read_without_the_new_fields() {
     // A page saved before webtoon segments, rulers before the horizon.

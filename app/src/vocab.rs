@@ -86,6 +86,7 @@ pub const CAMERA_MOVE: &str = "Camera move";
 pub const GO_TO_LAST_DRAWING: &str = "Go to the last drawing";
 // The Comic step's own words (AU22).
 pub const SEE_THE_PAGE: &str = "See the page";
+pub const PAGE_GUIDES: &str = "Page guides";
 pub const ADD_BALLOON: &str = "Add balloon";
 pub const ADD_TEXT: &str = "Add text";
 pub const SPEED_LINES: &str = "Speed lines";
@@ -366,6 +367,7 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("CAMERA_MOVE", CAMERA_MOVE, "Camera move"),
     ("GO_TO_LAST_DRAWING", GO_TO_LAST_DRAWING, "Go to the last drawing"),
     ("SEE_THE_PAGE", SEE_THE_PAGE, "See the page"),
+    ("PAGE_GUIDES", PAGE_GUIDES, "Page guides"),
     ("ADD_BALLOON", ADD_BALLOON, "Add balloon"),
     ("ADD_TEXT", ADD_TEXT, "Add text"),
     ("SPEED_LINES", SPEED_LINES, "Speed lines"),

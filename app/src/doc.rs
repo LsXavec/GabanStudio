@@ -463,6 +463,8 @@ pub const NOTHING_TO_PLAY: &str = "Nothing to play yet. Draw something first.";
 pub const READ_ONLY_VIEW: &str = "refused — Preview final is read-only (C to edit)";
 /// AU22: the same refusal on the Manga step, where the latch has this name.
 pub const SEE_PAGE_ON: &str = "Turn off See the page to draw.";
+/// AU22: `Remove` on a page whose graph a hand shaped.
+pub const REMOVE_BY_HAND: &str = "This page's graph was shaped by hand: remove it in the Effects graph.";
 
 /// GM20: a tool used on the paper past a capped painting window (a paper
 /// wider or taller than the GPU paints) — the Aka lane.
@@ -4575,12 +4577,19 @@ impl AppState {
     }
 
     /// AU22: `kind` on the open page as one undo step: the page stack rebuilt
-    /// through [`anim_core::manga::page_graph`] with it on top, so the page
-    /// stays the page graph and Clip to panels stays quiet. A graph a hand
-    /// shaped loses nothing: the new node lays over its feed. The rebuild
-    /// gives every node a new id, so the selection follows by place in the
-    /// stack: the new node, or with `stay` the one that was selected.
-    pub fn add_to_page(&mut self, label: &str, kind: anim_core::graph::NodeKind, stay: bool) -> Option<NodeId> {
+    /// in lettered order ([`anim_core::manga::lettered_page_graph`]), so the
+    /// page stays the page graph, Clip to panels stays quiet and words stay
+    /// over their balloon. A graph a hand shaped loses nothing: the new node
+    /// lays over its feed. The rebuild gives every node a new id, so the
+    /// selection follows by place in the stack: the new node, or with `stay`
+    /// the one that was selected. `grown`: a node's new kind, in the same step.
+    pub fn add_to_page(
+        &mut self,
+        label: &str,
+        kind: anim_core::graph::NodeKind,
+        stay: bool,
+        grown: Option<(NodeId, anim_core::graph::NodeKind)>,
+    ) -> Option<NodeId> {
         use anim_core::graph::Node;
         use anim_core::manga::{self, Page};
         let Some(page) = Page::of(self.cut()) else {
@@ -4596,6 +4605,7 @@ impl AppState {
                 self.refuse(NO_OUTPUT_FOR_EFFECTS);
                 return None;
             }
+            cmds.extend(grown.map(|(id, kind)| Command::SetNodeKind { at, id, kind }));
             let r = self.engine.apply(label, cmds);
             let added = r.is_ok();
             self.report(r, &format!("{label} added"));
@@ -4604,14 +4614,22 @@ impl AppState {
             }
             return added.then_some(id);
         }
-        let place = |cut: &Cut, id| crate::manga_tools::letters(cut).iter().position(|(n, _)| Some(*n) == id);
-        let kept = place(self.cut(), self.selected_node).filter(|_| stay);
         let id = self.engine.alloc_node_id();
         let mut cut = self.cut().clone();
         cut.graph.add_node(Node::new(id, kind.clone()));
+        if let Some((node, now)) = grown
+            && let Ok(node) = cut.graph.node_mut(node)
+        {
+            node.kind = now;
+        }
+        let order = manga::lettered(&cut);
+        let place = |id| order.iter().position(|n| *n == id);
+        let kept = self.selected_node.and_then(place).filter(|_| stay);
+        let new_at = place(id);
         let border = page.px(manga::BORDER_MM);
         let mut cmds = vec![Command::AddNode { at, id, kind }];
-        cmds.extend(manga::page_graph(&cut, at, || self.engine.alloc_node_id(), vec![page.first_panel()], border));
+        let polys = vec![page.first_panel()];
+        cmds.extend(manga::lettered_page_graph(&cut, at, || self.engine.alloc_node_id(), polys, border, &[]));
         let r = self.engine.apply(label, cmds);
         let added = r.is_ok();
         self.report(r, &format!("{label} added"));
@@ -4619,11 +4637,39 @@ impl AppState {
             return None;
         }
         let letters = crate::manga_tools::letters(self.cut());
-        let new = letters.last().map(|(n, _)| *n);
+        let at_place = |i: Option<usize>| i.and_then(|i| letters.get(i)).map(|(n, _)| *n);
+        let new = at_place(new_at);
         if !stay || kept.is_some() {
-            self.selected_node = kept.and_then(|i| letters.get(i).map(|(n, _)| *n)).or(new);
+            self.selected_node = at_place(kept).or(new);
         }
         new
+    }
+
+    /// AU22: `gone` off the open page as one undo step, the stack rebuilt as
+    /// [`Self::add_to_page`] does it. A graph a hand shaped is left alone: only
+    /// the hand knows what its blends mean, so the graph is where it comes off.
+    pub fn remove_from_page(&mut self, label: &str, gone: &[NodeId]) -> bool {
+        use anim_core::manga::{self, Page};
+        let Some(page) = Page::of(self.cut()) else {
+            self.refuse("refused — this shot is no page (New page makes one)");
+            return false;
+        };
+        if self.page_hand_built().is_some() {
+            self.refuse(REMOVE_BY_HAND);
+            return false;
+        }
+        let at = self.at();
+        let cut = self.cut().clone();
+        let border = page.px(manga::BORDER_MM);
+        let polys = vec![page.first_panel()];
+        let cmds = manga::lettered_page_graph(&cut, at, || self.engine.alloc_node_id(), polys, border, gone);
+        let r = self.engine.apply(label, cmds);
+        let removed = r.is_ok();
+        self.report(r, &format!("{label} removed"));
+        if removed {
+            self.selected_node = None;
+        }
+        removed
     }
 
     /// GM18: why Export pages cannot run now (None: it can) — one export

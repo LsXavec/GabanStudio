@@ -447,6 +447,48 @@ pub fn is_free_generator(n: &Node) -> bool {
 /// (else `polys`), a column's Tone its values, and a generator added by
 /// hand (a balloon, text) stays, stacked over the borders.
 pub fn page_graph(cut: &Cut, at: CutRef, alloc: impl FnMut() -> NodeId, polys: Vec<Poly>, border: f32) -> Vec<Command> {
+    let free = cut.graph.nodes().filter(|n| is_free_generator(n)).collect();
+    stack_page(cut, at, alloc, polys, border, free)
+}
+
+/// AU22: the free generators in the order a lettered page prints them, bottom
+/// first: speed lines and the like, then balloons, then the words, so what a
+/// person adds next cannot bury what they read. Within a kind, as they stand.
+pub fn lettered(cut: &Cut) -> Vec<NodeId> {
+    let rank = |n: &&Node| match n.kind {
+        NodeKind::Generator { generator: GenKind::Text, .. } => 2,
+        NodeKind::Generator { generator: GenKind::Balloon, .. } => 1,
+        _ => 0,
+    };
+    let mut free: Vec<&Node> = cut.graph.nodes().filter(|n| is_free_generator(n)).collect();
+    free.sort_by_key(rank);
+    free.into_iter().map(|n| n.id).collect()
+}
+
+/// AU22: [`page_graph`] for a page no hand has shaped, its free generators in
+/// [`lettered`] order and `without` gone. A hand-built page keeps
+/// [`page_graph`]'s stack.
+pub fn lettered_page_graph(
+    cut: &Cut,
+    at: CutRef,
+    alloc: impl FnMut() -> NodeId,
+    polys: Vec<Poly>,
+    border: f32,
+    without: &[NodeId],
+) -> Vec<Command> {
+    let order = lettered(cut).into_iter().filter(|id| !without.contains(id));
+    let free = order.filter_map(|id| cut.graph.node(id).ok()).collect();
+    stack_page(cut, at, alloc, polys, border, free)
+}
+
+fn stack_page(
+    cut: &Cut,
+    at: CutRef,
+    alloc: impl FnMut() -> NodeId,
+    polys: Vec<Poly>,
+    border: f32,
+    free: Vec<&Node>,
+) -> Vec<Command> {
     let panels_kind = match cut.graph.nodes().find(|n| matches!(n.kind, NodeKind::Generator { generator: GenKind::Panels, .. })) {
         Some(n) => n.kind.clone(),
         None => panels_kind(polys, border),
@@ -483,7 +525,7 @@ pub fn page_graph(cut: &Cut, at: CutRef, alloc: impl FnMut() -> NodeId, polys: V
         page = b.stack(Some(page), clip, BlendMode::Normal, (3.0 * COL, y));
     }
     let mut top = b.stack(Some(page), panels, BlendMode::Multiply, (4.0 * COL, y));
-    for n in cut.graph.nodes().filter(|n| is_free_generator(n)) {
+    for n in free {
         y += ROW;
         let over = b.add(n.kind.clone(), (3.0 * COL, y));
         top = b.stack(Some(top), over, BlendMode::Normal, (4.0 * COL, y));

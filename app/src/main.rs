@@ -3152,6 +3152,8 @@ impl Editor {
         if let Some(meant) = self.edit_row(action) {
             return self.perform(meant);
         }
+        // AU22: a verb is about to read the page: a save, an export, a step.
+        self.land_words();
         let seq = self.state.refusal_seq;
         let mut out = Performed::Done;
         self.perform_into(action, &mut out);
@@ -5352,6 +5354,7 @@ impl Editor {
     /// tool state (same law as saved workspaces). The room verbs stop short
     /// of here under a live stroke (`stroke_guarded`).
     fn enter_room(&mut self, st: Stage) {
+        self.land_words();
         let st = self.step_for(st);
         // The popover belongs to the step it opened in: a step key leaves it
         // with no press to close it.
@@ -5372,6 +5375,14 @@ impl Editor {
             self.state.view.line_guard = matches!(st, Stage::InkPaint);
             self.state.status = format!("{}: {}", vocab::STEP, self.step_name(st));
             self.export_left();
+        }
+    }
+
+    /// AU22: words left in the Manga pane's field reach the page. A live stroke
+    /// keeps them there: nothing edits under it.
+    fn land_words(&mut self) {
+        if !self.canvas.stroke_active() {
+            manga_tools::land_words(&mut self.state);
         }
     }
 
@@ -5603,12 +5614,14 @@ impl Editor {
     }
 
     /// AU9: `Back to Draw`: the step it came from, as it was left. Nothing was
-    /// armed on the way in, so nothing is armed on the way out.
+    /// armed on the way in, so nothing is armed on the way out. AU22: but for
+    /// `See the page`: the Manga step opens on the drawing, by every road.
     fn leave_export(&mut self) {
         match self.export_from.take() {
             Some((stage, dock)) => {
                 self.dock = dock;
                 self.stage = stage;
+                self.canvas.composite_view &= stage != Some(Stage::Manga);
                 self.state.status = format!("{}: {}", vocab::STEP, self.place_here());
                 self.export_left();
             }
@@ -6779,6 +6792,7 @@ impl Editor {
     /// newest wins, and closing the window outranks New/Open (a close
     /// arriving over a pending New must not be dropped).
     fn hold_leave(&mut self, what: Leave) -> bool {
+        self.land_words();
         if self.canvas.is_guest || !self.state.is_dirty() {
             return false;
         }
@@ -9791,6 +9805,10 @@ impl Editor {
             .show_inside(ui, &mut tabs);
         if let Some(on) = tabs.result_asked {
             self.switch_result(on);
+        }
+        // AU22: the Manga pane's field is gone, and it cannot let go unseen.
+        if !std::mem::take(&mut self.state.manga.words_shown) {
+            self.land_words();
         }
         if let Some(open) = self.state.graph_ui.details_asked.take() {
             self.camera_details = open;

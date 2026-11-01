@@ -48,11 +48,18 @@ pub struct MangaState {
     /// A field's value while its drag runs (the field's key, the value):
     /// the page changes once, when the drag ends.
     pub held: Option<(&'static str, f32)>,
-    /// AU22: the `Words` field while it is being typed in: the page changes
-    /// once, when it lets go.
-    pub typing: Option<String>,
-    /// AU22: the words it let go, for the pane to write this frame.
-    pub typed: Option<String>,
+    /// AU22: the `Words` field while it is being typed in, and whose words
+    /// they are: the page changes once, when it lets go.
+    pub typing: Option<(NodeId, String)>,
+    /// AU22: the words it let go, for the pane to write once no stroke is live.
+    pub typed: Option<(NodeId, String)>,
+    /// AU22: the field stood this frame. Gone, it can no longer let go, so its
+    /// words land without it ([`land_words`]).
+    pub words_shown: bool,
+    /// AU22: `Add balloon` or `Add text` hands the field the keys.
+    pub focus_words: bool,
+    /// AU22: the mode `Mono` stands over, for when it goes off.
+    pub over_mono: PageMode,
     /// Verbs the pane asked for, run through the one dispatch (D6).
     pub asked: Vec<Action>,
 }
@@ -70,6 +77,9 @@ impl Default for MangaState {
             held: None,
             typing: None,
             typed: None,
+            words_shown: false,
+            focus_words: false,
+            over_mono: PageMode::Color,
             asked: Vec::new(),
         }
     }
@@ -119,13 +129,30 @@ const AXIS_SNAP_DEG: f32 = 4.0;
 /// and a person replaces, so the button is seen to have done something.
 pub const TEXT_START: &str = "Your words";
 /// AU22: `See the page` on a machine that cannot compose it.
-pub const SEE_PAGE_NO_GPU: &str = "See the page needs the GPU: showing the drawing";
+pub const SEE_PAGE_NO_GPU: &str = "See the page needs a graphics card: showing the drawing.";
 /// AU22: the lane's words as it turns on.
 pub const SEE_PAGE_SAYS: &str = "See the page: this is how it prints.";
+/// AU22: the drawing view shows no speed lines, so `Speed lines` says where
+/// they are. A balloon and words show as they are added.
+pub const SPEED_LINES_SAY: &str = "Speed lines added. See the page shows them.";
 /// One threshold, read on this pane and on the Export step.
 pub const THRESHOLD_CARD: &str = "Mono: a pixel greyer than this prints black, the rest white (0.5 is half grey).";
 /// One card for the same latch on the Export step.
-pub const MONO_CARD: &str = "Black or white, nothing between: the print plate.";
+pub const MONO_CARD: &str = "Black or white, nothing between. Shows in the exported file.";
+/// AU22: the Export step's word for the third mode, which only this pane sets.
+pub const GREY_NOTE: &str = "Grey, set on the Manga step";
+
+/// AU22: how far across a balloon its words run before they wrap, and how much
+/// of its height they may take there, an ellipse being narrower up and down.
+const WRAP_IN_BALLOON: f32 = 0.8;
+const TALL_IN_BALLOON: f32 = 0.6;
+
+/// AU22: the field's room from the pane's scrollbar.
+const WORDS_MARGIN: f32 = 12.0;
+
+/// AU22: the largest words the canvas draws, points: each size is its own
+/// glyphs in the atlas, and a page at full zoom asks for a few hundred.
+const WORDS_MAX_PT: f32 = 96.0;
 
 /// AU22: `manga.panel.<n>`: a handle is a `&'static str`, and the lessons cut
 /// a page into no more than this.
@@ -478,12 +505,17 @@ pub fn letters(cut: &Cut) -> Vec<(NodeId, GenKind)> {
     cut.graph.nodes().filter(|n| manga::is_free_generator(n)).filter_map(kind).collect()
 }
 
-/// Node `id`'s generator values (None: it is no generator).
-fn values(cut: &Cut, id: NodeId) -> Option<GenValues> {
-    match &cut.graph.node(id).ok()?.kind {
+/// `kind`'s generator values (None: it is no generator).
+fn values_of(kind: &NodeKind) -> Option<GenValues> {
+    match kind {
         NodeKind::Generator { generator, params, binds } => Some(GenValues::resolve(*generator, params, binds, |_| None)),
         _ => None,
     }
+}
+
+/// Node `id`'s generator values (None: it is no generator).
+fn values(cut: &Cut, id: NodeId) -> Option<GenValues> {
+    values_of(&cut.graph.node(id).ok()?.kind)
 }
 
 /// AU22: the generator the pane's rows and the canvas's handle act on: the
@@ -501,28 +533,76 @@ fn placed(kind: GenKind) -> bool {
     matches!(kind, GenKind::Balloon | GenKind::Text)
 }
 
-/// AU22: the selected generator's handle in page px (None: nothing to hold,
-/// or the page's guides are off).
+/// The page's size in px.
+fn page_size(state: &AppState) -> (f32, f32) {
+    (state.engine.project.width as f32, state.engine.project.height as f32)
+}
+
+/// AU22: the selected generator's handle in page px, on the top edge of its
+/// box, clear of the words (None: nothing to hold, or the page's guides are
+/// off).
 pub fn letter_handle(state: &AppState) -> Option<[f32; 2]> {
     if !state.manga.guides {
         return None;
     }
-    let (_, v) = selected_letter(state).filter(|(_, v)| placed(v.kind))?;
-    let p = &state.engine.project;
-    Some([v.float("x") * p.width as f32, v.float("y") * p.height as f32])
+    let (_, v) = selected_letter(state)?;
+    let [x0, y0, x1, _] = letter_box(page_size(state), &v)?;
+    Some([(x0 + x1) / 2.0, y0])
 }
 
-/// The Text generators lying in balloon `b`, nearest its centre first: a
-/// balloon has no words of its own, so its lettering is the words inside it.
-fn lettering_of(cut: &Cut, b: &GenValues) -> Vec<NodeId> {
-    let (x, y, w, h) = (b.float("x"), b.float("y"), b.float("width"), b.float("height"));
+/// AU22: what a press at page px `p` takes hold of. The selected generator by
+/// its handle, within `reach`; with `whole` (the Brush, which has no handle of
+/// its own to find) the selected one anywhere in its box, else the topmost box
+/// there, a balloon standing for the words in it.
+pub fn letter_under(state: &AppState, p: [f32; 2], reach: f32, whole: bool) -> Option<NodeId> {
+    if !state.manga.guides {
+        return None;
+    }
+    let size = page_size(state);
+    let cut = state.cut();
+    let holds = |v: &GenValues| {
+        letter_box(size, v).is_some_and(|[x0, y0, x1, y1]| (x0..=x1).contains(&p[0]) && (y0..=y1).contains(&p[1]))
+    };
+    let near = letter_handle(state).is_some_and(|h| (h[0] - p[0]).hypot(h[1] - p[1]) <= reach);
+    if let Some((id, v)) = selected_letter(state)
+        && (near || (whole && holds(&v)))
+    {
+        return Some(id);
+    }
+    if !whole {
+        return None;
+    }
+    let top = letters(cut).into_iter().rev().find(|(id, _)| {
+        values(cut, *id).is_some_and(|v| holds(&v) && (v.kind != GenKind::Text || owner_of(cut, &v).is_none()))
+    });
+    top.map(|(id, _)| id)
+}
+
+/// The balloon Text `t` belongs to: of those it lies in, the one whose centre
+/// is nearest, so a balloon set down over another's words does not take them.
+fn owner_of(cut: &Cut, t: &GenValues) -> Option<NodeId> {
+    let balloons = letters(cut).into_iter().filter(|(_, kind)| *kind == GenKind::Balloon);
+    let lying = balloons.filter_map(|(id, _)| {
+        let b = values(cut, id)?;
+        let (dx, dy) = (t.float("x") - b.float("x"), t.float("y") - b.float("y"));
+        (dx.abs() <= b.float("width") / 2.0 && dy.abs() <= b.float("height") / 2.0).then_some((dx.hypot(dy), id))
+    });
+    lying.min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, id)| id)
+}
+
+/// The Text generators belonging to `balloon`, nearest its centre first: a
+/// balloon has no words of its own, so its lettering is the words given to it.
+fn lettering_of(cut: &Cut, balloon: NodeId) -> Vec<NodeId> {
+    let Some(b) = values(cut, balloon).filter(|b| b.kind == GenKind::Balloon) else {
+        return Vec::new();
+    };
     let mut found: Vec<(f32, NodeId)> = letters(cut)
         .iter()
         .filter(|(_, kind)| *kind == GenKind::Text)
         .filter_map(|(id, _)| {
             let t = values(cut, *id)?;
-            let (dx, dy) = (t.float("x") - x, t.float("y") - y);
-            (dx.abs() <= w / 2.0 && dy.abs() <= h / 2.0).then_some((dx.hypot(dy), *id))
+            let (dx, dy) = (t.float("x") - b.float("x"), t.float("y") - b.float("y"));
+            (owner_of(cut, &t) == Some(balloon)).then_some((dx.hypot(dy), *id))
         })
         .collect();
     found.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -561,17 +641,18 @@ pub fn letter_moved(state: &mut AppState, k: LetterDrag) {
     }
     let mut moved = vec![id];
     if v.kind == GenKind::Balloon {
-        moved.extend(lettering_of(state.cut(), &v));
+        moved.extend(lettering_of(state.cut(), id));
     }
     state.manga_edit("move lettering", |cut, at| moved.iter().filter_map(|id| shifted(cut, at, *id, dx, dy)).collect());
 }
 
-/// The words `v` shows in the `Words` field: none while it holds the stand-in.
-fn words_of(cut: &Cut, v: &GenValues) -> String {
+/// The words generator `id` shows in the `Words` field: none while it holds
+/// the stand-in.
+fn words_of(cut: &Cut, id: NodeId, v: &GenValues) -> String {
     let own = |t: &GenValues| Some(t.text("text").to_string()).filter(|w| w != TEXT_START);
     match v.kind {
         GenKind::Text => own(v).unwrap_or_default(),
-        GenKind::Balloon => lettering_of(cut, v).first().and_then(|id| own(&values(cut, *id)?)).unwrap_or_default(),
+        GenKind::Balloon => lettering_of(cut, id).first().and_then(|id| own(&values(cut, *id)?)).unwrap_or_default(),
         _ => String::new(),
     }
 }
@@ -628,42 +709,102 @@ fn add_letter(state: &mut AppState, kind: GenKind, label: &str) {
         return;
     };
     let node = letter_start(state.cut(), kind, state.manga.selected, &page);
-    state.add_to_page(label, node, false);
+    let added = state.add_to_page(label, node, false, None).is_some();
+    if added && kind == GenKind::SpeedLines {
+        state.status = SPEED_LINES_SAY.into();
+    }
+    state.manga.focus_words = added && placed(kind);
 }
 
-/// AU22: `words` on the selected generator, one undo step. A balloon has no
-/// words of its own, so the first it is given stand in a new Text at its
-/// centre, wrapped to it, and the balloon stays selected.
-fn set_words(state: &mut AppState, words: &str) {
-    let Some((id, v)) = selected_letter(state) else {
+/// `words` in a Text of kind `text`, wrapped to `balloon` if it has one.
+fn with_words(text: &NodeKind, words: &str, balloon: Option<&GenValues>) -> NodeKind {
+    let mut kind = text.clone();
+    if let NodeKind::Generator { params, .. } = &mut kind {
+        params.set("text", FxValue::Text { text: words.into() });
+        if let Some(b) = balloon {
+            params.set("wrap", FxValue::Float(b.float("width") * WRAP_IN_BALLOON));
+        }
+    }
+    kind
+}
+
+/// `balloon`'s kind grown down to hold `text` (None: it already does). Words
+/// wrapped to [`WRAP_IN_BALLOON`] of its width stand in an ellipse's middle,
+/// where it is [`TALL_IN_BALLOON`] of its height. The tail stays as far out.
+fn grown_for(size: (f32, f32), kind: &NodeKind, text: &NodeKind) -> Option<NodeKind> {
+    let (b, t) = (values_of(kind)?, values_of(text)?);
+    let (w, h) = size;
+    let block = anim_core::text::layout(t.text("text"), &anim_core::generator::text_style(&t, w as u32, h as u32));
+    let need = (block.h / h / TALL_IN_BALLOON).min(4.0);
+    let (height, y) = (b.float("height"), b.float("y"));
+    if need <= height {
+        return None;
+    }
+    let mut kind = kind.clone();
+    if let NodeKind::Generator { params, .. } = &mut kind {
+        let out = (b.float("tail_y") - y).signum() * (need - height) / 2.0;
+        params.set("height", FxValue::Float(need));
+        params.set("tail_y", FxValue::Float((b.float("tail_y") + out).clamp(-2.0, 3.0)));
+    }
+    Some(kind)
+}
+
+/// AU22: `words` on generator `id`, one undo step, a balloon grown to hold
+/// them in it. A balloon has no words of its own, so the first it is given
+/// stand in a new Text at its centre, wrapped to it, and the balloon stays
+/// selected. Words the page already holds are no step.
+fn set_words(state: &mut AppState, id: NodeId, words: &str) {
+    let size = page_size(state);
+    let cut = state.cut();
+    let Some(v) = values(cut, id).filter(|v| placed(v.kind)) else {
         return;
     };
-    let text = match v.kind {
-        GenKind::Text => Some(id),
-        GenKind::Balloon => lettering_of(state.cut(), &v).first().copied(),
-        _ => return,
-    };
+    if words == words_of(cut, id, &v) {
+        return;
+    }
+    let balloon = (v.kind == GenKind::Balloon).then_some(&v);
+    let kind_of = |id: NodeId| cut.graph.node(id).ok().map(|n| n.kind.clone());
+    let text = if balloon.is_some() { lettering_of(cut, id).first().copied() } else { Some(id) };
     if let Some(text) = text {
-        state.manga_edit("words", |cut, at| {
-            let Ok(node) = cut.graph.node(text) else {
-                return Vec::new();
-            };
-            let mut kind = node.kind.clone();
-            if let NodeKind::Generator { params, .. } = &mut kind {
-                params.set("text", FxValue::Text { text: words.into() });
-            }
-            vec![Command::SetNodeKind { at, id: text, kind }]
-        });
-    } else if !words.trim().is_empty() {
-        let Some(page) = Page::of(state.cut()) else {
+        let Some(worded) = kind_of(text).map(|kind| with_words(&kind, words, balloon)) else {
             return;
         };
-        let mut node = text_start(&page, v.float("x"), v.float("y"), words);
-        if let NodeKind::Generator { params, .. } = &mut node {
-            params.set("wrap", FxValue::Float(v.float("width") * 0.8));
-        }
-        state.add_to_page("words", node, true);
+        let grown = balloon.and_then(|_| grown_for(size, &kind_of(id)?, &worded));
+        state.manga_edit("words", |_, at| {
+            let mut cmds = vec![Command::SetNodeKind { at, id: text, kind: worded }];
+            cmds.extend(grown.map(|kind| Command::SetNodeKind { at, id, kind }));
+            cmds
+        });
+    } else if !words.trim().is_empty() {
+        let Some(page) = Page::of(cut) else {
+            return;
+        };
+        let node = with_words(&text_start(&page, v.float("x"), v.float("y"), words), words, balloon);
+        let grown = kind_of(id).and_then(|kind| grown_for(size, &kind, &node)).map(|kind| (id, kind));
+        state.add_to_page("words", node, true, grown);
     }
+}
+
+/// AU22: words still in the field land before anything reads the page or takes
+/// the pane away: a step's pill runs ahead of the dock, so the field is gone
+/// that frame and never lets go, and a save fires over it.
+pub fn land_words(state: &mut AppState) {
+    let (typed, typing) = (state.manga.typed.take(), state.manga.typing.take());
+    for (id, words) in typed.into_iter().chain(typing) {
+        set_words(state, id, &words);
+    }
+}
+
+/// `key`, a number generator `id` holds, becomes `v`: one `SetNodeKind`.
+fn set_float(cut: &Cut, at: CutRef, id: NodeId, key: &str, v: f32) -> Vec<Command> {
+    let Ok(node) = cut.graph.node(id) else {
+        return Vec::new();
+    };
+    let mut kind = node.kind.clone();
+    if let NodeKind::Generator { params, .. } = &mut kind {
+        params.set(key, FxValue::Float(v));
+    }
+    vec![Command::SetNodeKind { at, id, kind }]
 }
 
 /// AU22: the page's two template tracks, INK and TONE (None: it lacks one).
@@ -724,6 +865,10 @@ enum Edit {
     Add(GenKind, &'static str),
     /// AU22: the generator the rows and the handle act on.
     Pick(NodeId),
+    /// AU22: a number of the selected generator, and its word for the undo list.
+    Float(NodeId, &'static str, f32),
+    /// AU22: the selected generator off the page.
+    Remove(NodeId, GenKind),
 }
 
 /// `gesture_safe`: no stroke is live (an edit is refused while one is).
@@ -735,17 +880,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, koma_arme
         .auto_shrink([false, false])
         .show(ui, |ui| pane(ui, state, koma_armed, see_page, &mut edit));
     plate::note_viewport(ui, scroll.inner_rect, [false, true]);
-    // AU22: a press elsewhere is what lets `Words` go: both land, the words first.
-    let typed = state.manga.typed.take();
-    if edit.is_none() && typed.is_none() {
-        return;
-    }
     if !gesture_safe {
-        state.refuse("refused — finish the stroke first");
+        // The words wait out the stroke: only the verb is refused.
+        if edit.is_some() {
+            state.refuse("refused — finish the stroke first");
+        }
         return;
     }
-    if let Some(words) = typed {
-        set_words(state, &words);
+    // AU22: a press elsewhere is what lets `Words` go: both land, the words first.
+    if let Some((id, words)) = state.manga.typed.take() {
+        set_words(state, id, &words);
     }
     let Some(edit) = edit else {
         return;
@@ -781,13 +925,26 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, koma_arme
         Edit::Track(column) => state.view.active_column = column,
         Edit::Add(kind, label) => add_letter(state, kind, label),
         Edit::Pick(id) => state.selected_node = Some(id),
+        Edit::Float(id, key, v) => {
+            state.manga_edit("speed lines", |cut, at| set_float(cut, at, id, key, v));
+        }
+        Edit::Remove(id, kind) => {
+            let mut gone = vec![id];
+            if kind == GenKind::Balloon {
+                gone.extend(lettering_of(state.cut(), id));
+            }
+            state.remove_from_page(&kind.name().to_lowercase(), &gone);
+        }
     }
 }
 
-/// AU22: the page's generators, one row each, and the `Words` field of the
-/// selected balloon or text.
+/// AU22: the page's generators, one row each, and under the selected one what
+/// it is given here: `Remove`, its `Words`, or its direction and count. The
+/// rest of a generator stays the Effects graph's.
 fn letter_rows(ui: &mut egui::Ui, state: &mut AppState, edit: &mut Option<Edit>) {
     let rows = letters(state.cut());
+    let selected = selected_letter(state);
+    let by_hand = state.page_hand_built().is_some();
     ui.horizontal_wrapped(|ui| {
         for (i, (id, kind)) in rows.iter().enumerate() {
             let nth = rows[..=i].iter().filter(|(_, k)| k == kind).count();
@@ -795,32 +952,86 @@ fn letter_rows(ui: &mut egui::Ui, state: &mut AppState, edit: &mut Option<Edit>)
                 *edit = Some(Edit::Pick(*id));
             }
         }
+        if let Some((id, v)) = &selected {
+            let r = ui.add_enabled(!by_hand, egui::Button::new("Remove"));
+            plate::speak(&r, egui::WidgetType::Button, None, "Remove lettering");
+            plate::mark_row(&r, Target::Named("manga.remove"));
+            let more = "Takes it off the page. A balloon's words go with it.";
+            if r.on_hover_text(more).on_disabled_hover_text(crate::doc::REMOVE_BY_HAND).clicked() {
+                *edit = Some(Edit::Remove(*id, v.kind));
+            }
+        }
     });
-    let Some((_, v)) = selected_letter(state).filter(|(_, v)| placed(v.kind)) else {
-        state.manga.typing = None;
+    if let Some((id, v)) = selected.as_ref().filter(|(_, v)| v.kind == GenKind::SpeedLines) {
+        speed_rows(ui, state, *id, v, edit);
+    }
+    let Some((id, v)) = selected.filter(|(_, v)| placed(v.kind)) else {
+        if let Some(typing) = state.manga.typing.take() {
+            state.manga.typed = Some(typing);
+        }
         return;
     };
-    let now = words_of(state.cut(), &v);
+    // The selection left words behind in the field: they are the last letter's.
+    if state.manga.typing.as_ref().is_some_and(|(of, _)| *of != id) {
+        state.manga.typed = state.manga.typing.take();
+    }
+    let now = words_of(state.cut(), id, &v);
+    state.manga.words_shown = true;
     ui.horizontal(|ui| {
         plate::legend(ui, "words");
-        let mut text = state.manga.typing.clone().unwrap_or_else(|| now.clone());
+        let waiting = state.manga.typing.as_ref().or(state.manga.typed.as_ref()).filter(|(of, _)| *of == id);
+        let mut text = waiting.map_or_else(|| now.clone(), |(_, words)| words.clone());
         let r = plate::text_field(
             ui,
             egui::TextEdit::singleline(&mut text)
                 .id_salt("manga words")
                 .hint_text(TEXT_START)
-                .desired_width(ui.available_width()),
+                .desired_width((ui.available_width() - WORDS_MARGIN).max(0.0)),
         );
         plate::speak(&r, egui::WidgetType::TextEdit, None, "Words");
         plate::mark_row(&r, Target::Named("manga.words"));
+        // The rows above grow with the page: keys need a field that shows.
+        if std::mem::take(&mut state.manga.focus_words) {
+            r.request_focus();
+            r.scroll_to_me(None);
+        }
+        // egui lets a field go on a click, and a stroke on the paper is no
+        // click: the next key would type here. Any press elsewhere lets go.
+        if r.has_focus() && !r.hovered() && ui.input(|i| i.pointer.any_pressed()) {
+            r.surrender_focus();
+        }
         if r.has_focus() {
-            state.manga.typing = Some(text.clone());
+            state.manga.typing = Some((id, text.clone()));
         }
         if r.lost_focus() {
             state.manga.typing = None;
-            state.manga.typed = (text != now).then_some(text);
+            state.manga.typed = (text != now).then_some((id, text));
         }
     });
+}
+
+/// AU22: the two things a person asks of speed lines on a page: which way, and
+/// how many. One undo each, when the field lands.
+fn speed_rows(ui: &mut egui::Ui, state: &mut AppState, id: NodeId, v: &GenValues, edit: &mut Option<Edit>) {
+    const WAY: &str = "The lines' direction in degrees: 0 runs across, 90 runs down.";
+    const MANY: &str = "How many lines.";
+    let rows = [
+        ("direction", "Lines direction", "angle", -360.0..=360.0, "°", "manga.speed.direction", WAY),
+        ("lines", "Lines count", "count", 0.0..=2000.0, "", "manga.speed.count", MANY),
+    ];
+    for (word, name, key, range, suffix, handle, card) in rows {
+        ui.horizontal(|ui| {
+            plate::legend(ui, word).on_hover_text(card);
+            let (r, x) = held_field(ui, &mut state.manga.held, key, v.float(key), range, 1.0, suffix);
+            plate::speak(&r, egui::WidgetType::DragValue, None, name);
+            plate::mark_row(&r, Target::Named(handle));
+            r.on_hover_text(card);
+            // A press that lands where it stood is no edit.
+            if let Some(x) = x.filter(|x| *x != v.float(key)) {
+                *edit = Some(Edit::Float(id, key, x));
+            }
+        });
+    }
 }
 
 fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: bool, edit: &mut Option<Edit>) {
@@ -837,7 +1048,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
         }
     }
     ui.horizontal(|ui| {
-        plate::latch(ui, &mut state.manga.guides, "page guides").on_hover_text(
+        plate::latch(ui, &mut state.manga.guides, vocab::PAGE_GUIDES).on_hover_text(
             "The canvas draws the page's bleed edge, trim and inner frame, its panels and its rulers \
              (the Panel tool shows them while it is on, whatever this says).",
         );
@@ -859,6 +1070,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
             (tone, "Tone", "Tone track", "Draw on the TONE track: its greys print as screen dots."),
         ];
         let row = ui.horizontal(|ui| {
+            plate::legend(ui, "Draw on");
             for (column, word, name, help) in tracks {
                 let r = plate::detent(ui, active == column, word);
                 plate::speak(&r, egui::WidgetType::RadioButton, Some(active == column), name);
@@ -868,44 +1080,6 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
             }
         });
         plate::mark_row(&row.response, Target::Named("manga.ink_tone"));
-    }
-
-    ui.add_space(6.0);
-    plate::legend(ui, "pages");
-    let scene = state.at().scene;
-    let pages: Vec<(CutId, String, Page, Vec<Poly>)> = state
-        .engine
-        .project
-        .scenes
-        .iter()
-        .filter(|s| s.id == scene)
-        .flat_map(|s| s.cuts.iter())
-        .filter_map(|c| {
-            let polys = manga::panels_of(c).map(|(_, p)| p).unwrap_or_default();
-            Page::of(c).map(|p| (c.id, c.name.clone(), p, polys))
-        })
-        .collect();
-    // One row a page: its thumbnail, its number in the book, its name.
-    for (n, (id, name, p, polys)) in pages.iter().enumerate() {
-        let here = *id == state.view.cut;
-        ui.horizontal(|ui| {
-            let (thumb, ..) = page_thumb(ui, p, polys, None, egui::vec2(30.0, 40.0));
-            plate::speak(&thumb, egui::WidgetType::Button, Some(here), &format!("page {}: {name}", n + 1));
-            let thumb = thumb.on_hover_text(format!("page {} of the book — click to open it", n + 1));
-            plate::value(ui, &format!("{:>2}", n + 1));
-            let row = plate::detent(ui, here, name);
-            if (thumb.clicked() || row.clicked()) && !here {
-                *edit = Some(Edit::Goto(scene, *id));
-            }
-        });
-    }
-    let new = ui.add_enabled(not_a_book.is_none(), egui::Button::new("New page"));
-    let new = match not_a_book {
-        Some(why) => new.on_disabled_hover_text(format!("{}\nnot now: {why}", Action::NewPage.help())),
-        None => crate::menus::hover_tip(new, Action::NewPage, ""),
-    };
-    if new.clicked() {
-        state.manga.asked.push(Action::NewPage);
     }
 
     ui.add_space(6.0);
@@ -951,6 +1125,63 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
             }
         }
     });
+    // AU22: the step's job stands before the book's pages, which grow with it,
+    // and the tools that cut a page: it is what a person comes back to for
+    // every balloon.
+    if page.is_some() {
+        ui.add_space(6.0);
+        plate::legend(ui, "lettering");
+        ui.horizontal_wrapped(|ui| {
+            for (kind, word, label, handle, help) in LETTER_VERBS {
+                let r = ui.button(word);
+                plate::mark_row(&r, Target::Named(handle));
+                if r.on_hover_text(help).clicked() {
+                    *edit = Some(Edit::Add(kind, label));
+                }
+            }
+        });
+        letter_rows(ui, state, edit);
+    }
+
+    ui.add_space(6.0);
+    plate::legend(ui, "pages");
+    let scene = state.at().scene;
+    let pages: Vec<(CutId, String, Page, Vec<Poly>)> = state
+        .engine
+        .project
+        .scenes
+        .iter()
+        .filter(|s| s.id == scene)
+        .flat_map(|s| s.cuts.iter())
+        .filter_map(|c| {
+            let polys = manga::panels_of(c).map(|(_, p)| p).unwrap_or_default();
+            Page::of(c).map(|p| (c.id, c.name.clone(), p, polys))
+        })
+        .collect();
+    // One row a page: its thumbnail, its number in the book, its name.
+    for (n, (id, name, p, polys)) in pages.iter().enumerate() {
+        let here = *id == state.view.cut;
+        ui.horizontal(|ui| {
+            let (thumb, ..) = page_thumb(ui, p, polys, None, egui::vec2(30.0, 40.0));
+            plate::speak(&thumb, egui::WidgetType::Button, Some(here), &format!("page {}: {name}", n + 1));
+            let thumb = thumb.on_hover_text(format!("page {} of the book — click to open it", n + 1));
+            plate::value(ui, &format!("{:>2}", n + 1));
+            let row = plate::detent(ui, here, name);
+            if (thumb.clicked() || row.clicked()) && !here {
+                *edit = Some(Edit::Goto(scene, *id));
+            }
+        });
+    }
+    let new = ui.add_enabled(not_a_book.is_none(), egui::Button::new("New page"));
+    let new = match not_a_book {
+        Some(why) => new.on_disabled_hover_text(format!("{}\nnot now: {why}", Action::NewPage.help())),
+        None => crate::menus::hover_tip(new, Action::NewPage, ""),
+    };
+    if new.clicked() {
+        state.manga.asked.push(Action::NewPage);
+    }
+    ui.add_space(6.0);
+
     // The canvas's panel tool: a drag draws, splits or moves a ruler.
     let mut armed = koma_armed;
     let latch = plate::latch(ui, &mut armed, "Panel tool");
@@ -1002,21 +1233,6 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
     let more = hand.map_or_else(String::new, |n| format!("DANGER: it {CLIP_DANGER} ({n} nodes now)"));
     if crate::menus::hover_tip(clip, Action::ClipToPanels, &more).clicked() {
         state.manga.asked.push(Action::ClipToPanels);
-    }
-
-    if page.is_some() {
-        ui.add_space(6.0);
-        plate::legend(ui, "lettering");
-        ui.horizontal_wrapped(|ui| {
-            for (kind, word, label, handle, help) in LETTER_VERBS {
-                let r = ui.button(word);
-                plate::mark_row(&r, Target::Named(handle));
-                if r.on_hover_text(help).clicked() {
-                    *edit = Some(Edit::Add(kind, label));
-                }
-            }
-        });
-        letter_rows(ui, state, edit);
     }
 
     ui.add_space(6.0);
@@ -1126,7 +1342,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
 
     ui.add_space(6.0);
     plate::legend(ui, "export (nyūkō)");
-    let o = &mut state.manga.export;
+    let MangaState { export: o, over_mono, .. } = &mut state.manga;
     ui.horizontal_wrapped(|ui| {
         for (f, label, help) in [
             (PageFormat::Png, "PNG files", "One PNG a page, its dpi in the file."),
@@ -1144,6 +1360,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
             (PageMode::Mono, "in mono (1-bit)", "Black or white, nothing between: the print plate, below the threshold."),
         ] {
             if plate::detent(ui, o.mode == m, label).on_hover_text(help).clicked() {
+                *over_mono = if o.mode == PageMode::Mono { *over_mono } else { o.mode };
                 o.mode = m;
             }
         }
@@ -1320,58 +1537,126 @@ pub fn paint_page(
     }
 }
 
-/// AU22: what the page's balloons and words take up, in page px: the drawing
-/// view shows no graph, so this is where they are seen until `See the page`.
+/// AU22: what a balloon, its tail with it, or a block of words takes up, in
+/// page px. The Brush's press lands in it and the selected one is drawn round.
 fn letter_box(project: (f32, f32), v: &GenValues) -> Option<[f32; 4]> {
     if !placed(v.kind) {
         return None;
     }
     let (w, h) = project;
     let (x, y) = (v.float("x") * w, v.float("y") * h);
-    let (half_w, half_h) = match v.kind {
-        GenKind::Balloon => (v.float("width") * w / 2.0, v.float("height") * h / 2.0),
-        GenKind::Text => {
-            // A guess from the letters' count: near enough to find and hold.
-            let long = v.text("text").lines().map(|l| l.chars().count()).max().unwrap_or(1).max(1);
-            let lines = v.text("text").lines().count().max(1) as f32;
-            let across = long as f32 * v.float("size") * 0.6;
-            let wrap = v.float("wrap") * w;
-            let wide = if wrap > 0.0 { across.min(wrap) } else { across };
-            (wide / 2.0, (lines * across / wide).ceil() * v.float("size") * 0.65)
+    match v.kind {
+        GenKind::Balloon => {
+            let (half_w, half_h) = (v.float("width") * w / 2.0, v.float("height") * h / 2.0);
+            let body = [x - half_w, y - half_h, x + half_w, y + half_h];
+            let (tx, ty) = (v.float("tail_x") * w, v.float("tail_y") * h);
+            Some(if v.flag("tail") { [body[0].min(tx), body[1].min(ty), body[2].max(tx), body[3].max(ty)] } else { body })
         }
-        _ => return None,
-    };
-    Some([x - half_w, y - half_h, x + half_w, y + half_h])
+        GenKind::Text => {
+            let style = anim_core::generator::text_style(v, w as u32, h as u32);
+            let block = anim_core::text::layout(v.text("text"), &style);
+            let (half_w, half_h) = (block.w.max(v.float("size")) / 2.0, block.h.max(v.float("size")) / 2.0);
+            Some([x - half_w, y - half_h, x + half_w, y + half_h])
+        }
+        _ => None,
+    }
 }
 
-/// AU22: each balloon and text as a box over the canvas, the selected one in
-/// tally ink with its handle, where the drag holding it has it.
+/// `v`, a balloon, as a thin line through `pt` (page px to screen): its body
+/// and its tail from the body's edge to the tip. What prints is the graph's;
+/// this says where it stands.
+fn paint_balloon(painter: &egui::Painter, v: &GenValues, size: (f32, f32), pt: &impl Fn(f32, f32) -> egui::Pos2, line: egui::Stroke) {
+    let (w, h) = size;
+    let (cx, cy) = (v.float("x") * w, v.float("y") * h);
+    let (rx, ry) = ((v.float("width") * w / 2.0).max(1.0), (v.float("height") * h / 2.0).max(1.0));
+    let round = (0..=64).map(|n| {
+        let at = n as f32 / 64.0 * std::f32::consts::TAU;
+        pt(cx + rx * at.cos(), cy + ry * at.sin())
+    });
+    painter.add(egui::Shape::line(round.collect(), line));
+    if !v.flag("tail") {
+        return;
+    }
+    let (tx, ty) = (v.float("tail_x") * w, v.float("tail_y") * h);
+    let (dx, dy) = (tx - cx, ty - cy);
+    let long = dx.hypot(dy).max(1e-3);
+    let half = v.float("tail_width") * w / 2.0;
+    // Where the side from the tail's root to its tip leaves the ellipse.
+    let edge = |side: f32| {
+        let (bx, by) = (cx - dy / long * half * side, cy + dx / long * half * side);
+        let (ax, ay) = ((bx - cx) / rx, (by - cy) / ry);
+        let (ux, uy) = ((tx - bx) / rx, (ty - by) / ry);
+        let (a, b, c) = (ux * ux + uy * uy, ax * ux + ay * uy, ax * ax + ay * ay - 1.0);
+        let t = ((-b + (b * b - a * c).max(0.0).sqrt()) / a.max(1e-6)).clamp(0.0, 1.0);
+        pt(bx + (tx - bx) * t, by + (ty - by) * t)
+    };
+    painter.add(egui::Shape::line(vec![edge(1.0), pt(tx, ty), edge(-1.0)], line));
+}
+
+/// `v`, a Text, as its words where it stands, sized and turned with the view:
+/// the file's letters are the graph's and a screen's are near enough to read.
+fn paint_words(painter: &egui::Painter, v: &GenValues, width: f32, at: egui::Pos2, turn: egui::Vec2) {
+    let zoom = turn.length();
+    let px = (v.float("size") * zoom).round().clamp(6.0, WORDS_MAX_PT);
+    // The wrap as far across as the letters are, when they are held small.
+    let wrap = v.float("wrap") * width * px / v.float("size").max(1.0);
+    let wrap = if wrap > 0.0 { wrap } else { f32::INFINITY };
+    let job = egui::text::LayoutJob::simple(v.text("text").to_string(), egui::FontId::proportional(px), plate::INK2, wrap);
+    let galley = painter.layout_job(job);
+    let top_left = at - galley.size() / 2.0;
+    let shape = egui::epaint::TextShape::new(top_left, galley, plate::INK2);
+    painter.add(shape.with_angle_and_anchor(turn.y.atan2(turn.x), egui::Align2::CENTER_CENTER));
+}
+
+/// AU22: the page's lettering over the drawing, which shows no graph: each
+/// balloon as a thin line and each block of words as its words, the selected
+/// one in blue in a dashed box with its handle, where the drag holding it has
+/// it (a balloon's words go with it). `printed`: See the page, which shows them
+/// as they print, so only the handle stands, and only under the pointer
+/// (`over`, page px).
 pub fn paint_letters(
     painter: &egui::Painter,
     state: &AppState,
     to_screen: &impl Fn(egui::Pos2) -> egui::Pos2,
     drag: Option<&LetterDrag>,
+    printed: bool,
+    over: Option<[f32; 2]>,
 ) {
     if !state.manga.guides {
         return;
     }
     let cut = state.cut();
-    let (w, h) = (state.engine.project.width as f32, state.engine.project.height as f32);
-    let held = drag.map_or([0.0; 2], |k| [k.to[0] - k.from[0], k.to[1] - k.from[1]]);
+    let size = page_size(state);
+    let moved = drag.map_or([0.0; 2], |k| [k.to[0] - k.from[0], k.to[1] - k.from[1]]);
+    let picked = selected_letter(state).map(|(id, _)| id);
+    let carried = picked.map(|id| lettering_of(cut, id)).unwrap_or_default();
+    let turn = to_screen(egui::pos2(1.0, 0.0)) - to_screen(egui::pos2(0.0, 0.0));
     for (id, _) in letters(cut) {
-        let on = state.selected_node == Some(id);
-        let Some([x0, y0, x1, y1]) = values(cut, id).and_then(|v| letter_box((w, h), &v)) else {
+        let Some(v) = values(cut, id) else {
             continue;
         };
-        let [dx, dy] = if on { held } else { [0.0; 2] };
+        let Some([x0, y0, x1, y1]) = letter_box(size, &v) else {
+            continue;
+        };
+        let on = picked == Some(id);
+        let [dx, dy] = if on || carried.contains(&id) { moved } else { [0.0; 2] };
         let pt = |x: f32, y: f32| to_screen(egui::pos2(x + dx, y + dy));
-        let corners = [pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1), pt(x0, y0)];
-        let ink = if on { plate::TALLY } else { plate::INK3 };
-        painter.extend(egui::Shape::dashed_line(&corners, egui::Stroke::new(1.0, ink), 5.0, 4.0));
-        if on {
-            let c = pt((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let line = egui::Stroke::new(1.0, if on { plate::BLUE } else { plate::INK3 });
+        if !printed {
+            match v.kind {
+                GenKind::Balloon => paint_balloon(painter, &v, size, &pt, line),
+                _ => paint_words(painter, &v, size.0, pt((x0 + x1) / 2.0, (y0 + y1) / 2.0), turn),
+            }
+        }
+        let under = over.is_some_and(|p| (x0..=x1).contains(&p[0]) && (y0..=y1).contains(&p[1]));
+        if on && (!printed || under || drag.is_some()) {
+            if !printed {
+                let corners = [pt(x0, y0), pt(x1, y0), pt(x1, y1), pt(x0, y1), pt(x0, y0)];
+                painter.extend(egui::Shape::dashed_line(&corners, line, 5.0, 4.0));
+            }
+            let c = pt((x0 + x1) / 2.0, y0);
             painter.circle_filled(c, 6.0, plate::PAPER);
-            painter.circle_stroke(c, 6.0, egui::Stroke::new(2.0, plate::TALLY));
+            painter.circle_stroke(c, 6.0, egui::Stroke::new(2.0, plate::BLUE));
         }
     }
 }
@@ -1716,8 +2001,8 @@ mod tests {
         assert!(h.has("VP1") && h.has("horizon"), "the page guides name the handles\n{}", h.describe());
         assert!(h.has("VP 1") && h.has(crate::vocab::HORIZON_Y), "and the pane places them by number");
         // The guides latch hides them; the panel tool shows them again.
-        h.scroll_to("page guides");
-        h.click("page guides");
+        h.scroll_to(crate::vocab::PAGE_GUIDES);
+        h.click(crate::vocab::PAGE_GUIDES);
         assert!(!h.has("VP1"), "guides off");
         h.perform(Action::PanelTool);
         assert!(h.has("VP1"), "the armed panel tool shows the guides");
