@@ -72,11 +72,13 @@ Each row replaces the main-spec text it names. Nobody needs to read the old rule
 | 4.8 | Stands. "Paper under chrome" is now also gated in Plan and in every step of a lesson |
 | 4.9 | Plan row: left 349, canvas 1245×786, paper 1132×637 (50.0%), and left 279, canvas 995×686, paper 890×500 (43.5%), band 36. The "Draw, sheet on" row goes: it was never gated and it overstated (49.8% in the shot) |
 
-| Slot | Plan | Timing | Color, Effects, Export (animation) | Drawing |
+| Slot | Plan | Timing | Color, Effects, Export (animation) | Drawing, Comic |
 |---|---|---|---|---|
 | Left | Previous, Play, Next, `Frame 3 of 12` | Full transport, as today | Plain transport | Plain transport |
 | Centre | Say line | Say line | Say line | Say line |
 | Right | Add drawing, Ghost frames, Speed, Timing sheet | Longer, Shorter, Sound while dragging, fps | Add drawing, Ghost frames, Speed, Timing sheet | Nothing |
+
+The last column gained Comic in the AU18 review: the table had no Comic column, and a page offering `Add drawing` and `Timing sheet` beside `Comic pages have no timing.` read as an animation tool leaking in. Alt+A and `Window ▸ Timing sheet` stay on both.
 
 ### 1.5 The steps (main spec 5)
 
@@ -296,6 +298,8 @@ if kind == Drawing and no lesson stands:
 
 It sets `meta_dirty` and says its remark once. Frames, not drawings: two tracks on one frame are still a picture. It catches Add drawing, Insert frames, cut length, paste, a new cut and a guest's edit with no wire message. The page check comes first, or a New page on a page-sized drawing would promote to Animation by cut count.
 
+**Paste.** `sheet_ops::paste_block` never changes `frame_count`, so `AppState::paste_cells` does it, on a stamped drawing alone: a paste that runs past the one frame, Insert always, adds `SetFrameCount` to its own undo step. The cells are frames then, and the rule catches them. An animation's cells past the end stay as they are, and the frozen boot, which stamps nothing, is untouched.
+
 **What the person sees.** The pill reads Plan instead of Draw and Timing appears. The stage stays `Stage::Drawing`, so nothing moves under the pen: no dock swap, no refit. The strip opens as `AddDrawingAfter` already makes it. The sheet arrives the next time they enter Plan or press `Timing sheet`.
 
 **A drawing that becomes a comic moves.** The Comic bar has neither Draw nor Effects, so staying put would leave no pill lit and no pill for the step they stand on. When the stage is not on the Comic bar, the promotion runs `enter_room(Stage::Manga)`, after any stroke in progress has ended.
@@ -326,7 +330,7 @@ The two studies differed on F4. It runs the first step and is never refused: a p
 
 ### 2.10 Quick Start per kind
 
-`quick_start: [bool; 5]`, the dots and `EXPORT_STEP = 4` stay. `ui.quick_start` is one array, so only slots 0 and 4 share a meaning. Drawing and Comic slots 1 to 3 use free `hints_seen` bits 17 to 22.
+`quick_start: [bool; 5]`, the dots and `EXPORT_STEP = 4` stay. `ui.quick_start` is one array, so only slots 0 and 4 share a meaning. Drawing and Comic slots 1 to 3 use free `hints_seen` bits 17 to 22. The dots paint on a drawing and on a comic, in their own rows: the main spec hid them on a closed strip so a Picture start was not counted through an animation, and these rows remove that reason. An animation with its strip closed still hides them.
 
 | Slot | Animation | Drawing | Comic |
 |---|---|---|---|

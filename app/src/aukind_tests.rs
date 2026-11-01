@@ -260,7 +260,7 @@ fn aukind_every_route_stamps() {
         assert!(!h.state().is_dirty());
     }
     let rows = templates::ALL.iter().enumerate();
-    let mut comics = 0;
+    let (mut comics, mut animatics) = (0, 0);
     for (i, t) in rows {
         let comic = t.name.contains("Manga") || t.name.contains("Webtoon");
         comics += usize::from(comic);
@@ -274,11 +274,13 @@ fn aukind_every_route_stamps() {
         settle(&mut h);
         assert_eq!(kind_of(h.state()), kind, "{}", t.name);
         assert!(!h.state().is_dirty(), "{}", t.name);
-        if t.name == "Animatic" {
+        if t.name.starts_with("Animatic") {
             assert_eq!(h.editor().stage, Some(Stage::Edit), "it still opens on Timing");
+            animatics += 1;
         }
     }
     assert_eq!(comics, 3, "Manga B5, A4, Webtoon");
+    assert_eq!(animatics, 1, "the Animatic's row ran");
     // The form's blank and the sample derive: 48 frames, no key.
     let blank = NewProjectForm::default().new_state();
     assert_eq!(stored(&blank), None);
@@ -321,6 +323,7 @@ fn aukind_door_lands_on_the_first_step() {
     assert_eq!(h.editor().stage, Some(Stage::Drawing));
     assert_eq!(h.node_toggled(vocab::STEP_DRAW), Some(true));
     assert!(!h.state().is_dirty());
+    assert!(h.editor().strip_closed(), "the animation's strip stays with it");
     // A step on both bars stays.
     h.perform(Action::RoomFinishing);
     settle(&mut h);
@@ -546,6 +549,34 @@ fn aukind_new_page_lands_on_manga() {
         let want = if stage == Some(Stage::InkPaint) { stage } else { Some(Stage::Manga) };
         assert_eq!(h.editor().stage, want, "{step:?}");
     }
+    // Export is on the bar, so it stays; the way back was a step that is not,
+    // and no comic reaches Draw or Effects by it (acceptance 6).
+    for step in [Action::RoomDrawing, Action::RoomComposite] {
+        let mut h = shipped(a_page_sized_drawing());
+        h.perform(step);
+        settle(&mut h);
+        h.perform(Action::RoomExport);
+        settle(&mut h);
+        assert_eq!(h.perform(Action::NewPage), Performed::Done);
+        settle(&mut h);
+        assert_eq!(kind_of(h.state()), ProjectKind::Comic, "{step:?}");
+        assert_eq!(h.editor().stage, Some(Stage::Export), "{step:?}");
+        assert_eq!(back_word(&h).as_deref(), Some(vocab::STEP_MANGA), "{step:?}");
+        assert_eq!(h.editor().stage_kept(), Some(Stage::Manga), "{step:?}");
+        press_back(&mut h);
+        assert_eq!(h.editor().stage, Some(Stage::Manga), "{step:?}");
+        assert_eq!(h.node_toggled(vocab::STEP_MANGA), Some(true), "{step:?}");
+        assert!(same_shape(&h.editor().dock, &Stage::Manga.dock()), "{step:?}: {:?}", panes(&h));
+    }
+    // From a step the Comic bar has, the way back stands.
+    let mut h = shipped(a_page_sized_drawing());
+    h.perform(Action::RoomFinishing);
+    settle(&mut h);
+    h.perform(Action::RoomExport);
+    settle(&mut h);
+    h.perform(Action::NewPage);
+    settle(&mut h);
+    assert_eq!(back_word(&h).as_deref(), Some(vocab::STEP_COLOR));
 }
 
 // ---- the hidden steps ----
@@ -669,7 +700,7 @@ fn aukind_f4_runs_the_first_step() {
 
 /// The ways a drawing grows, each by its own verb. None marks the document
 /// through the kind alone, so each route is asserted the same way.
-const GROWN: [(&str, fn(&mut EditorHarness)); 4] = [
+const GROWN: [(&str, fn(&mut EditorHarness)); 5] = [
     ("Add drawing", |h| {
         h.perform(Action::AddDrawingAfter);
     }),
@@ -680,6 +711,11 @@ const GROWN: [(&str, fn(&mut EditorHarness)); 4] = [
     ("a new cut", |h| {
         let scene = h.state().view.scene;
         h.state_mut().new_cut(scene);
+    }),
+    ("paste", |h| {
+        h.state_mut().new_drawing_at_frame();
+        assert!(h.state_mut().copy_cells(), "{}", h.state().status);
+        h.perform(Action::PasteCellsInsert);
     }),
 ];
 
@@ -699,18 +735,54 @@ fn aukind_promotes_by_frames() {
         assert_eq!(h.editor().stage, stage, "{route}: nothing moves under the pen");
         assert_eq!(panes(&h), dock, "{route}: no dock swap");
     }
-    // A paste lengthens no cut: its cells past the end are no frames, so it
-    // leaves the rule nothing to catch. Frames, not cells.
+}
+
+/// A drawing has no rows past its one frame, so a paste running past it brings
+/// them, in its own undo step, by either route. What fits in the frame stays a
+/// drawing, and an animation's cells past the end are as they were.
+#[test]
+fn aukind_paste_past_the_frame_makes_frames() {
+    let paste: [fn(&mut EditorHarness); 2] = [
+        |h| {
+            h.perform(Action::PasteCellsInsert);
+        },
+        // The sheet's own Ctrl+Shift+V, which comes in with no Editor.
+        |h| h.state_mut().paste_cells(true),
+    ];
+    for route in paste {
+        let mut h = EditorHarness::as_shipped();
+        settle(&mut h);
+        h.state_mut().new_drawing_at_frame();
+        assert!(h.state_mut().copy_cells(), "{}", h.state().status);
+        let last_key = |h: &EditorHarness| h.state().cut().xsheet.columns[0].last_key();
+        let before = last_key(&h);
+        route(&mut h);
+        settle(&mut h);
+        assert_eq!(h.state().frame_count(), 2, "the pushed cell is a frame");
+        assert_ne!(last_key(&h), before, "it pasted");
+        assert_eq!(stored(h.state()), Some("animation"));
+        h.state_mut().undo();
+        settle(&mut h);
+        assert_eq!(h.state().frame_count(), 1, "one undo step: the frame");
+        assert_eq!(last_key(&h), before, "one undo step: the cells");
+        assert_eq!(stored(h.state()), Some("animation"), "and it does not demote");
+    }
+
     let mut h = EditorHarness::as_shipped();
     settle(&mut h);
-    let (before, cut) = (h.state().engine.revision(), h.state().cut().frame_count);
     h.state_mut().new_drawing_at_frame();
+    assert!(h.state_mut().copy_cells(), "{}", h.state().status);
+    h.perform(Action::PasteCells);
+    settle(&mut h);
+    assert_eq!(h.state().frame_count(), 1, "over its own cell");
+    assert_eq!(stored(h.state()), Some("drawing"));
+
+    let mut h = shipped(an_animation());
+    let frames = h.state().frame_count();
     assert!(h.state_mut().copy_cells(), "{}", h.state().status);
     h.perform(Action::PasteCellsInsert);
     settle(&mut h);
-    assert!(h.state().engine.revision() > before, "it pasted");
-    assert_eq!(h.state().cut().frame_count, cut, "and the cut stands");
-    assert_eq!(stored(h.state()), Some("drawing"));
+    assert_eq!(h.state().frame_count(), frames, "an animation's cut stands");
 }
 
 /// A verb that grows a drawing is a row of what it grew into: the row ticks.
@@ -756,10 +828,70 @@ fn aukind_two_tracks_on_one_frame_stay_a_drawing() {
     h.state_mut().add_column();
     settle(&mut h);
     assert_eq!(h.state().cut().xsheet.columns.len(), 2, "two tracks");
+    // Each with a drawing of its own: a picture, so the band's keys stay away.
+    h.state_mut().new_drawing_at_frame();
+    settle(&mut h);
+    let first = h.state().cut().xsheet.columns[0].id;
+    h.state_mut().view.active_column = first;
+    h.state_mut().new_drawing_at_frame();
+    settle(&mut h);
+    assert_eq!(h.state().cut().drawings.len(), 2, "two drawings");
     assert_eq!(h.state().frame_count(), 1);
     assert_eq!(stored(h.state()), Some("drawing"));
     assert_eq!(kind_of(h.state()), ProjectKind::Drawing);
     assert!(h.has(vocab::STEP_DRAW) && !h.has(vocab::STEP_TIMING));
+    assert_no_frame_keys(&h);
+    // They arrive with the frame that makes it an animation.
+    h.perform(Action::InsertFrames);
+    settle(&mut h);
+    assert!(h.has("Speed") && h.has("Flip"), "{}", h.describe());
+}
+
+/// The chrome the second drawing brings, gone.
+fn assert_no_frame_keys(h: &EditorHarness) {
+    assert!(!h.editor().full_band);
+    for key in ["previous frame (S)", "next frame (F)", "Ghost frames toggle", "Speed", "Flip"] {
+        assert!(!h.has(key), "{key}\n{}", h.describe());
+    }
+}
+
+/// R17: the strip and the band's keys are an animation's, and four routes
+/// replace the document in this Editor with no boot.
+#[test]
+fn aukind_strip_and_keys_stay_with_the_animation() {
+    let dir = tempfile::tempdir().unwrap();
+    let picture = saved(&a_drawing(), dir.path(), "picture");
+    let book = saved(&a_comic(), dir.path(), "book");
+    let mut long = a_drawing();
+    long.set_cut_length(6);
+    ProjectKind::Drawing.stamp(&mut long.engine.project);
+    let outgrown = saved(&long, dir.path(), "outgrown");
+    for file in [&picture, &book] {
+        let mut h = EditorHarness::as_animation();
+        settle(&mut h);
+        h.state_mut().new_drawing_at_frame();
+        h.perform(Action::AddDrawingAfter);
+        settle(&mut h);
+        assert!(!h.editor().strip_closed() && h.editor().full_band);
+        assert!(h.has("Speed") && h.has("Flip"), "{}", h.describe());
+        open(&mut h, file);
+        assert!(h.editor().strip_closed(), "{file:?}");
+        assert_no_frame_keys(&h);
+        assert!(!h.has("Add drawing (band)"), "{}", h.describe());
+    }
+    // A drawing stamped with frames in it opens as what it has grown into.
+    let mut h = EditorHarness::as_shipped();
+    settle(&mut h);
+    open(&mut h, &outgrown);
+    assert_eq!(stored(h.state()), Some("animation"));
+    assert!(!h.editor().strip_closed(), "it opens with its frames");
+    // A comic with Alt+A: frames, and still no strip.
+    let mut h = shipped(a_comic());
+    assert_eq!(h.perform(Action::AddDrawingAfter), Performed::Done);
+    settle(&mut h);
+    assert_eq!(stored(h.state()), Some("comic"));
+    assert!(h.state().frame_count() > 1);
+    assert!(h.editor().strip_closed());
 }
 
 #[test]
@@ -845,6 +977,23 @@ fn aukind_guest_promotes_with_no_wire_message() {
     h.editor_mut().state = a_comic();
     settle(&mut h);
     assert_eq!(h.editor().stage, Some(Stage::InkPaint));
+    // Nor does it rearrange the step: a sheet opened by hand stands.
+    let mut h = shipped(a_drawing());
+    h.editor_mut().canvas.is_guest = true;
+    h.editor_mut().open_pane(Pane::XSheet);
+    settle(&mut h);
+    let dock = panes(&h);
+    assert!(has_sheet(&h), "{dock:?}");
+    h.editor_mut().state = a_drawing();
+    settle(&mut h);
+    assert_eq!(panes(&h), dock);
+    // A person's own open does.
+    let mut h = shipped(a_drawing());
+    h.editor_mut().open_pane(Pane::XSheet);
+    settle(&mut h);
+    h.editor_mut().state = a_drawing();
+    settle(&mut h);
+    assert!(!has_sheet(&h), "{:?}", panes(&h));
 }
 
 // ---- the words ----
@@ -868,7 +1017,12 @@ fn aukind_go_to_word_follows_the_kind() {
         settle(&mut h);
         let word = Verb::GoToDraw.label(Some(kind));
         assert_eq!(h.editor().export_view().go_first, word);
+        // Its card speaks of that step too, under either button.
+        let card = steps::bar(kind)[0].purpose;
+        assert_eq!(Verb::GoToDraw.card(Some(kind)), card);
+        assert_eq!(h.editor().export_view().go_card, card);
     }
+    assert_eq!(Verb::GoToDraw.card(None), Action::RoomDrawing.help(), "the frozen boot");
     // The tooltip of a template names the step it opens on, by kind.
     assert!(templates::ALL[templates::COMIC].tooltip().contains("opens in the Manga room"));
     assert!(templates::ALL[0].tooltip().contains("opens in the Plan room"));
@@ -932,23 +1086,118 @@ fn aukind_quick_start_rows_per_kind() {
     assert!(h.rig().requests.contains(&crate::AppRequest::Save), "{:?}", h.rig().requests);
 }
 
-/// A hint's button names a pill of the bar it speaks on, and never one behind it.
+/// Feedback 2.10: the dots stay, on every kind, and count that kind's own five.
+#[test]
+fn aukind_dots_count_each_kinds_own_rows() {
+    let rows = [
+        (ProjectKind::Drawing, "Quick Start: 0 of 5. Next: draw something."),
+        (ProjectKind::Comic, "Quick Start: 0 of 5. Next: draw on the page."),
+    ];
+    for (kind, words) in rows {
+        let mut h = shipped(of_kind(kind));
+        h.kit_mut().set_size(eframe::egui::vec2(1600.0, 900.0));
+        settle(&mut h);
+        h.wait(4.2);
+        settle(&mut h);
+        assert!(h.editor().say.dots_painted, "{kind:?}");
+        let dots = h.editor().say.dots_at.expect("where they stand");
+        h.event(eframe::egui::Event::PointerMoved(dots.center()));
+        h.run_frames(1);
+        h.wait(1.5);
+        assert!(h.painted_text().iter().any(|w| w == words), "{kind:?}: {:?}", h.painted_text());
+    }
+    // The ready paper's first screen, and a tick on the drawing's own slot.
+    let mut h = EditorHarness::as_shipped();
+    settle(&mut h);
+    assert!(h.editor().say.dots_painted, "a fresh launch");
+    h.state_mut().fills_done += 1;
+    settle(&mut h);
+    assert_eq!(h.editor().ticks(), [false, true, false, false, false]);
+    assert!(h.editor().say.dots_painted);
+    let place = say::place_words(h.editor().quick_rows(), &h.editor().ticks());
+    assert_eq!(place, "Quick Start: 1 of 5. Next: draw something.");
+    // All five in, they are done.
+    let bits = say::DRAWING_SLOTS.iter().fold(0, |all, bit| all | bit);
+    h.rig_mut().config.ui.hints_seen |= bits;
+    h.editor_mut().quick_start = [true; 5];
+    settle(&mut h);
+    assert_eq!(h.editor().ticks(), [true; 5]);
+    assert!(!h.editor().say.dots_painted, "finished");
+}
+
+/// A comic is pages, and its first sentence says so. One lesson: one bit.
+#[test]
+fn aukind_a_comic_hears_of_the_page() {
+    for (kind, words) in [
+        (ProjectKind::Drawing, "Draw on the paper to begin."),
+        (ProjectKind::Animation, "Draw on the paper to begin."),
+        (ProjectKind::Comic, "Draw on the page to begin."),
+    ] {
+        let stage = steps::bar(kind)[0].stage;
+        let f = Facts { stage: Some(stage), kind: Some(kind), ..Facts::default() };
+        let mut seen = 0;
+        let spoken = say::read(&f, &mut seen, None, |_| None).expect("a row applies");
+        assert_eq!((spoken.bit, spoken.words.as_str()), (Some(say::NEW_PAPER), words), "{kind:?}");
+        seen |= say::NEW_PAPER;
+        assert_ne!(say::read(&f, &mut seen, None, |_| None).and_then(|s| s.bit), Some(say::NEW_PAPER), "{kind:?}");
+    }
+    let h = shipped(templates::ALL[templates::COMIC].build());
+    assert_eq!(h.editor().say.hint.as_ref().map(|s| s.words.as_str()), Some("Draw on the page to begin."));
+}
+
+/// A panel counts when one is cut. A page that has more than the last one does
+/// not tick the row by being turned to.
+#[test]
+fn aukind_turning_a_page_cuts_no_panel() {
+    let mut state = templates::ALL[templates::COMIC].build();
+    let (scene, first) = (state.view.scene, state.at().cut);
+    state.new_page(scene);
+    let second = state.at().cut;
+    assert_ne!(first, second);
+    let (node, mut polys) = anim_core::manga::panels_of(state.cut()).expect("the page's panels");
+    polys.push(polys[0].clone());
+    let cut_at = state.at();
+    let command = anim_core::manga::set_panels(state.cut(), cut_at, node, polys).expect("a Panels node");
+    state.engine.apply("panel", vec![command]).expect("applied");
+    state.goto_cut(scene, first);
+    let mut h = shipped(state);
+    h.state_mut().goto_cut(scene, second);
+    settle(&mut h);
+    assert_eq!(h.editor().ticks()[1], false, "turned to, not cut");
+}
+
+/// A hint's button names a pill of the bar it speaks on, and never one behind
+/// it; so does a sentence. `Go to` speaks on an empty step, and names the first.
 #[test]
 fn aukind_no_hint_points_backward_on_any_bar() {
-    let mut named = 0;
+    let (mut named, mut compared, mut empty) = (0, 0, 0);
     for kind in ProjectKind::ALL {
         let bar = steps::bar(kind);
         let place = |word: &str| bar.iter().position(|s| s.label == word);
         for hint in say::HINTS.iter().filter(|hint| hint.kinds.contains(&kind)) {
-            let Some(word) = hint.verb.and_then(|v| v.label(Some(kind)).strip_prefix("Go to ")) else { continue };
+            let said = match hint.words {
+                Words::Plain(words) => words.split_once("Go to ").map(|(_, word)| word.trim_end_matches('.')),
+                _ => None,
+            };
+            let button = hint.verb.and_then(|v| v.label(Some(kind)).strip_prefix("Go to "));
+            let Some(word) = button.or(said) else { continue };
             let there = place(word).unwrap_or_else(|| panic!("{word} is not on {kind:?}'s bar"));
             for here in hint.steps.iter().filter_map(|st| bar.iter().position(|s| s.stage == *st)) {
                 assert!(there >= here, "{word} points back on {kind:?}");
+                compared += 1;
             }
             named += 1;
         }
+        for row in say::EMPTY_STEPS.iter().filter(|row| bar.iter().any(|s| s.stage == row.stage)) {
+            let f = Facts { stage: Some(row.stage), kind: Some(kind), ..Facts::default() };
+            let verb = say::empty_step(&f, false).and_then(|spoken| spoken.verb).expect("its button");
+            assert_eq!(verb.label(Some(kind)).strip_prefix("Go to "), Some(bar[0].label), "{kind:?}");
+            empty += 1;
+        }
     }
     assert!(named >= 3, "{named}");
+    assert!(compared >= 4, "{compared}");
+    assert!(empty >= 3, "{empty}");
     // SHARE has a way in with no Play.
     let share = say::HINTS.iter().find(|hint| hint.bit == say::SHARE).expect("a row");
     for (kind, stage) in [(ProjectKind::Drawing, Stage::Drawing), (ProjectKind::Comic, Stage::Manga)] {
@@ -971,12 +1220,19 @@ fn aukind_a_drawing_never_hears_of_frames() {
         let lower = words.to_lowercase();
         assert!(!lower.contains("frame") && !lower.contains("play"), "{words:?}");
     }
-    let mut h = EditorHarness::as_shipped();
+    // A comic has neither either: F6 there says it has no timing. Alt+A and the
+    // menu remain: that is how a person promotes a drawing on purpose.
+    for kind in [ProjectKind::Drawing, ProjectKind::Comic] {
+        let mut h = shipped(of_kind(kind));
+        settle(&mut h);
+        assert!(!h.has("Add drawing (band)"), "{kind:?}: {}", h.describe());
+        assert!(!h.has(vocab::SHOW_TIMING_SHEET), "{kind:?}: {}", h.describe());
+        assert_eq!(h.editor().can_perform(Action::AddDrawingAfter), Ok(()), "{kind:?}");
+    }
+    // An animation's stand.
+    let mut h = EditorHarness::as_animation();
     settle(&mut h);
-    assert!(!h.has("Add drawing (band)"), "{}", h.describe());
-    assert!(!h.has(vocab::SHOW_TIMING_SHEET), "{}", h.describe());
-    // Alt+A and the menu remain: that is how a person promotes on purpose.
-    assert_eq!(h.editor().can_perform(Action::AddDrawingAfter), Ok(()));
+    assert!(h.has("Add drawing (band)") && h.has(vocab::SHOW_TIMING_SHEET), "{}", h.describe());
 }
 
 #[test]

@@ -157,6 +157,7 @@ fn ausay_hints_never_point_backward() {
         (ProjectKind::Animation, vec!["Plan", "Timing", "Color", "Effects", "Export"]),
         (ProjectKind::Comic, vec!["Manga", "Color", "Export"]),
     ];
+    let (mut total, mut sent_back) = (0, 0);
     for (kind, trade) in bars {
         let bar = steps::bar(kind);
         let place = |word: &str| bar.iter().position(|s| s.label == word);
@@ -172,13 +173,22 @@ fn ausay_hints_never_point_backward() {
                     assert!(there >= here, "{words:?} points back from {}", labels[here]);
                     checked += 1;
                 }
-                if hint.verb == Some(Verb::GoToDraw) {
-                    assert_eq!(here, 0, "{words:?}: the first step is the one it names");
-                }
             }
         }
         assert!(checked >= 1, "{kind:?}: the sentences that name a step: {checked}");
+        total += checked;
+        // `Go to` speaks on an empty step alone, and the step it names is the
+        // first, where the work that step lacks is made.
+        for row in say::EMPTY_STEPS.iter().filter(|row| bar.iter().any(|s| s.stage == row.stage)) {
+            let f = Facts { stage: Some(row.stage), kind: Some(kind), ..Facts::default() };
+            let spoken = say::empty_step(&f, false).expect("an empty step speaks");
+            let word = spoken.verb.expect("its button").label(Some(kind)).strip_prefix("Go to ").expect("a step");
+            assert_eq!(place(word), Some(0), "{:?} on {kind:?}", row.words);
+            sent_back += 1;
+        }
     }
+    assert!(total >= 4, "the sentences that name a step, on every bar: {total}");
+    assert!(sent_back >= 3, "the empty steps on a bar: {sent_back}");
     // The Quick Start chain speaks in its own order: each row needs what the
     // one before it taught.
     let chain = [say::NEW_PAPER, say::ADD_DRAWING, say::NEXT_POSE, say::TWO_DRAWINGS, say::PLAY, say::SHARE];
@@ -1381,11 +1391,12 @@ fn ausay_show_me_leaves_the_pen_check_listening() {
 /// and the last tick ends them.
 #[test]
 fn ausay_dots_show_the_place() {
-    let mut h = animation();
+    let mut h = ready();
     quiet(&mut h);
     assert!(h.editor().say.dots_painted);
     let before = measure::census(&mut h);
     h.editor_mut().quick_start = [true; 5];
+    h.rig_mut().config.ui.hints_seen |= say::DRAWING_SLOTS.iter().fold(0, |all, bit| all | bit);
     settle(&mut h);
     assert!(!h.editor().say.dots_painted, "finished");
     let after = measure::census(&mut h);
@@ -1397,8 +1408,8 @@ fn ausay_dots_show_the_place() {
     assert!(h.editor().say.dots_painted);
 }
 
-/// The dots wear a card for whoever rests on them, in words, and a Picture
-/// start's closed strip has no animation for them to count.
+/// The dots wear a card for whoever rests on them, in words, and an animation
+/// with its strip closed has nothing yet for them to count.
 #[test]
 fn ausay_dots_card_says_the_place() {
     let rows = &welcome::STEPS;
@@ -1416,7 +1427,7 @@ fn ausay_dots_card_says_the_place() {
     h.editor_mut().strip_open = false;
     h.editor_mut().full_band = false;
     settle(&mut h);
-    assert!(h.editor().strip_closed(), "a Picture start's arrangement");
+    assert!(h.editor().strip_closed(), "an animation with its strip closed");
     assert!(!h.editor().say.dots_painted, "the strip is closed");
     h.editor_mut().strip_open = true;
     settle(&mut h);

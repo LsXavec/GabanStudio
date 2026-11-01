@@ -16,6 +16,8 @@ use anim_core::raster::{TILE, TILE_LEN, TileCoord, TileData, TileDiff, f16_bits_
 use anim_core::sheet_ops;
 use anim_core::xsheet::{Column, ColumnDef, ColumnKind, Exposure, ParamColumn, ParamKey};
 
+use crate::steps::ProjectKind;
+
 /// Bottom→top display slices of cel layers: (tiles, effective opacity).
 pub type LayerSlices<'a> = Vec<(&'a BTreeMap<TileCoord, Arc<TileData>>, f32)>;
 
@@ -3298,8 +3300,20 @@ impl AppState {
             sheet_ops::PasteMode::Overwrite
         };
         let at = self.at();
-        let built =
+        let mut built =
             sheet_ops::paste_block(&mut self.engine.project, &block, at, columns[0], frame, mode);
+        // AU18: a drawing has no rows past its one frame, so a paste that runs
+        // past it brings them, in this one undo step: its cells are frames, and
+        // that is how a paste grows a drawing (spec 2.7). An animation's cells
+        // past the end wait there, as they always have.
+        let frames = if insert { self.frame_count() + block.len } else { frame + block.len };
+        if ProjectKind::stored(&self.engine.project) == Some(ProjectKind::Drawing)
+            && frames > self.frame_count()
+            && let Ok(commands) = &mut built
+            && !commands.is_empty()
+        {
+            commands.push(Command::SetFrameCount { at, frames });
+        }
         let label = if insert { "paste cells (insert)" } else { "paste cells" };
         self.apply_sheet(label, built, "cells pasted", "nothing to paste");
     }

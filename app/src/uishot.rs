@@ -655,16 +655,30 @@ fn hide_moments(dir: &Path) {
 }
 
 /// AU18: the three bars, each on its first step, and a step key a drawing's bar
-/// refuses.
-const KINDS: [(&str, u32, u32); 8] = [
+/// refuses; a drawing and a comic on the steps they share, a drawing's dots after
+/// its first stroke, the remark as it grows, and a drawing opened over an
+/// animation, whose strip does not outlive it.
+const KINDS: [(&str, u32, u32); 20] = [
     ("bar-drawing", 1600, 900),
     ("bar-refused", 1600, 900),
+    ("drawing-stroked", 1600, 900),
+    ("drawing-color", 1600, 900),
+    ("drawing-effects", 1600, 900),
+    ("drawing-grew", 1600, 900),
     ("bar-animation", 1600, 900),
+    ("drawing-over-animation", 1600, 900),
     ("bar-comic", 1600, 900),
+    ("comic-color", 1600, 900),
     ("bar-drawing-1280", 1280, 800),
     ("bar-refused-1280", 1280, 800),
+    ("drawing-stroked-1280", 1280, 800),
+    ("drawing-color-1280", 1280, 800),
+    ("drawing-effects-1280", 1280, 800),
+    ("drawing-grew-1280", 1280, 800),
     ("bar-animation-1280", 1280, 800),
+    ("drawing-over-animation-1280", 1280, 800),
     ("bar-comic-1280", 1280, 800),
+    ("comic-color-1280", 1280, 800),
 ];
 
 fn kinds_owed() -> Vec<(String, u32, u32)> {
@@ -673,6 +687,9 @@ fn kinds_owed() -> Vec<(String, u32, u32)> {
 
 fn kinds_moments(dir: &Path) {
     let mut shots = KINDS.iter().map(|(state, w, h)| (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32)));
+    let saved = tempfile::tempdir().expect("a temp dir");
+    let picture = saved.path().join("picture.animproj");
+    anim_core::store::save(&crate::templates::READY.build().engine.project, &picture).expect("saved");
     for _ in 0..2 {
         let mut shoot = |h: &mut EditorHarness, room: Option<Stage>| {
             let (name, size) = shots.next().expect("a shot owed");
@@ -688,12 +705,31 @@ fn kinds_moments(dir: &Path) {
         h.perform(Action::RoomEdit);
         h.run_frames(4);
         shoot(&mut h, None);
+        crate::ausay_tests::raster_line(&mut h);
+        shoot(&mut h, Some(Stage::Drawing));
+        h.perform(Action::RoomFinishing);
+        shoot(&mut h, Some(Stage::InkPaint));
+        h.perform(Action::RoomComposite);
+        shoot(&mut h, Some(Stage::Composite));
+        drop(h);
+        let mut h = EditorHarness::with_gpu_ready();
+        h.run_frames(4);
+        h.perform(Action::AddDrawingAfter);
+        h.run_frames(4);
+        shoot(&mut h, None);
         drop(h);
         let mut h = EditorHarness::with_gpu_animation();
+        shoot(&mut h, Some(Stage::Drawing));
+        h.perform(Action::AddDrawingAfter);
+        h.run_frames(4);
+        let ctx = h.ctx();
+        h.editor_mut().go(crate::Leave::OpenPath(picture.clone()), &ctx);
         shoot(&mut h, Some(Stage::Drawing));
         drop(h);
         let mut h = EditorHarness::with_gpu_shipped(crate::templates::ALL[crate::templates::COMIC].build());
         shoot(&mut h, Some(Stage::Manga));
+        h.perform(Action::RoomFinishing);
+        shoot(&mut h, Some(Stage::InkPaint));
     }
 }
 

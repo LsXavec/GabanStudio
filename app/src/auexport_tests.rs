@@ -115,6 +115,7 @@ fn view() -> export_step::View {
     export_step::View {
         back: Some(Stage::Drawing.name().to_string()),
         go_first: say::GO_TO_DRAW,
+        go_card: say::Verb::GoToDraw.card(None),
         more_default: false,
         range: None,
     }

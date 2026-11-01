@@ -109,6 +109,8 @@ pub struct View {
     pub back: Option<String>,
     /// AU18: the words that go to the bar's first step.
     pub go_first: &'static str,
+    /// AU18: that button's card, in the same step's words.
+    pub go_card: &'static str,
     /// `More options` before any press: the boot's default.
     pub more_default: bool,
     /// `File ▸ Export`'s frame fields, once they are moved: its rows and these
@@ -173,7 +175,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View, open: bool) {
     // Anywhere else the next step's pill leads the screen.
     let lead = view.back.is_some() && state.render_queue.panel.done.is_none();
     match Offer::of(state) {
-        Offer::NoArt => no_art(ui, state, view.go_first, lead),
+        Offer::NoArt => no_art(ui, state, view, lead),
         Offer::Comic => {
             lead_choice(ui, state, Action::ExportPages.label(), Action::ExportPages, lead);
             other_formats(ui, state, wide, open);
@@ -299,14 +301,14 @@ fn transparent(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-fn no_art(ui: &mut egui::Ui, state: &mut AppState, go_first: &str, lead: bool) {
+fn no_art(ui: &mut egui::Ui, state: &mut AppState, view: &View, lead: bool) {
     plain_words(ui, NO_ART, plate::LEGEND);
     let resp = if lead {
-        plate::primary_card(ui, go_first, CHOICE_H, plate::Role::Card)
+        plate::primary_card(ui, view.go_first, CHOICE_H, plate::Role::Card)
     } else {
-        plate::choice_card(ui, go_first, CHOICE_H)
+        plate::choice_card(ui, view.go_first, CHOICE_H)
     };
-    if resp.card(Action::RoomDrawing.help()).clicked() {
+    if resp.card(view.go_card).clicked() {
         state.render_queue.panel.ask(Ask::Do(Action::RoomDrawing));
     }
 }

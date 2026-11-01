@@ -10,11 +10,12 @@
 //! from outcomes only: the stroke signal, `AddDrawingAfter`, playback and a
 //! finished export's file on disk.
 
+use anim_core::command::CutRef;
 use anim_core::manga;
 
 use crate::config::{Action, UiConfig};
 use crate::render_queue::Landed;
-use crate::steps::ProjectKind;
+use crate::steps::{self, ProjectKind};
 use crate::viewer::ViewerView;
 use crate::welcome::{self, PenCheck};
 use crate::workspace::Stage;
@@ -88,10 +89,11 @@ impl Verb {
         }
     }
 
-    pub fn card(self) -> &'static str {
+    /// AU18: the label follows the kind, and so does what it says of itself.
+    pub fn card(self, kind: Option<ProjectKind>) -> &'static str {
         match self {
             Verb::Show(_) => "Do this step for me.",
-            Verb::GoToDraw => Action::RoomDrawing.help(),
+            Verb::GoToDraw => kind.map_or(Action::RoomDrawing.help(), |kind| steps::bar(kind)[0].purpose),
             Verb::Fix(action) => action.help(),
             Verb::PenPage => "Open Settings on the pen page.",
             Verb::OpenFile => "Open the file you exported.",
@@ -203,8 +205,9 @@ const ON_A_FRAME: &[Stage] = &[Stage::Drawing, Stage::Edit, Stage::InkPaint];
 const ANY_KIND: &[ProjectKind] = &ProjectKind::ALL;
 /// A row that names a frame, a drawing's order or Play.
 const ANIMATION: &[ProjectKind] = &[ProjectKind::Animation];
+const ON_PAPER: &[ProjectKind] = &[ProjectKind::Drawing, ProjectKind::Animation];
 
-pub const HINTS: [Hint; 15] = [
+pub const HINTS: [Hint; 16] = [
     // First, or a row with nowhere to stand would keep it from the dot. The
     // first stroke answers it too: whoever draws has read it, or has no need
     // to. Only one made under the card: `read` asks every row, shown or not.
@@ -307,7 +310,18 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Plain("Draw on the paper to begin."),
         verb: Some(Verb::Show(0)),
         steps: DRAWING_ROOMS,
-        kinds: ANY_KIND,
+        kinds: ON_PAPER,
+        shows: |f| !f.art,
+        answered: |f| f.stroked,
+        passes: false,
+    },
+    // AU18: the same lesson, in a comic's word: one bit.
+    Hint {
+        bit: NEW_PAPER,
+        words: Words::Plain("Draw on the page to begin."),
+        verb: Some(Verb::Show(0)),
+        steps: DRAWING_ROOMS,
+        kinds: &[ProjectKind::Comic],
         shows: |f| !f.art,
         answered: |f| f.stroked,
         passes: false,
@@ -496,6 +510,9 @@ pub struct Say {
     circle: bool,
     /// The five dots painted this frame.
     pub dots_painted: bool,
+    /// Where they last stood, for a test to rest on.
+    #[cfg(test)]
+    pub dots_at: Option<eframe::egui::Rect>,
     /// Hide tools was on at the last reading.
     pub tools_were_hidden: bool,
     /// AU10: the dock leaves the dot's first-time card its room (spec 8.5:
@@ -509,7 +526,9 @@ pub struct Say {
     strokes: Option<u64>,
     fills: Option<u64>,
     nodes: Option<usize>,
+    /// A comic's panels, and the page and the revision that count is of.
     panels: Option<usize>,
+    panels_at: Option<(CutRef, u64)>,
     plan_tried: bool,
     flat_strokes: u32,
     pen_answered: bool,
@@ -558,6 +577,7 @@ impl Say {
     /// Another document: nothing that differs from the last one is an outcome.
     pub fn new_document(&mut self) {
         (self.strokes, self.fills, self.nodes, self.panels) = (None, None, None, None);
+        self.panels_at = None;
         self.exported = None;
     }
 
@@ -772,11 +792,17 @@ impl Editor {
         let nodes = cut.graph.nodes().count();
         let effect_added = self.say.nodes.is_some_and(|before| nodes > before);
         self.say.nodes = Some(nodes);
-        // AU18: a comic's cut into panels by the count, read on a comic alone.
-        let comic = self.kind() == Some(ProjectKind::Comic);
-        let panels = comic.then(|| manga::panels_of(cut).map_or(0, |(_, polys)| polys.len()));
-        let panel_added = self.say.panels.zip(panels).is_some_and(|(before, now)| now > before);
-        self.say.panels = panels;
+        // AU18: a comic's cut into panels by the count, read on a comic alone
+        // and only after an edit: `panels_of` clones them, and this runs per
+        // frame. A page with more panels than the last one is no outcome.
+        let here = (state.at(), state.engine.revision());
+        let mut panel_added = false;
+        if self.kind() == Some(ProjectKind::Comic) && self.say.panels_at != Some(here) {
+            let now = manga::panels_of(cut).map_or(0, |(_, polys)| polys.len());
+            let same_page = self.say.panels_at.is_some_and(|(page, _)| page == here.0);
+            panel_added = same_page && self.say.panels.is_some_and(|before| now > before);
+            (self.say.panels, self.say.panels_at) = (Some(now), Some(here));
+        }
         let shown = state.current_drawing();
         let held = state.own_key_drawing().is_none().then(|| state.exposure_here()).flatten();
         let held = held.filter(|_| shown.is_some());

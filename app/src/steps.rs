@@ -29,7 +29,7 @@ impl ProjectKind {
     pub const ALL: [ProjectKind; 3] = [ProjectKind::Drawing, ProjectKind::Animation, ProjectKind::Comic];
 
     /// The stored value, unknown or absent as None.
-    fn stored(p: &Project) -> Option<ProjectKind> {
+    pub fn stored(p: &Project) -> Option<ProjectKind> {
         match p.app_meta.get(KIND_KEY).map(String::as_str) {
             Some("drawing") => Some(ProjectKind::Drawing),
             Some("animation") => Some(ProjectKind::Animation),

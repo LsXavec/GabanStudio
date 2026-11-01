@@ -3490,10 +3490,12 @@ impl Editor {
         match action {
             Action::PlayPause => s.toggle_play(),
             // AU5: the strip opens on the drawing that needs it; the one
-            // refit that costs waits for the pen, this being guarded.
+            // refit that costs waits for the pen, this being guarded. AU18: a
+            // drawing this grows is an animation by the next line of `ui`;
+            // a comic stays one, and has no strip (R17).
             Action::AddDrawingAfter => {
                 if s.add_drawing_after() {
-                    ed.strip_open = true;
+                    ed.strip_open |= ed.kind() != Some(ProjectKind::Comic);
                 }
             }
             Action::NextFrame => s.step(1),
@@ -5282,6 +5284,13 @@ impl Editor {
     fn door(&mut self) {
         let Some(kind) = self.kind() else { return };
         kind.stamp(&mut self.state.engine.project);
+        // R17: the strip and the full band stand for an animation, and four
+        // routes replace the document in this Editor, so the last one's do not
+        // outlive it. A drawing with frames promotes on this same frame.
+        let grown = ProjectKind::grown(&self.state.engine.project) == Some(ProjectKind::Animation);
+        if kind == ProjectKind::Comic || (kind == ProjectKind::Drawing && !grown) {
+            (self.strip_open, self.full_band) = (false, false);
+        }
         if kind == ProjectKind::Drawing {
             self.sheet_held |= std::mem::take(&mut self.sheet_in_draw);
         } else {
@@ -5292,18 +5301,19 @@ impl Editor {
         let on_bar = steps::bar(kind).iter().any(|s| Some(s.stage) == self.stage);
         let sheet = |dock: &DockState<Pane>| dock.find_tab(&Pane::XSheet).is_some();
         // A guest's snapshot is the host's fresh truth, not a document opened:
-        // it does not take them off a step they stand on.
-        let comic = kind == ProjectKind::Comic && !self.canvas.is_guest;
+        // it does not take them off a step they stand on, or rearrange it.
+        let guest = self.canvas.is_guest;
+        let comic = kind == ProjectKind::Comic && !guest;
         if comic && self.stage != Some(Stage::Manga) {
             self.enter_room(Stage::Manga);
         } else if self.stage.is_some() && !on_bar {
             self.enter_room(first);
-        } else if self.stage == Some(Stage::Drawing) && sheet(&self.dock) != sheet(&self.recipe(Stage::Drawing)) {
+        } else if self.stage == Some(Stage::Drawing) && !guest && sheet(&self.dock) != sheet(&self.recipe(Stage::Drawing)) {
             self.enter_room(Stage::Drawing);
         } else if self.stage == Some(Stage::Export) {
             // The way back and its dock are this document's. A guest keeps one
             // whose pill stands: the join opened nothing.
-            let held = self.canvas.is_guest
+            let held = guest
                 && self.export_from.as_ref().is_some_and(|(from, _)| {
                     steps::bar(kind).iter().any(|s| Some(s.stage) == *from)
                 });
@@ -5329,8 +5339,15 @@ impl Editor {
         self.state.meta_dirty = true;
         self.sheet_in_draw |= std::mem::take(&mut self.sheet_held);
         if kind == ProjectKind::Comic {
-            if !steps::bar(kind).iter().any(|s| Some(s.stage) == self.stage) {
+            let off_bar = |st| !steps::bar(kind).iter().any(|s| Some(s.stage) == st);
+            let back = self.export_from.as_ref().and_then(|(from, _)| *from);
+            if off_bar(self.stage) {
                 self.enter_room(Stage::Manga);
+            } else if back.is_some() && off_bar(back) {
+                // Export is on this bar, so it stays, and the step it would
+                // go back to is not: the way back is this bar's, as the door's.
+                let first = self.first_step();
+                self.export_from = Some((Some(first), self.recipe(first)));
             }
         } else if !self.say.off && self.say.seen & say::GREW == 0 {
             self.state.status = say::GREW_WORDS.into();
@@ -5374,7 +5391,8 @@ impl Editor {
             None => self.step_name(self.first_step()).to_string(),
         });
         let go_first = say::Verb::GoToDraw.label(self.kind());
-        export_step::View { back, go_first, more_default: self.more_default, range: self.export_range }
+        let go_card = say::Verb::GoToDraw.card(self.kind());
+        export_step::View { back, go_first, go_card, more_default: self.more_default, range: self.export_range }
     }
 
     /// AU9: the step a new Editor carries across a session's join: never
@@ -8117,9 +8135,9 @@ impl Editor {
                     plate::band_slot(ui, vocab::GHOST_FRAMES);
                 }
             }
-            // AU18: not on a drawing: Alt+A and the menu remain, which is how
-            // a person promotes one on purpose.
-            if self.kind() != Some(ProjectKind::Drawing) {
+            // AU18: an animation's alone. Alt+A and the menu remain, which is
+            // how a person promotes a drawing on purpose.
+            if self.animated() {
                 let add = plate::band_action(ui, Icon::Plus, "Add drawing", "Add drawing (band)");
                 if menus::hover_tip(add, Action::AddDrawingAfter, "").clicked() {
                     self.invoke(Action::AddDrawingAfter, ui.ctx());
@@ -8374,13 +8392,14 @@ impl Editor {
         // dots stand a hint gets back what its own button leaves, and words
         // with no button beside them have the lane: a refusal outranks every
         // hint, and its longest words need all of it at 832. The dots keep
-        // the lane's right end, past the longest words and their button, and
-        // a Picture start's closed strip has no animation for them to count.
+        // the lane's right end, past the longest words and their button. A
+        // drawing and a comic count their own five; an animation's closed
+        // strip has nothing yet for them to count.
         let lane = ui.available_rect_before_wrap();
         let verb = hint.as_ref().and_then(|h| h.verb);
         let fold = ui.ctx().content_rect().width() < steps::FOLD;
-        let animating = !self.strip_closed() || self.full_band;
-        let dots = !fold && !refusing && animating && lane.width() >= plate::SAY_DOTS_LANE;
+        let counting = !self.animated() || !self.strip_closed() || self.full_band;
+        let dots = !fold && !refusing && counting && lane.width() >= plate::SAY_DOTS_LANE;
         let spare = match verb {
             _ if dots => plate::SAY_ACTION + plate::SAY_DOTS,
             Some(verb) => plate::say_action_width(ui, verb.label(self.kind())) + 6.0,
@@ -8407,12 +8426,17 @@ impl Editor {
         self.say.dots_painted = dots && !self.say.off && ticks.iter().any(|done| !done);
         if self.say.dots_painted {
             let rows = self.quick_rows();
-            plate::hover_card(plate::say_dots(ui, row, &ticks), || say::place_words(rows, &ticks));
+            let painted = plate::say_dots(ui, row, &ticks);
+            #[cfg(test)]
+            {
+                self.say.dots_at = Some(painted.rect);
+            }
+            plate::hover_card(painted, || say::place_words(rows, &ticks));
         }
         if let Some(verb) = verb {
             let label = verb.label(self.kind());
             let beside = row.with_max_x(words_end + 6.0 + plate::say_action_width(ui, label));
-            if plate::say_action(ui, beside, label).card(verb.card()).clicked() {
+            if plate::say_action(ui, beside, label).card(verb.card(self.kind())).clicked() {
                 self.say_act(verb, ui.ctx());
             }
         }
@@ -8498,10 +8522,10 @@ impl Editor {
     /// AU3: the Timing sheet button: one click, remembered in Draw. Absent
     /// in Plan and Timing, whose recipes hold the sheet; everywhere else a
     /// plain action that opens the pane, and never lit, because a click
-    /// there cannot hide it. AU18: absent on a drawing, which has no timing:
-    /// Window and View still reach the pane.
+    /// there cannot hide it. AU18: absent on a drawing and on a comic, which
+    /// have no timing: Window and View still reach the pane.
     fn sheet_button(&mut self, ui: &mut egui::Ui) {
-        if matches!(self.stage, Some(Stage::Layout | Stage::Edit)) || self.kind() == Some(ProjectKind::Drawing) {
+        if matches!(self.stage, Some(Stage::Layout | Stage::Edit)) || !self.animated() {
             return;
         }
         let draw = self.stage == Some(Stage::Drawing);
@@ -8768,8 +8792,9 @@ impl Editor {
             self.door();
         }
         self.promote();
-        // The band's keys and the rail's Flip arrive on one frame.
-        self.full_band |= self.state.cut().drawings.len() > 1;
+        // The band's keys and the rail's Flip arrive on one frame. AU18: on an
+        // animation: two tracks on one frame are a picture, and it flips nothing.
+        self.full_band |= self.animated() && self.state.cut().drawings.len() > 1;
         // AU5: the hold trap (R19): with the sheet off screen nothing shows a
         // held frame's number, so a stop lands on the run's first frame.
         let playing = self.state.view.playing;

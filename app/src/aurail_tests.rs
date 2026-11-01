@@ -179,7 +179,9 @@ fn aurail_order_and_sizes_are_the_table() {
 
 #[test]
 fn aurail_nothing_moves_when_the_island_grows() {
-    let mut h = blank();
+    // R17: the latch stands for an animation: a drawing has nothing to flip.
+    let mut h = EditorHarness::as_animation();
+    window(&mut h, 1600.0, 900.0, 1.0);
     h.state_mut().new_drawing_at_frame();
     settle(&mut h);
     let tops: Vec<Rect> = KEYS[..8].iter().map(|k| points(&h, k)).collect();
