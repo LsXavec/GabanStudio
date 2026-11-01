@@ -510,5 +510,6 @@ fn fold(ui: &mut egui::Ui, state: &mut AppState, more_default: bool, wide: f32) 
     } else {
         panel.unfold();
     }
+    state.panel_more.set(plate::MORE_EXPORT, !open);
     !open
 }

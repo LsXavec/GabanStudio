@@ -78,13 +78,14 @@ pub fn ui(
     presets_dirty: &mut bool,
     canvas: &mut crate::canvas::CanvasView,
     status: &mut String,
+    more: &mut plate::PanelMore,
 ) {
     // Its own tab (owner's amendment) — the pane IS the forge.
     ui.add_space(4.0);
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            forge_body(ui, forge, presets, presets_dirty, canvas, status);
+            forge_body(ui, forge, presets, presets_dirty, canvas, status, more);
         });
     plate::note_viewport(ui, scroll.inner_rect, [false, true]);
 }
@@ -97,6 +98,7 @@ fn forge_body(
     presets_dirty: &mut bool,
     canvas: &mut crate::canvas::CanvasView,
     status: &mut String,
+    more: &mut plate::PanelMore,
 ) {
 
     // ---- THE SPECIMEN: a real stroke, drawn by the same math the pen
@@ -112,7 +114,8 @@ fn forge_body(
         forge.dirty = false;
     }
     if let Some(tex) = &forge.preview {
-        let (rect, resp) = ui.allocate_exact_size(vec2(300.0, 64.0), Sense::hover());
+        // AU15: the panel's minimum is under the specimen's width.
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width().min(300.0), 64.0), Sense::hover());
         let p = ui.painter();
         p.rect_filled(rect, 0.0, plate::PAPER);
         p.image(
@@ -136,7 +139,7 @@ fn forge_body(
 
     // ---- FOUNDATION row: name, start-from, arm, save.
     let mut changed = false;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         changed |= plate::text_field(
             ui,
             egui::TextEdit::singleline(&mut forge.draft.name)
@@ -227,6 +230,17 @@ fn forge_body(
             changed |= plate::latch(ui, &mut soft, "soft").changed();
             a.soft = soft;
         });
+    }
+
+    // ---- MOTION.
+    plate::legend(ui, "motion");
+    changed |= rail_row(ui, "size px", &mut forge.draft.size_px, 1.0, 300.0);
+    changed |= rail_row(ui, "spacing", &mut engine.spacing, 0.02, 2.0);
+
+    // AU15: the core shape stands; the rest folds under `More` (spec 7.1).
+    let open = plate::more_row(ui, more, plate::MORE_FORGE, crate::vocab::MENU_MORE);
+    if open {
+    if let Some(a) = engine.auto.as_mut() {
         changed |= rail_row(ui, "ratio", &mut a.ratio, 0.05, 1.0);
         changed |= rail_row(ui, "fade", &mut a.hfade, 0.0, 1.0);
         let mut spikes = a.spikes as f32;
@@ -236,11 +250,6 @@ fn forge_body(
             changed = true;
         }
     }
-
-    // ---- MOTION.
-    plate::legend(ui, "motion");
-    changed |= rail_row(ui, "size px", &mut forge.draft.size_px, 1.0, 300.0);
-    changed |= rail_row(ui, "spacing", &mut engine.spacing, 0.02, 2.0);
     changed |= rail_row(ui, "rotation jitter", &mut engine.randomness, 0.0, 1.0);
     changed |= rail_row(ui, "scatter", &mut engine.scatter, 0.0, 3.0);
 
@@ -282,10 +291,11 @@ fn forge_body(
         changed |= rail_row(ui, "strength", &mut engine.grain_strength, 0.0, 1.0);
         changed |= rail_row(ui, "scale", &mut engine.grain_scale, 0.1, 4.0);
     }
+    }
 
     // ---- THE DOORS: arm (the rail's own path) and save.
     ui.add_space(6.0);
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if ui
             .button("Use draft")
             .on_hover_text("paint with the draft now — nothing is saved yet")
@@ -304,7 +314,11 @@ fn forge_body(
                 *presets_dirty = true;
                 *status = format!("Saved brush '{}'", forge.draft.name);
             }
-        } else if plate::danger(ui, "OVERWRITE") {
+        } else if !open {
+            // AU15: `Replace` is in the fold. The save stays shown, with why.
+            ui.add_enabled(false, egui::Button::new("Save to Brushes"))
+                .on_disabled_hover_text("A brush has this name. Rename it, or open More to replace it.");
+        } else if plate::danger(ui, "Replace") {
             // Saving over a name destroys a tuned brush — held, and the
             // hover names the victim (NEVER-DO 3).
             if let Some(existing) = presets.iter_mut().find(|p| p.name == name) {

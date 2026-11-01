@@ -700,6 +700,8 @@ fn auwords_real_controls_show_the_studio_word_line() {
     let mut h = standing(crate::sample::build_sample(), Stage::Drawing);
     h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::XSheet]);
     h.run_frames(3);
+    h.click(crate::plate::more_name(crate::plate::MORE_SHEET));
+    h.run_frames(3);
     for (legend, word) in [(vocab::LENGTH, "shaku"), (vocab::NOTES, "serifu")] {
         let at = h.rect(legend).right_center() + egui::vec2(18.0, 0.0);
         let said = card_at(&mut h, at);
@@ -710,6 +712,8 @@ fn auwords_real_controls_show_the_studio_word_line() {
     let mut h = standing(crate::sample::build_sample(), Stage::Drawing);
     h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::Board]);
     h.run_frames(3);
+    h.click(crate::plate::more_name(crate::plate::MORE_SHOTS));
+    h.run_frames(2);
     h.click_combo("any status");
     let row = vocab::cut_status(CutStatus::Sakkan);
     let at = h.rect(row).center();
@@ -718,6 +722,8 @@ fn auwords_real_controls_show_the_studio_word_line() {
     // A stack row in the sheet's Layer set menu.
     let mut h = standing(crate::sample::build_sample(), Stage::Drawing);
     h.open_float(crate::floats::Float::Layers);
+    h.click(crate::plate::more_name(crate::plate::MORE_LAYERS));
+    h.run_frames(2);
     h.click(vocab::LAYER_SET);
     h.run_frames(2);
     let row = vocab::stack("Genga");

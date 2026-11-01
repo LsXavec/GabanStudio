@@ -328,7 +328,14 @@ fn empty_state(ui: &mut egui::Ui, rect: Rect, words: &str, button: &str, verb: A
 
 /// `final_look` is the shared [`FinalLook`] latch: its deck control sits
 /// beside "safe", and `graph` is the final look's frame while it is on.
-pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut ViewerView, final_look: &mut bool) {
+pub fn ui(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    graph: GraphView,
+    vs: &mut ViewerView,
+    final_look: &mut bool,
+    more: &mut crate::plate::PanelMore,
+) {
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let painter = ui.painter_at(rect);
@@ -489,7 +496,11 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
     // the 8 pt the float starts with.
     let safe_w = crate::plate::latch_width(ui, crate::vocab::MARGINS);
     let look_w = crate::plate::latch_width(ui, crate::vocab::FULL_QUALITY);
-    let row = Rect::from_min_size(rect.left_bottom() + vec2(4.0, -34.0), vec2(8.0 + safe_w + look_w, 34.0));
+    // AU15: the latches fold under `More`, so the picture stands alone.
+    let open = more.is_open(crate::plate::MORE_RESULT);
+    let tag_w = crate::plate::fold_row_width(ui, crate::vocab::MENU_MORE);
+    let latches = if open { safe_w + look_w } else { 0.0 };
+    let row = Rect::from_min_size(rect.left_bottom() + vec2(4.0, -34.0), vec2(16.0 + latches + tag_w, 34.0));
     // AU14: one tap to the frame the export ends on, beside the box it
     // serves. It stands while the box does, so nothing moves, and over the
     // latches where a narrow Result has no room beside them.
@@ -509,18 +520,24 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
         vs.go_last |= last.on_hover_text("The last frame that plays and exports.").clicked();
     }
     crate::plate::float_ground(ui, row);
-    let at = Rect::from_min_size(row.min + vec2(8.0, 4.0), vec2(safe_w, crate::plate::CTRL_H));
+    if open {
+        let at = Rect::from_min_size(row.min + vec2(8.0, 4.0), vec2(safe_w, crate::plate::CTRL_H));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+            crate::plate::latch(ui, &mut vs.safe, crate::vocab::MARGINS)
+                .on_hover_text("Lines at 93% and 90% of the frame: keep action and titles inside them.")
+        });
+        // GM11: the delivery's look, beside it (a fixed slot: nothing moves).
+        let at = Rect::from_min_size(row.min + vec2(8.0 + safe_w, 4.0), vec2(look_w, crate::plate::CTRL_H));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
+            crate::plate::latch(ui, final_look, crate::vocab::FULL_QUALITY).on_hover_text(
+                "The picture as the export delivers it: no rough, reference or correction layers, \
+                 no Reference tracks.",
+            )
+        });
+    }
+    let at = Rect::from_min_size(row.min + vec2(8.0 + latches, 4.0), vec2(tag_w, crate::plate::CTRL_H));
     ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
-        crate::plate::latch(ui, &mut vs.safe, crate::vocab::MARGINS)
-            .on_hover_text("Lines at 93% and 90% of the frame: keep action and titles inside them.")
-    });
-    // GM11: the delivery's look, beside it (a fixed slot: nothing moves).
-    let at = Rect::from_min_size(row.min + vec2(8.0 + safe_w, 4.0), vec2(look_w, crate::plate::CTRL_H));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
-        crate::plate::latch(ui, final_look, crate::vocab::FULL_QUALITY).on_hover_text(
-            "The picture as the export delivers it: no rough, reference or correction layers, \
-             no Reference tracks.",
-        )
+        crate::plate::more_tag(ui, more, crate::plate::MORE_RESULT, crate::vocab::MENU_MORE)
     });
 }
 
@@ -537,13 +554,14 @@ mod tests {
         let ctx = egui::Context::default();
         let mut vs = ViewerView::default();
         let mut fin = false;
+        let mut more = crate::plate::PanelMore::default();
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin)
+            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin, &mut more)
         });
         assert_eq!(vs.drawn_safe, None, "off by default");
         vs.safe = true;
         let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
-            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin)
+            super::ui(ui, state, GraphView::Off, &mut vs, &mut fin, &mut more)
         });
         assert_eq!(vs.drawn_safe, Some(anim_core::camera::safe_frames(w, fh)));
     }

@@ -1534,6 +1534,7 @@ fn aurail_mirror_stands_with_the_sheet() {
 fn aurail_layers_float_gives_way_to_a_tab() {
     let mut h = drawn();
     h.open_float(Float::Layers);
+    h.click(plate::more_name(plate::MORE_LAYERS));
     let lock = format!("lock layer {}", h.state().active_layer_name());
     assert!(is_open(&h, Float::Layers) && h.has(&lock), "the float's list");
     h.editor_mut().dock = Stage::dock_with_sheet();

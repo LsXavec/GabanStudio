@@ -240,6 +240,14 @@ pub enum Action {
     EditCut,
     EditCopy,
     EditPaste,
+    // AU15: the verbs that stood in a right-click alone (spec 6.2).
+    SetGraphOutput,
+    RemoveNode,
+    RemoveDrawing,
+    RemoveSoundTrack,
+    UsePanelOrder,
+    ToggleLayerLocked,
+    ResolveRetakeNote,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -530,6 +538,13 @@ impl Action {
         Action::EditCut,
         Action::EditCopy,
         Action::EditPaste,
+        Action::SetGraphOutput,
+        Action::RemoveNode,
+        Action::RemoveDrawing,
+        Action::RemoveSoundTrack,
+        Action::UsePanelOrder,
+        Action::ToggleLayerLocked,
+        Action::ResolveRetakeNote,
         Action::ReloadSequences,
         Action::Underlay3d,
     ];
@@ -708,6 +723,13 @@ impl Action {
             Action::EditCut => "Cut",
             Action::EditCopy => "Copy",
             Action::EditPaste => "Paste",
+            Action::SetGraphOutput => "Set as output",
+            Action::RemoveNode => "Remove node",
+            Action::RemoveDrawing => "Remove drawing",
+            Action::RemoveSoundTrack => "Remove sound track",
+            Action::UsePanelOrder => "Use panel order",
+            Action::ToggleLayerLocked => "Lock layer",
+            Action::ResolveRetakeNote => "Resolve retake note",
         }
     }
 
@@ -890,6 +912,13 @@ impl Action {
             EditCut => "Move the selected sheet cells to the clipboard; pixels have no such move, so use Copy, then Clear.",
             EditCopy => "Copy the selected cells, or the selected pixels over the canvas.",
             EditPaste => "Paste the copied cells, or the copied pixels over the canvas.",
+            SetGraphOutput => "Make the selected effect the one the Result shows.",
+            RemoveNode => "Take the selected effect off the picture; one undo step.",
+            RemoveDrawing => "Take the selected drawing and its cells out of this shot; one undo step.",
+            RemoveSoundTrack => "Remove the sound the Timing sheet shows and its track; one undo step.",
+            UsePanelOrder => "This frame's storyboard panel takes its shot number from its order on the track again.",
+            ToggleLayerLocked => "Every painting tool refuses the layer in hand until this is off.",
+            ResolveRetakeNote => "Mark the first open retake note on this frame as resolved; one undo step.",
         }
     }
 
@@ -899,6 +928,9 @@ impl Action {
         match self {
             EditCut | EditCopy | EditPaste => Group::Edit,
             BrushMakerRoom => Group::Room,
+            SetGraphOutput | RemoveNode => Group::Composite,
+            RemoveDrawing | RemoveSoundTrack | UsePanelOrder | ToggleLayerLocked => Group::Sheet,
+            ResolveRetakeNote => Group::Cut,
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | ImportSound | AddSoundTrack
             | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel | ExportPages
@@ -952,6 +984,8 @@ impl Action {
             NextCut => "File/Shots/Next shot",
             MakeCutsFromPanels => "File/Shots/Make shots from panels",
             AddRetakeNote => "File/Shots/Add retake note…",
+            ResolveRetakeNote => "File/Shots/Resolve retake note",
+            UsePanelOrder => "File/Shots/Use panel order",
             PaperSize => "File/Shots/Paper size…",
             ImportSound => "File/Import/Import sound…",
             AddSoundTrack => "File/Import/Add sound track…",
@@ -1067,6 +1101,9 @@ impl Action {
             ToggleColumnLocked => "Animation/Track/Lock track",
             LipFlap => "Animation/Track/Lip flap…",
             RemoveColumn => "Animation/Track/Remove track",
+            ToggleLayerLocked => "Animation/Track/Lock layer",
+            RemoveDrawing => "Animation/Track/Remove drawing",
+            RemoveSoundTrack => "Animation/Track/Remove sound track",
             InterpHold => "Animation/Curves/Hold key",
             InterpLinear => "Animation/Curves/Linear",
             InterpEase => "Animation/Curves/Ease",
@@ -1107,6 +1144,8 @@ impl Action {
             ShowCutBoard => "More/Panels/Shots",
             ShowEpisode => "More/Panels/Episode timeline",
             AddNode => "More/Effects setup/Add node…",
+            SetGraphOutput => "More/Effects setup/Set as output",
+            RemoveNode => "More/Effects setup/Remove node",
             BuildComposite => "More/Effects setup/Rebuild from layers",
             BuildSatsuei => "More/Effects setup/Full finishing setup",
             ConvertColorsToSrgb => "More/Effects setup/Convert colors to sRGB…",
@@ -1311,6 +1350,13 @@ impl Action {
             EditCut => &["cut", "clipboard"],
             EditCopy => &["copy", "clipboard"],
             EditPaste => &["paste", "clipboard"],
+            SetGraphOutput => &["output", "final node", "result node", "composite output"],
+            RemoveNode => &["delete node", "remove effect", "graph"],
+            RemoveDrawing => &["delete drawing", "library", "cel"],
+            RemoveSoundTrack => &["delete sound", "remove audio", "dialogue"],
+            UsePanelOrder => &["panel number", "shot number", "storyboard", "clear number"],
+            ToggleLayerLocked => &["lock layer", "unlock layer", "protect layer"],
+            ResolveRetakeNote => &["resolve", "retake", "note done", "kantoku"],
             MangaRoom => &["manga", "comic", "pages", "koma", "tone", "webtoon", "book", "room"],
             NewPage => &["page", "manga", "add page", "pēji"],
             ClipToPanels => &["koma", "panels", "clip", "mask to panels", "manga"],
@@ -1758,6 +1804,8 @@ impl Action {
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
             | WhatsNew | OpenLessons | ToggleLockPositions | ToggleHints
             | BrushMakerRoom | EditCut | EditCopy | EditPaste
+            | SetGraphOutput | RemoveNode | RemoveDrawing | RemoveSoundTrack | UsePanelOrder
+            | ToggleLayerLocked | ResolveRetakeNote
             | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels | ReloadSequences
             | Underlay3d | CanvasOptions | GoToFrame => None,
         }

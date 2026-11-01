@@ -195,6 +195,13 @@ impl Rig {
                 self.config.save_to(dir).expect("the rig's config saves");
             }
         }
+        // AU15: and every panel's own fold.
+        if !self.editor.fold_requests.is_empty() {
+            self.config.ui.panel_more.extend(self.editor.fold_requests.drain(..));
+            if let Some(dir) = &self.editor.data_dir {
+                self.config.save_to(dir).expect("the rig's config saves");
+            }
+        }
         // AU6: the Start float's latch and the lock's verb, likewise.
         let (show, lock) = (self.editor.show_start_request.take(), self.editor.lock_request.take());
         if let Some(on) = show {
@@ -1580,6 +1587,7 @@ mod tests {
         let layer = h.state().active_layer_name();
         assert!(!h.has(&format!("lock layer {layer}")), "shipped Draw has no list until it is asked");
         h.open_float(crate::floats::Float::Layers);
+        h.click(crate::plate::more_name(crate::plate::MORE_LAYERS));
         let tree = h.describe();
         assert!(h.has(&format!("lock layer {layer}")), "no row for {layer:?}\n{tree}");
         assert_eq!(h.node_toggled(&layer), Some(true), "{layer:?} is not the lit row\n{tree}");
@@ -3221,7 +3229,7 @@ mod tests {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (171, 0xe84df822bbc71439), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (178, 0x61fb65e565a721dc), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x8ade37ed8d86e6ca), "the panes and their titles");
     }
 }

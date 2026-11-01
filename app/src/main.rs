@@ -66,6 +66,8 @@ mod aukind_tests;
 #[cfg(test)]
 mod aucolor_tests;
 #[cfg(test)]
+mod audress_tests;
+#[cfg(test)]
 mod aufx_tests;
 #[cfg(test)]
 mod aupage_tests;
@@ -3627,6 +3629,35 @@ impl Editor {
             Action::ClearCelAll => s.clear_current_cel_all(),
             Action::ClearFrameKey => s.clear_key_at_frame(),
             Action::RemoveColumn => s.remove_active_column(),
+            // AU15: the right-click verbs' twins, on what is selected or
+            // under the cursor. `can_perform` has said why when there is none.
+            Action::SetGraphOutput => {
+                if let Some(node) = s.selected_node {
+                    s.graph_set_output(node);
+                }
+            }
+            Action::RemoveNode => {
+                if let Some(node) = s.selected_node {
+                    s.graph_remove_node(node);
+                }
+            }
+            Action::RemoveDrawing => {
+                if let Some(drawing) = s.drawing_in_hand() {
+                    s.remove_drawing_from_library(drawing);
+                }
+            }
+            Action::RemoveSoundTrack => s.remove_shown_sound(),
+            Action::UsePanelOrder => {
+                if let Some(drawing) = s.numbered_panel_here() {
+                    s.set_panel_cut(drawing, None);
+                }
+            }
+            Action::ToggleLayerLocked => s.toggle_layer_locked(),
+            Action::ResolveRetakeNote => {
+                if let Some(nth) = s.open_note_here() {
+                    s.set_note_resolved(s.at(), nth, true);
+                }
+            }
             // GM5: the sheet verbs, on the sheet cursor (the current cell,
             // or the active column from the cursor down).
             Action::InsertFrames => s.insert_frame(),
@@ -4044,6 +4075,14 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::KindBreakdown
             | Action::KindInbetween
             | Action::KindUnset
+            // AU15: the right-click verbs' twins edit the document.
+            | Action::SetGraphOutput
+            | Action::RemoveNode
+            | Action::RemoveDrawing
+            | Action::RemoveSoundTrack
+            | Action::UsePanelOrder
+            | Action::ToggleLayerLocked
+            | Action::ResolveRetakeNote
             // GM8: nothing modal opens over a live stroke (D7).
             | Action::WelcomeScreen
             // GM9: nor the add-node menu (it brings a pane forward).
@@ -4445,6 +4484,11 @@ struct Editor {
     /// AU9: the panels' folds before anyone presses them: closed for a
     /// person, open under the frozen boot (spec 1.5.2).
     pub(crate) more_default: bool,
+    /// AU15: `ui.panel_more`: a document swaps `AppState`, and the panels'
+    /// folds outlive it. Lent to `AppState::panel_more` each frame.
+    panel_more: std::collections::BTreeMap<String, bool>,
+    /// AU15: folds a person pressed, for the App to save.
+    fold_requests: Vec<(String, bool)>,
     /// AU18: the frozen boot's seam, set beside `more_default`: the kind reads
     /// unset, so nothing is stamped or promoted and each rule stands as it
     /// stood. Only the top row still reads the project (spec 1.13).
@@ -4736,6 +4780,9 @@ fn dock_style(base: &egui::Style, dock: &DockState<Pane>) -> egui_dock::Style {
     // slim rails.
     s.separator.extra = 26.0;
     s.separator.width = 6.0;
+    // AU15: a seam is its 6 pt: a grab wider than that would read as one more
+    // control in a crowded room (the census's rule, spec section 10).
+    s.separator.extra_interact_width = 0.0;
     let flush = dock.iter_all_tabs().count() == 1;
     s.tab_bar.height = if flush { 0.0 } else { 34.0 };
     if flush {
@@ -5123,7 +5170,8 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             plate::mark(ui, ui.max_rect(), Target::Paper);
         }
         plate::note_pane_body(ui);
-        match tab {
+        plate::note_tab_bar(ui);
+        plate::keep_minimum(ui, tab.held_size(), |ui| match tab {
             Pane::History => {
                 let gesture_safe = !self.canvas.stroke_active();
                 let shared = self.canvas.is_guest || self.canvas.session_live;
@@ -5157,6 +5205,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 self.presets_dirty,
                 self.canvas,
                 &mut self.state.status,
+                &mut self.state.panel_more,
             ),
             Pane::Palette => {
                 let asked = palette_panel::ui(ui, self.state, self.canvas, self.colors_view);
@@ -5217,7 +5266,9 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             }
             Pane::Viewer(id) => {
                 let vs = self.viewers.entry(*id).or_default();
-                viewer::ui(ui, self.state, self.graph, vs, self.final_look);
+                let mut more = std::mem::take(&mut self.state.panel_more);
+                viewer::ui(ui, self.state, self.graph, vs, self.final_look, &mut more);
+                self.state.panel_more = more;
                 if let Some(framing) = vs.framed.take() {
                     self.state.frame_camera(&framing, &viewer::camera_done(ui.ctx()));
                 }
@@ -5225,7 +5276,13 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                     self.state.go_to_last_drawing();
                 }
             }
-        }
+        });
+    }
+
+    /// AU15: no pane leans on the dock's blanket scroll: each has its policy
+    /// (`Pane::scroll_policy`), and below its minimum `keep_minimum` scrolls it.
+    fn scroll_bars(&self, _tab: &Pane) -> [bool; 2] {
+        [false, false]
     }
 
     /// AU19: Plan's canvas keeps its tab, and its body meets the pane's edges:
@@ -5877,6 +5934,8 @@ impl Editor {
     /// then differs.
     fn apply_ui(&mut self, ui: &config::UiConfig) {
         self.say.feed(ui);
+        self.panel_more = ui.panel_more.clone();
+        self.state.render_queue.panel.more = self.panel_more.get(plate::MORE_EXPORT).copied();
         let hidden = ui.plan_sheet_hidden();
         let changed = self.sheet_in_draw != ui.sheet_in_draw || self.plan_sheet_hidden != hidden;
         let result_changed = self.result_in_color != ui.result_in_color;
@@ -5985,6 +6044,8 @@ impl Editor {
             frame_box_was: false,
             camera_details: false,
             details_request: None,
+            panel_more: Default::default(),
+            fold_requests: Vec::new(),
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -6109,6 +6170,8 @@ impl Editor {
             frame_box_was: false,
             camera_details: false,
             details_request: None,
+            panel_more: Default::default(),
+            fold_requests: Vec::new(),
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -6671,6 +6734,19 @@ impl Editor {
                 Err("give this drawing a spacing chart first")
             }
             Action::ResetShift if s.view.light.offsets.is_empty() => Err("no pin is shifted"),
+            // AU15: the right-click verbs' twins need what they act on.
+            Action::SetGraphOutput | Action::RemoveNode if s.selected_node.is_none() => {
+                Err("select a node in the Effects graph first")
+            }
+            Action::RemoveDrawing if s.drawing_in_hand().is_none() => Err("no drawing selected or on this frame"),
+            Action::RemoveSoundTrack if anim_core::audio::tracks_iter(s.cut()).next().is_none() => {
+                Err("this shot has no sound")
+            }
+            Action::UsePanelOrder if s.numbered_panel_here().is_none() => {
+                Err("no numbered storyboard panel on this frame")
+            }
+            Action::ToggleLayerLocked if s.active_layer_props().is_none() => Err("no layer in hand on this frame"),
+            Action::ResolveRetakeNote if s.open_note_here().is_none() => Err("no open retake note on this frame"),
             // GM12: one sound decodes at a time; the loop range and the
             // lip flap need something to act on.
             Action::ImportSound | Action::AddSoundTrack if s.sound_import.is_some() => {
@@ -6751,6 +6827,7 @@ impl Editor {
             // GM18: the pen's ruler snap, and the panel tool armed.
             Action::ToggleRulerSnap => Some(self.state.manga.snap),
             Action::PanelTool => Some(self.canvas.tool == canvas::CanvasTool::Panel),
+            Action::ToggleLayerLocked => Some(self.state.active_layer_props().is_some_and(|p| p.locked)),
             Action::ToggleLockPositions => Some(self.ui_lock),
             Action::ToggleHints => Some(!self.say.off),
             Action::HideTools => Some(self.tools_hidden),
@@ -7362,6 +7439,11 @@ impl eframe::App for App {
             // AU14: and the camera's `Details`.
             if let Some(open) = editor.details_request.take() {
                 self.config.ui.set_camera_details(open);
+                self.config.save();
+            }
+            // AU15: and every panel's own fold.
+            if !editor.fold_requests.is_empty() {
+                self.config.ui.panel_more.extend(editor.fold_requests.drain(..));
                 self.config.save();
             }
             // AU6: the Start float's latch, and the lock's verb.
@@ -9753,6 +9835,10 @@ impl Editor {
             details: self.camera_details,
         });
         self.watch_frame_box();
+        self.state.panel_more.all_open = self.more_default;
+        if self.state.panel_more.open != self.panel_more {
+            self.state.panel_more.open.clone_from(&self.panel_more);
+        }
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -9797,6 +9883,10 @@ impl Editor {
             .style(dock_style)
             .draggable_tabs(!ui_lock)
             .show_close_buttons(true)
+            // AU15: a leaf's two corner buttons say nothing to a person, in
+            // every leaf of a crowded room. Each tab keeps its own close.
+            .show_leaf_close_all_buttons(false)
+            .show_leaf_collapse_buttons(false)
             .allowed_splits(if ui_lock {
                 egui_dock::AllowedSplits::None
             } else {
@@ -9805,6 +9895,10 @@ impl Editor {
             .show_inside(ui, &mut tabs);
         if let Some(on) = tabs.result_asked {
             self.switch_result(on);
+        }
+        for (key, open) in std::mem::take(&mut self.state.panel_more.changed) {
+            self.panel_more.insert(key.clone(), open);
+            self.fold_requests.push((key, open));
         }
         // AU22: the Manga pane's field is gone, and it cannot let go unseen.
         if !std::mem::take(&mut self.state.manga.words_shown) {

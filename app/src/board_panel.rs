@@ -27,6 +27,8 @@ use crate::{plate, vocab};
 
 /// A card's picture width in pixels.
 pub const THUMB_W: usize = 128;
+/// AU15: the Shots panel over a scene of one shot, above `Add shot`.
+pub const ONE_SHOT: &str = "One shot so far.";
 const CARD_W: f32 = 150.0;
 const CARD_H: f32 = 236.0;
 /// The retake note window's text field.
@@ -269,7 +271,10 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     let shown: Vec<CutId> = cards.iter().map(|c| c.at.cut).collect();
     refresh_thumbs(ui.ctx(), state, scene_id, &shown, gesture_safe);
     plate::legend(ui, vocab::SHOTS).on_hover_text(vocab::with_studio_word(vocab::SHOTS, "Every shot of the scene, by its status."));
+    // AU15: the cards and their status stand; the filters and exports fold.
+    let more = plate::more_row(ui, &mut state.panel_more, plate::MORE_SHOTS, vocab::MENU_MORE);
     // Filters.
+    if more {
     ui.horizontal_wrapped(|ui| {
         ui.label("status");
         let shown = state.board.status.map_or("any status", crate::vocab::cut_status);
@@ -299,11 +304,15 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
                 }
             });
     });
+    }
     // The count, and the exports — verbs the editor runs, as File ▸
     // Export does (D6); above the cards, so they never scroll away.
     let name = state.cut().name.clone();
     ui.horizontal_wrapped(|ui| {
         ui.label(format!("{} of {} shot(s)", cards.len(), total));
+        if !more {
+            return;
+        }
         if ui
             .button("export colour sheet")
             .on_hover_text(Action::ExportColorSheet.help())
@@ -322,6 +331,15 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             state.board.asked.push(Action::ExportCutAsProject);
         }
     });
+    // AU15: a scene of one shot says so, and offers the next (spec 8.4).
+    if total == 1 {
+        ui.label(egui::RichText::new(ONE_SHOT).color(plate::legend_dim()));
+        let add = ui.button("Add shot").on_hover_text("Add a shot to this scene.");
+        plate::speak(&add, egui::WidgetType::Button, None, "Add shot to this scene");
+        if add.clicked() && gesture_safe {
+            state.new_cut(scene_id);
+        }
+    }
     ui.separator();
     let fps = state.engine.project.fps;
     let mut open: Option<CutId> = None;
@@ -630,6 +648,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
         .collect();
     let fps = state.engine.project.fps;
     let trt = board::trt_frames(scene);
+    let more = state.panel_more.is_open(plate::MORE_EPISODE);
     plate::legend(ui, vocab::EPISODE_TIMELINE)
         .on_hover_text(vocab::with_studio_word(vocab::EPISODE_TIMELINE, "The scene's shots, end to end."));
     ui.horizontal_wrapped(|ui| {
@@ -683,14 +702,17 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
         {
             state.board.asked.push(Action::PlayEpisode);
         }
+        // AU15: the EDL folds, per spec 7.1: Timeline and Play stand.
+        plate::more_tag(ui, &mut state.panel_more, plate::MORE_EPISODE, vocab::MENU_MORE);
         let ext = state.edl_ext();
-        if ui
-            .button("export EDL")
-            .on_hover_text(format!(
-                "CMX3600, non-drop, record from 01:00:00:00, into the render folder; each event \
-                 names its cut's .{ext} render (a frame-sequence preset falls back to .mov)"
-            ))
-            .clicked()
+        if more
+            && ui
+                .button("export EDL")
+                .on_hover_text(format!(
+                    "CMX3600, non-drop, record from 01:00:00:00, into the render folder; each event \
+                     names its cut's .{ext} render (a frame-sequence preset falls back to .mov)"
+                ))
+                .clicked()
         {
             state.board.asked.push(Action::ExportEdl);
         }

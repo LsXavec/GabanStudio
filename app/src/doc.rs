@@ -745,9 +745,8 @@ pub struct AppState {
     pub palettes: crate::palette::Palettes,
     /// Transient UI state: the Palette pane's "new character" name field.
     pub palette_new_name: String,
-    /// AU13: the Colors panel's `More`, for this session (AU15 remembers it).
-    /// None reads the Editor's default.
-    pub palette_more: Option<bool>,
+    /// AU15: every panel's `More`, as `ui.panel_more` holds them.
+    pub panel_more: crate::plate::PanelMore,
     /// AU13: `Add color`'s popover, open on this (character, role). UI-transient.
     pub palette_adding: Option<(usize, usize)>,
     /// Transient layer-strip UI state: an in-progress rename (layer, buffer).
@@ -936,7 +935,7 @@ impl AppState {
             positioned_holds: HashSet::new(),
             palettes: Default::default(),
             palette_new_name: String::new(),
-            palette_more: None,
+            panel_more: Default::default(),
             palette_adding: None,
             strip_rename: None,
             drawing_rename: None,
@@ -1039,7 +1038,7 @@ impl AppState {
             status: "project loaded".into(),
             palettes: crate::palette::Palettes::load_from(&engine.project),
             palette_new_name: String::new(),
-            palette_more: None,
+            panel_more: Default::default(),
             palette_adding: None,
             engine,
             positioned_holds: HashSet::new(),
@@ -4818,6 +4817,57 @@ impl AppState {
     pub fn set_note_resolved(&mut self, at: CutRef, nth: usize, resolved: bool) {
         let label = if resolved { "note resolved" } else { "note open again" };
         self.prod_edit(at, label, |c| anim_core::board::set_note_resolved(c, at, nth, resolved));
+    }
+
+    /// AU15: the drawing the menu's Remove drawing acts on: the one selected
+    /// in the sheet's list, else this frame's.
+    pub fn drawing_in_hand(&self) -> Option<DrawingId> {
+        let listed = self.view.selected_drawing.filter(|d| self.cut().drawing(*d).is_some());
+        listed.or_else(|| self.current_drawing())
+    }
+
+    /// AU15: the sound the sheet's head shows, removed as its right-click does.
+    pub fn remove_shown_sound(&mut self) {
+        let tracks: Vec<usize> = anim_core::audio::tracks_iter(self.cut()).map(|(i, _, _)| i).collect();
+        let Some(&first) = tracks.first() else {
+            return;
+        };
+        let shown = if tracks.contains(&self.sheet_ui.track) { self.sheet_ui.track } else { first };
+        self.sheet_ui.track_edit = None;
+        if shown == 0 {
+            self.remove_audio();
+        } else {
+            self.remove_audio_track(shown);
+        }
+    }
+
+    /// AU15: the panel on this frame with a shot number set by hand, on the
+    /// active track when that holds panels, else on the board's.
+    pub fn numbered_panel_here(&self) -> Option<DrawingId> {
+        let active = self.view.active_column;
+        let column = if self.is_panel_column(active) { Some(active) } else { self.panel_column() }?;
+        let cut = self.cut();
+        let frame = self.view.frame;
+        anim_core::board::panels(cut, column)
+            .into_iter()
+            .find(|p| (p.start..p.start + p.frames).contains(&frame))
+            .map(|p| p.drawing)
+            .filter(|d| cut.drawing_def(*d).cut.is_some())
+    }
+
+    /// AU15: the armed layer's lock, flipped as the layer card's latch does.
+    pub fn toggle_layer_locked(&mut self) {
+        let (Some(id), Some(props)) = (self.active_layer_id(), self.active_layer_props().cloned()) else {
+            return;
+        };
+        let locked = !props.locked;
+        self.layer_set_props(id, anim_core::model::LayerProps { locked, ..props });
+    }
+
+    /// AU15: which of the shot's notes is the first still open on this frame.
+    pub fn open_note_here(&self) -> Option<usize> {
+        let frame = self.view.frame;
+        anim_core::board::notes_of(self.cut()).iter().position(|n| n.frame == frame && !n.resolved)
     }
 
     /// Move the cut at `from` to `to` in the scene's order — one undo step.

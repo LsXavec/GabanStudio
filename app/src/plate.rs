@@ -922,19 +922,23 @@ pub fn fit_menu(ui: &mut Ui, rows: usize) -> f32 {
     rows as f32 * (ROW_H + SHEET_GAP) + ui.spacing().menu_margin.sum().y
 }
 
-/// The dock in the look: tab bars on the desk, the current tab on its island.
+/// The dock in the look: tab bars on the desk, and AU15 pill tabs, the current
+/// one in the wash (spec 2.8), as the steps on the top row are.
 pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     let mut dock = egui_dock::Style::from_egui(style);
     dock.tab.tab_body.inner_margin = egui::Margin::same(PANE_MARGIN);
     dock.tab_bar.bg_fill = DESK;
     dock.tab_bar.hline_color = RULE;
-    let quiet = [&mut dock.tab.inactive, &mut dock.tab.inactive_with_kb_focus, &mut dock.tab.hovered];
+    dock.tab_bar.corner_radius = CornerRadius::same(R_CONTROL);
+    let quiet = [&mut dock.tab.inactive, &mut dock.tab.inactive_with_kb_focus];
     for tab in quiet {
         tab.bg_fill = DESK;
         tab.text_color = INK2;
         tab.outline_color = DESK;
     }
+    dock.tab.hovered.bg_fill = WELL;
     dock.tab.hovered.text_color = INK;
+    dock.tab.hovered.outline_color = WELL;
     let lit = [
         &mut dock.tab.active,
         &mut dock.tab.focused,
@@ -942,9 +946,20 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
         &mut dock.tab.focused_with_kb_focus,
     ];
     for tab in lit {
-        tab.bg_fill = ISLAND;
-        tab.text_color = INK;
-        tab.outline_color = RULE;
+        tab.bg_fill = BLUE_WASH;
+        tab.text_color = BLUE_DEEP;
+        tab.outline_color = BLUE_WASH;
+    }
+    for tab in [
+        &mut dock.tab.active,
+        &mut dock.tab.focused,
+        &mut dock.tab.active_with_kb_focus,
+        &mut dock.tab.focused_with_kb_focus,
+        &mut dock.tab.inactive,
+        &mut dock.tab.inactive_with_kb_focus,
+        &mut dock.tab.hovered,
+    ] {
+        tab.corner_radius = CornerRadius::same(R_CONTROL);
     }
     dock.tab.tab_body.stroke = Stroke::NONE;
     dock
@@ -1652,6 +1667,20 @@ pub fn step_pill(ui: &mut Ui, label: &str, current: bool, primary: bool) -> Resp
     describe(resp, "DETENT step_pill", label)
 }
 
+/// AU15: a card's words on one line in `role`, one size down where a narrow
+/// pane cannot hold them, and on two lines in the panel size past that.
+fn card_words(p: &egui::Painter, rect: egui::Rect, label: &str, role: Role, ink: Color32) {
+    let room = rect.width() - 2.0 * CARD_PAD;
+    let one_line = |role: Role| p.layout_no_wrap(label.to_owned(), role.font(), ink);
+    let words = [role, Role::Heading]
+        .into_iter()
+        .map(one_line)
+        .find(|words| words.size().x <= room)
+        .unwrap_or_else(|| p.layout(label.to_owned(), Role::Panel.font(), ink, room));
+    let at = Pos2::new(rect.left() + CARD_PAD, rect.center().y - words.size().y / 2.0);
+    p.galley(at, words, ink);
+}
+
 /// AU6: a big choice on the Start float: a `WELL` card the float's width,
 /// `tall` tall, its words on the left in the Card role.
 pub fn choice_card(ui: &mut Ui, label: &str, tall: f32) -> Response {
@@ -1660,8 +1689,7 @@ pub fn choice_card(ui: &mut Ui, label: &str, tall: f32) -> Response {
         let (fill, _) = filled(&resp);
         let p = ui.painter();
         p.rect_filled(rect, R_CONTROL, fill);
-        let at = Pos2::new(rect.left() + CARD_PAD, rect.center().y);
-        p.text(at, egui::Align2::LEFT_CENTER, label, Role::Card.font(), INK);
+        card_words(p, rect, label, Role::Card, INK);
     }
     speak(&resp, egui::WidgetType::Button, None, label);
     describe(resp, "CARD choice_card", label)
@@ -1675,8 +1703,7 @@ pub fn primary_card(ui: &mut Ui, label: &str, tall: f32, role: Role) -> Response
         let fill = if resp.hovered() { BLUE_DEEP } else { BLUE };
         let p = ui.painter();
         p.rect_filled(rect, R_CONTROL, fill);
-        let at = Pos2::new(rect.left() + CARD_PAD, rect.center().y);
-        p.text(at, egui::Align2::LEFT_CENTER, label, role.font(), ON_FILL);
+        card_words(p, rect, label, role, ON_FILL);
     }
     speak(&resp, egui::WidgetType::Button, None, label);
     describe(resp, "CARD primary_card", label)
@@ -2093,6 +2120,135 @@ pub fn fold_row(ui: &mut Ui, label: &str, width: f32, open: bool) -> Response {
     }
     speak(&resp, egui::WidgetType::Button, Some(open), label);
     describe(resp, "ACTION fold_row", label)
+}
+
+/// AU15: the panels' `More` folds, one key each (spec 7.1): `ui.panel_more` as
+/// this session reads it. A panel changes one here and the `Editor` saves it.
+#[derive(Clone, Debug)]
+pub struct PanelMore {
+    /// What the person has chosen, per panel.
+    pub open: std::collections::BTreeMap<String, bool>,
+    /// The frozen boot's seam: every fold nobody chose stands open. A panel
+    /// drawn alone in a test has no `Editor`, and stands the same way.
+    pub all_open: bool,
+    /// Folds changed this frame, for the `Editor` to save.
+    pub changed: Vec<(String, bool)>,
+}
+
+/// `ui.panel_more`'s keys, one per fold. Stored: never renamed.
+pub const MORE_SHEET: &str = "sheet_details";
+pub const MORE_LAYERS: &str = "layers_more";
+pub const MORE_FORGE: &str = "forge_more";
+pub const MORE_COLORS: &str = "colors_more";
+pub const MORE_GRAPH: &str = "graph_more";
+pub const MORE_RESULT: &str = "result_more";
+pub const MORE_CHECK: &str = "check_more";
+pub const MORE_EXPORT: &str = "export_more";
+pub const MORE_SHOTS: &str = "shots_more";
+pub const MORE_EPISODE: &str = "episode_more";
+pub const MORE_3D: &str = "view3d_more";
+pub const MORE_MANGA: &str = "manga_more";
+pub const MORE_BRUSHES: &str = "brushes_more";
+
+/// The name a panel's fold answers to: `More` alone is the menu bar's.
+pub fn more_name(key: &str) -> &'static str {
+    match key {
+        MORE_SHEET => "Timing sheet details",
+        MORE_LAYERS => "More in Layers",
+        MORE_FORGE => "More in Brush maker",
+        MORE_COLORS => "More in Colors",
+        MORE_GRAPH => "More in Effects graph",
+        MORE_RESULT => "More in Result",
+        MORE_CHECK => "More in Check paint",
+        MORE_SHOTS => "More in Shots",
+        MORE_EPISODE => "More in Episode",
+        MORE_3D => "More in 3D",
+        MORE_MANGA => "More in Manga",
+        MORE_BRUSHES => "More in Brushes",
+        _ => "More options",
+    }
+}
+
+/// AU15: egui_dock scrolls a tab bar too full for its leaf, over the body it
+/// tops, so the bar's words are a viewport's to cut.
+pub fn note_tab_bar(ui: &Ui) {
+    let body = ui.clip_rect();
+    let bar = egui::Rect::from_min_max(body.left_top() - egui::vec2(0.0, 40.0), body.right_top());
+    note_viewport(ui, bar, [true, false]);
+}
+
+impl Default for PanelMore {
+    fn default() -> Self {
+        Self { open: Default::default(), all_open: cfg!(test), changed: Vec::new() }
+    }
+}
+
+impl PanelMore {
+    pub fn is_open(&self, key: &str) -> bool {
+        self.open.get(key).copied().unwrap_or(self.all_open)
+    }
+
+    pub fn set(&mut self, key: &str, open: bool) {
+        self.open.insert(key.to_string(), open);
+        self.changed.push((key.to_string(), open));
+    }
+}
+
+/// AU15: the width a [`fold_row`] needs for `label`, whole.
+pub fn fold_row_width(ui: &Ui, label: &str) -> f32 {
+    let words = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), Role::Chrome.font(), INK));
+    words.size().x + 2.0 * ROW_PAD + ICON + 4.0
+}
+
+/// AU15: a panel in a slot smaller than its minimum keeps the minimum and
+/// scrolls as a whole, on the axes it does not fit. A slot it fits costs nothing.
+pub fn keep_minimum<R>(ui: &mut Ui, min: Vec2, add: impl FnOnce(&mut Ui) -> R) -> R {
+    use egui::scroll_area::ScrollSource;
+    let slot = ui.available_size();
+    let axes = [slot.x < min.x, slot.y < min.y];
+    if axes == [false, false] {
+        return add(ui);
+    }
+    let size = slot.max(min);
+    let scroll = egui::ScrollArea::new(axes)
+        .id_salt("pane_minimum")
+        .auto_shrink([false, false])
+        .scroll_source(ScrollSource::SCROLL_BAR | ScrollSource::MOUSE_WHEEL)
+        .show(ui, |ui| {
+            let layout = *ui.layout();
+            ui.allocate_ui_with_layout(size, layout, |ui| {
+                ui.set_min_size(size);
+                add(ui)
+            })
+            .inner
+        });
+    note_viewport(ui, scroll.inner_rect, axes);
+    scroll.inner
+}
+
+/// AU15: a panel's disclosure row, the width of the panel, remembered under
+/// `key`. It answers whether the fold stands open.
+pub fn more_row(ui: &mut Ui, more: &mut PanelMore, key: &'static str, label: &str) -> bool {
+    let width = ui.available_width();
+    more_at(ui, more, key, label, width)
+}
+
+/// AU15: a [`more_row`] the width of its words, for a panel's head row.
+pub fn more_tag(ui: &mut Ui, more: &mut PanelMore, key: &'static str, label: &str) -> bool {
+    let width = fold_row_width(ui, label);
+    more_at(ui, more, key, label, width)
+}
+
+fn more_at(ui: &mut Ui, more: &mut PanelMore, key: &'static str, label: &str, width: f32) -> bool {
+    let open = more.is_open(key);
+    let row = fold_row(ui, label, width, open);
+    speak(&row, egui::WidgetType::Button, Some(open), more_name(key));
+    mark_row(&row, Target::Named(key));
+    let row = row.card(if open { "Fold this section away." } else { "Show the rest of this panel." });
+    if row.clicked() {
+        more.set(key, !open);
+    }
+    open != row.clicked()
 }
 
 /// AU9: a [`ghost_row`] with a ground at rest: one action among plain words,

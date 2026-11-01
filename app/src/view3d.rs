@@ -523,6 +523,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         if set.clicked() {
             state.view3d.asked.push(Action::SetCutCameraFromView);
         }
+        crate::plate::more_tag(ui, &mut state.panel_more, crate::plate::MORE_3D, crate::vocab::MENU_MORE);
     });
     let Some(node) = node else {
         ui.centered_and_justified(|ui| {
@@ -533,7 +534,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         });
         return;
     };
-    ui.label(egui::RichText::new(NAV_LEGEND).small().color(crate::plate::legend_dim()));
+    // AU15: the view's key legend is what this panel has to disclose.
+    if state.panel_more.is_open(crate::plate::MORE_3D) {
+        ui.label(egui::RichText::new(NAV_LEGEND).small().color(crate::plate::legend_dim()));
+    }
     let avail = ui.available_size();
     let (rect, resp) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
     // Blender's navigation, over the pane only; Alt+drag stands in for the

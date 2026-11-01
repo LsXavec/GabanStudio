@@ -958,6 +958,7 @@ fn aufx_last_drawing_stands_clear_at_every_size() {
     for (w, tall) in SIZES {
         let mut h = film_room(w, tall);
         h.click(vocab::CAMERA_MOVE);
+        h.click(plate::more_name(plate::MORE_RESULT));
         settle(&mut h);
         let at = h.rect(vocab::GO_TO_LAST_DRAWING);
         assert!(pane_rect(&h, Pane::Viewer(0)).contains_rect(at), "at {w}: {at:?}");

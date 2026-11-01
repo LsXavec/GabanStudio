@@ -128,6 +128,8 @@ const AXIS_SNAP_DEG: f32 = 4.0;
 /// AU22: what `Add text` sets until words are typed: a stand-in the page shows
 /// and a person replaces, so the button is seen to have done something.
 pub const TEXT_START: &str = "Your words";
+/// AU15: the book with no page yet, over its `New page`.
+pub const NO_PAGES: &str = "No pages yet.";
 /// AU22: `See the page` on a machine that cannot compose it.
 pub const SEE_PAGE_NO_GPU: &str = "See the page needs a graphics card: showing the drawing.";
 /// AU22: the lane's words as it turns on.
@@ -1172,6 +1174,9 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
             }
         });
     }
+    if pages.is_empty() {
+        ui.label(egui::RichText::new(NO_PAGES).color(plate::legend_dim()));
+    }
     let new = ui.add_enabled(not_a_book.is_none(), egui::Button::new("New page"));
     let new = match not_a_book {
         Some(why) => new.on_disabled_hover_text(format!("{}\nnot now: {why}", Action::NewPage.help())),
@@ -1235,6 +1240,18 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
         state.manga.asked.push(Action::ClipToPanels);
     }
 
+    // AU15: the screen tone and the rulers fold; a lesson's ring opens them.
+    let wished = ["manga.tone_preset", "manga.rulers"].map(|name| plate::wishes(ui.ctx(), Target::Named(name)));
+    ui.add_space(6.0);
+    let open = plate::more_row(ui, &mut state.panel_more, plate::MORE_MANGA, vocab::MENU_MORE);
+    if open || wished.contains(&true) {
+        tone_and_rulers(ui, state, edit);
+    }
+    export_rows(ui, state);
+}
+
+/// AU15: the page's screen tone and perspective rulers (spec 7.1: disclosed).
+fn tone_and_rulers(ui: &mut egui::Ui, state: &mut AppState, edit: &mut Option<Edit>) {
     ui.add_space(6.0);
     plate::legend(ui, "tone");
     let tone = tone_now(state.cut());
@@ -1339,7 +1356,10 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
             }
         });
     }
+}
 
+/// The pages out to a folder: never behind the fold (spec 7.1).
+fn export_rows(ui: &mut egui::Ui, state: &mut AppState) {
     ui.add_space(6.0);
     plate::legend(ui, "export (nyūkō)");
     let MangaState { export: o, over_mono, .. } = &mut state.manga;

@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use eframe::egui;
 use egui_dock::{DockState, NodeIndex};
 
 use crate::vocab;
@@ -123,6 +124,79 @@ impl Pane {
             Pane::Viewer(n) => format!("{} {}", vocab::RESULT, n + 1),
         }
     }
+
+    /// AU15: the smallest this panel lays its essentials out at (spec 7.1). In
+    /// a smaller slot it keeps this size and scrolls: it is never squeezed.
+    pub fn min_size(&self) -> egui::Vec2 {
+        let (w, h) = match self {
+            // The paper's own view: any slot it is given, it fits.
+            Pane::Canvas => (0.0, 0.0),
+            Pane::XSheet => (240.0, 250.0),
+            Pane::Layers => (200.0, 140.0),
+            Pane::Brush => (160.0, 60.0),
+            Pane::Presets => (190.0, 120.0),
+            Pane::Forge => (240.0, 220.0),
+            Pane::Palette => (160.0, 140.0),
+            Pane::NodeGraph => (360.0, 260.0),
+            Pane::Viewer(_) => (160.0, 90.0),
+            Pane::History => (180.0, 160.0),
+            Pane::Curves => (360.0, 200.0),
+            Pane::PaintCheck => (220.0, 140.0),
+            Pane::RenderQueue => (280.0, 220.0),
+            Pane::Board => (170.0, 220.0),
+            Pane::Episode => (300.0, 100.0),
+            Pane::View3D => (240.0, 200.0),
+            Pane::Manga => (280.0, 320.0),
+        };
+        egui::vec2(w, h)
+    }
+
+    /// AU15: what `keep_minimum` holds this panel to. Colors rewraps its wells
+    /// to any width. The Export panel's foot is an `egui::Panel`, whose clip is
+    /// its own, so inside a scroll it would paint past the pane: its rows
+    /// scroll by themselves above that foot.
+    pub fn held_size(&self) -> egui::Vec2 {
+        let min = self.min_size();
+        match self {
+            Pane::Palette => egui::vec2(0.0, min.y),
+            Pane::RenderQueue => egui::Vec2::ZERO,
+            _ => min,
+        }
+    }
+
+    /// AU15: how this panel takes what does not fit (spec 7.1), said once per
+    /// panel so none is left to chance.
+    pub fn scroll_policy(&self) -> PaneScroll {
+        match self {
+            Pane::Canvas | Pane::NodeGraph | Pane::Viewer(_) | Pane::Curves | Pane::View3D => PaneScroll::Pans,
+            Pane::XSheet => PaneScroll::Sheet,
+            Pane::Episode => PaneScroll::Across,
+            Pane::Layers
+            | Pane::Brush
+            | Pane::Presets
+            | Pane::Forge
+            | Pane::Palette
+            | Pane::History
+            | Pane::PaintCheck
+            | Pane::RenderQueue
+            | Pane::Board
+            | Pane::Manga => PaneScroll::Rows,
+        }
+    }
+}
+
+/// AU15: a panel's scroll policy. Below its minimum every panel also scrolls as
+/// a whole; this is what it does inside its minimum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneScroll {
+    /// The view fits its slot and pans by hand. Nothing in it scrolls.
+    Pans,
+    /// A list runs down the panel under its fixed rows.
+    Rows,
+    /// A timeline runs across the panel.
+    Across,
+    /// The sheet: its rows run down and its tracks across.
+    Sheet,
 }
 
 /// The workflow trees (LENS-DOCK Phase 3): a FIXED ORDERED STAGE SPINE on
@@ -265,12 +339,16 @@ impl Stage {
             Stage::Composite => {
                 // The graph large with curves tabbed beside it; the result
                 // viewer (canvas tabbed behind it) and the palette at right,
-                // the render queue (GM11) tabbed behind it.
+                // the render queue (GM11) tabbed beside it and in front
+                // (AU15: the room's budget; the swatches are the Color step's).
                 let mut ds = DockState::new(vec![Pane::NodeGraph, Pane::Curves]);
                 let tree = ds.main_surface_mut();
                 let [_, side] =
                     tree.split_right(NodeIndex::root(), 0.58, vec![Pane::Viewer(0), Pane::Canvas]);
-                tree.split_below(side, 0.62, vec![Pane::Palette, Pane::RenderQueue]);
+                let [_, low] = tree.split_below(side, 0.62, vec![Pane::Palette, Pane::RenderQueue]);
+                if let Some(leaf) = tree[low].get_leaf_mut() {
+                    let _ = leaf.set_active_tab(1);
+                }
                 ds
             }
             Stage::Edit => {

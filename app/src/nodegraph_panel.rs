@@ -821,7 +821,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
         let op_resp = ui.interact(
             op_rect,
             ui.id().with(("outpin", nv.id.0)),
-            Sense::click_and_drag(),
+            // AU15: a pin is a pointer's target: Tab never stops on one.
+            Sense::CLICK | Sense::DRAG,
         );
         if op_resp.drag_started() {
             state.pending_wire = Some(nv.id);
@@ -853,7 +854,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
                 .interact(
                     ip_rect,
                     ui.id().with(("inpin", nv.id.0, pin)),
-                    Sense::click(),
+                    Sense::CLICK,
                 )
                 .on_hover_text(format!("{name}: {takes} (right-click to disconnect)"));
             if state.pending_wire.is_some() && released && ip_resp.hovered() {

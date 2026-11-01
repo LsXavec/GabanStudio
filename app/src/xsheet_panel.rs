@@ -80,7 +80,7 @@ pub struct SheetUi {
     /// GM12: a gain or offset drag in progress: (track, its live settings)
     /// — the field shows them, and the drag commits once, on release (one
     /// undo step).
-    track_edit: Option<(usize, anim_core::audio::TrackProps)>,
+    pub(crate) track_edit: Option<(usize, anim_core::audio::TrackProps)>,
 }
 
 impl SheetUi {
@@ -438,12 +438,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     // (The title row is EVICTED — the dock tab and the Slate already name
     // this sheet; ~145pt of header chrome becomes grid rows. Spec §4.2.)
 
+    // AU15: one line stands, the tracks and `Details`. The rest of the head
+    // folds under it (spec 7.1), and the rows take the room.
+    let details = state.panel_more.is_open(plate::MORE_SHEET);
+
     // ---- THE HENSHU HEAD (charter §B): ONE fixed 26pt row, Edit room
     // only — cut nav, the cut's identity, standing LIFT KEY, and the
     // HOLD readout. The editor of timing stays the tail drag; this row
     // answers the questions around it.
-    if edit_room {
-        ui.horizontal(|ui| {
+    if edit_room && details {
+        ui.horizontal_wrapped(|ui| {
             for (icon, fwd, hover) in [
                 (Icon::ChevL, false, "Previous shot (PageUp)"),
                 (Icon::ChevR, true, "Next shot (PageDown)"),
@@ -540,24 +544,38 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
 
     // Column tabs (active column = the one the pen draws into).
     ui.horizontal(|ui| {
-        plate::legend(ui, crate::vocab::TRACKS);
-        let columns: Vec<(anim_core::ids::ColumnId, String)> = state
-            .cut()
-            .xsheet
-            .columns
-            .iter()
-            .map(|c| (c.id, c.name.clone()))
-            .collect();
-        // AUDIT [4]: a mutually-exclusive pick is a DETENT — the Legend
-        // ring + Tally disc — not a selectable whose text turns amber.
-        for (id, name) in columns {
-            if plate::detent(ui, state.view.active_column == id, &name).clicked() {
-                state.view.active_column = id;
-            }
-        }
-        if plate::icon_button(ui, Icon::Plus, "", "Add track").clicked() {
-            state.add_column();
-        }
+        // AU15: the tracks run across under their own scroll, so a sheet of
+        // many never pushes `Details` out of the pane.
+        let fold = plate::fold_row_width(ui, crate::vocab::DETAILS);
+        let room = (ui.available_width() - fold - ui.spacing().item_spacing.x).max(0.0);
+        let tracks = egui::ScrollArea::horizontal()
+            .id_salt("sheet_tracks")
+            .max_width(room)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    plate::legend(ui, crate::vocab::TRACKS);
+                    let columns: Vec<(anim_core::ids::ColumnId, String)> = state
+                        .cut()
+                        .xsheet
+                        .columns
+                        .iter()
+                        .map(|c| (c.id, c.name.clone()))
+                        .collect();
+                    // AUDIT [4]: a mutually-exclusive pick is a DETENT — the Legend
+                    // ring + Tally disc — not a selectable whose text turns amber.
+                    for (id, name) in columns {
+                        if plate::detent(ui, state.view.active_column == id, &name).clicked() {
+                            state.view.active_column = id;
+                        }
+                    }
+                    if plate::icon_button(ui, Icon::Plus, "", "Add track").clicked() {
+                        state.add_column();
+                    }
+                });
+            });
+        plate::note_viewport(ui, tracks.inner_rect, [true, false]);
+        plate::more_tag(ui, &mut state.panel_more, plate::MORE_SHEET, crate::vocab::DETAILS);
     });
 
     // From here to the grid the head stands at a sheet row's height, as it
@@ -570,7 +588,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     head.interact_size.y = ROW_H;
     head.button_padding.y = (ROW_H - row_text) * 0.5;
 
-    ui.horizontal(|ui| {
+    if details {
+    ui.horizontal_wrapped(|ui| {
         ui.menu_button("Drawing", |ui| {
             if ui
                 .button("New drawing")
@@ -597,6 +616,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
         ui.add_space(6.0);
         memo_field(ui, state, gesture_safe);
     });
+    }
 
     // (Scratch audio import/remove is EVICTED to the Slate's file detent —
     // the sheet still draws the waveform column when a clip exists.)
@@ -604,6 +624,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
 
     // Drawing library — a DRAWER (spec §4.2): collapsed until reached for.
     ui.separator();
+    if details {
     egui::CollapsingHeader::new(crate::vocab::DRAWINGS)
         .default_open(false)
         .show(ui, |ui| {
@@ -693,8 +714,30 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     // GM12: the shown sound track's header, and its level for the
     // waveform column.
     track_header(ui, state, gesture_safe);
+    }
     let wave = sheet_wave(state);
 
+    // AU15: the sheet's tracks run across under one scroll, head and rows
+    // together; a wide cut never cuts a column at the pane's edge.
+    let view_w = ui.available_width();
+    let across = egui::ScrollArea::horizontal()
+        .id_salt("sheet_across")
+        .auto_shrink([false, false])
+        .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
+        .show(ui, |ui| grid(ui, state, gesture_safe, details, controls, wave, view_w));
+    plate::note_viewport(ui, across.inner_rect, [true, false]);
+}
+
+/// The sheet itself: its column heads and its rows.
+fn grid(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    gesture_safe: bool,
+    details: bool,
+    controls: egui::Spacing,
+    wave: Option<(std::sync::Arc<Vec<f32>>, bool)>,
+    view_w: f32,
+) {
     // ---- The sheet itself -------------------------------------------------
     let n_cols = state.cut().xsheet.columns.len();
     let n_params = state.cut().xsheet.params.len();
@@ -704,6 +747,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
         + n_params as f32 * PARAM_COL_W
         + if has_audio { AUDIO_COL_W } else { 0.0 };
     let sheet_w = memo_x + MEMO_COL_W;
+    ui.set_width(sheet_w.max(view_w));
 
     // Header row. Param-column headers are clickable: selecting one opens
     // its keying strip above the sheet.
@@ -760,6 +804,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     // GM14: each column's kind badge (a click steps Cel → BG → Book →
     // Ref) and its hide and lock toggles — the GM5 verbs, per column.
     let mut header_edit: Option<(ColumnId, u8)> = None;
+    if details {
     ui.horizontal(|ui| {
         ui.allocate_exact_size(vec2(GUTTER_W, ROW_H), Sense::hover());
         for col in &state.cut().xsheet.columns {
@@ -809,6 +854,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             }
         }
     });
+    }
     *ui.spacing_mut() = controls;
     match header_edit {
         Some((col, 0)) => state.cycle_kind_of(col),
@@ -2234,7 +2280,7 @@ fn opacity_cells(
     } else if resp.dragged() {
         state.strip_opacity = Some((lid, live));
         state.strip_opacity_drawn = true;
-    } else if resp.changed() {
+    } else if resp.clicked() && (live - opacity).abs() > 0.001 {
         // Click-to-set (no drag): apply immediately.
         state.layer_set_props(
             lid,
@@ -2270,10 +2316,14 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     const NARROW_STRIP: f32 = 296.0;
     /// That line starts under the name: eye, lock and dot before it.
     const NARROW_INDENT: f32 = 72.0;
+    /// AU15: with `More` shut a row is eye, name and opacity, and needs less.
+    const NARROW_FOLDED: f32 = 176.0;
     // Same width-isolation as the parent panel: the strip's rows must never
     // drive the panel width (they appear/disappear on undo/redo and playback).
     ui.set_min_width(ui.available_width());
     ui.add_space(2.0);
+    // AU15: a lesson's task on the layer's kind opens the fold it stands in.
+    let more = state.panel_more.is_open(plate::MORE_LAYERS) || plate::wishes(ui.ctx(), LAYERS_ROLE);
     ui.horizontal(|ui| {
         plate::legend(ui, crate::vocab::LAYERS);
         let have_cel = state.own_key_drawing().is_some();
@@ -2321,6 +2371,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
 
         // PSD-cel-layers Stage 4: the stack presets. Picking binds the
         // CURRENT room's new cels; apply/conform only ever ADD layers.
+        if more {
         ui.menu_button(crate::vocab::LAYER_SET, |ui| {
             ui.set_min_width(240.0);
             plate::legend(ui, "New drawings in this step get");
@@ -2379,6 +2430,10 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         })
         .response
         .card("Ready-made layer sets for rough, clean line and paint.");
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            plate::more_tag(ui, &mut state.panel_more, plate::MORE_LAYERS, crate::vocab::MENU_MORE);
+        });
     });
 
     // Owned snapshot so row actions can mutate state freely. The FULL props
@@ -2443,7 +2498,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     let armed_id = state.active_layer_id();
     let asked = [LAYERS_EYE, LAYERS_ROLE].iter().any(|t| plate::wishes(ui.ctx(), *t));
     let ringed = if asked { ringed_layer(state, armed_id) } else { None };
-    let narrow = ui.available_width() < NARROW_STRIP;
+    let narrow = ui.available_width() < if more { NARROW_STRIP } else { NARROW_FOLDED };
     for (row_i, (lid, name, visible, opacity)) in rows.iter().enumerate() {
         let is_active = armed_id == Some(*lid);
         let props = full[row_i].clone();
@@ -2466,6 +2521,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             }
             // PSD-cel-layers: the lock, beside the eye — one click = one
             // undo step. Unlocked is the quiet state (dim shackle).
+            if more {
             let lock_color = if props.locked {
                 plate::STRUCK
             } else {
@@ -2521,6 +2577,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             if ringed == Some(*lid) {
                 plate::mark_row(&dot_resp, LAYERS_ROLE);
             }
+            }
 
             // Name: click = activate, double-click = rename — in a FIXED
             // cell (spec defect 10): the columns after it never drift with
@@ -2528,7 +2585,12 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // Reserve what the row's fixed furniture actually needs —
             // eye 27 + dot 12 + two chevrons 54 + slider 60 + "100%" 34 +
             // spacing — or the percentage clips off the panel's edge.
-            let reserve = if narrow { 72.0 } else { 190.0 };
+            let reserve = match (more, narrow) {
+                (_, true) if !more => 0.0,
+                (false, _) => 112.0,
+                (_, true) => 72.0,
+                _ => 190.0,
+            };
             let name_w = (ui.available_width() - reserve).max(48.0);
             ui.allocate_ui_with_layout(
                 vec2(name_w, 20.0),
@@ -2610,11 +2672,13 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // Reorder: painted chevrons at fixed columns. Delete has LEFT
             // the row (spec §6 defect 11) — Fitts's law stops pointing at
             // the irreversible control; it lives in the footer as DANGER.
-            if plate::icon_button(ui, Icon::Up, "", "move up").clicked() {
-                state.layer_move(*lid, true);
-            }
-            if plate::icon_button(ui, Icon::Down, "", "move down").clicked() {
-                state.layer_move(*lid, false);
+            if more {
+                if plate::icon_button(ui, Icon::Up, "", "move up").clicked() {
+                    state.layer_move(*lid, true);
+                }
+                if plate::icon_button(ui, Icon::Down, "", "move down").clicked() {
+                    state.layer_move(*lid, false);
+                }
             }
 
             if !narrow {
@@ -2625,7 +2689,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         // line of its own, under the name.
         if narrow {
             ui.horizontal(|ui| {
-                ui.add_space(NARROW_INDENT);
+                ui.add_space(if more { NARROW_INDENT } else { 30.0 });
                 let track = ui.available_width() - 44.0;
                 opacity_cells(ui, state, *lid, *opacity, &props, track);
             });
@@ -2640,16 +2704,18 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     ui.horizontal_wrapped(|ui| {
         // LINE GUARD: arming-only protection for the line layer (shiage;
         // defaults ON in the Finishing room). A guard, not a lock.
+        if more {
         let mut lg = state.view.line_guard;
         plate::latch(ui, &mut lg, crate::vocab::PROTECT_LINE_ART).card(
         "While on, the line art layer can't be picked to draw on: stepping skips it, a tap refuses.",
         );
         state.view.line_guard = lg;
-        let active_lid = state.active_layer_id();
             if plate::danger(ui, "Erase drawing") && gesture_safe {
             // Pixels, not exposure: clears this cel's raster (undoable).
             state.clear_current_raster();
         }
+        }
+        let active_lid = state.active_layer_id();
         if plate::danger(ui, "Delete layer") && gesture_safe {
         match active_lid {
         Some(lid) => state.layer_remove(lid),

@@ -1275,6 +1275,9 @@ pub fn held_job(state: &mut AppState, file: &Path, done: usize) -> std::sync::mp
 /// foot whatever the pane's height, its choices lead the scrolling above it,
 /// and the new-job form over the job list follows them while `More options`
 /// is open.
+/// AU15: the empty Export queue (spec 8.4).
+pub const NOTHING_WAITING: &str = "Nothing waiting.";
+
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
     poll(state, ui.ctx());
     let ffmpeg = state.render_queue.ffmpeg_path();
@@ -1545,7 +1548,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                 }
             });
             if state.render_queue.queue.jobs.is_empty() {
-                ui.label(egui::RichText::new("no jobs — add one above").color(plate::legend_dim()));
+                ui.label(egui::RichText::new(NOTHING_WAITING).color(plate::legend_dim()));
             }
             let mut show = None;
             for job in &state.render_queue.queue.jobs {

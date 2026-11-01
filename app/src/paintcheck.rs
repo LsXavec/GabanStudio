@@ -198,8 +198,9 @@ pub fn jump(state: &mut AppState, canvas: &mut CanvasView, f: &Finding) {
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     state.paintcheck.poll();
     let frames = state.frame_count().max(1);
-    plate::legend(ui, "paint check");
     let now = state.view.frame;
+    // AU15: the list and its Run stand; what it looks for folds (spec 7.1).
+    if plate::more_row(ui, &mut state.panel_more, plate::MORE_CHECK, crate::vocab::MENU_MORE) {
     ui.horizontal_wrapped(|ui| {
         let pc = &mut state.paintcheck;
         if plate::detent(ui, !pc.use_range, "whole shot").clicked() {
@@ -249,6 +250,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             }
         }
     });
+    }
     ui.add_space(4.0);
     if state.paintcheck.busy() {
         ui.horizontal(|ui| {

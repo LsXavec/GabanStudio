@@ -225,7 +225,8 @@ pub const ORDER: &[Row] = {
     use Row::{A, Hand};
     &[
         A(NewProject), A(Open), Hand(OpenRecent), A(Save), A(SaveAs),
-        A(PrevCut), A(NextCut), A(MakeCutsFromPanels), A(AddRetakeNote), A(PaperSize), Hand(ShotNames), Hand(ShotTree),
+        A(PrevCut), A(NextCut), A(MakeCutsFromPanels), A(AddRetakeNote), A(ResolveRetakeNote), A(UsePanelOrder), A(PaperSize),
+        Hand(ShotNames), Hand(ShotTree),
         A(ImportSound), A(AddSoundTrack), A(Import3DModel), A(ReloadSequences), Hand(Xdts),
         A(ExportGif), A(ExportMp4), A(ExportPngSequence), A(ExportStill), Hand(OtherFormats),
         A(ExportPages), A(ExportEdl), A(ExportColorSheet), A(ExportCutAsProject), A(RenderEpisode), Hand(FrameRange),
@@ -257,7 +258,7 @@ pub const ORDER: &[Row] = {
         A(RetimeOnes), A(RetimeTwos), A(RetimeThrees), A(Reverse),
         A(KindKey), A(KindBreakdown), A(KindInbetween), A(KindUnset),
         A(ColumnKindCel), A(ColumnKindBg), A(ColumnKindBook), A(ColumnKindRef), A(ToggleColumnHidden),
-        A(ToggleColumnLocked), A(LipFlap), A(RemoveColumn),
+        A(ToggleColumnLocked), A(ToggleLayerLocked), A(LipFlap), A(RemoveColumn), A(RemoveDrawing), A(RemoveSoundTrack),
         A(InterpHold), A(InterpLinear), A(InterpEase), A(InterpEaseIn), A(InterpEaseOut), A(InterpBezier),
         A(HandlesAuto), A(HandlesSmooth), A(HandlesFlat), A(HandlesBroken), A(FrameCurves),
 
@@ -268,7 +269,7 @@ pub const ORDER: &[Row] = {
         Hand(MangaStep), A(RoomLayout), A(RoomDrawing), A(RoomEdit), A(RoomFinishing), A(RoomComposite), A(RoomExport),
         A(History), A(ShowCurves), A(ShowPaintCheck), A(ShowRenderQueue), A(ShowCutBoard), A(ShowEpisode),
         Hand(OtherPanes), Hand(AddResult), Hand(OsWindows),
-        A(AddNode), A(BuildComposite), A(BuildSatsuei), A(ConvertColorsToSrgb),
+        A(AddNode), A(SetGraphOutput), A(RemoveNode), A(BuildComposite), A(BuildSatsuei), A(ConvertColorsToSrgb),
         A(NewPage), A(ClipToPanels), A(ToggleRulerSnap),
         Hand(SaveArrangement), Hand(Arrangements),
         A(ResetLayout),

@@ -183,11 +183,9 @@ fn pot(ui: &mut egui::Ui, role: &ColorRole, armed: bool) -> egui::Response {
     let p = ui.painter();
     let well = pr.shrink(2.0);
     p.rect_filled(well.expand(2.0), plate::R_SHEET, plate::WELL);
-    p.rect_filled(well, plate::R_SHEET, plate::chip([role.color[0], role.color[1], role.color[2], 255]));
+    p.rect_filled(well, 0.0, plate::chip([role.color[0], role.color[1], role.color[2], 255]));
     if armed {
         p.rect_stroke(well.expand(1.0), plate::R_SHEET, egui::Stroke::new(2.0, plate::BLUE), egui::StrokeKind::Outside);
-    } else {
-        p.rect_stroke(well, plate::R_SHEET, egui::Stroke::new(1.0, plate::INK2), egui::StrokeKind::Inside);
     }
     presp
 }
@@ -243,11 +241,11 @@ fn board(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view:
     if n_chars == 0 {
         ui.label(egui::RichText::new(NO_COLORS).color(plate::legend_dim()));
     } else {
-        more = state.palette_more.unwrap_or(view.more_default);
+        more = state.panel_more.open.get(plate::MORE_COLORS).copied().unwrap_or(view.more_default);
         // `Edit colors` shows it all, so the fold would do nothing.
         if !edit && plate::fold_row(ui, vocab::COLOR_DETAILS, ui.available_width(), more).clicked() {
             more = !more;
-            state.palette_more = Some(more);
+            state.panel_more.set(plate::MORE_COLORS, more);
         }
     }
     let shown = more || edit;
@@ -286,7 +284,8 @@ fn board(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view:
             // The pots alone: a color is its own name.
             ui.horizontal_wrapped(|ui| {
                 for (ri, role) in ch.roles.iter().enumerate() {
-                    let presp = ui.push_id(ri, |ui| pot(ui, role, ring == Some(ri))).inner;
+                    // No `push_id` here: a scope's child never wraps.
+                    let presp = pot(ui, role, ring == Some(ri));
                     if presp.clicked() {
                         canvas.brush_color = role.color;
                         armed_pot = Some(ri);
@@ -425,7 +424,7 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
     let roles: Vec<(String, [u8; 4])> =
         ch.roles.iter().map(|r| (r.name.clone(), r.color)).collect();
     for (vi, v) in ch.variants.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             let mut close = false;
             match renaming.as_mut().filter(|(at, _)| *at == vi) {
                 Some((_, text)) => {

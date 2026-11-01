@@ -702,6 +702,11 @@ pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope) -> Clip 
             out.found.push(format!("elided {text:?}"));
         }
         let clip = clip.intersect(window);
+        // AU15: an empty clip paints nothing at all: a tab bar folded to no
+        // height, a row scrolled clean away. No word stands cut on the screen.
+        if !clip.is_positive() {
+            continue;
+        }
         let cut = |&side: &Side| side.past(bound, clip) && !owned(&views, side, side.of(clip), clip);
         if SIDES.iter().any(cut) {
             out.clipped += 1;
