@@ -1642,13 +1642,13 @@ pub(crate) mod tests {
     fn playback_verbs_have_menus_and_chords_and_run_through_perform() {
         use crate::config::{Ctx, Group, Keymap, clashes, default_binds};
         let verbs = [
-            (Action::ImportSound, "File/Import sound…", Group::File, "Ctrl+I"),
-            (Action::AddSoundTrack, "File/Add sound track…", Group::File, "Ctrl+Shift+I"),
-            (Action::LoopIn, "Sheet/Play/Loop in", Group::Playback, "Shift+I"),
-            (Action::LoopOut, "Sheet/Play/Loop out", Group::Playback, "Shift+O"),
-            (Action::ClearLoop, "Sheet/Play/Clear loop range", Group::Playback, "Alt+X"),
-            (Action::ToggleScrub, "Sheet/Play/Audio scrub", Group::Playback, "Shift+S"),
-            (Action::RamPreview, "Sheet/Play/Render RAM preview", Group::Playback, "0"),
+            (Action::ImportSound, "File/Import/Import sound…", Group::File, "Ctrl+I"),
+            (Action::AddSoundTrack, "File/Import/Add sound track…", Group::File, "Ctrl+Shift+I"),
+            (Action::LoopIn, "Animation/Loop/Loop start", Group::Playback, "Shift+I"),
+            (Action::LoopOut, "Animation/Loop/Loop end", Group::Playback, "Shift+O"),
+            (Action::ClearLoop, "Animation/Loop/Clear loop range", Group::Playback, "Alt+X"),
+            (Action::ToggleScrub, "Animation/Play/Sound while dragging", Group::Playback, "Shift+S"),
+            (Action::RamPreview, "Animation/Play/Render preview to memory", Group::Playback, "0"),
         ];
         for &km in Keymap::ALL {
             let binds = default_binds(km);
@@ -1663,7 +1663,7 @@ pub(crate) mod tests {
             assert!(clashes(&binds).is_empty(), "{km:?}: {:?}", clashes(&binds));
         }
         let lip = Action::LipFlap;
-        assert_eq!((lip.label(), lip.menu()), ("kuchipaku (lip flap)…", Some("Sheet/Lip flap…")));
+        assert_eq!((lip.label(), lip.menu()), ("kuchipaku (lip flap)…", Some("Animation/Track/Lip flap…")));
         assert_eq!((lip.group(), lip.context()), (Group::Sheet, Ctx::Sheet));
         for word in ["lip sync", "kuchipaku", "mouth"] {
             assert!(lip.aliases().contains(&word), "{word}");

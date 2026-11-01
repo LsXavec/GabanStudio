@@ -200,11 +200,11 @@ fn audock_open_pane_splits_a_single_leaf() {
     h.editor_mut().enter_room(Stage::InkPaint);
     h.editor_mut().open_pane(Pane::Episode);
     assert!(panes(&h).contains(&Pane::Episode));
-    // The Window menu's + Viewer splits too.
+    // More ▸ Panels ▸ Add Result splits too.
     h.editor_mut().enter_room(Stage::Drawing);
     settle(&mut h);
-    h.click("window");
-    h.click("+ Viewer");
+    h.open_path("More/Panels");
+    h.click("Add Result");
     settle(&mut h);
     let leaves = h.editor().dock.main_surface().iter().filter_map(Node::tabs).count();
     assert_eq!(leaves, 2);
@@ -792,13 +792,13 @@ fn audock_menus_rest_as_bare_words_on_the_desk() {
     let contrast = measure::contrast_of(&h.kit().output().shapes);
     assert!(contrast.failures.is_empty(), "{:?}", contrast.failures);
     // The hand brings the well, and an open menu keeps the wash.
-    h.hover("file");
+    h.hover(vocab::MENU_FILE);
     h.run_frames(2);
-    assert_eq!(grounds_on(&h, "file"), [plate::WELL]);
-    h.click("file");
+    assert_eq!(grounds_on(&h, vocab::MENU_FILE), [plate::WELL]);
+    h.click(vocab::MENU_FILE);
     settle(&mut h);
-    assert_eq!(grounds_on(&h, "file"), [plate::BLUE_WASH], "{}", h.describe());
-    assert!(grounds_on(&h, "edit").is_empty(), "only the open one");
+    assert_eq!(grounds_on(&h, vocab::MENU_FILE), [plate::BLUE_WASH], "{}", h.describe());
+    assert!(grounds_on(&h, vocab::MENU_EDIT).is_empty(), "only the open one");
     // The narrow Menu is a word too, and its rows are ordinary menu rows.
     let mut h = EditorHarness::as_shipped();
     h.kit_mut().set_size(vec2(steps::WIDE - 1.0, 800.0));
@@ -807,7 +807,7 @@ fn audock_menus_rest_as_bare_words_on_the_desk() {
     h.click("Menu");
     settle(&mut h);
     assert_eq!(grounds_on(&h, "Menu"), [plate::BLUE_WASH]);
-    assert!(!grounds_on(&h, "file ⏵").contains(&plate::BLUE_WASH), "the rows keep the menu's look");
+    assert!(!grounds_on(&h, "File ⏵").contains(&plate::BLUE_WASH), "the rows keep the menu's look");
 }
 
 #[test]
@@ -1015,30 +1015,32 @@ fn audock_long_refusal_stays_in_its_lane() {
     assert_eq!(words.iter().filter(|(_, t)| t == LONG).count(), 2, "the whole refusal in its hover");
 }
 
-const MENUS: [&str; 9] = ["file", "edit", "view", "sheet", "cut", "project", vocab::STEP, "window", "help"];
+const MENUS: [&str; 6] =
+    [vocab::MENU_FILE, vocab::MENU_EDIT, vocab::MENU_VIEW, vocab::MENU_ANIMATION, vocab::MENU_HELP, vocab::MENU_MORE];
 
 #[test]
 fn audock_narrow_row_collapses_to_menu() {
     let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(steps::WIDE, 800.0));
     settle(&mut h);
-    assert!(!h.has("Menu") && h.has("file"), "the menus show from 1120");
+    assert!(!h.has("Menu") && h.has(vocab::MENU_FILE), "the menus show from 1040");
     assert!(h.rect("Search").width() >= plate::SEARCH_W, "a wide Search");
-    // Nine words 6 apart leave the steps a gap either side at the threshold.
+    // Six words 6 apart leave the steps a gap either side at the threshold.
     let limit = |h: &EditorHarness| h.rect("Undo (toolbar)").left() - DOT_ZONE - steps::GROUP_GAP;
-    let menus_clear = |h: &EditorHarness| h.rect("help").right() + steps::GROUP_GAP <= h.rect(vocab::STEP_PLAN).left() + 0.5;
-    assert!(menus_clear(&h), "the words run into the steps at 1120");
-    assert!(h.rect(vocab::STEP_EXPORT).right() <= limit(&h) + 0.5, "the steps pass the dot at 1120");
+    let menus_clear =
+        |h: &EditorHarness| h.rect(vocab::MENU_MORE).right() + steps::GROUP_GAP <= h.rect(vocab::STEP_PLAN).left() + 0.5;
+    assert!(menus_clear(&h), "the words run into the steps at 1040");
+    assert!(h.rect(vocab::STEP_EXPORT).right() <= limit(&h) + 0.5, "the steps pass the dot at 1040");
     h.kit_mut().set_size(vec2(steps::WIDE - 1.0, 800.0));
     settle(&mut h);
-    assert!(h.has("Menu") && !h.has("file"), "{}", h.describe());
+    assert!(h.has("Menu") && !h.has(vocab::MENU_FILE), "{}", h.describe());
     assert!(h.rect("Search").width() <= plate::PILL_H, "the lens alone");
     h.click("Menu");
     settle(&mut h);
     for menu in MENUS {
         assert!(h.has(&format!("{menu} ⏵")), "{menu} under Menu\n{}", h.describe());
     }
-    h.click("edit ⏵");
+    h.click("Edit ⏵");
     settle(&mut h);
     assert!(h.has("Undo"), "{}", h.describe());
     // The off-spine pill needs its own room.
@@ -1049,9 +1051,9 @@ fn audock_narrow_row_collapses_to_menu() {
     assert!(!h.has("Menu"));
     let pill = h.rect(&format!("Current place: {}", vocab::LAYOUT_3D));
     assert!(pill.right() + steps::GROUP_GAP <= h.rect("Undo (toolbar)").left());
-    // Spec 4.2: `room` holds the pill's minimum here, with nine words showing.
-    assert!(menus_clear(&h), "the words run into the steps at 1180");
-    assert!(pill.width() >= steps::PLACE_MIN && pill.right() <= limit(&h) + 0.5, "{pill:?} at 1180");
+    // Spec 4.2: `room` holds the pill's minimum here, with six words showing.
+    assert!(menus_clear(&h), "the words run into the steps at 1100");
+    assert!(pill.width() >= steps::PLACE_MIN && pill.right() <= limit(&h) + 0.5, "{pill:?} at 1100");
     h.kit_mut().set_size(vec2(steps::WIDE_PLACE - 1.0, 800.0));
     settle(&mut h);
     assert!(h.has("Menu"));

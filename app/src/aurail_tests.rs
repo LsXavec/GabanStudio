@@ -120,7 +120,7 @@ fn stock_tips(h: &EditorHarness) -> Vec<LayerId> {
 /// The folds of a float: open, its rows stand at their widest.
 fn folds(f: Float) -> &'static [&'static str] {
     match f {
-        Float::Brushes => &["More"],
+        Float::Brushes => &["More settings"],
         Float::CanvasOptions => &["onion depth", "light table", "genga · douga"],
         _ => &[],
     }
@@ -1327,7 +1327,7 @@ const TODAY_DECK: [DeckRow; 15] = {
             home: "View ▸ Preview final",
             from: Paint,
             room: Drawing,
-            path: &[On("view"), On("Composite view")],
+            path: &[On(vocab::MENU_VIEW), On("Preview final")],
             read: |h| h.editor().canvas.composite_view,
         },
         DeckRow {
@@ -1368,7 +1368,7 @@ const TODAY_DECK: [DeckRow; 15] = {
             home: "Brushes",
             from: Select,
             room: Drawing,
-            path: &[On("Brush"), On("Brush"), On("More"), On(vocab::PIXEL_EDGES)],
+            path: &[On("Brush"), On("Brush"), On("More settings"), On(vocab::PIXEL_EDGES)],
             read: |h| h.editor().canvas.brush_aliased,
         },
         DeckRow {
@@ -1376,7 +1376,7 @@ const TODAY_DECK: [DeckRow; 15] = {
             home: "Brushes float",
             from: Select,
             room: Drawing,
-            path: &[On("Brush"), On("Brush"), On("More"), On("p·size")],
+            path: &[On("Brush"), On("Brush"), On("More settings"), On("p·size")],
             read: |h| !h.editor().canvas.deck_reads().dyn_size,
         },
         DeckRow {
@@ -1384,7 +1384,7 @@ const TODAY_DECK: [DeckRow; 15] = {
             home: "Canvas options float",
             from: Paint,
             room: Drawing,
-            path: &[On("view"), On("Canvas options…"), On("miss check")],
+            path: &[On(vocab::MENU_VIEW), On("Canvas options…"), On("miss check")],
             read: |h| h.editor().canvas.miss_check,
         },
         DeckRow {

@@ -16,6 +16,14 @@ pub const STEP: &str = "step";
 pub const SHARED_SESSION: &str = "in a room";
 pub const ARRANGEMENT: &str = "workspace";
 
+// The six menus on the top row (spec 6.2).
+pub const MENU_FILE: &str = "File";
+pub const MENU_EDIT: &str = "Edit";
+pub const MENU_VIEW: &str = "View";
+pub const MENU_ANIMATION: &str = "Animation";
+pub const MENU_HELP: &str = "Help";
+pub const MENU_MORE: &str = "More";
+
 // The steps. `Stage::name()` and `steps::CATALOG` read these.
 pub const STEP_PLAN: &str = "Plan";
 pub const STEP_DRAW: &str = "Draw";
@@ -122,6 +130,12 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("STEP", STEP, "step"),
     ("SHARED_SESSION", SHARED_SESSION, "in a room"),
     ("ARRANGEMENT", ARRANGEMENT, "workspace"),
+    ("MENU_FILE", MENU_FILE, "File"),
+    ("MENU_EDIT", MENU_EDIT, "Edit"),
+    ("MENU_VIEW", MENU_VIEW, "View"),
+    ("MENU_ANIMATION", MENU_ANIMATION, "Animation"),
+    ("MENU_HELP", MENU_HELP, "Help"),
+    ("MENU_MORE", MENU_MORE, "More"),
     ("STEP_PLAN", STEP_PLAN, "Plan"),
     ("STEP_DRAW", STEP_DRAW, "Draw"),
     ("STEP_COLOR", STEP_COLOR, "Color"),

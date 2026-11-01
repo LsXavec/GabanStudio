@@ -192,7 +192,7 @@ const CONTROLS: &[(Doc, &[Target], &str)] = &[
     (Doc::Drawing, &[Target::Rail(Key::Fill)], "Fill"),
     (Doc::Drawing, &[Target::Action(Action::FillTool)], "Fill"),
     (Doc::Drawing, &[Target::Step(Stage::InkPaint)], "Color"),
-    (Doc::Drawing, &[named("menu.view"), Target::Action(Action::MirrorView)], "Mirror view"),
+    (Doc::Drawing, &[named("menu.view"), Target::Action(Action::MirrorView)], "Mirror"),
     (Doc::Plain, &[named("band.fold"), named("band.speed"), named("speed.medium")], "Medium"),
     (Doc::Plain, &[Target::Action(Action::AddDrawingAfter)], "Add drawing (band)"),
 ];
@@ -575,7 +575,7 @@ fn auguide_menu_rings_the_menu() {
     assert!(h.editor().canvas.view_mirrored(), "and it lands");
 
     // A row a small window holds below its fold is brought in, and answers.
-    const LIP: &[Target] = &[named("menu.animation"), Target::Action(Action::LipFlap)];
+    const LIP: &[Target] = &[named("menu.animation"), named("menu.animation.track"), Target::Action(Action::LipFlap)];
     let mut h = at(Doc::Sample, POCKET);
     stand(&mut h, LIP, Stage::Drawing);
     walk(&mut h, LIP).expect("the row");
@@ -751,7 +751,7 @@ fn auguide_ring_gives_way_to_what_covers_it() {
     stand(&mut h, KEY, Stage::Drawing);
     let key = h.ring_rect().expect("the key");
     assert_eq!(h.ring_painted(), Some(key));
-    h.click("file");
+    h.click(crate::vocab::MENU_FILE);
     settle(&mut h);
     let top = h.ctx().layer_id_at(key.center()).expect("the menu");
     assert!(top.order >= Order::Foreground, "the menu is over the key: {top:?}");
@@ -833,21 +833,25 @@ fn auguide_every_site_is_marked() {
     let mut h = at(Doc::Sample, SIZES[0]);
     stand(&mut h, actions, Stage::Drawing);
     let mut filed = 0;
-    for word in ["file", "edit", "view", "sheet", "cut", "project", "window", "help"] {
-        h.click(word);
+    // Each menu, then each submenu: a row is marked where it stands. The
+    // Steps rows a bar lacks stand nowhere.
+    let bar = |action: &Action| {
+        steps::row_of(*action).is_none_or(|step| steps::bar(ProjectKind::Animation).iter().any(|on| on.label == step.label))
+    };
+    for place in crate::menus::places() {
+        h.open_path(place);
         settle(&mut h);
         let found = plate::ring_found(&h.ctx());
-        for action in Action::ALL {
-            let parts: Vec<&str> = action.menu().unwrap_or("").split('/').collect();
-            if parts.len() == 2 && parts[0].eq_ignore_ascii_case(word) {
+        for action in Action::ALL.iter().filter(|a| bar(a)) {
+            let path = action.menu().unwrap_or("");
+            if path.rsplit_once('/').is_some_and(|(parent, _)| parent == place) {
                 filed += 1;
-                assert!(found.contains(&Target::Action(*action)), "{word} / {}", parts[1]);
+                assert!(found.contains(&Target::Action(*action)), "{path}");
             }
         }
-        h.key(egui::Key::Escape);
-        settle(&mut h);
+        h.close_menus();
     }
-    assert!(filed > 40, "the menus' rows were read: {filed}");
+    assert!(filed > 150, "the menus' rows were read: {filed}");
 
     const WORDS: [&str; 4] = ["== \"", ".as_str()", ".contains(\"", ".starts_with(\""];
     let sources = [

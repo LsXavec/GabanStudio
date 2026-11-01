@@ -432,12 +432,12 @@ fn ausay_hints_switch_stands_in_both_places() {
     let mut h = ready();
     quiet(&mut h);
     assert!(h.editor().say.hint.is_some());
-    h.click("help");
+    h.click(crate::vocab::MENU_HELP);
     h.click("Hints");
     settle(&mut h);
     assert!(h.rig().config.ui.hints_off, "the menu row turned it off");
     assert_eq!(picked(&h), None);
-    h.click("help");
+    h.click(crate::vocab::MENU_HELP);
     h.click("Hints");
     settle(&mut h);
     assert!(!h.rig().config.ui.hints_off, "and on");
@@ -958,8 +958,7 @@ fn ausay_check_paint_empty_state_says_what_fills_it() {
 #[test]
 fn ausay_recent_empty_state_says_nothing_yet() {
     let mut h = ready();
-    h.click("file");
-    h.hover("Open Recent ⏵");
+    h.open_path("File/Open recent");
     settle(&mut h);
     assert!(says(&h, "Nothing yet"), "{:?}", h.painted_text());
 }

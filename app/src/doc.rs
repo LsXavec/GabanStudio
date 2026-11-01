@@ -398,7 +398,7 @@ fn tile_inside(top: &TileData, under: &TileData) -> Arc<TileData> {
 }
 
 /// GM20: a fill, refill or replace clicked off the paper (the Aka lane).
-pub const OUTSIDE_PAPER: &str = "outside the paper: Cut ▸ Paper size… extends it";
+pub const OUTSIDE_PAPER: &str = "outside the paper: File ▸ Shots ▸ Paper size… extends it";
 
 /// AU5 (spec 8.2): the two frames a fill, a refill or a transform cannot work
 /// on, as `AppState::no_own_cel_reason` says them.
@@ -420,7 +420,7 @@ pub const READ_ONLY_VIEW: &str = "refused — composite view is read-only (C to 
 
 /// GM20: a tool used on the paper past a capped painting window (a paper
 /// wider or taller than the GPU paints) — the Aka lane.
-pub const PAST_WINDOW: &str = "past this GPU's painting window: Cut ▸ Paper size… shows it";
+pub const PAST_WINDOW: &str = "past this GPU's painting window: File ▸ Shots ▸ Paper size… shows it";
 
 /// GM18: why a project that is no book makes no page.
 const NOT_A_BOOK: &str =
@@ -7018,7 +7018,7 @@ mod sheetedit_tests {
             for a in VERBS {
                 assert!(Action::ALL.contains(&a));
                 assert_eq!((a.group(), a.context()), (Group::Sheet, Ctx::Sheet), "{a:?}");
-                assert!(a.menu().is_some_and(|m| m.starts_with("Sheet/")), "{a:?}");
+                assert!(a.menu().is_some_and(|m| m.starts_with("Animation/")), "{a:?}");
                 assert!((1..=120).contains(&a.help().chars().count()), "{a:?} has help");
                 let b = binds.iter().find(|b| b.action == a).expect("bound");
                 let c = b.chord.as_ref().unwrap_or_else(|| panic!("{a:?} has a chord in {km:?}"));

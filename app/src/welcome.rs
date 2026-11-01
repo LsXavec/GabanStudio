@@ -1632,7 +1632,7 @@ mod tests {
         let mut s = crate::sample::build_sample();
         s.saved_rev = s.engine.revision();
         let mut h = crate::testkit::EditorHarness::with_state(s);
-        assert_eq!(Action::WelcomeScreen.menu(), Some("File/Welcome screen…"));
+        assert_eq!(Action::WelcomeScreen.menu(), Some("Help/Start screen…"));
         assert_eq!(h.perform(Action::WelcomeScreen), crate::Performed::Done);
         assert!(h.editor().start.as_ref().is_some_and(|w| w.over_editor));
         h.editor_mut().start = None;

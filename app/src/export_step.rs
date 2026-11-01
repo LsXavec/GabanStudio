@@ -36,6 +36,7 @@ pub const NO_FFMPEG: &str = "Video needs a free add-on on this PC. GIF works now
 pub const GIF_INSTEAD: &str = "Export GIF instead";
 pub const MORE_OPTIONS: &str = "More options";
 pub const OTHER_FORMATS: &str = "Other formats";
+pub const XDTS: &str = "Exposure sheet (XDTS)…";
 /// A one-frame document's choice, with `Action::ExportStill` behind it.
 pub const PNG_IMAGE: &str = "PNG image";
 pub const OPEN_FILE: &str = "Open file";
@@ -196,6 +197,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View, open: bool) {
     }
     if open {
         transparent(ui, state);
+        // AU11: XDTS moved here from the menus; its import is File ▸ Import ▸.
+        let row = plate::ghost_row(ui, XDTS, wide, None);
+        if row.card("This shot's timing as an exposure sheet (.xdts).").clicked() {
+            state.render_queue.panel.ask(Ask::App(AppRequest::ExportXdts));
+        }
     }
     ui.spacing_mut().item_spacing.y = rhythm;
 }

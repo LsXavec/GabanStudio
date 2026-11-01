@@ -83,6 +83,8 @@ mod austrip_tests;
 #[cfg(test)]
 mod aulesson_tests;
 #[cfg(test)]
+mod aumenu_tests;
+#[cfg(test)]
 mod auguide_tests;
 #[cfg(test)]
 mod auguide_show_tests;
@@ -3026,6 +3028,28 @@ impl App {
                     ed.export_to(ctx, kind, &path);
                 }
             }
+            // XDTS interop: the export is this shot's timing, and the import
+            // a NEW shot built from the file.
+            AppRequest::ExportXdts => {
+                let Some(ed) = &mut self.editor else { return };
+                let mut dialog = rfd::FileDialog::new()
+                    .add_filter("exposure sheet", &["xdts"])
+                    .set_file_name(format!("{}.xdts", ed.state.cut().name));
+                if let Some(dir) = export::suggest_dir(&ed.state) {
+                    dialog = dialog.set_directory(dir);
+                }
+                if let Some(path) = dialog.save_file() {
+                    ed.state.export_xdts(&path);
+                }
+            }
+            AppRequest::ImportXdts => {
+                let Some(ed) = &mut self.editor else { return };
+                if guard_gesture(&mut ed.canvas, &mut ed.state)
+                    && let Some(path) = rfd::FileDialog::new().add_filter("exposure sheet", &["xdts"]).pick_file()
+                {
+                    ed.state.import_xdts(&path);
+                }
+            }
             AppRequest::OpenFile(path) => proc::open_file(&path),
             AppRequest::ShowInFolder(path) => proc::show_in_folder(&path),
         }
@@ -3096,6 +3120,10 @@ pub enum AppRequest {
     /// GM18: File ▸ Export ▸ Manga pages… — the folder picker is the
     /// shell's; the pages then render and write on a worker.
     ExportPages,
+    /// AU11: the Export step's XDTS row and File ▸ Import ▸ XDTS… — the
+    /// file pickers are the shell's.
+    ExportXdts,
+    ImportXdts,
     /// AU9: Animated GIF, Video (MP4), Picture sequence (PNG) and This frame
     /// (PNG), from the Export step or File ▸ Export ▸: the save dialog is the
     /// shell's, the job then runs in the queue.
@@ -3112,6 +3140,10 @@ impl Editor {
     /// file dialogs and the window belong to the shell, so those come back
     /// as [`Performed::App`].
     pub fn perform(&mut self, action: Action) -> Performed {
+        // AU11: a merged Edit row is the Action it stands for this frame.
+        if let Some(meant) = self.edit_row(action) {
+            return self.perform(meant);
+        }
         let seq = self.state.refusal_seq;
         let mut out = Performed::Done;
         self.perform_into(action, &mut out);
@@ -3321,6 +3353,8 @@ impl Editor {
                 self.go_off_spine(vocab::LAYOUT_3D);
                 self.state.status = "the 3D layout room".into();
             }
+            // AU11: the forge's room has a row of its own.
+            Action::BrushMakerRoom => self.open_brush_maker(),
             // GM18: the manga room, off the spine (D12).
             Action::MangaRoom => self.enter_room(Stage::Manga),
             Action::View3dFrameAll => view3d::frame_all(&mut self.state),
@@ -3553,7 +3587,7 @@ impl Editor {
             Action::RamPreview => s.status = s.ram.toggle().into(),
             Action::LipFlap => match playback::LipForm::of(s) {
                 Some(form) => ed.lip_form = Some(form),
-                None => s.refuse("refused — import a dialogue track first (File ▸ Import sound…)"),
+                None => s.refuse("refused — import a dialogue track first (File ▸ Import ▸ Import sound…)"),
             },
             // GM12: the file picker is the shell's; one decode at a time.
             Action::ImportSound | Action::AddSoundTrack => match &s.sound_import {
@@ -3817,11 +3851,31 @@ impl Editor {
             | Action::View3dOrtho
             | Action::View3dFrameAll
             | Action::Underlay3d
-            | Action::ReloadSequences => {} // the chrome's, handled above
+            | Action::ReloadSequences
+            | Action::BrushMakerRoom => {} // the chrome's, handled above
             Action::BrushSmaller | Action::BrushBigger => {} // the canvas's, above
+            // AU11: `perform` turned the others into what they stand for.
+            Action::EditCut => s.refuse(format!("refused — {PIXELS_HAVE_NO_CUT}")),
+            Action::EditCopy | Action::EditPaste => {}
+        }
+    }
+
+    /// AU11: what a merged Edit row stands for over the pane `last_ctx` names:
+    /// the sheet's or strip's cells, else the canvas's pixels. None for every
+    /// other Action, and for Cut over the canvas: pixels have none.
+    pub(crate) fn edit_row(&self, action: Action) -> Option<Action> {
+        let cells = self.last_ctx == config::Ctx::Sheet;
+        match action {
+            Action::EditCut if cells => Some(Action::CutCells),
+            Action::EditCopy => Some(if cells { Action::CopyCells } else { Action::CopyPixels }),
+            Action::EditPaste => Some(if cells { Action::PasteCells } else { Action::PastePixels }),
+            _ => None,
         }
     }
 }
+
+/// AU11: `Edit ▸ Cut` over the canvas, after the row's "not now: ".
+const PIXELS_HAVE_NO_CUT: &str = "pixels have no Cut. Use Copy, then Clear.";
 
 /// GM3: the chrome's own verbs (windows, panes, rooms) — never the
 /// document's.
@@ -3891,6 +3945,8 @@ fn is_chrome(action: Action) -> bool {
             // (the disk, not the document).
             | Action::Underlay3d
             | Action::ReloadSequences
+            // AU11: the Brush maker's arrangement (a view).
+            | Action::BrushMakerRoom
     )
 }
 
@@ -4014,6 +4070,8 @@ fn stroke_guarded(action: Action) -> bool {
             // sequence reread.
             | Action::Underlay3d
             | Action::ReloadSequences
+            // AU11: the Brush maker's arrangement, as its old row refused.
+            | Action::BrushMakerRoom
     )
 }
 
@@ -4453,6 +4511,8 @@ struct Editor {
     /// GM2: the recent files with their "still on disk" flags, checked when
     /// the list changes and when the file menu opens — never every frame.
     recent_shown: Vec<(std::path::PathBuf, bool)>,
+    /// AU11: `shortcut_ctx` from the last frame with no popup open.
+    last_ctx: config::Ctx,
     /// GM2: the file menu was open last frame (its opening re-checks disk).
     file_menu_open: bool,
     /// GM2: an edit the artist made to the recent list — the shell applies it.
@@ -5074,7 +5134,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 ui.centered_and_justified(|ui| {
                     ui.label(
                         egui::RichText::new(
-                            "canvas is open in its own window — window ▾ to bring it back",
+                            "Canvas is open in its own window. More ▸ Panels ▸ brings it back.",
                         )
                         .color(plate::legend_dim()),
                     );
@@ -5821,6 +5881,7 @@ impl Editor {
             requests: Vec::new(),
             recent: Vec::new(),
             recent_shown: Vec::new(),
+            last_ctx: config::Ctx::Global,
             file_menu_open: false,
             recent_edit: None,
             autosave: worksafe::AutosaveClock::new(worksafe::AUTOSAVE_DEFAULT_MIN),
@@ -5937,6 +5998,7 @@ impl Editor {
             requests: Vec::new(),
             recent: Vec::new(),
             recent_shown: Vec::new(),
+            last_ctx: config::Ctx::Global,
             file_menu_open: false,
             recent_edit: None,
             autosave: worksafe::AutosaveClock::new(worksafe::AUTOSAVE_DEFAULT_MIN),
@@ -6295,7 +6357,9 @@ impl Editor {
     /// or still (`dest` the file) — a render queue job for this cut over the
     /// menu's frame range (None = the whole cut; a still is the current
     /// frame), the queue brought forward and started (a job already rendering
-    /// finishes first).
+    /// finishes first). AU11: the menu's rows left for the Export step, whose
+    /// road `start_export` is; the queue's tests still drive this door.
+    #[cfg(test)]
     pub(crate) fn queue_export(
         &mut self,
         ctx: &egui::Context,
@@ -6346,7 +6410,11 @@ impl Editor {
         if let Some(why) = self.hidden_step(action) {
             return Err(why);
         }
+        if let Some(meant) = self.edit_row(action) {
+            return self.can_perform(meant);
+        }
         match action {
+            Action::EditCut => Err(PIXELS_HAVE_NO_CUT),
             Action::CanvasOptions if !self.canvas_shown() => Err("no canvas here"),
             Action::Undo if !shared && !s.engine.can_undo() => Err("nothing to undo"),
             Action::Redo if !shared && !s.engine.can_redo() => {
@@ -9052,6 +9120,11 @@ impl Editor {
         binds: &[config::Binding],
     ) {
         // AU5: from here, so the strip's entry in the band survives the dock.
+        // AU11: the Edit rows answer for the pane under the menu, so it stops
+        // moving while one is open.
+        if !egui::Popup::is_any_open(ui.ctx()) {
+            self.last_ctx = self.shortcut_ctx(ui.ctx());
+        }
         self.pane_rects.clear();
         self.strip.begin();
         self.ui_lock = ui_lock;
@@ -9225,549 +9298,7 @@ impl Editor {
             let window = ui.ctx().content_rect().width();
             let place = self.place_name().map(str::to_string);
             let narrow = steps::narrow(window, place.is_some());
-            let file_menu_was_open = std::mem::take(&mut self.file_menu_open);
-            let mut menus = |ui: &mut egui::Ui| {
-                // File commands live in ONE detent.
-                plate::menu_word(ui, "file", |ui| {
-                    // GM2: the recent files are checked on disk as the menu
-                    // opens, not on every frame it stays open.
-                    self.file_menu_open = true;
-                    if !file_menu_was_open {
-                        self.recent_shown = worksafe::on_disk(&self.recent);
-                    }
-                    // GM2: New/Open/Recent go through the unsaved guard
-                    // (GM3: the registry's items, Editor::invoke).
-                    self.menu_item(ui, Action::NewProject);
-                    // GM8: templates, recent files and the sample again.
-                    self.menu_item(ui, Action::WelcomeScreen);
-                    self.menu_item(ui, Action::OpenSample);
-                    self.menu_item(ui, Action::Open);
-                    ui.menu_button("Open Recent", |ui| {
-                        if self.recent_shown.is_empty() {
-                            ui.label(egui::RichText::new("Nothing yet").color(plate::legend_dim()));
-                        }
-                        for (p, present) in self.recent_shown.clone() {
-                            // Cut files repeat across episode folders
-                            // (ep01/c012, ep02/c012): the folder tells them
-                            // apart at a glance.
-                            let name = recent_label(&p);
-                            if present {
-                                if ui
-                                    .button(&name)
-                                    .on_hover_text(p.display().to_string())
-                                    .clicked()
-                                {
-                                    self.leave(Leave::OpenPath(p), ui.ctx());
-                                    ui.close();
-                                }
-                            } else {
-                                // Missing: greyed, with its own Remove.
-                                ui.horizontal(|ui| {
-                                    ui.label(
-                                        egui::RichText::new(format!("{name} (missing)"))
-                                            .color(plate::legend_dim()),
-                                    )
-                                    .on_hover_text(p.display().to_string());
-                                    if ui.small_button("remove").clicked() {
-                                        self.recent_edit = Some(RecentEdit::Remove(p.clone()));
-                                    }
-                                });
-                            }
-                        }
-                        if !self.recent_shown.is_empty() {
-                            ui.separator();
-                            // Forgets the list only; no file is touched.
-                            if ui
-                                .button("clear recent")
-                                .on_hover_text("empties this list — no file is removed")
-                                .clicked()
-                            {
-                                self.recent_edit = Some(RecentEdit::Clear);
-                                ui.close();
-                            }
-                        }
-                    });
-                    // Save lands the gesture first (Editor::perform): the
-                    // saved file must contain what the screen shows.
-                    self.menu_item(ui, Action::Save);
-                    self.menu_item(ui, Action::SaveAs);
-                    ui.menu_button("Export…", |ui| {
-                        // AU9: the plain exports: a dialog each, and the job
-                        // runs where the person stands. Other formats opens
-                        // the Export step. The rows below stay as they were.
-                        self.state.render_queue.search_ffmpeg();
-                        self.menu_item(ui, Action::ExportGif);
-                        self.menu_item(ui, Action::ExportMp4);
-                        self.menu_item(ui, Action::ExportPngSequence);
-                        self.menu_item(ui, Action::ExportStill);
-                        if ui.button("Other formats…").on_hover_text(Action::RoomExport.help()).clicked() {
-                            ui.close();
-                            self.invoke(Action::RoomExport, ui.ctx());
-                            self.state.render_queue.panel.unfold();
-                        }
-                        ui.separator();
-                        // GM11: every export is a render queue job, rendered
-                        // on its worker while the artist keeps drawing; the
-                        // queue itself has every preset.
-                        if ui
-                            .button("open the render queue (all presets)")
-                            .on_hover_text(
-                                "Window ▸ Render Queue: PNG16, TIFF16, EXR, ProRes, the line \
-                                 test, burn-ins and a slate",
-                            )
-                            .clicked()
-                        {
-                            ui.close();
-                            self.perform(Action::ShowRenderQueue);
-                        }
-                        ui.separator();
-                        // Frame range (C3): 1-based in the UI (matches the
-                        // "N / total" frame readout elsewhere), 0-based
-                        // internally. None = whole cut (read when the job
-                        // starts) until a field is moved, so it can never
-                        // point past a cut that's since gotten shorter.
-                        let n = self.state.frame_count();
-                        let (mut a, mut b) = render_queue::resolve(n, self.export_range);
-                        let shown = (a, b);
-                        ui.horizontal(|ui| {
-                            ui.label("frames");
-                            let mut a1 = a + 1;
-                            let mut b1 = b + 1;
-                            if plate::field(ui, egui::DragValue::new(&mut a1).range(1..=b1)).changed() {
-                                a = a1 - 1;
-                            }
-                            ui.label("–");
-                            if plate::field(ui, egui::DragValue::new(&mut b1).range(a1..=n)).changed() {
-                                b = b1 - 1;
-                            }
-                        });
-                        if (a, b) != shown {
-                            self.export_range = Some((a, b));
-                        }
-                        if ui
-                            .small_button("whole cut")
-                            .on_hover_text("reset the range to frame 1 – last")
-                            .clicked()
-                        {
-                            self.export_range = None;
-                        }
-                        ui.separator();
-
-                        // GM11: each picks where, then queues its job over
-                        // this range and starts the queue (queue_export).
-                        if ui
-                            .button("PNG sequence…")
-                            .on_hover_text(
-                                "a render queue job (PNG 8-bit): one PNG per frame, transparent \
-                                 background — it starts at once",
-                            )
-                            .clicked()
-                        {
-                            ui.close();
-                            let mut dlg = rfd::FileDialog::new();
-                            if let Some(dir) = export::suggest_dir(&self.state) {
-                                dlg = dlg.set_directory(dir);
-                            }
-                            if let Some(dir) = dlg.pick_folder() {
-                                let ctx = ui.ctx().clone();
-                                self.queue_export(&ctx, render_queue::ExportKind::Png, &dir);
-                            }
-                        }
-                        let ffmpeg = self.state.render_queue.ffmpeg_path().is_some();
-                        let mp4 = ui
-                            .add_enabled(ffmpeg, egui::Button::new("MP4 video…"))
-                            .on_hover_text(
-                                "a render queue job (H.264 review): white background — it starts \
-                                 at once",
-                            )
-                            .on_disabled_hover_text(render_queue::NEEDS_FFMPEG);
-                        if mp4.clicked() {
-                            ui.close();
-                            let mut dlg = rfd::FileDialog::new()
-                                .add_filter("MP4 video", &["mp4"])
-                                .set_file_name("animation.mp4");
-                            if let Some(dir) = export::suggest_dir(&self.state) {
-                                dlg = dlg.set_directory(dir);
-                            }
-                            if let Some(path) = dlg.save_file() {
-                                let ctx = ui.ctx().clone();
-                                self.queue_export(&ctx, render_queue::ExportKind::Mp4, &path);
-                            }
-                        }
-                        // GM15: the editorial's exports, written into the
-                        // render folder: the EDL, the iro shitei and the
-                        // open cut as a project for a freelancer.
-                        ui.separator();
-                        self.menu_item(ui, Action::ExportEdl);
-                        self.menu_item(ui, Action::ExportColorSheet);
-                        self.menu_item(ui, Action::ExportCutAsProject);
-                        // GM18: the book's pages, into a folder the shell
-                        // asks for (the Manga pane's options).
-                        self.menu_item(ui, Action::ExportPages);
-                    });
-                    ui.separator();
-                    // GM12: the sound verbs (WAV, MP3, OGG Vorbis or FLAC,
-                    // decoded on a worker). A track's removal is a DANGER
-                    // in its sheet header's context menu.
-                    self.menu_item(ui, Action::ImportSound);
-                    self.menu_item(ui, Action::AddSoundTrack);
-                    // GM17: a glTF or OBJ model, embedded in the cut.
-                    self.menu_item(ui, Action::Import3DModel);
-                    // GM22: a sequence re-rendered on disk, read again.
-                    self.menu_item(ui, Action::ReloadSequences);
-                    ui.separator();
-                    self.menu_item(ui, Action::Settings);
-                    self.menu_item(ui, Action::Quit);
-                });
-                // GM3: the registry's own menus.
-                self.plain_menus(ui);
-                // GM7: the project's colour law and its migration (a DANGER
-                // confirm), before the cuts it holds.
-                self.project_menu(ui);
-                // Scene/cut navigation (C2): the model always supported
-                // more than one, there was just no way to reach them.
-                // GM3: beside the sheet menu, in the spec's menu order.
-                let cut_rows = menus::cut_rows(&self.state.engine.project);
-                let cut = |ui: &mut egui::Ui| {
-                    self.filed_items(ui, "Cut");
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!("now editing: {}", self.state.cut().name))
-                            .color(plate::legend_dim()),
-                    );
-                    // Rename the current cut (one undo step, GM21) or scene
-                    // (scaffolding, not undoable). Empty-buffer pattern: type
-                    // a new name and confirm; no pre-seeding to fight.
-                    ui.horizontal(|ui| {
-                        plate::text_field(
-                            ui,
-                            egui::TextEdit::singleline(&mut self.rename_buf)
-                                .hint_text("new name…")
-                                .desired_width(110.0),
-                        );
-                        let name = self.rename_buf.trim().to_string();
-                        if ui
-                            .add_enabled(!name.is_empty(), egui::Button::new("rename cut"))
-                            .clicked()
-                        {
-                            self.state.rename_current_cut(&name);
-                            self.rename_buf.clear();
-                        }
-                        if ui
-                            .add_enabled(!name.is_empty(), egui::Button::new("rename scene"))
-                            .clicked()
-                        {
-                            self.state.rename_current_scene(&name);
-                            self.rename_buf.clear();
-                        }
-                    });
-                    // GM10: Cut ▸ Paper size… is a verb (listed above
-                    // with the cut's others); its window holds the fields.
-                    // XDTS interop: the industry exposure-sheet exchange
-                    // format (Toei/OpenToonz/CSP). Export = this cut's
-                    // timing; import = a NEW cut built from the file.
-                    ui.horizontal(|ui| {
-                        if ui
-                            .button("export XDTS…")
-                            .on_hover_text("export this cut's timing as an exposure sheet (.xdts)")
-                            .clicked()
-                        {
-                            ui.close();
-                            let mut dlg = rfd::FileDialog::new()
-                                .add_filter("exposure sheet", &["xdts"])
-                                .set_file_name(format!("{}.xdts", self.state.cut().name));
-                            if let Some(dir) = export::suggest_dir(&self.state) {
-                                dlg = dlg.set_directory(dir);
-                            }
-                            if let Some(path) = dlg.save_file() {
-                                self.state.export_xdts(&path);
-                            }
-                        }
-                        if ui
-                            .button("import XDTS…")
-                            .on_hover_text("import an exposure sheet (.xdts) as a NEW cut")
-                            .clicked()
-                        {
-                            ui.close();
-                            if guard_gesture(&mut self.canvas, &mut self.state)
-                                && let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("exposure sheet", &["xdts"])
-                                    .pick_file()
-                            {
-                                self.state.import_xdts(&path);
-                            }
-                        }
-                    });
-                    ui.separator();
-                    let scenes: SceneCutTree = self
-                        .state
-                        .engine
-                        .project
-                        .scenes
-                        .iter()
-                        .map(|s| {
-                            (
-                                s.id,
-                                s.name.clone(),
-                                s.cuts.iter().map(|c| (c.id, c.name.clone())).collect(),
-                            )
-                        })
-                        .collect();
-                    for (scene_id, scene_name, cuts) in &scenes {
-                        ui.label(egui::RichText::new(scene_name).strong());
-                        for (cut_id, cut_name) in cuts {
-                            let current = *scene_id == self.state.view.scene
-                                && *cut_id == self.state.view.cut;
-                            if ui
-                                .selectable_label(current, format!("    {cut_name}"))
-                                .clicked()
-                                && !current
-                                && guard_gesture(&mut self.canvas, &mut self.state)
-                            {
-                                self.state.goto_cut(*scene_id, *cut_id);
-                                ui.close();
-                            }
-                        }
-                        if ui
-                            .small_button("+ cut")
-                            .on_hover_text("add a cut to this scene")
-                            .clicked()
-                            && guard_gesture(&mut self.canvas, &mut self.state)
-                        {
-                            self.state.new_cut(*scene_id);
-                            ui.close();
-                        }
-                        ui.add_space(4.0);
-                    }
-                    ui.separator();
-                    if ui
-                        .button("+ scene")
-                        .on_hover_text("a new scene with its first cut")
-                        .clicked()
-                        && guard_gesture(&mut self.canvas, &mut self.state)
-                    {
-                        self.state.new_scene();
-                        ui.close();
-                    }
-                };
-                plate::menu_word(ui, "cut", |ui| menus::scroll_laid_menu(ui, cut_rows, cut));
-
-                // GM3: was "ws" — the rooms, then the saved arrangements.
-                let room_rows = menus::room_rows(self.workspaces.list.len());
-                let room = |ui: &mut egui::Ui| {
-                    self.filed_items(ui, "Room");
-                    ui.separator();
-                    ui.label(egui::RichText::new("save current arrangement as:").color(plate::legend_dim()));
-                    ui.horizontal(|ui| {
-                        plate::text_field(ui, egui::TextEdit::singleline(&mut self.ws_name));
-                        let name = self.ws_name.trim().to_string();
-                        if ui.button("save").clicked() && !name.is_empty() {
-                            // Saving a room captures the CURRENT tool/view
-                            // state along with the layout.
-                            let view = Some(self.canvas.snapshot_view(&self.state));
-                            if let Some(w) =
-                                self.workspaces.list.iter_mut().find(|w| w.name == name)
-                            {
-                                w.dock = self.dock.clone();
-                                w.view = view;
-                            } else {
-                                self.workspaces.list.push(Workspace {
-                                    name,
-                                    dock: self.dock.clone(),
-                                    preset: None,
-                                    view,
-                                });
-                            }
-                            self.save_workspaces();
-                            self.ws_name.clear();
-                            ui.close();
-                        }
-                    });
-                    ui.separator();
-                    // THE FORGE ROOM (PSD-brush-forge amendment): built in,
-                    // above the saved rooms — one click arranges the whole
-                    // window for brush design.
-                    if ui
-                        .button("Brush Forge room")
-                        .on_hover_text(
-                            "the brush-design arrangement — forge tall on the                              left, quick list and palette under it, the canvas                              as test paper",
-                        )
-                        .clicked()
-                    {
-                        self.open_brush_maker();
-                        ui.close();
-                    }
-                    // GM17: THE 3D LAYOUT ROOM, built in beside the forge's
-                    // and off the spine like it — the Room menu's verb (D6).
-                    if ui
-                        .button("3D layout room")
-                        .on_hover_text(
-                            "View3D beside a composite viewer, the node graph under them — \
-                             set the cut camera from the view; View ▸ 3D underlay draws the \
-                             model faded under the canvas's drawing",
-                        )
-                        .clicked()
-                    {
-                        self.invoke(Action::Layout3dRoom, ui.ctx());
-                        ui.close();
-                    }
-                    ui.separator();
-                    let mut apply: Option<usize> = None;
-                    let mut remove: Option<usize> = None;
-                    let mut assign: Option<(usize, Option<String>)> = None;
-                    for (i, w) in self.workspaces.list.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button(&w.name)
-                                .on_hover_text("apply this saved arrangement")
-                                .clicked()
-                            {
-                                apply = Some(i);
-                                ui.close();
-                            }
-                            // Bound brush preset for this workspace (workflow
-                            // stage keeps its own brush).
-                            let bound = w.preset.clone().unwrap_or_else(|| "no brush".into());
-                            // GM16: a word, not 🖌, which no embedded face draws.
-                            ui.menu_button(format!("brush: {bound}"), |ui| {
-                                if ui.button("no brush").clicked() {
-                                    assign = Some((i, None));
-                                    ui.close();
-                                }
-                                for p in presets.iter() {
-                                    if ui.button(&p.name).clicked() {
-                                        assign = Some((i, Some(p.name.clone())));
-                                        ui.close();
-                                    }
-                                }
-                            });
-                            // AUDIT [11]: this was the smallest target in
-                            // the row, one item from "apply". Destruction
-                            // must be findable by feel, not by precision.
-                            if plate::danger(ui, "DELETE ROOM") {
-                                remove = Some(i);
-                            }
-                        });
-                    }
-                    if let Some(i) = apply {
-                        let name = self.workspaces.list[i].name.clone();
-                        self.dock = self.workspaces.list[i].dock.clone();
-                        // A custom room is off-spine — no stage highlighted.
-                        self.go_off_spine(&name);
-                        // Same all-or-nothing tool/view + brush gate as the
-                        // stage buttons.
-                        let view_ok = match self.workspaces.list[i].view {
-                            Some(v) => self.canvas.apply_view(&v, &mut self.state),
-                            None => !self.canvas.stroke_active(),
-                        };
-                        self.state.status = format!("workspace: {name}");
-                        if view_ok
-                            && let Some(pname) = self.workspaces.list[i].preset.clone()
-                            && let Some(p) = presets.iter().find(|p| p.name == pname)
-                        {
-                            self.canvas.apply_preset(p);
-                            self.state.status = format!("workspace {name} — brush: {pname}");
-                        }
-                    }
-                    if let Some((i, pname)) = assign {
-                        self.workspaces.list[i].preset = pname;
-                        self.save_workspaces();
-                    }
-                    if let Some(i) = remove {
-                        self.workspaces.list.remove(i);
-                        self.save_workspaces();
-                    }
-                };
-                plate::menu_word(ui, vocab::STEP, |ui| menus::scroll_laid_menu(ui, room_rows, room));
-                // Open or bring forward each pane (a pane lives only while
-                // it's in the dock tree). GM3: was "panes".
-                let window = |ui: &mut egui::Ui| {
-                    for pane in menus::window_panes() {
-                        let present = self.dock.iter_all_tabs().any(|(_, t)| t == pane);
-                        let hover = if present { "bring it forward" } else { "open it" };
-                        if ui.button(pane.title()).on_hover_text(hover).clicked() {
-                            self.open_pane(*pane);
-                            ui.close();
-                        }
-                    }
-                    // Viewers are multi-instance: add up to MAX_VIEWERS.
-                    let next_id = (0..Pane::MAX_VIEWERS).find(|id| {
-                        !self
-                            .dock
-                            .iter_all_tabs()
-                            .any(|(_, t)| *t == Pane::Viewer(*id))
-                    });
-                    if ui
-                        .add_enabled(next_id.is_some(), egui::Button::new("+ Viewer"))
-                        .on_hover_text(
-                            "a read-only composite viewer (the node graph's render) — \
-                        dock one beside the canvas to paint and watch the result live",
-                        )
-                        .clicked()
-                        && let Some(id) = next_id
-                    {
-                        self.add_pane(Pane::Viewer(id));
-                        ui.close();
-                    }
-                    ui.separator();
-                    // Phase 5 step 1: the viewer as a REAL OS window — drag
-                    // it onto the second monitor / pen display.
-                    let mut floating = self.float_viewer.is_open();
-                    if ui
-                        .add(|ui: &mut egui::Ui| {
-                            plate::latch(ui, &mut floating, "viewer in an OS window")
-                        })
-                        .on_hover_text(
-                            "open the composite viewer as a separate real window \
-                        (drag it to another monitor)",
-                        )
-                        .changed()
-                    {
-                        self.float_viewer.set_open(floating);
-                        ui.close();
-                    }
-                    // Phase 5 step 2: the EDITABLE canvas as a real OS window
-                    // — draw directly on the pen display. Docking it back
-                    // goes through the SAME guard as Save/Open/workspace
-                    // switching: a live pen stroke refuses the transition
-                    // rather than being silently orphaned (mid-stroke this
-                    // would otherwise strand touch_active forever — nothing
-                    // else ever resets it).
-                    let mut floating = self.float_canvas.open;
-                    if ui
-                        .add(|ui: &mut egui::Ui| {
-                            plate::latch(ui, &mut floating, "canvas in an OS window")
-                        })
-                        .on_hover_text(
-                            "open the drawing canvas as a separate real window \
-                        (drag it onto the pen display) — every tool works \
-                        there exactly as it does docked",
-                        )
-                        .changed()
-                    {
-                        if floating {
-                            self.float_canvas.open = true;
-                            ui.close();
-                        } else if guard_gesture(&mut self.canvas, &mut self.state) {
-                            self.float_canvas.open = false;
-                            ui.close();
-                        }
-                        // Refused: leave float_canvas.open at its prior value
-                        // (still true) — the checkbox reflects it again next
-                        // frame; the status line already explains why.
-                    }
-                    ui.separator();
-                    self.filed_items(ui, "Window");
-                };
-                let word = plate::menu_word(ui, "window", |ui| {
-                    // AU21: one scroll over the whole body, hand-built rows
-                    // and filed ones alike.
-                    let tall = plate::fit_menu(ui, menus::window_rows());
-                    menus::scroll_menu(ui, tall, window);
-                });
-                menus::mark_word(&word, menus::WINDOW_HANDLES);
-                self.help_menu(ui);
-            };
+            let mut menus = |ui: &mut egui::Ui| self.menu_bar(ui, presets);
             let mut strip = ui.new_child(
                 egui::UiBuilder::new()
                     .max_rect(row)

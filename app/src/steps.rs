@@ -160,6 +160,21 @@ pub fn bar(kind: ProjectKind) -> &'static [Step] {
     }
 }
 
+/// AU11: the catalog's row a `More ▸ Steps ▸` action stands for. Plan and Draw
+/// share a stage, and their rows are two Actions (F4 and F5).
+pub fn row_of(action: Action) -> Option<&'static Step> {
+    let label = match action {
+        Action::RoomLayout => vocab::STEP_PLAN,
+        Action::RoomDrawing => vocab::STEP_DRAW,
+        Action::RoomEdit => vocab::STEP_TIMING,
+        Action::RoomFinishing => vocab::STEP_COLOR,
+        Action::RoomComposite => vocab::STEP_EFFECTS,
+        Action::RoomExport => vocab::STEP_EXPORT,
+        _ => return None,
+    };
+    CATALOG.iter().find(|s| s.label == label)
+}
+
 /// The catalog's row for `stage`, so a stage off a bar still finds its words.
 /// By the stage's own name: `Stage::Drawing` is two rows, and it is Draw's, and
 /// no row lenses `Stage::Layout`, which is Plan's.
@@ -178,11 +193,11 @@ impl Step {
     }
 }
 
-/// Row widths, in points. The row fits nine menus from `WIDE`, and the
+/// Row widths, in points. The row fits six menus from `WIDE`, and the
 /// off-spine pill as well from `WIDE_PLACE`; under that the menus collapse
 /// into one `Menu` button and Search becomes an icon.
-pub const WIDE: f32 = 1120.0;
-pub const WIDE_PLACE: f32 = 1180.0;
+pub const WIDE: f32 = 1040.0;
+pub const WIDE_PLACE: f32 = 1100.0;
 /// The off-spine pill: its width is the name's, between these.
 pub const PLACE_MIN: f32 = 72.0;
 pub const PLACE_MAX: f32 = 140.0;

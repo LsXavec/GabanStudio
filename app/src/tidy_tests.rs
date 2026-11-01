@@ -104,9 +104,9 @@ fn tidy_ctrl_x_cut_event_cuts_cells_and_fires_neither() {
 fn tidy_cut_event_does_nothing_while_typing() {
     let mut h = EditorHarness::new();
     let frames = h.state().frame_count();
-    // The room menu's name field, typed into and its text selected
+    // The arrangements' name field, typed into and its text selected
     // (Shift+Home), with the pointer resting over the sheet.
-    h.click(crate::vocab::STEP);
+    h.open_path("More/Saved arrangements");
     h.focus_text_field(0);
     h.type_text("gb");
     assert_eq!(h.editor().ws_name, "gb", "{}", h.describe());
@@ -239,7 +239,7 @@ fn tidy_open_sample_is_a_file_verb_with_no_chord() {
     assert_eq!(a.label(), "Open the sample cut");
     assert!((1..=120).contains(&a.help().chars().count()), "{}", a.help());
     assert_eq!(a.group(), Group::File);
-    assert_eq!(a.menu(), Some("File/Open the sample cut"));
+    assert_eq!(a.menu(), Some("Help/Example project"));
     for word in ["sample", "demo", "example", "tutorial"] {
         assert!(a.aliases().contains(&word), "{word}");
     }
@@ -258,8 +258,8 @@ fn tidy_open_sample_over_a_clean_document_opens_it() {
     let rev = h.state().engine.revision();
     h.state_mut().saved_rev = rev;
     assert!(!h.state().is_dirty());
-    h.click("file");
-    h.click("Open the sample cut");
+    h.click("Help");
+    h.click("Example project");
     assert!(!h.editor().leave_pending(), "nothing to ask about");
     let p = &h.state().engine.project;
     assert_eq!((p.width, p.height), sample::SIZE);
@@ -270,8 +270,8 @@ fn tidy_open_sample_over_a_clean_document_opens_it() {
 fn tidy_open_sample_over_unsaved_work_asks_first() {
     let mut h = EditorHarness::new();
     assert!(h.state().is_dirty(), "the harness drew a frame");
-    h.click("file");
-    h.click("Open the sample cut");
+    h.click("Help");
+    h.click("Example project");
     assert!(h.editor().leave_pending());
     assert!(h.has("Save changes?"), "{}", h.describe());
     assert_eq!(h.state().engine.project.width, 1920, "still the old document");

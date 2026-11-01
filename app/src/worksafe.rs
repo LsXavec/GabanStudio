@@ -1112,7 +1112,7 @@ mod tests {
 
     /// The slate's file menu, one item (a click inside a menu closes it).
     fn file_menu(h: &mut EditorHarness, item: &str) {
-        h.click("file");
+        h.click(crate::vocab::MENU_FILE);
         h.click(item);
     }
 
@@ -1169,15 +1169,15 @@ mod tests {
         h.editor_mut().set_recent(&[file.clone(), gone.clone()]);
         // A click inside a menu closes it: open it afresh for each one.
         let open_recent = |h: &mut EditorHarness| {
-            h.click("file");
-            h.hover("Open Recent ⏵");
+            h.open_path("File/Open recent");
         };
         open_recent(&mut h);
         assert!(h.has(&format!("{} (missing)", crate::recent_label(&gone))), "{}", h.describe());
-        h.click("remove");
+        h.click("Remove");
         assert_eq!(h.editor().recent_edit, Some(crate::RecentEdit::Remove(gone)));
+        h.close_menus();
         open_recent(&mut h);
-        h.click("clear recent");
+        h.click("Clear recent");
         assert_eq!(h.editor().recent_edit, Some(crate::RecentEdit::Clear));
         // Opening a recent file over unsaved work asks first.
         open_recent(&mut h);

@@ -240,10 +240,8 @@ mod tests {
     use anim_core::raster::{TILE, TILE_LEN, TileCoord, TileData};
     use eframe::egui;
 
-    /// The menus a well-formed path may name (GM7: and the project's own).
-    const MENUS: [&str; 9] = [
-        "File", "Edit", "View", "Sheet", "Project", "Cut", "Room", "Window", "Help",
-    ];
+    /// The menus a well-formed path may name.
+    const MENUS: [&str; 6] = ["File", "Edit", "View", "Animation", "Help", "More"];
 
     #[test]
     fn cmdui_every_action_has_help_a_group_and_a_place() {
@@ -324,12 +322,12 @@ mod tests {
     #[test]
     fn cmdui_all_menus_present_and_edit_undo_undoes() {
         let mut h = EditorHarness::new();
-        for m in ["file", "edit", "view", "sheet", "cut", crate::vocab::STEP, "window", "help"] {
+        for (m, _) in crate::menus::MENUS {
             assert!(h.has(m), "no {m} menu\n{}", h.describe());
         }
         let before = h.state().engine.position();
         assert!(before > 0, "the harness drew a drawing first");
-        h.click("edit");
+        h.click("Edit");
         h.click("Undo");
         assert_eq!(h.state().engine.position(), before - 1, "one step back");
     }
@@ -338,7 +336,7 @@ mod tests {
     fn cmdui_redo_with_nothing_to_redo_is_greyed_and_says_why() {
         let mut h = EditorHarness::new();
         assert!(!h.state().engine.can_redo());
-        h.click("edit");
+        h.click("Edit");
         let redo = h.node_enabled("Redo");
         assert_eq!(redo, Some(false), "Redo is greyed\n{}", h.describe());
         assert!(!h.has_text_containing("nothing to redo"), "said only on hover");
@@ -547,7 +545,7 @@ mod tests {
                 "{button}: no {line:?} in its tooltip\n{}",
                 h.describe()
             );
-            h.hover("file");
+            h.hover("File");
             h.wait(0.2);
         }
         // AU4: the composite latch left the deck, and its chord went with it
@@ -556,9 +554,9 @@ mod tests {
         let chord = chord_of(&binds, action).expect("bound");
         let line = crate::menus::tip_with(action, Some(chord.clone()));
         assert!(line.contains(&format!("({chord})")));
-        h.click("view");
+        h.click("View");
         assert!(!h.has_text_containing(&line), "shown before the hover");
-        h.hover("Composite view");
+        h.hover("Preview final");
         h.wait(1.0);
         assert!(h.has_text_containing(&line), "no {line:?} on its row\n{}", h.describe());
     }
@@ -566,7 +564,7 @@ mod tests {
     #[test]
     fn cmdui_menu_and_palette_reach_the_shell_like_shortcuts() {
         let mut h = EditorHarness::new();
-        h.click("file");
+        h.click("File");
         h.click("Settings…");
         assert_eq!(h.rig().requests, vec![AppRequest::Settings]);
         h.perform(Action::CommandPalette);
@@ -649,8 +647,8 @@ mod tests {
         ];
         assert_eq!(rooms.len(), Stage::ALL.len());
         for (a, st) in rooms.iter().zip(Stage::ALL) {
-            let item = a.menu().expect("in the Room menu");
-            assert!(item.starts_with("Room/") && item.contains(st.name()), "{a:?}: {item}");
+            let item = a.menu().expect("in More ▸ Steps ▸");
+            assert!(item.starts_with("More/Steps/") && item.contains(st.name()), "{a:?}: {item}");
             assert!(a.label().contains(st.name()), "{a:?}: {}", a.label());
         }
         // The English words still find them.
@@ -664,7 +662,7 @@ mod tests {
             assert!(score(word, a).is_some(), "{word:?} finds {a:?}");
         }
         let mut h = EditorHarness::new();
-        h.click(crate::vocab::STEP);
+        h.open_path("More/Steps");
         h.click("Color step");
         assert_eq!(h.editor().stage, Some(Stage::InkPaint));
     }
@@ -742,7 +740,7 @@ mod tests {
             let pos = h.state().engine.position();
             // The menu's Undo is live in a session (the host decides) and
             // asks the host.
-            h.click("edit");
+            h.click("Edit");
             assert_eq!(h.node_enabled("Undo"), Some(true));
             h.click("Undo");
             assert_eq!(h.editor().canvas.history_request, Some(false), "{guest} {hosting}");
@@ -852,8 +850,8 @@ mod tests {
         h.key(egui::Key::Escape);
         assert!(!h.editor().palette.open);
         // ...and the menu greys it.
-        h.click("cut");
-        assert_eq!(h.node_enabled("Next cut"), Some(false));
+        h.open_path("File/Shots");
+        assert_eq!(h.node_enabled("Next shot"), Some(false));
     }
 
     #[test]
@@ -865,12 +863,12 @@ mod tests {
         assert_eq!(h.editor().is_on(Action::Undo), None, "not a toggle");
         // The view menu's toggles say whether they are on.
         let onion = h.state().view.onion;
-        h.click("view");
-        assert_eq!(h.node_toggled("Onion skin"), Some(onion), "{}", h.describe());
-        h.click("Onion skin");
+        h.click("View");
+        assert_eq!(h.node_toggled("Ghost frames"), Some(onion), "{}", h.describe());
+        h.click("Ghost frames");
         assert_eq!(h.state().view.onion, !onion);
-        h.click("view");
-        assert_eq!(h.node_toggled("Onion skin"), Some(!onion));
+        h.click("View");
+        assert_eq!(h.node_toggled("Ghost frames"), Some(!onion));
         h.key(egui::Key::Escape);
         // The About window says its name in glyphs the embedded font has.
         h.perform(Action::About);

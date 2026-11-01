@@ -700,16 +700,21 @@ mod tests {
 
     #[test]
     fn inkpaint_the_project_menu_says_the_colour_law_beside_its_migration() {
-        assert_eq!(Action::ConvertColorsToSrgb.menu(), Some("Project/Convert colours to sRGB…"));
+        assert_eq!(Action::ConvertColorsToSrgb.menu(), Some("More/Effects setup/Convert colors to sRGB…"));
         let mut h = EditorHarness::new();
-        h.click("project");
-        assert!(h.has_text_containing("colour law: legacy (linear, v0.3)"), "{}", h.describe());
+        h.open_path("More/Effects setup");
         // Never saved, so greyed: the hover says why, and what this is.
-        assert_eq!(h.node_enabled("Convert colours to sRGB…"), Some(false));
-        h.hover("Convert colours to sRGB…");
+        assert_eq!(h.node_enabled("Convert colors to sRGB…"), Some(false));
+        h.hover("Convert colors to sRGB…");
         h.wait(1.0);
         assert!(h.has_text_containing("this project: legacy (linear, v0.3)"), "{}", h.describe());
         assert!(h.has_text_containing("save the project first"), "{}", h.describe());
+        // The law's own line moved to Project settings (spec 6.2).
+        h.close_menus();
+        h.perform(Action::ProjectSettings);
+        h.run();
+        assert!(h.has_text_containing("colour law"), "{}", h.describe());
+        assert!(h.has_text_containing("legacy (linear, v0.3)"), "{}", h.describe());
     }
 
     #[test]

@@ -2115,7 +2115,7 @@ mod tests {
     fn render_queue_is_a_window_verb_with_chords_and_opens_from_any_room() {
         use crate::config::{Ctx, Group, Keymap, clashes, default_binds};
         let a = Action::ShowRenderQueue;
-        assert_eq!(a.menu(), Some("Window/Render Queue (delivery)"));
+        assert_eq!(a.menu(), Some("More/Panels/Export queue"));
         assert_eq!((a.group(), a.context()), (Group::Window, Ctx::Global));
         assert!(a.help().contains("render queue") && a.help().len() <= 120);
         for word in [
@@ -2169,7 +2169,7 @@ mod tests {
         let mut h = EditorHarness::with_state(small_with_sakkan());
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::Viewer(0)]);
         h.run();
-        assert_eq!(Action::ToggleFinalLook.menu(), Some("View/Final look (delivery)"));
+        assert_eq!(Action::ToggleFinalLook.menu(), Some("View/Full quality"));
         assert_eq!(h.editor().is_on(Action::ToggleFinalLook), Some(false));
         assert_eq!(h.node_toggled("final look"), Some(false), "{}", h.describe());
         // The viewer's latch turns it on: the frame renders on a worker
@@ -2206,11 +2206,12 @@ mod tests {
         h.perform(Action::RoomDrawing);
         h.run();
         // The menu: the queue itself first; the MP4 greyed without ffmpeg.
-        h.click("file");
-        h.hover("Export… ⏵");
-        assert_eq!(h.node_enabled("PNG sequence…"), Some(true), "{}", h.describe());
-        assert_eq!(h.node_enabled("MP4 video…"), Some(false));
-        h.click("open the render queue (all presets)");
+        h.open_path("File/Export");
+        assert_eq!(h.node_enabled("Picture sequence (PNG)"), Some(true), "{}", h.describe());
+        assert_eq!(h.node_enabled("Video (MP4)"), Some(false));
+        h.close_menus();
+        h.open_path("More/Panels");
+        h.click("Export queue");
         assert!(h.editor().dock.find_tab(&Pane::RenderQueue).is_some());
         // PNG sequence…, past its folder dialog: a PNG 8-bit job over the
         // whole cut, the queue forward and started.

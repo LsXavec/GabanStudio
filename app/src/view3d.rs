@@ -42,7 +42,7 @@ pub const MAX_RENDER_W: u32 = 960;
 pub const WORKER_LOST: &str = "the render stopped before it finished";
 
 /// Why a View3D verb has nothing to act on.
-pub const NO_MODEL: &str = "no Model3D node — File ▸ Import 3D model…";
+pub const NO_MODEL: &str = "no Model3D node — File ▸ Import ▸ Import 3D model…";
 
 /// Why the cut camera is not keyed from an orthographic view.
 pub const ORTHO_REFUSAL: &str = "the cut camera is perspective — press Ortho (numpad 5) to return";
@@ -527,7 +527,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(node) = node else {
         ui.centered_and_justified(|ui| {
             ui.label(
-                egui::RichText::new("no 3D model in this cut — File ▸ Import 3D model…")
+                egui::RichText::new("no 3D model in this cut — File ▸ Import ▸ Import 3D model…")
                     .color(crate::plate::legend_dim()),
             );
         });
@@ -1512,8 +1512,8 @@ mod tests {
     #[test]
     fn worker3d_the_new_verbs_have_help_a_place_and_no_chord_and_the_room_says_the_underlay_is_in() {
         use crate::config::{Ctx, Group, Keymap, clashes, default_binds};
-        assert_eq!(Action::ReloadSequences.menu(), Some("File/Reload image sequences"));
-        assert_eq!(Action::Underlay3d.menu(), Some("View/3D underlay"));
+        assert_eq!(Action::ReloadSequences.menu(), Some("File/Import/Reload image sequences"));
+        assert_eq!(Action::Underlay3d.menu(), Some("View/3D view/3D underlay"));
         assert_eq!((Action::ReloadSequences.group(), Action::Underlay3d.group()), (Group::File, Group::View));
         assert_eq!(Action::Underlay3d.context(), Ctx::Canvas);
         for a in [Action::ReloadSequences, Action::Underlay3d] {
@@ -1533,14 +1533,11 @@ mod tests {
         for alias in ["3d lo", "3d layout", "layout under", "genzu"] {
             assert!(Action::Underlay3d.aliases().contains(&alias), "{alias}");
         }
-        // The room says the underlay is in this build, in its help and on
-        // the Room menu's hover.
-        assert!(!Action::Layout3dRoom.help().contains("not in this build"), "{}", Action::Layout3dRoom.help());
-        let main = include_str!("main.rs");
-        let at = main.find(".button(\"3D layout room\")").expect("the Room menu's button");
-        let hover: String = main[at..].chars().take(320).collect();
-        assert!(!hover.contains("not in this build") && hover.contains("3D underlay"), "{hover}");
-        assert!(main.contains("self.menu_item(ui, Action::ReloadSequences);"), "File ▸ Reload image sequences");
+        // The room says the underlay is in this build, in its help, which is
+        // its menu row's hover.
+        let help = Action::Layout3dRoom.help();
+        assert!(!help.contains("not in this build") && help.contains("3D underlay"), "{help}");
+        assert!(crate::menus::ORDER.contains(&crate::menus::Row::A(Action::ReloadSequences)), "its row");
     }
 
     #[test]

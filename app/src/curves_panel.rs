@@ -1086,7 +1086,7 @@ mod tests {
         for q in ["graph editor", "f-curve", "curves"] {
             assert_eq!(crate::cmdpal::ranked(q, &[]).first(), Some(&Action::ShowCurves), "{q}");
         }
-        assert_eq!(Action::ShowCurves.menu(), Some("Window/Curves (graph editor)"));
+        assert_eq!(Action::ShowCurves.menu(), Some("More/Panels/Motion curves"));
         // Frame curves has a chord in both keymaps, over the curves pane;
         // the key verbs are filed in the Sheet menu.
         for km in Keymap::ALL {
@@ -1096,7 +1096,7 @@ mod tests {
         assert_eq!(Action::FrameCurves.context(), Ctx::Curves);
         for (_, action, _, _) in KEY_VERBS {
             assert_eq!(action.context(), Ctx::Curves, "{action:?}");
-            assert!(action.menu().is_some_and(|m| m.starts_with("Sheet/")), "{action:?}");
+            assert!(action.menu().is_some_and(|m| m.starts_with("Animation/")), "{action:?}");
         }
         // Window › Curves docks the pane where it is not.
         let mut h = EditorHarness::new();

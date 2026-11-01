@@ -1708,8 +1708,7 @@ fn aulesson_opened_file_is_left_alone() {
     assert_eq!(at(&h), 0);
     assert!(!h.state().is_dirty());
     h.editor_mut().set_recent(std::slice::from_ref(&file));
-    h.click("file");
-    h.hover("Open Recent ⏵");
+    h.open_path("File/Open recent");
     h.click(&crate::recent_label(&file));
     settle(&mut h);
     assert_eq!(h.state().file_path.as_deref(), Some(file.as_path()), "the file opened");

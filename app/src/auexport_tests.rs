@@ -1004,9 +1004,7 @@ fn auexport_more_options_holds_the_queue_panel() {
 #[test]
 fn auexport_file_menu_leads_with_the_plain_rows() {
     fn export_menu(h: &mut EditorHarness) {
-        h.click("file");
-        settle(h);
-        h.click("Export… ⏵");
+        h.open_path("File/Export");
         settle(h);
     }
     const OTHER: &str = "Other formats…";
@@ -1048,15 +1046,12 @@ fn auexport_old_rows_land_on_the_queue_itself() {
     settle(&mut h);
     on_the_queue(&h, "the verb");
 
-    // The File menu's own row.
+    // The menu's own row.
     let mut h = shipped(ball(3));
     assert_eq!(h.perform(Action::RoomDrawing), Performed::Done);
     settle(&mut h);
-    h.click("file");
-    settle(&mut h);
-    h.click("Export… ⏵");
-    settle(&mut h);
-    h.click("open the render queue (all presets)");
+    h.open_path("More/Panels");
+    h.click("Export queue");
     settle(&mut h);
     on_the_queue(&h, "the menu's row");
 

@@ -2018,5 +2018,5 @@ fn austrip_left_out_stays_out() {
     let lane = Rect::from_x_y_ranges(left..=right, row.y_range());
     assert_eq!(measure::words_in(&h, lane), Vec::<String>::new(), "a quiet lane");
     // Menu moves: the new verb stands where the spec left it for now.
-    assert_eq!(Action::AddDrawingAfter.menu(), Some("Sheet/Add drawing"));
+    assert_eq!(Action::AddDrawingAfter.menu(), Some("Animation/Add drawing"));
 }

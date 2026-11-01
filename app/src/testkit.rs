@@ -565,6 +565,38 @@ impl EditorHarness {
         self.click_named(label, 0, true);
     }
 
+    /// AU11: open the menus down `path`: `File/Export` presses the word, then
+    /// each submenu's head. Under the narrow `Menu` the word is a head too.
+    #[track_caller]
+    pub fn open_path(&mut self, path: &str) {
+        let mut parts = path.split('/');
+        let word = parts.next().unwrap_or(path);
+        if self.has(word) {
+            self.click(word);
+        } else {
+            self.click("Menu");
+            self.run_frames(4);
+            self.click(&format!("{word} ⏵"));
+        }
+        self.run_frames(4);
+        for head in parts {
+            self.click(&format!("{head} ⏵"));
+            self.run_frames(4);
+        }
+    }
+
+    /// AU11: every menu shut, however deep: Esc takes one level a press.
+    #[track_caller]
+    pub fn close_menus(&mut self) {
+        for _ in 0..4 {
+            if egui::Popup::is_any_open(&self.ctx()) {
+                self.key(egui::Key::Escape);
+                self.run_frames(4);
+            }
+        }
+        assert!(!egui::Popup::is_any_open(&self.ctx()), "a menu stayed open\n{}", self.describe());
+    }
+
     /// Click the n-th of several widgets sharing a name.
     #[track_caller]
     pub fn click_nth(&mut self, label: &str, n: usize) {
@@ -1479,9 +1511,9 @@ mod tests {
         assert!(h.editor().canvas.tool == CanvasTool::Paint);
     }
 
-    /// Open the room menu (GM3: was "ws") and focus its name field.
+    /// Open `More ▸ Saved arrangements ▸` and focus its name field.
     fn focus_field(h: &mut EditorHarness) {
-        h.click(crate::vocab::STEP);
+        h.open_path("More/Saved arrangements");
         h.focus_text_field(0);
         assert!(h.typing(), "no text field took focus\n{}", h.describe());
     }
@@ -3094,13 +3126,14 @@ mod tests {
     /// this and say so in their commit bodies. AU4 brought the rail and
     /// `CanvasOptions`, AU5 `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew`
     /// and `ToggleLockPositions`, AU7 `ToggleHints`, AU9 `RoomExport` and the
-    /// four plain exports, AU10 `HideTools`, AU20 `OpenLessons`.
+    /// four plain exports, AU10 `HideTools`, AU20 `OpenLessons`, AU11
+    /// `BrushMakerRoom`, the three Edit rows and the six menus' words.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (167, 0x3ee163fa00d20adf), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (171, 0x9ef370ef01baff35), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }

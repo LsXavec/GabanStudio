@@ -1932,10 +1932,10 @@ mod tests {
         h.kit_mut().set_size(vec2(1600.0, 900.0));
         h.editor_mut().enter_room(Stage::Drawing);
         settle(&mut h);
-        for menu in ["file", "edit", "view", "sheet", "cut", "project", crate::vocab::STEP, "window", "help"] {
-            h.click(menu);
+        for menu in crate::menus::places() {
+            h.open_path(menu);
             add(menu, text_contrast_audit(&mut h));
-            h.click(menu);
+            h.close_menus();
         }
         h.perform(Action::CommandPalette);
         add("the palette", text_contrast_audit(&mut h));
@@ -2068,7 +2068,7 @@ mod tests {
         let mut h = EditorHarness::with_state(crate::sample::build_sample());
         h.kit_mut().set_size(vec2(1280.0, 800.0));
         settle(&mut h);
-        let right = h.rect("help").right();
+        let right = h.rect(crate::vocab::MENU_MORE).right();
         assert!(right <= 1280.0, "the last menu ends at {right}");
     }
 
@@ -2094,9 +2094,21 @@ mod tests {
             h.kit_mut().set_size(size);
             h.editor_mut().enter_room(Stage::Drawing);
             settle(&mut h);
-            let closed = built_rows(&h);
-            for menu in ["file", "edit", "view", "sheet", "cut", "project", crate::vocab::STEP, "window", "help"] {
-                h.click(menu);
+            h.editor_mut().set_recent(&[std::path::PathBuf::from("C:/gone/c012.animproj")]);
+            let bare = built_rows(&h);
+            for menu in crate::menus::places() {
+                // A submenu's rows are what its opening adds to its parent's.
+                let closed = match menu.rsplit_once('/') {
+                    Some((parent, _)) => {
+                        h.open_path(parent);
+                        settle(&mut h);
+                        let rows = built_rows(&h);
+                        h.close_menus();
+                        rows
+                    }
+                    None => bare.clone(),
+                };
+                h.open_path(menu);
                 settle(&mut h);
                 assert!(egui::Popup::is_any_open(&h.ctx()), "{menu} at {size:?} opens");
                 let open_rows = |h: &EditorHarness| -> Vec<(String, egui::Rect)> {
@@ -2122,21 +2134,18 @@ mod tests {
                 println!("{menu} at {size:?}: {} rows to {bottom}, {} lost: {off:?}", rows.len(), off.len());
                 assert!(off.is_empty(), "{menu} at {size:?} loses {off:?}");
                 if scrolled {
-                    h.key(egui::Key::Escape);
-                    settle(&mut h);
-                    h.click(menu);
+                    h.close_menus();
+                    h.open_path(menu);
                     settle(&mut h);
                     let top = open_rows(&h).iter().map(|r| r.1.top()).fold(f32::MAX, f32::min);
                     assert_eq!(top, first, "{menu} at {size:?} opens at its first row");
                 }
                 match menu {
-                    "sheet" => assert!(rows.len() >= 34, "the whole menu was read: {}", rows.len()),
-                    "edit" => assert!(rows.iter().all(|r| r.1.height() == plate::CTRL_H), "{rows:?}"),
+                    "More/Panels" => assert!(rows.len() >= 16, "the whole menu was read: {}", rows.len()),
+                    "Edit" => assert!(rows.iter().all(|r| r.1.height() == plate::CTRL_H), "{rows:?}"),
                     _ => {}
                 }
-                h.key(egui::Key::Escape);
-                settle(&mut h);
-                assert!(!egui::Popup::is_any_open(&h.ctx()), "{menu} at {size:?} closes");
+                h.close_menus();
             }
         }
     }

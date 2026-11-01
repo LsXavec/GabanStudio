@@ -1055,7 +1055,7 @@ mod tests {
         ] {
             assert!(h.has(label), "the manga room has no {label:?}\n{}", h.describe());
         }
-        assert_eq!(Action::MangaRoom.menu(), Some("Room/Manga"));
+        assert_eq!(Action::MangaRoom.menu(), Some("More/Manga"));
         // The page's tone starts at the common screen: 60 lpi at 45°, round.
         assert_eq!(h.node_toggled("60 lpi"), Some(true));
         assert_eq!(h.node_toggled("screen 45°"), Some(true));
@@ -1338,11 +1338,11 @@ mod tests {
         h.hover("Clip to panels");
         h.wait(1.0);
         assert!(h.has_text_containing(CLIP_DANGER), "{}", h.describe());
-        // The Cut menu's entry says it too (the pane out of the dock).
+        // The menu's entry says it too (the pane out of the dock).
         h.editor_mut().dock = egui_dock::DockState::new(vec![crate::workspace::Pane::Canvas]);
         h.run();
         assert!(!h.has_text_containing(CLIP_DANGER), "the pane's tooltip went with it");
-        h.click("cut");
+        h.open_path("More/Manga tools");
         h.hover("Clip to panels");
         h.wait(1.0);
         assert!(h.has_text_containing(CLIP_DANGER), "{}", h.describe());
@@ -1364,7 +1364,7 @@ mod tests {
             assert_eq!(chord(Action::ExportPages).as_deref(), Some("Ctrl+E"), "{km:?}");
             assert_eq!(chord(Action::NewPage).as_deref(), Some("Ctrl+Shift+N"), "{km:?}");
         }
-        assert_eq!(Action::ToggleRulerSnap.menu(), Some("View/Snap to rulers"));
+        assert_eq!(Action::ToggleRulerSnap.menu(), Some("More/Manga tools/Snap to rulers"));
         let mut h = b5();
         assert_eq!(h.editor().is_on(Action::ToggleRulerSnap), Some(true));
         // The pane's latch runs the verb (the status line is the verb's).

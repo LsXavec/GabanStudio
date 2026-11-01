@@ -979,7 +979,7 @@ fn austart_esc_closes_the_float() {
     settle(&mut h);
     assert!(!h.editor().palette.open, "the palette takes it");
     assert!(is_open(&h), "and the float stays");
-    h.click("file");
+    h.click(crate::vocab::MENU_FILE);
     settle(&mut h);
     assert!(egui::Popup::is_any_open(&h.ctx()));
     h.key(Key::Escape);
@@ -2067,7 +2067,7 @@ fn austart_menu_rows_open_the_float_with_no_modal() {
     let mut h = EditorHarness::with_state_shipped(s);
     sized(&mut h, 1600.0, 900.0);
     assert!(!is_open(&h), "the shipped boot is a fresh install with it closed");
-    assert_eq!(Action::WelcomeScreen.menu(), Some("File/Welcome screen…"));
+    assert_eq!(Action::WelcomeScreen.menu(), Some("Help/Start screen…"));
     h.perform(Action::WelcomeScreen);
     settle(&mut h);
     assert!(is_open(&h) && float_rect(&h).is_some());

@@ -1713,7 +1713,7 @@ mod tests {
         h.wait(1.0);
         assert!(h.has_text_containing(Action::BuildSatsuei.help()), "{}", h.describe());
         assert!(h.has_text_containing("The BG goes through the camera"), "{}", h.describe());
-        assert_eq!(Action::BuildSatsuei.menu(), Some("Project/Build satsuei graph"));
+        assert_eq!(Action::BuildSatsuei.menu(), Some("More/Effects setup/Full finishing setup"));
         // A hidden column still counts: the template wires it.
         let s = h.state_mut();
         let at = s.at();

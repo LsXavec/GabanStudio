@@ -3272,7 +3272,9 @@ impl CanvasView {
         self.steady_row(ui);
         self.keep_inside_row(ui);
         ui.add_space(4.0);
-        egui::CollapsingHeader::new("More").id_salt("brushes_more").show(ui, |ui| {
+        // "More settings": the top row holds a word `More`, and a name is one
+        // control's (spec 1.5 rule 9).
+        egui::CollapsingHeader::new("More settings").id_salt("brushes_more").show(ui, |ui| {
             // The fold stands indented, and `set_width` above it is only a
             // floor: a slider of the body's width would widen the float.
             ui.spacing_mut().slider_width = ui.available_width();
@@ -9411,7 +9413,7 @@ mod camview_tests {
         let (w, fh) = frame_size(&h);
         // D6: in the registry, the Cut menu and the palette.
         assert!(Action::ALL.contains(&Action::PaperSize));
-        assert_eq!(Action::PaperSize.menu(), Some("Cut/Paper size…"));
+        assert_eq!(Action::PaperSize.menu(), Some("File/Shots/Paper size…"));
         assert_eq!(crate::cmdpal::ranked("paper size", &[]).first(), Some(&Action::PaperSize));
         for word in ["hiki", "BG pan", "kami"] {
             assert!(crate::cmdpal::ranked(word, &[]).contains(&Action::PaperSize), "{word}");

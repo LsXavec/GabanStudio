@@ -106,8 +106,25 @@ fn walk(h: &mut EditorHarness, dir: &Path, size: egui::Vec2, suffix: &str) {
     h.editor_mut().start = None;
 }
 
-/// The menus, by what opens them.
-const MENUS: [&str; 9] = ["file", "edit", "view", "sheet", "cut", "project", crate::vocab::STEP, "window", "help"];
+/// The menus and the submenus a shot opens, by the path that opens them.
+const MENUS: [&str; 16] = [
+    "File",
+    "File/Shots",
+    "File/Import",
+    "File/Export",
+    "Edit",
+    "Edit/Tools",
+    "View",
+    "View/3D view",
+    "Animation",
+    "Animation/Track",
+    "Animation/Curves",
+    "Help",
+    "More",
+    "More/Steps",
+    "More/Panels",
+    "More/Saved arrangements",
+];
 
 /// The states off the rooms' own floors, by file name.
 const STATES: [&str; 8] = [
@@ -127,7 +144,7 @@ fn state_name(state: &str, suffix: &str) -> String {
 
 /// Every picture of a state a run owes, kept apart from the rooms' sixteen.
 fn states_owed() -> Vec<(String, u32, u32)> {
-    let menus = MENUS.map(|menu| format!("menu-{menu}"));
+    let menus = MENUS.map(|menu| format!("menu-{}", menu.replace(['/', ' '], "-")));
     let states = menus.iter().map(String::as_str).chain(STATES);
     let owed = SIZES.iter().flat_map(|(w, h, suffix)| {
         states.clone().map(move |state| (state_name(state, suffix), *w, *h))
@@ -205,14 +222,12 @@ fn states(h: &mut EditorHarness, dir: &Path, size: egui::Vec2, suffix: &str) {
     h.editor_mut().enter_room(Stage::Drawing);
     arrive(h, ProbeRoom::Stage(Stage::Drawing));
     for menu in MENUS {
-        h.click(menu);
+        h.open_path(menu);
         h.run_frames(4);
         assert!(egui::Popup::is_any_open(&h.ctx()), "the {menu} shot shows {menu} open");
-        h.shot(size, &dir.join(state_name(&format!("menu-{menu}"), suffix)));
+        h.shot(size, &dir.join(state_name(&format!("menu-{}", menu.replace(['/', ' '], "-")), suffix)));
         // Not a second click: a long menu can stand over its own label.
-        h.key(egui::Key::Escape);
-        h.run_frames(4);
-        assert!(!egui::Popup::is_any_open(&h.ctx()), "{menu} closed before the next shot");
+        h.close_menus();
     }
     for (state, toggle) in [("palette", Action::CommandPalette), ("f1-sheet", Action::ShortcutSheet)] {
         h.perform(toggle);
@@ -1286,10 +1301,7 @@ fn export_moments(dir: &Path) {
             h.wait(4.2);
         }
         if state.contains("file-menu") {
-            h.click("file");
-            h.run_frames(4);
-            h.click("Export… ⏵");
-            h.run_frames(4);
+            h.open_path("File/Export");
             assert!(h.has(crate::config::Action::ExportGif.label()), "{state} shows its rows");
         }
         h.shot(size, &dir.join(format!("{state}.png")));
@@ -1572,7 +1584,7 @@ fn audock_shots_owe_the_shipped_boot_too() {
     assert_eq!(names.len(), 8, "no two shots share a name: {names:?}");
     assert!(shipped.iter().all(|o| o.0.starts_with("shipped-")), "{names:?}");
     // The ignored pass checks all of these at once.
-    assert_eq!(shots_owed().len() + states_owed().len() + shipped.len(), 62);
+    assert_eq!(shots_owed().len() + states_owed().len() + shipped.len(), 76);
 }
 
 #[test]

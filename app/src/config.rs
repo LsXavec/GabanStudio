@@ -233,6 +233,13 @@ pub enum Action {
     ReloadSequences,
     /// GM22: the cut's Model3D node drawn faded under the canvas's drawing.
     Underlay3d,
+    /// AU11: the brush-design room, off the spine like the 3D layout's.
+    BrushMakerRoom,
+    // AU11: Edit's three clipboard rows, one row each however the keys share
+    // them: each performs the verb of the pane it was aimed at.
+    EditCut,
+    EditCopy,
+    EditPaste,
 }
 
 /// GM3: what an action is about — the shortcut sheet's sections.
@@ -519,6 +526,10 @@ impl Action {
         Action::ExportStill,
         Action::ToggleRulerSnap,
         Action::PanelTool,
+        Action::BrushMakerRoom,
+        Action::EditCut,
+        Action::EditCopy,
+        Action::EditPaste,
         Action::ReloadSequences,
         Action::Underlay3d,
     ];
@@ -693,6 +704,10 @@ impl Action {
             Action::PanelTool => "Panel (koma) tool",
             Action::ReloadSequences => "Reload image sequences",
             Action::Underlay3d => "3D underlay",
+            Action::BrushMakerRoom => "Brush maker",
+            Action::EditCut => "Cut",
+            Action::EditCopy => "Copy",
+            Action::EditPaste => "Paste",
         }
     }
 
@@ -848,7 +863,7 @@ impl Action {
             AddRetakeNote => "Note what to fix on this frame of the open cut (it can set the cut to Retake); the sheet shows it.",
             Import3DModel => "Embed a glTF (.glb, .gltf) or OBJ model in the cut and add its Model3D node, as one undo step; View3D shows it.",
             SetCutCameraFromView => "Key the cut camera to what View3D sees at this frame, as one undo step.",
-            Layout3dRoom => "3D layout (LO) room: View3D, a composite viewer and the node graph; View ▸ 3D underlay draws on the model.",
+            Layout3dRoom => "3D layout (LO) room: View3D, a composite viewer and the node graph; View ▸ 3D view ▸ 3D underlay draws on the model.",
             View3dFront => "View3D: look from the front (numpad 1 in Blender).",
             View3dBack => "View3D: look from the back (Ctrl+numpad 1 in Blender).",
             View3dRight => "View3D: look from the right (numpad 3 in Blender).",
@@ -871,6 +886,10 @@ impl Action {
             PanelTool => "Drag on paper: a panel; across a panel: a split at the gutter; a VP or the horizon: moved. One undo step each.",
             ReloadSequences => "Read every image sequence's files again (a re-render on disk shows); also on returning to the window.",
             Underlay3d => "Draw the cut's 3D model faded under the canvas's drawing, at the current frame; a view, not in the export.",
+            BrushMakerRoom => "Brush maker: the forge tall on the left, quick list and palette under it, the canvas as test paper.",
+            EditCut => "Cut the selected sheet cells. Pixels have no Cut: use Copy, then Clear.",
+            EditCopy => "Copy the selected cells, or the selected pixels over the canvas.",
+            EditPaste => "Paste the copied cells, or the copied pixels over the canvas.",
         }
     }
 
@@ -878,6 +897,8 @@ impl Action {
     pub fn group(self) -> Group {
         use Action::*;
         match self {
+            EditCut | EditCopy | EditPaste => Group::Edit,
+            BrushMakerRoom => Group::Room,
             NewProject | Open | Save | SaveAs | Settings | Quit | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | ImportSound | AddSoundTrack
             | ExportEdl | ExportColorSheet | ExportCutAsProject | Import3DModel | ExportPages
@@ -917,164 +938,80 @@ impl Action {
         }
     }
 
-    /// GM3: "Menu/Item" in the menu bar. None = PALETTE-ONLY: the tools
-    /// live on the canvas deck, so the menus do not repeat them.
+    /// GM3: "Menu/Item" in the menu bar. AU11: the paths of spec 6.2; the rows'
+    /// order is `menus::ORDER`. None = PALETTE-ONLY: the presets live in the
+    /// Brushes tiles and on the keys.
     pub fn menu(self) -> Option<&'static str> {
         use Action::*;
         Some(match self {
             NewProject => "File/New…",
             Open => "File/Open…",
             Save => "File/Save",
-            SaveAs => "File/Save As…",
-            Settings => "File/Settings…",
-            Quit => "File/Quit",
-            Undo => "Edit/Undo",
-            Redo => "Edit/Redo",
-            History => "Edit/History",
-            SelectAll => "Edit/Select All",
-            ClearCel => "Edit/Clear active layer",
-            ClearCelAll => "Edit/Clear whole cel",
-            ZoomFit => "View/Fit view",
-            ZoomIn => "View/Zoom in",
-            ZoomOut => "View/Zoom out",
-            Zoom100 => "View/Actual size (100%)",
-            RotateViewLeft => "View/Rotate left 15°",
-            RotateViewRight => "View/Rotate right 15°",
-            ResetRotation => "View/Reset rotation",
-            MirrorView => "View/Mirror view",
-            ToggleOnion => "View/Onion skin",
-            ToggleCompositeView => "View/Composite view",
-            CanvasOptions => "View/Canvas options…",
-            MissCheck => "View/Miss check",
-            // GM12: the transport's verbs share one submenu (the play
-            // verb's path had a "/" in its name, which filed it in a
-            // submenu of its own).
-            PlayPause => "Sheet/Play/Play or pause",
-            ToggleLoop => "Sheet/Play/Loop playback",
-            LoopIn => "Sheet/Play/Loop in",
-            LoopOut => "Sheet/Play/Loop out",
-            ClearLoop => "Sheet/Play/Clear loop range",
-            ToggleScrub => "Sheet/Play/Audio scrub",
-            RamPreview => "Sheet/Play/Render RAM preview",
-            LipFlap => "Sheet/Lip flap…",
-            ImportSound => "File/Import sound…",
-            AddSoundTrack => "File/Add sound track…",
-            Import3DModel => "File/Import 3D model…",
-            ReloadSequences => "File/Reload image sequences",
-            FirstFrame => "Sheet/First frame",
-            PrevFrame => "Sheet/Previous frame",
-            NextFrame => "Sheet/Next frame",
-            LastFrame => "Sheet/Last frame",
-            PrevKey => "Sheet/Previous key",
-            NextKey => "Sheet/Next key",
-            NewDrawing => "Sheet/New drawing",
-            ClearFrameKey => "Sheet/Lift key",
-            RemoveColumn => "Sheet/Remove column",
-            InsertFrames => "Sheet/Insert frame",
-            DeleteFrames => "Sheet/Delete frame",
-            HoldPlus => "Sheet/Hold +1",
-            HoldMinus => "Sheet/Hold -1",
-            RetimeOnes => "Sheet/Retime to 1s (on ones)",
-            RetimeTwos => "Sheet/Retime to 2s (on twos)",
-            RetimeThrees => "Sheet/Retime to 3s (on threes)",
-            Reverse => "Sheet/Reverse timing",
-            ColumnKindCel => "Sheet/Column kind: Cel",
-            ColumnKindBg => "Sheet/Column kind: BG (haikei)",
-            ColumnKindBook => "Sheet/Column kind: Book (overlay)",
-            ColumnKindRef => "Sheet/Column kind: Ref (guide)",
-            ToggleColumnHidden => "Sheet/Hide column",
-            ToggleColumnLocked => "Sheet/Lock column",
-            CopyCells => "Sheet/Copy cells",
-            CutCells => "Sheet/Cut cells",
-            PasteCells => "Sheet/Paste cells",
-            PasteCellsInsert => "Sheet/Paste cells (insert)",
-            TypeIntoCell => "Sheet/Type into cell",
-            AddDrawingAfter => "Sheet/Add drawing",
-            // The Sheet menu is full at a 720 window (aulook_menus_stay_on_the_window).
-            GoToFrame => "View/Go to frame…",
-            // GM14: the curves pane's key verbs, a submenu each (the pane's
-            // right-click menu runs the same verbs).
-            InterpHold => "Sheet/Key interpolation/hold",
-            InterpLinear => "Sheet/Key interpolation/linear",
-            InterpEase => "Sheet/Key interpolation/ease",
-            InterpEaseIn => "Sheet/Key interpolation/ease in (slow start)",
-            InterpEaseOut => "Sheet/Key interpolation/ease out (slow stop)",
-            InterpBezier => "Sheet/Key interpolation/bezier",
-            HandlesAuto => "Sheet/Key handles/auto",
-            HandlesSmooth => "Sheet/Key handles/smooth",
-            HandlesFlat => "Sheet/Key handles/flat",
-            HandlesBroken => "Sheet/Key handles/broken",
-            // GM6: the genga-to-douga verbs.
-            CopyPixels => "Edit/Copy pixels",
-            PastePixels => "Edit/Paste pixels",
-            DuplicateCel => "Edit/Duplicate cel",
-            MakeInbetweens => "Sheet/Make douga (inbetweens)",
-            KindKey => "Sheet/Drawing kind/genga (key)",
-            KindBreakdown => "Sheet/Drawing kind/breakdown",
-            KindInbetween => "Sheet/Drawing kind/douga (inbetween)",
-            KindUnset => "Sheet/Drawing kind/unmarked",
-            PinToLightTable => "View/Light table/Pin this drawing",
-            ShiftTrace => "View/Light table/Shift & trace",
-            ResetShift => "View/Light table/Reset shift",
-            FrameCurves => "View/Frame curves",
-            ShowCurves => "Window/Curves (graph editor)",
-            ShowPaintCheck => "Window/Nuri check (paint check)",
-            // GM11: the delivery — its queue, and the look it renders.
-            ShowRenderQueue => "Window/Render Queue (delivery)",
-            ToggleFinalLook => "View/Final look (delivery)",
-            Underlay3d => "View/3D underlay",
-            // GM7: the project's own menu, beside its colour law.
-            ConvertColorsToSrgb => "Project/Convert colours to sRGB…",
-            BuildComposite => "Project/Build composite from sheet",
-            // GM9: beside the auto-comp, where graphs are made.
-            AddNode => "Project/Add node…",
-            // GM13: and the satsuei look's graph beside them.
-            BuildSatsuei => "Project/Build satsuei graph",
-            ProjectSettings => "Project/Project settings…",
-            WelcomeScreen => "File/Welcome screen…",
-            OpenSample => "File/Open the sample cut",
-            WhatsNew => "Help/What's New",
-            OpenLessons => "Help/Lessons",
-            ToggleHints => "Help/Hints",
-            HideTools => "View/Hide tools",
-            ToggleLockPositions => "View/Lock UI positions",
-            PrevCut => "Cut/Previous cut",
-            NextCut => "Cut/Next cut",
-            PaperSize => "Cut/Paper size…",
-            // GM15: the editorial's verbs. The exports write into the
-            // render folder (no dialog, so no "…"); the Episode render sits
-            // under the queue's own entry, as its "+ episode" button.
-            ShowCutBoard => "Window/Shinkō board (cut board)",
-            ShowEpisode => "Window/Henshū timeline (episode)",
-            PlayEpisode => "Sheet/Play/Play episode",
-            ExportEdl => "File/Export/EDL (CMX3600)",
-            ExportColorSheet => "File/Export/Colour designation sheet (iro shitei)",
-            ExportCutAsProject => "File/Export/Cut as project (for a freelancer)",
-            MakeCutsFromPanels => "Cut/Make cuts from panels",
-            RenderEpisode => "Window/Render Queue/+ episode",
-            AddRetakeNote => "Cut/Add retake note…",
-            // Each item is its pill's Stage::name with its kind (a test
-            // holds them together): the pill says `Plan`, the row `Plan step`.
-            RoomLayout => "Room/Plan step",
-            RoomDrawing => "Room/Draw step",
-            RoomFinishing => "Room/Color step",
-            RoomComposite => "Room/Effects step",
-            RoomEdit => "Room/Timing step",
-            RoomExport => "Room/Export step",
-            // GM17: the 3D layout room (off the spine, like the forge's),
-            // the cut camera keyed from View3D, and View3D's numpad verbs.
-            Layout3dRoom => "Room/3D layout (LO)",
-            // GM18: the manga room (off the spine) and its page verbs.
-            MangaRoom => "Room/Manga",
-            NewPage => "Cut/New page",
-            ClipToPanels => "Cut/Clip to panels",
-            ExportPages => "File/Export/Manga pages (PNG, TIFF)…",
+            SaveAs => "File/Save as…",
+            PrevCut => "File/Shots/Previous shot",
+            NextCut => "File/Shots/Next shot",
+            MakeCutsFromPanels => "File/Shots/Make shots from panels",
+            AddRetakeNote => "File/Shots/Add retake note…",
+            PaperSize => "File/Shots/Paper size…",
+            ImportSound => "File/Import/Import sound…",
+            AddSoundTrack => "File/Import/Add sound track…",
+            Import3DModel => "File/Import/Import 3D model…",
+            ReloadSequences => "File/Import/Reload image sequences",
             ExportGif => "File/Export/Animated GIF",
             ExportMp4 => "File/Export/Video (MP4)",
             ExportPngSequence => "File/Export/Picture sequence (PNG)",
             ExportStill => "File/Export/This frame (PNG)",
-            ToggleRulerSnap => "View/Snap to rulers",
-            SetCutCameraFromView => "Cut/Set cut camera from view",
+            ExportPages => "File/Export/Manga pages (PNG, TIFF)…",
+            ExportEdl => "File/Export/EDL (CMX3600)",
+            ExportColorSheet => "File/Export/Color sheet",
+            ExportCutAsProject => "File/Export/Shot as project (for a freelancer)",
+            RenderEpisode => "File/Export/Episode",
+            ProjectSettings => "File/Project settings…",
+            Settings => "File/Settings…",
+            Quit => "File/Quit",
+
+            Undo => "Edit/Undo",
+            Redo => "Edit/Redo",
+            EditCut => "Edit/Cut",
+            EditCopy => "Edit/Copy",
+            EditPaste => "Edit/Paste",
+            CutCells => "Edit/Clipboard/Cut cells",
+            CopyCells => "Edit/Clipboard/Copy cells",
+            PasteCells => "Edit/Clipboard/Paste cells",
+            PasteCellsInsert => "Edit/Clipboard/Paste cells (insert)",
+            CopyPixels => "Edit/Clipboard/Copy pixels",
+            PastePixels => "Edit/Clipboard/Paste pixels",
+            SelectAll => "Edit/Select all",
+            ClearCel => "Edit/Clear/Clear layer",
+            ClearCelAll => "Edit/Clear/Clear whole drawing",
+            BrushTool => "Edit/Tools/Brush tool",
+            ToggleEraser => "Edit/Tools/Eraser tool",
+            SelectTool => "Edit/Tools/Select tool",
+            FillTool => "Edit/Tools/Fill tool",
+            LassoFillTool => "Edit/Tools/Draw to fill tool",
+            ToggleAlphaLock => "Edit/Tools/Keep inside strokes",
+            PanelTool => "Edit/Tools/Panel tool",
+            BrushSmaller => "Edit/Tools/Smaller brush",
+            BrushBigger => "Edit/Tools/Bigger brush",
+            CycleCelLayer => "Edit/Tools/Next layer",
+            CycleCelLayerBack => "Edit/Tools/Previous layer",
+
+            ZoomIn => "View/Zoom/Zoom in",
+            ZoomOut => "View/Zoom/Zoom out",
+            Zoom100 => "View/Zoom/Actual size (100%)",
+            ZoomFit => "View/Fit",
+            RotateViewLeft => "View/Rotate/Rotate left 15°",
+            RotateViewRight => "View/Rotate/Rotate right 15°",
+            ResetRotation => "View/Rotate/Reset rotation",
+            MirrorView => "View/Mirror",
+            ToggleOnion => "View/Ghost frames",
+            ToggleCompositeView => "View/Preview final",
+            ToggleFinalLook => "View/Full quality",
+            CanvasOptions => "View/Canvas options…",
+            MissCheck => "View/Check/Miss check",
+            PinToLightTable => "View/Check/Pin this drawing",
+            ShiftTrace => "View/Check/Shift & trace",
+            ResetShift => "View/Check/Reset shift",
             View3dFront => "View/3D view/Front",
             View3dBack => "View/3D view/Back",
             View3dRight => "View/3D view/Right",
@@ -1084,14 +1021,100 @@ impl Action {
             View3dCamera => "View/3D view/Camera",
             View3dOrtho => "View/3D view/Ortho or perspective",
             View3dFrameAll => "View/3D view/Frame all",
-            ResetLayout => "Window/Reset layout",
-            QuickStart => "Help/Quick start",
+            SetCutCameraFromView => "View/3D view/Set shot camera from view",
+            Underlay3d => "View/3D view/3D underlay",
+            HideTools => "View/Hide tools",
+            ToggleLockPositions => "View/Lock UI positions",
+
+            AddDrawingAfter => "Animation/Add drawing",
+            NextFrame => "Animation/Go to/Next frame",
+            PrevFrame => "Animation/Go to/Previous frame",
+            FirstFrame => "Animation/Go to/First frame",
+            LastFrame => "Animation/Go to/Last frame",
+            NextKey => "Animation/Go to/Next drawing",
+            PrevKey => "Animation/Go to/Previous drawing",
+            GoToFrame => "Animation/Go to/Go to frame…",
+            PlayPause => "Animation/Play/Play or pause",
+            ToggleScrub => "Animation/Play/Sound while dragging",
+            RamPreview => "Animation/Play/Render preview to memory",
+            PlayEpisode => "Animation/Play/Play episode",
+            ToggleLoop => "Animation/Loop/Loop playback",
+            LoopIn => "Animation/Loop/Loop start",
+            LoopOut => "Animation/Loop/Loop end",
+            ClearLoop => "Animation/Loop/Clear loop range",
+            NewDrawing => "Animation/Insert or delete/New drawing here",
+            DuplicateCel => "Animation/Insert or delete/Duplicate drawing",
+            MakeInbetweens => "Animation/Insert or delete/Make inbetweens",
+            TypeIntoCell => "Animation/Insert or delete/Type into cell",
+            ClearFrameKey => "Animation/Insert or delete/Remove from timeline",
+            InsertFrames => "Animation/Insert or delete/Insert frame",
+            DeleteFrames => "Animation/Insert or delete/Delete frame",
+            HoldPlus => "Animation/Hold/Longer",
+            HoldMinus => "Animation/Hold/Shorter",
+            RetimeOnes => "Animation/Retime/On ones",
+            RetimeTwos => "Animation/Retime/On twos",
+            RetimeThrees => "Animation/Retime/On threes",
+            Reverse => "Animation/Retime/Reverse timing",
+            KindKey => "Animation/Mark as/Key pose",
+            KindBreakdown => "Animation/Mark as/Breakdown",
+            KindInbetween => "Animation/Mark as/Inbetween",
+            KindUnset => "Animation/Mark as/Unmarked",
+            ColumnKindCel => "Animation/Track/Drawing track",
+            ColumnKindBg => "Animation/Track/Background track",
+            ColumnKindBook => "Animation/Track/Overlay track",
+            ColumnKindRef => "Animation/Track/Reference track",
+            ToggleColumnHidden => "Animation/Track/Hide track",
+            ToggleColumnLocked => "Animation/Track/Lock track",
+            LipFlap => "Animation/Track/Lip flap…",
+            RemoveColumn => "Animation/Track/Remove track",
+            InterpHold => "Animation/Curves/Hold key",
+            InterpLinear => "Animation/Curves/Linear",
+            InterpEase => "Animation/Curves/Ease",
+            InterpEaseIn => "Animation/Curves/Ease in",
+            InterpEaseOut => "Animation/Curves/Ease out",
+            InterpBezier => "Animation/Curves/Bezier",
+            HandlesAuto => "Animation/Curves/Auto handles",
+            HandlesSmooth => "Animation/Curves/Smooth handles",
+            HandlesFlat => "Animation/Curves/Flat handles",
+            HandlesBroken => "Animation/Curves/Broken handles",
+            FrameCurves => "Animation/Curves/Frame curves",
+
+            QuickStart => "Help/Quick Start",
+            OpenLessons => "Help/Lessons",
+            ToggleHints => "Help/Hints",
             ShortcutSheet => "Help/Keyboard shortcuts",
-            CommandPalette => "Help/Command palette…",
+            CommandPalette => "Help/Search commands",
+            WhatsNew => "Help/What's New",
+            WelcomeScreen => "Help/Start screen…",
+            OpenSample => "Help/Example project",
             About => "Help/About",
-            SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
-            | Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8
-            | CycleCelLayer | CycleCelLayerBack | BrushSmaller | BrushBigger | PanelTool => return None,
+
+            MangaRoom => "More/Manga",
+            Layout3dRoom => "More/3D layout",
+            BrushMakerRoom => "More/Brush maker",
+            // Each row is its pill's Stage::name with its kind (a test holds
+            // them together): the pill says `Plan`, the row `Plan step`.
+            RoomLayout => "More/Steps/Plan step",
+            RoomDrawing => "More/Steps/Draw step",
+            RoomEdit => "More/Steps/Timing step",
+            RoomFinishing => "More/Steps/Color step",
+            RoomComposite => "More/Steps/Effects step",
+            RoomExport => "More/Steps/Export step",
+            History => "More/Panels/History",
+            ShowCurves => "More/Panels/Motion curves",
+            ShowPaintCheck => "More/Panels/Check paint",
+            ShowRenderQueue => "More/Panels/Export queue",
+            ShowCutBoard => "More/Panels/Shots",
+            ShowEpisode => "More/Panels/Episode timeline",
+            AddNode => "More/Effects setup/Add node…",
+            BuildComposite => "More/Effects setup/Rebuild from layers",
+            BuildSatsuei => "More/Effects setup/Full finishing setup",
+            ConvertColorsToSrgb => "More/Effects setup/Convert colors to sRGB…",
+            NewPage => "More/Manga tools/New page",
+            ClipToPanels => "More/Manga tools/Clip to panels",
+            ToggleRulerSnap => "More/Manga tools/Snap to rulers",
+            ResetLayout => "More/Reset this step",
+            Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8 => return None,
         })
     }
 
@@ -1122,7 +1145,8 @@ impl Action {
             Save => &["write", "store"],
             Open => &["load"],
             NewProject => &["create"],
-            Settings => &["preferences", "options", "config"],
+            // AU11: the LAN room lives in Settings; this is its palette link.
+            Settings => &["preferences", "options", "config", "lan", "host", "join", "network", "room"],
             Quit => &["exit", "close"],
             CommandPalette => &["search", "commands"],
             ShortcutSheet => &["keys", "hotkeys", "cheat sheet"],
@@ -1270,6 +1294,10 @@ impl Action {
             Import3DModel => &["3d", "gltf", "glb", "obj", "model", "layout", "blender"],
             SetCutCameraFromView => &["align camera to view", "kamera", "LO camera"],
             Layout3dRoom => &["3d", "layout", "LO"],
+            BrushMakerRoom => &["brush forge", "forge", "brush design", "kpp", "room"],
+            EditCut => &["cut", "clipboard"],
+            EditCopy => &["copy", "clipboard"],
+            EditPaste => &["paste", "clipboard"],
             MangaRoom => &["manga", "comic", "pages", "koma", "tone", "webtoon", "book", "room"],
             NewPage => &["page", "manga", "add page", "pēji"],
             ClipToPanels => &["koma", "panels", "clip", "mask to panels", "manga"],
@@ -1716,6 +1744,7 @@ impl Action {
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
             | WhatsNew | OpenLessons | ToggleLockPositions | ToggleHints
+            | BrushMakerRoom | EditCut | EditCopy | EditPaste
             | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels | ReloadSequences
             | Underlay3d | CanvasOptions | GoToFrame => None,
         }
@@ -4212,7 +4241,7 @@ pub(crate) fn general_page(
     // turned off there can be turned back on.
     ui.add_space(6.0);
     if crate::plate::latch(ui, &mut config.ui.show_welcome, "Show Start at startup")
-        .on_hover_text("off: start-up opens the same blank paper without it (File ▸ Welcome screen… still shows it)")
+        .on_hover_text("off: start-up opens the same blank paper without it (Help ▸ Start screen… still shows it)")
         .changed()
     {
         changed = true;
