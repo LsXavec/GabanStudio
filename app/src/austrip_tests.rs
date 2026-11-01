@@ -1725,7 +1725,7 @@ fn austrip_say_rule_stands_only_beside_words() {
 }
 
 /// Every shape the frame painted, out of its `Vec`s.
-fn painted(h: &EditorHarness) -> Vec<egui::Shape> {
+pub(crate) fn painted(h: &EditorHarness) -> Vec<egui::Shape> {
     fn walk(shape: &egui::Shape, out: &mut Vec<egui::Shape>) {
         match shape {
             egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),

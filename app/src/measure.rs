@@ -1840,6 +1840,13 @@ mod tests {
             (INK, 1.0, BLUE_WASH, 12.91, 4.5),
             (BLUE_DEEP, 1.0, DESK, 5.62, 3.0),
             (BLUE_DEEP, 1.0, PAPER, 8.27, 3.0),
+            // AU21: the lesson ring's stroke where it crosses a pill or the
+            // strip's peg bar. Alone it is lost there, so its floor is none:
+            // the ISLAND halo round it carries the edge, at the next two rows.
+            (BLUE_DEEP, 1.0, BLUE, 1.36, 0.0),
+            (BLUE_DEEP, 1.0, STEEL, 1.65, 0.0),
+            (ISLAND, 1.0, BLUE, 5.68, 3.0),
+            (ISLAND, 1.0, STEEL, 12.72, 3.0),
             (plate::RED, 1.0, ISLAND, 5.67, 4.5),
             (RED, 1.0, DESK, 4.13, 3.0),
             (RED, 1.0, RED_WASH, 5.04, 4.5),
@@ -1864,7 +1871,7 @@ mod tests {
             (PAPER, 1.0, DESK, 1.47, 0.0),
             (HOVER, 1.0, ISLAND, 1.20, 0.0),
         ];
-        assert_eq!(rows.len(), 44);
+        assert_eq!(rows.len(), 48);
         for (i, (ink, opacity, ground, table, floor)) in rows.into_iter().enumerate() {
             let under = effective(ground, 1.0, [0.0; 3]);
             let got = ratio(effective(ink, opacity, under), under);
@@ -2074,11 +2081,15 @@ mod tests {
         rows.map(|n| (label(&n), n.rect())).collect()
     }
 
-    /// Every menu's every row stands inside every window the rooms are
-    /// measured at: a row off the window is a row a person cannot reach.
+    /// Every menu's every row is reached in every window the rooms are measured
+    /// at: on the window as it opens, or by the wheel over its body. A row off
+    /// the window is a row a person cannot reach. Closed and opened again, a
+    /// menu that scrolled starts at its first row.
     #[test]
     fn aulook_menus_stay_on_the_window() {
-        for size in [vec2(1600.0, 900.0), vec2(1280.0, 800.0), vec2(1280.0, 720.0)] {
+        const WHEEL: f32 = -120.0;
+        let sizes = [(1600.0, 900.0), (1280.0, 800.0), (1280.0, 720.0), (1280.0, 640.0), (1280.0, 520.0), (1280.0, 480.0)];
+        for size in sizes.map(|(w, tall)| vec2(w, tall)) {
             let mut h = EditorHarness::with_state(crate::sample::build_sample());
             h.kit_mut().set_size(size);
             h.editor_mut().enter_room(Stage::Drawing);
@@ -2088,13 +2099,36 @@ mod tests {
                 h.click(menu);
                 settle(&mut h);
                 assert!(egui::Popup::is_any_open(&h.ctx()), "{menu} at {size:?} opens");
-                let rows: Vec<_> = built_rows(&h).into_iter().filter(|r| !closed.contains(r)).collect();
+                let open_rows = |h: &EditorHarness| -> Vec<(String, egui::Rect)> {
+                    built_rows(h).into_iter().filter(|r| !closed.contains(r)).collect()
+                };
+                let rows = open_rows(&h);
                 assert!(!rows.is_empty(), "{menu} at {size:?} builds its rows");
+                let first = rows.iter().map(|r| r.1.top()).fold(f32::MAX, f32::min);
+                let on = |r: &(String, egui::Rect)| r.1.top() >= 0.0 && r.1.bottom() <= size.y;
+                let mut reached: Vec<String> = rows.iter().filter(|r| on(r)).map(|r| r.0.clone()).collect();
+                let over = rows.iter().find(|r| on(r)).map(|r| r.1.center());
+                let mut scrolled = false;
+                if let Some(over) = over.filter(|_| rows.iter().any(|r| !on(r))) {
+                    for _ in 0..24 {
+                        h.wheel_at(over, WHEEL);
+                        reached.extend(open_rows(&h).iter().filter(|r| on(r)).map(|r| r.0.clone()));
+                    }
+                    scrolled = true;
+                }
                 let off: Vec<&str> =
-                    rows.iter().filter(|r| r.1.bottom() > size.y).map(|r| r.0.as_str()).collect();
+                    rows.iter().filter(|r| !reached.contains(&r.0)).map(|r| r.0.as_str()).collect();
                 let bottom = rows.iter().map(|r| r.1.bottom()).fold(0.0, f32::max);
-                println!("{menu} at {size:?}: {} rows to {bottom}, {} off: {off:?}", rows.len(), off.len());
+                println!("{menu} at {size:?}: {} rows to {bottom}, {} lost: {off:?}", rows.len(), off.len());
                 assert!(off.is_empty(), "{menu} at {size:?} loses {off:?}");
+                if scrolled {
+                    h.key(egui::Key::Escape);
+                    settle(&mut h);
+                    h.click(menu);
+                    settle(&mut h);
+                    let top = open_rows(&h).iter().map(|r| r.1.top()).fold(f32::MAX, f32::min);
+                    assert_eq!(top, first, "{menu} at {size:?} opens at its first row");
+                }
                 match menu {
                     "sheet" => assert!(rows.len() >= 34, "the whole menu was read: {}", rows.len()),
                     "edit" => assert!(rows.iter().all(|r| r.1.height() == plate::CTRL_H), "{rows:?}"),

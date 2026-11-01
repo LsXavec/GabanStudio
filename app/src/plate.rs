@@ -1636,15 +1636,18 @@ fn ring_on(painter: &egui::Painter, around: egui::Rect) -> egui::Rect {
 }
 
 /// AU21: a task's chain this frame (spec 5.5): the wish, ancestor first, the
-/// first rect each target found, and where the ring stood last.
+/// first place each target found, and where the ring stood last.
 #[derive(Clone, Default)]
 struct Marks {
     wish: Vec<Target>,
-    found: Vec<Option<egui::Rect>>,
+    found: Vec<Option<(egui::Rect, egui::LayerId)>>,
     stands: Option<(Target, egui::Rect)>,
-    /// Rows drawn this frame, and those a scroll has come to already.
+    /// Rows drawn this frame, and those already met since they came to be drawn.
     laid: Vec<Target>,
-    scrolled: Vec<Target>,
+    met: Vec<Target>,
+    /// The rect the ring was stroked round: none under a menu.
+    #[cfg(test)]
+    painted: Option<egui::Rect>,
 }
 
 fn marks_id() -> egui::Id {
@@ -1657,73 +1660,153 @@ pub fn wish(ctx: &egui::Context, chain: Vec<Target>) {
     ctx.data_mut(|d| {
         let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
         let laid = std::mem::take(&mut marks.laid);
-        marks.scrolled.retain(|t| laid.contains(t) && chain.contains(t));
+        marks.met.retain(|t| laid.contains(t) && chain.contains(t));
         marks.found = vec![None; chain.len()];
         marks.wish = chain;
     });
 }
 
-/// AU21: `target` stands at `rect`, if the wish asks for it. Nothing here reads
-/// a word. The first rect of a frame holds, so a row of an open menu stands
-/// before the word that opened it, however late that word is drawn. A control
-/// scrolled away has no size, and the canvas in its own OS window is not on
-/// this screen.
-pub fn mark(ctx: &egui::Context, rect: egui::Rect, target: Target) {
+/// AU21: does the wish ask for `target`? A scan that only a lesson reads asks
+/// this once a frame first, so the working animator's frame pays nothing.
+pub fn wishes(ctx: &egui::Context, target: Target) -> bool {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Marks>(marks_id()).wish.contains(&target))
+}
+
+/// AU21: the sheet's cells the wish asks for, the same one look.
+pub fn wished_cells(ctx: &egui::Context) -> Vec<(u8, u32)> {
+    let cell = |t: &Target| if let Target::Cell { track, frame } = *t { Some((track, frame)) } else { None };
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Marks>(marks_id()).wish.iter().filter_map(cell).collect())
+}
+
+/// AU21: `target` stands at `rect` in the `ui` it is drawn in, if the wish asks
+/// for it. Nothing here reads a word. The first rect of a frame holds, so a row
+/// of an open menu stands before the word that opened it, however late that
+/// word is drawn. A control scrolled away has no size, and the canvas in its
+/// own OS window is not on this screen.
+pub fn mark(ui: &Ui, rect: egui::Rect, target: Target) {
+    mark_on(ui.ctx(), ui.layer_id(), rect, target);
+}
+
+/// AU21: [`mark`] for a control known by its layer.
+pub fn mark_on(ctx: &egui::Context, layer: egui::LayerId, rect: egui::Rect, target: Target) {
+    #[cfg(test)]
+    MARK_COST.with(|c| c.set(c.get() + 1));
     if !rect.is_positive() || ctx.viewport_id() != egui::ViewportId::ROOT {
         return;
     }
     ctx.data_mut(|d| {
         let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
         if let Some(i) = marks.wish.iter().position(|t| *t == target) {
-            marks.found[i].get_or_insert(rect);
+            marks.found[i].get_or_insert((rect, layer));
         }
     });
 }
 
-/// AU21: [`mark`] for a control in a body that scrolls. Scrolled away it has no
-/// rect, so a wished one is brought into view: once, each time it comes to be
-/// drawn, and the person's own scroll stands after that.
-pub fn mark_row(resp: &Response, target: Target) {
-    let ctx = &resp.ctx;
-    let hidden = !resp.interact_rect.contains_rect(resp.rect) && ctx.viewport_id() == egui::ViewportId::ROOT;
-    let reveal = ctx.data_mut(|d| {
+/// AU21: the frame a wished control comes to be drawn, once, however it is
+/// laid out: what brings a row into view leaves the person's own scroll alone
+/// after that.
+pub fn first_sight(ctx: &egui::Context, target: Target) -> bool {
+    ctx.data_mut(|d| {
         let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
         if !marks.wish.contains(&target) {
             return false;
         }
         marks.laid.push(target);
-        let reveal = hidden && !marks.scrolled.contains(&target);
-        if reveal {
-            marks.scrolled.push(target);
+        let first = !marks.met.contains(&target);
+        if first {
+            marks.met.push(target);
         }
-        reveal
-    });
-    if reveal {
+        first
+    })
+}
+
+/// AU21: [`mark`] for a control in a body that scrolls. Scrolled away it has no
+/// rect, so a wished one that arrives hidden is brought into view: once, each
+/// time it comes to be drawn, and the person's own scroll stands after that.
+pub fn mark_row(resp: &Response, target: Target) {
+    let ctx = &resp.ctx;
+    let hidden = !resp.interact_rect.contains_rect(resp.rect) && ctx.viewport_id() == egui::ViewportId::ROOT;
+    if first_sight(ctx, target) && hidden {
         resp.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
     }
-    mark(ctx, resp.interact_rect, target);
+    mark_on(ctx, resp.layer_id, resp.interact_rect, target);
+}
+
+/// The lesson ring's halo, outside its stroke: `BLUE_DEEP` alone is lost on a
+/// `BLUE` pill and on the strip's `STEEL`.
+const RING_HALO: f32 = 1.0;
+
+/// AU21: something in front of the control stands over its centre: an open menu
+/// or a dialog, and the ring would cross its rows. A float over a pane leaves
+/// the rest of the pane to ring.
+fn ring_covered(ctx: &egui::Context, target: Target, rect: egui::Rect, own: egui::LayerId) -> bool {
+    let beside = |top: egui::LayerId| matches!(target, Target::Pane(_)) && top.order < egui::Order::Foreground;
+    ctx.layer_id_at(rect.center()).is_some_and(|top| top != own && !beside(top))
 }
 
 /// AU21: the ring on the chain's last target with a rect (spec 5.8), on a bare
 /// painter: no `Area`, so `layer_id_at` skips it and the pen passes (R15).
-/// `Target::Paper` is found and rings nothing.
+/// `Target::Paper` is found and rings nothing. Kept inside the window, so a
+/// pane at its edge keeps every side, with a halo of its own: `panel.ring`'s
+/// mark stands on calm ground and has none. A pill's ring is a stadium.
 pub fn stroke_ring(ctx: &egui::Context) {
     let stands = ctx.data_mut(|d| {
         let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
         let last = marks.found.iter().rposition(Option::is_some);
-        marks.stands = last.and_then(|i| Some((marks.wish[i], marks.found[i]?)));
-        marks.stands
+        let found = last.and_then(|i| Some((marks.wish[i], marks.found[i]?)));
+        marks.stands = found.map(|(target, (rect, _))| (target, rect));
+        found
     });
-    if let Some((_, rect)) = stands.filter(|(target, _)| *target != Target::Paper) {
+    let room = ctx.content_rect().shrink(RING_GAP + 2.0 + RING_HALO);
+    let shown = stands.filter(|(target, (rect, layer))| {
+        *target != Target::Paper && !ring_covered(ctx, *target, *rect, *layer)
+    });
+    let painted = shown.map(|(target, (rect, _))| {
+        let rect = rect.intersect(room);
+        let ring = rect.expand(RING_GAP);
+        let round = match target {
+            Target::Step(_) => (ring.height() / 2.0) as u8,
+            _ => R_CONTROL + RING_GAP as u8,
+        };
         let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("lesson_ring"));
-        ring_on(&ctx.layer_painter(layer), rect);
-    }
+        let painter = ctx.layer_painter(layer);
+        painter.rect_stroke(ring, round, Stroke::new(2.0, BLUE_DEEP), StrokeKind::Outside);
+        painter.rect_stroke(ring.expand(2.0), round + 2, Stroke::new(RING_HALO, ISLAND), StrokeKind::Outside);
+        rect
+    });
+    #[cfg(test)]
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Marks>(marks_id()).painted = painted);
+    #[cfg(not(test))]
+    let _ = painted;
 }
 
 /// AU21: where the ring stood at the end of the last frame.
 #[cfg(test)]
 pub fn ring_stands(ctx: &egui::Context) -> Option<(Target, egui::Rect)> {
     ctx.data_mut(|d| d.get_temp_mut_or_default::<Marks>(marks_id()).stands)
+}
+
+/// AU21: the rect the ring was stroked round at the end of the last frame.
+#[cfg(test)]
+pub fn ring_painted(ctx: &egui::Context) -> Option<egui::Rect> {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Marks>(marks_id()).painted)
+}
+
+/// AU21: what of the wish was marked in the last frame.
+#[cfg(test)]
+pub fn ring_found(ctx: &egui::Context) -> Vec<Target> {
+    ctx.data_mut(|d| {
+        let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
+        marks.wish.iter().zip(&marks.found).filter(|(_, f)| f.is_some()).map(|(t, _)| *t).collect()
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// AU21: `mark_on`'s calls on this thread: a frame's bill for its handles.
+    pub static MARK_COST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// AU21: the walks over drawings or layers that only a lesson reads.
+    pub static SCAN_COST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// AU20: a lesson on the Lessons page: a `WELL` card at `rect`, its `picture`

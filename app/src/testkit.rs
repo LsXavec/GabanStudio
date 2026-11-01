@@ -563,6 +563,25 @@ impl EditorHarness {
         self.ring_stands().filter(|stands| !on_paper(stands)).map(|(_, rect)| rect)
     }
 
+    /// AU21: the rect the ring was stroked round: none while a menu covers it.
+    pub fn ring_painted(&self) -> Option<egui::Rect> {
+        crate::plate::ring_painted(&self.h.ctx)
+    }
+
+    /// AU21: a person's wheel over `pos`, by `delta` points of content.
+    pub fn wheel_at(&mut self, pos: egui::Pos2, delta: f32) {
+        let input = self.h.input_mut();
+        input.events.push(egui::Event::PointerMoved(pos));
+        input.events.push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, delta),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        self.run();
+        self.run_frames(30);
+    }
+
     /// AU21: in points, the rect of each widget with this name.
     pub fn rects(&self, label: &str) -> Vec<egui::Rect> {
         let ppp = self.h.ctx.pixels_per_point();
@@ -2587,8 +2606,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 1036;
-    const ASSERT_FLOOR: usize = 6448;
+    const TEST_FLOOR: usize = 1047;
+    const ASSERT_FLOOR: usize = 6532;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

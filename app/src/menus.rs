@@ -136,28 +136,24 @@ pub fn gesture_rows(query: &str) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-/// AU21: the `menu.*` handles, by the menu word that holds each today (spec
-/// 5.5). The Track and Panels rows have no head of their own until Menus.
-const MENU_HANDLES: [(&str, &str); 5] = [
-    ("view", "menu.view"),
-    ("sheet", "menu.animation"),
-    ("sheet", "menu.animation.track"),
-    ("window", "menu.more"),
-    ("window", "menu.more.panels"),
-];
+/// AU21: the `menu.*` handles each menu word holds today (spec 5.5). The Track
+/// and Panels rows have no head of their own until Menus.
+pub const VIEW_HANDLES: &[&str] = &["menu.view"];
+pub const SHEET_HANDLES: &[&str] = &["menu.animation", "menu.animation.track"];
+pub const WINDOW_HANDLES: &[&str] = &["menu.more", "menu.more.panels"];
 
-/// AU21: the handles of the menu word `word`, by its key, never by what it reads.
-pub fn mark_word(ctx: &egui::Context, resp: &egui::Response, word: &str) {
-    for (_, handle) in MENU_HANDLES.iter().filter(|(of, _)| *of == word) {
-        plate::mark(ctx, resp.interact_rect, Target::Named(handle));
+/// AU21: `handles` stand on this menu word, whatever it reads.
+pub fn mark_word(resp: &egui::Response, handles: &[&'static str]) {
+    for handle in handles {
+        plate::mark_on(&resp.ctx, resp.layer_id, resp.interact_rect, Target::Named(handle));
     }
 }
 
 /// AU21: the collapsed `Menu` marks every handle. A row open inside it marked
 /// first, so this stands only until its row is open.
-pub fn mark_narrow(ctx: &egui::Context, resp: &egui::Response) {
-    for (_, handle) in MENU_HANDLES {
-        plate::mark(ctx, resp.interact_rect, Target::Named(handle));
+pub fn mark_narrow(resp: &egui::Response) {
+    for handles in [VIEW_HANDLES, SHEET_HANDLES, WINDOW_HANDLES] {
+        mark_word(resp, handles);
     }
 }
 
@@ -167,6 +163,73 @@ fn menu_rows(menu: &str) -> usize {
     let rows: std::collections::BTreeSet<&str> =
         filed.map(|path| path.split('/').next().unwrap_or(path)).collect();
     rows.len()
+}
+
+/// The panes the Window menu lists by hand. The Brush window is RETIRED (owner
+/// 2026-08-17): its settings live on the canvas deck + right rail. GM14: the
+/// Curves pane is the registry's own item (Window ▸ Curves (graph editor)),
+/// GM7: so is Window ▸ Nuri check (paint check), GM11: Window ▸ Render Queue
+/// (delivery), and GM15: the shinkō board and the henshū timeline.
+pub(crate) fn window_panes() -> impl Iterator<Item = &'static crate::Pane> {
+    use crate::Pane;
+    let filed = |p: &&Pane| {
+        matches!(**p, Pane::Brush | Pane::Curves | Pane::PaintCheck | Pane::RenderQueue | Pane::Board | Pane::Episode)
+    };
+    Pane::ALL.iter().filter(move |p| !filed(p))
+}
+
+/// AU21: the Window menu's whole body, by the row: its panes, `+ Viewer`, the
+/// two OS windows, a row for its two rules, and what the registry files there.
+pub(crate) fn window_rows() -> usize {
+    window_panes().count() + 3 + 1 + menu_rows("Window")
+}
+
+/// AU21: the Cut menu's body: what the registry files, its two rules and three
+/// hand-laid rows, and the tree, whose length is the document's.
+pub(crate) fn cut_rows(project: &anim_core::model::Project) -> usize {
+    let tree: usize = project.scenes.iter().map(|s| s.cuts.len() + 2).sum();
+    menu_rows("Cut") + 5 + tree + 2
+}
+
+/// AU21: the step menu's body: what the registry files, its three rules, the
+/// save row and its line, the two built-in rooms, and the saved ones.
+pub(crate) fn room_rows(saved: usize) -> usize {
+    menu_rows("Room") + 3 + 2 + 2 + saved
+}
+
+/// AU21: a menu `tall` high that the window cannot hold scrolls (a shorter one
+/// the popup lifts to fit). Under the edge a row has no rect: no pointer reaches
+/// it, and neither does a ring. egui keeps a scroll's offset by its id, so the
+/// frame a menu opens starts it at its first row.
+pub(crate) fn scroll_menu(ui: &mut egui::Ui, tall: f32, body: impl FnOnce(&mut egui::Ui)) {
+    let window = ui.ctx().content_rect().height();
+    if tall <= window {
+        return body(ui);
+    }
+    let room = window - ui.spacing().menu_margin.sum().y;
+    let seen = ui.id().with("menu_seen");
+    let frame = ui.ctx().cumulative_frame_nr();
+    let last = ui.ctx().data_mut(|d| {
+        let last = d.get_temp::<u64>(seen);
+        d.insert_temp(seen, frame);
+        last
+    });
+    let mut area = egui::ScrollArea::vertical().max_height(room);
+    if last.is_none_or(|at| at + 1 < frame) {
+        area = area.vertical_scroll_offset(0.0);
+    }
+    let shown = area.show(ui, body);
+    plate::note_viewport(ui, shown.inner_rect, [false, true]);
+}
+
+/// AU21: a menu laid by hand, of about `rows` rows: its fields and tree keep
+/// their own heights, so one past the window at the full row height scrolls
+/// whatever the registry's rows compact to.
+pub(crate) fn scroll_laid_menu(ui: &mut egui::Ui, rows: usize, body: impl FnOnce(&mut egui::Ui)) {
+    let spacing = ui.spacing();
+    let full = rows as f32 * (plate::CTRL_H + spacing.item_spacing.y) + spacing.menu_margin.sum().y;
+    plate::fit_menu(ui, rows);
+    scroll_menu(ui, full, body);
 }
 
 impl crate::Editor {
@@ -220,21 +283,10 @@ impl crate::Editor {
     /// submenu, opened where its first item sits.
     pub(crate) fn menu_items(&mut self, ui: &mut egui::Ui, menu: &str) {
         let tall = plate::fit_menu(ui, menu_rows(menu));
-        // AU21: a menu taller than the window scrolls (a shorter one the popup
-        // lifts to fit). Under the edge a row has no rect: no pointer reaches
-        // it, and neither does a ring.
-        let window = ui.ctx().content_rect().height();
-        if tall > window {
-            let room = window - ui.spacing().menu_margin.sum().y;
-            let shown =
-                egui::ScrollArea::vertical().max_height(room).show(ui, |ui| self.filed_items(ui, menu));
-            plate::note_viewport(ui, shown.inner_rect, [false, true]);
-        } else {
-            self.filed_items(ui, menu);
-        }
+        scroll_menu(ui, tall, |ui| self.filed_items(ui, menu));
     }
 
-    fn filed_items(&mut self, ui: &mut egui::Ui, menu: &str) {
+    pub(crate) fn filed_items(&mut self, ui: &mut egui::Ui, menu: &str) {
         let mut subs: Vec<&str> = Vec::new();
         for a in Action::ALL {
             let Some(path) = a.menu() else { continue };
@@ -281,9 +333,11 @@ impl crate::Editor {
 
     /// The registry-only menus: edit, view, sheet.
     pub(crate) fn plain_menus(&mut self, ui: &mut egui::Ui) {
-        for (label, menu) in [("edit", "Edit"), ("view", "View"), ("sheet", "Sheet")] {
+        for (label, menu, handles) in
+            [("edit", "Edit", &[][..]), ("view", "View", VIEW_HANDLES), ("sheet", "Sheet", SHEET_HANDLES)]
+        {
             let word = plate::menu_word(ui, label, |ui| self.menu_items(ui, menu));
-            mark_word(ui.ctx(), &word, label);
+            mark_word(&word, handles);
         }
     }
 

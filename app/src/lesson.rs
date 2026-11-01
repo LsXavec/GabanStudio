@@ -814,9 +814,26 @@ impl Editor {
         word(token).map(str::to_string)
     }
 
-    /// The task's own step has been left. A task that is the pill stays itself.
+    /// The task's own step has been left. A task that is the pill stays itself,
+    /// and a place off the spine stands when the chain itself goes there: Plate
+    /// One sends the person into the Brush maker, a pane no step holds.
     fn lesson_wandered(&self, task: &Task) -> bool {
-        !matches!(task.done, Done::OnStep(_)) && self.stage != Some(task.step)
+        if matches!(task.done, Done::OnStep(_)) || self.stage == Some(task.step) {
+            return false;
+        }
+        !(self.stage.is_none() && self.lesson_place(task))
+    }
+
+    /// The dock shows a pane the task's chain names and its step does not hold.
+    fn lesson_place(&self, task: &Task) -> bool {
+        let (here, step) = (crate::visible_panes(&self.dock), crate::visible_panes(&task.step.dock()));
+        task.ring.iter().any(|t| matches!(t, Target::Pane(p) if here.contains(p) && !step.contains(p)))
+    }
+
+    /// The card's button has something to show: the paper rings nothing, so a
+    /// task there offers no `Show me where`, and its sentence says the paper.
+    fn lesson_rings(task: Option<&Task>) -> bool {
+        task.is_some_and(|t| !matches!(t.ring.last(), None | Some(Target::Paper)))
     }
 
     /// AU21: what the ring looks for this frame, ancestor first: the way back
@@ -881,6 +898,7 @@ impl Editor {
         let night = plate::chip_bytes(plate::LESSON_NIGHT);
         let armed = self.canvas.brush_color == night;
         let where_only = lesson.class == Class::Experienced || matches!(run.current().map(|t| t.show), Some(Show::Where));
+        let offered = !where_only || Self::lesson_rings(run.current());
 
         let area = ui.max_rect().shrink(CARD_PAD);
         let foot_rows = 2.0;
@@ -938,11 +956,14 @@ impl Editor {
                 if plate::filled_row(ui, NEXT, width).clicked() {
                     self.lesson_next(&ctx);
                 }
-            } else {
+            } else if offered {
                 let word = if where_only { SHOW_WHERE } else { SHOW_ME };
                 if plate::filled_row(ui, word, width).clicked() {
                     self.lesson_show(&ctx);
                 }
+            } else {
+                // `Leave lesson` stays under the hand.
+                ui.add_space(plate::CTRL_H + CARD_GAP);
             }
             if plate::ghost_row(ui, LEAVE, width, None).clicked() {
                 self.leave_lesson();

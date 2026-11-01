@@ -3,7 +3,7 @@
 //! ● + name; held frames show as │. Click any row to jump the playhead.
 
 use anim_core::ids::{ColumnId, LayerId};
-use anim_core::model::LayerProps;
+use anim_core::model::{CelLayer, LayerProps};
 use anim_core::xsheet::Exposure;
 use eframe::egui;
 use egui::{Color32, Rect, Sense, pos2, vec2};
@@ -845,6 +845,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             let mut type_here = false;
             // Content origin (top-left of frame 0's row) for handle geometry.
             let mut geom: Option<(f32, f32)> = None;
+            let cells = plate::wished_cells(ui.ctx());
             let row_w = sheet_w.max(ui.available_width());
             for frame in rows.start as u32..rows.end as u32 {
                 let (row_rect, _) = ui.allocate_exact_size(vec2(row_w, ROW_H), Sense::hover());
@@ -1010,9 +1011,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 }
                 // AU21: a task's cell, as much of it as the scroll shows. A
                 // row scrolled off marks nothing: the ring waits on its ancestor.
-                for (track, _) in col_ids.iter().enumerate() {
-                    let target = Target::Cell { track: track as u8, frame };
-                    plate::mark(ui.ctx(), cell_of(track).intersect(ui.clip_rect()), target);
+                for &(track, _) in cells.iter().filter(|c| c.1 == frame) {
+                    let target = Target::Cell { track, frame };
+                    plate::mark(ui, cell_of(usize::from(track)).intersect(ui.clip_rect()), target);
                 }
             }
 
@@ -1408,6 +1409,20 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     None,
                 );
                 ui.ctx().request_repaint();
+            }
+            // AU21: a task's cell the same way, once, as a marked row is: only
+            // the rows in view are laid out, so one below the fold never
+            // reaches its mark, and the person's own scroll stands after this.
+            for &(track, frame) in cells.iter().filter(|c| c.1 < frame_count) {
+                if let Some((ctop, cleft)) = geom
+                    && plate::first_sight(ui.ctx(), Target::Cell { track, frame })
+                {
+                    ui.scroll_to_rect(
+                        Rect::from_min_size(pos2(cleft, ctop + frame as f32 * ROW_H), vec2(1.0, ROW_H)),
+                        None,
+                    );
+                    ui.ctx().request_repaint();
+                }
             }
         });
     plate::note_viewport(ui, scroll.inner_rect, [false, true]);
@@ -2072,7 +2087,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
             plate::identity_dot(ui.painter(), dot.center(), 3.5, role_chip_color(*role));
             let row = plate::detent(ui, on, role.label());
             if *role == LayerRole::Rough {
-                plate::mark_row(&row, Target::Named("layers.role"));
+                plate::mark_row(&row, LAYERS_ROLE);
             }
             if row.clicked() && !on {
                 let name = if props.name == props.role.default_name() {
@@ -2217,13 +2232,22 @@ fn opacity_cells(
     }
 }
 
+const LAYERS_EYE: Target = Target::Named("layers.eye");
+const LAYERS_ROLE: Target = Target::Named("layers.role");
+
 /// AU21: the row `layers.eye` and `layers.role` stand on: a task over the layer
-/// under the pen means the art beside it, the sketch below the armed layer, and
-/// with no art there the armed layer itself.
-fn ringed_layer(state: &AppState, armed: Option<LayerId>) -> Option<LayerId> {
+/// under the pen means the art beside it, the sketch below the armed layer
+/// first, then art above it, and with no art there the armed layer itself.
+/// Only a lesson's task reads it, so the panel asks first.
+pub(crate) fn ringed_layer(state: &AppState, armed: Option<LayerId>) -> Option<LayerId> {
+    #[cfg(test)]
+    plate::SCAN_COST.with(|c| c.set(c.get() + 1));
+    // Top first, as the strip lists them.
     let layers = state.strip_layers();
-    let art = layers.iter().find(|(_, l)| Some(l.id) != armed && !l.raster.tiles.is_empty());
-    art.map(|(_, l)| l.id).or(armed)
+    let art = |(_, l): &&(usize, &CelLayer)| Some(l.id) != armed && !l.raster.tiles.is_empty();
+    let under = layers.iter().position(|(_, l)| Some(l.id) == armed).map_or(0, |i| i + 1);
+    let below = layers[under..].iter().find(art);
+    below.or_else(|| layers.iter().find(art)).map(|(_, l)| l.id).or(armed)
 }
 
 pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
@@ -2268,13 +2292,13 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             }
             ui.separator();
             let custom = ui.button(egui::RichText::new("custom layer").color(plate::LEGEND));
-            plate::mark(ui.ctx(), custom.interact_rect, Target::Named("layers.custom"));
+            plate::mark(ui, custom.interact_rect, Target::Named("layers.custom"));
             if custom.clicked() {
                 state.layer_add_role(anim_core::model::LayerRole::Custom);
                 ui.close();
             }
         });
-        plate::mark(ui.ctx(), add.response.interact_rect, Target::Named("layers.add"));
+        plate::mark(ui, add.response.interact_rect, Target::Named("layers.add"));
         add.response.card("add a layer — it lands at its role's pipeline position");
 
         // PSD-cel-layers Stage 4: the stack presets. Picking binds the
@@ -2375,7 +2399,8 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         return;
     }
     let armed_id = state.active_layer_id();
-    let ringed = ringed_layer(state, armed_id);
+    let asked = [LAYERS_EYE, LAYERS_ROLE].iter().any(|t| plate::wishes(ui.ctx(), *t));
+    let ringed = if asked { ringed_layer(state, armed_id) } else { None };
     let narrow = ui.available_width() < NARROW_STRIP;
     for (row_i, (lid, name, visible, opacity)) in rows.iter().enumerate() {
         let is_active = armed_id == Some(*lid);
@@ -2386,7 +2411,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             let eye_icon = if *visible { Icon::Eye } else { Icon::EyeOff };
             let eye = plate::icon_button(ui, eye_icon, "", "show / hide");
             if ringed == Some(*lid) {
-                plate::mark_row(&eye, Target::Named("layers.eye"));
+                plate::mark_row(&eye, LAYERS_EYE);
             }
             if eye.clicked() {
                 state.layer_set_props(
@@ -2452,7 +2477,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             });
             // AU21: after the card, whose Rough row stands first while it is open.
             if ringed == Some(*lid) {
-                plate::mark_row(&dot_resp, Target::Named("layers.role"));
+                plate::mark_row(&dot_resp, LAYERS_ROLE);
             }
 
             // Name: click = activate, double-click = rename — in a FIXED

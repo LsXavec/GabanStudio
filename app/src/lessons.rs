@@ -283,7 +283,7 @@ pub const PROBED: Lesson = Lesson {
         guide: &[],
         stand_in: &[],
         miss: None,
-        show: Show::Where,
+        show: Show::Trace(&[]),
     }],
     closing: "",
     ..Lesson::BLANK

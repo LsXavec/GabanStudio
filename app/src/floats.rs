@@ -219,7 +219,7 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
     if close {
         args.floats.close(f);
     }
-    plate::mark(ctx, shown.rect, Target::Float(f));
+    plate::mark_on(ctx, shown.layer_id, shown.rect, Target::Float(f));
     if let Some(rects) = args.pane_rects.as_deref_mut() {
         rects.push((f.pane(), shown.rect, shown.layer_id));
     }

@@ -648,9 +648,43 @@ fn lesson_owed() -> Vec<(String, u32, u32)> {
 /// AU21: the ring on a rail key, on a menu's word, on the row that opens.
 const GUIDE: [&str; 3] = ["guide-rail", "guide-menu", "guide-row"];
 
+/// AU21: the ring where its control waits: on `More` at the Pocket tier, on the
+/// band's `…`, on a cell the sheet came to, on the strip's next sheet.
+const GUIDE_AT: [(&str, u32, u32); 4] =
+    [("guide-pocket", 853, 480), ("guide-fold", 1024, 640), ("guide-cell", 832, 520), ("guide-strip", 1600, 900)];
+
 fn guide_owed() -> Vec<(String, u32, u32)> {
     let sized = |&(w, h, suffix): &(u32, u32, &str)| GUIDE.map(|state| (format!("{state}{suffix}.png"), w, h));
-    SIZES.iter().flat_map(sized).collect()
+    let placed = GUIDE_AT.iter().map(|(name, w, h)| (format!("{name}.png"), *w, *h));
+    SIZES.iter().flat_map(sized).chain(placed).collect()
+}
+
+/// AU21: one harness each, gone before the next: a GPU harness holds the device.
+fn guide_placed(dir: &Path) {
+    use crate::auguide_tests::{stand, strip_up_for_color};
+    use crate::aurail_tests::sized;
+    use crate::lessons::Target;
+    let held = Target::Rail(crate::rail::Key::More);
+    const POCKET: &[Target] = &[Target::Rail(crate::rail::Key::More), Target::Rail(crate::rail::Key::Size)];
+    const FOLD: &[Target] = &[Target::Named("band.fold"), Target::Named("band.speed"), Target::Named("speed.medium")];
+    const CELL: &[Target] = &[Target::Cell { track: 0, frame: 16 }];
+    let shot = |mut h: EditorHarness, at: usize, chain: &'static [Target], step: Stage, rings: Target| {
+        let (name, w, tall) = GUIDE_AT[at];
+        sized(&mut h, w as f32, tall as f32);
+        stand(&mut h, chain, step);
+        assert_eq!(h.ring_stands().map(|s| s.0), Some(rings), "{name}");
+        h.shot(egui::vec2(w as f32, tall as f32), &dir.join(format!("{name}.png")));
+    };
+    shot(EditorHarness::with_gpu_ready(), 0, POCKET, Stage::Drawing, held);
+    shot(EditorHarness::with_gpu_animation(), 1, FOLD, Stage::Drawing, FOLD[0]);
+    let sample = crate::sample::build_sample();
+    shot(EditorHarness::with_gpu_shipped(sample), 2, CELL, Stage::Edit, CELL[0]);
+    let (name, w, tall) = GUIDE_AT[3];
+    let mut h = EditorHarness::with_gpu_shipped(crate::auguide_tests::film().build());
+    sized(&mut h, w as f32, tall as f32);
+    strip_up_for_color(&mut h);
+    assert!(h.ring_rect().is_some(), "{name}");
+    h.shot(egui::vec2(w as f32, tall as f32), &dir.join(format!("{name}.png")));
 }
 
 fn guide_moments(dir: &Path) {
@@ -671,6 +705,7 @@ fn guide_moments(dir: &Path) {
         h.run_frames(4);
         h.shot(size, &dir.join(format!("guide-row{suffix}.png")));
     }
+    guide_placed(dir);
 }
 
 /// AU7: the lane as it teaches: a hint with its button and dots, under the

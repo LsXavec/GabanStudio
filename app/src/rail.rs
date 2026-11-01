@@ -196,7 +196,7 @@ fn tool_key(ui: &mut egui::Ui, args: &mut OverlayArgs, key: Key, size: Vec2, cap
     let caption = captioned.then_some(face.caption);
     let opened = armed && args.floats.is_open(face.options);
     let resp = plate::rail_key(ui, size, Sense::click(), face.icon, caption, face.name, armed, opened, armed);
-    plate::mark(ui.ctx(), resp.interact_rect, Target::Rail(key));
+    plate::mark(ui, resp.interact_rect, Target::Rail(key));
     let resp = if key == Key::Brush {
         hover_tip_with(resp, face.action, || args.canvas.drawing_with(args.state))
     } else {
@@ -229,7 +229,7 @@ fn size_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: bo
     let (px, range) = (args.canvas.active_px(), args.canvas.px_range());
     let caption = captioned.then_some("Size");
     let resp = plate::size_key(ui, size, caption, size_t(px, range));
-    plate::mark(ui.ctx(), resp.interact_rect, Target::Rail(Key::Size));
+    plate::mark(ui, resp.interact_rect, Target::Rail(Key::Size));
     // The whole pull, from the size at the press: a frame's delta would carry
     // a pointer's jump onto the key, and a press alone changes nothing.
     let from = resp.id.with("from");
@@ -280,7 +280,7 @@ fn color_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: b
     let caption = captioned.then_some("Color");
     let ink = plate::chip(args.canvas.brush_color);
     let resp = plate::color_key(ui, size, caption, ink, opened);
-    plate::mark(ui.ctx(), resp.interact_rect, Target::Rail(Key::Color));
+    plate::mark(ui, resp.interact_rect, Target::Rail(Key::Color));
     let resp = resp.card("Brush color — opens your colors");
     if resp.clicked() {
         let busy = args.canvas.stroke_active();
@@ -293,7 +293,7 @@ fn layers_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: 
     let caption = captioned.then_some("Layers");
     let resp =
         plate::rail_key(ui, size, Sense::click(), Icon::Layers, caption, "Layers", false, opened, false);
-    plate::mark(ui.ctx(), resp.interact_rect, Target::Rail(Key::Layers));
+    plate::mark(ui, resp.interact_rect, Target::Rail(Key::Layers));
     let resp = resp.card("Layers — opens your layers");
     if resp.clicked() {
         if args.layers_docked {
@@ -309,7 +309,7 @@ fn hand_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: bo
     let held = args.canvas.hand_held;
     let caption = captioned.then_some("Hand");
     let resp = plate::rail_key(ui, size, Sense::click(), Icon::Hand, caption, "Hand", held, false, false);
-    plate::mark(ui.ctx(), resp.interact_rect, Target::Rail(Key::Hand));
+    plate::mark(ui, resp.interact_rect, Target::Rail(Key::Hand));
     let resp = resp.card("Hand (Space) — drag to move the canvas. Tap a tool to stop.");
     if resp.clicked() && !args.canvas.pen_busy() {
         args.canvas.hand_held = !held;
@@ -322,7 +322,7 @@ fn flip_key(ui: &mut egui::Ui, args: &mut OverlayArgs, size: Vec2, captioned: bo
     let held = args.canvas.rail_flip;
     let caption = captioned.then_some("Flip");
     let resp = plate::rail_key(ui, size, Sense::drag(), Icon::Flip, caption, "Flip", held, false, false);
-    plate::mark(ui.ctx(), resp.interact_rect, Target::Rail(Key::Flip));
+    plate::mark(ui, resp.interact_rect, Target::Rail(Key::Flip));
     args.canvas.rail_flip = resp.is_pointer_button_down_on();
     resp.card("Flip (R) — hold to see the drawing before this one.");
 }
@@ -342,7 +342,7 @@ fn draw_key(ui: &mut egui::Ui, args: &mut OverlayArgs, key: Key, tier: Tier, cap
             let open = args.floats.more;
             let resp =
                 plate::rail_key(ui, size, Sense::click(), Icon::Dots, None, "More tools", false, open, false);
-            plate::mark(ui.ctx(), resp.interact_rect, Target::Rail(Key::More));
+            plate::mark(ui, resp.interact_rect, Target::Rail(Key::More));
             if resp.card("More tools — the keys this height leaves out").clicked() {
                 args.floats.toggle_more();
             }
