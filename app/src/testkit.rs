@@ -692,6 +692,19 @@ impl EditorHarness {
         self.run();
     }
 
+    /// AU11: where the `n`-th text field stands, for a press by position.
+    #[track_caller]
+    pub fn text_field_rect(&self, n: usize) -> egui::Rect {
+        let fields = self.h.query_all_by_role(egui::accesskit::Role::TextInput);
+        fields.into_iter().nth(n).unwrap_or_else(|| panic!("text field {n}\n{}", self.describe())).rect()
+    }
+
+    /// AU11: what the drag fields on screen read, in tree order.
+    pub fn drag_values(&self) -> Vec<f64> {
+        let fields = self.h.query_all_by_role(egui::accesskit::Role::SpinButton);
+        fields.into_iter().filter_map(|field| field.accesskit_node().numeric_value()).collect()
+    }
+
     /// GM13: click the ONE combo box showing `value` — a combo carries its
     /// value, not a name (`ComboBox = "…"` in [`describe`](Self::describe)).
     #[track_caller]
@@ -2657,8 +2670,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 1047;
-    const ASSERT_FLOOR: usize = 6532;
+    const TEST_FLOOR: usize = 1117;
+    const ASSERT_FLOOR: usize = 6850;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

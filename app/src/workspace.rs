@@ -113,7 +113,7 @@ impl Pane {
             Pane::Curves => vocab::MOTION_CURVES.into(),
             Pane::PaintCheck => "Nuri check (paint check)".into(),
             Pane::RenderQueue => vocab::EXPORT_QUEUE.into(),
-            // GM15: the studio's words first (D7), as the Window menu says
+            // GM15: the studio's words first (D7), as `More ▸ Panels ▸` says
             // them.
             Pane::Board => "Shinkō board (cut board)".into(),
             Pane::Episode => "Henshū timeline (episode)".into(),

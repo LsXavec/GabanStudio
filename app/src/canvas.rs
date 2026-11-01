@@ -9411,7 +9411,7 @@ mod camview_tests {
     fn camview_paper_size_is_a_verb_whose_window_sets_the_paper_in_one_step() {
         let mut h = harness();
         let (w, fh) = frame_size(&h);
-        // D6: in the registry, the Cut menu and the palette.
+        // D6: in the registry, File ▸ Shots ▸ and the palette.
         assert!(Action::ALL.contains(&Action::PaperSize));
         assert_eq!(Action::PaperSize.menu(), Some("File/Shots/Paper size…"));
         assert_eq!(crate::cmdpal::ranked("paper size", &[]).first(), Some(&Action::PaperSize));

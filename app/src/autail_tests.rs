@@ -78,7 +78,7 @@ fn clicked(rows: &[u32], draw: fn(&mut AppState, i32)) -> AppState {
 }
 
 /// A shot whose active track holds one drawing for each of `holds`.
-fn timed(holds: &[u32]) -> AppState {
+pub(crate) fn timed(holds: &[u32]) -> AppState {
     let mut s = AppState::new_project("t", 64, 36, 12, 72.0);
     ProjectKind::Animation.stamp(&mut s.engine.project);
     s.set_cut_length(holds.iter().sum());
@@ -93,7 +93,7 @@ fn timed(holds: &[u32]) -> AppState {
 }
 
 /// `timed`, with `frame` on the active track blanked: a gap, or a tail.
-fn gap_at(mut s: AppState, frame: u32) -> AppState {
+pub(crate) fn gap_at(mut s: AppState, frame: u32) -> AppState {
     let (at, column) = (s.at(), s.view.active_column);
     let cmd = Command::SetCell { at, column, frame, key: Some(Exposure::Empty) };
     s.engine.apply("gap", vec![cmd]).expect("the gap lands");
@@ -774,11 +774,12 @@ fn autail_queue_keeps_the_whole_cut() {
     assert_eq!((job.frames, job.span), (None, (0, 11)), "a deliberate blank is made here");
     let mut h = shipped(s);
     h.state_mut().render_queue.queue.jobs.clear();
-    // The menu's queue rows read that menu's range, as the sheet of it says.
+    // Off the queue, the blank tail is a range a person sets in the menu.
+    h.editor_mut().export_range = Some((0, 11));
     let ctx = h.ctx();
-    h.editor_mut().queue_export(&ctx, ExportKind::Png, dir.path());
+    h.editor_mut().export_to(&ctx, ExportKind::Png, dir.path());
     let job = &h.state().render_queue.queue.jobs[0];
-    assert_eq!((job.frames, job.total()), (None, 12));
+    assert_eq!((job.frames, job.total()), (Some((0, 11)), 12));
 }
 
 // ---- Longer and Shorter (spec 3.9) ----

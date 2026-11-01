@@ -752,8 +752,8 @@ impl Editor {
         let landed = std::mem::take(&mut self.state.render_queue.landed);
         let count = landed.len() as u32;
         // A blank graph still exports (spec AU8), and it earns no tick.
-        let art = self.state.has_art() || crate::export_step::shows_a_source(self.state.cut());
-        self.quick_start[welcome::EXPORT_STEP] |= count > 0 && art && self.lesson.is_none();
+        let art = || self.state.has_art() || crate::export_step::shows_a_source(self.state.cut());
+        self.quick_start[welcome::EXPORT_STEP] |= count > 0 && self.lesson.is_none() && art();
         let card = self.stage == Some(Stage::Export) && visible_panes(&self.dock).contains(&Pane::RenderQueue);
         for file in landed {
             if !card && self.say.off {

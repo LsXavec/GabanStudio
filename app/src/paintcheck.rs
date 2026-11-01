@@ -1,4 +1,4 @@
-//! GM7 THE PAINT CHECK (Window ▸ nuri check): the shiage room's last pass
+//! GM7 THE PAINT CHECK (More ▸ Panels ▸ Check paint): the shiage room's last pass
 //! before a cut goes out — unpainted holes (bare paper the art encloses),
 //! stray colours (paint that is no chip of the palette) and soft edges
 //! (part-covered paint), across the cut or a frame range. The scan runs on

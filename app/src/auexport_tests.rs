@@ -853,12 +853,14 @@ fn auexport_quick_start_ends_in_a_file() {
     export_gif(&mut h, Action::ExportGif, &dir.path().join("from-the-menu.gif"));
     assert!(tick(&h));
 
-    // By the queue's old route, which opens the pane as it always did.
+    // With the queue standing open: the job is the queue's as well.
     let mut h = shipped(ball(3));
+    assert_eq!(h.perform(Action::ShowRenderQueue), Performed::Done);
+    settle(&mut h);
     let ctx = h.ctx();
     let old = dir.path().join("old-row");
     std::fs::create_dir(&old).unwrap();
-    h.editor_mut().queue_export(&ctx, ExportKind::Png, &old);
+    h.editor_mut().export_to(&ctx, ExportKind::Png, &old);
     settle(&mut h);
     assert!(visible_panes(&h.editor().dock).contains(&Pane::RenderQueue));
     h.run_export_to_end();
@@ -1055,16 +1057,15 @@ fn auexport_old_rows_land_on_the_queue_itself() {
     settle(&mut h);
     on_the_queue(&h, "the menu's row");
 
-    // An old row's job brings the queue forward with its job on view.
+    // A job from `File ▸ Export ▸` runs with the queue open, its job on view.
     let dir = tempfile::tempdir().unwrap();
-    let mut h = shipped(ball(3));
     let ctx = h.ctx();
-    h.editor_mut().queue_export(&ctx, ExportKind::Png, dir.path());
+    h.editor_mut().export_to(&ctx, ExportKind::Png, dir.path());
     settle(&mut h);
-    on_the_queue(&h, "the old export");
+    on_the_queue(&h, "the export");
     h.run_export_to_end();
     settle(&mut h);
-    assert_eq!(h.state().render_queue.queue.jobs[0].asked, None, "its range is the form's to know");
+    assert_eq!(h.state().render_queue.queue.jobs[0].asked, Some(ExportKind::Png));
 }
 
 /// Spec 5.5's pinned list and AU15's smallest pane: the jobs, Stop and the fold

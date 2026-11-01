@@ -327,7 +327,7 @@ mod tests {
         }
         let before = h.state().engine.position();
         assert!(before > 0, "the harness drew a drawing first");
-        h.click("Edit");
+        h.click(crate::vocab::MENU_EDIT);
         h.click("Undo");
         assert_eq!(h.state().engine.position(), before - 1, "one step back");
     }
@@ -336,7 +336,7 @@ mod tests {
     fn cmdui_redo_with_nothing_to_redo_is_greyed_and_says_why() {
         let mut h = EditorHarness::new();
         assert!(!h.state().engine.can_redo());
-        h.click("Edit");
+        h.click(crate::vocab::MENU_EDIT);
         let redo = h.node_enabled("Redo");
         assert_eq!(redo, Some(false), "Redo is greyed\n{}", h.describe());
         assert!(!h.has_text_containing("nothing to redo"), "said only on hover");
@@ -554,7 +554,7 @@ mod tests {
         let chord = chord_of(&binds, action).expect("bound");
         let line = crate::menus::tip_with(action, Some(chord.clone()));
         assert!(line.contains(&format!("({chord})")));
-        h.click("View");
+        h.click(crate::vocab::MENU_VIEW);
         assert!(!h.has_text_containing(&line), "shown before the hover");
         h.hover("Preview final");
         h.wait(1.0);
@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn cmdui_menu_and_palette_reach_the_shell_like_shortcuts() {
         let mut h = EditorHarness::new();
-        h.click("File");
+        h.click(crate::vocab::MENU_FILE);
         h.click("Settings…");
         assert_eq!(h.rig().requests, vec![AppRequest::Settings]);
         h.perform(Action::CommandPalette);
@@ -740,7 +740,7 @@ mod tests {
             let pos = h.state().engine.position();
             // The menu's Undo is live in a session (the host decides) and
             // asks the host.
-            h.click("Edit");
+            h.click(crate::vocab::MENU_EDIT);
             assert_eq!(h.node_enabled("Undo"), Some(true));
             h.click("Undo");
             assert_eq!(h.editor().canvas.history_request, Some(false), "{guest} {hosting}");
@@ -863,11 +863,11 @@ mod tests {
         assert_eq!(h.editor().is_on(Action::Undo), None, "not a toggle");
         // The view menu's toggles say whether they are on.
         let onion = h.state().view.onion;
-        h.click("View");
+        h.click(crate::vocab::MENU_VIEW);
         assert_eq!(h.node_toggled("Ghost frames"), Some(onion), "{}", h.describe());
         h.click("Ghost frames");
         assert_eq!(h.state().view.onion, !onion);
-        h.click("View");
+        h.click(crate::vocab::MENU_VIEW);
         assert_eq!(h.node_toggled("Ghost frames"), Some(!onion));
         h.key(egui::Key::Escape);
         // The About window says its name in glyphs the embedded font has.

@@ -2214,10 +2214,9 @@ mod tests {
         h.click("Export queue");
         assert!(h.editor().dock.find_tab(&Pane::RenderQueue).is_some());
         // PNG sequence…, past its folder dialog: a PNG 8-bit job over the
-        // whole cut, the queue forward and started.
+        // whole cut, started, with the queue standing open behind it.
         let ctx = h.ctx();
-        h.editor_mut()
-            .queue_export(&ctx, ExportKind::Png, dir.path());
+        h.editor_mut().export_to(&ctx, ExportKind::Png, dir.path());
         let j = h.state().render_queue.queue.jobs[0].clone();
         assert_eq!(
             (j.preset().name, j.frames, j.burn_ins),

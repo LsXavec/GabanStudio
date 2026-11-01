@@ -1196,7 +1196,7 @@ impl AppState {
         self.engine.evaluator.set_base(dir);
     }
 
-    /// GM22: File ▸ Reload image sequences (and the window regaining
+    /// GM22: File ▸ Import ▸ Reload image sequences (and the window regaining
     /// focus): every ImageSequence node's values and their downstream are
     /// dropped, so the next eval stats the files again — a re-rendered file
     /// changes only the frames that show it. A look at the disk: no undo
@@ -3683,7 +3683,7 @@ impl AppState {
         self.report(r, label);
     }
 
-    /// GM12: File ▸ Import sound… (`as_track` false: the cut's first track
+    /// GM12: File ▸ Import ▸ Import sound… (`as_track` false: the cut's first track
     /// while it has none, else a further one) or Add sound track… (true).
     /// The file is read and decoded on a worker (NEVER-DO 6: a long MP3
     /// never stalls the pen); [`Self::poll_sound_import`] applies it as one
@@ -5335,7 +5335,7 @@ impl AppState {
         }
     }
 
-    /// GM10: Cut ▸ Paper size — the cut's paper in frame pixels (the frame
+    /// GM10: File ▸ Shots ▸ Paper size — the cut's paper in frame pixels (the frame
     /// itself clears the key), one undo step. A rect past the side or area
     /// cap, or without area, is refused, and says so.
     pub fn set_cut_paper(&mut self, rect: anim_core::camera::IRect) {

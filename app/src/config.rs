@@ -147,7 +147,7 @@ pub enum Action {
     ProjectSettings,
     /// GM8: the Welcome screen again (templates, recent, the sample).
     WelcomeScreen,
-    /// GM21: File ▸ Open the sample cut — the Welcome's sample as a verb.
+    /// GM21: Help ▸ Example project — the Welcome's sample as a verb.
     OpenSample,
     /// AU6: the Start float, on its What's new tab.
     WhatsNew,
@@ -159,13 +159,13 @@ pub enum Action {
     ToggleHints,
     /// AU10: the chrome off the screen, or back. Never stored.
     HideTools,
-    /// GM10: Cut ▸ Paper size… — the sheet the camera pans over.
+    /// GM10: File ▸ Shots ▸ Paper size… — the sheet the camera pans over.
     PaperSize,
-    /// GM11: Window ▸ Render Queue — the delivery jobs, on a worker.
+    /// GM11: More ▸ Panels ▸ Export queue — the delivery jobs, on a worker.
     ShowRenderQueue,
     /// GM11: View ▸ Final look — the composite as the master delivers it.
     ToggleFinalLook,
-    // GM12: sound — File ▸ Import sound… / Add sound track… (decoded on a
+    // GM12: sound — File ▸ Import ▸ Import sound… / Add sound track… (decoded on a
     // worker), the transport's loop range and scrub latch, RAM preview and
     // the kuchipaku (lip flap) window.
     ImportSound,
@@ -192,7 +192,7 @@ pub enum Action {
     MakeCutsFromPanels,
     RenderEpisode,
     AddRetakeNote,
-    /// GM17: File ▸ Import 3D model… (glTF or OBJ, embedded in the cut with
+    /// GM17: File ▸ Import ▸ Import 3D model… (glTF or OBJ, embedded in the cut with
     /// its Model3D node).
     Import3DModel,
     /// GM17: key the cut camera to what View3D sees (one undo step).
@@ -1919,6 +1919,16 @@ fn pretty_key(name: &str) -> &str {
         "Comma" => ",",
         "Period" => ".",
         "Space" => "Space",
+        // AU11: what the key wears. The stored name stays the egui one.
+        "OpenBracket" => "[",
+        "CloseBracket" => "]",
+        "Backslash" => "\\",
+        "Slash" => "/",
+        "Minus" => "-",
+        "Equals" => "=",
+        "Semicolon" => ";",
+        "Quote" => "'",
+        "Backtick" => "`",
         other => other,
     }
 }

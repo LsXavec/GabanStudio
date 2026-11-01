@@ -258,7 +258,7 @@ fn tidy_open_sample_over_a_clean_document_opens_it() {
     let rev = h.state().engine.revision();
     h.state_mut().saved_rev = rev;
     assert!(!h.state().is_dirty());
-    h.click("Help");
+    h.click(crate::vocab::MENU_HELP);
     h.click("Example project");
     assert!(!h.editor().leave_pending(), "nothing to ask about");
     let p = &h.state().engine.project;
@@ -270,7 +270,7 @@ fn tidy_open_sample_over_a_clean_document_opens_it() {
 fn tidy_open_sample_over_unsaved_work_asks_first() {
     let mut h = EditorHarness::new();
     assert!(h.state().is_dirty(), "the harness drew a frame");
-    h.click("Help");
+    h.click(crate::vocab::MENU_HELP);
     h.click("Example project");
     assert!(h.editor().leave_pending());
     assert!(h.has("Save changes?"), "{}", h.describe());

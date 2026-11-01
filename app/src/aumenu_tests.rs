@@ -2,21 +2,27 @@
 //! 1.11 and AU11). `TABLE` is cut from spec 6.2's own rows, with 1.11's
 //! `Help ▸ Lessons`, and the code answers to it.
 
+use anim_core::store;
 use eframe::egui;
 use egui::{Modifiers, vec2};
 
+use crate::auguide_tests::stand;
+use crate::aukeys_tests::{FROZEN, FROZEN_BARE, golden, loaded};
 use crate::aulesson_tests::{along, pen};
 use crate::aurail_tests::window;
+use crate::austrip_tests::strip_of;
+use crate::autail_tests::{gap_at, timed};
 use crate::cmdpal;
 use crate::config::{self, Action, Group};
 use crate::doc::AppState;
+use crate::lessons::Target;
 use crate::measure::{self, Scope};
 use crate::menus::{self, HandRow, MENUS, ORDER, Row};
 use crate::steps::{self, ProjectKind};
 use crate::testkit::EditorHarness;
-use crate::welcome::EXPORT_STEP;
+use crate::welcome::{EXPORT_STEP, WelcomeAction};
 use crate::workspace::{Pane, Workspace};
-use crate::{Performed, export_step, sample, templates, vocab};
+use crate::{AppRequest, Performed, export_step, plate, sample, templates, vocab};
 
 const TABLE: &[(&str, Action)] = &[
     ("File/New…", Action::NewProject),
@@ -328,13 +334,14 @@ fn aumenu_every_hand_row_has_a_home() {
     sized(&mut h, 1600.0, 900.0);
     let list = Workspace { name: "mine".into(), dock: h.editor().dock.clone(), preset: None, view: None };
     h.editor_mut().workspaces.list.push(list);
-    let homes: [(&str, &str); 11] = [
+    let homes: [(&str, &str); 12] = [
         ("File/Open recent", "Nothing yet"),
         ("File/Shots", "Rename shot…"),
         ("File/Shots", "Add scene"),
         ("File/Import", "XDTS…"),
         ("File/Export", "Other formats…"),
         ("File/Export", "Whole shot"),
+        ("More/Steps", "Manga step"),
         ("More/Panels", "Layers panel"),
         ("More/Panels", "Add Result"),
         ("More/Panels", "Canvas in an OS window"),
@@ -343,6 +350,9 @@ fn aumenu_every_hand_row_has_a_home() {
     ];
     for (hand, (place, row)) in HandRow::ALL.into_iter().zip(homes) {
         assert!(hand.path().starts_with(place), "{hand:?} stands at {}", hand.path());
+        if hand == HandRow::MangaStep {
+            continue; // a comic's alone: `aumenu_steps_submenu_reads_the_bar`
+        }
         h.open_path(place);
         settle(&mut h);
         assert!(h.has_text_containing(row), "{place} holds {row}\n{}", h.describe());
@@ -358,6 +368,12 @@ fn aumenu_every_hand_row_has_a_home() {
     settle(&mut h);
     h.scroll_to(export_step::XDTS);
     assert!(h.has(export_step::XDTS), "{}", h.describe());
+    // On the queue's wide pane it costs the fold no height: it shares a row.
+    h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
+    settle(&mut h);
+    h.scroll_to(export_step::XDTS);
+    let (row, latch) = (h.rect(export_step::XDTS), h.rect(export_step::TRANSPARENT));
+    assert_eq!(row.center().y, latch.center().y, "{row:?} under {latch:?}");
 }
 
 #[test]
@@ -403,17 +419,108 @@ fn aumenu_edit_cut_copy_paste_follow_the_last_pane() {
     assert_eq!(cells, 0, "Ctrl+C over the canvas leaves the sheet's alone");
 }
 
+/// Spec 6.2's column `Over the sheet or strip`, by the road a person takes: a
+/// press on the strip, out across the paper, up to a top row that holds no pane.
 #[test]
 fn aumenu_edit_rows_answer_over_the_strip() {
+    let mut h = strip_of(timed(&[2, 2, 2]));
+    let rects = &h.editor().pane_rects;
+    assert_eq!(rects.iter().filter(|(p, ..)| *p == Pane::XSheet).count(), 1, "the strip alone");
+    let strip = centre_of(&h, Pane::XSheet);
+    h.click_pos(strip);
+    settle(&mut h);
+    over(&mut h, Pane::Canvas);
+    h.point_at(egui::pos2(640.0, 4.0));
+    settle(&mut h);
+    let ctx = h.ctx();
+    let copy = menus::chord_label(&ctx, Action::CopyCells).expect("Copy cells has a chord");
+    h.click(vocab::MENU_EDIT);
+    settle(&mut h);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Sheet, "{}", h.describe());
+    assert_eq!(h.node_enabled("Cut"), Some(true), "{}", h.describe());
+    assert!(h.painted_text().iter().any(|t| *t == copy), "{:?}", h.painted_text());
+    h.click("Copy");
+    settle(&mut h);
+    assert!(h.state().sheet_ui.clip_text.is_some(), "the cells were copied");
+    assert!(h.state().pixel_clip.is_none(), "not the pixels");
+}
+
+/// egui_dock moves its focus on a click alone, so a drag on the paper leaves it
+/// on the sheet. The press is what counts.
+#[test]
+fn aumenu_edit_rows_follow_a_drag_on_the_paper() {
     let mut h = EditorHarness::as_animation();
-    h.editor_mut().strip_open = true;
     sized(&mut h, 1600.0, 900.0);
-    h.editor_mut().enter_room(crate::workspace::Stage::Drawing);
+    let sheet = centre_of(&h, Pane::XSheet);
+    h.click_pos(sheet);
     settle(&mut h);
-    let strip = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::XSheet).map(|r| r.1.center());
-    h.point_at(strip.expect("the strip speaks for the sheet"));
+    assert_eq!(h.perform(Action::SelectTool), Performed::Done);
+    let paper = h.editor().canvas.dbg_rect.center();
+    h.drag(paper - vec2(60.0, 40.0), paper + vec2(60.0, 40.0), 6);
     settle(&mut h);
-    assert_eq!(h.editor().edit_row(Action::EditCopy), Some(Action::CopyCells));
+    let focus = h.editor_mut().dock.find_active_focused().map(|(_, pane)| *pane);
+    assert_eq!(focus, Some(Pane::XSheet), "the premise: the drag left the focus there");
+    h.click(vocab::MENU_EDIT);
+    settle(&mut h);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Canvas, "{}", h.describe());
+    assert_eq!(h.node_enabled("Cut"), Some(false), "{}", h.describe());
+    h.click("Copy");
+    settle(&mut h);
+    assert!(h.state().sheet_ui.clip_text.is_none(), "the sheet's clipboard is left alone");
+    assert_eq!(h.editor().edit_row(Action::EditPaste), Some(Action::PastePixels));
+}
+
+/// The way to a menu crosses panes, and passing over one is no press. A press
+/// on a pane replaces the last, and a popup answers for none.
+#[test]
+fn aumenu_only_a_press_moves_the_rows() {
+    let mut h = EditorHarness::as_animation();
+    sized(&mut h, 1600.0, 900.0);
+    let sheet = centre_of(&h, Pane::XSheet);
+    let paper = h.editor().canvas.dbg_rect.center();
+    h.click_pos(sheet);
+    settle(&mut h);
+    over(&mut h, Pane::Canvas);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Sheet, "the way to a menu crosses the paper");
+    h.click_pos(paper);
+    settle(&mut h);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Canvas);
+    over(&mut h, Pane::XSheet);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Canvas, "and back again");
+    h.click_pos(egui::pos2(800.0, 4.0));
+    settle(&mut h);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Canvas, "the top row is no pane");
+}
+
+/// A pressed pane is forgotten once it has left the screen, so a drawing opened
+/// over an animation aims no row at a strip it does not have.
+#[test]
+fn aumenu_a_pressed_pane_goes_with_the_screen() {
+    let mut h = strip_of(timed(&[2, 2, 2]));
+    let strip = centre_of(&h, Pane::XSheet);
+    h.click_pos(strip);
+    settle(&mut h);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Sheet);
+    h.answer_start(WelcomeAction::Intent(templates::PICTURE));
+    settle(&mut h);
+    assert_eq!(h.editor().kind(), Some(ProjectKind::Drawing));
+    assert!(!h.editor().pane_rects.iter().any(|(p, ..)| *p == Pane::XSheet), "{}", h.describe());
+    over(&mut h, Pane::Canvas);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Canvas, "nothing to answer for the old strip");
+    assert_eq!(h.editor().edit_row(Action::EditCopy), Some(Action::CopyPixels));
+
+    // The same when the project stays and only the pane goes. (Not the sheet:
+    // it stands on as the strip wherever the dock has no room for it.)
+    let mut h = EditorHarness::as_animation();
+    sized(&mut h, 1600.0, 900.0);
+    let paper = centre_of(&h, Pane::Canvas);
+    h.click_pos(paper);
+    settle(&mut h);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Canvas);
+    h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
+    settle(&mut h);
+    over(&mut h, Pane::RenderQueue);
+    assert_eq!(h.editor().last_ctx, config::Ctx::Global, "the paper left the screen");
 }
 
 #[test]
@@ -506,15 +613,22 @@ fn aumenu_steps_submenu_reads_the_bar() {
         sized(&mut h, 1600.0, 900.0);
         assert_eq!(h.editor().kind(), Some(kind));
         h.open_path("More/Steps");
-        let on: Vec<&str> = steps::CATALOG
-            .iter()
-            .filter(|step| step.label != vocab::STEP_MANGA)
-            .map(|step| step.label)
-            .filter(|label| h.has(&format!("{label} step")))
-            .collect();
-        let bar: Vec<&str> =
-            steps::bar(kind).iter().map(|step| step.label).filter(|label| *label != vocab::STEP_MANGA).collect();
+        let mut on: Vec<&str> =
+            steps::CATALOG.iter().map(|step| step.label).filter(|label| h.has(&format!("{label} step"))).collect();
+        let bar: Vec<&str> = steps::bar(kind).iter().map(|step| step.label).collect();
+        on.sort_by_key(|label| bar.iter().position(|step| step == label));
         assert_eq!(on, bar, "{kind:?}\n{}", h.describe());
+        if kind == ProjectKind::Comic {
+            assert_eq!(on, [vocab::STEP_MANGA, vocab::STEP_COLOR, vocab::STEP_EXPORT]);
+            assert!(h.rect("Manga step").top() < h.rect("Color step").top(), "in the bar's order");
+            h.close_menus();
+            h.editor_mut().enter_room(steps::bar(kind)[1].stage);
+            settle(&mut h);
+            h.open_path("More/Steps");
+            h.click("Manga step");
+            settle(&mut h);
+            assert_eq!(h.editor().stage, Some(steps::bar(kind)[0].stage), "the row takes the step");
+        }
     }
 }
 
@@ -568,31 +682,217 @@ fn aumenu_no_art_export_earns_no_tick() {
     assert!(h.editor().quick_start[EXPORT_STEP], "a real file ticks");
 }
 
-/// Spec 6.2: a submenu's head holds its `menu.*` mark, and each menu's clip
-/// audit passes with the menu open at both shot sizes.
+/// Spec 6.2: each menu's clip audit passes with the menu open, at both shot
+/// sizes and under the narrow `Menu`, on blank paper and on a full project. The
+/// full one stands on the strip: the audit tells a float by where text stands,
+/// so a sheet's own cut cells under an open menu would read as the menu's.
 #[test]
 fn aumenu_open_menus_clip_nothing() {
-    for (w, tall) in [(1600.0, 900.0), (1280.0, 800.0)] {
-        let mut h = EditorHarness::as_shipped();
-        sized(&mut h, w, tall);
-        for place in menus::places() {
-            h.open_path(place);
-            settle(&mut h);
-            let clip = measure::clip_here(&h, Scope::Chrome);
-            assert_eq!(clip.clipped, 0, "{place} at {w}: {clip:?}");
-            h.close_menus();
+    for (w, tall) in [(1600.0, 900.0), (1280.0, 800.0), (1039.0, 800.0)] {
+        for mut h in [EditorHarness::as_shipped(), strip_of(sample::build_sample())] {
+            sized(&mut h, w, tall);
+            for place in menus::places() {
+                h.open_path(place);
+                settle(&mut h);
+                let clip = measure::clip_here(&h, Scope::Chrome);
+                assert_eq!((clip.clipped, clip.outside), (0, 0), "{place} at {w}: {clip:?}");
+                h.close_menus();
+            }
         }
     }
 }
 
-/// Spec 6.2: the narrow row at its thresholds, and a head's mark behind it.
+/// Spec 6.2: the narrow row at its thresholds. The feedback spec's 5.5: a
+/// `menu.*` mark stands on its word, or on the collapsed `Menu`, until the row
+/// that holds it is open, and then on the submenu's head.
 #[test]
 fn aumenu_narrow_falls_to_1040() {
     assert_eq!((steps::WIDE, steps::WIDE_PLACE), (1040.0, 1100.0));
     assert!(!steps::narrow(1040.0, false) && steps::narrow(1039.0, false));
     assert!(!steps::narrow(1100.0, true) && steps::narrow(1099.0, true));
+    static PANELS: [Target; 1] = [Target::Named("menu.more.panels")];
+    for (w, word) in [(1040.0, vocab::MENU_MORE), (1039.0, "Menu")] {
+        let mut h = EditorHarness::with_state_shipped(sample::build_sample());
+        sized(&mut h, w, 800.0);
+        let first = h.editor().bar()[0].stage;
+        stand(&mut h, &PANELS, first);
+        let stands = |h: &EditorHarness| plate::ring_stands(&h.ctx()).expect("the ring stands").1;
+        assert!(stands(&h).contains(h.rect(word).center()), "{word} at {w}: {:?}", stands(&h));
+        h.open_path("More/Panels");
+        assert!(h.has("Motion curves"), "{}", h.describe());
+        assert!(stands(&h).contains(h.rect("Panels ⏵").center()), "the head at {w}: {:?}", stands(&h));
+    }
+}
+
+/// AU26 left this: with no range set the fields read as far as the plain rows
+/// above them export, and a person may still reach into the tail.
+#[test]
+fn aumenu_frame_fields_stop_at_the_last_drawing() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = gap_at(timed(&[1, 1, 1, 9]), 3);
+    assert_eq!((state.frame_count(), state.shown_length()), (12, 3), "12 rows and 3 drawings");
+    let mut h = EditorHarness::with_state_shipped(state);
+    sized(&mut h, 1600.0, 900.0);
+    h.open_path("File/Export");
+    settle(&mut h);
+    assert_eq!(h.drag_values(), [1.0, 3.0], "{}", h.describe());
+    h.close_menus();
+    let ctx = h.ctx();
+    h.editor_mut().invoke(Action::ExportGif, &ctx);
+    settle(&mut h);
+    h.answer_export(&dir.path().join("three.gif"));
+    let job = &h.state().render_queue.queue.jobs[0];
+    assert_eq!((job.frames, job.total()), (Some((0, 2)), 3), "the fields told the truth");
+    h.run_export_to_end();
+    // A chosen range still runs past the last drawing, and `Whole shot` drops it.
+    h.editor_mut().export_range = Some((0, 11));
+    h.open_path("File/Export");
+    settle(&mut h);
+    assert_eq!(h.drag_values(), [1.0, 12.0]);
+    h.click("Whole shot");
+    settle(&mut h);
+    assert_eq!(h.editor().export_range, None);
+    assert!(!egui::Popup::is_any_open(&h.ctx()), "a row closes its menu");
+}
+
+/// egui shuts a menu on any click inside it, which took a field away before a
+/// word was typed. By position, as a pen presses: `focus_text_field` goes
+/// through accesskit and never saw it.
+#[test]
+fn aumenu_a_press_on_a_field_keeps_its_menu() {
     let mut h = EditorHarness::with_state_shipped(sample::build_sample());
-    sized(&mut h, 1039.0, 800.0);
-    h.open_path("More/Panels");
-    assert!(h.has("Motion curves"), "{}", h.describe());
+    sized(&mut h, 1600.0, 900.0);
+    h.open_path("File/Shots");
+    let field = h.text_field_rect(0).center();
+    h.click_pos(field);
+    settle(&mut h);
+    assert!(egui::Popup::is_any_open(&h.ctx()), "{}", h.describe());
+    h.type_text("Ball");
+    settle(&mut h);
+    assert_eq!(h.editor().rename_buf, "Ball");
+    h.click("Rename shot…");
+    settle(&mut h);
+    assert_eq!(h.state().cut().name, "Ball");
+    assert!(!egui::Popup::is_any_open(&h.ctx()), "a row still closes it");
+
+    h.open_path("File/Export");
+    h.click_pos(h.rect("Frames").right_center() + vec2(24.0, 0.0));
+    settle(&mut h);
+    assert!(egui::Popup::is_any_open(&h.ctx()), "{}", h.describe());
+    h.close_menus();
+
+    h.open_path("More/Saved arrangements");
+    assert_eq!(h.node_enabled("Save"), Some(false), "no name, no Save\n{}", h.describe());
+    assert!(h.painted_text().iter().any(|t| t == "Name"), "{:?}", h.painted_text());
+    let field = h.text_field_rect(0).center();
+    h.click_pos(field);
+    settle(&mut h);
+    assert!(egui::Popup::is_any_open(&h.ctx()), "{}", h.describe());
+    h.type_text("Mine");
+    settle(&mut h);
+    assert_eq!(h.node_enabled("Save"), Some(true));
+    h.click("Save");
+    settle(&mut h);
+    assert_eq!(h.editor().workspaces.list.last().map(|w| w.name.as_str()), Some("Mine"));
+    assert!(!egui::Popup::is_any_open(&h.ctx()));
+}
+
+/// Spec 1.5 rule 10: both routes reach the App's dialogs, read off the log.
+#[test]
+fn aumenu_xdts_rows_ask_the_app() {
+    let mut h = EditorHarness::with_state_shipped(sample::build_sample());
+    sized(&mut h, 1600.0, 900.0);
+    h.open_path("File/Import");
+    h.click("XDTS…");
+    settle(&mut h);
+    assert!(h.rig().requests.contains(&AppRequest::ImportXdts), "{:?}", h.rig().requests);
+    assert_eq!(h.perform(Action::RoomExport), Performed::Done);
+    settle(&mut h);
+    h.click(export_step::MORE_OPTIONS);
+    settle(&mut h);
+    h.scroll_to(export_step::XDTS);
+    h.click(export_step::XDTS);
+    settle(&mut h);
+    assert!(h.rig().requests.contains(&AppRequest::ExportXdts), "{:?}", h.rig().requests);
+}
+
+/// Spec AU11 Build 3: the words where the docked canvas stood.
+#[test]
+fn aumenu_canvas_window_says_where_it_went() {
+    const LINE: &str = "Canvas is open in its own window. More ▸ Panels ▸ brings it back.";
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1600.0, 900.0);
+    assert!(!h.has_text_containing(LINE));
+    h.editor_mut().float_canvas.open = true;
+    settle(&mut h);
+    assert!(h.has_text_containing(LINE), "{}", h.describe());
+    // The row it names is `aumenu_every_hand_row_has_a_home`'s OS windows row.
+    assert!(HandRow::OsWindows.path().starts_with("More/Panels/"));
+}
+
+/// A menu row wears what is printed on the key. The stored chord keeps egui's
+/// name, which is the file's vocabulary (`aukeys_tests::FROZEN`).
+#[test]
+fn aumenu_chords_read_as_the_keys_read() {
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1600.0, 900.0);
+    let ctx = h.ctx();
+    for (action, chord) in [
+        (Action::BrushSmaller, "["),
+        (Action::BrushBigger, "]"),
+        (Action::RotateViewLeft, "Ctrl+["),
+        (Action::RotateViewRight, "Ctrl+]"),
+        (Action::ResetRotation, "Ctrl+\\"),
+        (Action::ZoomOut, "Ctrl+-"),
+        (Action::ZoomIn, "Ctrl+= / Ctrl+Plus"),
+    ] {
+        assert_eq!(menus::chord_label(&ctx, action).as_deref(), Some(chord), "{action:?}");
+    }
+    h.open_path("Edit/Tools");
+    let painted = h.painted_text();
+    assert!(painted.iter().any(|t| t == "["), "{painted:?}");
+    assert!(!painted.iter().any(|t| t.contains("Bracket")), "{painted:?}");
+    let config = config::Config::default();
+    let stored = serde_json::to_string(config.binding(Action::BrushSmaller).unwrap()).unwrap();
+    assert!(stored.contains("\"OpenBracket\""), "{stored}");
+}
+
+/// Spec AU11's `Must not change`: Actions only grow, every chord and config a
+/// person has reads as it did, and the menus add nothing to a project.
+/// `aulook_config_shape_stands` holds the config's keys, and `aukeys_tests`
+/// each chord.
+#[test]
+fn aumenu_stored_words_stand() {
+    const NEW: [Action; 4] = [Action::BrushMakerRoom, Action::EditCut, Action::EditCopy, Action::EditPaste];
+    let old: Vec<&str> = FROZEN.iter().map(|(name, _)| *name).chain(FROZEN_BARE).collect();
+    for name in &old {
+        let action: Result<Action, _> = serde_json::from_value(serde_json::json!(name));
+        assert!(action.is_ok(), "{name} is a stored word and still reads");
+    }
+    for action in NEW {
+        let word = serde_json::to_value(action).unwrap();
+        assert_eq!(word, format!("{action:?}"), "a variant's own name");
+        assert!(!old.contains(&word.as_str().unwrap()), "{action:?} is new");
+    }
+    // An old config takes the new verbs unbound, and keeps them that way.
+    let (_dir, config) = loaded(&golden("Gaban"));
+    for action in NEW {
+        let binding = config.binding(action).expect("fill_missing brought it in");
+        assert_eq!(binding.chords().count(), 0, "{action:?} took a chord");
+        assert_eq!(config::Config::default().binding(action).map(|b| b.chords().count()), Some(0));
+    }
+    // A project saved after the new rows is the project saved before them.
+    assert!(include_str!("../../crates/anim-core/src/store.rs").contains("const SCHEMA_VERSION: i64 = 11;"));
+    let dir = tempfile::tempdir().unwrap();
+    let (before, after) = (dir.path().join("before.animproj"), dir.path().join("after.animproj"));
+    let mut h = EditorHarness::with_state_shipped(sample::build_sample());
+    sized(&mut h, 1600.0, 900.0);
+    store::save(&h.state().engine.project, &before).expect("saved");
+    for action in [Action::EditCopy, Action::BrushMakerRoom] {
+        let ctx = h.ctx();
+        h.editor_mut().invoke(action, &ctx);
+        settle(&mut h);
+    }
+    store::save(&h.state().engine.project, &after).expect("saved");
+    assert_eq!(std::fs::read(&before).unwrap(), std::fs::read(&after).unwrap());
 }

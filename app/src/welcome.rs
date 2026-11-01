@@ -378,7 +378,7 @@ pub enum WelcomeAction {
     ShowMe(usize),
     /// Settings… (the shell's window, over the screen).
     Settings,
-    /// Close the screen shown over an open cut (File ▸ Welcome screen…).
+    /// Close the screen shown over an open cut (Help ▸ Start screen…).
     Back,
 }
 
@@ -500,7 +500,7 @@ fn whats_new_ui(ui: &mut egui::Ui) {
 pub struct Welcome {
     pub cards: Vec<RecentCard>,
     textures: HashMap<PathBuf, Option<egui::TextureHandle>>,
-    /// Shown again over an open cut (File ▸ Welcome screen…): a modal with
+    /// Shown again over an open cut (Help ▸ Start screen…): a modal with
     /// a way back, and the cut stays open until a card replaces it.
     pub over_editor: bool,
     /// GM19: the tab shown (What's New on a new version's first launch).
@@ -1627,7 +1627,7 @@ mod tests {
 
     #[test]
     fn welcome_screen_comes_back_after_startup() {
-        // File ▸ Welcome screen…: the float opens at once, clean or not, and
+        // Help ▸ Start screen…: the float opens at once, clean or not, and
         // the open cut stands under it: only a card that replaces it asks.
         let mut s = crate::sample::build_sample();
         s.saved_rev = s.engine.revision();

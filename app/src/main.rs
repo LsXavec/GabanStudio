@@ -3095,18 +3095,18 @@ pub enum AppRequest {
     Start(welcome::WelcomeAction),
     NewProject,
     Open,
-    /// GM21: File ▸ Open the sample cut.
+    /// GM21: Help ▸ Example project.
     OpenSample,
     Save,
     SaveAs,
     /// GM3: raised by the menus, the palette and their chords.
     Settings,
     Quit,
-    /// GM12: File ▸ Import sound… and Add sound track… — the file picker
+    /// GM12: File ▸ Import ▸ Import sound… and Add sound track… — the file picker
     /// is the shell's (it is a window); the decode then runs on a worker.
     ImportSound,
     AddSoundTrack,
-    /// GM17: File ▸ Import 3D model… — the model picker is the shell's.
+    /// GM17: File ▸ Import ▸ Import 3D model… — the model picker is the shell's.
     Import3DModel,
     /// GM13: the inspector's "load .cube…" for this node's file parameter
     /// — the .cube picker is the shell's too (a window, on a real click).
@@ -3877,6 +3877,18 @@ impl Editor {
 /// AU11: `Edit ▸ Cut` over the canvas, after the row's "not now: ".
 const PIXELS_HAVE_NO_CUT: &str = "pixels have no Cut. Use Copy, then Clear.";
 
+/// The context the keys take from `pane`.
+fn pane_ctx(pane: Option<Pane>) -> config::Ctx {
+    match pane {
+        Some(Pane::Canvas) => config::Ctx::Canvas,
+        Some(Pane::XSheet) => config::Ctx::Sheet,
+        Some(Pane::NodeGraph) => config::Ctx::NodeGraph,
+        Some(Pane::Curves) => config::Ctx::Curves,
+        Some(Pane::View3D) => config::Ctx::View3D,
+        _ => config::Ctx::Global,
+    }
+}
+
 /// GM3: the chrome's own verbs (windows, panes, rooms) — never the
 /// document's.
 fn is_chrome(action: Action) -> bool {
@@ -4493,7 +4505,7 @@ struct Editor {
     /// GM22: the window came back mid-stroke: the image sequences are read
     /// again on the first frame after the pen lifts.
     reload_pending: bool,
-    /// GM12: Sheet ▸ Lip flap…'s window is open with this form.
+    /// GM12: Animation ▸ Track ▸ Lip flap…'s window is open with this form.
     lip_form: Option<playback::LipForm>,
     /// GM2: what the artist asked for that would drop unsaved work — the
     /// "Save changes?" modal shows while this is Some.
@@ -4511,8 +4523,10 @@ struct Editor {
     /// GM2: the recent files with their "still on disk" flags, checked when
     /// the list changes and when the file menu opens — never every frame.
     recent_shown: Vec<(std::path::PathBuf, bool)>,
-    /// AU11: `shortcut_ctx` from the last frame with no popup open.
+    /// AU11: the pane the merged Edit rows answer for (`latch_last_ctx`).
     last_ctx: config::Ctx,
+    /// AU11: the pane last pressed, while it stands on the screen.
+    pressed_pane: Option<Pane>,
     /// GM2: the file menu was open last frame (its opening re-checks disk).
     file_menu_open: bool,
     /// GM2: an edit the artist made to the recent list — the shell applies it.
@@ -4667,7 +4681,7 @@ enum Startup {
 /// GM8: the start-up route from the facts alone — nothing open and no
 /// dialog makes the ready paper (AU6), with the Start float unless its latch
 /// is off; a cut opening drops a start-up screen, but not one asked for over
-/// the cut (File ▸ Welcome screen…).
+/// the cut (Help ▸ Start screen…).
 fn startup_route(
     editor: bool,
     form: bool,
@@ -4877,7 +4891,7 @@ pub enum Leave {
     /// The recovery dialog's "Open recovered" over a document that has
     /// work of its own (a handover restore, say): asked about like an Open.
     Recover(worksafe::Recovered),
-    /// GM21: File ▸ Open the sample cut.
+    /// GM21: Help ▸ Example project.
     Sample,
     /// AU6: a Start float choice that puts another document here.
     Start(welcome::WelcomeAction),
@@ -5098,8 +5112,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 // 2026-08-17) — this pane is a pointer, not a duplicate.
                 plate::legend(ui, "brush");
                 ui.label(
-                    "the brush deck rides on the canvas now — close this pane \
-                     (the window menu can reopen it)",
+                    "the brush deck rides on the canvas now — close this pane",
                 );
             }
             Pane::Presets => self.presets_ui(ui),
@@ -5882,6 +5895,7 @@ impl Editor {
             recent: Vec::new(),
             recent_shown: Vec::new(),
             last_ctx: config::Ctx::Global,
+            pressed_pane: None,
             file_menu_open: false,
             recent_edit: None,
             autosave: worksafe::AutosaveClock::new(worksafe::AUTOSAVE_DEFAULT_MIN),
@@ -5999,6 +6013,7 @@ impl Editor {
             recent: Vec::new(),
             recent_shown: Vec::new(),
             last_ctx: config::Ctx::Global,
+            pressed_pane: None,
             file_menu_open: false,
             recent_edit: None,
             autosave: worksafe::AutosaveClock::new(worksafe::AUTOSAVE_DEFAULT_MIN),
@@ -6153,7 +6168,7 @@ impl Editor {
         }
     }
 
-    /// GM10 Cut ▸ Paper size: the cut's paper (kami) in frame pixels —
+    /// GM10 File ▸ Shots ▸ Paper size: the cut's paper (kami) in frame pixels —
     /// typed, or a preset centred on the frame — set as one undo step.
     fn paper_size_window(&mut self, ctx: &egui::Context) {
         use anim_core::camera::{self, IRect};
@@ -6270,22 +6285,38 @@ impl Editor {
     /// pointer, else the focused pane (shortcuts.rs resolves shared chords
     /// by it).
     pub fn shortcut_ctx(&mut self, ctx: &egui::Context) -> config::Ctx {
-        // AU4: the topmost layer answers, so a float speaks for what it
-        // covers. A popup over everything falls through to the focus.
-        let under = ctx.pointer_latest_pos().and_then(|p| {
+        let focused = self.dock.find_active_focused().map(|(_, t)| *t);
+        pane_ctx(self.pane_under(ctx).or(focused))
+    }
+
+    /// AU4: the topmost layer answers, so a float speaks for what it covers. A
+    /// popup over everything answers for no pane. The strip speaks as the sheet.
+    fn pane_under(&self, ctx: &egui::Context) -> Option<Pane> {
+        ctx.pointer_latest_pos().and_then(|p| {
             let top = ctx.layer_id_at(p);
-            self.pane_rects.iter().find(|(_, r, layer)| r.contains(p) && top == Some(*layer))
-        });
-        let pane = under
-            .map(|(pane, ..)| *pane)
-            .or_else(|| self.dock.find_active_focused().map(|(_, t)| *t));
-        match pane {
-            Some(Pane::Canvas) => config::Ctx::Canvas,
-            Some(Pane::XSheet) => config::Ctx::Sheet,
-            Some(Pane::NodeGraph) => config::Ctx::NodeGraph,
-            Some(Pane::Curves) => config::Ctx::Curves,
-            Some(Pane::View3D) => config::Ctx::View3D,
-            _ => config::Ctx::Global,
+            let under = self.pane_rects.iter().find(|(_, r, layer)| r.contains(p) && top == Some(*layer));
+            under.map(|(pane, ..)| *pane)
+        })
+    }
+
+    /// AU11: the pane the merged Edit rows answer for. The pointer leaves every
+    /// pane to reach a menu and crosses others on the way, and egui_dock moves
+    /// its focus on a click only, never on a drag or for the strip, so the pane
+    /// that counts is the one last pressed. Before any press, and once that
+    /// pane has left the screen, the keys' own answer stands, held while a menu
+    /// is open.
+    fn latch_last_ctx(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.pointer.any_pressed())
+            && let Some(pane) = self.pane_under(ctx)
+        {
+            self.pressed_pane = Some(pane);
+        }
+        let rects = &self.pane_rects;
+        self.pressed_pane = self.pressed_pane.filter(|pane| rects.iter().any(|(on, ..)| on == pane));
+        if let Some(pane) = self.pressed_pane {
+            self.last_ctx = pane_ctx(Some(pane));
+        } else if !egui::Popup::is_any_open(ctx) {
+            self.last_ctx = self.shortcut_ctx(ctx);
         }
     }
 
@@ -6350,54 +6381,16 @@ impl Editor {
         let shown = self.state.shown_length();
         let tail = shown < self.state.frame_count();
         let frames = self.export_range.or(tail.then_some((0, shown - 1)));
-        self.start_export(ctx, kind, path, frames, false);
-    }
-
-    /// GM11: File ▸ Export…'s PNG sequence (`dest` a folder), or its MP4, GIF
-    /// or still (`dest` the file) — a render queue job for this cut over the
-    /// menu's frame range (None = the whole cut; a still is the current
-    /// frame), the queue brought forward and started (a job already rendering
-    /// finishes first). AU11: the menu's rows left for the Export step, whose
-    /// road `start_export` is; the queue's tests still drive this door.
-    #[cfg(test)]
-    pub(crate) fn queue_export(
-        &mut self,
-        ctx: &egui::Context,
-        kind: render_queue::ExportKind,
-        dest: &std::path::Path,
-    ) {
-        self.start_export(ctx, kind, dest, self.export_range, true);
-    }
-
-    fn start_export(
-        &mut self,
-        ctx: &egui::Context,
-        kind: render_queue::ExportKind,
-        dest: &std::path::Path,
-        frames: Option<(u32, u32)>,
-        queue_forward: bool,
-    ) {
-        let Some(i) = render_queue::export_job(&mut self.state, kind, dest, frames) else {
+        let Some(i) = render_queue::export_job(&mut self.state, kind, path, frames) else {
             return;
         };
-        if queue_forward {
-            self.open_pane(Pane::RenderQueue);
-            self.state.render_queue.panel.unfold();
-        } else {
-            self.state.render_queue.queue.jobs[i].asked = Some(kind);
-        }
+        self.state.render_queue.queue.jobs[i].asked = Some(kind);
         render_queue::start(&mut self.state, ctx);
         let job = &self.state.render_queue.queue.jobs[i];
-        self.state.status = if queue_forward {
-            format!(
-                "queued {} ({}) — the render queue renders it while you work",
-                job.label,
-                job.preset().name
-            )
-        } else if kind == render_queue::ExportKind::Png {
+        self.state.status = if kind == render_queue::ExportKind::Png {
             format!("Exporting {} pictures…", job.total())
         } else {
-            format!("Exporting {}…", dest.file_name().unwrap_or_default().display())
+            format!("Exporting {}…", path.file_name().unwrap_or_default().display())
         };
     }
 
@@ -9120,11 +9113,7 @@ impl Editor {
         binds: &[config::Binding],
     ) {
         // AU5: from here, so the strip's entry in the band survives the dock.
-        // AU11: the Edit rows answer for the pane under the menu, so it stops
-        // moving while one is open.
-        if !egui::Popup::is_any_open(ui.ctx()) {
-            self.last_ctx = self.shortcut_ctx(ui.ctx());
-        }
+        self.latch_last_ctx(ui.ctx());
         self.pane_rects.clear();
         self.strip.begin();
         self.ui_lock = ui_lock;

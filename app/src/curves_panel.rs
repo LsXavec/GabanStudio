@@ -372,8 +372,7 @@ fn set_interp(state: &mut AppState, interp: ParamInterp, mode: Option<HandleMode
     state.set_param_keys(label, edits);
 }
 
-/// A key verb (the context menu, Sheet ▸ Key interpolation / Key handles,
-/// the palette) on the selected keys — one undo step.
+/// A key verb (the context menu, Animation ▸ Curves ▸, the palette) on the selected keys — one undo step.
 pub fn key_verb(state: &mut AppState, action: Action) {
     let Some(&(label, _, interp, mode)) = KEY_VERBS.iter().find(|v| v.1 == action) else {
         return;
@@ -1088,7 +1087,7 @@ mod tests {
         }
         assert_eq!(Action::ShowCurves.menu(), Some("More/Panels/Motion curves"));
         // Frame curves has a chord in both keymaps, over the curves pane;
-        // the key verbs are filed in the Sheet menu.
+        // the key verbs are filed in Animation ▸ Curves ▸.
         for km in Keymap::ALL {
             let binds = default_binds(*km);
             assert!(crate::cmdpal::chord_of(&binds, Action::FrameCurves).is_some(), "{km:?}");

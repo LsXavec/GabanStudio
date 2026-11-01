@@ -40,7 +40,7 @@ fn timed(holds: &[u32]) -> AppState {
 /// `state`, shipped: the sheet off screen and the strip up. AU19: a shipped
 /// document of many frames is an animation and opens on its sheet, so this is
 /// that sheet hidden by hand: the one state the strip stands in.
-fn strip_of(state: AppState) -> EditorHarness {
+pub(crate) fn strip_of(state: AppState) -> EditorHarness {
     let mut h = EditorHarness::with_state_shipped(state);
     h.editor_mut().plan_sheet_hidden = true;
     h.editor_mut().dock = Stage::Drawing.dock();

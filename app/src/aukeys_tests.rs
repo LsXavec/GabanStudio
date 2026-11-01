@@ -20,7 +20,7 @@ use crate::{Pane, Performed, plate, templates, visible_panes};
 
 /// v0.5.0's primary chords as `git show ebbc5fc:app/src/config.rs` has them:
 /// the frozen list. Ctrl+1 style names are the key names the file stores.
-const FROZEN: [(&str, &str); 120] = [
+pub(crate) const FROZEN: [(&str, &str); 120] = [
     ("PlayPause", "Space"), ("NextFrame", "F"), ("PrevFrame", "S"), ("FirstFrame", "Home"),
     ("LastFrame", "End"), ("PrevKey", "Q"), ("NextKey", "W"), ("MissCheck", "M"),
     ("PrevCut", "PageUp"), ("NextCut", "PageDown"), ("ToggleLoop", "P"), ("NewDrawing", "E"),
@@ -59,7 +59,7 @@ const FROZEN: [(&str, &str); 120] = [
 ];
 
 /// The 34 of v0.5.0's Actions with no chord.
-const FROZEN_BARE: [&str; 34] = [
+pub(crate) const FROZEN_BARE: [&str; 34] = [
     "QuickStart", "About", "History", "ResetLayout", "RoomLayout", "RoomDrawing", "RoomFinishing",
     "RoomComposite", "RoomEdit", "ShowCurves", "InterpHold", "InterpLinear", "InterpEase", "InterpEaseIn",
     "InterpEaseOut", "InterpBezier", "HandlesAuto", "HandlesSmooth", "HandlesFlat", "HandlesBroken",
@@ -122,7 +122,7 @@ fn stock_keybinds(keymap: &str) -> Vec<Value> {
 
 /// The whole of a v0.5.0 config: no `session` secrets, and a `render` section
 /// worth keeping.
-fn golden(keymap: &str) -> Value {
+pub(crate) fn golden(keymap: &str) -> Value {
     json!({
         "keymap": keymap,
         "keybinds": stock_keybinds(keymap),
@@ -164,7 +164,7 @@ pub(crate) const KEYS_MOVED: &str =
     "Column kind: Book (overlay) moved from Alt+K to Alt+O · Column kind: BG (haikei) moved from Alt+B to Alt+W";
 
 /// The file's bytes, read the way the app reads them, once.
-fn loaded(config: &Value) -> (tempfile::TempDir, Config) {
+pub(crate) fn loaded(config: &Value) -> (tempfile::TempDir, Config) {
     let dir = tempfile::tempdir().expect("a data dir");
     write(dir.path(), config);
     let loaded = Config::load_in(dir.path());

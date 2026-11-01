@@ -490,7 +490,7 @@ impl Drop for RamPass {
     }
 }
 
-/// RAM preview (Sheet ▸ Play ▸ Render RAM preview): the play range's
+/// RAM preview (Animation ▸ Play ▸ Render preview to memory): the play range's
 /// composites drawn by the CPU on a worker (D9) into a [`FrameCache`],
 /// and played from it — the viewer shows a held frame while playing, the
 /// sheet marks each held frame with an Ao bar. An edit drops just the
@@ -912,7 +912,7 @@ pub fn column_drawings(cut: &Cut, column: ColumnId) -> Vec<DrawingId> {
     out
 }
 
-/// Sheet ▸ Lip flap…'s form (D14): which track's level drives which
+/// Animation ▸ Track ▸ Lip flap…'s form (D14): which track's level drives which
 /// column's three mouth drawings over which frames, at which thresholds.
 pub struct LipForm {
     pub at: CutRef,
@@ -988,7 +988,7 @@ impl LipForm {
 }
 
 impl crate::Editor {
-    /// Sheet ▸ Lip flap… — a non-modal window: the dialogue track, the
+    /// Animation ▸ Track ▸ Lip flap… — a non-modal window: the dialogue track, the
     /// mouth column and its closed, half and open drawings, the frames, and
     /// the two thresholds over the track's level; Generate writes the
     /// mouths as one undo step. It closes when the cut changes.

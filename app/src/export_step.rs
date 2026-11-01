@@ -37,6 +37,8 @@ pub const GIF_INSTEAD: &str = "Export GIF instead";
 pub const MORE_OPTIONS: &str = "More options";
 pub const OTHER_FORMATS: &str = "Other formats";
 pub const XDTS: &str = "Exposure sheet (XDTS)…";
+/// The pane width both of the fold's rows' words fit on one row.
+const FOLD_ONE_ROW: f32 = 480.0;
 /// A one-frame document's choice, with `Action::ExportStill` behind it.
 pub const PNG_IMAGE: &str = "PNG image";
 pub const OPEN_FILE: &str = "Open file";
@@ -196,14 +198,32 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View, open: bool) {
         }
     }
     if open {
-        transparent(ui, state);
+        // Before the row below: a row's cursor stands at its middle, not its top.
+        if std::mem::take(&mut state.render_queue.panel.reveal) {
+            ui.scroll_to_cursor(Some(egui::Align::TOP));
+        }
         // AU11: XDTS moved here from the menus; its import is File ▸ Import ▸.
-        let row = plate::ghost_row(ui, XDTS, wide, None);
-        if row.card("This shot's timing as an exposure sheet (.xdts).").clicked() {
-            state.render_queue.panel.ask(Ask::App(AppRequest::ExportXdts));
+        // It shares the latch's row, so the fold costs a wide pane no height.
+        if wide >= FOLD_ONE_ROW {
+            ui.horizontal(|ui| {
+                transparent(ui, state);
+                let left = ui.available_width();
+                xdts_row(ui, state, left);
+            });
+        } else {
+            transparent(ui, state);
+            xdts_row(ui, state, wide);
         }
     }
     ui.spacing_mut().item_spacing.y = rhythm;
+}
+
+/// `Exposure sheet (XDTS)…`, the app's dialog behind it.
+fn xdts_row(ui: &mut egui::Ui, state: &mut AppState, wide: f32) {
+    let row = plate::ghost_row(ui, XDTS, wide, None);
+    if row.card("This shot's timing as an exposure sheet (.xdts).").clicked() {
+        state.render_queue.panel.ask(Ask::App(AppRequest::ExportXdts));
+    }
 }
 
 /// The panel's foot: the jobs, `Stop export` and `More options`, outside the
@@ -303,9 +323,6 @@ fn range_note(ui: &mut egui::Ui, state: &AppState, view: &View) {
 /// What only a still takes, first behind the fold.
 fn transparent(ui: &mut egui::Ui, state: &mut AppState) {
     let panel = &mut state.render_queue.panel;
-    if std::mem::take(&mut panel.reveal) {
-        ui.scroll_to_cursor(Some(egui::Align::TOP));
-    }
     let card = "A still keeps its see-through background: a PNG with no white behind it.";
     let latch = plate::latch(ui, &mut panel.transparent, TRANSPARENT);
     plate::mark_row(&latch, Target::Named("export.transparent"));

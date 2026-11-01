@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use eframe::egui;
+use egui::containers::menu::{MenuConfig, SubMenuButton};
 
 use crate::config::{Action, Binding, BrushPreset, Group};
 use crate::lessons::Target;
@@ -147,6 +148,7 @@ pub enum HandRow {
     Xdts,
     OtherFormats,
     FrameRange,
+    MangaStep,
     OtherPanes,
     AddResult,
     OsWindows,
@@ -156,13 +158,14 @@ pub enum HandRow {
 
 impl HandRow {
     #[cfg(test)]
-    pub const ALL: [HandRow; 11] = [
+    pub const ALL: [HandRow; 12] = [
         HandRow::OpenRecent,
         HandRow::ShotNames,
         HandRow::ShotTree,
         HandRow::Xdts,
         HandRow::OtherFormats,
         HandRow::FrameRange,
+        HandRow::MangaStep,
         HandRow::OtherPanes,
         HandRow::AddResult,
         HandRow::OsWindows,
@@ -180,12 +183,18 @@ impl HandRow {
             HandRow::Xdts => "File/Import/XDTS…",
             HandRow::OtherFormats => "File/Export/Other formats…",
             HandRow::FrameRange => "File/Export/Frame range",
+            HandRow::MangaStep => "More/Steps/Manga step",
             HandRow::OtherPanes => "More/Panels/each other panel",
             HandRow::AddResult => "More/Panels/Add Result",
             HandRow::OsWindows => "More/Panels/the OS windows",
             HandRow::SaveArrangement => "More/Saved arrangements/Save this arrangement…",
             HandRow::Arrangements => "More/Saved arrangements/each saved arrangement",
         }
+    }
+
+    /// It holds a field to type or drag in.
+    const fn has_field(self) -> bool {
+        matches!(self, HandRow::ShotNames | HandRow::FrameRange | HandRow::SaveArrangement)
     }
 }
 
@@ -254,7 +263,7 @@ pub const ORDER: &[Row] = {
         A(WelcomeScreen), A(OpenSample), A(About),
 
         A(MangaRoom), A(Layout3dRoom), A(BrushMakerRoom),
-        A(RoomLayout), A(RoomDrawing), A(RoomEdit), A(RoomFinishing), A(RoomComposite), A(RoomExport),
+        Hand(MangaStep), A(RoomLayout), A(RoomDrawing), A(RoomEdit), A(RoomFinishing), A(RoomComposite), A(RoomExport),
         A(History), A(ShowCurves), A(ShowPaintCheck), A(ShowRenderQueue), A(ShowCutBoard), A(ShowEpisode),
         Hand(OtherPanes), Hand(AddResult), Hand(OsWindows),
         A(AddNode), A(BuildComposite), A(BuildSatsuei), A(ConvertColorsToSrgb),
@@ -386,7 +395,11 @@ impl crate::Editor {
         let Some(path) = action.menu() else {
             return;
         };
-        let name = path.rsplit('/').next().unwrap_or(path);
+        self.action_row(ui, action, path.rsplit('/').next().unwrap_or(path));
+    }
+
+    /// [`Self::menu_item`] under `name`.
+    fn action_row(&mut self, ui: &mut egui::Ui, action: Action, name: &str) {
         // AU11: a merged Edit row shows the chord of what it would perform.
         let chord = chord_label(ui.ctx(), self.edit_row(action).unwrap_or(action));
         let can = self.can_perform(action);
@@ -464,12 +477,18 @@ impl crate::Editor {
     }
 
     fn submenu(&mut self, ui: &mut egui::Ui, menu: &str, sub: &str, presets: &[BrushPreset]) {
-        let head = ui.menu_button(sub, |ui| {
+        let rows: Vec<Row> = self.sub_rows(menu, sub);
+        // egui shuts a menu on any click inside it, so a click on a field
+        // would take the field away. These close from their rows instead.
+        let mut config = MenuConfig::find(ui);
+        if rows.iter().any(|row| matches!(row, Row::Hand(hand) if hand.has_field())) {
+            config = config.close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        }
+        let (head, _) = SubMenuButton::new(sub).config(config).ui(ui, |ui| {
             // AU9: MP4's row reads the add-on, so it is looked for here.
             if sub == "Export" {
                 self.state.render_queue.search_ffmpeg();
             }
-            let rows: Vec<Row> = self.sub_rows(menu, sub);
             let tall: usize = rows.iter().map(|row| self.row_height(*row)).sum();
             scroll_laid_menu(ui, tall, |ui| {
                 for row in rows {
@@ -477,14 +496,15 @@ impl crate::Editor {
                 }
             });
         });
-        mark_word(&head.response, head_handles(menu, sub));
+        mark_word(&head, head_handles(menu, sub));
     }
 
     /// A submenu's rows. AU18: `More ▸ Steps ▸` is the bar of the open project.
     fn sub_rows(&self, menu: &str, sub: &str) -> Vec<Row> {
+        let on_bar = |label: &str| self.bar().iter().any(|on| on.label == label);
         let shown = |row: &Row| match row {
-            Row::A(action) => crate::steps::row_of(*action)
-                .is_none_or(|step| self.bar().iter().any(|on| on.label == step.label)),
+            Row::A(action) => crate::steps::row_of(*action).is_none_or(|step| on_bar(step.label)),
+            Row::Hand(HandRow::MangaStep) => on_bar(vocab::STEP_MANGA),
             Row::Hand(_) => true,
         };
         let filed = rows_of(menu).filter(|(_, rest)| rest.split_once('/').is_some_and(|(s, _)| s == sub));
@@ -494,7 +514,8 @@ impl crate::Editor {
     /// How many rows' height `row` stands, for a menu laid by hand.
     fn row_height(&self, row: Row) -> usize {
         match row {
-            Row::A(_) | Row::Hand(HandRow::Xdts | HandRow::OtherFormats | HandRow::AddResult) => 1,
+            Row::A(_)
+            | Row::Hand(HandRow::Xdts | HandRow::OtherFormats | HandRow::MangaStep | HandRow::AddResult) => 1,
             Row::Hand(HandRow::SaveArrangement | HandRow::OsWindows) => 2,
             Row::Hand(HandRow::ShotNames) => 3,
             Row::Hand(HandRow::FrameRange) => 3,
@@ -517,6 +538,9 @@ impl crate::Editor {
             Row::Hand(HandRow::Xdts) => self.xdts_row(ui),
             Row::Hand(HandRow::OtherFormats) => self.other_formats_row(ui),
             Row::Hand(HandRow::FrameRange) => self.frame_range(ui),
+            // A comic's bar opens on Manga, and the verb's own row stays at
+            // `More ▸ Manga` for the projects whose bar lacks it.
+            Row::Hand(HandRow::MangaStep) => self.action_row(ui, Action::MangaRoom, "Manga step"),
             Row::Hand(HandRow::OtherPanes) => self.pane_rows(ui),
             Row::Hand(HandRow::AddResult) => self.add_result(ui),
             Row::Hand(HandRow::OsWindows) => self.os_windows(ui),
@@ -579,10 +603,12 @@ impl crate::Editor {
             if ui.add_enabled(!name.is_empty(), egui::Button::new("Rename shot…")).clicked() {
                 self.state.rename_current_cut(&name);
                 self.rename_buf.clear();
+                ui.close();
             }
             if ui.add_enabled(!name.is_empty(), egui::Button::new("Rename scene…")).clicked() {
                 self.state.rename_current_scene(&name);
                 self.rename_buf.clear();
+                ui.close();
             }
         });
     }
@@ -602,27 +628,30 @@ impl crate::Editor {
             ui.label(egui::RichText::new(scene_name).strong());
             for (cut_id, cut_name) in cuts {
                 let current = *scene_id == self.state.view.scene && *cut_id == self.state.view.cut;
-                if ui.selectable_label(current, format!("    {cut_name}")).clicked()
-                    && !current
-                    && crate::guard_gesture(&mut self.canvas, &mut self.state)
-                {
-                    self.state.goto_cut(*scene_id, *cut_id);
+                if ui.selectable_label(current, format!("    {cut_name}")).clicked() {
                     ui.close();
+                    if !current && crate::guard_gesture(&mut self.canvas, &mut self.state) {
+                        self.state.goto_cut(*scene_id, *cut_id);
+                    }
                 }
             }
-            let add = ui.small_button("Add shot").on_hover_text("Add a shot to this scene.");
+            let add = ui.button("Add shot").on_hover_text("Add a shot to this scene.");
             plate::speak(&add, egui::WidgetType::Button, None, &format!("Add shot to {scene_name}"));
-            if add.clicked() && crate::guard_gesture(&mut self.canvas, &mut self.state) {
-                self.state.new_cut(*scene_id);
+            if add.clicked() {
                 ui.close();
+                if crate::guard_gesture(&mut self.canvas, &mut self.state) {
+                    self.state.new_cut(*scene_id);
+                }
             }
             ui.add_space(4.0);
         }
         ui.separator();
         let add = ui.button("Add scene").on_hover_text("A new scene with its first shot.");
-        if add.clicked() && crate::guard_gesture(&mut self.canvas, &mut self.state) {
-            self.state.new_scene();
+        if add.clicked() {
             ui.close();
+            if crate::guard_gesture(&mut self.canvas, &mut self.state) {
+                self.state.new_scene();
+            }
         }
     }
 
@@ -649,13 +678,15 @@ impl crate::Editor {
     }
 
     /// Frame range (C3): 1-based in the UI (matches the "N / total" frame
-    /// readout elsewhere), 0-based internally. None = the whole shot (read
-    /// when the job starts) until a field is moved, so it can never point
-    /// past a shot that has since grown shorter.
+    /// readout elsewhere), 0-based internally. None = up to the last drawing,
+    /// as the plain rows above it stop (read when the job starts), until a
+    /// field is moved, so it can never point past a shot that has since grown
+    /// shorter. A field may still reach into the blank tail: that is a choice.
     fn frame_range(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         let n = self.state.frame_count();
-        let (mut a, mut b) = crate::render_queue::resolve(n, self.export_range);
+        let reach = if self.export_range.is_some() { n } else { self.state.shown_length() };
+        let (mut a, mut b) = crate::render_queue::resolve(reach, self.export_range);
         let shown = (a, b);
         ui.horizontal(|ui| {
             ui.label("Frames");
@@ -672,9 +703,10 @@ impl crate::Editor {
         if (a, b) != shown {
             self.export_range = Some((a, b));
         }
-        let whole = ui.small_button("Whole shot").on_hover_text("Reset the range to frame 1 to the last.");
+        let whole = ui.button("Whole shot").on_hover_text("Reset the range to the last drawing.");
         if whole.clicked() {
             self.export_range = None;
+            ui.close();
         }
     }
 
@@ -753,9 +785,9 @@ impl crate::Editor {
     fn save_arrangement(&mut self, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Save this arrangement…").color(plate::legend_dim()));
         ui.horizontal(|ui| {
-            plate::text_field(ui, egui::TextEdit::singleline(&mut self.ws_name));
+            plate::text_field(ui, egui::TextEdit::singleline(&mut self.ws_name).hint_text("Name"));
             let name = self.ws_name.trim().to_string();
-            if ui.button("Save").clicked() && !name.is_empty() {
+            if ui.add_enabled(!name.is_empty(), egui::Button::new("Save")).clicked() {
                 let view = Some(self.canvas.snapshot_view(&self.state));
                 if let Some(w) = self.workspaces.list.iter_mut().find(|w| w.name == name) {
                     w.dock = self.dock.clone();
@@ -805,6 +837,7 @@ impl crate::Editor {
                 // not by precision.
                 if plate::danger(ui, "Delete") {
                     remove = Some(i);
+                    ui.close();
                 }
             });
         }
