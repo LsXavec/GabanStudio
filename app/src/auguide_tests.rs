@@ -175,6 +175,11 @@ const CHAINS: &[(Doc, Stage, &[Target])] = &[
     (Doc::Sample, Stage::Drawing, &[Target::Rail(Key::More), Target::Rail(Key::Flip)]),
     (Doc::Drawing, Stage::Drawing, &[Target::Step(Stage::InkPaint)]),
     (Doc::Drawing, Stage::Drawing, &[Target::Pane(Pane::Canvas)]),
+    (Doc::Drawing, Stage::InkPaint, &[named("swatch.black")]),
+    (Doc::Drawing, Stage::InkPaint, &[named("swatch.white")]),
+    (Doc::Drawing, Stage::InkPaint, &[named("swatch.yellow")]),
+    (Doc::Drawing, Stage::InkPaint, &[named("swatch.brown")]),
+    (Doc::Drawing, Stage::InkPaint, &[named("swatch.red")]),
 ];
 
 /// The `Named` and `menu.*` handles this part owns (spec 5.5). The walks must
@@ -183,7 +188,8 @@ const OWNED: &[&str] = &[
     "band.fold", "band.speed", "speed.medium", "band.loop", "band.longer", "band.sheet", "strip.next",
     "layers.add", "layers.custom", "layers.eye", "layers.role", "brush.sketch", "brush.clean", "steady.row",
     "keep.row", "export.more", "export.transparent", "options.chart", "lip.generate", "menu.view",
-    "menu.animation", "menu.animation.track", "menu.more", "menu.more.panels",
+    "menu.animation", "menu.animation.track", "menu.more", "menu.more.panels", "swatch.black", "swatch.white",
+    "swatch.yellow", "swatch.brown", "swatch.red",
 ];
 
 /// A control and the name it answers to, in the chain that reaches it.
@@ -601,8 +607,8 @@ pub(crate) fn strip_up_for_color(h: &mut EditorHarness) {
         pen(h, &line);
     }
     stand(h, NEXT, Stage::InkPaint);
-    // Open paper: the strip stands where no sheet does, as the Color step has it.
-    h.editor_mut().dock = Stage::Drawing.dock();
+    // Open paper: the Color step has no sheet, so the strip stands there.
+    assert!(!h.editor().dock.iter_all_tabs().any(|(_, p)| *p == Pane::XSheet), "the step's own recipe");
     h.editor_mut().strip_open = true;
     settle(h);
 }

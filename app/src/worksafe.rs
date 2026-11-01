@@ -728,7 +728,9 @@ mod tests {
         let mut p = PanelHarness::new(
             egui::vec2(320.0, 400.0),
             (s, CanvasView::new()),
-            |ui, (st, cv): &mut (AppState, CanvasView)| crate::palette_panel::ui(ui, st, cv),
+            |ui, (st, cv): &mut (AppState, CanvasView)| {
+                crate::palette_panel::ui(ui, st, cv, Default::default());
+            },
         );
         p.click(&format!("+ {}", crate::vocab::COLOR_NAME));
         assert!(p.state().0.meta_dirty && p.state().0.is_dirty(), "a palette edit is unsaved work");

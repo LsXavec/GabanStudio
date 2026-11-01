@@ -6,9 +6,12 @@
 //! a press on anything that also senses clicks loses its capture to egui's
 //! long touch at 0.817 s under a pen.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
 
 use anim_core::ids::{CutId, DrawingId};
+use anim_core::raster::{TILE, TileCoord, TileData, f16_bits_to_f32};
 use anim_core::xsheet::Exposure;
 use eframe::egui;
 use egui::accesskit;
@@ -44,6 +47,14 @@ const WORDED: f32 = 100.0;
 const SHEET_ROW: f32 = 20.0;
 /// The census counts at most this many sheets (spec 7.2).
 pub const CENSUS_CAP: usize = 12;
+/// A sheet this wide shows its picture; a narrower one keeps its number.
+const PICTURED: f32 = 28.0;
+/// Where a picture stands on its sheet, under the peg hole.
+const PICTURE_TOP: f32 = 12.0;
+const PICTURE_FOOT: f32 = 2.0;
+const PICTURE_SIDE: f32 = 4.0;
+/// A picture's largest size in pixels, twice what it stands at on the sheet.
+const PICTURE_PX: [usize; 2] = [96, 52];
 
 /// One sheet: a run of the active track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +123,183 @@ fn tally(sheets: &[Sheet]) -> HashMap<DrawingId, Tally> {
         }
     }
     seen
+}
+
+/// One drawing's tiles and opacity, held by a picture job.
+pub(crate) type PictureLayer = (BTreeMap<TileCoord, Arc<TileData>>, f32);
+
+/// The picture being made, off the UI thread.
+struct PictureJob {
+    id: DrawingId,
+    key: u64,
+    rx: Receiver<Option<egui::ColorImage>>,
+}
+
+/// AU13: the sheets' pictures (spec 7.2): keyed on the drawing's content, for
+/// the sheets on screen, one job at a time and none while a stroke is live.
+#[derive(Default)]
+struct Pictures {
+    /// The key each picture was made from: None where there is nothing to
+    /// show. A stale one stays until its new one lands.
+    held: HashMap<DrawingId, (u64, Option<egui::TextureHandle>)>,
+    /// The content keys of the drawings asked about since `keyed` moved.
+    keys: HashMap<DrawingId, u64>,
+    keyed: Option<(CutId, u64, u64)>,
+    job: Option<PictureJob>,
+    /// Jobs started, for the tests.
+    #[cfg(test)]
+    started: u32,
+    /// Off the UI thread here too: the suite makes its pictures in line.
+    #[cfg(test)]
+    threaded: bool,
+}
+
+impl Pictures {
+    /// Pick up a finished picture and start the next one, for `shown`.
+    fn refresh(&mut self, ctx: &egui::Context, state: &AppState, shown: &[DrawingId], gesture_safe: bool) {
+        if !gesture_safe {
+            return;
+        }
+        if let Some(job) = &self.job {
+            match job.rx.try_recv() {
+                Ok(image) => {
+                    let (id, key) = (job.id, job.key);
+                    self.job = None;
+                    self.land(ctx, id, key, image);
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => self.job = None,
+            }
+        }
+        let stamp = (state.cut().id, state.doc_gen, state.engine.revision());
+        if self.keyed != Some(stamp) {
+            self.keyed = Some(stamp);
+            self.keys.clear();
+            self.held.retain(|id, _| state.cut().drawing(*id).is_some());
+        }
+        let (keys, held) = (&mut self.keys, &self.held);
+        let stale = shown.iter().copied().find(|id| {
+            let key = *keys.entry(*id).or_insert_with(|| content_key(state, *id));
+            held.get(id).is_none_or(|(made, _)| *made != key)
+        });
+        let Some(id) = stale else {
+            return;
+        };
+        let key = self.keys[&id];
+        let layers = layers_of(state, id);
+        let paper = {
+            let p = &state.engine.project;
+            [p.width as usize, p.height as usize]
+        };
+        #[cfg(test)]
+        {
+            self.started += 1;
+        }
+        if !self.aside() {
+            self.land(ctx, id, key, picture(&layers, paper));
+            return;
+        }
+        let (tx, rx) = channel();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(picture(&layers, paper));
+            repaint.request_repaint();
+        });
+        self.job = Some(PictureJob { id, key, rx });
+    }
+
+    fn land(&mut self, ctx: &egui::Context, id: DrawingId, key: u64, image: Option<egui::ColorImage>) {
+        let name = format!("strip_picture_{}", id.0);
+        let texture = image.map(|image| ctx.load_texture(name, image, egui::TextureOptions::LINEAR));
+        self.held.insert(id, (key, texture));
+    }
+
+    /// The job runs on its own thread.
+    fn aside(&self) -> bool {
+        #[cfg(test)]
+        return self.threaded;
+        #[cfg(not(test))]
+        true
+    }
+}
+
+/// What a drawing's picture is made from, as a key: 0 for nothing to show.
+fn content_key(state: &AppState, id: DrawingId) -> u64 {
+    state.drawing_composite(id, None, false).map_or(0, |(_, key)| key)
+}
+
+fn layers_of(state: &AppState, id: DrawingId) -> Vec<PictureLayer> {
+    let slices = state.drawing_composite(id, None, false).map(|(slices, _)| slices);
+    slices.unwrap_or_default().into_iter().map(|(tiles, opacity)| (tiles.clone(), opacity)).collect()
+}
+
+/// One pixel of `tiles`: premultiplied, and scaled by the layer's opacity.
+fn texel(tile: &TileData, x: usize, y: usize, opacity: f32) -> [f32; 4] {
+    let at = (y * TILE + x) * 4;
+    std::array::from_fn(|c| f16_bits_to_f32(tile.rgba[at + c]) * opacity)
+}
+
+/// The drawing's visible layers on white paper, small: every pixel on the
+/// paper is composited, then averaged into its cell. A thin line must still
+/// read at a twentieth of its size, so what covers a cell is lifted. None when
+/// nothing is drawn on the paper. Runs on the job's thread.
+pub(crate) fn picture(layers: &[PictureLayer], paper: [usize; 2]) -> Option<egui::ColorImage> {
+    let [width, height] = paper.map(|side| side.max(1));
+    let fit = (PICTURE_PX[0] as f32 / width as f32).min(PICTURE_PX[1] as f32 / height as f32);
+    let cells = [width, height].map(|side| ((side as f32 * fit).round() as usize).max(1));
+    let mut sums = vec![[0.0f32; 4]; cells[0] * cells[1]];
+    let mut coords: Vec<TileCoord> = layers.iter().flat_map(|(tiles, _)| tiles.keys().copied()).collect();
+    coords.sort_unstable();
+    coords.dedup();
+    let t = TILE as i64;
+    for (tx, ty) in coords {
+        let found: Vec<_> = layers.iter().filter_map(|(tiles, o)| Some((tiles.get(&(tx, ty))?, *o))).collect();
+        for y in 0..TILE {
+            let py = ty as i64 * t + y as i64;
+            if !(0..height as i64).contains(&py) {
+                continue;
+            }
+            let row = py as usize * cells[1] / height;
+            for x in 0..TILE {
+                let px = tx as i64 * t + x as i64;
+                if !(0..width as i64).contains(&px) {
+                    continue;
+                }
+                let mut over = [0.0f32; 4];
+                for (tile, opacity) in &found {
+                    let s = texel(tile, x, y, *opacity);
+                    over = std::array::from_fn(|c| s[c] + over[c] * (1.0 - s[3]));
+                }
+                let sum = &mut sums[row * cells[0] + px as usize * cells[0] / width];
+                for c in 0..4 {
+                    sum[c] += over[c];
+                }
+            }
+        }
+    }
+    // Cells take a whole number of pixels, so they do not all take the same.
+    let spans = |side: usize, cells: usize| {
+        let mut spans = vec![0.0f32; cells];
+        (0..side).for_each(|at| spans[at * cells / side] += 1.0);
+        spans
+    };
+    let (wide, tall) = (spans(width, cells[0]), spans(height, cells[1]));
+    let mut drawn = false;
+    let pixels = sums
+        .iter()
+        .enumerate()
+        .map(|(at, sum)| {
+            let cover = (sum[3] / (wide[at % cells[0]] * tall[at / cells[0]])).clamp(0.0, 1.0);
+            if cover <= 0.0 {
+                return plate::ON_FILL;
+            }
+            drawn = true;
+            let (lifted, a) = (cover.sqrt(), sum[3].max(f32::EPSILON));
+            let shade = |c: f32| (((c / a).clamp(0.0, 1.0) * lifted + 1.0 - lifted) * 255.0).round() as u8;
+            plate::chip([shade(sum[0]), shade(sum[1]), shade(sum[2]), 255])
+        })
+        .collect();
+    drawn.then_some(egui::ColorImage { size: cells, source_size: vec2(cells[0] as f32, cells[1] as f32), pixels })
 }
 
 /// Frames and points, across one surface.
@@ -183,9 +371,40 @@ pub struct Strip {
     rect: Option<Rect>,
     /// The first frame of the sheet under the pointer.
     under: Option<u32>,
+    pictures: Pictures,
 }
 
 impl Strip {
+    /// Picture jobs started so far.
+    #[cfg(test)]
+    pub(crate) fn picture_jobs(&self) -> u32 {
+        self.pictures.started
+    }
+
+    /// `id` has a picture to show.
+    #[cfg(test)]
+    pub(crate) fn pictured(&self, id: DrawingId) -> bool {
+        self.pictures.held.get(&id).is_some_and(|(_, texture)| texture.is_some())
+    }
+
+    /// The content key `id`'s picture was made from.
+    #[cfg(test)]
+    pub(crate) fn picture_key(&self, id: DrawingId) -> Option<u64> {
+        self.pictures.held.get(&id).map(|(key, _)| *key)
+    }
+
+    /// Pictures run on their own thread, as they do outside the suite.
+    #[cfg(test)]
+    pub(crate) fn pictures_aside(&mut self) {
+        self.pictures.threaded = true;
+    }
+
+    /// A picture job is out.
+    #[cfg(test)]
+    pub(crate) fn picture_out(&self) -> bool {
+        self.pictures.job.is_some()
+    }
+
     /// A new frame: the strip has not shown yet.
     pub fn begin(&mut self) {
         self.rect = None;
@@ -398,7 +617,17 @@ impl Strip {
         }
         self.follow(ui, state, rect, ruler);
         let drawings = tally(&sheets);
-        paint(ui, state, rect, ruler, &sheets, &drawings, self.under);
+        let clip = ui.clip_rect();
+        let shows = |s: &Sheet| match s.shows {
+            Exposure::Drawing(id) => {
+                let at = sheet_rect(ruler, top, s);
+                (at.width() >= PICTURED && at.intersects(clip)).then_some(id)
+            }
+            Exposure::Empty => None,
+        };
+        let shown: Vec<DrawingId> = sheets.iter().filter_map(shows).collect();
+        self.pictures.refresh(ui.ctx(), state, &shown, gesture_safe);
+        paint(ui, state, rect, ruler, &sheets, &drawings, self.under, &self.pictures);
         speak_sheets(ui, state, &resp, ruler, top, &sheets, &drawings);
         if self.press.is_none()
             && self.menu.is_none()
@@ -556,6 +785,7 @@ fn speak_sheets(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn paint(
     ui: &Ui,
     state: &AppState,
@@ -564,6 +794,7 @@ fn paint(
     sheets: &[Sheet],
     drawings: &HashMap<DrawingId, Tally>,
     under: Option<u32>,
+    pictures: &Pictures,
 ) {
     let painter = ui.painter();
     let clip = ui.clip_rect();
@@ -598,7 +829,7 @@ fn paint(
         if !at.intersects(clip) {
             continue;
         }
-        paint_sheet(painter, at, sheet, drawings, under == Some(sheet.from));
+        paint_sheet(painter, at, sheet, drawings, under == Some(sheet.from), pictures);
         if frame >= sheet.from && frame < sheet.from + sheet.len {
             let round = CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 };
             painter.rect_stroke(at, round, Stroke::new(2.0, plate::BLUE_DEEP), StrokeKind::Inside);
@@ -650,7 +881,22 @@ fn edge_grip(painter: &egui::Painter, at: Rect) {
     }
 }
 
-fn paint_sheet(painter: &egui::Painter, at: Rect, sheet: &Sheet, drawings: &HashMap<DrawingId, Tally>, under: bool) {
+/// Where `texture` stands on a sheet: under the peg hole, at its own shape.
+fn picture_rect(at: Rect, texture: &egui::TextureHandle) -> Rect {
+    let room = vec2(at.width() - 2.0 * PICTURE_SIDE, SHEET_H - PICTURE_TOP - PICTURE_FOOT);
+    let size = texture.size_vec2();
+    let fit = (room.x / size.x).min(room.y / size.y);
+    Rect::from_min_size(pos2(at.left() + PICTURE_SIDE, at.top() + PICTURE_TOP), size * fit)
+}
+
+fn paint_sheet(
+    painter: &egui::Painter,
+    at: Rect,
+    sheet: &Sheet,
+    drawings: &HashMap<DrawingId, Tally>,
+    under: bool,
+    pictures: &Pictures,
+) {
     let round = CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 };
     let Exposure::Drawing(id) = sheet.shows else {
         if under {
@@ -664,9 +910,23 @@ fn paint_sheet(painter: &egui::Painter, at: Rect, sheet: &Sheet, drawings: &Hash
     plate::peg_hole(painter, pos2(at.center().x, at.top() + 6.0));
     let twice = drawings.get(&id).is_some_and(|t| t.uses > 1);
     let worded = twice && at.width() >= WORDED;
-    if at.width() >= NUMBERED {
+    let texture = pictures.held.get(&id).and_then(|(_, texture)| texture.as_ref()).filter(|_| at.width() >= PICTURED);
+    let beside = texture.map(|texture| {
+        let shown = picture_rect(at, texture);
+        let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        painter.image(texture.id(), shown, uv, plate::ON_FILL);
+        painter.rect_stroke(shown, 0.0, Stroke::new(1.0, plate::LEGEND), StrokeKind::Outside);
+        shown.right()
+    });
+    // The picture takes the number's place when the sheet holds no room for
+    // both.
+    if at.width() >= NUMBERED && beside.is_none_or(|right| at.right() - right >= NUMBERED) {
         // Beside the badge's words when they show, in the middle when not.
-        let (x, align) = if worded { (at.left() + 8.0, Align2::LEFT_CENTER) } else { (at.center().x, Align2::CENTER_CENTER) };
+        let (x, align) = match beside {
+            Some(right) => (right + 6.0, Align2::LEFT_CENTER),
+            None if worded => (at.left() + 8.0, Align2::LEFT_CENTER),
+            None => (at.center().x, Align2::CENTER_CENTER),
+        };
         let font = plate::Role::Chrome.font();
         painter.text(pos2(x, at.top() + SHEET_ROW), align, number_of(drawings, id).to_string(), font, plate::INK2);
     }

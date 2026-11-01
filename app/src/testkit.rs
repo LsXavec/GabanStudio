@@ -181,6 +181,13 @@ impl Rig {
                 self.config.save_to(dir).expect("the rig's config saves");
             }
         }
+        // AU13: and Color's `Result beside`.
+        if let Some(on) = self.editor.result_request.take() {
+            self.config.ui.result_in_color = on;
+            if let Some(dir) = &self.editor.data_dir {
+                self.config.save_to(dir).expect("the rig's config saves");
+            }
+        }
         // AU6: the Start float's latch and the lock's verb, likewise.
         let (show, lock) = (self.editor.show_start_request.take(), self.editor.lock_request.take());
         if let Some(on) = show {
@@ -424,6 +431,7 @@ impl EditorHarness {
     fn frozen(config: &mut Config) {
         config.ui.lock_positions = false;
         config.ui.sheet_in_draw = true;
+        config.ui.result_in_color = true;
         config.ui.hints_off = true;
     }
 
@@ -3130,7 +3138,7 @@ mod tests {
             keys(&config["ui"]),
             [
                 "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start",
-                "scale", "sheet_in_draw", "show_welcome", "whats_new_seen",
+                "result_in_color", "scale", "sheet_in_draw", "show_welcome", "whats_new_seen",
             ]
         );
     }
@@ -3142,13 +3150,13 @@ mod tests {
     /// and `ToggleLockPositions`, AU7 `ToggleHints`, AU9 `RoomExport` and the
     /// four plain exports, AU10 `HideTools`, AU20 `OpenLessons`, AU11
     /// `BrushMakerRoom`, the three Edit rows and the six menus' words, AU12 the
-    /// plain words.
+    /// plain words, AU13 the `Colors` tab.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
         assert_eq!((Action::ALL.len(), digest(&actions)), (171, 0xe84df822bbc71439), "the Actions, their words, their menus");
-        assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x7cfaa85046cd2ab3), "the panes and their titles");
+        assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x8ade37ed8d86e6ca), "the panes and their titles");
     }
 }

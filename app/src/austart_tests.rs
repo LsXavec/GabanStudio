@@ -1978,8 +1978,8 @@ fn austart_saved_data_stands() {
     let mut keys: Vec<_> = ui.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
     let shape = [
-        "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start", "scale",
-        "sheet_in_draw", "show_welcome", "whats_new_seen",
+        "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start",
+        "result_in_color", "scale", "sheet_in_draw", "show_welcome", "whats_new_seen",
     ];
     assert_eq!(keys, shape, "the ui section's shape");
     let store = include_str!("../../crates/anim-core/src/store.rs");

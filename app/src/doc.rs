@@ -697,6 +697,11 @@ pub struct AppState {
     pub palettes: crate::palette::Palettes,
     /// Transient UI state: the Palette pane's "new character" name field.
     pub palette_new_name: String,
+    /// AU13: the Colors panel's `More`, for this session (AU15 remembers it).
+    /// None reads the Editor's default.
+    pub palette_more: Option<bool>,
+    /// AU13: `Add color`'s popover, open on this (character, role). UI-transient.
+    pub palette_adding: Option<(usize, usize)>,
     /// Transient layer-strip UI state: an in-progress rename (layer, buffer).
     pub strip_rename: Option<(LayerId, String)>,
     /// Transient drawing-library UI state: an in-progress rename.
@@ -883,6 +888,8 @@ impl AppState {
             positioned_holds: HashSet::new(),
             palettes: Default::default(),
             palette_new_name: String::new(),
+            palette_more: None,
+            palette_adding: None,
             strip_rename: None,
             drawing_rename: None,
             strip_opacity: None,
@@ -984,6 +991,8 @@ impl AppState {
             status: "project loaded".into(),
             palettes: crate::palette::Palettes::load_from(&engine.project),
             palette_new_name: String::new(),
+            palette_more: None,
+            palette_adding: None,
             engine,
             positioned_holds: HashSet::new(),
             strip_rename: None,

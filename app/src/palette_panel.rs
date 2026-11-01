@@ -1,53 +1,234 @@
-//! THE SWATCH BOARD (shiage room charter, built 2026-08-17): the painter's
-//! primary instrument. One character at a time behind DETENT tabs; pots are
-//! 44×30 seated wells — a pot's own colour is its icon, grid position its
-//! address — with the armed pot ringed in Tally. The model is EDITED only
-//! behind the EDIT MODEL latch: mid-metronome the board is pure pots, and
-//! nothing destructive or renaming can be hit by accident. Removals are
-//! held DANGERs (model edits propagate to every frame using the role).
+//! THE COLORS PANEL (the swatch board of the shiage charter, built 2026-08-17,
+//! AU13: made canvas-first). Ten starter swatches, `Add color` and `Edit
+//! colors` stand above the scroll, so none of them can leave the screen. A
+//! person's own colors are pots under them, a pot's own colour its icon; the
+//! armed pot is ringed. Character groups and color names are disclosed. The
+//! colors are EDITED only behind the `Edit colors` latch: nothing destructive
+//! or renaming can be hit by accident while painting. Removals are held
+//! dangers (edits propagate to every frame using the role).
 //!
 //! Presentation only: `CharacterPalette`/`ColorRole` serde is untouched
 //! (the project format is NEVER-DO 1 territory).
 
 use anim_core::color::RecolourScope;
 use eframe::egui;
+use egui::color_picker::{Alpha, color_picker_color32};
 use egui::{Sense, vec2};
 
 use crate::canvas::CanvasView;
 use crate::doc::AppState;
+use crate::lessons::Target;
 use crate::palette::{CharacterPalette, ColorRole};
-use crate::plate;
+use crate::plate::{self, Card};
+use crate::vocab;
 
-/// AU7: the empty board, naming the two controls under it.
-pub(crate) const NO_CHARACTERS: &str = "No characters yet. Turn on Edit colors, then + character.";
+/// AU13: the empty board. `Add color` stands above it.
+pub(crate) const NO_COLORS: &str = "No colors yet.";
+/// The character `Add color` makes the first time, unasked.
+pub(crate) const DEFAULT_CHARACTER: &str = "Colors";
+/// A starter swatch's cell stands this wide at the most, five to the row.
+const WIDEST_SWATCH: f32 = 44.0;
+/// A pot: the room's most clicked non-canvas target (XL law).
+const POT: egui::Vec2 = vec2(44.0, 30.0);
+/// The popover's area.
+pub(crate) const ADDING: &str = "add color popover";
+/// The picker's square, big enough for a pen.
+const PICKER_W: f32 = 200.0;
 
-pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
-    ui.add_space(4.0);
+/// What the Colors panel reads from the Editor.
+#[derive(Clone, Copy, Default)]
+pub struct View {
+    /// `Result beside`, in the Color step, the one place it means anything.
+    pub beside: Option<bool>,
+    /// The frozen boot keeps the fold open (spec 1.5.2).
+    pub more_default: bool,
+}
 
-    // Character DETENT tabs — one board at a time (today's all-characters
-    // stack made every pick a scroll hunt).
+/// The handle a starter swatch answers to (feedback spec 5.5).
+fn swatch_handle(name: &str) -> Option<Target> {
+    match name {
+        "Black" => Some(Target::Named("swatch.black")),
+        "White" => Some(Target::Named("swatch.white")),
+        "Yellow" => Some(Target::Named("swatch.yellow")),
+        "Brown" => Some(Target::Named("swatch.brown")),
+        "Red" => Some(Target::Named("swatch.red")),
+        _ => None,
+    }
+}
+
+/// The ten starters, two rows of five: a click arms the color and nothing
+/// else, so the document does not change.
+fn starters(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
+    let gap = ui.spacing().item_spacing.x;
+    let cell = ((ui.available_width() - 4.0 * gap) / 5.0).clamp(plate::CTRL_H - 4.0, WIDEST_SWATCH);
+    for row in plate::STARTER_SWATCHES.chunks(5) {
+        ui.horizontal(|ui| {
+            for (name, color) in row {
+                let held = canvas.brush_color == color.to_array();
+                let resp = plate::swatch_cell(ui, vec2(cell, plate::CTRL_H), *color, held, name);
+                if let Some(handle) = swatch_handle(name) {
+                    plate::mark(ui, resp.rect, handle);
+                }
+                if resp.clicked() {
+                    canvas.brush_color = color.to_array();
+                    state.active_chip = None;
+                }
+            }
+        });
+    }
+}
+
+/// `Add color`: the first use makes the default character silently, every
+/// use adds one color, holding what the brush holds until the popover says
+/// otherwise. The new character starts bare: nobody here asked for the
+/// trade's three model tones.
+fn add_color(state: &mut AppState, canvas: &CanvasView) {
+    if state.palettes.characters.is_empty() {
+        let mut first = CharacterPalette::new(DEFAULT_CHARACTER);
+        first.roles.clear();
+        state.palettes.characters.push(first);
+        state.active_character = 0;
+    }
+    let ci = state.active_character.min(state.palettes.characters.len() - 1);
+    let roles = &mut state.palettes.characters[ci].roles;
+    let free = |n: &usize| !roles.iter().any(|r| r.name == format!("Color {n}"));
+    let n = (roles.len() + 1..).find(free).expect("a free number");
+    roles.push(ColorRole { name: format!("Color {n}"), color: canvas.brush_color });
+    let ri = roles.len() - 1;
+    state.active_chip = Some(ri);
+    state.palette_adding = Some((ci, ri));
+    state.meta_dirty = true;
+}
+
+/// The popover over the newest color: egui's own picker, which stays open
+/// across picks. Only a press elsewhere or Esc closes it: a press on `Add
+/// color` starts the next color under it.
+fn adding_ui(ui: &egui::Ui, state: &mut AppState, canvas: &mut CanvasView, add: &egui::Response) {
+    let Some((ci, ri)) = state.palette_adding else {
+        return;
+    };
+    let role = state.palettes.characters.get_mut(ci).and_then(|c| c.roles.get_mut(ri));
+    let Some(role) = role else {
+        state.palette_adding = None;
+        return;
+    };
+    let mut color = plate::chip(role.color);
+    let mut open = true;
+    let shown = egui::Popup::from_response(add)
+        .id(egui::Id::new(ADDING))
+        .open_bool(&mut open)
+        .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
+        .show(|ui| {
+            ui.spacing_mut().slider_width = PICKER_W;
+            color_picker_color32(ui, &mut color, Alpha::Opaque)
+        });
+    let Some(shown) = shown else {
+        return;
+    };
+    if shown.inner {
+        role.color = color.to_srgba_unmultiplied();
+        canvas.brush_color = role.color;
+        state.meta_dirty = true;
+    }
+    let keeps = |at: egui::Pos2| shown.response.rect.contains(at) || add.rect.contains(at);
+    let elsewhere = ui.input(|i| {
+        i.events.iter().any(|e| {
+            matches!(e, egui::Event::PointerButton { pos, pressed: true, .. } if !keeps(*pos))
+        })
+    });
+    if elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.palette_adding = None;
+    }
+}
+
+/// One pot: its color, seated, ringed when armed.
+fn pot(ui: &mut egui::Ui, role: &ColorRole, armed: bool) -> egui::Response {
+    let (pr, presp) = ui.allocate_exact_size(POT, Sense::click());
+    plate::speak(&presp, egui::WidgetType::Button, Some(armed), &format!("paint pot: {}", role.name));
+    let p = ui.painter();
+    let well = pr.shrink(2.0);
+    p.rect_filled(well.expand(2.0), 0.0, plate::WELL);
+    p.rect_filled(well, 0.0, plate::chip([role.color[0], role.color[1], role.color[2], 255]));
+    if armed {
+        p.rect_stroke(well.expand(1.0), 0.0, egui::Stroke::new(2.0, plate::TALLY), egui::StrokeKind::Outside);
+    } else {
+        p.rect_stroke(well, 0.0, egui::Stroke::new(1.0, plate::LEGEND), egui::StrokeKind::Inside);
+    }
+    presp
+}
+
+/// Returns `Result beside`'s new value, the frame it is pressed: the dock is
+/// being drawn, so the Editor swaps it after.
+pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view: View) -> Option<bool> {
+    ui.add_space(2.0);
+    starters(ui, state, canvas);
+    ui.add_space(2.0);
+    // Above the scroll: these never fall below the fold (spec AU13 item 4).
+    let add = ui.horizontal_wrapped(|ui| {
+        let add = ui.button(vocab::ADD_COLOR).card("Keep a color of your own in this project.");
+        // The latch is deliberately keyless: model edits are rare and global,
+        // and they cost a click.
+        let mut em = state.palette_edit;
+        plate::latch(ui, &mut em, vocab::EDIT_COLORS).on_hover_text(
+            "Open the colors for editing. Renames, removals and new colors reach every frame that uses them.",
+        );
+        state.palette_edit = em;
+        add
+    });
+    if add.inner.clicked() {
+        add_color(state, canvas);
+    }
+    adding_ui(ui, state, canvas, &add.inner);
+    let mut beside = view.beside.unwrap_or(false);
+    let beside_row = view.beside.map(|_| plate::latch(ui, &mut beside, vocab::RESULT_BESIDE));
+    let asked = beside_row.is_some_and(|row| {
+        row.card("Show the Timing sheet, Layers and the Result beside the paper.").clicked()
+    });
+    ui.add_space(2.0);
+    let scroll = egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| board(ui, state, canvas, view));
+    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
+    asked.then_some(beside)
+}
+
+/// Everything under the header, in its scroll.
+fn board(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view: View) {
     let n_chars = state.palettes.characters.len();
     if n_chars > 0 && state.active_character >= n_chars {
         state.active_character = n_chars - 1;
     }
-    ui.horizontal_wrapped(|ui| {
-        for ci in 0..n_chars {
-            let name = state.palettes.characters[ci].name.clone();
-            if plate::detent(ui, state.active_character == ci, &name).clicked() {
-                if state.active_character != ci {
-                    // GM7: the active chip is a pot of the board on show.
-                    state.active_chip = None;
-                }
-                state.active_character = ci;
-            }
-        }
-    });
-    if n_chars == 0 {
-        ui.label(egui::RichText::new(NO_CHARACTERS).color(plate::legend_dim()));
-    }
     recolour_offer_ui(ui, state);
-    ui.add_space(2.0);
     let edit = state.palette_edit;
+    let mut more = false;
+    if n_chars == 0 {
+        ui.label(egui::RichText::new(NO_COLORS).color(plate::legend_dim()));
+    } else {
+        more = state.palette_more.unwrap_or(view.more_default);
+        if plate::fold_row(ui, vocab::COLOR_DETAILS, ui.available_width(), more).clicked() {
+            more = !more;
+            state.palette_more = Some(more);
+        }
+    }
+    let shown = more || edit;
+    if shown {
+        // Character DETENT tabs — one board at a time (today's all-characters
+        // stack made every pick a scroll hunt).
+        ui.horizontal_wrapped(|ui| {
+            for ci in 0..n_chars {
+                let name = state.palettes.characters[ci].name.clone();
+                // Under the fold's `DETENT`s, a name of its own.
+                if plate::detent(ui, state.active_character == ci, &name).clicked() {
+                    if state.active_character != ci {
+                        // GM7: the active chip is a pot of the board on show.
+                        state.active_chip = None;
+                    }
+                    state.active_character = ci;
+                }
+            }
+        });
+    }
+    ui.add_space(2.0);
     let ci = state.active_character.min(n_chars.saturating_sub(1));
     let mut remove_role: Option<usize> = None;
     // GM2: palette edits live outside the undo system — they mark the
@@ -60,114 +241,76 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     // GM7 CHIP PICK: one ringed pot — the active chip, else the first pot
     // of the brush colour (two pots sharing a colour never both ring).
     let ring = state.ringed_chip(canvas.brush_color);
-    // AU7: the pots leave room for what stands under them, as last frame
-    // measured it, so the latch stays on the pane's own screen. With no
-    // character there is nothing to scroll, and it stands under the sentence
-    // that names it.
-    let under_id = ui.id().with("palette under the pots");
-    let under = ui.data(|d| d.get_temp::<f32>(under_id)).unwrap_or(0.0);
-    let room = if n_chars == 0 { 0.0 } else { (ui.available_height() - under).max(0.0) };
-    let scroll = egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .max_height(room)
-        .show(ui, |ui| {
-            if let Some(ch) = state.palettes.characters.get_mut(ci) {
-                for (ri, role) in ch.roles.iter_mut().enumerate() {
-                    ui.push_id(ri, |ui| {
-                        ui.horizontal(|ui| {
-                            // THE POT: 44×30, seated — the room's most
-                            // clicked non-canvas target (XL law).
-                            let (pr, presp) =
-                                ui.allocate_exact_size(vec2(44.0, 30.0), Sense::click());
-                            let armed = ring == Some(ri);
-                            plate::speak(
-                                &presp,
-                                egui::WidgetType::Button,
-                                Some(armed),
-                                &format!("paint pot: {}", role.name),
-                            );
-                            let p = ui.painter();
-                            let well = pr.shrink(2.0);
-                            p.rect_filled(well.expand(2.0), 0.0, plate::WELL);
-                            p.rect_filled(
-                                well,
-                                0.0,
-                                crate::plate::chip([
-                                    role.color[0],
-                                    role.color[1],
-                                    role.color[2],
-                                    255,
-                                ]),
-                            );
-                            if armed {
-                                p.rect_stroke(
-                                    well.expand(1.0),
-                                    0.0,
-                                    egui::Stroke::new(2.0, plate::TALLY),
-                                    egui::StrokeKind::Outside,
-                                );
-                            } else {
-                                p.rect_stroke(
-                                    well,
-                                    0.0,
-                                    egui::Stroke::new(1.0, plate::LEGEND),
-                                    egui::StrokeKind::Inside,
-                                );
-                            }
-                            if presp.clicked() {
-                                canvas.brush_color = role.color;
-                                armed_pot = Some(ri);
-                            }
-                            let key_hint = if ri < 8 {
-                                format!(" · press {} with Fill", ri + 1)
-                            } else {
-                                String::new()
-                            };
-                            presp.on_hover_text(format!("Use '{}'{key_hint}", role.name));
-                            if edit {
-                                // EDIT MODEL: the wheel lives here and only
-                                // here; edits propagate everywhere.
-                                let mut rgb = [role.color[0], role.color[1], role.color[2]];
-                                if ui.color_edit_button_srgb(&mut rgb).changed() {
-                                    let old = role.color;
-                                    role.color = [rgb[0], rgb[1], rgb[2], role.color[3]];
-                                    chip_changed = Some((ri, old, role.color));
-                                    model_changed = true;
-                                }
-                                if plate::text_field(
-                                    ui,
-                                    egui::TextEdit::singleline(&mut role.name).desired_width(72.0),
-                                )
-                                .changed()
-                                {
-                                    model_changed = true;
-                                }
-                                if plate::danger(ui, "remove") {
-                                    remove_role = Some(ri);
-                                }
-                            } else {
-                                // Mid-metronome: the name, Struck (the
-                                // colour designer authored it), nothing else.
-                                ui.label(
-                                    egui::RichText::new(role.name.clone())
-                                        .font(plate::Role::Small.font())
-                                        .color(plate::STRUCK),
-                                );
-                            }
-                        });
-                    });
-                    ui.add_space(4.0);
+    if let Some(ch) = state.palettes.characters.get_mut(ci) {
+        if !shown {
+            // The pots alone: a color is its own name.
+            ui.horizontal_wrapped(|ui| {
+                for (ri, role) in ch.roles.iter().enumerate() {
+                    let presp = ui.push_id(ri, |ui| pot(ui, role, ring == Some(ri))).inner;
+                    if presp.clicked() {
+                        canvas.brush_color = role.color;
+                        armed_pot = Some(ri);
+                    }
+                    presp.on_hover_text(format!("Use '{}'", role.name));
                 }
-                if edit && ui.button(format!("+ {}", crate::vocab::COLOR_NAME)).clicked() {
-                    ch.roles.push(ColorRole {
-                        name: "color".into(),
-                        color: [200, 200, 200, 255],
-                    });
-                    model_changed = true;
-                }
-            }
-        });
-    plate::note_viewport(ui, scroll.inner_rect, [false, true]);
+            });
+        }
+        for (ri, role) in ch.roles.iter_mut().enumerate().filter(|_| shown) {
+            ui.push_id(ri, |ui| {
+                ui.horizontal(|ui| {
+                    let presp = pot(ui, role, ring == Some(ri));
+                    if presp.clicked() {
+                        canvas.brush_color = role.color;
+                        armed_pot = Some(ri);
+                    }
+                    let key_hint = if ri < 8 {
+                        format!(" · press {} with Fill", ri + 1)
+                    } else {
+                        String::new()
+                    };
+                    presp.on_hover_text(format!("Use '{}'{key_hint}", role.name));
+                    if edit {
+                        // Edit colors: the wheel lives here and only here;
+                        // edits propagate everywhere.
+                        let mut rgb = [role.color[0], role.color[1], role.color[2]];
+                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                            let old = role.color;
+                            role.color = [rgb[0], rgb[1], rgb[2], role.color[3]];
+                            chip_changed = Some((ri, old, role.color));
+                            model_changed = true;
+                        }
+                        if plate::text_field(
+                            ui,
+                            egui::TextEdit::singleline(&mut role.name).desired_width(72.0),
+                        )
+                        .changed()
+                        {
+                            model_changed = true;
+                        }
+                        if plate::danger(ui, "remove") {
+                            remove_role = Some(ri);
+                        }
+                    } else {
+                        // Mid-metronome: the name, Struck (the
+                        // colour designer authored it), nothing else.
+                        ui.label(
+                            egui::RichText::new(role.name.clone())
+                                .font(plate::Role::Small.font())
+                                .color(plate::STRUCK),
+                        );
+                    }
+                });
+            });
+            ui.add_space(4.0);
+        }
+        if edit && ui.button(format!("+ {}", vocab::COLOR_NAME)).clicked() {
+            ch.roles.push(ColorRole {
+                name: "color".into(),
+                color: [200, 200, 200, 255],
+            });
+            model_changed = true;
+        }
+    }
     if let Some(ri) = remove_role {
         state.palettes.characters[ci].roles.remove(ri);
         // GM13: the variants stay aligned to the model.
@@ -195,20 +338,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     if armed_pot.is_some() {
         state.active_chip = armed_pot;
     }
-    let under_top = ui.cursor().top();
-    if !state.palettes.characters.is_empty() {
+    if shown && !state.palettes.characters.is_empty() {
         variants_ui(ui, state, ci);
     }
-
-    // Footer: the EDIT MODEL latch — deliberately keyless (model edits are
-    // rare and global; they cost a click).
-    ui.separator();
-    let mut em = state.palette_edit;
-    plate::latch(ui, &mut em, crate::vocab::EDIT_COLORS).on_hover_text(
-        "Open the colors for editing. Renames, removals and new colors reach every frame that uses them.",
-    );
-    state.palette_edit = em;
     if state.palette_edit {
+        ui.separator();
         ui.horizontal(|ui| {
             plate::text_field(
                 ui,
@@ -232,11 +366,6 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             state.meta_dirty = true;
         }
     }
-    let measured = ui.cursor().top() - under_top;
-    if (measured - under).abs() > 0.5 {
-        ui.data_mut(|d| d.insert_temp(under_id, measured));
-        ui.ctx().request_repaint();
-    }
 }
 
 /// GM13: the character's time-of-day variants (day, evening, night ...): a
@@ -248,7 +377,7 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
     let name_id = egui::Id::new("palette variant name");
     let rename_id = egui::Id::new(("palette variant rename", ci));
     ui.separator();
-    plate::legend(ui, "variants").on_hover_text(
+    plate::legend(ui, vocab::COLOR_SETS).on_hover_text(
         "time-of-day colours of this character, one per chip: a Palette map node in the \
          graph swaps the model's chips for a variant's",
     );
@@ -319,11 +448,11 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
         plate::text_field(
             ui,
             egui::TextEdit::singleline(&mut name)
-                .hint_text("variant name… (evening)")
+                .hint_text("set name… (evening)")
                 .desired_width(110.0),
         );
         let trimmed = name.trim().to_string();
-        if ui.button("+ variant").clicked() && !trimmed.is_empty() {
+        if ui.button(format!("+ {}", vocab::COLOR_SET)).clicked() && !trimmed.is_empty() {
             ch.add_variant(trimmed);
             name.clear();
             stale = true;

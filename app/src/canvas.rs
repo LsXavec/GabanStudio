@@ -9630,6 +9630,42 @@ pub(crate) mod extpaper_tests {
         assert!(texel(state, 960, 540)[3] > 0.0, "the paint is on the cel");
     }
 
+    /// AU13: the Color step's fill on the CPU route: armed by the step itself,
+    /// the paint lands on the color layer and no line tile moves.
+    #[test]
+    fn aucolor_cpu_fill_lands_on_the_color_layer() {
+        use crate::workspace::Stage;
+        use anim_core::model::LayerRole;
+        let mut armed = EditorHarness::with_state_shipped(AppState::new_project("ext", 1920, 1080, 24, 300.0));
+        armed.run_frames(2);
+        armed.state_mut().new_drawing_at_frame();
+        paint_texels(armed.state_mut(), &ring(860, 440, 1060, 640), [0.1, 0.1, 0.1, 1.0]);
+        armed.editor_mut().enter_room(Stage::InkPaint);
+        armed.run_frames(4);
+        let spare = AppState::new_project("spare", 64, 48, 24, 72.0);
+        let state = std::mem::replace(armed.state_mut(), spare);
+        drop(armed);
+        assert_eq!(state.view.active_role, LayerRole::Color, "armed by the step");
+        assert!(state.view.line_guard);
+        let lines = |state: &AppState| -> Vec<u64> {
+            let d = state.cut().drawing(state.current_drawing().expect("the cel")).expect("in the cut");
+            let lines = d.layers.iter().filter(|l| l.props.role != LayerRole::Color);
+            lines.flat_map(|l| l.raster.tiles.values().map(|t| t.hash)).collect()
+        };
+        let before = lines(&state);
+        assert!(!before.is_empty(), "the ring is on the line layer");
+        let fills = state.fills_done;
+        let (mut h, xf) = fill_rig(state);
+        let at = xf.paper_to_screen(pos2(960.5, 540.5));
+        click(&mut h, at, Modifiers::NONE);
+        let state = &h.state().1;
+        assert_eq!(state.fills_done, fills + 1, "{} / {}", state.refusal, state.status);
+        let d = state.cut().drawing(state.current_drawing().expect("the cel")).expect("in the cut");
+        let color = d.layers.iter().find(|l| l.props.role == LayerRole::Color).expect("a color layer");
+        assert!(!color.raster.tiles.is_empty(), "the pixels are on the color layer");
+        assert_eq!(lines(state), before, "and the line layer's tiles did not move");
+    }
+
     #[test]
     fn auseam_stroke_signal_vector_route() {
         let mut h = EditorHarness::new();

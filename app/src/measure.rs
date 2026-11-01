@@ -2271,6 +2271,8 @@ mod tests {
         let mut h = EditorHarness::with_state_shipped(crate::sample::build_sample());
         h.kit_mut().set_size(size);
         h.editor_mut().sheet_in_draw = true;
+        // AU13: Color's sheet stands behind `Result beside`.
+        h.editor_mut().result_in_color = true;
         h.editor_mut().enter_room(room);
         settle(&mut h);
         let sheet = &h.state().sheet_ui;

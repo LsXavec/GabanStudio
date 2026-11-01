@@ -1928,8 +1928,8 @@ fn austrip_saved_vocabulary_is_additive() {
     let mut keys: Vec<_> = ui.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
     let shape = [
-        "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start", "scale",
-        "sheet_in_draw", "show_welcome", "whats_new_seen",
+        "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start",
+        "result_in_color", "scale", "sheet_in_draw", "show_welcome", "whats_new_seen",
     ];
     assert_eq!(keys, shape);
     // A strip's edits are plain exposures: the file takes them as it stands.
@@ -1981,8 +1981,8 @@ fn austrip_strip_and_band_open_no_window() {
     assert_eq!(lines[at - 1], "#[cfg(test)]", "the pictures never ship");
 }
 
-/// Spec, AU5's Leave out: no thumbnails, no drag reorder, one active track,
-/// no hints, no menu moves.
+/// Spec, AU5's Leave out: no drag reorder, one active track, no hints, no menu
+/// moves. Thumbnails came with AU13.
 #[test]
 fn austrip_left_out_stays_out() {
     let mut s = timed(&[4, 2, 6]);
@@ -1994,9 +1994,6 @@ fn austrip_left_out_stays_out() {
     s.goto(0);
     let mut h = strip_of(s);
     let r = strip_rect(&h);
-    // Thumbnails: a sheet paints no image.
-    let images = measure::images_of(&h.kit().output().shapes);
-    assert!(!images.iter().any(|at| at.intersects(r)), "{images:?}");
     // One active track: one row of sheets, its runs and no others.
     let sheets = plate::strip_sheets(&h.ctx());
     assert_eq!(sheets.len(), 3, "{sheets:?}");

@@ -107,7 +107,7 @@ impl Pane {
             Pane::Brush => "Brush".into(),
             Pane::Presets => vocab::BRUSHES.into(),
             Pane::Forge => vocab::BRUSH_MAKER.into(),
-            Pane::Palette => "Palette".into(),
+            Pane::Palette => vocab::COLORS.into(),
             Pane::NodeGraph => vocab::EFFECTS_GRAPH.into(),
             Pane::History => "History".into(),
             Pane::Curves => vocab::MOTION_CURVES.into(),
@@ -214,6 +214,21 @@ impl Stage {
         ds
     }
 
+    /// AU13: Color with `Result beside`: the edit canvas and the live result
+    /// SIDE BY SIDE (the A2 motivation), the sheet and layers at the left,
+    /// the colors under the result, and GM7's paint check tabbed behind them,
+    /// the room's last pass. `Editor::recipe` picks it when `result_in_color`
+    /// is on.
+    pub fn dock_with_result() -> DockState<Pane> {
+        let mut ds = DockState::new(vec![Pane::Canvas]);
+        let tree = ds.main_surface_mut();
+        let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.18, vec![Pane::XSheet]);
+        tree.split_below(rail, 0.55, vec![Pane::Layers]);
+        let [_canvas, side] = tree.split_right(canvas, 0.58, vec![Pane::Viewer(0)]);
+        tree.split_below(side, 0.55, vec![Pane::Palette, Pane::PaintCheck]);
+        ds
+    }
+
     /// The stage's opinionated default layout.
     /// (fraction = share of the top/left child of the split.)
     pub fn dock(self) -> DockState<Pane> {
@@ -227,16 +242,12 @@ impl Stage {
             }
             // AU3: the paper alone.
             Stage::Drawing => DockState::new(vec![Pane::Canvas]),
+            // AU13: canvas first: the colors, the paint check and the Result
+            // tabbed at the right.
             Stage::InkPaint => {
-                // Edit canvas + live composite viewer SIDE BY SIDE (the A2
-                // motivation), palette under the viewer — GM7: the nuri
-                // check tabbed behind it, the room's last pass.
                 let mut ds = DockState::new(vec![Pane::Canvas]);
-                let tree = ds.main_surface_mut();
-                let [canvas, rail] = tree.split_left(NodeIndex::root(), 0.18, vec![Pane::XSheet]);
-                tree.split_below(rail, 0.55, vec![Pane::Layers]);
-                let [_canvas, side] = tree.split_right(canvas, 0.58, vec![Pane::Viewer(0)]);
-                tree.split_below(side, 0.55, vec![Pane::Palette, Pane::PaintCheck]);
+                let tabs = vec![Pane::Palette, Pane::PaintCheck, Pane::Viewer(0)];
+                ds.main_surface_mut().split_right(NodeIndex::root(), 0.78, tabs);
                 ds
             }
             Stage::Composite => {

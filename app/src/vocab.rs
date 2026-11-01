@@ -85,6 +85,13 @@ pub const PREVIEW: &str = "Preview";
 pub const MOTION_CURVES: &str = "Motion curves";
 pub const EDIT_COLORS: &str = "Edit colors";
 pub const COLOR_NAME: &str = "Color name";
+pub const COLORS: &str = "Colors";
+pub const ADD_COLOR: &str = "Add color";
+pub const COLOR_DETAILS: &str = "Color details";
+pub const COLOR_SET: &str = "Color set";
+pub const COLOR_SETS: &str = "Color sets";
+pub const RESULT_BESIDE: &str = "Result beside";
+pub const GO_TO_THIS_DRAWING: &str = "Go to this drawing";
 pub const PROTECT_LINE_ART: &str = "Protect line art";
 pub const REMOVE_FROM_TIMELINE: &str = "Remove from timeline";
 pub const SHOTS: &str = "Shots";
@@ -346,6 +353,13 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("MOTION_CURVES", MOTION_CURVES, "Motion curves"),
     ("EDIT_COLORS", EDIT_COLORS, "Edit colors"),
     ("COLOR_NAME", COLOR_NAME, "Color name"),
+    ("COLORS", COLORS, "Colors"),
+    ("ADD_COLOR", ADD_COLOR, "Add color"),
+    ("COLOR_DETAILS", COLOR_DETAILS, "Color details"),
+    ("COLOR_SET", COLOR_SET, "Color set"),
+    ("COLOR_SETS", COLOR_SETS, "Color sets"),
+    ("RESULT_BESIDE", RESULT_BESIDE, "Result beside"),
+    ("GO_TO_THIS_DRAWING", GO_TO_THIS_DRAWING, "Go to this drawing"),
     ("PROTECT_LINE_ART", PROTECT_LINE_ART, "Protect line art"),
     ("REMOVE_FROM_TIMELINE", REMOVE_FROM_TIMELINE, "Remove from timeline"),
     ("SHOTS", SHOTS, "Shots"),

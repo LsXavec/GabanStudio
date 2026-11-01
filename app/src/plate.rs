@@ -59,6 +59,20 @@ pub const BLUE_WASH: Color32 = Color32::from_rgb(0xDC, 0xE8, 0xF9);
 pub const RED: Color32 = Color32::from_rgb(0xB9, 0x2D, 0x1C);
 /// AU27: the night sky a lesson paints: a chip on the lesson card.
 pub const LESSON_NIGHT: Color32 = Color32::from_rgb(0x14, 0x1B, 0x34);
+/// AU13: the Colors panel's ten starter swatches, as (name, color). UI
+/// constants: nothing of them reaches a document until a fill lands.
+pub const STARTER_SWATCHES: [(&str, Color32); 10] = [
+    ("Black", Color32::from_rgb(0x00, 0x00, 0x00)),
+    ("White", Color32::from_rgb(0xFF, 0xFF, 0xFF)),
+    ("Red", Color32::from_rgb(0xD9, 0x3A, 0x2B)),
+    ("Orange", Color32::from_rgb(0xF2, 0x99, 0x4A)),
+    ("Yellow", Color32::from_rgb(0xF2, 0xC9, 0x4C)),
+    ("Green", Color32::from_rgb(0x3F, 0xA3, 0x4D)),
+    ("Blue", Color32::from_rgb(0x2F, 0x7F, 0xD8)),
+    ("Purple", Color32::from_rgb(0x8A, 0x5C, 0xC7)),
+    ("Peach", Color32::from_rgb(0xF2, 0xC9, 0xA1)),
+    ("Brown", Color32::from_rgb(0x8B, 0x5E, 0x3C)),
+];
 /// The refusal pill.
 pub const RED_WASH: Color32 = Color32::from_rgb(0xFB, 0xE5, 0xE1);
 /// The peg bar, and paper turned dark for the miss check.
@@ -2304,6 +2318,25 @@ pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response 
     };
     speak(&resp, egui::WidgetType::Button, Some(armed), &name);
     describe(resp, "SWATCH swatch", "colour well")
+}
+
+/// AU13: a [`swatch`] that fills a cell of `size`, for a pen to find: the
+/// Colors panel's starters.
+pub fn swatch_cell(ui: &mut Ui, size: Vec2, color: Color32, armed: bool, name: &str) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        let well = rect.shrink(3.0);
+        p.rect_filled(well, R_SHEET, color);
+        p.rect_stroke(well, R_SHEET, Stroke::new(1.0, at_rest(ui, INK3)), StrokeKind::Outside);
+        if armed {
+            p.rect_stroke(well.expand(2.0), R_INPUT, Stroke::new(2.0, at_rest(ui, TALLY)), StrokeKind::Outside);
+        } else if resp.hovered() {
+            p.rect_stroke(well.expand(2.0), R_INPUT, Stroke::new(1.0, STRUCK), StrokeKind::Outside);
+        }
+    }
+    speak(&resp, egui::WidgetType::Button, Some(armed), &format!("colour well: {name}"));
+    describe(resp, "SWATCH swatch_cell", "colour well")
 }
 
 /// RAIL — a bounded value the hand drags (the plate's fourth and last

@@ -1856,8 +1856,8 @@ mod tests {
         h.type_text("night");
         assert_eq!(h.text_fields()[0], "night", "{}", h.describe());
         // (The panel's foot sits below the fold of the test window.)
-        h.scroll_to("+ variant");
-        h.click("+ variant");
+        h.scroll_to("+ Color set");
+        h.click("+ Color set");
         assert_eq!(h.state().palette_variant_names(), ["Ball/night"], "{}", h.describe());
         // ... is a choice of the Palette map picker, as palette/variant.
         h.click_combo("none");

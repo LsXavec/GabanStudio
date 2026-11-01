@@ -64,6 +64,8 @@ mod auexport_tests;
 #[cfg(test)]
 mod aukind_tests;
 #[cfg(test)]
+mod aucolor_tests;
+#[cfg(test)]
 mod auplan_tests;
 #[cfg(test)]
 mod autail_tests;
@@ -4406,6 +4408,8 @@ struct Editor {
     /// AU19: Plan's sheet is on for every animation, and this is a person's
     /// hiding it: `ui.panel_more`'s key, mirrored as `sheet_in_draw` is.
     plan_sheet_hidden: bool,
+    /// AU13: `ui.result_in_color`, mirrored the same way.
+    result_in_color: bool,
     /// AU19: the document a template started with its sheet on (its
     /// `untitled_group`). That is this project's, not the memory's, so the
     /// next document in this Editor reads the memory again.
@@ -4415,6 +4419,8 @@ struct Editor {
     sheet_request: Option<bool>,
     /// AU19: the same button in Plan: true when it hid the sheet.
     plan_sheet_request: Option<bool>,
+    /// AU13: `Result beside`'s choice, likewise.
+    result_request: Option<bool>,
     /// AU3: where the arrangement came from while `stage` is None: the
     /// off-spine pill's name, and the arrangement it opened with. Reset goes
     /// back to it, and the lock keeps its panes (a panel opened by hand
@@ -4435,7 +4441,7 @@ struct Editor {
     /// they were read for. The dock asks every frame; the recipe changes
     /// rarely.
     held: Vec<Pane>,
-    held_for: Option<(Option<Stage>, bool, bool, Option<ProjectKind>, bool)>,
+    held_for: Option<(Option<Stage>, bool, bool, bool, Option<ProjectKind>, bool)>,
     /// Named, persisted workspaces (%APPDATA%/AnimStudio/workspaces.json).
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
@@ -5074,6 +5080,10 @@ struct EditorTabs<'a> {
     export_view: export_step::View,
     /// AU19: this is Plan: an animation's `Stage::Drawing`.
     plan: bool,
+    /// AU13: what the Colors panel reads from the Editor.
+    colors_view: palette_panel::View,
+    /// AU13: `Result beside`, pressed this frame, for after the dock.
+    result_asked: Option<bool>,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -5130,7 +5140,10 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 self.canvas,
                 &mut self.state.status,
             ),
-            Pane::Palette => palette_panel::ui(ui, self.state, self.canvas),
+            Pane::Palette => {
+                let asked = palette_panel::ui(ui, self.state, self.canvas, self.colors_view);
+                self.result_asked = asked.or(self.result_asked);
+            }
             Pane::NodeGraph => nodegraph_panel::ui(ui, self.state),
             Pane::Curves => {
                 let gesture_safe = !self.canvas.stroke_active();
@@ -5570,6 +5583,7 @@ impl Editor {
         match st {
             Stage::Drawing if self.is_animation() && !self.plan_sheet_off() => Stage::Layout.dock(),
             Stage::Drawing if self.kind_unset && self.sheet_in_draw => Stage::dock_with_sheet(),
+            Stage::InkPaint if self.result_in_color => Stage::dock_with_result(),
             _ => st.dock(),
         }
     }
@@ -5747,7 +5761,7 @@ impl Editor {
     /// memory says.
     fn locked_panes(&mut self) -> &[Pane] {
         let plan_sheet = self.in_plan() && self.dock.find_tab(&Pane::XSheet).is_some();
-        let key = (self.stage, self.sheet_in_draw, self.plan_sheet_off(), self.kind(), plan_sheet);
+        let key = (self.stage, self.sheet_in_draw, self.result_in_color, self.plan_sheet_off(), self.kind(), plan_sheet);
         if self.held_for != Some(key) {
             let dock = self.stage.map(|st| if plan_sheet { Stage::Layout.dock() } else { self.recipe(st) });
             let dock = dock.as_ref().or(self.place_dock.as_ref());
@@ -5787,10 +5801,26 @@ impl Editor {
         self.say.feed(ui);
         let hidden = ui.plan_sheet_hidden();
         let changed = self.sheet_in_draw != ui.sheet_in_draw || self.plan_sheet_hidden != hidden;
+        let result_changed = self.result_in_color != ui.result_in_color;
         self.sheet_in_draw = ui.sheet_in_draw;
         self.plan_sheet_hidden = hidden;
-        if changed && let Some(st @ Stage::Drawing) = self.stage {
-            self.dock = self.recipe(st);
+        self.result_in_color = ui.result_in_color;
+        match self.stage {
+            Some(st @ Stage::Drawing) if changed => self.dock = self.recipe(st),
+            Some(st @ Stage::InkPaint) if result_changed => self.dock = self.recipe(st),
+            _ => {}
+        }
+    }
+
+    /// AU13: `Result beside`, pressed in Color: the step's other arrangement,
+    /// remembered. A dock that is neither recipe was arranged by hand, so it
+    /// stays, and the next entry reads the choice.
+    fn switch_result(&mut self, on: bool) {
+        self.result_in_color = on;
+        self.result_request = Some(on);
+        let plain = [Stage::InkPaint.dock(), Stage::dock_with_result()];
+        if self.stage == Some(Stage::InkPaint) && plain.iter().any(|d| same_shape(&self.dock, d)) {
+            self.dock = self.recipe(Stage::InkPaint);
         }
     }
 
@@ -5854,6 +5884,8 @@ impl Editor {
             template_sheet: None,
             sheet_request: None,
             plan_sheet_request: None,
+            result_in_color: false,
+            result_request: None,
             place: String::new(),
             place_dock: None,
             export_from: None,
@@ -5972,6 +6004,8 @@ impl Editor {
             template_sheet: None,
             sheet_request: None,
             plan_sheet_request: None,
+            result_in_color: false,
+            result_request: None,
             place: String::new(),
             place_dock: None,
             export_from: None,
@@ -7219,6 +7253,11 @@ impl eframe::App for App {
             // AU19: and in Plan.
             if let Some(hidden) = editor.plan_sheet_request.take() {
                 self.config.ui.set_plan_sheet_hidden(hidden);
+                self.config.save();
+            }
+            // AU13: and Color's `Result beside`.
+            if let Some(on) = editor.result_request.take() {
+                self.config.ui.result_in_color = on;
                 self.config.save();
             }
             // AU6: the Start float's latch, and the lock's verb.
@@ -9597,6 +9636,10 @@ impl Editor {
             self.say.empty_cell_due(&self.state) && self.animated() && self.lesson.is_none();
         self.lesson_guide(ui.ctx());
         let export_view = self.export_view();
+        let colors_view = palette_panel::View {
+            beside: (self.stage == Some(Stage::InkPaint)).then_some(self.result_in_color),
+            more_default: self.more_default,
+        };
         let strokes = self.state.strokes_done;
         let mut tabs = EditorTabs {
             stage: self.stage,
@@ -9622,6 +9665,8 @@ impl Editor {
             locked: if ui_lock { &self.held } else { &[] },
             export_view,
             plan,
+            colors_view,
+            result_asked: None,
         };
         let mut dock_style = dock_style(ui.style().as_ref(), &self.dock);
         if hidden {
@@ -9645,6 +9690,9 @@ impl Editor {
                 egui_dock::AllowedSplits::All
             })
             .show_inside(ui, &mut tabs);
+        if let Some(on) = tabs.result_asked {
+            self.switch_result(on);
+        }
         // AU19: the sheet's leaf drew before the canvas took the pen up, so
         // this frame goes round once more and the key stands on its row in
         // the frame the stroke lands (spec 3.8).

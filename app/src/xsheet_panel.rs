@@ -2403,6 +2403,25 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     {
         state.strip_rename = None;
     }
+    // AU13: a held frame has no layers of its own to touch: one read-only row
+    // says whose they are and goes there.
+    if rows.is_empty()
+        && state.current_drawing().is_some()
+        && let Some((key, _)) = state.exposure_here()
+    {
+        let name = state.current_drawing().and_then(|id| state.cut().drawing(id)).map_or("", |d| d.name.as_str());
+        let words = format!("Held from frame {}: {name}", key + 1);
+        ui.label(egui::RichText::new(words).color(plate::legend_dim()).font(plate::Role::Small.font()));
+        if ui.button(crate::vocab::GO_TO_THIS_DRAWING).card("Its first frame, where its layers can be changed.").clicked() {
+            if gesture_safe {
+                state.goto(key);
+            } else {
+                state.refuse(crate::doc::FINISH_STROKE);
+            }
+        }
+        ui.add_space(2.0);
+        return;
+    }
     if rows.is_empty() {
         // Say what a stroke here will ACTUALLY create (the held cel's
         // cloned stack, else the chosen preset) — never a fixed pair.

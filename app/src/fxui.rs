@@ -393,7 +393,7 @@ fn specs_ui(
                     .selected_text(shown)
                     .show_ui(ui, |ui| {
                         if choices.is_empty() {
-                            ui.label("no palette has variants yet — add one in the palette panel");
+                            ui.label("No color sets yet. Add one in the Colors panel.");
                         }
                         for name in &choices {
                             if ui.selectable_label(*name == from, name).clicked() {

@@ -1123,6 +1123,72 @@ fn tail_moments(dir: &Path) {
     }
 }
 
+/// AU13: the Color step: the paper first with the strip's pictures, the Add
+/// color popover, Colors opened up, the old split with a held frame's row, and
+/// a comic's Color.
+const COLOR: [&str; 5] = ["color-room", "color-adding", "color-details", "color-beside", "color-comic"];
+const COLOR_SIZES: [(&str, u32, u32); 2] = [("", 1600, 900), ("-1280", 1280, 800)];
+
+fn color_owed() -> Vec<(String, u32, u32)> {
+    let sized = |state: &&str| COLOR_SIZES.map(|(suffix, w, h)| (format!("{state}{suffix}.png"), w, h));
+    COLOR.iter().flat_map(sized).collect()
+}
+
+fn color_moments(dir: &Path) {
+    for (suffix, w, tall) in COLOR_SIZES {
+        let size = egui::vec2(w as f32, tall as f32);
+        let shoot = |h: &mut EditorHarness, state: &str| {
+            h.run_frames(6);
+            h.shot(size, &dir.join(format!("{state}{suffix}.png")));
+        };
+        let mut h = EditorHarness::with_gpu_animation();
+        h.kit_mut().set_size(size);
+        arrive(&mut h, ProbeRoom::Stage(Stage::Drawing));
+        h.hide_sheet();
+        let c = h.editor().canvas.dbg_rect.center();
+        let ring = |r: f32| -> Vec<egui::Pos2> {
+            let at = |n: u32| n as f32 / 32.0 * std::f32::consts::TAU;
+            (0..=32).map(|n| c + r * egui::vec2(at(n).cos(), at(n).sin())).collect()
+        };
+        h.drag_path(&ring(60.0));
+        h.run_frames(8);
+        for r in [100.0, 150.0] {
+            h.perform(Action::AddDrawingAfter);
+            h.run_frames(4);
+            h.drag_path(&ring(r));
+            h.run_frames(8);
+        }
+        h.editor_mut().strip_open = true;
+        h.editor_mut().enter_room(Stage::InkPaint);
+        arrive(&mut h, ProbeRoom::Stage(Stage::InkPaint));
+        h.click("colour well: Red");
+        h.click_pos(h.editor().canvas.dbg_rect.center());
+        h.run_frames(8);
+        shoot(&mut h, "color-room");
+        h.click(crate::vocab::ADD_COLOR);
+        shoot(&mut h, "color-adding");
+        h.key(egui::Key::Escape);
+        h.click(crate::vocab::COLOR_DETAILS);
+        h.click(crate::vocab::EDIT_COLORS);
+        shoot(&mut h, "color-details");
+        h.click(crate::vocab::EDIT_COLORS);
+        h.click(crate::vocab::RESULT_BESIDE);
+        h.run_frames(4);
+        h.state_mut().goto(0);
+        h.perform(Action::HoldPlus);
+        h.perform(Action::HoldPlus);
+        h.state_mut().goto(1);
+        shoot(&mut h, "color-beside");
+        drop(h);
+        let comic = crate::templates::ALL[crate::templates::COMIC].build();
+        let mut h = EditorHarness::with_gpu_shipped(comic);
+        h.kit_mut().set_size(size);
+        h.editor_mut().enter_room(Stage::InkPaint);
+        arrive(&mut h, ProbeRoom::Stage(Stage::InkPaint));
+        shoot(&mut h, "color-comic");
+    }
+}
+
 /// AU8: the queue's preset row with its last two chips, wrapped: the tab in
 /// its room, where the pane is narrow, and the pane alone.
 const QUEUE: [(&str, u32, u32); 4] = [
@@ -1355,6 +1421,8 @@ fn uishot_rooms() {
     check_shots(&dir, &kinds_owed()).expect("the three bars");
     tail_moments(&dir);
     check_shots(&dir, &tail_owed()).expect("the twelve rows and the hold keys");
+    color_moments(&dir);
+    check_shots(&dir, &color_owed()).expect("the Color step");
 }
 
 #[test]

@@ -2751,6 +2751,10 @@ pub struct UiConfig {
     /// the frozen boot alone: Plan's memory is `panel_more`.
     #[serde(default)]
     pub sheet_in_draw: bool,
+    /// AU13: `Result beside` in the Colors panel, the old Color arrangement,
+    /// remembered. `Editor.result_in_color` mirrors it.
+    #[serde(default)]
+    pub result_in_color: bool,
     /// AU19: what a person left each panel's disclosure at, by key. Plan's
     /// sheet lands here first, as [`PLAN_SHEET_HIDDEN`]: `sheet_in_draw`
     /// defaults false and upgraders hold it false, so it cannot mean "on".
@@ -2787,6 +2791,7 @@ impl Default for UiConfig {
             lock_positions: false,
             exact_descriptions: false,
             sheet_in_draw: false,
+            result_in_color: false,
             panel_more: Default::default(),
             hints_seen: 0,
             hints_off: false,

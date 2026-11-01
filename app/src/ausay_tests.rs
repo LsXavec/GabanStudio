@@ -978,15 +978,14 @@ fn ausay_false_copy_is_gone() {
         }
     }
     // The sentence that stands in names a control on screen.
-    assert!(crate::palette_panel::NO_CHARACTERS.contains(crate::vocab::EDIT_COLORS));
-    assert!(crate::palette_panel::NO_CHARACTERS.contains("+ character"));
+    assert_eq!(crate::palette_panel::NO_COLORS, "No colors yet.");
     // And the status a new project starts with is no teaching at all.
     assert_eq!(AppState::new_project("t", 64, 48, 24, 72.0).status, "");
 }
 
-/// AU7's list: the empty board's sentence is true where it stands: the latch
-/// it names is in the pane with it, then the button, and the board that comes
-/// of it keeps both on the pane's own screen.
+/// AU7's list, AU13's words: the empty board's sentence is true where it
+/// stands: `Add color` and the latch are in the pane with it, then the button,
+/// and the board that comes of it keeps both on the pane's own screen.
 #[test]
 fn ausay_empty_palette_names_what_is_on_screen() {
     fn palette(h: &EditorHarness) -> Rect {
@@ -1003,7 +1002,8 @@ fn ausay_empty_palette_names_what_is_on_screen() {
         h.editor_mut().enter_room(Stage::InkPaint);
         settle(&mut h);
         assert!(h.state().palettes.characters.is_empty());
-        assert!(says(&h, crate::palette_panel::NO_CHARACTERS), "{:?}", h.painted_text());
+        assert!(says(&h, crate::palette_panel::NO_COLORS), "{:?}", h.painted_text());
+        on_screen(&h, crate::vocab::ADD_COLOR);
         on_screen(&h, crate::vocab::EDIT_COLORS);
         h.click(crate::vocab::EDIT_COLORS);
         settle(&mut h);
@@ -1012,7 +1012,7 @@ fn ausay_empty_palette_names_what_is_on_screen() {
         h.click("+ character");
         settle(&mut h);
         assert_eq!(h.state().palettes.characters.len(), 1, "the sentence's two steps made one");
-        assert!(!says(&h, crate::palette_panel::NO_CHARACTERS));
+        assert!(!says(&h, crate::palette_panel::NO_COLORS));
         on_screen(&h, crate::vocab::EDIT_COLORS);
         on_screen(&h, "+ character");
         on_screen(&h, "REMOVE CHARACTER");
