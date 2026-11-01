@@ -151,6 +151,8 @@ pub enum Action {
     OpenSample,
     /// AU6: the Start float, on its What's new tab.
     WhatsNew,
+    /// AU20: the Start float, on its Lessons page.
+    OpenLessons,
     /// AU6: Lock UI positions, from the View menu.
     ToggleLockPositions,
     /// AU7: the Say line's hints and the Quick Start dots, on or off.
@@ -469,6 +471,7 @@ impl Action {
         Action::WelcomeScreen,
         Action::OpenSample,
         Action::WhatsNew,
+        Action::OpenLessons,
         Action::HideTools,
         Action::ToggleLockPositions,
         Action::ToggleHints,
@@ -640,6 +643,7 @@ impl Action {
             Action::WelcomeScreen => "Welcome screen…",
             Action::OpenSample => "Open the sample cut",
             Action::WhatsNew => "What's New",
+            Action::OpenLessons => "Lessons",
             Action::HideTools => "Hide tools",
             Action::ToggleLockPositions => "Lock UI positions",
             Action::ToggleHints => "Hints",
@@ -817,6 +821,7 @@ impl Action {
             WelcomeScreen => "Open the Start panel: templates, recent files and the sample cut (a card asks about unsaved work).",
             OpenSample => "Open the sample cut to learn on (unsaved work is asked about first).",
             WhatsNew => "Show what this release brings, in the Start panel.",
+            OpenLessons => "Pick a lesson that makes a real file, in the Start panel.",
             HideTools => "Clear the screen down to your drawing; a dot in the corner brings the tools back.",
             ToggleLockPositions => "Keep the panels where they are: tabs stop dragging and the step's panels stay open.",
             ToggleHints => "Show or hide the teaching sentences and the Quick Start dots; turning them on starts them again.",
@@ -908,7 +913,7 @@ impl Action {
             | Layout3dRoom | MangaRoom => Group::Room,
             ResetLayout | ShowCurves | ShowPaintCheck | ShowRenderQueue | ShowCutBoard
             | ShowEpisode | RenderEpisode => Group::Window,
-            CommandPalette | ShortcutSheet | QuickStart | About | WhatsNew | ToggleHints => Group::Help,
+            CommandPalette | ShortcutSheet | QuickStart | About | WhatsNew | OpenLessons | ToggleHints => Group::Help,
         }
     }
 
@@ -1029,6 +1034,7 @@ impl Action {
             WelcomeScreen => "File/Welcome screen…",
             OpenSample => "File/Open the sample cut",
             WhatsNew => "Help/What's New",
+            OpenLessons => "Help/Lessons",
             ToggleHints => "Help/Hints",
             HideTools => "View/Hide tools",
             ToggleLockPositions => "View/Lock UI positions",
@@ -1166,6 +1172,7 @@ impl Action {
             WelcomeScreen => &["templates", "new from template", "start page", "welcome"],
             OpenSample => &["sample", "demo", "example", "tutorial"],
             WhatsNew => &["release notes", "changes", "changelog"],
+            OpenLessons => &["tutorial", "learn", "class"],
             HideTools => &["clean screen", "full screen", "zen", "show tools"],
             ToggleLockPositions => &["lock panels", "freeze layout", "lock layout"],
             ToggleHints => &["tips", "teaching", "tutorial hints"],
@@ -1708,7 +1715,7 @@ impl Action {
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
-            | WhatsNew | ToggleLockPositions | ToggleHints
+            | WhatsNew | OpenLessons | ToggleLockPositions | ToggleHints
             | BuildSatsuei | Import3DModel | Layout3dRoom | MangaRoom | ClipToPanels | ReloadSequences
             | Underlay3d | CanvasOptions | GoToFrame => None,
         }

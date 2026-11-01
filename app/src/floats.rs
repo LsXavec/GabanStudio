@@ -25,6 +25,8 @@ const HANDLE_W: f32 = 4.0;
 pub const GUTTER: f32 = 10.0;
 /// The Start float's rule: the peg bar, cut down to a line (spec 2.1).
 const PEG_RULE_H: f32 = 8.0;
+/// The `Area` of the Pocket tier's `…` popover, which rail.rs draws.
+const POPOVER: &str = "rail_popover";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Float {
@@ -93,6 +95,9 @@ pub struct Floats {
     /// Layers was tapped with a Layers tab on screen. The dock is the
     /// Editor's, so it brings the tab forward after the panes are drawn.
     pub focus_layers: bool,
+    /// AU20: Start was just opened: a left float under it makes way, where a
+    /// left float opened over it closes it.
+    pub start_fresh: bool,
 }
 
 impl Floats {
@@ -149,6 +154,22 @@ impl Floats {
             self.open(f, false);
         }
     }
+
+    /// AU20: what stands on the left now, as it was last drawn.
+    pub fn left_rect(&self, ctx: &egui::Context) -> Option<Rect> {
+        let area = match self.left {
+            Some(f) => area_id(f.heading()),
+            None if self.more => egui::Id::new(POPOVER),
+            None => return None,
+        };
+        ctx.memory(|m| m.area_rect(area))
+    }
+
+    /// AU20: the left float, or the `…` popover in its place, makes way.
+    pub fn close_left(&mut self) {
+        self.left = None;
+        self.more = false;
+    }
 }
 
 /// The body of `f`, inside its scroll.
@@ -173,10 +194,10 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
     }
     // The first frame of an `auto` float knows nothing of its height: the
     // host's cap stands in until the Area has one.
-    let id = egui::Id::new(("float", f.heading()));
+    let id = area_id(f.heading());
     let tall = ctx.memory(|m| m.area_rect(id)).map_or(size.y, |r| r.height().min(size.y));
     let pos = f.pos(host, rail_top, vec2(size.x, tall));
-    let head = Head { words: f.heading(), role: plate::Role::Heading, start: false, page: 0 };
+    let head = Head { id: f.heading(), words: f.heading(), role: plate::Role::Heading, start: false, page: 0, top: false };
     let (shown, close) = frame(ctx, head, pos, size, host, |ui| body(ui, f, args));
     if close {
         args.floats.close(f);
@@ -186,25 +207,42 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
     }
 }
 
-/// AU6: where the Start float stands in a pane of `pane`, and its size (spec
-/// 4.5): top right, and wide enough only to stay past the pane's centre.
+/// AU20: where the Start float stands, dead centre on the dock rect `pane`, at
+/// its largest, and that size (spec 4.1). A card that ends short of the cap
+/// stays centred on its own height: [`start_rect`].
 pub fn start_place(pane: Rect) -> (Pos2, Vec2) {
-    let w = (pane.width() / 2.0 - 20.0).clamp(240.0, 320.0);
-    let size = vec2(w, (pane.height() - 24.0).min(460.0));
-    (pos2(pane.right() - INSET - size.x, pane.top() + INSET), size)
+    let w = (pane.width() - 2.0 * LEFT_X).clamp(240.0, 600.0);
+    let h = (pane.height() - 2.0 * INSET).min(300.0);
+    (pane.center() - vec2(w, h) / 2.0, vec2(w, h))
 }
 
-/// A float's heading: its words, their type role, and whether it is the Start
-/// float's. That one has the peg rule under its words, which stand on the
-/// body's text edge, and a scroll reaching into the right margin: the handle
-/// lives there, so a body that starts to scroll moves nothing sideways.
-/// `page` is the body's tab: each keeps its own scroll, or a tab opens part
-/// way down, with its way back out of sight.
+/// AU20: the rect the Start float, named `id`, stands in now: as tall as it
+/// was last frame, within the cap. And the cap.
+pub fn start_rect(ctx: &egui::Context, id: &str, pane: Rect) -> (Rect, Vec2) {
+    let (pos, size) = start_place(pane);
+    let tall = ctx.memory(|m| m.area_rect(area_id(id))).map_or(size.y, |r| r.height().min(size.y));
+    (Rect::from_min_size(pos + vec2(0.0, (size.y - tall) / 2.0), vec2(size.x, tall)), size)
+}
+
+/// A float's `Area`.
+fn area_id(name: &str) -> egui::Id {
+    egui::Id::new(("float", name))
+}
+
+/// A float's heading: the name of its `Area`, its words, their type role, and
+/// whether it is the Start float's. That one has the peg rule under its words,
+/// which stand on the body's text edge, and a scroll reaching into the right
+/// margin: the handle lives there, so a body that starts to scroll moves
+/// nothing sideways. `page` is the body's tab: each keeps its own scroll, or a
+/// tab opens part way down, with its way back out of sight. `top` puts the
+/// body back at its head, for a float that has just opened.
 pub struct Head<'a> {
+    pub id: &'a str,
     pub words: &'a str,
     pub role: plate::Role,
     pub start: bool,
     pub page: usize,
+    pub top: bool,
 }
 
 /// A float's frame, each float's and the Start float's: an `Area` at `Middle`,
@@ -223,7 +261,7 @@ pub fn frame(
     let margin = egui::Margin { right: MARGIN - reach as i8, ..egui::Margin::same(MARGIN) };
     let mut close = false;
     let heading = head.words;
-    let shown = egui::Area::new(egui::Id::new(("float", heading)))
+    let shown = egui::Area::new(area_id(head.id))
         .order(egui::Order::Middle)
         .fixed_pos(pos)
         .constrain_to(host)
@@ -265,16 +303,19 @@ pub fn frame(
                 bar.floating_allocated_width = GUTTER - reach;
                 let widgets = &mut ui.visuals_mut().widgets;
                 let ink = std::mem::replace(&mut widgets.inactive.fg_stroke.color, plate::INK3);
-                let scroll = egui::ScrollArea::vertical()
+                let mut area = egui::ScrollArea::vertical()
                     .id_salt(("float_scroll", heading, head.page))
                     .scroll_source(egui::scroll_area::ScrollSource::ALL)
                     .max_height((size.y - spent).max(40.0))
-                    .auto_shrink([false, true])
-                    .show(ui, |ui| {
-                        ui.visuals_mut().widgets.inactive.fg_stroke.color = ink;
-                        ui.set_width(ui.available_width() - reach);
-                        body(ui);
-                    });
+                    .auto_shrink([false, true]);
+                if head.top {
+                    area = area.vertical_scroll_offset(0.0);
+                }
+                let scroll = area.show(ui, |ui| {
+                    ui.visuals_mut().widgets.inactive.fg_stroke.color = ink;
+                    ui.set_width(ui.available_width() - reach);
+                    body(ui);
+                });
                 plate::note_viewport(ui, scroll.inner_rect, [false, true]);
             });
         });

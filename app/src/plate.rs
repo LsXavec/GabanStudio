@@ -1550,8 +1550,10 @@ const PILL_PAD: f32 = 14.0;
 pub const CARD_PAD: f32 = 12.0;
 /// AU9: between a control and [`ring`]'s line.
 pub const RING_GAP: f32 = 2.0;
-/// A card chip's words, from its ends.
-const CHIP_PAD: f32 = 10.0;
+/// A card chip's height.
+pub const CHIP_H: f32 = CHROME_H - 4.0;
+/// A picture card's picture, from its edges, and its words from the picture.
+const PICTURE_INSET: f32 = 6.0;
 /// A ghost row's words, from its ends: a card's edge, so the two line up.
 const ROW_PAD: f32 = CARD_PAD;
 
@@ -1586,8 +1588,7 @@ pub fn step_pill(ui: &mut Ui, label: &str, current: bool, primary: bool) -> Resp
 }
 
 /// AU6: a big choice on the Start float: a `WELL` card the float's width,
-/// `tall` tall, its words on the left in the Card role. The right end is the
-/// caller's, for a [`card_chip`].
+/// `tall` tall, its words on the left in the Card role.
 pub fn choice_card(ui: &mut Ui, label: &str, tall: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), tall), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -1623,20 +1624,44 @@ pub fn ring(ui: &Ui, around: egui::Rect) -> egui::Rect {
     ring.expand(2.0)
 }
 
-/// AU6: a small key standing on a [`choice_card`]'s right end, with its right
-/// edge at `right`: another size of the card's choice.
-pub fn card_chip(ui: &mut Ui, card: egui::Rect, right: f32, label: &str) -> Response {
-    let width = text_width(ui, label, CTRL_TEXT) + 2.0 * CHIP_PAD;
-    let size = Vec2::new(width, CHROME_H - 4.0);
-    let rect = egui::Rect::from_min_size(Pos2::new(right - width, card.center().y - size.y / 2.0), size);
+/// AU20: a lesson on the Lessons page: a `WELL` card at `rect`, its `picture`
+/// on a square of paper at the left, its title beside it, on up to two lines.
+pub fn picture_card(
+    ui: &Ui,
+    rect: egui::Rect,
+    title: &str,
+    picture: impl FnOnce(&egui::Painter, egui::Rect),
+) -> Response {
+    let resp = ui.interact(rect, ui.id().with(("picture_card", title)), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, _) = filled(&resp);
+        let p = ui.painter();
+        p.rect_filled(rect, R_CONTROL, fill);
+        let side = rect.height() - 2.0 * PICTURE_INSET;
+        let at = rect.left_top() + Vec2::splat(PICTURE_INSET);
+        let paper = egui::Rect::from_min_size(at, Vec2::splat(side));
+        p.rect_filled(paper, R_CONTROL, PAPER);
+        picture(p, paper);
+        let wrap = rect.right() - PICTURE_INSET - paper.right() - PICTURE_INSET;
+        let words = ui.fonts_mut(|f| f.layout(title.to_string(), Role::Panel.font(), INK, wrap));
+        let top = rect.center().y - words.size().y / 2.0;
+        p.galley(Pos2::new(paper.right() + PICTURE_INSET, top), words, INK);
+    }
+    speak(&resp, egui::WidgetType::Button, None, title);
+    describe(resp, "CARD picture_card", title)
+}
+
+/// AU6: a small key under a [`choice_card`], at `rect`: another size of the
+/// card's choice. AU20: three cards across leave it no room on the card.
+pub fn card_chip(ui: &mut Ui, rect: egui::Rect, label: &str) -> Response {
     let resp = ui.interact(rect, ui.id().with(("card_chip", label)), Sense::click());
     if ui.is_rect_visible(rect) {
         let (fill, ink) = if resp.is_pointer_button_down_on() {
             (BLUE_WASH, BLUE_DEEP)
         } else if resp.hovered() {
-            (PAPER, STRUCK)
+            (HOVER, STRUCK)
         } else {
-            (ISLAND, LEGEND)
+            (WELL, LEGEND)
         };
         let p = ui.painter();
         p.rect_filled(rect, R_CONTROL, fill);

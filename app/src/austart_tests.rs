@@ -1,5 +1,6 @@
 //! AU6: the ready paper and the Start float (spec 8.1). A fresh launch draws
-//! at once; the float sits to one side of the paper and asks nothing.
+//! at once; the float asks nothing. AU20: it stands dead centre (feedback spec
+//! 4), and every point of the paper outside the card still takes a stroke.
 
 use eframe::egui;
 use egui::{Id, Key, LayerId, Modifiers, Order, Pos2, Rect, pos2, vec2};
@@ -8,12 +9,12 @@ use crate::aurail_tests::{paper_share_sweep, window};
 use crate::canvas::extpaper_tests::paint_texels;
 use crate::config::{Action, Config, Ctx, Keymap, UiConfig};
 use crate::floats::{self, Float};
-use crate::measure::{self, Census, Reading};
+use crate::measure::{self, Census, Reading, Scope};
 use crate::testkit::{Boot, CTRL, EditorHarness};
-use crate::welcome::{self, HEADING, PenCheck, Welcome, WelcomeAction, WelcomeTab};
+use crate::welcome::{self, HEADING, LESSONS_HEADING, PenCheck, Welcome, WelcomeAction, WelcomeTab};
 use crate::workspace::Stage;
 use crate::{
-    AppRequest, Leave, PROBE_SCALES, Pane, Performed, Startup, plate, sample, startup_route, templates,
+    AppRequest, Leave, PROBE_SCALES, Pane, Performed, Startup, lessons, plate, sample, startup_route, templates,
 };
 
 const SIZES: [(f32, f32); 4] = [(1600.0, 900.0), (1280.0, 800.0), (1280.0, 720.0), (1024.0, 640.0)];
@@ -63,6 +64,18 @@ fn paper_middle(h: &EditorHarness) -> Pos2 {
 
 fn strokes(h: &EditorHarness) -> usize {
     h.state().cut().drawings.iter().map(|d| d.strokes.len()).sum()
+}
+
+/// Paper beside the card, with room for `line_at` to its left: the card stands
+/// on the paper's centre.
+fn free_paper(h: &EditorHarness) -> Pos2 {
+    let card = float_open(h);
+    pos2(card.left() - 4.0, card.center().y)
+}
+
+/// The dock rect, which the card centres on.
+fn dock(h: &EditorHarness) -> Rect {
+    plate::dock_rect(&h.ctx()).expect("the dock was drawn")
 }
 
 /// A line from `from`, leftward, away from the float.
@@ -119,7 +132,7 @@ fn austart_fresh_launch_opens_on_ready_paper() {
     assert!(float_rect(&h).is_some());
     assert_eq!(startup_route(false, false, None, &Config::default()), Startup::Welcome);
     // Zero clicks to the first line.
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     let mut h = h;
     line_at(&mut h, at);
     assert_eq!(h.state().strokes_done, 1);
@@ -150,7 +163,7 @@ fn austart_shipped_boot_is_the_ready_paper_with_the_float_closed() {
 fn austart_first_stroke_closes_the_float_and_keeps_the_stroke() {
     let mut h = first_run();
     let group = h.state().untitled_group.clone();
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     line_at(&mut h, at);
     assert!(!is_open(&h), "the first finished stroke ends it");
     assert!(float_rect(&h).is_none(), "and nothing of it is left on screen");
@@ -176,24 +189,34 @@ fn austart_raster_stroke_closes_the_float() {
     assert!(h.state().active_layer_tiles().is_some_and(|tiles| !tiles.is_empty()));
 }
 
+/// Every point of the paper outside the card takes a first stroke: on each of
+/// its four sides, at every size, and the stroke stays.
 #[test]
-fn austart_stroke_at_the_paper_centre_with_the_float_open() {
+fn austart_stroke_on_free_paper_with_the_float_open() {
     for (w, tall) in SIZES {
         for stored in PROBE_SCALES {
-            let mut h = EditorHarness::as_first_run();
-            window(&mut h, w, tall, stored);
-            let (at, float) = (paper_middle(&h), float_open(&h));
-            let size = format!("{w}×{tall} at {stored}");
-            assert!(!float.contains(at), "{size}: the centre is free: {at:?} {float:?}");
-            line_at(&mut h, at);
-            assert_eq!(strokes(&h), 1, "{size}");
-            assert!(!is_open(&h), "{size}");
+            let sides = [vec2(-4.0, 0.0), vec2(4.0, 0.0), vec2(0.0, -4.0), vec2(0.0, 4.0)];
+            for side in sides {
+                let mut h = EditorHarness::as_first_run();
+                window(&mut h, w, tall, stored);
+                let float = float_open(&h);
+                let at = float.center() + side.normalized() * (float.size() / 2.0) + side;
+                let size = format!("{w}×{tall} at {stored}, {side:?}");
+                assert!(!float.contains(at), "{size}: {at:?} {float:?}");
+                assert!(h.editor().canvas.dbg_rect.contains(at), "{size}: on the canvas");
+                // Along the card's edge, so all of it is on free paper.
+                let along = if side.x == 0.0 { vec2(60.0, 0.0) } else { vec2(0.0, 40.0) };
+                h.drag_path(&[at, at + along / 2.0, at + along]);
+                settle(&mut h);
+                assert_eq!(strokes(&h), 1, "{size}");
+                assert!(!is_open(&h), "{size}");
+            }
         }
     }
 }
 
 #[test]
-fn austart_largest_float_leaves_the_paper_centre_clear() {
+fn austart_largest_float_stands_centred() {
     for ((w, tall), stored) in SIZES.into_iter().flat_map(|size| PROBE_SCALES.map(|stored| (size, stored))) {
         let dir = tempfile::tempdir().unwrap();
         let mut h = EditorHarness::as_first_run();
@@ -207,14 +230,13 @@ fn austart_largest_float_leaves_the_paper_centre_clear() {
             }
             settle(&mut h);
             let float = float_open(&h);
-            let pane = h.editor().canvas.dbg_rect;
+            let pane = dock(&h);
             let at = format!("{what} at {w}×{tall}, {stored}: {float:?} in {pane:?}");
-            assert!(float.left() > paper_middle(&h).x, "the paper's centre is clear: {at}");
-            assert!(float.left() > pane.center().x, "past the pane's centre: {at}");
-            assert!(pane.contains_rect(float), "inside its pane: {at}");
-            assert!(float.height() <= 460.5, "{at}");
-            assert!((pane.right() - float.right() - 12.0).abs() < 1.0, "12 in: {at}");
-            assert!((float.top() - pane.top() - 12.0).abs() < 1.0, "12 in: {at}");
+            assert!((float.center().x - pane.center().x).abs() < 1.0, "centred across: {at}");
+            assert!((float.center().y - pane.center().y).abs() < 1.0, "centred down: {at}");
+            assert!(pane.contains_rect(float), "inside the dock: {at}");
+            assert!(float.left() >= 76.0, "clear of the rail: {at}");
+            assert!(float.height() <= 300.5, "{at}");
         }
     }
     // 8.1's number: what the paper keeps with the float at its largest.
@@ -232,11 +254,390 @@ fn austart_largest_float_leaves_the_paper_centre_clear() {
 fn austart_float_geometry_is_the_rule() {
     let pane = |w: f32, tall: f32| Rect::from_min_size(pos2(100.0, 50.0), vec2(w, tall));
     let (pos, size) = floats::start_place(pane(1500.0, 800.0));
-    assert_eq!(size, vec2(320.0, 460.0));
-    assert_eq!(pos, pos2(100.0 + 1500.0 - 12.0 - 320.0, 62.0));
-    assert_eq!(floats::start_place(pane(560.0, 800.0)).1.x, 260.0, "half the pane less 20");
-    assert_eq!(floats::start_place(pane(400.0, 800.0)).1.x, 240.0, "a pane under 520 may cross");
+    assert_eq!(size, vec2(600.0, 300.0));
+    assert_eq!(pos, pos2(100.0 + 750.0 - 300.0, 50.0 + 400.0 - 150.0), "dead centre");
+    assert_eq!(floats::start_place(pane(752.0, 800.0)).1.x, 600.0, "the width's cap");
+    assert_eq!(floats::start_place(pane(652.0, 800.0)).1.x, 500.0, "76 clear at each side");
+    assert_eq!(floats::start_place(pane(300.0, 800.0)).1.x, 240.0, "the floor");
     assert_eq!(floats::start_place(pane(1000.0, 300.0)).1.y, 276.0, "the pane less 24");
+}
+
+/// Spec 4.2, whole: window, stored scale, the card's left, and its top over a
+/// band of 36 and of 92. `1024×640, 125 or 150` is one row there, and the
+/// last row here is the one off the table.
+const PLACES: [(f32, f32, f32, f32, f32, f32); 13] = [
+    (1600.0, 900.0, 1.0, 500.0, 304.0, 276.0),
+    (1600.0, 900.0, 1.25, 340.0, 214.0, 186.0),
+    (1600.0, 900.0, 1.5, 233.0, 154.0, 126.0),
+    (1280.0, 800.0, 1.0, 340.0, 254.0, 226.0),
+    (1280.0, 800.0, 1.25, 212.0, 174.0, 146.0),
+    (1280.0, 800.0, 1.5, 126.0, 120.0, 92.0),
+    (1280.0, 720.0, 1.0, 340.0, 214.0, 186.0),
+    (1280.0, 720.0, 1.25, 212.0, 142.0, 114.0),
+    (1280.0, 720.0, 1.5, 162.0, 114.0, 86.0),
+    (1024.0, 640.0, 1.0, 212.0, 174.0, 146.0),
+    (1024.0, 640.0, 1.25, 116.0, 114.0, 86.0),
+    (1024.0, 640.0, 1.5, 116.0, 114.0, 86.0),
+    (1024.0, 768.0, 2.0, 80.0, 139.0, 111.0),
+];
+
+/// Start at its cap: two recents and `More sizes` overflow any card.
+fn at_the_cap(h: &mut EditorHarness, dir: &std::path::Path) {
+    let mut w = Welcome::new(&recents(dir));
+    w.more_open = true;
+    h.editor_mut().open_start(w);
+    settle(h);
+}
+
+#[test]
+fn austart_stands_centred() {
+    for (w, tall, stored, left, top, top_strip) in PLACES {
+        let dir = tempfile::tempdir().unwrap();
+        // Ready paper, band 36; an animation with its sheet hidden, band 92.
+        let mut ready = EditorHarness::as_first_run();
+        let mut strip = EditorHarness::as_animation();
+        strip.editor_mut().plan_sheet_hidden = true;
+        strip.editor_mut().dock = Stage::Drawing.dock();
+        strip.editor_mut().strip_open = true;
+        for (h, want_top) in [(&mut ready, top), (&mut strip, top_strip)] {
+            window(h, w, tall, stored);
+            at_the_cap(h, dir.path());
+            let (card, pane) = (float_open(h), dock(h));
+            let at = format!("{w}×{tall} at {stored}: {card:?} in {pane:?}");
+            assert!((card.width() - 600.0).abs() < 0.5 && (card.height() - 300.0).abs() < 0.5, "{at}");
+            assert!((card.center() - pane.center()).length() <= 1.0, "within 1 pt: {at}");
+            assert!((card.left() - left).abs() <= 1.0 && (card.top() - want_top).abs() <= 1.0, "the table: {at}");
+            assert!(pane.contains_rect(card), "inside the dock: {at}");
+            assert!(card.left() >= if stored == 2.0 { 79.5 } else { 115.5 }, "{at}");
+        }
+        // A card that ends short of the cap stays centred on its own height.
+        ready.editor_mut().start = Some(Welcome::new(&[]));
+        settle(&mut ready);
+        let (card, pane) = (float_open(&ready), dock(&ready));
+        assert!(card.height() < 300.0, "the fresh card ends short: {card:?}");
+        assert!((card.center() - pane.center()).length() <= 1.0, "{w}×{tall}: {card:?} in {pane:?}");
+    }
+}
+
+/// Under the cap a body scrolls, and egui keeps a scroll by its id: opened
+/// again, Start stands at its head, with the cards in sight.
+#[test]
+fn austart_opens_at_its_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = first_run();
+    with_recents(&mut h, dir.path());
+    let head = h.rect("A drawing");
+    h.scroll_to("Show at startup");
+    settle(&mut h);
+    assert_ne!(h.rect("A drawing"), head, "it did scroll");
+    h.click("Close Start");
+    settle(&mut h);
+    h.editor_mut().open_start(Welcome::new(&recents(dir.path())));
+    settle(&mut h);
+    assert_eq!(h.rect("A drawing"), head);
+}
+
+/// `More sizes` scrolls, so opening it leaves the card's width and centre.
+#[test]
+fn austart_more_sizes_keeps_it_centred() {
+    let mut h = first_run();
+    let shut = float_open(&h);
+    h.click("More sizes");
+    settle(&mut h);
+    let open = float_open(&h);
+    assert_eq!(open.height(), 300.0, "the cap, and the rows scroll under it");
+    assert_eq!((open.left(), open.right()), (shut.left(), shut.right()));
+    assert!((open.center().y - shut.center().y).abs() <= 1.0, "{open:?} {shut:?}");
+}
+
+#[test]
+fn austart_clears_the_rail() {
+    for (w, tall, stored, ..) in PLACES {
+        let mut h = EditorHarness::as_first_run();
+        window(&mut h, w, tall, stored);
+        h.editor_mut().floats.more = false;
+        settle(&mut h);
+        let rail = h.ctx().memory(|m| m.area_rect(Id::new("rail"))).expect("the rail");
+        let card = float_open(&h);
+        assert!(rail.right() <= 68.5, "{w}×{tall} at {stored}: {rail:?}");
+        assert!(!rail.intersects(card), "{w}×{tall} at {stored}: {rail:?} {card:?}");
+    }
+}
+
+/// The card lies wholly on the ready paper, so it costs its own area and no
+/// more. The worst gated size leaves paper on all four sides: the floors are
+/// the first measured values less 0.5. Spec 4.2 reckons 56 and 67 on 735×413,
+/// but Fit keeps a ready paper 76 clear of each side: 680×382.
+#[test]
+fn austart_paper_uncovered() {
+    let mut h = first_run();
+    let fresh = measure::paper_share(&h);
+    println!("paper uncovered at 1600×900, fresh: {fresh:?}, {:?}", float_open(&h));
+    let dir = tempfile::tempdir().unwrap();
+    at_the_cap(&mut h, dir.path());
+    let share = measure::paper_share(&h);
+    println!("paper uncovered at 1600×900, at the cap: {share:?}");
+    assert!(share.paper >= 58.0, "paper uncovered at 1600×900: {share:?}");
+    assert!(fresh.paper > share.paper, "{fresh:?} {share:?}");
+    let mut h = EditorHarness::as_first_run();
+    window(&mut h, 1024.0, 640.0, 1.5);
+    at_the_cap(&mut h, dir.path());
+    let xf = h.editor().canvas.view_xform();
+    let corners = [pos2(0.0, 0.0), pos2(xf.paper.x, xf.paper.y)].map(|at| xf.paper_to_screen(at));
+    let (paper, card) = (Rect::from_two_pos(corners[0], corners[1]), float_open(&h));
+    assert!(paper.contains_rect(card), "{paper:?} {card:?}");
+    let free = [card.top() - paper.top(), paper.bottom() - card.bottom()];
+    let sides = [card.left() - paper.left(), paper.right() - card.right()];
+    println!("paper at 832×520: {paper:?}, free {free:?} {sides:?}");
+    assert!(free.iter().all(|f| *f >= 40.4) && sides.iter().all(|s| *s >= 39.3), "{free:?} {sides:?}");
+}
+
+/// Stored scales past the gated three clip nothing: the same `min` caps them.
+#[test]
+fn austart_stored_200_clips_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = EditorHarness::as_first_run();
+    window(&mut h, 1024.0, 640.0, 2.0);
+    let fresh = measure::clip_here(&h, Scope::Chrome);
+    assert_eq!(fresh.clipped + fresh.outside, 0, "{:?}", fresh.found);
+    at_the_cap(&mut h, dir.path());
+    let full = measure::clip_here(&h, Scope::Chrome);
+    assert_eq!(full.clipped + full.outside, 0, "{:?}", full.found);
+    assert!(dock(&h).contains_rect(float_open(&h)));
+}
+
+/// A left float standing on the card ends it, as Layers does, whichever float;
+/// one beside it shares the screen. At 1600×900 none reaches it.
+#[test]
+fn austart_left_float_closes_it() {
+    let lefts = [Float::Brushes, Float::Color, Float::ToolOptions, Float::CanvasOptions];
+    let mut closed = 0;
+    for f in lefts {
+        let mut h = first_run();
+        let card = float_open(&h);
+        h.open_float(f);
+        settle(&mut h);
+        let area = Id::new(("float", f.heading()));
+        let float = h.ctx().memory(|m| m.area_rect(area)).expect("the float");
+        assert!(!float.intersects(card) && is_open(&h), "{f:?} at 1600×900: {float:?} {card:?}");
+        for (w, tall, stored) in [(1280.0, 800.0, 1.0), (1024.0, 640.0, 1.0), (1024.0, 640.0, 1.5)] {
+            let mut h = EditorHarness::as_first_run();
+            window(&mut h, w, tall, stored);
+            let card = float_open(&h);
+            h.open_float(f);
+            settle(&mut h);
+            let float = h.ctx().memory(|m| m.area_rect(area)).expect("the float");
+            let at = format!("{f:?} at {w}×{tall}, {stored}: {float:?} {card:?}");
+            assert_eq!(is_open(&h), !float.intersects(card), "{at}");
+            assert!(h.editor().floats.is_open(f), "the float stays: {at}");
+            closed += usize::from(!is_open(&h));
+        }
+    }
+    assert!(closed >= 4, "{closed}");
+    // Start opened over one is the newer: the float makes way, and it stands.
+    let mut h = EditorHarness::as_shipped();
+    window(&mut h, 1024.0, 640.0, 1.5);
+    h.open_float(Float::Brushes);
+    settle(&mut h);
+    h.perform(Action::WelcomeScreen);
+    settle(&mut h);
+    assert!(is_open(&h), "Start stands");
+    assert!(!h.editor().floats.is_open(Float::Brushes), "the float made way");
+    // Beside it, the two share the screen, and that stands too.
+    let mut h = first_run();
+    h.click("Close Start");
+    h.open_float(Float::Brushes);
+    settle(&mut h);
+    h.perform(Action::WelcomeScreen);
+    settle(&mut h);
+    assert!(is_open(&h) && h.editor().floats.is_open(Float::Brushes));
+    // The Pocket tier's `…` stands where a left float does.
+    let mut h = EditorHarness::as_first_run();
+    window(&mut h, 1024.0, 640.0, 1.5);
+    h.editor_mut().floats.toggle_more();
+    settle(&mut h);
+    let popover = h.ctx().memory(|m| m.area_rect(Id::new("rail_popover")));
+    if popover.is_some_and(|p| p.right() > 116.0) {
+        assert!(!is_open(&h), "{popover:?}");
+    }
+}
+
+/// The nine rows on `h`'s float, on `tab`.
+fn stand_in(h: &mut EditorHarness, tab: WelcomeTab) {
+    let mut w = Welcome::new(&[]);
+    w.lessons = lessons::STAND_IN;
+    w.tab = tab;
+    h.editor_mut().start = Some(w);
+    settle(h);
+}
+
+/// Until a lesson ships, row two is `Open the example`, and nothing reaches
+/// the page: the card is not there, and `Help ▸ Lessons` and the palette say
+/// why. The first row of `ALL` flips all of it, which a stand-in table proves.
+#[test]
+fn austart_row_two_waits_for_lessons() {
+    assert!(lessons::ALL.is_empty(), "no lesson ships yet: this test moves with the first");
+    let mut h = first_run();
+    assert!(h.has("Open the example") && !h.has("Follow a lesson"));
+    assert_eq!(h.editor().can_perform(Action::OpenLessons), Err("no lessons yet"));
+    assert_eq!(Action::OpenLessons.menu(), Some("Help/Lessons"));
+    assert_eq!(Welcome::new(&[]).on_lessons().tab, WelcomeTab::Start, "no way in by the verb");
+    h.click("Open the example");
+    settle(&mut h);
+    assert_eq!(h.rig().requests, [AppRequest::Start(WelcomeAction::Sample)]);
+    // The same row, the same place, once there are lessons.
+    let mut h = first_run();
+    let (row, card) = (h.rect("Open the example"), float_open(&h));
+    stand_in(&mut h, WelcomeTab::Start);
+    assert!(h.has("Follow a lesson") && !h.has("Open the example"));
+    assert_eq!((h.rect("Follow a lesson"), float_open(&h)), (row, card), "one control for one");
+    h.click("Follow a lesson");
+    settle(&mut h);
+    assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::Lessons));
+    assert!(h.has(LESSONS_HEADING) && h.has("Close Lessons") && !h.has("Close Start"));
+    assert_eq!(float_open(&h).width(), card.width(), "the same card");
+    assert!(float_open(&h).height() <= 300.5);
+    assert!(h.has("Open the example"), "the example moves here");
+    h.click("Back to Start");
+    settle(&mut h);
+    assert!(h.has("Follow a lesson") && h.has("Close Start"));
+    let mut w = Welcome::new(&[]);
+    w.lessons = lessons::STAND_IN;
+    assert_eq!(w.on_lessons().tab, WelcomeTab::Lessons, "the verb's way in");
+}
+
+#[test]
+fn austart_page_budget() {
+    let mut h = first_run();
+    stand_in(&mut h, WelcomeTab::Lessons);
+    let page = float_census(&mut h);
+    println!("Lessons page: {} controls, {} words", page.controls, page.words);
+    assert!(page.controls <= 12 && page.words <= 48, "{page:?}");
+    // `Follow a lesson` takes the place of `Open the example`, one for one.
+    let dir = tempfile::tempdir().unwrap();
+    stand_in(&mut h, WelcomeTab::Start);
+    let fresh = float_census(&mut h);
+    assert!(fresh.controls <= 12 && fresh.words <= 25, "{fresh:?}");
+    let mut w = Welcome::new(&recents(dir.path()));
+    w.lessons = lessons::STAND_IN;
+    h.editor_mut().start = Some(w);
+    let worst = float_census(&mut h);
+    assert!(worst.controls <= 14 && worst.words <= 30, "{worst:?}");
+}
+
+/// The nine cards stand whole in the card at every size: nothing to scroll,
+/// and nothing cut.
+#[test]
+fn austart_grid_stands_unscrolled() {
+    for (w, tall, stored, ..) in PLACES {
+        let mut h = EditorHarness::as_first_run();
+        window(&mut h, w, tall, stored);
+        stand_in(&mut h, WelcomeTab::Lessons);
+        let card = float_open(&h);
+        let at = format!("{w}×{tall} at {stored}: {card:?}");
+        assert!(card.height() <= 300.5, "{at}");
+        assert!((card.center() - dock(&h).center()).length() <= 1.0, "{at}");
+        let ppp = h.ctx().pixels_per_point();
+        for lesson in lessons::STAND_IN {
+            // The harness reads a widget in pixels; the card is in points.
+            let row = h.rect(lesson.title) / ppp;
+            let at = format!("{} {row:?} in {at}", lesson.title);
+            assert!((row.height() - welcome::PAGE_ROW_H).abs() < 0.1, "{at}");
+            assert!(row.bottom() <= card.bottom() - 8.0, "{at}");
+            assert!(card.contains_rect(row), "{at}");
+        }
+        let clip = measure::clip_here(&h, Scope::All);
+        let inside: Vec<_> = clip.found.iter().filter(|f| lessons::STAND_IN.iter().any(|l| f.contains(l.title))).collect();
+        assert!(inside.is_empty(), "{inside:?} in {at}");
+    }
+}
+
+/// A card sends its own row, and comes through the door every document does:
+/// the unsaved guard, the guest's refusal, an untouched blank's silence.
+#[test]
+fn austart_page_cards_go_through_leave() {
+    assert!(WelcomeAction::Lesson(0).replaces_document());
+    for (i, lesson) in lessons::STAND_IN.iter().enumerate() {
+        let mut h = first_run();
+        stand_in(&mut h, WelcomeTab::Lessons);
+        h.click(lesson.title);
+        settle(&mut h);
+        assert_eq!(h.rig().requests, [AppRequest::Start(WelcomeAction::Lesson(i))], "{}", lesson.title);
+        assert_eq!(h.editor().leave, None, "a blank asks nothing");
+    }
+    // The grid reads columns of classes, rows of kinds.
+    let mut h = first_run();
+    stand_in(&mut h, WelcomeTab::Lessons);
+    for row in lessons::STAND_IN.chunks(3) {
+        let at: Vec<_> = row.iter().map(|l| h.rect(l.title)).collect();
+        assert!(at[0].top() == at[2].top() && at[0].right() < at[1].left() && at[1].right() < at[2].left());
+    }
+    for (class, head) in lessons::Class::ALL.into_iter().zip(lessons::STAND_IN) {
+        let word = h.painted_at(class.word());
+        assert!(word.x >= h.rect(head.title).left(), "{class:?} over its column");
+    }
+    let mut h = first_run();
+    h.click("Close Start");
+    settle(&mut h);
+    let at = paper_middle(&h);
+    line_at(&mut h, at);
+    stand_in(&mut h, WelcomeTab::Lessons);
+    h.click(lessons::STAND_IN[0].title);
+    settle(&mut h);
+    assert_eq!(h.editor().leave, Some(Leave::Start(WelcomeAction::Lesson(0))), "asked first");
+    assert!(h.rig().requests.is_empty());
+    let mut h = first_run();
+    h.editor_mut().canvas.is_guest = true;
+    stand_in(&mut h, WelcomeTab::Lessons);
+    let seq = h.state().refusal_seq;
+    h.click(lessons::STAND_IN[0].title);
+    settle(&mut h);
+    assert_eq!(h.state().refusal_seq, seq + 1, "said no to");
+    assert!(h.rig().requests.is_empty());
+}
+
+/// A chord over the card acts as it does with the card closed: the pane under
+/// the pointer answers, whichever it is.
+#[test]
+fn austart_chords_stay_live() {
+    // Over paper.
+    let mut h = first_run();
+    let on = float_open(&h).center();
+    h.point_at(on);
+    settle(&mut h);
+    let ctx = h.ctx();
+    assert_eq!(h.editor_mut().shortcut_ctx(&ctx), Ctx::Canvas);
+    let from = h.performed().len();
+    h.key_mods(CTRL, Key::V);
+    let fired: Vec<_> = h.performed()[from..].iter().map(|(a, _)| *a).collect();
+    assert!(fired.contains(&Action::PastePixels), "{fired:?}");
+    assert!(is_open(&h), "it stands");
+    // Over the sheet: Plan on a window where the card reaches it.
+    let mut h = EditorHarness::as_animation();
+    window(&mut h, 1024.0, 640.0, 1.5);
+    let sheet = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::XSheet);
+    let over = sheet.expect("Plan's sheet").1;
+    h.editor_mut().open_start(Welcome::new(&[]));
+    settle(&mut h);
+    let card = float_open(&h);
+    assert!(card.intersects(over), "{card:?} {over:?}");
+    let on = pos2(card.left() + 10.0, card.center().y);
+    assert!(over.contains(on), "{on:?} in {over:?}");
+    h.point_at(on);
+    settle(&mut h);
+    let ctx = h.ctx();
+    assert_eq!(h.editor_mut().shortcut_ctx(&ctx), Ctx::Sheet, "as with the card closed");
+    let from = h.performed().len();
+    h.key_mods(CTRL, Key::V);
+    let fired: Vec<_> = h.performed()[from..].iter().map(|(a, _)| *a).collect();
+    assert!(fired.contains(&Action::PasteCells), "{fired:?}");
+    assert!(!fired.contains(&Action::PastePixels), "{fired:?}");
+    h.click("Close Start");
+    settle(&mut h);
+    h.point_at(on);
+    settle(&mut h);
+    let ctx = h.ctx();
+    assert_eq!(h.editor_mut().shortcut_ctx(&ctx), Ctx::Sheet);
 }
 
 #[test]
@@ -289,9 +690,9 @@ fn austart_esc_closes_the_float() {
     // A stroke under way, and the unsaved question.
     let mut h = EditorHarness::as_shipped();
     sized(&mut h, 1600.0, 900.0);
-    let at = paper_middle(&h);
     h.editor_mut().open_start(Welcome::new(&[]));
     settle(&mut h);
+    let at = free_paper(&h);
     h.pen_down(at);
     h.pen_move(at + vec2(-30.0, 0.0));
     assert!(h.editor().canvas.stroke_active());
@@ -652,7 +1053,7 @@ fn austart_more_sizes_rows_say_their_size() {
     let mut h = first_run();
     h.click("More sizes");
     settle(&mut h);
-    let wide = h.rect("More sizes").width();
+    let wide = h.rect("More sizes").right() - h.rect("Open a project").left();
     let painted = h.painted_text();
     for t in &templates::ALL[..3] {
         let size = format!("{}×{}", t.width, t.height);
@@ -687,7 +1088,7 @@ fn austart_more_sizes_moves_nothing_sideways() {
     let handles = h.filled_rects(rest);
     let handle = *handles.iter().find(|r| float.contains_rect(**r)).expect("the handle at rest");
     assert_eq!(handle.width(), 4.0, "{handle:?}");
-    assert!(handle.left() >= before[0].right() + 6.0, "clear of the cards: {handle:?}");
+    assert!(handle.left() >= before[4].right() + 6.0, "clear of the cards: {handle:?}");
     assert!(handle.right() < float.right(), "inside the float: {handle:?}");
     let comic = h.rect("A comic");
     h.drag_path(&[handle.center(), handle.center() + vec2(0.0, 30.0), handle.center() + vec2(0.0, 60.0)]);
@@ -738,18 +1139,25 @@ fn austart_float_budget_at_worst_case() {
     let fresh = float_census(&mut h);
     let tall = float_open(&h).height();
     println!("fresh install: {} controls, {} words, {tall} tall", fresh.controls, fresh.words);
-    assert!(tall <= 384.5, "fresh install: {tall}");
+    assert!(tall <= 300.5, "fresh install: {tall}");
     assert!(fresh.controls <= 12 && fresh.words <= 25, "fresh install: {fresh:?}");
+    // A fresh card's body fits: its last row stands in the float unscrolled.
+    let last = h.rect("Show at startup");
+    assert!(last.bottom() <= float_open(&h).bottom() - 8.0, "{last:?} in {:?}", float_open(&h));
     with_recents(&mut h, dir.path());
     let worst = float_census(&mut h);
     assert!(worst.controls <= 14, "controls: {worst:?}");
     assert!(worst.words <= 30, "words: {worst:?}");
     let tall = float_open(&h).height();
     println!("worst case: {} controls, {} words, {tall} tall", worst.controls, worst.words);
-    assert!(tall <= 460.5, "worst case: {tall}");
-    // Its body fits: the worst case's last row stands in the float unscrolled.
+    assert!(tall <= 300.5, "worst case: {tall}");
+    // Two recents pass the cap of spec 4.1: the last row is a scroll away, and
+    // the head, with the way to close it, stands.
+    h.scroll_to("Show at startup");
+    settle(&mut h);
     let last = h.rect("Show at startup");
     assert!(last.bottom() <= float_open(&h).bottom() - 8.0, "{last:?} in {:?}", float_open(&h));
+    assert!(float_open(&h).contains_rect(h.rect("Close Start")));
 }
 
 #[test]
@@ -772,12 +1180,19 @@ fn austart_words_stand_on_one_edge() {
     let mut h = first_run();
     with_recents(&mut h, dir.path());
     let edge = float_open(&h).left() + 12.0 + plate::CARD_PAD;
-    for word in ["Start", "A drawing", "An animation", "A comic", "Open a project", "Open the example"] {
+    for word in ["Start", "A drawing", "Open the example", "Open a project", "Recent", RECENT[0], RECENT[1]] {
         assert_eq!(h.painted_at(word).x, edge, "{word}");
     }
-    for word in ["More sizes", "Recent", RECENT[0], RECENT[1], "Check your pen"] {
-        assert_eq!(h.painted_at(word).x, edge, "{word}");
+    // Each column keeps its own: a card's, a half row's.
+    for card in ["An animation", "A comic"] {
+        assert_eq!(h.painted_at(card).x, h.rect(card).left() + plate::CARD_PAD, "{card}");
     }
+    let half = h.rect("More sizes").left() + plate::CARD_PAD;
+    assert_eq!(h.painted_at("More sizes").x, half);
+    h.scroll_to("Check your pen");
+    settle(&mut h);
+    assert_eq!(h.painted_at("Check your pen").x, edge);
+    assert_eq!(h.painted_at("What's new").x, half, "the two half rows share their edges");
     assert_eq!(h.rect("Show at startup").left(), edge, "the latch's box");
     // On the other tab too, and in the answer to a check.
     let w = h.editor_mut().start.as_mut().expect("open");
@@ -1001,7 +1416,7 @@ fn austart_check_your_pen_reports() {
     h.click("Check your pen");
     settle(&mut h);
     assert!(h.has("Draw one line"), "it asks for the line");
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     pen_line(&mut h, at);
     assert_eq!(h.state().strokes_done, 1);
     assert_eq!(pen_of(&h), Some(PenCheck::Works));
@@ -1018,12 +1433,12 @@ fn austart_check_your_pen_reports() {
     let mut h = first_run();
     h.click("Check your pen");
     settle(&mut h);
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     line_at(&mut h, at);
     assert_eq!(pen_of(&h), Some(PenCheck::Mouse));
     assert!(h.has("No pressure") && h.has_text_containing("Windows Ink"));
     assert!(h.has(welcome::MOUSE_FIX), "{}", h.describe());
-    assert!(float_open(&h).height() <= 460.5);
+    assert!(float_open(&h).height() <= 300.5);
     // Asked again, it reads the next line.
     h.click("Check your pen");
     settle(&mut h);
@@ -1033,9 +1448,10 @@ fn austart_check_your_pen_reports() {
     let mut h = EditorHarness::as_first_run();
     sized(&mut h, 1280.0, 800.0);
     with_recents(&mut h, dir.path());
+    h.scroll_to("Check your pen");
     h.click("Check your pen");
     settle(&mut h);
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     line_at(&mut h, at);
     let (fix, float) = (h.rect(welcome::MOUSE_FIX), float_open(&h));
     assert!(fix.bottom() <= float.bottom(), "the fix is read whole: {fix:?} in {float:?}");
@@ -1043,7 +1459,7 @@ fn austart_check_your_pen_reports() {
     let mut h = first_run();
     h.click("Check your pen");
     settle(&mut h);
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     flat_line(&mut h, at);
     assert_eq!(pen_of(&h), Some(PenCheck::NoPressure));
     assert!(h.has("No pressure") && h.has(welcome::PEN_FIX), "{}", h.describe());
@@ -1058,7 +1474,7 @@ fn austart_check_your_pen_keeps_listening_after_no_pressure() {
         let mut h = first_run();
         h.click("Check your pen");
         settle(&mut h);
-        let at = paper_middle(&h);
+        let at = free_paper(&h);
         if flat {
             flat_line(&mut h, at);
             flat_line(&mut h, at + vec2(0.0, 30.0));
@@ -1079,7 +1495,7 @@ fn austart_check_your_pen_keeps_listening_after_no_pressure() {
     let mut h = first_run();
     h.click("Check your pen");
     settle(&mut h);
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     line_at(&mut h, at);
     assert_eq!((pen_of(&h), strokes(&h)), (Some(PenCheck::Mouse), 0));
     line_at(&mut h, at + vec2(0.0, 40.0));
@@ -1094,7 +1510,7 @@ fn austart_a_pen_tap_keeps_asking() {
     let mut h = first_run();
     h.click("Check your pen");
     settle(&mut h);
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     h.pen_tap(at);
     settle(&mut h);
     assert_eq!(h.editor().canvas.pen_verdict(), PenCheck::Waiting);
@@ -1120,7 +1536,7 @@ fn austart_check_your_pen_reads_the_raster_route() {
     assert!(h.editor().canvas.raster, "the paint layer is live");
     h.click("Check your pen");
     h.run_frames(4);
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     h.pen_tap(at);
     h.run_frames(8);
     assert_eq!(h.state().strokes_done, 1, "{}", h.state().status);
@@ -1146,10 +1562,11 @@ fn austart_a_card_after_a_pen_check_asks_nothing() {
     let mut h = first_run();
     h.click("Check your pen");
     settle(&mut h);
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     pen_line(&mut h, at);
     assert_eq!(pen_of(&h), Some(PenCheck::Works));
     assert!(!h.state().is_dirty(), "the blank is clean again");
+    h.scroll_to("A drawing");
     h.click("A drawing");
     settle(&mut h);
     assert_eq!(h.editor().leave, None, "nothing to ask about");
@@ -1166,8 +1583,10 @@ fn austart_a_card_after_a_pen_check_asks_nothing() {
     settle(&mut h);
     h.click("Check your pen");
     settle(&mut h);
-    line_at(&mut h, at + vec2(0.0, 40.0));
+    let at = free_paper(&h);
+    line_at(&mut h, at);
     assert_eq!(strokes(&h), 1, "the check's line alone came off");
+    h.scroll_to("A drawing");
     h.click("A drawing");
     settle(&mut h);
     assert!(h.has("Save changes?"), "the work before the check is unsaved");
@@ -1185,9 +1604,12 @@ fn austart_check_your_pen_shows_its_state() {
     settle(&mut h);
     assert_eq!(h.rect("Draw one line"), row);
     assert!(h.filled_rects(plate::BLUE_WASH).contains(&row), "the current row's wash");
-    let at = paper_middle(&h);
+    let at = free_paper(&h);
     pen_line(&mut h, at);
-    assert_eq!(h.rect("Check your pen"), row, "the row is back, and asks again");
+    // The answer's line takes the body past the cap: the same row, scrolled by it.
+    let back = h.rect("Check your pen");
+    assert_eq!((back.left(), back.size()), (row.left(), row.size()), "the row is back, and asks again");
+    assert!(float_open(&h).contains_rect(back), "{back:?}");
     assert!(h.painted_text().contains(&"Pressure works".to_string()));
     let answered = float_census(&mut h);
     assert_eq!(answered.controls, idle.controls, "an answer is no control");
@@ -1287,7 +1709,7 @@ fn austart_menu_rows_open_the_float_with_no_modal() {
     assert!(is_open(&h) && float_rect(&h).is_some());
     assert!(h.ctx().memory(|m| m.top_modal_layer()).is_none(), "no Modal");
     let shown = float_open(&h);
-    assert!(shown.left() > h.editor().canvas.dbg_rect.center().x);
+    assert!((shown.center().x - dock(&h).center().x).abs() <= 1.0, "{shown:?}");
     h.click("Close Start");
     settle(&mut h);
     // What's New: the same float, on its tab.
@@ -1336,7 +1758,7 @@ fn austart_upgrader_opens_once_on_whats_new() {
     sized(&mut h, 1600.0, 900.0);
     assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::WhatsNew));
     assert_eq!(h.rig().config.ui.whats_new_seen, welcome::VERSION, "once");
-    assert!(float_open(&h).left() > paper_middle(&h).x, "the same paper and float");
+    assert!((float_open(&h).center().x - paper_middle(&h).x).abs() <= 1.0, "the same paper and float");
     assert_eq!(h.state().fps(), 12);
     // A fresh install has nothing new to say.
     let h = first_run();

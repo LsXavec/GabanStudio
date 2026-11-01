@@ -102,6 +102,8 @@ fn walk(h: &mut EditorHarness, dir: &Path, size: egui::Vec2, suffix: &str) {
         arrive(h, room);
         h.shot(size, &dir.join(shot_name(i, room, suffix)));
     }
+    // The last room's float is that room's alone.
+    h.editor_mut().start = None;
 }
 
 /// The menus, by what opens them.
@@ -533,7 +535,7 @@ fn start_float(dir: &Path) {
             w.pen = *said;
             w.pen_said = true;
         }
-        h.editor_mut().start = Some(w);
+        h.editor_mut().open_start(w);
         arrive(&mut h, draw);
         h.shot(size, &dir.join(format!("{state}.png")));
     }
@@ -1333,7 +1335,7 @@ fn audock_shots_owe_the_shipped_boot_too() {
     assert_eq!(names.len(), 8, "no two shots share a name: {names:?}");
     assert!(shipped.iter().all(|o| o.0.starts_with("shipped-")), "{names:?}");
     // The ignored pass checks all of these at once.
-    assert_eq!(shots_owed().len() + states_owed().len() + shipped.len(), 60);
+    assert_eq!(shots_owed().len() + states_owed().len() + shipped.len(), 62);
 }
 
 #[test]
@@ -1348,10 +1350,11 @@ fn aulook_shots_owe_every_state_at_both_sizes() {
 #[test]
 fn auseam_shots_owed_are_sixteen_at_two_sizes_and_answer_shots_before() {
     let owed = shots_owed();
-    // Sixteen and the Export step's two, at the same two sizes.
-    assert_eq!(owed.len(), 18);
+    // Sixteen, the Export step's two and the Lessons page's two, at the same
+    // two sizes.
+    assert_eq!(owed.len(), 20);
     let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
-    assert_eq!(names.len(), 18, "no two shots share a name: {names:?}");
+    assert_eq!(names.len(), 20, "no two shots share a name: {names:?}");
     let sizes: BTreeSet<(u32, u32)> = owed.iter().map(|o| (o.1, o.2)).collect();
     assert_eq!(sizes, BTreeSet::from([(1280, 800), (1600, 900)]));
     for before in SHOTS_BEFORE {

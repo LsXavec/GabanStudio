@@ -1333,8 +1333,10 @@ mod tests {
         let seeded = clip_audit(&mut h, Scope::Chrome);
         assert_eq!(seeded.clipped, chrome.clipped + PROBE_ROOMS.len(), "{:?}", seeded.found);
         assert!(seeded.found.iter().any(|f| f.starts_with("Forge:")), "named by room");
-        // One inside a pane body: `All` has it, `Chrome` leaves it out.
+        // One inside a pane body: `All` has it, `Chrome` leaves it out. The
+        // last room's float would stand on it: a text is told by where it stands.
         h.rig_mut().seed = None;
+        h.editor_mut().start = None;
         h.editor_mut().enter_room(Stage::Drawing);
         settle(&mut h);
         let (all, chrome) = (clip_here(&h, Scope::All), clip_here(&h, Scope::Chrome));

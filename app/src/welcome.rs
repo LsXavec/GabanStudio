@@ -13,6 +13,7 @@ use anim_core::store::FileMeta;
 use eframe::egui;
 
 use crate::config::Action;
+use crate::lessons::{self, Class, Lesson};
 use crate::plate;
 use crate::plate::Card;
 use crate::steps::ProjectKind;
@@ -27,6 +28,8 @@ pub const THUMB_MAX_BYTES: usize = 64 * 1024;
 pub const RECENT_CARDS: usize = 12;
 /// AU6: the Start float's heading.
 pub const HEADING: &str = "Start";
+/// AU20: its heading on the Lessons page.
+pub const LESSONS_HEADING: &str = "Lessons";
 /// AU6: the Start float's recent rows; the rest are under File ▸ Open recent.
 const RECENT_ROWS: usize = 2;
 
@@ -360,6 +363,8 @@ pub enum WelcomeAction {
     Template(usize),
     /// AU6: a card on the Start float: an entry of `templates::INTENTS`.
     Intent(usize),
+    /// AU20: a card on the Lessons page: an entry of the page's table.
+    Lesson(usize),
     Custom,
     Open,
     OpenRecent(PathBuf),
@@ -378,7 +383,7 @@ impl WelcomeAction {
     /// unsaved guard asks first. The rest ask for themselves, or drop nothing.
     pub fn replaces_document(&self) -> bool {
         use WelcomeAction::*;
-        matches!(self, Template(_) | Intent(_) | OpenRecent(_) | Sample | ShowMe(_))
+        matches!(self, Template(_) | Intent(_) | Lesson(_) | OpenRecent(_) | Sample | ShowMe(_))
     }
 }
 
@@ -395,6 +400,8 @@ pub enum WelcomeTab {
     /// What this release brings, grouped by who reaches for it — the tab
     /// the first launch of a new version opens on.
     WhatsNew,
+    /// AU20: the grid of lessons, on its own scroll.
+    Lessons,
 }
 
 /// Whether the What's New tab is due: `seen` (the config's last shown
@@ -500,6 +507,8 @@ pub struct Welcome {
     pub pen: PenCheck,
     /// AU6: the answer just came in: the body scrolls down to it, once.
     pub pen_said: bool,
+    /// AU20: the Lessons page's table. Empty, the page cannot be reached.
+    pub lessons: &'static [Lesson],
 }
 
 /// AU6: `Check your pen`: the next line drawn is read, and the row below says
@@ -568,6 +577,7 @@ impl Welcome {
             more_open: false,
             pen: PenCheck::Idle,
             pen_said: false,
+            lessons: lessons::ALL,
         }
     }
 
@@ -577,6 +587,14 @@ impl Welcome {
             over_editor: true,
             ..Self::new(recent)
         }
+    }
+
+    /// AU20: on the Lessons page, while there are lessons to show.
+    pub fn on_lessons(mut self) -> Self {
+        if !self.lessons.is_empty() {
+            self.tab = WelcomeTab::Lessons;
+        }
+        self
     }
 
     /// Drop a card (Remove) without touching the disk.
@@ -611,10 +629,21 @@ fn section(ui: &mut egui::Ui, text: &str) {
 /// A card on the float, and the gap between cards.
 const CARD_H: f32 = 44.0;
 const CARD_GAP: f32 = 8.0;
+/// The chips under `A drawing`: from the card, and from each other.
+const CHIP_GAP: f32 = 4.0;
 /// The float's rows stand this far apart, and a group this much further from
-/// the next: spec 8.1's budget, with its last row unscrolled at the worst case.
+/// the next.
 const ROW_GAP: f32 = 2.0;
 const GROUP_GAP: f32 = 4.0;
+/// `Open the example`'s hover, on either page.
+const EXAMPLE_CARD: &str = "A ball bounce to look through and draw on";
+/// The Lessons page (spec 4.5): the legends over its columns, its gutter of
+/// kinds, its rows and the gap between them. Under a cap of 300 the head and
+/// the margins leave the body 229: rows of 56, not 60, keep the grid unscrolled.
+const PAGE_LEGEND_H: f32 = 16.0;
+const PAGE_GUTTER: f32 = 72.0;
+pub const PAGE_ROW_H: f32 = 56.0;
+const PAGE_GAP: f32 = 6.0;
 
 /// What is no card or row on the float, on the one edge their words start at.
 fn on_edge<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
@@ -639,26 +668,39 @@ pub fn float_body(
         on_edge(ui, whats_new_ui);
         return None;
     }
+    if w.tab == WelcomeTab::Lessons {
+        return lessons_page(ui, w, wide);
+    }
     let mut out = None;
-    intent_cards(ui, &mut out);
+    intent_cards(ui, wide, &mut out);
     ui.add_space(GROUP_GAP);
-    let open = plate::ghost_row(ui, "Open a project", wide, None);
-    if open.card("Open a project saved on this computer").clicked() {
-        out = Some(WelcomeAction::Open);
+    if w.lessons.is_empty() {
+        let sample = plate::choice_card(ui, "Open the example", CARD_H);
+        if sample.card(EXAMPLE_CARD).clicked() {
+            out = Some(WelcomeAction::Sample);
+        }
+    } else {
+        let lessons = plate::choice_card(ui, "Follow a lesson", CARD_H);
+        if lessons.card("Learn by making something, step by step").clicked() {
+            w.tab = WelcomeTab::Lessons;
+        }
     }
-    let sample = plate::ghost_row(ui, "Open the example", wide, None);
-    if sample.card("A ball bounce to look through and draw on").clicked() {
-        out = Some(WelcomeAction::Sample);
-    }
-    if plate::ghost_row(ui, "More sizes", wide, Some(w.more_open)).clicked() {
-        w.more_open = !w.more_open;
-    }
+    ui.add_space(GROUP_GAP);
+    let half = (wide - ui.spacing().item_spacing.x) / 2.0;
+    ui.horizontal(|ui| {
+        let open = plate::ghost_row(ui, "Open a project", half, None);
+        if open.card("Open a project saved on this computer").clicked() {
+            out = Some(WelcomeAction::Open);
+        }
+        if plate::ghost_row(ui, "More sizes", half, Some(w.more_open)).clicked() {
+            w.more_open = !w.more_open;
+        }
+    });
     if w.more_open {
         more_sizes(ui, wide, &mut out);
     }
     recent_rows(ui, w, wide, &mut out);
     ui.add_space(GROUP_GAP);
-    let half = (wide - ui.spacing().item_spacing.x) / 2.0;
     ui.horizontal(|ui| {
         let check = if w.pen == PenCheck::Waiting {
             plate::current_row(ui, w.pen.words(), half)
@@ -689,33 +731,115 @@ pub fn float_body(
     out
 }
 
-/// The float's three cards. `A drawing` holds its other two sizes.
-fn intent_cards(ui: &mut egui::Ui, out: &mut Option<WelcomeAction>) {
-    let gap = ui.spacing_mut().item_spacing.y;
-    ui.spacing_mut().item_spacing.y = CARD_GAP;
-    let drawing = plate::choice_card(ui, "A drawing", CARD_H);
-    let mut right = drawing.rect.right() - 8.0;
-    for (word, intent) in [("Tall", templates::PICTURE_TALL), ("Square", templates::PICTURE_SQUARE)] {
-        let t = &templates::INTENTS[intent];
-        let chip = plate::card_chip(ui, drawing.rect, right, word);
-        right = chip.rect.left() - 4.0;
-        if chip.card(format!("{}×{}", t.width, t.height)).clicked() {
-            *out = Some(WelcomeAction::Intent(intent));
+/// The float's three cards, across. `A drawing`'s other two sizes stand under
+/// it: it and its chips miss one card's width (spec 4.3).
+fn intent_cards(ui: &mut egui::Ui, wide: f32, out: &mut Option<WelcomeAction>) {
+    let across = (wide - 2.0 * CARD_GAP) / 3.0;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(CARD_GAP, CHIP_GAP);
+        ui.vertical(|ui| {
+            ui.set_width(across);
+            let t = &templates::INTENTS[templates::PICTURE];
+            let drawing = plate::choice_card(ui, "A drawing", CARD_H);
+            if drawing.card(format!("One picture, {}×{}", t.width, t.height)).clicked() {
+                *out = Some(WelcomeAction::Intent(templates::PICTURE));
+            }
+            let (row, _) = ui.allocate_exact_size(egui::vec2(across, plate::CHIP_H), egui::Sense::hover());
+            let half = egui::vec2((across - CHIP_GAP) / 2.0, row.height());
+            let sizes = [(row.left(), "Square", templates::PICTURE_SQUARE), (row.right() - half.x, "Tall", templates::PICTURE_TALL)];
+            for (left, word, intent) in sizes {
+                let t = &templates::INTENTS[intent];
+                let at = egui::Rect::from_min_size(egui::pos2(left, row.top()), half);
+                if plate::card_chip(ui, at, word).card(format!("{}×{}", t.width, t.height)).clicked() {
+                    *out = Some(WelcomeAction::Intent(intent));
+                }
+            }
+        });
+        ui.vertical(|ui| {
+            ui.set_width(across);
+            let animation = plate::choice_card(ui, "An animation", CARD_H);
+            if animation.card("Drawings that move, on new paper").clicked() {
+                *out = Some(WelcomeAction::Intent(templates::ANIMATION));
+            }
+        });
+        ui.vertical(|ui| {
+            ui.set_width(across);
+            let t = &templates::ALL[templates::COMIC];
+            let comic = plate::choice_card(ui, "A comic", CARD_H);
+            if comic.card(format!("A page: {}", t.name)).clicked() {
+                *out = Some(WelcomeAction::Template(templates::COMIC));
+            }
+        });
+    });
+}
+
+/// AU20: the Lessons page: its two ways out, then a card for each kind and
+/// class, in the same float at the same size (spec 4.5).
+fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<WelcomeAction> {
+    let mut out = None;
+    let half = (wide - ui.spacing().item_spacing.x) / 2.0;
+    ui.horizontal(|ui| {
+        if plate::ghost_row(ui, "Back to Start", half, None).clicked() {
+            w.tab = WelcomeTab::Start;
+        }
+        let sample = plate::ghost_row(ui, "Open the example", half, None);
+        if sample.card(EXAMPLE_CARD).clicked() {
+            out = Some(WelcomeAction::Sample);
+        }
+    });
+    let across = (wide - PAGE_GUTTER - 3.0 * PAGE_GAP) / 3.0;
+    let tall = PAGE_LEGEND_H + ROW_GAP + 3.0 * PAGE_ROW_H + 2.0 * PAGE_GAP;
+    let (grid, _) = ui.allocate_exact_size(egui::vec2(wide, tall), egui::Sense::hover());
+    let column = |c: usize| grid.left() + PAGE_GUTTER + PAGE_GAP + c as f32 * (across + PAGE_GAP);
+    for (c, class) in Class::ALL.into_iter().enumerate() {
+        let at = egui::pos2(column(c) + plate::CARD_PAD, grid.top());
+        let cell = egui::Rect::from_min_size(at, egui::vec2(across, PAGE_LEGEND_H));
+        ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| plate::legend(ui, class.word()));
+    }
+    let kinds = [(ProjectKind::Drawing, "A drawing"), (ProjectKind::Animation, "An animation"), (ProjectKind::Comic, "A comic")];
+    for (r, (kind, word)) in kinds.into_iter().enumerate() {
+        let top = grid.top() + PAGE_LEGEND_H + ROW_GAP + r as f32 * (PAGE_ROW_H + PAGE_GAP);
+        let gutter = egui::Rect::from_min_size(
+            egui::pos2(grid.left() + plate::CARD_PAD, top),
+            egui::vec2(PAGE_GUTTER - plate::CARD_PAD, PAGE_ROW_H),
+        );
+        ui.scope_builder(egui::UiBuilder::new().max_rect(gutter).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+            plate::legend(ui, word);
+        });
+        for (c, class) in Class::ALL.into_iter().enumerate() {
+            let Some(i) = w.lessons.iter().position(|l| l.kind == kind && l.class == class) else { continue };
+            let lesson = &w.lessons[i];
+            let at = egui::pos2(column(c), top);
+            let rect = egui::Rect::from_min_size(at, egui::vec2(across, PAGE_ROW_H));
+            let card = plate::picture_card(ui, rect, lesson.title, |p, paper| lesson_picture(p, paper, lesson));
+            if card.card(lesson.hover).clicked() {
+                out = Some(WelcomeAction::Lesson(i));
+            }
         }
     }
-    let t = &templates::INTENTS[templates::PICTURE];
-    if drawing.card(format!("One picture, {}×{}", t.width, t.height)).clicked() && out.is_none() {
-        *out = Some(WelcomeAction::Intent(templates::PICTURE));
+    out
+}
+
+/// A lesson's finish, drawn small: its paths, fitted to `paper` and kept to
+/// their own shape.
+fn lesson_picture(p: &egui::Painter, paper: egui::Rect, lesson: &Lesson) {
+    let art = (lesson.art)();
+    let paths: Vec<_> = lesson.finish.iter().filter_map(|i| art.get(*i as usize)).collect();
+    let at = |q: &[f32; 3]| egui::pos2(q[0], q[1]);
+    let mut bounds = egui::Rect::NOTHING;
+    for q in paths.iter().flat_map(|path| &path.points) {
+        bounds.extend_with(at(q));
     }
-    let animation = plate::choice_card(ui, "An animation", CARD_H);
-    if animation.card("Drawings that move, on new paper").clicked() {
-        *out = Some(WelcomeAction::Intent(templates::ANIMATION));
+    if !bounds.is_positive() {
+        return;
     }
-    ui.spacing_mut().item_spacing.y = gap;
-    let t = &templates::ALL[templates::COMIC];
-    let comic = plate::choice_card(ui, "A comic", CARD_H);
-    if comic.card(format!("A page: {}", t.name)).clicked() {
-        *out = Some(WelcomeAction::Template(templates::COMIC));
+    let room = paper.shrink(6.0);
+    let scale = (room.width() / bounds.width()).min(room.height() / bounds.height());
+    let place = |q: &[f32; 3]| room.center() + (at(q) - bounds.center()) * scale;
+    for path in paths {
+        let line = path.points.iter().map(place).collect();
+        p.add(egui::Shape::line(line, egui::Stroke::new((path.width * scale).max(1.0), plate::INK)));
     }
 }
 

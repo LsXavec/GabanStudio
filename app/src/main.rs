@@ -27,6 +27,7 @@ mod icons;
 mod kpp;
 mod brushbank;
 mod kritares;
+mod lessons;
 mod manga_tools;
 #[cfg(test)]
 mod measure;
@@ -3193,6 +3194,8 @@ impl Editor {
                 w.tab = welcome::WelcomeTab::WhatsNew;
                 self.open_start(w);
             }
+            // AU20: and on its Lessons page.
+            Action::OpenLessons => self.open_start(welcome::Welcome::over_editor(&self.recent).on_lessons()),
             // AU6: the shell stores it, as Settings does.
             Action::ToggleLockPositions => self.lock_request = Some(!self.ui_lock),
             // AU7: and this.
@@ -3780,6 +3783,7 @@ impl Editor {
             | Action::ProjectSettings
             | Action::WelcomeScreen
             | Action::WhatsNew
+            | Action::OpenLessons
             | Action::ToggleLockPositions
             | Action::ToggleHints
             | Action::HideTools
@@ -3845,6 +3849,7 @@ fn is_chrome(action: Action) -> bool {
             | Action::ProjectSettings
             | Action::WelcomeScreen
             | Action::WhatsNew
+            | Action::OpenLessons
             | Action::ToggleLockPositions
             | Action::ToggleHints
             | Action::HideTools
@@ -4007,7 +4012,10 @@ fn stroke_guarded(action: Action) -> bool {
 /// AU10: the verbs that open something in the chrome Hide tools took off: the
 /// counter's field, and the floats that are not the rail's to open.
 fn shows_on_chrome(action: Action) -> bool {
-    matches!(action, Action::GoToFrame | Action::CanvasOptions | Action::WelcomeScreen | Action::WhatsNew)
+    matches!(
+        action,
+        Action::GoToFrame | Action::CanvasOptions | Action::WelcomeScreen | Action::WhatsNew | Action::OpenLessons
+    )
 }
 
 /// AU10: a panel of the chrome, unless Hide tools has it off the screen. Its
@@ -4780,7 +4788,8 @@ pub(crate) fn apply_start(
         Choice::Sample => replace(Editor::boot(sample::build_sample(), rs, dir, ui)),
         Choice::ShowMe(step) => replace(welcome_show_me(step, rs, dir, ui).0),
         Choice::Settings => StartOutcome::Request(AppRequest::Settings),
-        Choice::Remove(_) | Choice::Back => StartOutcome::Stay,
+        // AU20: no lesson opens yet: the lesson frame brings `open_lesson`.
+        Choice::Lesson(_) | Choice::Remove(_) | Choice::Back => StartOutcome::Stay,
     }
 }
 
@@ -5487,14 +5496,15 @@ impl Editor {
         self.strip_open = i == templates::ANIMATION;
     }
 
-    /// AU6: the Start float, now or at pen-up. It stands on the right, so
-    /// Layers makes way for it (spec 4.5).
+    /// AU6: the Start float, now or at pen-up. Layers makes way for it (spec
+    /// 4.5), and AU20 so does a left float it lands on: `start_ui` knows that.
     pub(crate) fn open_start(&mut self, w: welcome::Welcome) {
         if self.canvas.stroke_active() {
             self.start_waiting = Some(w);
             return;
         }
         self.floats.close(floats::Float::Layers);
+        self.floats.start_fresh = true;
         self.start = Some(w);
     }
 
@@ -6314,6 +6324,9 @@ impl Editor {
             // GM8: the project's size and rate are the host's in a room.
             Action::ProjectSettings if guest => Err("the host owns the project settings"),
             Action::WelcomeScreen if guest => Err("leave the room first to open your own file"),
+            // AU20: the page waits for its first lesson.
+            Action::OpenLessons if lessons::ALL.is_empty() => Err("no lessons yet"),
+            Action::OpenLessons if guest => Err("leave the room first to open your own file"),
             Action::BuildComposite if s.cut().render_order().is_empty() => {
                 Err("no column reaches the composite")
             }
@@ -7640,12 +7653,15 @@ enum ProbeRoom {
     Stage(Stage),
     Forge,
     Layout3d,
+    /// AU20: Draw, with the Start float on its Lessons page, on the nine rows
+    /// it is built for.
+    Lessons,
 }
 
 /// Every room: the CLI probe and the ship tests walk these. AU19: `Stage::Drawing`
 /// on an animation is Plan with its sheet on, and `Stage::Layout` has no room of
 /// its own: it lands there.
-const PROBE_ROOMS: [ProbeRoom; 8] = [
+const PROBE_ROOMS: [ProbeRoom; 9] = [
     ProbeRoom::Stage(Stage::Drawing),
     ProbeRoom::Stage(Stage::InkPaint),
     ProbeRoom::Stage(Stage::Composite),
@@ -7655,6 +7671,7 @@ const PROBE_ROOMS: [ProbeRoom; 8] = [
     ProbeRoom::Layout3d,
     // AU9: last, so the shots of the rooms before it keep their numbers.
     ProbeRoom::Stage(Stage::Export),
+    ProbeRoom::Lessons,
 ];
 
 impl ProbeRoom {
@@ -7663,12 +7680,17 @@ impl ProbeRoom {
             ProbeRoom::Stage(st) => st.name(),
             ProbeRoom::Forge => "forge",
             ProbeRoom::Layout3d => "3D layout (LO)",
+            ProbeRoom::Lessons => "Lessons page",
         }
     }
 
     /// Into this room the way its button or verb goes (AU1: the audits walk
     /// the same rooms).
     fn enter(self, editor: &mut Editor) {
+        // AU20: the page is this room's alone.
+        if editor.start.as_ref().is_some_and(|w| w.tab == welcome::WelcomeTab::Lessons) {
+            editor.start = None;
+        }
         match self {
             ProbeRoom::Stage(st) => editor.enter_room(st),
             ProbeRoom::Forge => {
@@ -7677,6 +7699,16 @@ impl ProbeRoom {
             }
             ProbeRoom::Layout3d => {
                 editor.perform(Action::Layout3dRoom);
+            }
+            ProbeRoom::Lessons => {
+                editor.enter_room(Stage::Drawing);
+                // On open paper, where Start stands first: a text keeps no
+                // layer, so the audit would read Plan's cells under the card
+                // as the card's.
+                editor.dock = Stage::Drawing.dock();
+                let mut w = welcome::Welcome::new(&[]);
+                w.lessons = lessons::STAND_IN;
+                editor.open_start(w.on_lessons());
             }
         }
     }
@@ -7688,7 +7720,9 @@ impl ProbeRoom {
                 probe_run_in(ppp, 100, Pane::RenderQueue, |editor| self.enter(editor))
             }
             ProbeRoom::Stage(st) => probe_run(st, ppp),
-            ProbeRoom::Forge => probe_run_in(ppp, 100, Pane::Canvas, |editor| self.enter(editor)),
+            ProbeRoom::Forge | ProbeRoom::Lessons => {
+                probe_run_in(ppp, 100, Pane::Canvas, |editor| self.enter(editor))
+            }
             ProbeRoom::Layout3d => {
                 probe_run_in(ppp, 100, Pane::View3D, |editor| self.enter(editor))
             }
@@ -8834,8 +8868,9 @@ impl Editor {
         }
     }
 
-    /// AU6: the Start float over the pane the dock just drew (spec 8.1), and
-    /// what ends it: a finished stroke, the Layers float opening, its `×`.
+    /// AU6: the Start float, AU20 dead centre on the rect the dock just drew
+    /// in (spec 4), and what ends it: a finished stroke, the Layers float
+    /// opening, a left float opened over it, its `×`.
     fn start_ui(&mut self, ctx: &egui::Context, dock: egui::Rect) {
         let stroked = self.state.strokes_done != self.strokes_seen;
         self.strokes_seen = self.state.strokes_done;
@@ -8865,20 +8900,32 @@ impl Editor {
             return;
         }
         let Some(mut w) = self.start.take() else { return };
-        let on_canvas = visible_panes(&self.dock).contains(&Pane::Canvas) && !self.float_canvas.open;
-        let host = if on_canvas { self.canvas.dbg_rect } else { dock };
-        let (pos, size) = floats::start_place(host);
+        let (card, size) = floats::start_rect(ctx, welcome::HEADING, dock);
+        // A left float over the card ends it, as Layers does. Start opened
+        // over one is the newer of the two, and that one makes way.
+        let over = self.floats.left_rect(ctx).is_some_and(|float| float.intersects(card));
+        let top = std::mem::take(&mut self.floats.start_fresh);
+        if top && over {
+            self.floats.close_left();
+        } else if over {
+            return;
+        }
         let page = w.tab as usize;
-        let head = floats::Head { words: welcome::HEADING, role: plate::Role::Title, start: true, page };
+        let words = if w.tab == welcome::WelcomeTab::Lessons { welcome::LESSONS_HEADING } else { welcome::HEADING };
+        let head = floats::Head { id: welcome::HEADING, words, role: plate::Role::Title, start: true, page, top };
         let mut show = self.show_start;
         let mut action = None;
-        let (shown, close) = floats::frame(ctx, head, pos, size, host, |ui| {
+        let (shown, close) = floats::frame(ctx, head, card.min, size, dock, |ui| {
             action = welcome::float_body(ui, &mut w, &mut show);
         });
-        // Over the canvas it is the canvas's for the keys. With no canvas on
+        // Over a canvas's room it speaks for the panes it covers, so a chord
+        // over it acts as it would with the card closed. With no canvas on
         // screen it claims no pane, and the focused pane answers them.
-        if on_canvas {
-            self.pane_rects.push((Pane::Canvas, shown.rect, shown.layer_id));
+        if visible_panes(&self.dock).contains(&Pane::Canvas) && !self.float_canvas.open {
+            let layer = shown.layer_id;
+            let under = self.pane_rects.iter().map(|(pane, rect, _)| (*pane, rect.intersect(shown.rect), layer));
+            let under: Vec<_> = under.filter(|(_, rect, _)| rect.is_positive()).collect();
+            self.pane_rects.extend(under);
         }
         if show != self.show_start {
             self.show_start = show;

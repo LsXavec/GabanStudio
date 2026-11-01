@@ -2287,7 +2287,7 @@ mod tests {
             .iter()
             .filter_map(|r| match r {
                 crate::ProbeRoom::Stage(st) => Some(*st),
-                crate::ProbeRoom::Forge | crate::ProbeRoom::Layout3d => None,
+                crate::ProbeRoom::Forge | crate::ProbeRoom::Layout3d | crate::ProbeRoom::Lessons => None,
             })
             .collect();
         for st in [
@@ -2637,8 +2637,10 @@ mod tests {
         let layers = moved.rig().config.layers.clone();
         let (mut seen_moved, mut seen_kept) = ("", "");
         // The rooms that block knew: the Export step came later, and arms
-        // nothing (`auexport_arming_key_skips_export`).
-        let rooms = crate::PROBE_ROOMS.into_iter().filter(|r| !matches!(r, crate::ProbeRoom::Stage(Stage::Export)));
+        // nothing (`auexport_arming_key_skips_export`). So did the Lessons
+        // page, a float over Draw.
+        let later = |r: &crate::ProbeRoom| matches!(r, crate::ProbeRoom::Stage(Stage::Export) | crate::ProbeRoom::Lessons);
+        let rooms = crate::PROBE_ROOMS.into_iter().filter(|r| !later(r));
         for room in rooms {
             for _twice in 0..2 {
                 room.enter(moved.editor_mut());
@@ -3010,13 +3012,13 @@ mod tests {
     /// this and say so in their commit bodies. AU4 brought the rail and
     /// `CanvasOptions`, AU5 `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew`
     /// and `ToggleLockPositions`, AU7 `ToggleHints`, AU9 `RoomExport` and the
-    /// four plain exports, AU10 `HideTools`.
+    /// four plain exports, AU10 `HideTools`, AU20 `OpenLessons`.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (166, 0x941d1b60acffda57), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (167, 0x3ee163fa00d20adf), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }
