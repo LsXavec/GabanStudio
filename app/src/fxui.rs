@@ -95,9 +95,17 @@ pub fn inspector(
     }
 }
 
+/// AU14: how many of `CAMERA_SPECS` the Effects step shows before `Details`:
+/// the frame box's pan x, pan y and zoom.
+const CAMERA_FRAMING: usize = 3;
+/// What the fold's chevron adds to its words.
+const DETAILS_MARK: f32 = 24.0;
+
 /// GM10: the selected Camera node's parameters (the specs' controls, as
 /// an Effect's), then its planes: a depth each, "+ plane" and "− plane".
-/// One gesture is one undo step here too.
+/// One gesture is one undo step here too. AU14: `details` is the Effects
+/// step's fold (is it open?): the eye belongs on the Result there, so the
+/// framing stands alone and the rest waits behind `Details`. None: all of it.
 pub fn camera_inspector(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -105,12 +113,31 @@ pub fn camera_inspector(
     planes: &[PlaneSpec],
     params: &FxParams,
     binds: &FxBinds,
+    details: Option<bool>,
 ) {
     let frame = state.view.frame;
     let resolved = fx::resolve_specs(CAMERA_SPECS, params, binds, |p| {
         state.cut().param_value(p, frame)
     });
-    let specs = specs_ui(ui, state, id, "Camera", CAMERA_SPECS, &resolved, params, binds);
+    let split = if details.is_some() { CAMERA_FRAMING } else { CAMERA_SPECS.len() };
+    let (first, rest) = CAMERA_SPECS.split_at(split);
+    let (now, later) = resolved.split_at(split);
+    let mut specs = specs_ui(ui, state, id, "Camera", first, now, params, binds);
+    if let Some(open) = details {
+        let word = crate::vocab::DETAILS;
+        make_room(ui);
+        let wide = crate::plate::filled_row_width(ui, word) + DETAILS_MARK;
+        if crate::plate::fold_row(ui, word, wide, open).clicked() {
+            state.graph_ui.details_asked = Some(!open);
+        }
+        if !open {
+            if let Some((params, binds)) = specs {
+                commit_kind(state, id, NodeKind::Camera { planes: planes.to_vec(), params, binds });
+            }
+            return;
+        }
+        specs = specs.or(specs_rows(ui, state, id, "Camera", rest, later, params, binds));
+    }
     let mut next = planes.to_vec();
     let mut changed = false;
     ui.separator();
@@ -231,23 +258,27 @@ fn commit_kind(state: &mut AppState, id: NodeId, kind: NodeKind) {
     }
 }
 
-/// AU14: what the shelf's one `Strength` moves on each kind, its first key the
-/// one it reads. Blur moves both radii as one: its stored pair would streak
-/// sideways with the first alone. A kind with no single amount has none.
+/// AU14: what the shelf's one `Strength` moves on each kind. Blur's one amount
+/// is a stored pair: the first alone would streak sideways, so it moves as one
+/// (the spec's single exception to one parameter a kind, see [`strength`]).
+/// A kind with no single amount has none.
 pub fn strength_keys(fx: FxKind) -> &'static [&'static str] {
     match fx {
         FxKind::Glow | FxKind::LightWrap | FxKind::Rim => &["intensity"],
         FxKind::Diffusion | FxKind::Lut => &["mix"],
         FxKind::Grade => &["saturation"],
         FxKind::Blur => &["radius_x", "radius_y"],
+        FxKind::MotionBlur => &["length"],
         FxKind::Para | FxKind::Vignette | FxKind::Grain => &["amount"],
         _ => &[],
     }
 }
 
 /// AU14: `Strength` for the selected effect, `width` wide: a drag shows live
-/// and lands as one undo step on release, the inspector's law. None when the
-/// selection has no strength. A value a track drives stands disabled.
+/// and lands as one undo step on release, the inspector's law. It reads the
+/// largest of its keys and moves them by one ratio, so a directional Blur
+/// keeps its direction. None when the selection has no strength. A value a
+/// track drives stands disabled.
 pub fn strength(ui: &mut egui::Ui, state: &mut AppState, width: f32) -> Option<egui::Response> {
     use crate::plate::Card as _;
     let id = state.selected_node?;
@@ -260,9 +291,11 @@ pub fn strength(ui: &mut egui::Ui, state: &mut AppState, width: f32) -> Option<e
     let ParamKind::Float { min, max, .. } = spec.kind else {
         return None;
     };
-    let FxValue::Float(stored) = spec.read(params.get(key)) else {
-        return None;
+    let amount = |k: &str| match fx.spec(k).map(|s| s.read(params.get(k))) {
+        Some(FxValue::Float(v)) => v,
+        _ => 0.0,
     };
+    let stored = keys.iter().map(|k| amount(k)).fold(0.0, f32::max);
     let mut value = match &state.graph_ui.fx.live {
         Some((n, k, FxValue::Float(v))) if *n == id && k == key => *v,
         _ => stored,
@@ -278,15 +311,23 @@ pub fn strength(ui: &mut egui::Ui, state: &mut AppState, width: f32) -> Option<e
     crate::plate::speak(&r, egui::WidgetType::Slider, None, crate::vocab::STRENGTH);
     let r = r.card(spec.help).on_disabled_hover_text("A track on the Timing sheet drives this.");
     let live = state.graph_ui.fx.live.as_ref().is_some_and(|(n, k, _)| *n == id && k == key);
-    if r.is_pointer_button_down_on() {
+    // The live slot is shared: the inspector's field runs after this and holds
+    // the same key mid-drag. Only a press this slider took is this slider's
+    // to land, and it runs a frame past the press, on the release.
+    let down = r.is_pointer_button_down_on();
+    let mine = ui.data(|d| d.get_temp::<bool>(r.id)).unwrap_or(false);
+    ui.data_mut(|d| d.insert_temp(r.id, down));
+    if down {
         if r.changed() {
             state.graph_ui.fx.live = Some((id, key.to_string(), FxValue::Float(value)));
         }
-    } else if live || r.changed() {
+    } else if (live && mine) || r.changed() {
         state.graph_ui.fx.live = None;
-        let mut next = params;
+        let mut next = params.clone();
         for k in keys {
-            next.set(k, FxValue::Float(value));
+            let was = amount(k);
+            let moved = if was == stored { value } else { was * value / stored };
+            next.set(k, FxValue::Float(moved));
         }
         commit_kind(state, id, NodeKind::Effect { fx, params: next, binds });
     }
@@ -298,10 +339,13 @@ const PARAM_ROOM: f32 = 140.0;
 
 /// Break the inspector's wrapped row before a parameter that would not fit.
 /// A field sits in its own scope, and egui's wrap measures only the widgets it
-/// places itself, so a row left alone runs the field off the pane.
+/// places itself, so a row left alone runs the field off the pane. A new row
+/// stands a control tall: a legend centres on its field only in a row as tall
+/// as the field.
 fn make_room(ui: &mut egui::Ui) {
     if ui.available_size_before_wrap().x < PARAM_ROOM {
         ui.end_row();
+        ui.set_row_height(crate::plate::CTRL_H);
     }
 }
 
@@ -329,13 +373,6 @@ fn specs_ui(
     params: &FxParams,
     binds: &FxBinds,
 ) -> Option<(FxParams, FxBinds)> {
-    let columns: Vec<(ParamId, String)> = state
-        .cut()
-        .xsheet
-        .params
-        .iter()
-        .map(|p| (p.id, p.name.clone()))
-        .collect();
     state.graph_ui.fx.fields.clear();
     // A drag's live value outlives no drag: one this inspector never saw
     // end (it was hidden mid-drag) is dropped.
@@ -343,6 +380,28 @@ fn specs_ui(
     if !held && matches!(state.graph_ui.fx.live, Some((_, _, FxValue::Float(_)))) {
         state.graph_ui.fx.live = None;
     }
+    specs_rows(ui, state, id, node_name, specs, resolved, params, binds)
+}
+
+/// [`specs_ui`]'s rows, for a node whose controls stand in more than one run.
+#[allow(clippy::too_many_arguments)]
+fn specs_rows(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    id: NodeId,
+    node_name: &str,
+    specs: &'static [ParamSpec],
+    resolved: &[FxValue],
+    params: &FxParams,
+    binds: &FxBinds,
+) -> Option<(FxParams, FxBinds)> {
+    let columns: Vec<(ParamId, String)> = state
+        .cut()
+        .xsheet
+        .params
+        .iter()
+        .map(|p| (p.id, p.name.clone()))
+        .collect();
     let mut commit: Option<(String, FxValue)> = None;
     let mut rebind: Option<(&'static str, Option<ParamId>)> = None;
     for (spec, now) in specs.iter().zip(resolved) {

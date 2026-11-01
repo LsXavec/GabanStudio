@@ -208,15 +208,19 @@ pub struct ViewerView {
     /// AU7: the verb an empty state's button asked for.
     pub(crate) asked: Option<Action>,
     /// AU14: the frame box's gesture in progress: how far it moved (screen
-    /// px), how much it zoomed in, the frame it began on, the last wheel tick.
+    /// px), how much it zoomed in, the frame it began on, the last wheel tick,
+    /// and whether the drag took a corner (a pen has no wheel).
     box_drag: egui::Vec2,
     box_zoom: f32,
     box_frame: u32,
     wheel_at: f64,
+    box_corner: bool,
     /// AU14: the frame box as drawn this frame, on screen.
     pub(crate) drawn_box: Option<Rect>,
     /// AU14: a framing finished this frame, for the Editor to key.
     pub(crate) framed: Option<Framing>,
+    /// AU14: `Go to the last drawing` was pressed, for the Editor to do.
+    pub(crate) go_last: bool,
 }
 
 impl Default for ViewerView {
@@ -231,8 +235,10 @@ impl Default for ViewerView {
             box_zoom: 1.0,
             box_frame: 0,
             wheel_at: 0.0,
+            box_corner: false,
             drawn_box: None,
             framed: None,
+            go_last: false,
         }
     }
 }
@@ -273,7 +279,29 @@ impl Framing {
 /// of ticks is one framing and one undo step.
 const WHEEL_REST: f64 = 0.3;
 /// AU14: what the frame box says it takes, while it stands on the Result.
-pub const FRAME_BOX_SAYS: &str = "Drag to frame, scroll to zoom";
+pub const FRAME_BOX_SAYS: &str = "Drag to frame, drag a corner to zoom";
+/// AU14: how near a corner a press takes it, and the grip's size there.
+const CORNER_REACH: f32 = 18.0;
+const CORNER_GRIP: f32 = 12.0;
+
+/// AU14: the status lane's last word on a camera move, said by its chord in
+/// this keymap.
+pub fn camera_done(ctx: &egui::Context) -> String {
+    match crate::menus::chord_label(ctx, Action::PlayPause) {
+        Some(chord) => format!("Camera move done. Press {chord} to play."),
+        None => "Camera move done. Play it to see it.".to_string(),
+    }
+}
+
+fn box_corners(r: Rect) -> [Pos2; 4] {
+    [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()]
+}
+
+/// AU14: the box's zoom for a drag from `from` to `at`: the corner stays
+/// under the hand, and a box drawn in toward its centre zooms the camera in.
+fn corner_zoom(home: Rect, from: Pos2, at: Pos2) -> f32 {
+    (from - home.center()).length() / (at - home.center()).length().max(1.0)
+}
 
 /// AU7: the Result's empty state (spec 8.4).
 pub const NOTHING_TO_SHOW: &str = "Nothing to show yet.";
@@ -328,10 +356,17 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
         }
     }
     if framing {
+        let home = Rect::from_min_size(origin, vec2(paper_w, paper_h) * scale);
+        let press = ui.input(|i| i.pointer.press_origin());
         if begins(vs) {
             vs.box_frame = frame;
+            let near = |p: Pos2| box_corners(home).iter().any(|c| c.distance(p) <= CORNER_REACH);
+            vs.box_corner = press.is_some_and(near);
         }
-        vs.box_drag += response.drag_delta();
+        match (vs.box_corner, press, response.interact_pointer_pos()) {
+            (true, Some(from), Some(at)) => vs.box_zoom = corner_zoom(home, from, at),
+            _ => vs.box_drag += response.drag_delta(),
+        }
     }
 
     // Zoom at cursor; any drag pans (the viewer is read-only, so the primary
@@ -416,15 +451,27 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
     // comes back through the new keys with the box home around it.
     vs.drawn_box = armed.then(|| Rect::from_center_size(paper_rect.center() + vs.box_drag, paper_rect.size() / vs.box_zoom));
     if let Some(boxed) = vs.drawn_box {
-        painter.rect_stroke(boxed, 0, egui::Stroke::new(2.0, crate::plate::TALLY), egui::StrokeKind::Outside);
+        // `BLUE` alone is 1.5:1 on the Result's grey: a white edge under it
+        // holds the box off the surround, and the grips say it is a thing to
+        // take hold of, not the paper's border.
+        painter.rect_stroke(boxed, 0, egui::Stroke::new(4.0, crate::plate::ON_FILL), egui::StrokeKind::Outside);
+        let edge = egui::Stroke::new(2.0, crate::plate::TALLY);
+        painter.rect_stroke(boxed, 0, edge, egui::StrokeKind::Outside);
+        for corner in box_corners(boxed) {
+            let grip = Rect::from_center_size(corner, egui::Vec2::splat(CORNER_GRIP));
+            painter.rect(grip, 0, crate::plate::ON_FILL, edge, egui::StrokeKind::Inside);
+        }
         crate::plate::picture_tag(&painter, pos2(boxed.left() + 8.0, boxed.top() + 30.0), FRAME_BOX_SAYS);
     }
     if !armed {
         vs.box_drag = egui::Vec2::ZERO;
         vs.box_zoom = 1.0;
+        vs.box_corner = false;
     } else if !begins(vs) && !framing {
+        // A drag ends on its release, a run of wheel ticks on rest alone: the
+        // keys land on the frame it began on, wherever the playhead went.
         let rested = ui.input(|i| i.time) - vs.wheel_at >= WHEEL_REST;
-        if rested || vs.box_drag != egui::Vec2::ZERO || vs.box_frame != frame {
+        if rested || vs.box_drag != egui::Vec2::ZERO || vs.box_corner {
             vs.framed = Some(Framing {
                 frame: vs.box_frame,
                 shift: (vs.box_drag.x / scale, vs.box_drag.y / scale),
@@ -432,6 +479,7 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
             });
             vs.box_drag = egui::Vec2::ZERO;
             vs.box_zoom = 1.0;
+            vs.box_corner = false;
         } else {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(WHEEL_REST));
         }
@@ -442,6 +490,24 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
     let safe_w = crate::plate::latch_width(ui, crate::vocab::MARGINS);
     let look_w = crate::plate::latch_width(ui, crate::vocab::FULL_QUALITY);
     let row = Rect::from_min_size(rect.left_bottom() + vec2(4.0, -34.0), vec2(8.0 + safe_w + look_w, 34.0));
+    // AU14: one tap to the frame the export ends on, beside the box it
+    // serves. It stands while the box does, so nothing moves, and over the
+    // latches where a narrow Result has no room beside them.
+    if armed {
+        let word = crate::vocab::GO_TO_LAST_DRAWING;
+        let wide = crate::plate::filled_row_width(ui, word);
+        let mut spot = Rect::from_min_size(rect.right_bottom() - vec2(wide + 12.0, 34.0), vec2(wide + 8.0, 34.0));
+        if spot.intersects(row) {
+            spot = spot.translate(vec2(0.0, -34.0));
+        }
+        crate::plate::float_ground(ui, spot);
+        let at = Rect::from_min_size(spot.min + vec2(4.0, 4.0), vec2(wide, crate::plate::CTRL_H));
+        let here = frame + 1 == state.shown_length();
+        let last = ui.put(at, |ui: &mut egui::Ui| {
+            ui.add_enabled_ui(!here, |ui| crate::plate::filled_row(ui, word, wide)).inner
+        });
+        vs.go_last |= last.on_hover_text("The last frame that plays and exports.").clicked();
+    }
     crate::plate::float_ground(ui, row);
     let at = Rect::from_min_size(row.min + vec2(8.0, 4.0), vec2(safe_w, crate::plate::CTRL_H));
     ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {

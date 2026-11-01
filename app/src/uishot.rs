@@ -1192,26 +1192,61 @@ fn color_moments(dir: &Path) {
     }
 }
 
-/// AU14: the Effects step: an empty graph, the shelf with an effect on the
-/// picture, its More open, and the frame box on the Result.
-const FX: [&str; 4] = ["fx-empty", "fx-shelf", "fx-more", "fx-frame-box"];
+/// AU14: the Effects step: a graph with nothing in it, a shelf disabled on a
+/// hand-built graph, the sheet's graph before any effect, the shelf with an
+/// effect on the picture, the Add effect menu, its More open, the frame box
+/// on the Result, and a framed Result after a drag.
+const FX: [&str; 8] =
+    ["fx-empty", "fx-disabled", "fx-start", "fx-shelf", "fx-add-menu", "fx-more", "fx-frame-box", "fx-framed"];
 
 pub(crate) fn fx_owed() -> Vec<(String, u32, u32)> {
     let sized = |state: &&str| COLOR_SIZES.map(|(suffix, w, h)| (format!("{state}{suffix}.png"), w, h));
     FX.iter().flat_map(sized).collect()
 }
 
+/// A cut with one drawing and no graph, for the shots that need its graph.
+fn fx_bare() -> crate::doc::AppState {
+    let mut s = crate::doc::AppState::new_project("shot", 1280, 720, 24, 72.0);
+    s.set_cut_length(12);
+    s.new_drawing_at_frame();
+    s
+}
+
 fn fx_moments(dir: &Path) {
     for (suffix, w, tall) in COLOR_SIZES {
         let size = egui::vec2(w as f32, tall as f32);
+        // Each shot waits for the picture, as a walk's room does: one taken
+        // mid-render is a shot of `Rendering effects…`.
         let shoot = |h: &mut EditorHarness, state: &str| {
-            h.run_frames(6);
+            arrive(h, ProbeRoom::Stage(Stage::Composite));
             h.shot(size, &dir.join(format!("{state}{suffix}.png")));
         };
+        let room = |state| {
+            let mut h = EditorHarness::with_gpu_shipped(state);
+            h.kit_mut().set_size(size);
+            h.run_frames(4);
+            h.editor_mut().enter_room(Stage::Composite);
+            h
+        };
+        // Each in its own block: a harness holds the GPU's turn until it goes,
+        // and a shadowed one has not gone.
+        {
+            let mut h = room(fx_bare());
+            shoot(&mut h, "fx-empty");
+        }
+        {
+            let mut bare = fx_bare();
+            bare.graph_add_node(anim_core::graph::NodeKind::Solid { rgba: [255, 255, 255, 255] }, (40.0, 40.0));
+            let mut h = room(bare);
+            shoot(&mut h, "fx-disabled");
+        }
+
         let mut h = EditorHarness::with_gpu_shipped(crate::auguide_tests::film().build());
         h.kit_mut().set_size(size);
         arrive(&mut h, ProbeRoom::Stage(Stage::Drawing));
         h.hide_sheet();
+        // Starter red: the shelf's Glow has something to light.
+        h.editor_mut().canvas.brush_color = crate::plate::STARTER_SWATCHES[2].1.to_array();
         let c = h.editor().canvas.dbg_rect.center();
         let ring: Vec<egui::Pos2> = (0..=35)
             .map(|n| c + 70.0 * egui::Vec2::angled(n as f32 / 32.0 * std::f32::consts::TAU))
@@ -1219,16 +1254,22 @@ fn fx_moments(dir: &Path) {
         h.drag_path(&ring);
         h.run_frames(8);
         h.editor_mut().enter_room(Stage::Composite);
-        arrive(&mut h, ProbeRoom::Stage(Stage::Composite));
-        shoot(&mut h, "fx-empty");
+        shoot(&mut h, "fx-start");
         h.click("Glow");
         shoot(&mut h, "fx-shelf");
+        h.click(crate::vocab::ADD_EFFECT);
+        shoot(&mut h, "fx-add-menu");
+        h.key(egui::Key::Escape);
+        h.run_frames(4);
         h.click(crate::nodegraph_panel::SHELF_MORE);
         shoot(&mut h, "fx-more");
         h.key(egui::Key::Escape);
         h.run_frames(4);
         h.click(crate::vocab::CAMERA_MOVE);
         shoot(&mut h, "fx-frame-box");
+        let boxed = h.editor().viewers[&0].drawn_box.expect("the box stands").center();
+        h.drag(boxed, boxed + egui::vec2(-30.0, 12.0), 6);
+        shoot(&mut h, "fx-framed");
     }
 }
 

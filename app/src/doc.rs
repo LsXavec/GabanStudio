@@ -37,6 +37,34 @@ pub const NO_OUTPUT_FOR_EFFECTS: &str = "Add an Output node to use effects here.
 const OUTPUT_STEP: f32 = 220.0;
 /// AU14: the tracks `camera_move` adds, as the sheet names them.
 const CAMERA_TRACKS: [&str; 3] = ["Camera pan x", "Camera pan y", "Camera zoom"];
+/// AU14: what the status lane says through a camera move, step by step.
+pub const CAMERA_ADDED: &str = "Camera added. Drag the frame to set the start.";
+pub const CAMERA_START_SET: &str = "Start set. Go to the last drawing, then drag the frame again.";
+/// AU14: a camera the undo took the tracks from cannot frame.
+pub const CAMERA_NO_TRACKS: &str = "This camera has lost its tracks. Tap Camera move to add them.";
+/// AU14: what a tap on Glow answers when the picture has nothing to light.
+pub const GLOW_NEEDS_COLOR: &str = "Glow lights up bright colors. This drawing has none yet.";
+/// AU14: a shelf Glow lights from this chip's brightness up: `fx.rs`'s 0.7
+/// default is the finishing chain's and leaves mid-tone color dark, and the
+/// control that could change it is out of sight. A chip byte, so a project of
+/// either color law reads it the same.
+const SHELF_GLOW_FROM: u8 = 51;
+/// AU14: and spreads this tight, this strong: on a 2 px starter-red ring,
+/// `fx.rs`'s 16 and 1 move no pixel by 16/255, and 8 and 3 move 7,660. The
+/// `Strength` it opens on has room each way.
+const SHELF_GLOW_RADIUS: f32 = 8.0;
+const SHELF_GLOW_INTENSITY: f32 = 3.0;
+/// AU14: a shelf Color look starts here: `fx.rs`'s 1.0 is "unchanged", and a
+/// tap has to change the picture.
+const SHELF_LOOK_SATURATION: f32 = 1.3;
+
+/// AU14: would a person see these two as one picture? Light past white stays
+/// white on screen, so a halo on white paper is no change.
+fn same_picture(a: &anim_core::fx::Image, b: &anim_core::fx::Image) -> bool {
+    const ONE_STEP: f32 = 1.0 / 255.0;
+    let seen = |v: &f32| v.clamp(0.0, 1.0);
+    a.px.len() == b.px.len() && a.px.iter().zip(&b.px).all(|(x, y)| (seen(x) - seen(y)).abs() < ONE_STEP)
+}
 
 /// AU14: `name`, numbered past any track that already has it.
 fn track_name(name: &str, taken: &[String]) -> String {
@@ -5312,10 +5340,42 @@ impl AppState {
         true
     }
 
+    /// AU14: `kind` as the shelf starts it, where the kind's stored default
+    /// would leave the picture as it is. `fx.rs` keeps those defaults: the
+    /// finishing chain reads them.
+    fn shelf_start(&self, mut kind: anim_core::graph::NodeKind) -> anim_core::graph::NodeKind {
+        use anim_core::fx::{FxKind, FxValue};
+        use anim_core::graph::NodeKind;
+        if let NodeKind::Effect { fx, params, .. } = &mut kind {
+            match fx {
+                FxKind::Glow => {
+                    let from = self.engine.project.color_law.encode(SHELF_GLOW_FROM);
+                    params.set("threshold", FxValue::Float(from));
+                    params.set("radius", FxValue::Float(SHELF_GLOW_RADIUS));
+                    params.set("intensity", FxValue::Float(SHELF_GLOW_INTENSITY));
+                }
+                FxKind::Grade => params.set("saturation", FxValue::Float(SHELF_LOOK_SATURATION)),
+                _ => {}
+            }
+        }
+        kind
+    }
+
+    /// AU14: the picture at half size, as the Result composes it: the CPU
+    /// route, so what a tap changed is known with no GPU and no wait.
+    fn draft_picture(&self) -> anim_core::fx::Image {
+        use anim_core::deliver::{self, Purpose, RenderOpts};
+        let (w, tall) = (self.engine.project.width, self.engine.project.height);
+        let opts = RenderOpts { purpose: Purpose::View, scale: 0.5 };
+        deliver::render(self.cut(), self.engine.project.color_law, self.view.frame, w, tall, &opts)
+    }
+
     /// AU14: a shelf tap or an `Add effect` pick: `kind` on the picture at
     /// once, no wires, one undo step, and selected so `Strength` reads it. A
-    /// generator lays over the feed; everything else goes in series.
+    /// generator lays over the feed; everything else goes in series. A Glow
+    /// that lit nothing says so: the Say hint alone would read as success.
     pub fn shelf_add(&mut self, kind: anim_core::graph::NodeKind) -> Option<NodeId> {
+        use anim_core::fx::FxKind;
         use anim_core::graph::NodeKind;
         if let Some(why) = self.shelf_refusal() {
             self.refuse(why);
@@ -5326,7 +5386,9 @@ impl AppState {
         let id = self.engine.alloc_node_id();
         let word = crate::vocab::fx(kind.name()).to_string();
         let over = matches!(&kind, NodeKind::Generator { generator, .. } if !generator.input_names().contains(&"image"));
-        let mut cmds = vec![Command::AddNode { at, id, kind }];
+        let lights = matches!(kind, NodeKind::Effect { fx: FxKind::Glow, .. });
+        let before = lights.then(|| self.draft_picture());
+        let mut cmds = vec![Command::AddNode { at, id, kind: self.shelf_start(kind) }];
         let wired = if over { self.wire_over(id, &mut cmds) } else { self.wire_over_output(id, &mut cmds) };
         if !wired {
             self.refuse(NO_OUTPUT_FOR_EFFECTS);
@@ -5335,10 +5397,34 @@ impl AppState {
         let r = self.engine.apply("add effect", cmds);
         let added = r.is_ok();
         self.report(r, &format!("{word} added"));
-        added.then(|| {
-            self.selected_node = Some(id);
-            id
-        })
+        if !added {
+            return None;
+        }
+        if before.is_some_and(|b| same_picture(&b, &self.draft_picture())) {
+            self.status = GLOW_NEEDS_COLOR.into();
+        }
+        self.selected_node = Some(id);
+        self.graph_ui.reveal = true;
+        Some(id)
+    }
+
+    /// AU14: does the camera feeding the Output hold the three tracks a
+    /// framing keys? An undo or the sheet can take them from it under the box.
+    pub fn camera_moves(&self) -> bool {
+        use anim_core::camera::output_camera;
+        use anim_core::graph::NodeKind;
+        let cut = self.cut();
+        let camera = output_camera(cut).and_then(|id| cut.graph.node(id).ok());
+        let Some(NodeKind::Camera { binds, .. }) = camera.map(|n| &n.kind) else {
+            return false;
+        };
+        ["pan_x", "pan_y", "zoom"].iter().all(|key| binds.get(key).is_some_and(|p| cut.xsheet.param(p).is_some()))
+    }
+
+    /// AU14: the last frame play and the Export cards reach. `End` goes to the
+    /// sheet's last, past a blank tail, where a key would never be seen.
+    pub fn go_to_last_drawing(&mut self) {
+        self.goto(self.shown_length().saturating_sub(1));
     }
 
     /// AU14: `Camera move`: the camera feeding the Output, or a new one in
@@ -5394,10 +5480,11 @@ impl AppState {
         if !cmds.is_empty() {
             let r = self.engine.apply("camera move", cmds);
             let ok = r.is_ok();
-            self.report(r, "camera keyed: drag the frame on the Result");
+            self.report(r, CAMERA_ADDED);
             if !ok {
                 return false;
             }
+            self.graph_ui.reveal = true;
         }
         self.selected_node = Some(id);
         true
@@ -5406,16 +5493,16 @@ impl AppState {
     /// AU14: one framing on the Result's box: keys at its frame on the three
     /// tracks `camera_move` bound, through [`Self::set_param_keys`], one undo
     /// step. A key that stands there keeps its easing, a new one runs
-    /// straight to the next (the sheet's Hold would never move).
-    pub fn frame_camera(&mut self, framing: &crate::viewer::Framing) {
+    /// straight to the next (the sheet's Hold would never move). The status
+    /// lane says what comes next: `done` when the move has both its ends.
+    pub fn frame_camera(&mut self, framing: &crate::viewer::Framing, done: &str) {
         use anim_core::camera::{CameraState, output_camera};
         use anim_core::graph::NodeKind;
         use anim_core::xsheet::ParamInterp;
         let frame = framing.frame;
-        let Some(id) = output_camera(self.cut()) else {
-            return;
-        };
-        let Some(cam) = CameraState::at(self.cut(), id, frame) else {
+        let Some((id, cam)) = output_camera(self.cut()).and_then(|id| Some((id, CameraState::at(self.cut(), id, frame)?)))
+        else {
+            self.refuse(CAMERA_NO_TRACKS);
             return;
         };
         let Ok(NodeKind::Camera { binds, .. }) = self.cut().graph.node(id).map(|n| &n.kind) else {
@@ -5424,14 +5511,21 @@ impl AppState {
         let (pan_x, pan_y, zoom) = framing.on(&cam);
         let mut keys = Vec::new();
         for (key, value) in [("pan_x", pan_x), ("pan_y", pan_y), ("zoom", zoom)] {
-            let Some(column) = binds.get(key) else {
+            let Some(column) = binds.get(key).filter(|p| self.cut().xsheet.param(*p).is_some()) else {
+                self.refuse(CAMERA_NO_TRACKS);
                 return;
             };
             let held = self.cut().xsheet.param(column).and_then(|p| p.key_at(frame));
             let interp = held.map_or(ParamInterp::Linear, |k| k.interp);
             keys.push((column, frame, ParamKey { value, interp, handles: held.and_then(|k| k.handles) }));
         }
+        let pan = keys[0].0;
+        let at = self.engine.position();
         self.set_param_keys("frame camera", keys);
+        if self.engine.position() != at {
+            let another = self.cut().xsheet.param(pan).is_some_and(|p| p.keys().any(|(f, _)| f != frame));
+            self.status = if another { done.into() } else { CAMERA_START_SET.into() };
+        }
     }
 
     /// GM9: the cut's saved node layout (its `graph.layout.<id>` keys).

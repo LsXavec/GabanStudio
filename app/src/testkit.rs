@@ -188,6 +188,13 @@ impl Rig {
                 self.config.save_to(dir).expect("the rig's config saves");
             }
         }
+        // AU14: and the camera's `Details`.
+        if let Some(open) = self.editor.details_request.take() {
+            self.config.ui.set_camera_details(open);
+            if let Some(dir) = &self.editor.data_dir {
+                self.config.save_to(dir).expect("the rig's config saves");
+            }
+        }
         // AU6: the Start float's latch and the lock's verb, likewise.
         let (show, lock) = (self.editor.show_start_request.take(), self.editor.lock_request.take());
         if let Some(on) = show {
@@ -629,6 +636,14 @@ impl EditorHarness {
 
     /// AU21: a person's wheel over `pos`, by `delta` points of content.
     pub fn wheel_at(&mut self, pos: egui::Pos2, delta: f32) {
+        self.wheel_tick_at(pos, delta);
+        self.run();
+        self.run_frames(30);
+    }
+
+    /// AU14: one tick of that wheel, left for the next frame to read: a run
+    /// of them, each sooner than the last has rested.
+    pub fn wheel_tick_at(&mut self, pos: egui::Pos2, delta: f32) {
         let input = self.h.input_mut();
         input.events.push(egui::Event::PointerMoved(pos));
         input.events.push(egui::Event::MouseWheel {
@@ -637,8 +652,6 @@ impl EditorHarness {
             phase: egui::TouchPhase::Move,
             modifiers: egui::Modifiers::NONE,
         });
-        self.run();
-        self.run_frames(30);
     }
 
     /// AU21: in points, the rect of each widget with this name.
@@ -1077,6 +1090,40 @@ impl EditorHarness {
         let mut out = Vec::new();
         for c in &self.h.output().shapes {
             walk(&c.shape, within, &mut out);
+        }
+        out
+    }
+
+    /// AU14: where the glyphs of `word` landed: a label's rect can stand true
+    /// while its text sits on the rect's floor.
+    pub fn painted_ink(&self, word: &str) -> egui::Rect {
+        fn walk(s: &egui::Shape, word: &str, out: &mut Option<egui::Rect>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, word, out)),
+                egui::Shape::Text(t) if t.galley.text() == word => *out = Some(t.visual_bounding_rect()),
+                _ => {}
+            }
+        }
+        let mut out = None;
+        for c in &self.h.output().shapes {
+            walk(&c.shape, word, &mut out);
+        }
+        out.unwrap_or_else(|| panic!("{word:?} was not painted"))
+    }
+
+    /// AU14: the solid ground the last frame left at `at`: the last filled
+    /// rect painted over it. State is a filled shape, and a shape has no name.
+    pub fn painted_fill_at(&self, at: egui::Pos2) -> Option<egui::Color32> {
+        fn walk(s: &egui::Shape, at: egui::Pos2, out: &mut Option<egui::Color32>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, at, out)),
+                egui::Shape::Rect(r) if r.rect.contains(at) && r.fill.a() == 255 => *out = Some(r.fill),
+                _ => {}
+            }
+        }
+        let mut out = None;
+        for c in &self.h.output().shapes {
+            walk(&c.shape, at, &mut out);
         }
         out
     }

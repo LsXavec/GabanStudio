@@ -2780,6 +2780,8 @@ pub const KEYMAP_REV: u32 = 1;
 
 /// AU19: `ui.panel_more`'s key: a person hid Plan's sheet.
 pub const PLAN_SHEET_HIDDEN: &str = "plan_sheet_hidden";
+/// AU14: and a person opened the camera's `Details` in the Effects step.
+pub const CAMERA_DETAILS: &str = "camera_details";
 
 impl Default for UiConfig {
     fn default() -> Self {
@@ -2817,6 +2819,15 @@ impl UiConfig {
 
     pub fn set_plan_sheet_hidden(&mut self, hidden: bool) {
         self.panel_more.insert(PLAN_SHEET_HIDDEN.to_string(), hidden);
+    }
+
+    /// AU14: the camera's `Details` start folded, so a missing key reads shut.
+    pub fn camera_details(&self) -> bool {
+        self.panel_more.get(CAMERA_DETAILS).copied().unwrap_or(false)
+    }
+
+    pub fn set_camera_details(&mut self, open: bool) {
+        self.panel_more.insert(CAMERA_DETAILS.to_string(), open);
     }
 }
 

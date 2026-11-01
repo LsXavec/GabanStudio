@@ -4423,6 +4423,10 @@ struct Editor {
     plan_sheet_request: Option<bool>,
     /// AU13: `Result beside`'s choice, likewise.
     result_request: Option<bool>,
+    /// AU14: the camera's `Details` are open (`ui.panel_more`), and the fold's
+    /// latest word for the App to remember.
+    camera_details: bool,
+    details_request: Option<bool>,
     /// AU3: where the arrangement came from while `stage` is None: the
     /// off-spine pill's name, and the arrangement it opened with. Reset goes
     /// back to it, and the lock keeps its panes (a panel opened by hand
@@ -4439,8 +4443,10 @@ struct Editor {
     /// unset, so nothing is stamped or promoted and each rule stands as it
     /// stood. Only the top row still reads the project (spec 1.13).
     kind_unset: bool,
-    /// AU14: the canvas tool the frame box was armed under: another tool ends it.
+    /// AU14: the canvas tool the frame box was armed under: another tool ends
+    /// it. And was it armed last frame: arming brings the Result to the front.
     frame_box_tool: canvas::CanvasTool,
+    frame_box_was: bool,
     /// AU3: the panes the lock holds, and the stage, sheet choices and kind
     /// they were read for. The dock asks every frame; the recipe changes
     /// rarely.
@@ -5207,7 +5213,10 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 let vs = self.viewers.entry(*id).or_default();
                 viewer::ui(ui, self.state, self.graph, vs, self.final_look);
                 if let Some(framing) = vs.framed.take() {
-                    self.state.frame_camera(&framing);
+                    self.state.frame_camera(&framing, &viewer::camera_done(ui.ctx()));
+                }
+                if std::mem::take(&mut vs.go_last) {
+                    self.state.go_to_last_drawing();
                 }
             }
         }
@@ -5381,7 +5390,9 @@ impl Editor {
     }
 
     /// AU14: the frame box stands until another tool: the step left, the
-    /// canvas's tool changed since it was armed, or the camera gone.
+    /// canvas's tool changed since it was armed, or the camera gone or no
+    /// longer on its three tracks (an undo, the sheet). Arming brings the
+    /// Result forward: the box is drawn there and nowhere else.
     fn watch_frame_box(&mut self) {
         let tool = self.canvas.tool;
         let armed = &mut self.state.graph_ui.frame_box;
@@ -5391,9 +5402,15 @@ impl Editor {
         if !*armed {
             self.frame_box_tool = tool;
         }
-        if self.state.graph_ui.frame_box && anim_core::camera::output_camera(self.state.cut()).is_none() {
+        if self.state.graph_ui.frame_box && !self.state.camera_moves() {
             self.state.graph_ui.frame_box = false;
         }
+        let armed = self.state.graph_ui.frame_box;
+        if armed && !self.frame_box_was {
+            let docked = self.dock.iter_all_tabs().find_map(|(_, p)| matches!(p, Pane::Viewer(_)).then_some(*p));
+            self.open_pane(docked.unwrap_or(Pane::Viewer(0)));
+        }
+        self.frame_box_was = armed;
     }
 
     /// AU19: this document is an animation. Unlike `animated`, the frozen
@@ -5849,6 +5866,7 @@ impl Editor {
         self.sheet_in_draw = ui.sheet_in_draw;
         self.plan_sheet_hidden = hidden;
         self.result_in_color = ui.result_in_color;
+        self.camera_details = ui.camera_details();
         match self.stage {
             Some(st @ Stage::Drawing) if changed => self.dock = self.recipe(st),
             Some(st @ Stage::InkPaint) if result_changed => self.dock = self.recipe(st),
@@ -5947,6 +5965,9 @@ impl Editor {
             more_default: false,
             kind_unset: false,
             frame_box_tool: canvas::CanvasTool::Paint,
+            frame_box_was: false,
+            camera_details: false,
+            details_request: None,
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -6068,6 +6089,9 @@ impl Editor {
             more_default: false,
             kind_unset: false,
             frame_box_tool: canvas::CanvasTool::Paint,
+            frame_box_was: false,
+            camera_details: false,
+            details_request: None,
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -7315,6 +7339,11 @@ impl eframe::App for App {
             // AU13: and Color's `Result beside`.
             if let Some(on) = editor.result_request.take() {
                 self.config.ui.result_in_color = on;
+                self.config.save();
+            }
+            // AU14: and the camera's `Details`.
+            if let Some(open) = editor.details_request.take() {
+                self.config.ui.set_camera_details(open);
                 self.config.save();
             }
             // AU6: the Start float's latch, and the lock's verb.
@@ -9702,6 +9731,7 @@ impl Editor {
         // The frozen boot's unset kind keeps the bare toolbar.
         let effects_shelf = self.kind().filter(|_| self.stage == Some(Stage::Composite)).map(|kind| nodegraph_panel::Shelf {
             camera: kind == ProjectKind::Animation,
+            details: self.camera_details,
         });
         self.watch_frame_box();
         let mut tabs = EditorTabs {
@@ -9756,6 +9786,10 @@ impl Editor {
             .show_inside(ui, &mut tabs);
         if let Some(on) = tabs.result_asked {
             self.switch_result(on);
+        }
+        if let Some(open) = self.state.graph_ui.details_asked.take() {
+            self.camera_details = open;
+            self.details_request = Some(open);
         }
         // A popover hangs from a pane that is drawn. The tab behind or gone,
         // nothing would close it, and it would come back unasked.

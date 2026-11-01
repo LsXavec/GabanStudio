@@ -1,7 +1,7 @@
 //! AU14's tests: a glow is one tap, a camera move is two framings, and no
 //! wire is drawn for either.
 
-use anim_core::camera::{CameraState, output_camera};
+use anim_core::camera::{CAMERA_SPECS, CameraState, output_camera};
 use anim_core::deliver::{self, Purpose, RenderOpts};
 use anim_core::fx::{FxKind, FxValue};
 use anim_core::generator::GenKind;
@@ -13,14 +13,15 @@ use egui::{Key, Pos2, Rect, vec2};
 
 use crate::canvas::extpaper_tests::paint_texels;
 use crate::config::Action;
-use crate::doc::{AppState, NO_OUTPUT_FOR_EFFECTS};
+use crate::doc::{AppState, CAMERA_ADDED, CAMERA_NO_TRACKS, CAMERA_START_SET, GLOW_NEEDS_COLOR, NO_OUTPUT_FOR_EFFECTS};
+use crate::fxui::strength_keys;
 use crate::measure::{self, Act, Recorder};
-use crate::nodegraph_panel::{FULL_SETUP_WARNS, GRAPH_SET_UP, SHELF_MORE};
+use crate::nodegraph_panel::{FULL_SETUP_WARNS, GRAPH_SET_UP, PICK_A_BOX, SHELF_MORE};
 use crate::lessons::Target;
 use crate::plate;
 use crate::steps::ProjectKind;
 use crate::testkit::EditorHarness;
-use crate::viewer::{FRAME_BOX_SAYS, Framing, NOTHING_TO_SHOW, SET_UP_COMPOSITE};
+use crate::viewer::{FRAME_BOX_SAYS, Framing, NOTHING_TO_SHOW, SET_UP_COMPOSITE, camera_done};
 use crate::workspace::{Pane, Stage};
 use crate::{auguide_tests, templates, vocab};
 
@@ -513,6 +514,12 @@ fn aufx_display_map_leaves_stored_names() {
     settle(&mut h);
     assert!(h.has("Soft focus"), "{}", h.describe());
     assert!(!h.has("Diffusion"));
+    h.type_text("Diffusion");
+    settle(&mut h);
+    h.key(Key::Enter);
+    settle(&mut h);
+    let id = h.state().selected_node.expect("added");
+    assert_eq!(h.state().cut().graph.node(id).unwrap().kind.name(), "Diffusion", "the trade word finds its row");
 }
 
 /// The shelf is one row 40 tall, whatever the pane, and its handles stand.
@@ -567,9 +574,7 @@ fn aufx_inspector_fields_stay_in_the_pane() {
 fn aufx_narrow_shelf_folds_into_more() {
     let (w, tall) = SIZES[2];
     let mut h = film_room(w, tall);
-    if h.has("Color look") {
-        return;
-    }
+    assert!(!h.has("Color look"), "folded at {w}: {}", h.describe());
     h.click(SHELF_MORE);
     settle(&mut h);
     h.click("Color look");
@@ -679,12 +684,14 @@ fn aufx_glow_and_pan_journey() {
         assert_eq!(r.harness().editor().stage, Some(Stage::Composite), "no room switch");
         assert!(r.harness().state().pending_wire.is_none(), "no wire");
         read.extend(r.harness().editor().say.hint.as_ref().map(|s| s.words.clone()));
+        read.push(r.harness().state().status.clone());
     }
     let mut s = auguide_tests::film().build();
     paint_texels(&mut s, &[(40, 40), (41, 40)], [0.1, 0.1, 0.1, 1.0]);
     let mut h = EditorHarness::with_state_shipped(s);
     sized(&mut h, 1600.0, 900.0);
-    let mut read: Vec<String> = ["Glow", vocab::STRENGTH, vocab::CAMERA_MOVE, FRAME_BOX_SAYS].map(String::from).to_vec();
+    let words = ["Glow", vocab::STRENGTH, vocab::CAMERA_MOVE, FRAME_BOX_SAYS, vocab::GO_TO_LAST_DRAWING, PICK_A_BOX];
+    let mut read: Vec<String> = words.map(String::from).to_vec();
     let concepts = ["an effect goes on the picture at a tap", "strength is how much", "a camera moves between two framings"];
 
     let mut r = Recorder::new(&mut h, "glow and pan");
@@ -703,7 +710,8 @@ fn aufx_glow_and_pan_journey() {
     let start = path(-30.0);
     r.act("frame the start", Act::Drag(&start));
     keep_room(&mut r, &mut read);
-    r.act("go to the end", Act::Key(Key::End));
+    assert_eq!(r.harness().state().status, CAMERA_START_SET, "what comes next, in words");
+    r.act("go to the end", Act::Click(vocab::GO_TO_LAST_DRAWING));
     keep_room(&mut r, &mut read);
     let end = path(40.0);
     r.act("frame the end", Act::Drag(&end));
@@ -736,6 +744,546 @@ fn aufx_the_ignored_pass_owes_the_shelf_shots() {
     let checked = pass.find("check_shots(&dir, &fx_owed())").expect("it checks them");
     assert!(taken < checked, "taken, then checked");
     let owed = crate::uishot::fx_owed();
-    assert_eq!(owed.len(), 8, "{owed:?}");
+    assert_eq!(owed.len(), 16, "{owed:?}");
     assert!(owed.iter().any(|(name, w, _)| name == "fx-frame-box-1280.png" && *w == 1280), "{owed:?}");
+    for state in ["fx-empty", "fx-disabled", "fx-add-menu", "fx-framed"] {
+        assert!(owed.iter().any(|(name, ..)| name.starts_with(state)), "{state}: {owed:?}");
+    }
+}
+
+// ---- The inspector under the shelf ----
+
+/// Where the inspector's field for `key` stands.
+fn field(h: &EditorHarness, key: &str) -> Rect {
+    let fields = &h.state().graph_ui.fx.fields;
+    fields.iter().find(|(k, _)| *k == key).map(|(_, r)| *r).unwrap_or_else(|| panic!("{key}: {fields:?}"))
+}
+
+fn selected(h: &EditorHarness) -> NodeId {
+    h.state().selected_node.expect("a selection")
+}
+
+/// The Effects step's shipped inspector runs after `Strength`, which reads
+/// the same live slot: a drag there is still one undo on the one parameter.
+#[test]
+fn aufx_inspector_drag_is_one_undo_on_one_parameter() {
+    let mut h = film_room(1600.0, 900.0);
+    h.click("Glow");
+    settle(&mut h);
+    let id = selected(&h);
+    let others = |h: &EditorHarness| ["threshold", "radius"].map(|k| float(h.state(), id, k));
+    let (held, was, history) = (others(&h), float(h.state(), id, "intensity"), h.state().engine.history_len());
+    let at = field(&h, "intensity").center();
+    h.drag(at, at + vec2(40.0, 0.0), 8);
+    settle(&mut h);
+    assert_ne!(float(h.state(), id, "intensity"), was, "the drag landed");
+    assert_eq!(others(&h), held, "on that parameter alone");
+    assert_eq!(h.state().engine.history_len(), history + 1, "as one undo");
+
+    h.click("Blur");
+    settle(&mut h);
+    let id = selected(&h);
+    let (x, y, history) = (float(h.state(), id, "radius_x"), float(h.state(), id, "radius_y"), h.state().engine.history_len());
+    let at = field(&h, "radius_x").center();
+    h.drag(at, at + vec2(35.0, 0.0), 7);
+    settle(&mut h);
+    assert_ne!(float(h.state(), id, "radius_x"), x, "the drag landed");
+    assert_eq!(float(h.state(), id, "radius_y"), y, "nobody touched radius y");
+    assert_eq!(h.state().engine.history_len(), history + 1, "one undo");
+}
+
+/// Every kind's Strength names real amounts, and Blur's stored pair, its one
+/// exception, keeps its direction: the shelf moves it by one ratio.
+#[test]
+fn aufx_strength_keeps_a_directional_blur() {
+    for fx in FxKind::ALL {
+        for key in strength_keys(*fx) {
+            assert!(fx.spec(key).is_some(), "{fx:?} has no {key}");
+        }
+    }
+    assert_eq!(strength_keys(FxKind::MotionBlur), ["length"], "one plain amount");
+    let mut h = film_room(1600.0, 900.0);
+    h.click("Blur");
+    settle(&mut h);
+    let id = selected(&h);
+    for (x, y) in [(8.0, 0.0), (0.0, 8.0), (8.0, 4.0)] {
+        let NodeKind::Effect { fx, mut params, binds } = h.state().cut().graph.node(id).unwrap().kind.clone() else {
+            panic!("an effect");
+        };
+        params.set("radius_x", FxValue::Float(x));
+        params.set("radius_y", FxValue::Float(y));
+        h.state_mut().graph_set_kind(id, NodeKind::Effect { fx, params, binds });
+        settle(&mut h);
+        let history = h.state().engine.history_len();
+        let track = h.rect(vocab::STRENGTH);
+        h.drag(track.left_center() + vec2(track.width() * 0.5, 0.0), track.left_center() + vec2(track.width() * 0.8, 0.0), 6);
+        settle(&mut h);
+        let (nx, ny) = (float(h.state(), id, "radius_x"), float(h.state(), id, "radius_y"));
+        assert!(nx.max(ny) > f32::max(x, y), "({x}, {y}) to ({nx}, {ny})");
+        assert!((nx * y - ny * x).abs() < 1e-2 * nx.max(ny) * f32::max(x, y), "({x}, {y}) to ({nx}, {ny}): one direction");
+        assert_eq!(h.state().engine.history_len(), history + 1, "one undo");
+    }
+}
+
+// ---- A tap changes the picture, or says why ----
+
+/// A dab of `color` in a new animation, with its sheet's graph built.
+fn dabbed(color: [f32; 4]) -> AppState {
+    let mut s = auguide_tests::film().build();
+    let dab: Vec<(i32, i32)> = (600..680).flat_map(|x| (320..400).map(move |y| (x, y))).collect();
+    paint_texels(&mut s, &dab, color);
+    assert!(s.auto_comp());
+    s
+}
+
+fn starter_red() -> [f32; 4] {
+    let law = auguide_tests::film().build().engine.project.color_law;
+    law.encode_rgba(plate::STARTER_SWATCHES[2].1.to_array())
+}
+
+fn final_picture(s: &AppState) -> anim_core::fx::Image {
+    let opts = RenderOpts { purpose: Purpose::Final, scale: 1.0 };
+    let (w, tall) = (s.engine.project.width, s.engine.project.height);
+    deliver::render(s.cut(), s.engine.project.color_law, s.view.frame, w, tall, &opts)
+}
+
+/// How far the picture moved at its worst, on the 0 to 1 a screen shows.
+fn most_moved(a: &anim_core::fx::Image, b: &anim_core::fx::Image) -> f32 {
+    let seen = |v: f32| v.clamp(0.0, 1.0);
+    a.px.iter().zip(&b.px).map(|(x, y)| (seen(*x) - seen(*y)).abs()).fold(0.0, f32::max)
+}
+
+/// The art a newcomer has: every shelf effect changes it at the tap, with the
+/// amount it opens on. The kinds' stored defaults stay where they were.
+#[test]
+fn aufx_every_shelf_effect_changes_colored_art() {
+    for fx in [FxKind::Glow, FxKind::Diffusion, FxKind::Blur, FxKind::Grade] {
+        let mut s = dabbed(starter_red());
+        let before = final_picture(&s);
+        s.shelf_add(NodeKind::effect(fx)).expect("added");
+        let moved = most_moved(&before, &final_picture(&s));
+        assert!(moved > 2.0 / 255.0, "{fx:?} moved {moved}");
+        assert_ne!(s.status, GLOW_NEEDS_COLOR, "{fx:?}");
+    }
+    let default = |fx: FxKind, key: &str| fx.spec(key).expect(key).default_value();
+    assert_eq!(default(FxKind::Glow, "threshold"), FxValue::Float(0.7), "the finishing chain's");
+    assert_eq!(default(FxKind::Grade, "saturation"), FxValue::Float(1.0));
+}
+
+/// A newcomer's first art is a line, not a filled shape, and the tap has to
+/// show on that: a glow nobody can see is the same as one that did not run.
+#[test]
+fn aufx_glow_shows_on_a_thin_line() {
+    let mut s = auguide_tests::film().build();
+    let (cx, cy) = (s.engine.project.width as f32 / 2.0, s.engine.project.height as f32 / 2.0);
+    let turn = (0..4000).map(|n| n as f32 / 4000.0 * std::f32::consts::TAU);
+    let ring: Vec<(i32, i32)> = turn
+        .flat_map(|t| [140.0, 141.0].map(|r| ((cx + r * t.cos()) as i32, (cy + r * t.sin()) as i32)))
+        .collect();
+    paint_texels(&mut s, &ring, starter_red());
+    assert!(s.auto_comp());
+    let before = final_picture(&s);
+    s.shelf_add(glow()).expect("added");
+    let after = final_picture(&s);
+    let seen = |v: f32| v.clamp(0.0, 1.0);
+    let moved = |(a, b): (&[f32], &[f32])| (0..3).any(|c| (seen(a[c]) - seen(b[c])).abs() > 16.0 / 255.0);
+    let plain = before.px.chunks(4).zip(after.px.chunks(4)).filter(|p| moved(*p)).count();
+    assert!(plain >= 1000, "{plain} pixels moved by 16/255");
+}
+
+/// Near-black has nothing to light. The tap says so, in place of a dead slider.
+#[test]
+fn aufx_glow_on_dark_ink_says_why() {
+    let mut h = EditorHarness::with_state_shipped(dabbed([0.1, 0.1, 0.1, 1.0]));
+    sized(&mut h, 1600.0, 900.0);
+    enter(&mut h, Stage::Composite);
+    let before = final_picture(h.state());
+    h.click("Glow");
+    settle(&mut h);
+    assert_eq!(most_moved(&before, &final_picture(h.state())), 0.0, "nothing to light");
+    assert_eq!(h.state().status, GLOW_NEEDS_COLOR);
+    assert!(says(&h, GLOW_NEEDS_COLOR), "{:?}", h.painted_text());
+    // The same tap on color says nothing of the kind.
+    let mut h = EditorHarness::with_state_shipped(dabbed(starter_red()));
+    sized(&mut h, 1600.0, 900.0);
+    enter(&mut h, Stage::Composite);
+    h.click("Glow");
+    settle(&mut h);
+    assert_ne!(h.state().status, GLOW_NEEDS_COLOR);
+}
+
+// ---- A camera move a newcomer can finish ----
+
+#[test]
+fn aufx_camera_move_says_each_next_step() {
+    let mut h = three_drawings();
+    h.click(vocab::CAMERA_MOVE);
+    settle(&mut h);
+    assert_eq!(h.state().status, CAMERA_ADDED);
+    assert!(says(&h, CAMERA_ADDED), "{:?}", h.painted_text());
+    let c = h.editor().viewers[&0].drawn_box.expect("the box").center();
+    h.drag(c, c + vec2(-30.0, 0.0), 6);
+    settle(&mut h);
+    assert_eq!(h.state().status, CAMERA_START_SET);
+    assert!(says(&h, CAMERA_START_SET), "{:?}", h.painted_text());
+    h.click(vocab::GO_TO_LAST_DRAWING);
+    settle(&mut h);
+    h.drag(c, c + vec2(40.0, 0.0), 6);
+    settle(&mut h);
+    let done = camera_done(&h.ctx());
+    assert_eq!(done, "Camera move done. Press Space to play.", "the keymap's own chord");
+    assert_eq!(h.state().status, done);
+    assert!(says(&h, &done), "{:?}", h.painted_text());
+}
+
+/// Three drawings and a blank tail on the Effects step.
+fn three_drawings() -> EditorHarness {
+    let mut s = auguide_tests::film().build();
+    let ink = [0.8, 0.2, 0.2, 1.0];
+    paint_texels(&mut s, &[(40, 40), (41, 40)], ink);
+    for _ in 0..2 {
+        assert!(s.add_drawing_after());
+        paint_texels(&mut s, &[(40, 40), (41, 40)], ink);
+    }
+    s.goto(0);
+    let mut h = EditorHarness::with_state_shipped(s);
+    sized(&mut h, 1600.0, 900.0);
+    enter(&mut h, Stage::Composite);
+    h
+}
+
+/// The way to the end stands on the Result at every size, clear of the latches.
+#[test]
+fn aufx_last_drawing_stands_clear_at_every_size() {
+    for (w, tall) in SIZES {
+        let mut h = film_room(w, tall);
+        h.click(vocab::CAMERA_MOVE);
+        settle(&mut h);
+        let at = h.rect(vocab::GO_TO_LAST_DRAWING);
+        assert!(pane_rect(&h, Pane::Viewer(0)).contains_rect(at), "at {w}: {at:?}");
+        assert!(!at.intersects(h.rect(vocab::FULL_QUALITY)), "at {w}: {at:?} over {:?}", h.rect(vocab::FULL_QUALITY));
+    }
+}
+
+/// `End` runs past what plays on a blank tail, so the one-tap route has to
+/// land where the export ends: the move has to be in the film.
+#[test]
+fn aufx_last_drawing_lands_inside_the_export() {
+    let mut h = three_drawings();
+    let shown = h.state().shown_length();
+    assert!(1 < shown && shown < h.state().frame_count(), "a blank tail: {shown}");
+    assert!(!h.has(vocab::GO_TO_LAST_DRAWING), "only with the box");
+    h.click(vocab::CAMERA_MOVE);
+    settle(&mut h);
+    assert_eq!(h.node_enabled(vocab::GO_TO_LAST_DRAWING), Some(true));
+    let c = h.editor().viewers[&0].drawn_box.expect("the box").center();
+    h.drag(c, c + vec2(-30.0, 0.0), 6);
+    settle(&mut h);
+    h.key(Key::End);
+    settle(&mut h);
+    assert_eq!(h.state().view.frame, h.state().frame_count() - 1, "End stays the sheet's last frame");
+    h.click(vocab::GO_TO_LAST_DRAWING);
+    settle(&mut h);
+    let last = h.state().view.frame;
+    assert_eq!(last, shown - 1, "the last frame the Export cards pass");
+    assert_eq!(h.node_enabled(vocab::GO_TO_LAST_DRAWING), Some(false), "already there");
+    h.drag(c, c + vec2(40.0, 0.0), 6);
+    settle(&mut h);
+    let cam = output_camera(h.state().cut()).expect("a camera");
+    let [px, ..] = tracks(h.state(), cam);
+    let end = key(h.state(), px, last).expect("the end key lands inside the export").value;
+    assert!(key(h.state(), px, h.state().frame_count() - 1).is_none(), "and none on the blank tail");
+    let start = key(h.state(), px, 0).expect("the start").value;
+    let mid = CameraState::at(h.state().cut(), cam, last / 2).expect("the camera").pan_x;
+    assert!(start < mid && mid < end, "the export sees the whole move: {start}, {mid}, {end}");
+}
+
+/// The wheel's gesture ends on rest alone, so a run of ticks over a moving
+/// playhead is one framing, keyed where it began.
+#[test]
+fn aufx_wheel_over_a_moving_playhead_is_one_framing() {
+    let mut h = film_room(1600.0, 900.0);
+    h.click(vocab::CAMERA_MOVE);
+    settle(&mut h);
+    let cam = output_camera(h.state().cut()).expect("a camera");
+    let [_, _, zoom] = tracks(h.state(), cam);
+    let history = h.state().engine.history_len();
+    let at = h.editor().viewers[&0].drawn_box.unwrap().center();
+    for frame in [1, 2, 3] {
+        h.wheel_tick_at(at, 120.0);
+        h.run_frames(1);
+        h.state_mut().goto(frame);
+        h.run_frames(1);
+        assert_eq!(h.state().engine.history_len(), history, "still turning");
+    }
+    h.wait(0.6);
+    settle(&mut h);
+    assert_eq!(h.state().engine.history_len(), history + 1, "one framing");
+    assert!(key(h.state(), zoom, 0).expect("where it began").value > 1.0);
+    assert!((1..=3).all(|f| key(h.state(), zoom, f).is_none()), "and nowhere else");
+}
+
+/// A pen has no wheel: a corner of the box draws it in, one undo, the place
+/// kept. A box that shrinks is a camera that zooms in.
+#[test]
+fn aufx_frame_box_corner_zooms_in_one_undo() {
+    let mut h = film_room(1600.0, 900.0);
+    h.click(vocab::CAMERA_MOVE);
+    settle(&mut h);
+    let cam = output_camera(h.state().cut()).expect("a camera");
+    let [px, py, zoom] = tracks(h.state(), cam);
+    let boxed = h.editor().viewers[&0].drawn_box.expect("the box");
+    let history = h.state().engine.history_len();
+    let corner = boxed.right_bottom();
+    h.drag(corner, corner + (boxed.center() - corner) * 0.25, 8);
+    settle(&mut h);
+    assert_eq!(h.state().engine.history_len(), history + 1, "one undo");
+    let value = key(h.state(), zoom, 0).expect("keyed").value;
+    assert!((value - 4.0 / 3.0).abs() < 0.05, "a quarter in: {value}");
+    assert_eq!(key(h.state(), px, 0).map(|k| k.value), Some(0.0), "the place kept");
+    assert_eq!(key(h.state(), py, 0).map(|k| k.value), Some(0.0));
+    assert_eq!(h.editor().viewers[&0].drawn_box, Some(boxed), "the box home around the new frame");
+}
+
+/// The box holds its edge against the Result's grey, where `BLUE` alone reads
+/// 1.5:1, and stands where a person can see it: arming brings it forward.
+#[test]
+fn aufx_frame_box_stands_out_and_comes_forward() {
+    assert!(plate::contrast(plate::ON_FILL, plate::RESULT) >= 3.0, "the edge under the blue");
+    let mut h = film_room(1600.0, 900.0);
+    h.editor_mut().open_pane(Pane::Canvas);
+    settle(&mut h);
+    h.click(vocab::CAMERA_MOVE);
+    settle(&mut h);
+    let boxed = h.editor().viewers[&0].drawn_box.expect("the Result came forward with its box");
+    assert_eq!(h.painted_fill_at(boxed.right_bottom()), Some(plate::ON_FILL), "a grip to take hold of");
+}
+
+#[test]
+fn aufx_armed_camera_move_is_a_filled_shape() {
+    let mut h = film_room(1600.0, 900.0);
+    let at = h.rect(vocab::CAMERA_MOVE).center();
+    let away = egui::pos2(4.0, 4.0);
+    h.point_at(away);
+    settle(&mut h);
+    let rest = h.painted_fill_at(at);
+    assert_ne!(rest, Some(plate::BLUE), "at rest");
+    h.click(vocab::CAMERA_MOVE);
+    h.point_at(away);
+    settle(&mut h);
+    assert_eq!(h.painted_fill_at(at), Some(plate::BLUE), "armed");
+    assert!(plate::contrast(plate::ON_FILL, plate::BLUE) >= 4.5, "with words that read on it");
+    h.click(vocab::CAMERA_MOVE);
+    h.point_at(away);
+    settle(&mut h);
+    assert_eq!(h.painted_fill_at(at), rest, "and back");
+}
+
+/// An undo can take the tracks from a camera that stays, and the box with
+/// them: nothing would land. A framing that still comes says so.
+#[test]
+fn aufx_frame_box_goes_with_its_tracks() {
+    let mut h = film_room(1600.0, 900.0);
+    h.state_mut().shelf_add(NodeKind::camera()).expect("a camera");
+    settle(&mut h);
+    h.click(vocab::CAMERA_MOVE);
+    settle(&mut h);
+    assert!(h.state().graph_ui.frame_box);
+    h.perform(Action::Undo);
+    settle(&mut h);
+    assert!(output_camera(h.state().cut()).is_some(), "the camera stands");
+    assert!(!h.state().graph_ui.frame_box, "its box does not");
+    assert_eq!(h.editor().viewers[&0].drawn_box, None);
+    let framing = Framing { frame: 0, shift: (4.0, 0.0), factor: 1.0 };
+    h.state_mut().frame_camera(&framing, "done");
+    assert_eq!(h.state().refusal, CAMERA_NO_TRACKS, "aloud");
+}
+
+// ---- The pane ----
+
+#[test]
+fn aufx_no_selection_says_one_plain_line() {
+    let mut h = film_room(832.0, 600.0);
+    h.state_mut().selected_node = None;
+    settle(&mut h);
+    assert!(says(&h, PICK_A_BOX), "{:?}", h.painted_text());
+    let painted = h.painted_text().join(" ");
+    assert!(!painted.contains("no node selected"), "{painted}");
+    assert!(!painted.contains("right-click a node"), "{painted}");
+}
+
+/// A person clicking from the Glow to the Camera finds the graph where it was.
+#[test]
+fn aufx_selection_never_moves_the_graph() {
+    for (w, tall) in SIZES {
+        let mut h = film_room(w, tall);
+        h.click("Glow");
+        settle(&mut h);
+        let glow = selected(&h);
+        h.click(vocab::CAMERA_MOVE);
+        settle(&mut h);
+        let cam = selected(&h);
+        let out = output(h.state());
+        let place = |h: &EditorHarness| {
+            let rects = &h.state().graph_ui.node_rects;
+            rects.iter().find(|(id, _)| *id == out).map(|(_, r)| *r).expect("the Output")
+        };
+        h.state_mut().selected_node = None;
+        settle(&mut h);
+        let home = place(&h);
+        for node in [glow, cam, out] {
+            h.state_mut().selected_node = Some(node);
+            settle(&mut h);
+            assert_eq!(place(&h), home, "at {w}");
+        }
+        h.state_mut().selected_node = Some(cam);
+        settle(&mut h);
+        h.click(vocab::DETAILS);
+        settle(&mut h);
+        assert_eq!(place(&h), home, "with the Details open at {w}");
+    }
+}
+
+/// One tap on Camera move leaves the eye on the Result: the framing alone,
+/// the rest a fold away, and the fold remembered.
+#[test]
+fn aufx_camera_shows_its_framing_first() {
+    let mut h = film_room(1600.0, 900.0);
+    h.click(vocab::CAMERA_MOVE);
+    settle(&mut h);
+    let keys = |h: &EditorHarness| h.state().graph_ui.fx.fields.iter().map(|(k, _)| *k).collect::<Vec<_>>();
+    assert_eq!(keys(&h), ["pan_x", "pan_y", "zoom"]);
+    assert!(!h.has("+ plane"), "{}", h.describe());
+    h.click(vocab::DETAILS);
+    settle(&mut h);
+    assert!(keys(&h).contains(&"shake_seed") && keys(&h).contains(&"aperture"), "{:?}", keys(&h));
+    assert!(h.has("+ plane"));
+    assert!(h.rig().config.ui.camera_details(), "remembered");
+    // The hand-wiring path has no fold: everything stands, as it always did.
+    let mut s = composed();
+    s.shelf_add(NodeKind::camera()).expect("a camera");
+    let mut frozen = EditorHarness::with_state(s);
+    frozen.editor_mut().open_pane(Pane::NodeGraph);
+    settle(&mut frozen);
+    assert!(frozen.state().graph_ui.fx.fields.iter().any(|(k, _)| *k == "aperture"));
+}
+
+/// Each legend's letters stand level with its field, wherever it lands in a
+/// row. Its rect is no witness: the row can stretch it round letters on the
+/// floor.
+#[test]
+fn aufx_legends_centre_on_their_fields() {
+    let mut h = film_room(1600.0, 900.0);
+    h.click("Glow");
+    settle(&mut h);
+    let level = |h: &EditorHarness, word: &str, key: &str| {
+        let (legend, at) = (h.painted_ink(word).center().y, field(h, key).center().y);
+        assert!((legend - at).abs() <= 2.0, "{word} at {legend}, its field at {at}");
+    };
+    for (word, key) in [("Threshold", "threshold"), ("Radius", "radius"), ("Intensity", "intensity")] {
+        level(&h, word, key);
+    }
+    h.click(vocab::CAMERA_MOVE);
+    settle(&mut h);
+    h.click(vocab::DETAILS);
+    settle(&mut h);
+    for (word, key) in [("Pan x", "pan_x"), ("Pan y", "pan_y"), ("Zoom in", "zoom"), ("Rotate", "rotate_deg")] {
+        level(&h, word, key);
+    }
+}
+
+/// Each effect moves the Output a column on: the view follows just enough to
+/// keep what was added, and the Output it feeds, on the pane.
+#[test]
+fn aufx_new_effect_stands_in_view() {
+    let mut h = film_room(1280.0, 800.0);
+    let pane = pane_rect(&h, Pane::NodeGraph);
+    for _ in 0..4 {
+        h.state_mut().shelf_add(glow()).expect("added");
+        settle(&mut h);
+        let place = |id: NodeId| {
+            let rects = &h.state().graph_ui.node_rects;
+            rects.iter().find(|(n, _)| *n == id).map(|(_, r)| *r).expect("drawn")
+        };
+        let (new, out) = (place(selected(&h)), place(output(h.state())));
+        assert!(pane.contains_rect(new), "{new:?} in {pane:?}");
+        assert!(pane.contains_rect(out), "{out:?} in {pane:?}");
+    }
+}
+
+// ---- What this part promised to leave ----
+
+/// FNV-1a of the stretch of `source` from `head` to the `tail` after it, line
+/// endings aside: the diff read, kept as a check.
+fn fingerprint(source: &str, head: &str, tail: &str) -> u64 {
+    let text = source.replace("\r\n", "\n");
+    let from = text.find(head).unwrap_or_else(|| panic!("{head}"));
+    let to = from + text[from..].find(tail).unwrap_or_else(|| panic!("{tail}"));
+    text.as_bytes()[from..to].iter().fold(0xcbf29ce484222325, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
+}
+
+/// The code the spec says this part leaves, each against its text at the
+/// commit before the part. A part that means to change one re-pins it here.
+#[test]
+fn aufx_guarded_code_stands() {
+    const METHOD: &str = "\n    }\n";
+    let doc = include_str!("doc.rs");
+    let table = [
+        (doc, "fn wire_under_composite(", METHOD, 0xf70b2164c8cd7c50_u64),
+        (doc, "pub fn import_model(", METHOD, 0x5fc94b36903924f9),
+        (doc, "pub fn set_cut_camera_from_view(", METHOD, 0x1abc664eb2084707),
+        (include_str!("graphcomp.rs"), "fn render_node(", METHOD, 0xc3a8df3a7f11ff21),
+        (include_str!("../../crates/anim-core/src/look.rs"), "pub fn satsuei_template(", "\n}\n", 0x14aba9b6659106d5),
+    ];
+    for (source, head, tail, want) in table {
+        assert_eq!(fingerprint(source, head, tail), want, "{head} changed");
+    }
+    // Its one caller stays its one caller, and the new path does not call it.
+    let calls = |source: &str, name: &str| source.matches(name).count();
+    assert_eq!(calls(doc, ".wire_under_composite("), 1, "import_model's");
+    let shelf = [include_str!("main.rs"), include_str!("nodegraph_panel.rs"), include_str!("fxui.rs"), include_str!("viewer.rs")];
+    assert_eq!(shelf.iter().map(|s| calls(s, ".wire_under_composite(")).sum::<usize>(), 0);
+    assert_eq!(calls(doc, ".set_cut_camera_from_view("), 0, "3D's alone");
+}
+
+/// What is stored stays as it was: effect names, camera parameters and their
+/// keys, Tab, the step's dock, the config's shape, the schema. The finishing
+/// chain has its own spelled test, and its template is fingerprinted above.
+#[test]
+fn aufx_stored_vocabulary_stands() {
+    let names: Vec<&str> = FxKind::ALL.iter().map(|f| f.name()).collect();
+    let want = [
+        "Blur", "Glow", "Diffusion", "Grade", "Para", "Light wrap", "Rim light", "Vignette", "Grain", "Motion blur",
+        "LUT", "Matte", "Palette map", "Tone",
+    ];
+    assert_eq!(names, want);
+    let keys: Vec<&str> = CAMERA_SPECS.iter().map(|s| s.key).collect();
+    let want = [
+        "pan_x", "pan_y", "zoom", "rotate_deg", "shake_amp", "shake_freq", "shake_seed", "focus_z", "aperture", "parallax_k",
+    ];
+    assert_eq!(keys, want);
+    let dock = Stage::Composite.dock();
+    let panes: Vec<Pane> = dock.iter_all_tabs().map(|(_, p)| *p).collect();
+    let want = [Pane::NodeGraph, Pane::Curves, Pane::Viewer(0), Pane::Canvas, Pane::Palette, Pane::RenderQueue];
+    assert_eq!(panes, want);
+    let ui = serde_json::to_value(crate::config::UiConfig::default()).expect("the section");
+    let fields: Vec<&str> = ui.as_object().expect("a map").keys().map(String::as_str).collect();
+    let want = [
+        "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start", "result_in_color",
+        "scale", "sheet_in_draw", "show_welcome", "whats_new_seen",
+    ];
+    assert_eq!(fields, want, "the ui section's shape: `panel_more` stays out until something folds");
+    let mut opened = crate::config::UiConfig::default();
+    opened.set_camera_details(true);
+    let stored = serde_json::to_value(&opened).expect("the section");
+    assert_eq!(stored["panel_more"], serde_json::json!({"camera_details": true}), "a key in the map that was there");
+    let store = include_str!("../../crates/anim-core/src/store.rs");
+    assert!(store.contains("const SCHEMA_VERSION: i64 = 11;"), "the schema");
+
+    // Tab stays the add verb over the graph, on the shipped step too.
+    let mut h = film_room(1600.0, 900.0);
+    h.point_at(pane_rect(&h, Pane::NodeGraph).center());
+    h.key(Key::Tab);
+    settle(&mut h);
+    assert!(h.state().graph_ui.add_menu.is_some(), "{}", h.describe());
 }

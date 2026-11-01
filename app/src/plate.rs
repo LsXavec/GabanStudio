@@ -986,6 +986,9 @@ pub fn legend(ui: &mut Ui, text: &str) -> Response {
         TextFormat {
             font_id: legend_font(),
             color: LEGEND,
+            // A wrapped row stretches a label to its own height: unset, the
+            // letters sit on that floor, under the middle of what they name.
+            valign: egui::Align::Center,
             ..Default::default()
         },
     );
@@ -2109,11 +2112,24 @@ pub fn filled_row_width(ui: &Ui, label: &str) -> f32 {
 pub fn filled_named(ui: &mut Ui, label: &str, name: &str, width: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
-        let (fill, ink) = filled(&resp);
-        row_words(ui, rect, label, 0.0, fill, ink);
+        let (fill, _) = filled(&resp);
+        row_words(ui, rect, label, 0.0, fill, INK);
     }
     speak(&resp, egui::WidgetType::Button, None, name);
     describe(resp, "ACTION filled_row", name)
+}
+
+/// AU14: a [`filled_row`] that stays on: armed, it is the armed tool's solid
+/// `BLUE` with white words (spec 2.8), so it reads as a thing that is on, not
+/// as the ring that means "press this next". A disabled one is never armed.
+pub fn armed_row(ui: &mut Ui, label: &str, width: f32, armed: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = if armed && ui.is_enabled() { (TALLY, ON_FILL) } else { (filled(&resp).0, INK) };
+        row_words(ui, rect, label, 0.0, fill, ink);
+    }
+    speak(&resp, egui::WidgetType::Button, Some(armed), label);
+    describe(resp, "ACTION armed_row", label)
 }
 
 /// AU6: a [`ghost_row`] with a dim note at its right end, which the row's

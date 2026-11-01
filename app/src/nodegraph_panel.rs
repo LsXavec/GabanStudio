@@ -50,6 +50,10 @@ pub struct GraphUi {
     effect_at: Option<Pos2>,
     /// AU14: Camera move is armed: the Result shows the frame box.
     pub frame_box: bool,
+    /// AU14: the shelf added a node: the view brings it and the Output in.
+    pub reveal: bool,
+    /// AU14: `Details` was pressed: for the Editor to remember.
+    pub details_asked: Option<bool>,
 }
 
 impl GraphUi {
@@ -65,10 +69,17 @@ impl GraphUi {
 pub struct Shelf {
     /// `Camera move`: an animation's alone (feedback 1.9).
     pub camera: bool,
+    /// The camera's `Details` are open.
+    pub details: bool,
 }
 
 const SHELF_H: f32 = 40.0;
 const SHELF_GAP: f32 = 4.0;
+/// The inspector's height on the Effects step: two rows of controls, the rest
+/// by its own scroll, so what is selected never moves the graph under the hand.
+const INSPECTOR_ROWS: f32 = 2.0;
+/// What the inspector says on the Effects step with nothing selected.
+pub const PICK_A_BOX: &str = "Click a box in the graph to change it.";
 /// The shelf's effects, most asked first: a narrow pane folds the rest into
 /// `More` from the end.
 const SHELF_EFFECTS: [FxKind; 4] = [FxKind::Glow, FxKind::Diffusion, FxKind::Blur, FxKind::Grade];
@@ -399,7 +410,7 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
         .show(&ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_width(260.0);
-                crate::plate::legend(ui, if menu.wired { crate::vocab::ADD_EFFECT } else { "add node" });
+                crate::plate::legend(ui, if menu.wired { crate::vocab::ADD_EFFECT } else { "Add node" });
                 let field = crate::plate::text_field(
                     ui,
                     egui::TextEdit::singleline(&mut menu.query)
@@ -578,7 +589,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
         Some(offer) => shelf_ui(ui, state, offer),
         None => toolbar(ui, state),
     }
-    inspector_row(ui, state);
+    inspector_row(ui, state, shelf);
     ui.separator();
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -591,6 +602,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
     if response.dragged() && state.pending_wire.is_none() {
         state.graph_pan.0 += response.drag_delta().x;
         state.graph_pan.1 += response.drag_delta().y;
+    }
+    if std::mem::take(&mut state.graph_ui.reveal) {
+        reveal_chain(state, rect.size());
     }
     let origin = rect.left_top() + vec2(state.graph_pan.0, state.graph_pan.1);
     let to_screen = |p: (f32, f32)| pos2(origin.x + p.0, origin.y + p.1);
@@ -912,6 +926,26 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
     }
 }
 
+/// AU14: the view moves just enough to show what the shelf added and the
+/// Output it feeds, each node staying where the stored layout put it: every
+/// effect moves the Output a column on, off the pane's edge. The node a shelf
+/// added wins if the pane cannot hold both.
+fn reveal_chain(state: &mut AppState, room: egui::Vec2) {
+    const EDGE: f32 = 12.0;
+    let nodes = [state.cut().graph.output, state.selected_node];
+    let (mut x, mut y) = state.graph_pan;
+    for id in nodes.into_iter().flatten() {
+        let Ok(node) = state.cut().graph.node(id) else {
+            continue;
+        };
+        let size = vec2(NODE_W, node_height(node.inputs.len()));
+        let at = state.node_pos(id);
+        x = x.min(room.x - EDGE - at.0 - size.x).max(EDGE - at.0);
+        y = y.min(room.y - EDGE - at.1 - size.y).max(EDGE - at.1);
+    }
+    state.graph_pan = (x, y);
+}
+
 /// AU14: one filled control of the shelf: disabled, it says why.
 fn shelf_button(ui: &mut egui::Ui, word: &str, why: Option<&str>) -> egui::Response {
     let wide = crate::plate::filled_row_width(ui, word);
@@ -971,13 +1005,13 @@ fn shelf_ui(ui: &mut egui::Ui, state: &mut AppState, offer: Shelf) {
         }
         if offer.camera {
             let armed = state.graph_ui.frame_box;
-            let r = shelf_button(ui, vocab::CAMERA_MOVE, why)
-                .card("Add a camera, then frame the start and the end on the Result.");
-            plate::speak(&r, egui::WidgetType::Button, Some(armed), vocab::CAMERA_MOVE);
-            if armed {
-                let edge = Stroke::new(2.0, plate::TALLY);
-                ui.painter().rect_stroke(r.rect, plate::R_CONTROL, edge, egui::StrokeKind::Inside);
-            }
+            let wide = plate::filled_row_width(ui, vocab::CAMERA_MOVE);
+            let r = ui.add_enabled_ui(why.is_none(), |ui| plate::armed_row(ui, vocab::CAMERA_MOVE, wide, armed)).inner;
+            let r = match why {
+                Some(why) => r.on_disabled_hover_text(why),
+                None => r,
+            };
+            let r = r.card("Add a camera, then frame the start and the end on the Result.");
             plate::mark(ui, r.interact_rect, Target::Named("shelf.camera"));
             if r.clicked() {
                 state.graph_ui.frame_box = !armed && state.camera_move();
@@ -1111,13 +1145,42 @@ fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 /// Selected node's parameters, edited through SetNodeKind (undoable).
-fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
+fn inspector_row(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
+    if shelf.is_none() {
+        inspector_controls(ui, state, shelf);
+        return;
+    }
+    // AU14: a fixed height with its own scroll: clicking from a Glow to a
+    // Camera leaves the graph where the hand is.
+    let tall = INSPECTOR_ROWS * crate::plate::CTRL_H + ui.spacing().item_spacing.y;
+    let scroll = egui::ScrollArea::vertical()
+        .id_salt("effects inspector")
+        .max_height(tall)
+        .min_scrolled_height(tall)
+        .auto_shrink([false, false])
+        .show(ui, |ui| inspector_controls(ui, state, shelf));
+    crate::plate::note_viewport(ui, scroll.inner_rect, [false, true]);
+}
+
+fn inspector_controls(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
     ui.horizontal_wrapped(|ui| {
-        // A button's height with or without a selection: the graph under the
-        // row stays put when a node's controls come in.
-        let button = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
-        ui.set_min_height(button);
+        if shelf.is_some() {
+            // A row this tall from its first word centres a legend on its
+            // field: a row left to grow lays what comes before its tallest
+            // control against a shorter row, and each legend lands elsewhere.
+            ui.set_row_height(crate::plate::CTRL_H);
+            ui.set_min_height(crate::plate::CTRL_H);
+        } else {
+            // A button's height with or without a selection: the graph under
+            // the row stays put when a node's controls come in.
+            let button = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+            ui.set_min_height(button);
+        }
         let Some(id) = state.selected_node else {
+            if shelf.is_some() {
+                ui.label(egui::RichText::new(PICK_A_BOX).color(crate::plate::legend_dim()));
+                return;
+            }
             // GM9: the add verb said by its chord in this keymap.
             let add = crate::menus::chord_label(ui.ctx(), crate::config::Action::AddNode)
                 .map(|c| format!("{c} or right-click"))
@@ -1338,7 +1401,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 params,
                 binds,
             } => {
-                crate::fxui::camera_inspector(ui, state, id, planes, params, binds);
+                crate::fxui::camera_inspector(ui, state, id, planes, params, binds, shelf.map(|s| s.details));
             }
             // GM16: the generator's specs, as an Effect's.
             NodeKind::Generator {

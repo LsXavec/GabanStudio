@@ -83,6 +83,8 @@ pub const REBUILD_FROM_LAYERS: &str = "Rebuild from layers";
 pub const STRENGTH: &str = "Strength";
 pub const ADD_EFFECT: &str = "Add effect";
 pub const CAMERA_MOVE: &str = "Camera move";
+pub const GO_TO_LAST_DRAWING: &str = "Go to the last drawing";
+pub const DETAILS: &str = "Details";
 pub const RESULT: &str = "Result";
 /// The Layout room's canvas pane: the shot's preview, under the Canvas tab.
 pub const PREVIEW: &str = "Preview";
@@ -356,6 +358,8 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("STRENGTH", STRENGTH, "Strength"),
     ("ADD_EFFECT", ADD_EFFECT, "Add effect"),
     ("CAMERA_MOVE", CAMERA_MOVE, "Camera move"),
+    ("GO_TO_LAST_DRAWING", GO_TO_LAST_DRAWING, "Go to the last drawing"),
+    ("DETAILS", DETAILS, "Details"),
     ("REBUILD_FROM_LAYERS", REBUILD_FROM_LAYERS, "Rebuild from layers"),
     ("RESULT", RESULT, "Result"),
     ("PREVIEW", PREVIEW, "Preview"),
