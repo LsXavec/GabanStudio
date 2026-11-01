@@ -338,13 +338,14 @@ fn audress_rooms_reach_the_baseline_of_2026_10() {
     assert!(over.is_empty(), "over the baseline: {over:?}");
 }
 
-/// One frame's shapes, its vertices, and the best of five tessellations.
+/// One frame's shapes, its vertices, and the best of 40 tessellations: the
+/// suite runs beside this on every core, and a burst lasts longer than five.
 fn cost(h: &EditorHarness) -> (usize, usize, u128) {
     let ctx = h.ctx();
     let shapes = h.kit().output().shapes.clone();
     let mut best = u128::MAX;
     let mut verts = 0;
-    for _ in 0..5 {
+    for _ in 0..40 {
         let at = std::time::Instant::now();
         let meshes = ctx.tessellate(shapes.clone(), ctx.pixels_per_point());
         best = best.min(at.elapsed().as_micros());
