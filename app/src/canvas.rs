@@ -852,6 +852,8 @@ pub struct CanvasView {
     /// AU4: the strip is closed by its latch here, and may open. The host
     /// sets it before `ui`: the rail's reference height and Fit read it.
     pub(crate) strip_closed: bool,
+    /// AU10: Hide tools is on: the overlay stands down. The host sets it.
+    pub(crate) tools_hidden: bool,
     /// AU4: the sheet is on screen: the rule's mirror stands beside it.
     pub(crate) sheet_shown: bool,
     /// AU7: the empty cell's line is due: hints on, its once-only bit unset,
@@ -1122,6 +1124,7 @@ impl CanvasView {
             rail_flip: false,
             hand_held: false,
             strip_closed: false,
+            tools_hidden: false,
             sheet_shown: false,
             empty_cell_hint: false,
             dbg_empty_line: false,

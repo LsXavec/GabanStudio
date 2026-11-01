@@ -44,6 +44,13 @@ pub fn chord_label(ctx: &egui::Context, action: Action) -> Option<String> {
     crate::cmdpal::chord_of(&binds, action)
 }
 
+/// AU10: the first of them, for a key's name: a key answers to the chord you
+/// would press, and its card lists the rest.
+pub fn first_chord(ctx: &egui::Context, action: Action) -> Option<String> {
+    let binds = ctx.data(|d| d.get_temp::<Arc<Vec<Binding>>>(chords_id()))?;
+    Some(binds.iter().find(|b| b.action == action)?.chords().next()?.label())
+}
+
 /// "Name (chord) — help": the one tooltip shape for menu items, deck
 /// buttons and palette rows.
 pub fn tip(ctx: &egui::Context, action: Action) -> String {

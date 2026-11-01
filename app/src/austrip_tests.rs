@@ -1892,8 +1892,8 @@ fn austrip_saved_vocabulary_is_additive() {
     let mut keys: Vec<_> = ui.as_object().unwrap().keys().map(String::as_str).collect();
     keys.sort_unstable();
     let shape = [
-        "exact_descriptions", "hints_off", "hints_seen", "lock_positions", "quick_start", "scale", "sheet_in_draw",
-        "show_welcome", "whats_new_seen",
+        "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start", "scale",
+        "sheet_in_draw", "show_welcome", "whats_new_seen",
     ];
     assert_eq!(keys, shape);
     // A strip's edits are plain exposures: the file takes them as it stands.

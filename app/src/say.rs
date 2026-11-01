@@ -24,9 +24,9 @@ pub const FIX_IT: &str = "Fix it";
 /// The Plan preview's answer to a stroke, whether or not a hint can say it.
 pub const PLAN_WORDS: &str = "This step shows a preview. Drawing happens in Draw.";
 
-// The stored bits, one for each row of spec 8.2. 13 is AU10's card on the
-// return dot. 15 was AU7's stand-in for the Export step: it may stand set in a
-// config, so it is not given to another row.
+// The stored bits, one for each row of spec 8.2. 15 was AU7's stand-in for the
+// Export step: it may stand set in a config, so it is not given to another
+// row.
 pub const NEW_PAPER: u32 = 1 << 0;
 pub const ADD_DRAWING: u32 = 1 << 1;
 pub const NEXT_POSE: u32 = 1 << 2;
@@ -41,6 +41,8 @@ pub const COLOR: u32 = 1 << 9;
 pub const EFFECTS: u32 = 1 << 10;
 pub const APPEARS_TWICE: u32 = 1 << 11;
 pub const HELD: u32 = 1 << 12;
+/// AU10: the return dot's card, not the lane's: the band is off when it speaks.
+pub const HIDE_TOOLS: u32 = 1 << 13;
 /// The canvas line's bit (spec 8.4).
 pub const EMPTY_CELL: u32 = 1 << 14;
 pub const TWO_DRAWINGS: u32 = 1 << 16;
@@ -126,6 +128,8 @@ pub struct Facts {
     pub flat_pen: bool,
     /// A refusal said twice running.
     pub refused_twice: Option<String>,
+    /// Hide tools is on.
+    pub tools_hidden: bool,
     /// `ui.hints_seen`, as the frame began.
     pub seen: u32,
     /// The row last on the lane stood long enough to read.
@@ -138,6 +142,8 @@ pub struct Facts {
     /// A finished export's file reached the disk.
     pub exported: bool,
     pub pen_works: bool,
+    /// The tools just came back.
+    pub tools_back: bool,
 }
 
 impl Facts {
@@ -169,7 +175,17 @@ const DRAWING_ROOMS: &[Stage] = &[Stage::Drawing, Stage::Manga];
 const TRANSPORT: &[Stage] = &[Stage::Drawing, Stage::Edit];
 const ON_A_FRAME: &[Stage] = &[Stage::Drawing, Stage::Edit, Stage::InkPaint];
 
-pub const HINTS: [Hint; 14] = [
+pub const HINTS: [Hint; 15] = [
+    // First, or a row with nowhere to stand would keep it from the dot.
+    Hint {
+        bit: HIDE_TOOLS,
+        words: Words::Chord("Tap the dot, or press ", Action::HideTools, ", to bring the tools back."),
+        verb: None,
+        steps: &[],
+        shows: |f| f.tools_hidden,
+        answered: |f| f.tools_back,
+        passes: false,
+    },
     Hint {
         bit: PLAN,
         words: Words::Plain(PLAN_WORDS),
@@ -431,6 +447,8 @@ pub struct Say {
     circle: bool,
     /// The five dots painted this frame.
     pub dots_painted: bool,
+    /// Hide tools was on at the last reading.
+    pub tools_were_hidden: bool,
     /// A sentence a test holds on the lane, whatever the document says.
     #[cfg(test)]
     pub pin: Option<Spoken>,
@@ -642,6 +660,7 @@ impl Editor {
         let held = held.filter(|_| shown.is_some());
         let length = state.frame_count();
         let keys = |d| cut.xsheet.column(state.view.active_column).map_or(0, |c| c.keys_referencing(d).len());
+        let tools_back = std::mem::replace(&mut self.say.tools_were_hidden, self.tools_hidden) && !self.tools_hidden;
         Facts {
             stage: self.stage,
             drawings: cut.drawings.len(),
@@ -659,6 +678,7 @@ impl Editor {
             plan_tried: self.say.plan_tried,
             flat_pen: self.say.flat_strokes >= FLAT_STROKES,
             refused_twice: (self.say.refusals >= 2).then(|| self.say.refusal.clone()),
+            tools_hidden: self.tools_hidden,
             seen: self.say.seen,
             stood: self.say.stood,
             stroked,
@@ -667,6 +687,7 @@ impl Editor {
             effect_added,
             exported,
             pen_works: std::mem::take(&mut self.say.pen_answered),
+            tools_back,
         }
     }
 

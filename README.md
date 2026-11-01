@@ -93,8 +93,10 @@ Presets include "Master PNG 16-bit", "ProRes 422 HQ" and "H.264 review".
 | Ctrl+K (or F3) | the command palette: every verb, searchable |
 | F1 | the shortcut sheet |
 | Space | play / stop |
-| F / S | next / previous frame |
+| F / S (or Right, Down / Left, Up) | next / previous frame |
 | W / Q | next / previous key |
+| F4 to F9 | go to a step: Plan, Draw, Timing, Color, Effects, Export |
+| T | hide the tools; press again, or tap the dot, to bring them back |
 | E | new drawing in the current cell |
 | X | eraser |
 | Ctrl+Z, Ctrl+Y (or Ctrl+Shift+Z) | undo, redo |

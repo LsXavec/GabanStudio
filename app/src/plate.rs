@@ -613,10 +613,23 @@ fn card_at(
     }
     let words = text();
     let style = ctx.global_style();
-    let frame = egui::Frame::popup(&style).fill(ISLAND);
+    let frame = card_frame(&style);
     let (font, limit) = (egui::TextStyle::Body.resolve(&style), style.spacing.tooltip_width);
     let galley = ctx.fonts_mut(|f| f.layout(words.clone(), font, INK, limit));
     let (pivot, at) = place(galley.size().x + frame.total_margin().sum().x);
+    card_area(&ctx, id, pivot, at, |ui| {
+        ui.label(words);
+    });
+    resp
+}
+
+fn card_frame(style: &egui::Style) -> egui::Frame {
+    egui::Frame::popup(style).fill(ISLAND)
+}
+
+/// A card's own layer: over everything, and the pen passes through it.
+fn card_area(ctx: &egui::Context, id: egui::Id, pivot: egui::Align2, at: Pos2, add: impl FnOnce(&mut Ui)) {
+    let frame = card_frame(&ctx.global_style());
     egui::Area::new(id)
         .order(egui::Order::Tooltip)
         .interactable(false)
@@ -624,13 +637,19 @@ fn card_at(
         .constrain_to(ctx.content_rect())
         .pivot(pivot)
         .fixed_pos(at)
-        .show(&ctx, |ui| {
+        .show(ctx, |ui| {
             frame.show(ui, |ui| {
                 ui.set_max_width(ui.spacing().tooltip_width);
-                ui.label(words);
+                add(ui);
             });
         });
-    resp
+}
+
+/// AU10: what stands beside the return dot with no pointer on it. A card
+/// that needs no resting, clear of the dot as any card is.
+pub fn dot_card(dot: &Response, add: impl FnOnce(&mut Ui)) {
+    let at = dot.rect.right_top() + Vec2::new(8.0, 0.0);
+    card_area(&dot.ctx, dot.id.with("dot_card"), egui::Align2::LEFT_TOP, at, add);
 }
 
 /// The ink a rail key stands in: solid blue armed, the wash while it holds a
@@ -1737,6 +1756,29 @@ pub fn island_key(ui: &mut Ui, icon: crate::icons::Icon, name: &str) -> Response
     }
     speak(&resp, egui::WidgetType::Button, None, name);
     describe(resp, "ACTION island_key", name)
+}
+
+/// AU10: where the return dot stands (spec section AU10), and what it answers
+/// to.
+pub const RETURN_DOT_AT: Pos2 = Pos2::new(8.0, 8.0);
+/// The width the dock leaves it: the dot and its margin on each side.
+pub const RETURN_DOT_ROOM: i8 = (RETURN_DOT_AT.x * 2.0 + PILL_H) as i8;
+pub const SHOW_TOOLS: &str = "Show tools";
+
+/// AU10: the one thing Hide tools leaves on the screen: a `PILL_H` round key
+/// on its own island, so it reads on paper and on the desk alike.
+pub fn return_dot(ui: &mut Ui) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::splat(PILL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let p = ui.painter();
+        p.add(ui.visuals().window_shadow.as_shape(rect, CornerRadius::same(R_PILL)));
+        p.rect_filled(rect, R_PILL, ISLAND);
+        let (fill, ink) = ghost(ui, &resp);
+        p.rect_filled(rect, R_PILL, fill);
+        crate::icons::paint(p, egui::Rect::from_center_size(rect.center(), Vec2::splat(BAR_ICON)), ink, crate::icons::Icon::Dots);
+    }
+    speak(&resp, egui::WidgetType::Button, None, SHOW_TOOLS);
+    describe(resp, "ACTION return_dot", SHOW_TOOLS)
 }
 
 /// Search: a button in an input's clothes, or the bare lens when the row is

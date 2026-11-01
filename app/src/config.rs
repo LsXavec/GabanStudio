@@ -155,6 +155,8 @@ pub enum Action {
     ToggleLockPositions,
     /// AU7: the Say line's hints and the Quick Start dots, on or off.
     ToggleHints,
+    /// AU10: the chrome off the screen, or back. Never stored.
+    HideTools,
     /// GM10: Cut ▸ Paper size… — the sheet the camera pans over.
     PaperSize,
     /// GM11: Window ▸ Render Queue — the delivery jobs, on a worker.
@@ -467,6 +469,7 @@ impl Action {
         Action::WelcomeScreen,
         Action::OpenSample,
         Action::WhatsNew,
+        Action::HideTools,
         Action::ToggleLockPositions,
         Action::ToggleHints,
         Action::PaperSize,
@@ -637,6 +640,7 @@ impl Action {
             Action::WelcomeScreen => "Welcome screen…",
             Action::OpenSample => "Open the sample cut",
             Action::WhatsNew => "What's New",
+            Action::HideTools => "Hide tools",
             Action::ToggleLockPositions => "Lock UI positions",
             Action::ToggleHints => "Hints",
             Action::PaperSize => "Paper size…",
@@ -813,6 +817,7 @@ impl Action {
             WelcomeScreen => "Open the Start panel: templates, recent files and the sample cut (a card asks about unsaved work).",
             OpenSample => "Open the sample cut to learn on (unsaved work is asked about first).",
             WhatsNew => "Show what this release brings, in the Start panel.",
+            HideTools => "Clear the screen down to your drawing; a dot in the corner brings the tools back.",
             ToggleLockPositions => "Keep the panels where they are: tabs stop dragging and the step's panels stay open.",
             ToggleHints => "Show or hide the teaching sentences and the Quick Start dots; turning them on starts them again.",
             PaperSize => "Set the cut's paper: the sheet the camera pans over, larger than the frame for BG pans and hiki slides.",
@@ -893,7 +898,7 @@ impl Action {
             | PasteCellsInsert | TypeIntoCell | InterpHold | InterpLinear | InterpEase
             | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto | HandlesSmooth
             | HandlesFlat | HandlesBroken => Group::Sheet,
-            FrameCurves | ToggleLockPositions => Group::View,
+            FrameCurves | ToggleLockPositions | HideTools => Group::View,
             PrevCut | NextCut | PaperSize | MakeCutsFromPanels | AddRetakeNote | NewPage => Group::Cut,
             AddNode | BuildSatsuei | ClipToPanels => Group::Composite,
             SelectTool | BrushTool | FillTool | LassoFillTool | ToggleEraser | ToggleAlphaLock
@@ -1025,6 +1030,7 @@ impl Action {
             OpenSample => "File/Open the sample cut",
             WhatsNew => "Help/What's New",
             ToggleHints => "Help/Hints",
+            HideTools => "View/Hide tools",
             ToggleLockPositions => "View/Lock UI positions",
             PrevCut => "Cut/Previous cut",
             NextCut => "Cut/Next cut",
@@ -1160,6 +1166,7 @@ impl Action {
             WelcomeScreen => &["templates", "new from template", "start page", "welcome"],
             OpenSample => &["sample", "demo", "example", "tutorial"],
             WhatsNew => &["release notes", "changes", "changelog"],
+            HideTools => &["clean screen", "full screen", "zen", "show tools"],
             ToggleLockPositions => &["lock panels", "freeze layout", "lock layout"],
             ToggleHints => &["tips", "teaching", "tutorial hints"],
             PaperSize => &["paper", "hiki", "BG pan", "pan paper", "kami", "BG sheet"],
@@ -1355,6 +1362,11 @@ impl Action {
                 | Action::View3dCamera
                 | Action::View3dOrtho
                 | Action::View3dFrameAll
+                // AU10: the two column kinds that left Alt+K and Alt+B keep
+                // their reach over the sheet and fire nowhere else, so no
+                // chord of theirs reaches a column from the canvas.
+                | Action::ColumnKindBg
+                | Action::ColumnKindBook
         )
     }
 
@@ -1403,6 +1415,10 @@ impl Action {
             Action::CommandPalette => vec![Chord::plain("F3")],
             // GM4: the keypad's plus zooms in beside Ctrl+=.
             Action::ZoomIn => vec![Chord::ctrl("Plus")],
+            // AU10: the arrows step frames beside each preset's own keys
+            // (Left, Up back; Right, Down on).
+            Action::PrevFrame => arrows(PREV_ARROWS),
+            Action::NextFrame => arrows(NEXT_ARROWS),
             _ => Vec::new(),
         }
     }
@@ -1411,10 +1427,7 @@ impl Action {
         use Action::*;
         let k = |name: &str| Chord::plain(name);
         let ctrl = |name: &str| Chord::ctrl(name);
-        let alt = |name: &str| Chord {
-            alt: true,
-            ..Chord::plain(name)
-        };
+        let alt = |name: &str| Chord::alt(name);
         match self {
             PlayPause => Some(k("Space")),
             NextFrame => Some(k("F")),
@@ -1510,8 +1523,10 @@ impl Action {
             RetimeThrees => Some(alt("3")),
             Reverse => Some(alt("V")),
             ColumnKindCel => Some(alt("C")),
-            ColumnKindBg => Some(alt("B")),
-            ColumnKindBook => Some(alt("K")),
+            // AU10: off Alt+B and Alt+K, which stay the drawing kinds' alone
+            // (spec 6.4).
+            ColumnKindBg => Some(alt("W")),
+            ColumnKindBook => Some(alt("O")),
             ColumnKindRef => Some(alt("G")),
             ToggleColumnHidden => Some(alt("H")),
             ToggleColumnLocked => Some(alt("L")),
@@ -1539,8 +1554,8 @@ impl Action {
             PastePixels => Some(ctrl("V")),
             // GM6: the genga-to-douga verbs on Alt, the same in both
             // presets — never R (the flip), never Alt+Shift (the Windows
-            // layout switch). The kinds share Alt+K / Alt+B with the
-            // column kinds: over the canvas they mark the drawing.
+            // layout switch). AU10: Alt+K and Alt+B mark the drawing wherever
+            // the pointer is.
             DuplicateCel => Some(alt("D")),
             MakeInbetweens => Some(alt("M")),
             KindKey => Some(alt("K")),
@@ -1662,12 +1677,18 @@ impl Action {
             ExportPages => Some(ctrl("E")),
             ToggleRulerSnap => Some(ctrl("2")),
             PanelTool => Some(k("K")),
-            // AU9: the Export step on F9, free in both presets (the other
-            // rooms have no key, so this is the one a new person can learn).
+            // AU9, AU10: each step has its key, in the trade's order, free in
+            // both presets.
+            RoomLayout => Some(k("F4")),
+            RoomDrawing => Some(k("F5")),
+            RoomEdit => Some(k("F6")),
+            RoomFinishing => Some(k("F7")),
+            RoomComposite => Some(k("F8")),
             RoomExport => Some(k("F9")),
+            // AU10: bare, so a text field keeps it.
+            HideTools => Some(k("T")),
             ExportGif | ExportMp4 | ExportPngSequence | ExportStill => None,
-            QuickStart | About | History | ResetLayout | RoomLayout | RoomDrawing
-            | RoomFinishing | RoomComposite | RoomEdit | ShowCurves | InterpHold | InterpLinear
+            QuickStart | About | History | ResetLayout | ShowCurves | InterpHold | InterpLinear
             | InterpEase | InterpEaseIn | InterpEaseOut | InterpBezier | HandlesAuto
             | HandlesSmooth | HandlesFlat | HandlesBroken | ConvertColorsToSrgb
             | BuildComposite | ProjectSettings | WelcomeScreen | OpenSample | PaperSize | LipFlap
@@ -1707,6 +1728,16 @@ pub fn clashes(binds: &[Binding]) -> Vec<(Action, Action, Chord)> {
     out
 }
 
+/// AU10: the frame steps' arrows.
+const PREV_ARROWS: [egui::Key; 2] = [egui::Key::ArrowLeft, egui::Key::ArrowUp];
+const NEXT_ARROWS: [egui::Key; 2] = [egui::Key::ArrowRight, egui::Key::ArrowDown];
+
+/// Each by the name the Shortcuts page captures it under, so a stock arrow
+/// and a pressed one are the same chord.
+fn arrows(keys: [egui::Key; 2]) -> Vec<Chord> {
+    keys.iter().map(|k| Chord::plain(k.name())).collect()
+}
+
 /// A key combination: a set of (non-modifier) keys plus modifier flags. Held
 /// together, they fire the action. Multi-key chords (e.g. A+S) are supported.
 /// `keys` are egui [`egui::Key`] names; `ctrl` is the platform command modifier.
@@ -1731,6 +1762,13 @@ impl Chord {
     fn ctrl(key: &str) -> Self {
         Self {
             ctrl: true,
+            ..Self::plain(key)
+        }
+    }
+
+    fn alt(key: &str) -> Self {
+        Self {
+            alt: true,
             ..Self::plain(key)
         }
     }
@@ -1766,6 +1804,15 @@ impl Chord {
     /// on the release (a tap), not the press.
     pub(crate) fn is_space_tap(&self) -> bool {
         self.keys.len() == 1 && self.keys[0] == "Space" && !self.ctrl && !self.shift && !self.alt
+    }
+
+    /// AU10: an arrow key is in it, which a focused widget keeps for itself.
+    pub(crate) fn has_arrow(&self) -> bool {
+        use egui::Key::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp};
+        let arrow = |name: &String| {
+            matches!(egui::Key::from_name(name), Some(ArrowDown | ArrowLeft | ArrowRight | ArrowUp))
+        };
+        self.keys.iter().any(arrow)
     }
 
     /// Fires when every key is held, at least one was pressed THIS frame, and
@@ -2624,7 +2671,14 @@ pub struct UiConfig {
     /// is. Back on, `hints_seen` clears and they start again.
     #[serde(default)]
     pub hints_off: bool,
+    /// AU10: the keymap's migrations this config has had. A missing field
+    /// reads 0, older than every one of them.
+    #[serde(default)]
+    pub keymap_rev: u32,
 }
+
+/// AU10: [`Config::migrate_keymap`] brings a config older than this up to it.
+pub const KEYMAP_REV: u32 = 1;
 
 impl Default for UiConfig {
     fn default() -> Self {
@@ -2638,6 +2692,7 @@ impl Default for UiConfig {
             sheet_in_draw: false,
             hints_seen: 0,
             hints_off: false,
+            keymap_rev: 0,
         }
     }
 }
@@ -2706,6 +2761,10 @@ pub struct Config {
     /// lane, then cleared; not persisted).
     #[serde(skip)]
     pub load_notes: Vec<String>,
+    /// Transient: this load ran the keymap migration, so it is written back
+    /// and runs once (not persisted).
+    #[serde(skip)]
+    pub migrated: bool,
 }
 
 impl Default for Config {
@@ -2725,6 +2784,7 @@ impl Default for Config {
             render: RenderConfig::default(),
             last_import_note: String::new(),
             load_notes: Vec::new(),
+            migrated: false,
         }
     }
 }
@@ -2879,16 +2939,28 @@ fn note_dropped(path: &Path, bytes: &[u8], dropped: &Dropped, notes: &mut Vec<St
 }
 
 impl Config {
-    /// Load config from the real data dir (see [`Config::load_from`]); the
-    /// notes ride along in `load_notes` for the status lane.
+    /// Load config from the real data dir (see [`Config::load_in`]).
     pub fn load() -> Self {
-        let Some(dir) = data_dir() else {
-            let mut cfg = Self::default();
-            cfg.fill_missing(false);
-            return cfg;
-        };
-        let (mut cfg, notes) = Self::load_from(&dir);
+        data_dir().map_or_else(Self::fresh, |dir| Self::load_in(&dir))
+    }
+
+    /// No data dir at all: a fresh install with nothing older to move.
+    fn fresh() -> Self {
+        let mut cfg = Self::default();
+        cfg.ui.keymap_rev = KEYMAP_REV;
+        cfg.fill_missing(false);
+        cfg
+    }
+
+    /// [`Config::load_from`], the notes riding along in `load_notes` for the
+    /// status lane. AU10: a migrated keymap is written back at once, so it
+    /// moves and speaks once.
+    pub fn load_in(dir: &Path) -> Self {
+        let (mut cfg, notes) = Self::load_from(dir);
         cfg.load_notes = notes;
+        if cfg.migrated {
+            let _ = cfg.save_to(dir);
+        }
         cfg
     }
 
@@ -2923,13 +2995,18 @@ impl Config {
             // (a config an earlier version wrote reads "" and is due).
             // AU6: and it starts with the panels locked. An existing config
             // keeps what it says, so `UiConfig::default()` does not move.
+            // AU10: and it has no older keymap to migrate.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 cfg.ui.whats_new_seen = crate::welcome::VERSION.into();
                 cfg.ui.lock_positions = true;
+                cfg.ui.keymap_rev = KEYMAP_REV;
             }
-            Err(_) => {}
+            // AU10: a file it could not read is no older keymap either, and
+            // `load_in` must not write defaults over it.
+            Err(_) => cfg.ui.keymap_rev = KEYMAP_REV,
         }
         cfg.fill_missing(before_keymaps);
+        notes.extend(cfg.migrate_keymap());
         (cfg, notes)
     }
 
@@ -3009,6 +3086,77 @@ impl Config {
         for p in pencil_box_presets().into_iter().rev() {
             if !cfg.presets.iter().any(|q| q.name == p.name) {
                 cfg.presets.insert(0, p);
+            }
+        }
+    }
+
+    /// AU10: runs once on a config older than [`KEYMAP_REV`], after
+    /// `fill_missing`. Returns what moved, for the notes. A user's own
+    /// binding always wins (spec 6.5): nothing lands on a key anything holds.
+    fn migrate_keymap(&mut self) -> Vec<String> {
+        if self.ui.keymap_rev >= KEYMAP_REV {
+            return Vec::new();
+        }
+        let mut moved = Vec::new();
+        self.rehome(Action::ColumnKindBook, Chord::alt("K"), Chord::alt("O"), &mut moved);
+        self.rehome(Action::ColumnKindBg, Chord::alt("B"), Chord::alt("W"), &mut moved);
+        for (action, key) in [
+            (Action::RoomLayout, "F4"),
+            (Action::RoomDrawing, "F5"),
+            (Action::RoomEdit, "F6"),
+            (Action::RoomFinishing, "F7"),
+            (Action::RoomComposite, "F8"),
+        ] {
+            self.give_if_empty(action, Chord::plain(key));
+        }
+        self.add_also_if_free(Action::PrevFrame, arrows(PREV_ARROWS));
+        self.add_also_if_free(Action::NextFrame, arrows(NEXT_ARROWS));
+        // Spec 8.5: someone upgrading has not come to be taught.
+        self.ui.hints_seen = u32::MAX;
+        self.ui.keymap_rev = KEYMAP_REV;
+        self.migrated = true;
+        moved
+    }
+
+    /// Does anything hold this chord, in any pane? Stricter than
+    /// [`conflict`](Self::conflict): a verb that gained a rival in another
+    /// pane would stop firing everywhere but its own (see `aimed_here`).
+    fn chord_held(&self, chord: &Chord) -> bool {
+        self.keybinds.iter().any(|b| b.chords().any(|c| c == chord))
+    }
+
+    /// The stored chord still equals the old default: the action moves if the
+    /// new key is free, and stays where it was with one note if it is not.
+    fn rehome(&mut self, action: Action, from: Chord, to: Chord, moved: &mut Vec<String>) {
+        if self.chord_for(action) != Some(&from) {
+            return;
+        }
+        let (name, old, new) = (action.label(), from.label(), to.label());
+        if self.chord_held(&to) {
+            moved.push(format!("{name} stays on {old}: {new} is taken"));
+        } else {
+            self.binding_mut(action).chord = Some(to);
+            moved.push(format!("{name} moved from {old} to {new}"));
+        }
+    }
+
+    /// Only if chord and extra chords are both empty and the key is free.
+    fn give_if_empty(&mut self, action: Action, chord: Chord) {
+        let bound = self.binding(action).is_some_and(|b| b.chords().next().is_some());
+        if !bound && !self.chord_held(&chord) {
+            self.binding_mut(action).chord = Some(chord);
+        }
+    }
+
+    /// Beside the existing chord, only where the key is free. An action the
+    /// artist unbound has no chord to stand beside, and stays unbound.
+    fn add_also_if_free(&mut self, action: Action, chords: Vec<Chord>) {
+        if self.chord_for(action).is_none() {
+            return;
+        }
+        for chord in chords {
+            if !self.chord_held(&chord) {
+                self.binding_mut(action).also.push(chord);
             }
         }
     }

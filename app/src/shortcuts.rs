@@ -10,6 +10,9 @@
 //! whose context is Global or the pane the keys are aimed at (`here`: the
 //! pane under the pointer, else the focused pane). A chord only one action
 //! uses fires anywhere, as before.
+//!
+//! AU10: while any widget has keyboard focus the arrows are its own: a
+//! slider steps, and egui walks the focus on from a button.
 
 use eframe::egui;
 
@@ -19,9 +22,10 @@ use crate::config::{Action, Binding, Chord, Ctx};
 /// [`Action::ALL`] order.
 pub fn collect(ctx: &egui::Context, binds: &[Binding], here: Ctx) -> Vec<Action> {
     let typing = ctx.text_edit_focused();
+    let focused = ctx.memory(|m| m.focused()).is_some();
     let released = ctx.input(|i| i.key_released(egui::Key::Space));
     let hand = take_hand_drag(ctx, released);
-    ctx.input(|i| fired(i, binds, typing, here, hand))
+    ctx.input(|i| fired(i, binds, typing, focused, here, hand))
 }
 
 /// The same over one viewport's input — the popout canvas is its own OS
@@ -33,9 +37,10 @@ pub fn collect_for(
     here: Ctx,
 ) -> Vec<Action> {
     let typing = ctx.text_edit_focused();
+    let focused = ctx.memory(|m| m.focused()).is_some();
     let released = ctx.input_for(viewport, |i| i.key_released(egui::Key::Space));
     let hand = take_hand_drag(ctx, released);
-    ctx.input_for(viewport, |i| fired(i, binds, typing, here, hand))
+    ctx.input_for(viewport, |i| fired(i, binds, typing, focused, here, hand))
 }
 
 /// GM4: the canvas notes that the Space hold dragged — anything moved the
@@ -68,6 +73,7 @@ fn fired(
     i: &egui::InputState,
     binds: &[Binding],
     typing: bool,
+    focused: bool,
     here: Ctx,
     hand_dragged: bool,
 ) -> Vec<Action> {
@@ -80,6 +86,7 @@ fn fired(
             };
             b.chords().any(|c| {
                 (!typing || fires_over_field(c))
+                    && !(focused && c.has_arrow())
                     && c.matches(i)
                     && !(hand_dragged && c.is_space_tap())
                     && aimed_here(*a, c, binds, here)
@@ -90,7 +97,7 @@ fn fired(
 
 /// A chord another action also uses fires only in its own pane; so does
 /// a destructive pane verb's chord (see [`Action::pane_only`]).
-fn aimed_here(a: Action, c: &Chord, binds: &[Binding], here: Ctx) -> bool {
+pub(crate) fn aimed_here(a: Action, c: &Chord, binds: &[Binding], here: Ctx) -> bool {
     if a.pane_only() {
         return a.context() == here;
     }

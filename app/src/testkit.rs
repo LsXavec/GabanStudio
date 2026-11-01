@@ -2484,8 +2484,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 830;
-    const ASSERT_FLOOR: usize = 5054;
+    const TEST_FLOOR: usize = 864;
+    const ASSERT_FLOOR: usize = 5274;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");
@@ -2939,8 +2939,8 @@ mod tests {
         assert_eq!(
             keys(&config["ui"]),
             [
-                "exact_descriptions", "hints_off", "hints_seen", "lock_positions", "quick_start", "scale",
-                "sheet_in_draw", "show_welcome", "whats_new_seen",
+                "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start",
+                "scale", "sheet_in_draw", "show_welcome", "whats_new_seen",
             ]
         );
     }
@@ -2950,13 +2950,13 @@ mod tests {
     /// this and say so in their commit bodies. AU4 brought the rail and
     /// `CanvasOptions`, AU5 `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew`
     /// and `ToggleLockPositions`, AU7 `ToggleHints`, AU9 `RoomExport` and the
-    /// four plain exports.
+    /// four plain exports, AU10 `HideTools`.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (165, 0x93ec41fb5bedd391), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (166, 0x941d1b60acffda57), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
     }
 }

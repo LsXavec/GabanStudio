@@ -384,6 +384,11 @@ pub fn overlay(ui: &egui::Ui, args: &mut OverlayArgs, host: Rect) {
         args.floats.close(Float::Layers);
     }
     args.canvas.rail_flip = false;
+    // AU10: Hide tools takes the rail and the floats off, and keeps them as
+    // they stand for its return.
+    if args.canvas.tools_hidden {
+        return;
+    }
     let reference = reference(host.height(), args.canvas.strip_closed);
     let tier = if args.rail_off { Tier::Hidden } else { Tier::of(reference, host.width()) };
     let mut top = host.top() + 12.0;

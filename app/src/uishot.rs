@@ -598,6 +598,56 @@ fn say_moments(dir: &Path) {
     shoot(&mut h, ProbeRoom::Stage(Stage::Export));
 }
 
+/// AU10: Hide tools: the first time, with its card; a refusal on that card;
+/// the dot alone on the paper; the dot in a step whose tabs reach the corner.
+const HIDE: [(&str, u32, u32); 8] = [
+    ("hide-tools", 1600, 900),
+    ("hide-refusal", 1600, 900),
+    ("hide-dot", 1600, 900),
+    ("hide-timing", 1600, 900),
+    ("hide-tools-1280", 1280, 800),
+    ("hide-refusal-1280", 1280, 800),
+    ("hide-dot-1280", 1280, 800),
+    ("hide-timing-1280", 1280, 800),
+];
+
+fn hide_owed() -> Vec<(String, u32, u32)> {
+    HIDE.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn hide_moments(dir: &Path) {
+    let mut shots = HIDE.iter().map(|(state, w, h)| (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32)));
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    for _ in 0..2 {
+        let mut h = EditorHarness::with_gpu_ready();
+        let mut shoot = |h: &mut EditorHarness, room: Option<ProbeRoom>| {
+            let (name, size) = shots.next().expect("a shot owed");
+            h.kit_mut().set_size(size);
+            if let Some(room) = room {
+                arrive(h, room);
+            }
+            h.shot(size, &name);
+        };
+        h.perform(Action::HideTools);
+        shoot(&mut h, Some(draw));
+        // After `arrive`, whose frames outlast the four seconds it dwells.
+        h.state_mut().refuse(crate::doc::FINISH_STROKE);
+        h.run_frames(2);
+        let refused = h.painted_text().join(" ");
+        assert!(refused.contains(crate::doc::FINISH_STROKE), "on the dot's card: {refused}");
+        shoot(&mut h, None);
+        // Past the refusal's dwell, and back once: the row has been answered.
+        h.wait(4.2);
+        h.perform(Action::HideTools);
+        h.run_frames(4);
+        h.perform(Action::HideTools);
+        shoot(&mut h, Some(draw));
+        let timing = ProbeRoom::Stage(Stage::Edit);
+        timing.enter(h.editor_mut());
+        shoot(&mut h, Some(timing));
+    }
+}
+
 /// AU8: the queue's preset row with its last two chips, wrapped: the tab in
 /// its room, where the pane is narrow, and the pane alone.
 const QUEUE: [(&str, u32, u32); 4] = [
@@ -819,6 +869,24 @@ fn uishot_rooms() {
     check_shots(&dir, &queue_owed()).expect("the queue's preset row");
     export_moments(&dir);
     check_shots(&dir, &export_owed()).expect("the Export step's moments");
+    hide_moments(&dir);
+    check_shots(&dir, &hide_owed()).expect("Hide tools' moments");
+}
+
+/// Only the ignored pass takes them, so this holds it to them, at both sizes.
+#[test]
+fn aukeys_the_ignored_pass_owes_the_hide_tools_shots() {
+    let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
+    let taken = pass.find("hide_moments(&dir);").expect("it takes them");
+    let checked = pass.find("check_shots(&dir, &hide_owed())").expect("it checks them");
+    assert!(taken < checked, "taken, then checked");
+    let owed = hide_owed();
+    for moment in ["hide-tools", "hide-refusal", "hide-dot", "hide-timing"] {
+        assert!(owed.contains(&(format!("{moment}.png"), 1600, 900)), "{moment} at 1600");
+        assert!(owed.contains(&(format!("{moment}-1280.png"), 1280, 800)), "{moment} at 1280");
+    }
+    let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
+    assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
 }
 
 #[test]

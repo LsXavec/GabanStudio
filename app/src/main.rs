@@ -63,6 +63,8 @@ mod auexport_tests;
 #[path = "../../crates/anim-core/tests/support/gif_decode.rs"]
 mod gif_decode;
 #[cfg(test)]
+mod aukeys_tests;
+#[cfg(test)]
 mod aurail_tests;
 #[cfg(test)]
 mod ausay_tests;
@@ -3133,6 +3135,11 @@ impl Editor {
             *out = Performed::Ignored;
             return;
         }
+        // AU10: what these show stands in the chrome, so the tools come back
+        // with it.
+        if shows_on_chrome(action) {
+            self.tools_hidden = false;
+        }
         // GM3: the chrome's own verbs — windows, panes and rooms; the
         // document is untouched.
         match action {
@@ -3169,6 +3176,8 @@ impl Editor {
             Action::ToggleLockPositions => self.lock_request = Some(!self.ui_lock),
             // AU7: and this.
             Action::ToggleHints => self.say.hints_request = Some(self.say.off),
+            // AU10: only this session's: nothing stores it.
+            Action::HideTools => self.tools_hidden = !self.tools_hidden,
             // GM10: the cut's paper window (its "set paper" is the edit).
             Action::PaperSize => self.paper_form = Some(PaperForm::of(&self.state)),
             // GM11: the delivery jobs' pane, and the composite viewers'
@@ -3750,6 +3759,7 @@ impl Editor {
             | Action::WhatsNew
             | Action::ToggleLockPositions
             | Action::ToggleHints
+            | Action::HideTools
             | Action::PaperSize
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
@@ -3814,6 +3824,7 @@ fn is_chrome(action: Action) -> bool {
             | Action::WhatsNew
             | Action::ToggleLockPositions
             | Action::ToggleHints
+            | Action::HideTools
             | Action::PaperSize
             | Action::ShowRenderQueue
             | Action::ToggleFinalLook
@@ -3949,6 +3960,14 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::NewPage
             | Action::ClipToPanels
             | Action::ExportPages
+            // AU10: no room swapped from a key, and no pane regrown, under
+            // a live stroke. These took a click until they took F-keys.
+            | Action::RoomLayout
+            | Action::RoomDrawing
+            | Action::RoomFinishing
+            | Action::RoomComposite
+            | Action::RoomEdit
+            | Action::HideTools
             // AU9: nor the Export step, a dialog or a job.
             | Action::RoomExport
             | Action::ExportGif
@@ -3960,6 +3979,20 @@ fn stroke_guarded(action: Action) -> bool {
             | Action::Underlay3d
             | Action::ReloadSequences
     )
+}
+
+/// AU10: the verbs that open something in the chrome Hide tools took off: the
+/// counter's field, and the floats that are not the rail's to open.
+fn shows_on_chrome(action: Action) -> bool {
+    matches!(action, Action::GoToFrame | Action::CanvasOptions | Action::WelcomeScreen | Action::WhatsNew)
+}
+
+/// AU10: a panel of the chrome, unless Hide tools has it off the screen. Its
+/// body does not run: nothing in it may be owed a frame.
+fn chrome_panel(panel: egui::Panel, hidden: bool, ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui)) {
+    if !hidden {
+        panel.show(ui, body);
+    }
 }
 
 /// The pen line the artist hears when the native tablet backend drops out.
@@ -4433,6 +4466,9 @@ struct Editor {
     was_playing: bool,
     /// AU5: the frame number being typed, while the counter is a field.
     frame_entry: Option<String>,
+    /// AU10: Hide tools: the top row, band, rail and floats are off the
+    /// screen. Never stored: a session opens with its tools.
+    tools_hidden: bool,
     /// AU1: every action `perform` answered `Ignored`, however it ran (a
     /// key, a click, the palette). The journey `Recorder` reads it.
     #[cfg(test)]
@@ -4553,6 +4589,15 @@ fn dock_style(base: &egui::Style, dock: &DockState<Pane>) -> egui_dock::Style {
         s.tab_bar.hline_color = egui::Color32::TRANSPARENT;
     }
     s
+}
+
+/// AU10: the dock's share of the return dot's corner. A lone canvas has desk
+/// round its paper; anything else reaches the corner with a tab or a pane's
+/// first control, so the dock stands out from under the dot, which stays
+/// where the spec puts it.
+fn dot_room(dock: &DockState<Pane>) -> Option<egui::Margin> {
+    let lone_canvas = dock.iter_all_tabs().map(|(_, pane)| pane).eq([&Pane::Canvas]);
+    (!lone_canvas).then_some(egui::Margin { left: plate::RETURN_DOT_ROOM, ..egui::Margin::ZERO })
 }
 
 /// AU3: `a` and `b` are one arrangement: the same leaves, tabs and splits,
@@ -4820,7 +4865,7 @@ fn loop_card() -> String {
 /// A transport key: its name and its card read the chord it has now, so a
 /// rebound key never leaves the band out of date (AU5).
 fn transport_key(ui: &mut egui::Ui, icon: Icon, word: &str, action: Action) -> egui::Response {
-    let name = match menus::chord_label(ui.ctx(), action) {
+    let name = match menus::first_chord(ui.ctx(), action) {
         Some(chord) => format!("{word} ({chord})"),
         None => word.to_string(),
     };
@@ -5110,7 +5155,8 @@ impl Editor {
     /// Enter a spine room — the room switcher, the layout probe and the
     /// room verbs all come through here. The layout always swaps; the
     /// tool/view restore is all-or-nothing, so a live stroke keeps the old
-    /// tool state (same law as saved workspaces).
+    /// tool state (same law as saved workspaces). The room verbs stop short
+    /// of here under a live stroke (`stroke_guarded`).
     fn enter_room(&mut self, st: Stage) {
         if st == Stage::Export {
             return self.enter_export();
@@ -5525,6 +5571,7 @@ impl Editor {
             opened_doc: None,
             was_playing: false,
             frame_entry: None,
+            tools_hidden: false,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -5634,6 +5681,7 @@ impl Editor {
             opened_doc: None,
             was_playing: false,
             frame_entry: None,
+            tools_hidden: false,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -6193,6 +6241,7 @@ impl Editor {
             Action::PanelTool => Some(self.canvas.tool == canvas::CanvasTool::Panel),
             Action::ToggleLockPositions => Some(self.ui_lock),
             Action::ToggleHints => Some(!self.say.off),
+            Action::HideTools => Some(self.tools_hidden),
             _ => None,
         }
     }
@@ -8121,47 +8170,12 @@ impl Editor {
     /// first, the machine's last remark after it, and what `say.rs` picked
     /// third, its action button straight after its words.
     fn say_line(&mut self, ui: &mut egui::Ui) {
-        // REFUSAL: the machine overruled the hand. Dwells 4s; a repeat of
-        // the same refusal re-flashes.
-        if self.state.refusal_seq != self.refusal_seen_seq {
-            self.refusal_seen_seq = self.state.refusal_seq;
-            self.refusal_since = ui.input(|i| i.time);
-        }
-        // A NOTICE (a reset config, a lost tablet) waits for the artist: the
-        // dwell starts at the first key or click after it shows, so it is
-        // never missed. (Raw events: a widget that consumed the key still
-        // saw the artist act.)
-        if self.notice_seq == Some(self.state.refusal_seq) {
-            let acted = ui.input(|i| {
-                i.pointer.any_pressed()
-                    || i.raw.events.iter().any(|e| {
-                        matches!(e, egui::Event::Key { pressed: true, .. })
-                    })
-            });
-            if acted {
-                self.notice_seq = None;
-            } else {
-                self.refusal_since = ui.input(|i| i.time);
-            }
-        }
-        // CHATTER: the machine's last remark, decaying — a stale "painted"
-        // must never train the eye to ignore this. A step down to the
-        // quietest ink, not a fade: text is opaque, so it never falls under
-        // its floor on the way out.
-        if self.state.status != self.status_seen {
-            self.status_seen = self.state.status.clone();
-            self.status_since = ui.input(|i| i.time);
-        }
+        let (refusing, saying, age) = self.say_clock(ui.ctx());
         let now = ui.input(|i| i.time);
-        let (rage, age) = (now - self.refusal_since, now - self.status_since);
-        let refusing = rage < 4.0 && !self.state.refusal.is_empty();
-        let saying = age < 4.0 && !self.state.status.is_empty();
-        // Whatever waits behind a dwell comes up when it ends, with no event.
-        if refusing || saying {
-            let dwell = if refusing { 4.0 - rage } else { 4.0 - age };
-            ui.ctx().request_repaint_after_secs(dwell as f32);
-        }
-        let hint = if refusing || saying { None } else { self.say.hint.clone() };
+        // AU10: nothing was picked for the frame the band comes back on, by
+        // whichever road: the row in hand was the dot's, and any other starts
+        // its reading again.
+        let hint = if refusing || saying || self.say.tools_were_hidden { None } else { self.say.hint.clone() };
         // The rule stands only beside words, and its room stays either way.
         ui.spacing_mut().item_spacing.x = 4.0;
         let (rule, _) = ui.allocate_exact_size(egui::vec2(6.0, plate::CHROME_H), egui::Sense::hover());
@@ -8212,6 +8226,87 @@ impl Editor {
             if plate::say_action(ui, beside, verb.label()).card(verb.card()).clicked() {
                 self.say_act(verb, ui.ctx());
             }
+        }
+    }
+
+    /// The lane's clock, read each frame the band is up or not: a refusal
+    /// said under Hide tools dwells on the dot's card, and a remark grows no
+    /// younger for having nowhere to stand. Refusing, saying, and the
+    /// remark's age.
+    fn say_clock(&mut self, ctx: &egui::Context) -> (bool, bool, f64) {
+        // REFUSAL: the machine overruled the hand. Dwells 4s; a repeat of
+        // the same refusal re-flashes.
+        if self.state.refusal_seq != self.refusal_seen_seq {
+            self.refusal_seen_seq = self.state.refusal_seq;
+            self.refusal_since = ctx.input(|i| i.time);
+        }
+        // A NOTICE (a reset config, a lost tablet) waits for the artist: the
+        // dwell starts at the first key or click after it shows, so it is
+        // never missed. (Raw events: a widget that consumed the key still
+        // saw the artist act.)
+        if self.notice_seq == Some(self.state.refusal_seq) {
+            let acted = ctx.input(|i| {
+                i.pointer.any_pressed()
+                    || i.raw.events.iter().any(|e| {
+                        matches!(e, egui::Event::Key { pressed: true, .. })
+                    })
+            });
+            if acted {
+                self.notice_seq = None;
+            } else {
+                self.refusal_since = ctx.input(|i| i.time);
+            }
+        }
+        // CHATTER: the machine's last remark, decaying — a stale "painted"
+        // must never train the eye to ignore this. A step down to the
+        // quietest ink, not a fade: text is opaque, so it never falls under
+        // its floor on the way out.
+        if self.state.status != self.status_seen {
+            self.status_seen = self.state.status.clone();
+            self.status_since = ctx.input(|i| i.time);
+        }
+        let now = ctx.input(|i| i.time);
+        let (rage, age) = (now - self.refusal_since, now - self.status_since);
+        let refusing = rage < 4.0 && !self.state.refusal.is_empty();
+        let saying = age < 4.0 && !self.state.status.is_empty();
+        // Whatever waits behind a dwell comes up when it ends, with no event.
+        if refusing || saying {
+            let dwell = if refusing { 4.0 - rage } else { 4.0 - age };
+            ctx.request_repaint_after_secs(dwell as f32);
+        }
+        (refusing, saying, age)
+    }
+
+    /// AU10: the way back (spec R14), and all that is left to say anything
+    /// while the band is off: the row taught once, or a refusal for as long
+    /// as the lane would have held it.
+    fn return_dot(&mut self, ctx: &egui::Context) {
+        let (refusing, _, _) = self.say_clock(ctx);
+        let row = self.say.hint.clone().filter(|h| h.bit == Some(say::HIDE_TOOLS));
+        self.say.dots_painted = false;
+        let dot = egui::Area::new(egui::Id::new("return_dot"))
+            .order(egui::Order::Middle)
+            .fixed_pos(plate::RETURN_DOT_AT)
+            .fade_in(false)
+            .show(ctx, plate::return_dot)
+            .inner;
+        // What stands beside it outranks its own tip, which would stand there.
+        if refusing {
+            plate::dot_card(&dot, |ui| {
+                ui.horizontal(|ui| plate::refusal(ui, &self.state.refusal));
+            });
+        } else if let Some(row) = &row {
+            plate::dot_card(&dot, |ui| {
+                ui.label(&row.words);
+            });
+        } else {
+            plate::hover_card(dot.clone(), || {
+                let chord = menus::chord_label(ctx, Action::HideTools);
+                chord.map_or_else(|| plate::SHOW_TOOLS.to_string(), |c| format!("{} ({c})", plate::SHOW_TOOLS))
+            });
+        }
+        if dot.clicked() {
+            self.invoke(Action::HideTools, ctx);
         }
     }
 
@@ -8426,6 +8521,10 @@ impl Editor {
         if self.floats.is_open(floats::Float::Layers) {
             self.start = None;
         }
+        // AU10: off the screen with the other floats, and back with them.
+        if self.tools_hidden {
+            return;
+        }
         let Some(mut w) = self.start.take() else { return };
         let on_canvas = visible_panes(&self.dock).contains(&Pane::Canvas) && !self.float_canvas.open;
         let host = if on_canvas { self.canvas.dbg_rect } else { dock };
@@ -8606,7 +8705,9 @@ impl Editor {
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.play_tick(dt);
         let row_frame = plate::desk_frame(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
-        egui::Panel::top("top_bar").frame(row_frame).exact_size(44.0).show_separator_line(false).show(ui, |ui| {
+        let hidden = self.tools_hidden;
+        let top = egui::Panel::top("top_bar").frame(row_frame).exact_size(44.0).show_separator_line(false);
+        chrome_panel(top, hidden, ui, |ui| {
             // Owner's directive (2026-08-17): the bar read small. The Chrome
             // role, scoped to this panel only, with wider breathing room:
             // the bar is the one surface read from arm's length.
@@ -9311,7 +9412,8 @@ impl Editor {
         let strip = self.strip_open && self.strip_room();
         let rows = if strip { rail::STRIP_H } else { 0.0 };
         let band = egui::Panel::bottom("status_bar").exact_size(plate::BAND_H + rows);
-        band.frame(plate::desk_frame(ui.style())).show_separator_line(false).show(ui, |ui| {
+        let band = band.frame(plate::desk_frame(ui.style())).show_separator_line(false);
+        chrome_panel(band, hidden, ui, |ui| {
             if strip {
                 let size = egui::vec2(ui.available_width(), rows);
                 let rect = egui::Rect::from_min_size(ui.cursor().min, size);
@@ -9462,7 +9564,9 @@ impl Editor {
         let rail_off = self.rail_off();
         let panes = visible_panes(&self.dock);
         let layers_docked = panes.contains(&Pane::Layers);
-        self.canvas.strip_closed = self.strip_closed();
+        // Hide tools gives the paper the strip's room too.
+        self.canvas.strip_closed = self.strip_closed() && !hidden;
+        self.canvas.tools_hidden = hidden;
         self.canvas.sheet_shown = panes.contains(&Pane::XSheet);
         self.canvas.empty_cell_hint = self.say.empty_cell_due(&self.state);
         let export_view = self.export_view();
@@ -9490,9 +9594,16 @@ impl Editor {
             locked: if ui_lock { &self.held } else { &[] },
             export_view,
         };
-        let dock_style = dock_style(ui.style().as_ref(), &self.dock);
+        let mut dock_style = dock_style(ui.style().as_ref(), &self.dock);
+        if hidden {
+            dock_style.dock_area_padding = dot_room(&self.dock);
+        }
         let dock_rect = ui.available_rect_before_wrap();
         plate::note_dock(ui, dock_rect);
+        if let Some(room) = dock_style.dock_area_padding {
+            let desk = dock_rect.with_max_x(dock_rect.left() + f32::from(room.left));
+            ui.painter().rect_filled(desk, 0.0, plate::DESK);
+        }
         // UI lock (Settings -> UI Features): the layout freezes — no tab
         // dragging and no splits, and the recipe's panes stay open — but the
         // arrangement is kept.
@@ -9553,6 +9664,9 @@ impl Editor {
         }
         self.start_ui(ui.ctx(), dock_rect);
         self.say_read(ui.ctx());
+        if hidden {
+            self.return_dot(ui.ctx());
+        }
 
         // Phase 5 step 2: the canvas in its own OS window. Tabs' borrows of
         // state/canvas/paint end above, so this can borrow them fresh.
