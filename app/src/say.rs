@@ -166,6 +166,8 @@ pub struct Facts {
     pub pen_works: bool,
     /// The tools just came back.
     pub tools_back: bool,
+    /// AU27: a lesson stands: its card carries the sentence.
+    pub lesson: bool,
 }
 
 impl Facts {
@@ -468,11 +470,16 @@ pub fn read(
     // The Exported row is news, not a lesson: no seen bit silences it, not
     // even an upgrader's whole mask.
     let due = |hint: &&Hint| (hint.bit == EXPORTED || *seen & hint.bit == 0) && hint.applies(f);
-    HINTS.iter().filter(due).find_map(|hint| hint.spoken(f, &chord))
+    // AU27: during a lesson the lane keeps what is no lesson's to say.
+    let kept = |hint: &&Hint| !f.lesson || matches!(hint.bit, EXPORTED | REFUSED_TWICE | FLAT_PEN);
+    HINTS.iter().filter(due).filter(kept).find_map(|hint| hint.spoken(f, &chord))
 }
 
 /// The empty state of the step `f` stands in.
 pub fn empty_step(f: &Facts, hints_off: bool) -> Option<Spoken> {
+    if f.lesson {
+        return None;
+    }
     let row = EMPTY_STEPS.iter().find(|e| f.stage == Some(e.stage) && (e.applies)(f))?;
     let verb = (!hints_off).then_some(Verb::GoToDraw);
     Some(Spoken { bit: None, words: row.words.to_string(), verb })
@@ -656,6 +663,10 @@ impl Editor {
 
     /// AU18: slot `i` is done, where this kind keeps it.
     pub(crate) fn tick_slot(&mut self, i: usize) {
+        // AU27: a lesson is not a free Quick Start.
+        if self.lesson.is_some() {
+            return;
+        }
         match self.slot_bits() {
             Some(bits) if (1..4).contains(&i) => {
                 if self.say.seen & bits[i - 1] == 0 {
@@ -672,6 +683,7 @@ impl Editor {
         let (stroked, filled, exported) = self.say_outcomes();
         self.say.count_refusals(&self.state);
         let facts = self.say_facts(stroked, filled, exported);
+        self.lesson_read(&facts);
         let mut seen = self.say.seen;
         let hint = if self.say.off {
             None
@@ -679,7 +691,7 @@ impl Editor {
             seen |= if stroked && self.say.line_shown { EMPTY_CELL } else { 0 };
             read(&facts, &mut seen, self.say.shown, |a| menus::chord_label(ctx, a))
         };
-        if seen != self.say.seen {
+        if seen != self.say.seen && !facts.lesson {
             self.say.seen = seen;
             self.say.seen_request = Some(seen);
         }
@@ -718,7 +730,7 @@ impl Editor {
             }
         }
         if self.animated() {
-            self.quick_start[welcome::PLAY_STEP] |= self.state.view.playing;
+            self.quick_start[welcome::PLAY_STEP] |= self.state.view.playing && self.lesson.is_none();
         } else if filled && self.kind() == Some(ProjectKind::Drawing) {
             self.tick_slot(1);
         }
@@ -735,7 +747,7 @@ impl Editor {
     fn say_landed(&mut self) -> bool {
         let landed = std::mem::take(&mut self.state.render_queue.landed);
         let exported = !landed.is_empty();
-        self.quick_start[welcome::EXPORT_STEP] |= exported;
+        self.quick_start[welcome::EXPORT_STEP] |= exported && self.lesson.is_none();
         let card = self.stage == Some(Stage::Export) && visible_panes(&self.dock).contains(&Pane::RenderQueue);
         for file in landed {
             if !card && self.say.off {
@@ -755,6 +767,9 @@ impl Editor {
 
     /// What a finished stroke ticks (spec 8.3).
     fn tick_stroke(&mut self) {
+        if self.lesson.is_some() {
+            return;
+        }
         self.quick_start[welcome::FIRST_STROKE] = true;
         if self.animated() {
             self.quick_start[welcome::NEXT_POSE] |= self.state.view.frame >= 1;
@@ -825,6 +840,7 @@ impl Editor {
             exported,
             pen_works: std::mem::take(&mut self.say.pen_answered),
             tools_back,
+            lesson: self.lesson.is_some(),
         };
         if effect_added && self.kind() == Some(ProjectKind::Drawing) {
             self.tick_slot(2);
@@ -865,6 +881,9 @@ impl Editor {
     }
 
     pub(crate) fn say_answered(&mut self, bit: u32) {
+        if self.lesson.is_some() {
+            return;
+        }
         self.say.seen |= bit;
         self.say.seen_request = Some(self.say.seen);
     }

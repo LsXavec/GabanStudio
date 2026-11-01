@@ -1525,3 +1525,21 @@ fn aukeys_chord_knows_an_arrow() {
     assert!(!chord("F").has_arrow());
     assert!(!chord("Ctrl+Comma").has_arrow());
 }
+
+/// AU27, spec 1.11: `T` is refused while a lesson stands, in words that name
+/// the way out, and works again after Leave.
+#[test]
+fn aukeys_hide_tools_waits_for_a_lesson() {
+    let mut h = crate::testkit::EditorHarness::as_shipped();
+    h.editor_mut().begin_lesson(crate::lessons::PROBED, 0);
+    h.run();
+    assert_eq!(h.editor().can_perform(Action::HideTools), Err("Leave the lesson to hide the tools."));
+    h.perform(Action::HideTools);
+    h.run();
+    assert!(!h.editor().tools_hidden);
+    h.click(crate::lesson::LEAVE);
+    h.run();
+    h.perform(Action::HideTools);
+    h.run();
+    assert!(h.editor().tools_hidden);
+}

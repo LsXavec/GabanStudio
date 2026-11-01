@@ -27,6 +27,7 @@ mod icons;
 mod kpp;
 mod brushbank;
 mod kritares;
+mod lesson;
 mod lessons;
 mod manga_tools;
 #[cfg(test)]
@@ -79,6 +80,8 @@ mod ausay_tests;
 mod austart_tests;
 #[cfg(test)]
 mod austrip_tests;
+#[cfg(test)]
+mod aulesson_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;
@@ -4506,6 +4509,8 @@ struct Editor {
     /// AU5: the document the strip's latch and scale were set for, so a
     /// frame added later never refits the paper under a stroke.
     opened_doc: Option<String>,
+    /// AU27: the lesson standing over this document.
+    lesson: Option<lesson::LessonRun>,
     /// AU5: playback was running last frame: a stop is seen as it happens.
     was_playing: bool,
     /// AU5: the frame number being typed, while the counter is a field.
@@ -4788,8 +4793,11 @@ pub(crate) fn apply_start(
         Choice::Sample => replace(Editor::boot(sample::build_sample(), rs, dir, ui)),
         Choice::ShowMe(step) => replace(welcome_show_me(step, rs, dir, ui).0),
         Choice::Settings => StartOutcome::Request(AppRequest::Settings),
-        // AU20: no lesson opens yet: the lesson frame brings `open_lesson`.
-        Choice::Lesson(_) | Choice::Remove(_) | Choice::Back => StartOutcome::Stay,
+        Choice::Lesson(i) => match lessons::table().get(i) {
+            Some(row) => replace(lesson::open_lesson(row, rs, dir, ui)),
+            None => StartOutcome::Stay,
+        },
+        Choice::Remove(_) | Choice::Back => StartOutcome::Stay,
     }
 }
 
@@ -5299,6 +5307,10 @@ impl Editor {
     /// AU18: why this step is not on this bar (spec 2.8). `can_perform` and
     /// `perform` both read it, for one sentence. F4 and F5 never refuse.
     pub(crate) fn hidden_step(&self, action: Action) -> Option<&'static str> {
+        // AU27: the rail is what a lesson's rings stand on (spec 1.11).
+        if action == Action::HideTools && self.lesson.is_some() {
+            return Some("Leave the lesson to hide the tools.");
+        }
         match (self.kind()?, action) {
             (ProjectKind::Drawing, Action::RoomEdit) => Some("A single picture has no timing."),
             (ProjectKind::Comic, Action::RoomEdit) => Some("Comic pages have no timing."),
@@ -5361,7 +5373,8 @@ impl Editor {
     /// but a comic's bar has neither Draw nor Effects, so that one moves, and
     /// a stroke in progress ends first.
     fn promote(&mut self) {
-        if self.kind() != Some(ProjectKind::Drawing) || self.canvas.stroke_active() {
+        // AU27: a lesson's bar stands under it to the end: this runs on Leave.
+        if self.kind() != Some(ProjectKind::Drawing) || self.canvas.stroke_active() || self.lesson.is_some() {
             return;
         }
         let project = &mut self.state.engine.project;
@@ -5470,9 +5483,12 @@ impl Editor {
     }
 
     /// AU19: Plan opens without its sheet: the memory says so, and no
-    /// template started this document with it on.
+    /// template started this document with it on. AU27: a lesson's Plan shows
+    /// the sheet whatever the memory says, and leaves the memory as it stood.
     fn plan_sheet_off(&self) -> bool {
-        self.plan_sheet_hidden && self.template_sheet.as_ref() != Some(&self.state.untitled_group)
+        self.lesson.is_none()
+            && self.plan_sheet_hidden
+            && self.template_sheet.as_ref() != Some(&self.state.untitled_group)
     }
 
     /// AU3: a template's project opens in the template's first step, its
@@ -5498,13 +5514,14 @@ impl Editor {
 
     /// AU6: the Start float, now or at pen-up. Layers makes way for it (spec
     /// 4.5), and AU20 so does a left float it lands on: `start_ui` knows that.
-    pub(crate) fn open_start(&mut self, w: welcome::Welcome) {
+    pub(crate) fn open_start(&mut self, mut w: welcome::Welcome) {
         if self.canvas.stroke_active() {
             self.start_waiting = Some(w);
             return;
         }
         self.floats.close(floats::Float::Layers);
         self.floats.start_fresh = true;
+        w.finished = lesson::finished(self.data_dir.as_deref());
         self.start = Some(w);
     }
 
@@ -5805,6 +5822,7 @@ impl Editor {
             full_band: false,
             strip: strip::Strip::default(),
             opened_doc: None,
+            lesson: None,
             was_playing: false,
             frame_entry: None,
             tools_hidden: false,
@@ -5920,6 +5938,7 @@ impl Editor {
             full_band: false,
             strip: strip::Strip::default(),
             opened_doc: None,
+            lesson: None,
             was_playing: false,
             frame_entry: None,
             tools_hidden: false,
@@ -7656,6 +7675,9 @@ enum ProbeRoom {
     /// AU20: Draw, with the Start float on its Lessons page, on the nine rows
     /// it is built for.
     Lessons,
+    /// AU27: a step with the lesson card standing beside it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Lesson(Stage),
 }
 
 /// Every room: the CLI probe and the ship tests walk these. AU19: `Stage::Drawing`
@@ -7674,6 +7696,18 @@ const PROBE_ROOMS: [ProbeRoom; 9] = [
     ProbeRoom::Lessons,
 ];
 
+/// AU27: the card in every step: what the clip audit walks after the rooms.
+/// The shots and the rail's audits number `PROBE_ROOMS` alone.
+#[cfg(test)]
+const LESSON_ROOMS: [ProbeRoom; 6] = [
+    ProbeRoom::Lesson(Stage::Drawing),
+    ProbeRoom::Lesson(Stage::InkPaint),
+    ProbeRoom::Lesson(Stage::Composite),
+    ProbeRoom::Lesson(Stage::Edit),
+    ProbeRoom::Lesson(Stage::Manga),
+    ProbeRoom::Lesson(Stage::Export),
+];
+
 impl ProbeRoom {
     fn name(self) -> &'static str {
         match self {
@@ -7681,6 +7715,12 @@ impl ProbeRoom {
             ProbeRoom::Forge => "forge",
             ProbeRoom::Layout3d => "3D layout (LO)",
             ProbeRoom::Lessons => "Lessons page",
+            ProbeRoom::Lesson(Stage::Drawing) => "lesson card, Draw",
+            ProbeRoom::Lesson(Stage::InkPaint) => "lesson card, Color",
+            ProbeRoom::Lesson(Stage::Composite) => "lesson card, Effects",
+            ProbeRoom::Lesson(Stage::Edit) => "lesson card, Timing",
+            ProbeRoom::Lesson(Stage::Manga) => "lesson card, Manga",
+            ProbeRoom::Lesson(_) => "lesson card, Export",
         }
     }
 
@@ -7691,6 +7731,8 @@ impl ProbeRoom {
         if editor.start.as_ref().is_some_and(|w| w.tab == welcome::WelcomeTab::Lessons) {
             editor.start = None;
         }
+        // AU27: and the card its rooms'.
+        editor.lesson = None;
         match self {
             ProbeRoom::Stage(st) => editor.enter_room(st),
             ProbeRoom::Forge => {
@@ -7710,17 +7752,21 @@ impl ProbeRoom {
                 w.lessons = lessons::STAND_IN;
                 editor.open_start(w.on_lessons());
             }
+            ProbeRoom::Lesson(st) => {
+                editor.begin_lesson(lessons::PROBED, 0);
+                editor.enter_room(st);
+            }
         }
     }
 
     fn probe(self, ppp: f32) -> ProbeRun {
         match self {
             // AU9: this step has no paper: its panel is what must hold still.
-            ProbeRoom::Stage(Stage::Export) => {
+            ProbeRoom::Stage(Stage::Export) | ProbeRoom::Lesson(Stage::Export) => {
                 probe_run_in(ppp, 100, Pane::RenderQueue, |editor| self.enter(editor))
             }
             ProbeRoom::Stage(st) => probe_run(st, ppp),
-            ProbeRoom::Forge | ProbeRoom::Lessons => {
+            ProbeRoom::Forge | ProbeRoom::Lessons | ProbeRoom::Lesson(_) => {
                 probe_run_in(ppp, 100, Pane::Canvas, |editor| self.enter(editor))
             }
             ProbeRoom::Layout3d => {
@@ -8579,7 +8625,7 @@ impl Editor {
         // Spec 8.3: the place, in dots. Painted: no control, no words, and a
         // card for whoever rests on them.
         let ticks = self.ticks();
-        self.say.dots_painted = dots && !self.say.off && ticks.iter().any(|done| !done);
+        self.say.dots_painted = dots && !self.say.off && self.lesson.is_none() && ticks.iter().any(|done| !done);
         if self.say.dots_painted {
             let rows = self.quick_rows();
             let painted = plate::say_dots(ui, row, &ticks);
@@ -8969,7 +9015,11 @@ impl Editor {
             self.opened_doc = Some(self.state.untitled_group.clone());
             self.strip_open |= self.state.frame_count() > 1;
             self.strip.opened();
+            let resumed = self.lesson_door();
             self.door();
+            if resumed {
+                self.lesson_arm();
+            }
         }
         self.promote();
         // The band's keys and the rail's Flip arrive on one frame. AU18: on an
@@ -9825,6 +9875,7 @@ impl Editor {
             }
             self.transport_row(ui);
         });
+        self.lesson_panel(ui);
 
         // The docking shell replaces the fixed left/central panels: panes are
         // draggable/stackable windows onto the one document; workspaces are
@@ -9967,8 +10018,10 @@ impl Editor {
         // The frozen boot keeps today's Fit. A floated canvas hosts its rail
         // too, so the paper clears it there as well.
         let rail_shows = !rail_off && !hidden;
-        self.canvas.rail_reserve = panes.contains(&Pane::XSheet) && rail_shows && !self.kind_unset;
-        self.canvas.empty_cell_hint = self.say.empty_cell_due(&self.state) && self.animated();
+        let reserve = panes.contains(&Pane::XSheet) || self.lesson.is_some();
+        self.canvas.rail_reserve = reserve && rail_shows && !self.kind_unset;
+        self.canvas.empty_cell_hint =
+            self.say.empty_cell_due(&self.state) && self.animated() && self.lesson.is_none();
         let export_view = self.export_view();
         let strokes = self.state.strokes_done;
         let mut tabs = EditorTabs {

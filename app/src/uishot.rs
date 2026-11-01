@@ -552,6 +552,24 @@ fn start_float(dir: &Path) {
     }
 }
 
+/// AU27: the lesson card beside Draw, at a wide and a narrow window, and at
+/// the finish.
+fn lesson_card(dir: &Path) {
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    let mut h = EditorHarness::with_gpu_shipped(crate::lessons::PROBED.paper.build());
+    h.run_frames(4);
+    for (name, w, tall, finished) in
+        [("lesson-card", 1600.0, 900.0, false), ("lesson-card-1280", 1280.0, 800.0, false), ("lesson-finish", 1280.0, 800.0, true)]
+    {
+        let size = egui::vec2(w, tall);
+        h.kit_mut().set_size(size);
+        arrive(&mut h, draw);
+        h.editor_mut().begin_lesson(crate::lessons::PROBED, usize::from(finished));
+        h.run_frames(4);
+        h.shot(size, &dir.join(format!("{name}.png")));
+    }
+}
+
 /// AU7: the lane as it teaches: a hint with its button and dots, under the
 /// fold, beside the sheet, and the longest sentence with `Fix it`; each empty
 /// step; the empty cell's line; and Show me's ring in the Export step.
@@ -1103,6 +1121,7 @@ fn uishot_rooms() {
     check_shots(&dir, &strip_owed()).expect("the strip's moments");
     start_float(&dir);
     check_shots(&dir, &start_owed()).expect("the Start float's moments");
+    lesson_card(&dir);
     say_moments(&dir);
     check_shots(&dir, &say_owed()).expect("what the Say line teaches");
     queue_moments(&dir);

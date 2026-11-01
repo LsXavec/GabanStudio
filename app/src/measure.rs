@@ -17,7 +17,7 @@ use crate::config::Action;
 use crate::plate::{self, Viewport};
 use crate::testkit::EditorHarness;
 use crate::workspace::Pane;
-use crate::{PROBE_ROOMS, ProbeRoom};
+use crate::{LESSON_ROOMS, PROBE_ROOMS, ProbeRoom};
 
 /// A frame's worth of settling, as the journeys were measured.
 fn settle(h: &mut EditorHarness) {
@@ -725,11 +725,12 @@ pub fn clip_here(h: &EditorHarness, scope: Scope) -> Clip {
     clip_frame(&h.ctx(), &h.kit().output().shapes, scope)
 }
 
-/// Every room in `PROBE_ROOMS`, entered as its button enters it, added up.
-/// The harness stays in the last room.
+/// Every room in `PROBE_ROOMS`, entered as its button enters it, added up,
+/// and AU27 each step with the lesson card beside it. The harness stays in
+/// the last room.
 pub fn clip_audit(h: &mut EditorHarness, scope: Scope) -> Clip {
     let mut total = Clip::default();
-    for room in PROBE_ROOMS {
+    for room in PROBE_ROOMS.into_iter().chain(LESSON_ROOMS) {
         room.enter(h.editor_mut());
         settle(h);
         let here = clip_here(h, scope);
@@ -1331,7 +1332,8 @@ mod tests {
         // A cut label on the top row: every room, one finding each.
         h.rig_mut().seed = Some(cut_label(Rect::from_min_size(pos2(1.0, 1.0), vec2(40.0, 12.0))));
         let seeded = clip_audit(&mut h, Scope::Chrome);
-        assert_eq!(seeded.clipped, chrome.clipped + PROBE_ROOMS.len(), "{:?}", seeded.found);
+        let rooms = PROBE_ROOMS.len() + LESSON_ROOMS.len();
+        assert_eq!(seeded.clipped, chrome.clipped + rooms, "{:?}", seeded.found);
         assert!(seeded.found.iter().any(|f| f.starts_with("Forge:")), "named by room");
         // One inside a pane body: `All` has it, `Chrome` leaves it out. The
         // last room's float would stand on it: a text is told by where it stands.

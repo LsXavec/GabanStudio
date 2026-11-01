@@ -2287,7 +2287,10 @@ mod tests {
             .iter()
             .filter_map(|r| match r {
                 crate::ProbeRoom::Stage(st) => Some(*st),
-                crate::ProbeRoom::Forge | crate::ProbeRoom::Layout3d | crate::ProbeRoom::Lessons => None,
+                crate::ProbeRoom::Forge
+                | crate::ProbeRoom::Layout3d
+                | crate::ProbeRoom::Lessons
+                | crate::ProbeRoom::Lesson(_) => None,
             })
             .collect();
         for st in [
@@ -2543,8 +2546,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 925;
-    const ASSERT_FLOOR: usize = 5757;
+    const TEST_FLOOR: usize = 950;
+    const ASSERT_FLOOR: usize = 5900;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

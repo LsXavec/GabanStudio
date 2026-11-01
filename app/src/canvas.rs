@@ -681,7 +681,7 @@ pub struct CanvasView {
     /// eraser). Bypasses the wet buffer (like eraser) so the mask reads the
     /// ACTIVE layer's real alpha, not the wet buffer's own (which starts
     /// every stroke transparent and would mask out everything).
-    alpha_lock: bool,
+    pub(crate) alpha_lock: bool,
     /// Per-dab strength (0–1): scales each dab's alpha, so overlapping dabs build
     /// up within a stroke (airbrush-like). NOT whole-stroke opacity — that needs
     /// the wet-buffer (paints the stroke separately, then composites once).
@@ -744,8 +744,9 @@ pub struct CanvasView {
     pub tool: CanvasTool,
     /// Selection drawing shape for the Select tool (toolbar toggle).
     sel_shape: SelShape,
-    /// Fill: line-art gaps up to this many px act closed.
-    fill_gap: u32,
+    /// Fill: line-art gaps up to this many px act closed. AU27: a lesson sets
+    /// it for its run and gives it back on leaving.
+    pub(crate) fill_gap: u32,
     /// Fill: how far flats tuck UNDER the lines (kills the pale halo).
     fill_grow: u32,
     /// Fill reference: true = the whole cel's flatten bounds the fill (line
@@ -791,7 +792,7 @@ pub struct CanvasView {
     /// colour follows the layer.
     /// The pencil-box preset the brush was last armed FROM (by name). The
     /// slot's Tally ring draws broken once the live numbers drift off it.
-    armed_preset: Option<String>,
+    pub(crate) armed_preset: Option<String>,
     /// SESSION v2: this app is a GUEST in someone's room — finished
     /// strokes are SENT, never committed locally (one writer, NEVER-DO 1).
     pub(crate) is_guest: bool,
@@ -866,6 +867,12 @@ pub struct CanvasView {
     /// AU19: Fit keeps the paper clear of the rail: the sheet is on screen,
     /// the rail shows and the tools are not hidden. The host sets it.
     pub(crate) rail_reserve: bool,
+    /// AU27: the last finished stroke's box on the paper, `[left, top, right,
+    /// bottom]`, vector and raster alike. A lesson takes it: a stroke is met
+    /// by what it covered, not by what route it came.
+    pub(crate) last_stroke_box: Option<[f32; 4]>,
+    /// AU27: floating selections that landed moved.
+    pub(crate) moves_done: u64,
     /// AU7: the empty cell's line is due: hints on, its once-only bit unset,
     /// and the document holds a drawing. The host sets it before `ui`.
     pub(crate) empty_cell_hint: bool,
@@ -1005,7 +1012,7 @@ pub struct CanvasView {
     pub stacks: (Vec<ColumnId>, Vec<ColumnId>),
     /// GM4: the stabilizer level (pen config), the live string, and the
     /// last raw paper point fed to it (the pen-up point).
-    stabilizer: u8,
+    pub(crate) stabilizer: u8,
     stab: Option<crate::stabilizer::Stabilizer>,
     stab_raw: Pos2,
     /// GM18: the page's perspective rulers while their snap is on (read
@@ -1134,6 +1141,8 @@ impl CanvasView {
             tools_hidden: false,
             sheet_shown: false,
             rail_reserve: false,
+            last_stroke_box: None,
+            moves_done: 0,
             empty_cell_hint: false,
             dbg_empty_line: false,
             flash_seq: 0,
@@ -1811,6 +1820,7 @@ impl CanvasView {
             let diff = edit::merge_patch(&f.base_tiles, &f.cleared, &moved);
             if !diff.is_empty() {
                 state.commit_region_edit("transform", f.drawing, f.layer, diff);
+                self.moves_done += 1;
             }
         }
         // Either way the displayed texture was punched — restore from truth.
@@ -7106,6 +7116,10 @@ impl CanvasView {
         // flagging a legitimate quick pen tap (Start+End, no Move sample at all).
         // Drives the red MOUSE badge that tells the user to fix the driver.
         self.dbg_mouse_mode = self.stroke_from_mouse || (self.cur_none > 0 && self.cur_some == 0);
+        self.last_stroke_box = self.current.iter().fold(None, |b: Option<[f32; 4]>, p| {
+            let [l, t, r, d] = b.unwrap_or([p.x, p.y, p.x, p.y]);
+            Some([l.min(p.x), t.min(p.y), r.max(p.x), d.max(p.y)])
+        });
         // Raster mode: dabs are stamped incrementally in ui(); just flag the
         // final flush + reset. No vector taper/commit needed — dab radius
         // already follows pressure, and opaque dabs don't get the tip blob.

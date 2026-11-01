@@ -54,6 +54,8 @@ pub const BLUE_DEEP: Color32 = Color32::from_rgb(0x18, 0x4C, 0x9A);
 pub const BLUE_WASH: Color32 = Color32::from_rgb(0xDC, 0xE8, 0xF9);
 /// Refusal words, a danger fill.
 pub const RED: Color32 = Color32::from_rgb(0xB9, 0x2D, 0x1C);
+/// AU27: the night sky a lesson paints: a chip on the lesson card.
+pub const LESSON_NIGHT: Color32 = Color32::from_rgb(0x14, 0x1B, 0x34);
 /// The refusal pill.
 pub const RED_WASH: Color32 = Color32::from_rgb(0xFB, 0xE5, 0xE1);
 /// The peg bar, and paper turned dark for the miss check.
@@ -1649,6 +1651,87 @@ pub fn picture_card(
     }
     speak(&resp, egui::WidgetType::Button, None, title);
     describe(resp, "CARD picture_card", title)
+}
+
+/// AU27: a finished lesson's tick, in the top right of its card.
+pub fn finished_tick(painter: &egui::Painter, card: egui::Rect) {
+    let at = card.right_top() + Vec2::new(-PICTURE_INSET - 12.0, PICTURE_INSET + 6.0);
+    let line = vec![at + Vec2::new(0.0, 1.0), at + Vec2::new(4.0, 5.0), at + Vec2::new(12.0, -4.0)];
+    painter.add(egui::Shape::line(line, Stroke::new(2.0, BLUE)));
+}
+
+/// AU27: a run of the lesson card's words, wrapped to the card.
+pub fn lesson_words(ui: &mut Ui, words: &str, role: Role, ink: Color32) -> Response {
+    ui.add(egui::Label::new(egui::RichText::new(words).font(role.font()).color(ink)).wrap())
+}
+
+/// AU27: the lesson's steps in bar order, on a line that wraps; the open one
+/// stands in ink.
+pub fn lesson_path(ui: &mut Ui, steps: &[(&str, bool)]) -> Response {
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    for (i, (name, open)) in steps.iter().enumerate() {
+        let format = |ink| egui::TextFormat::simple(Role::Panel.font(), ink);
+        if i > 0 {
+            job.append("  ", 0.0, format(INK3));
+        }
+        job.append(name, 0.0, format(if *open { BLUE_DEEP } else { INK3 }));
+    }
+    ui.add(egui::Label::new(job))
+}
+
+/// AU27: one tick a task, and Deckle on the strip, who moves a tick for each
+/// finished task, flat and arched by turns, and stands up on the last. Off
+/// white, one eye, two holes (spec 5.6).
+pub fn lesson_strip(ui: &mut Ui, width: f32, done: usize, total: usize) -> Response {
+    const TALL: f32 = 28.0;
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, TALL), Sense::hover());
+    let p = ui.painter();
+    let base = rect.bottom() - 2.0;
+    let inset = 12.0;
+    let step = (rect.width() - 2.0 * inset) / total.max(1) as f32;
+    let at = |i: usize| rect.left() + inset + step * i as f32;
+    p.line_segment([Pos2::new(at(0), base), Pos2::new(at(total), base)], Stroke::new(1.0, RULE));
+    for i in 0..=total {
+        let tick = Pos2::new(at(i), base);
+        p.circle_filled(tick, 2.0, if i <= done { BLUE } else { RULE });
+    }
+    let (body, eye) = deckle(Pos2::new(at(done.min(total)), base - 2.0), done, done >= total);
+    p.add(egui::Shape::line(body.clone(), Stroke::new(5.0, INK2)));
+    p.add(egui::Shape::line(body.clone(), Stroke::new(3.0, PAPER)));
+    p.circle_filled(eye, 1.0, INK);
+    for hole in [body[1], body[body.len() - 2]] {
+        p.circle_filled(hole, 0.75, HOVER);
+    }
+    resp
+}
+
+/// Deckle's spine at `foot`, and its eye: a strip of paper, flat or arched,
+/// stood up at the finish.
+fn deckle(foot: Pos2, pose: usize, standing: bool) -> (Vec<Pos2>, Pos2) {
+    let spine: [Vec2; 5] = if standing {
+        [Vec2::new(0.0, 0.0), Vec2::new(0.0, -5.0), Vec2::new(0.0, -10.0), Vec2::new(0.0, -15.0), Vec2::new(1.0, -20.0)]
+    } else if pose % 2 == 1 {
+        [Vec2::new(-9.0, 0.0), Vec2::new(-6.0, -6.0), Vec2::new(0.0, -9.0), Vec2::new(6.0, -6.0), Vec2::new(9.0, 0.0)]
+    } else {
+        [Vec2::new(-10.0, 0.0), Vec2::new(-5.0, -1.0), Vec2::new(0.0, -1.0), Vec2::new(5.0, -1.0), Vec2::new(10.0, -1.0)]
+    };
+    let body: Vec<Pos2> = spine.iter().map(|v| foot + *v).collect();
+    let eye = body[4] + Vec2::new(-1.0, 0.0);
+    (body, eye)
+}
+
+/// AU27: the finish picture on a square of paper, centred in `rect`.
+pub fn lesson_picture(ui: &Ui, rect: egui::Rect, picture: impl FnOnce(&egui::Painter, egui::Rect)) {
+    let paper = egui::Rect::from_center_size(rect.center(), Vec2::splat(rect.height()));
+    let p = ui.painter();
+    p.rect_filled(paper, R_CONTROL, PAPER);
+    picture(p, paper);
+}
+
+/// The card's chip as the brush holds its colour.
+pub fn chip_bytes(color: Color32) -> [u8; 4] {
+    color.to_srgba_unmultiplied()
 }
 
 /// AU6: a small key under a [`choice_card`], at `rect`: another size of the

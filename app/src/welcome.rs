@@ -515,6 +515,10 @@ pub struct Welcome {
     pub lessons: &'static [Lesson],
     /// AU20: each lesson's picture, built once by its id.
     pictures: HashMap<&'static str, Picture>,
+    /// AU27: the ids in `lessons.txt`.
+    pub finished: Vec<String>,
+    /// AU27: the ticks the page drew last: painted, no control.
+    pub ticks_painted: usize,
 }
 
 /// AU6: `Check your pen`: the next line drawn is read, and the row below says
@@ -585,6 +589,8 @@ impl Welcome {
             pen_said: false,
             lessons: lessons::ALL,
             pictures: HashMap::new(),
+            finished: Vec::new(),
+            ticks_painted: 0,
         }
     }
 
@@ -805,6 +811,7 @@ fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcome
         }
     });
     let lessons = w.lessons;
+    w.ticks_painted = 0;
     let gutter_right = plate::CARD_PAD + PAGE_GUTTER;
     let across = (wide - gutter_right - 3.0 * PAGE_GAP) / 3.0;
     let tall = PAGE_LEGEND_H + ROW_GAP + 3.0 * PAGE_ROW_H + 2.0 * PAGE_GAP;
@@ -832,6 +839,10 @@ fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcome
             let rect = egui::Rect::from_min_size(at, egui::vec2(across, PAGE_ROW_H));
             let picture = w.pictures.entry(lesson.id).or_insert_with(|| Picture::of(lesson));
             let card = plate::picture_card(ui, rect, lesson.title, |p, paper| picture.paint(p, paper));
+            if w.finished.iter().any(|id| id == lesson.id) {
+                plate::finished_tick(ui.painter(), rect);
+                w.ticks_painted += 1;
+            }
             if card.card(lesson.hover).clicked() {
                 out = Some(WelcomeAction::Lesson(i));
             }
@@ -842,14 +853,14 @@ fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcome
 
 /// A lesson's finish, read once: `art` is the whole lesson's paths, too much
 /// to build on each repaint.
-struct Picture {
+pub(crate) struct Picture {
     /// Each line, and its width.
     lines: Vec<(Vec<egui::Pos2>, f32)>,
     bounds: egui::Rect,
 }
 
 impl Picture {
-    fn of(lesson: &Lesson) -> Self {
+    pub(crate) fn of(lesson: &Lesson) -> Self {
         let art = (lesson.art)();
         let at = |q: &[f32; 3]| egui::pos2(q[0], q[1]);
         let paths = lesson.finish.iter().filter_map(|i| art.get(*i as usize));
@@ -860,7 +871,7 @@ impl Picture {
     }
 
     /// Drawn small: fitted to `paper` and kept to its own shape.
-    fn paint(&self, p: &egui::Painter, paper: egui::Rect) {
+    pub(crate) fn paint(&self, p: &egui::Painter, paper: egui::Rect) {
         if !self.bounds.is_positive() {
             return;
         }

@@ -261,7 +261,7 @@ pub fn ring_tiles(center: [f32; 2], radius: f32, width: f32, rgba: [f32; 4]) -> 
     tiles.into_iter().map(|(c, v)| (c, Arc::new(TileData::from_vec(v)))).collect()
 }
 
-fn drawing_has_art(d: &anim_core::model::Drawing) -> bool {
+pub(crate) fn drawing_has_art(d: &anim_core::model::Drawing) -> bool {
     !d.strokes.is_empty() || d.layers.iter().any(|l| !l.raster.tiles.is_empty())
 }
 

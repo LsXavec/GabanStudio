@@ -759,17 +759,14 @@ static ART_BUILT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsiz
 fn counted_art() -> Vec<lessons::Path> {
     ART_BUILT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let points = vec![[0.0, 0.0, 1.0], [10.0, 5.0, 1.0], [20.0, 10.0, 1.0]];
-    vec![lessons::Path { points, width: 2.0 }]
+    vec![lessons::Path::new(points, 2.0)]
 }
 
 static COUNTED: [lessons::Lesson; 1] = [lessons::Lesson {
     id: "counted",
-    kind: crate::steps::ProjectKind::Drawing,
-    class: lessons::Class::Rookie,
     title: "Counted",
-    hover: "",
     art: counted_art,
-    finish: &[0],
+    ..lessons::Lesson::BLANK
 }];
 
 /// Each card's picture is drawn from its lesson's paths, on its paper square,
