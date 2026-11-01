@@ -85,6 +85,8 @@ pub const PREVIEW: &str = "Preview";
 pub const MOTION_CURVES: &str = "Motion curves";
 pub const EDIT_COLORS: &str = "Edit colors";
 pub const COLOR_NAME: &str = "Color name";
+pub const COLOR_WELL: &str = "color well";
+pub const KEPT_COLOR: &str = "kept color";
 pub const COLORS: &str = "Colors";
 pub const ADD_COLOR: &str = "Add color";
 pub const COLOR_DETAILS: &str = "Color details";
@@ -353,6 +355,8 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("MOTION_CURVES", MOTION_CURVES, "Motion curves"),
     ("EDIT_COLORS", EDIT_COLORS, "Edit colors"),
     ("COLOR_NAME", COLOR_NAME, "Color name"),
+    ("COLOR_WELL", COLOR_WELL, "color well"),
+    ("KEPT_COLOR", KEPT_COLOR, "kept color"),
     ("COLORS", COLORS, "Colors"),
     ("ADD_COLOR", ADD_COLOR, "Add color"),
     ("COLOR_DETAILS", COLOR_DETAILS, "Color details"),

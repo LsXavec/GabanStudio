@@ -1702,6 +1702,16 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - A `ui` section of the wrong shape resets as it always did, so it reads rev 0 and migrates like any other. Its `hints_seen` goes to the mask, and the arrows do not double, because they are already held. A step key the artist had cleared comes back on that path, the one thing it costs.
 - `README.md`'s keyboard table has rows for the step keys and for `T`, and the arrows on the frame row: `ship_readme_covers_the_release` holds every live chord named there.
 
+**AU13 notes.** Choices the build made where this document was silent or spoke twice. None needs a device; the first two are the Lead's to take or change.
+
+- The Add color popover keeps egui's stock picker, whose top row shows `U8` beside the numbers. No part here builds a new picker, so `measure::TERMS` gained `U8` and J3 reads the popover's own text: it is the one jargon term the journey is allowed. Decision: keep the row, or give the picker a plain one.
+- An empty board reads `No colors yet.`, build item 5's words, though the board stands under ten starter colors. The words mean the project's own colors. Decision: keep them, or say `Your colors stand here.`
+- `Result beside` on a page brings Layers and the Result, and no sheet: a drawing or comic has no Timing sheet to bring. Its card says which it brings. A lesson's Color stands as the step's own whatever the memory says, and a press during the run lasts for the run.
+- `Add color` is the one way to add. The `+ Color name` button in `Edit colors` did the same thing, and the color's name stays as the name field's hint. The fold gives way to `Edit colors` too, which opens all it holds.
+- The popover covers the board, so it shows what it keeps: the new color's name and the character's last eight colors, the new one ringed.
+- The strip's picture dilates a line by one cell at most and holds it at 0.8 of its strongest pixel. egui samples the texture in linear light with no mipmaps, so a one-cell line loses weight on the way to the screen and a floor alone stops short of 3:1 on the paper (`aucolor_a_thin_line_reads_on_its_sheet`). A paper smaller than the picture keeps its own pixels.
+- The Color float keeps `SWATCHES`, as the floats table and the moved-controls table say: the pencil case's ink, construction blue, correction red and white, which a brush reaches in any step. The starters are the Colors panel's.
+
 ---
 
 ## 14 Part map

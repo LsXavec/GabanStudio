@@ -1993,7 +1993,6 @@ fn austrip_left_out_stays_out() {
     s.view.active_column = first;
     s.goto(0);
     let mut h = strip_of(s);
-    let r = strip_rect(&h);
     // One active track: one row of sheets, its runs and no others.
     let sheets = plate::strip_sheets(&h.ctx());
     assert_eq!(sheets.len(), 3, "{sheets:?}");

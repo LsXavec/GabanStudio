@@ -259,6 +259,9 @@ pub(crate) struct LessonRun {
     /// A hide of Plan's sheet during this run. `plan_sheet_hidden` is the
     /// person's own and stands untouched (spec 3.10).
     pub sheet_off: bool,
+    /// `Result beside`, pressed during this run. `result_in_color` is the
+    /// person's own and stands untouched, as `plan_sheet_hidden` does.
+    pub result_on: bool,
     /// The document this run is over.
     doc: String,
     /// The boxes of the strokes landed since the task began.
@@ -505,6 +508,7 @@ impl Editor {
             based: false,
             back,
             sheet_off: false,
+            result_on: false,
             doc: state.untitled_group.clone(),
             marks: Vec::new(),
             peak: state.engine.undo_depth_by(None),
@@ -910,14 +914,15 @@ impl Editor {
     }
 
     /// `Leave lesson`: the card goes, the document stays a real document. The
-    /// paper refits once for the room the card gave back, and Plan's sheet is
-    /// the person's own memory's again.
+    /// paper refits once for the room the card gave back, and Plan's sheet and
+    /// Color's `Result beside` are the person's own memory's again.
     pub(crate) fn leave_lesson(&mut self) {
         if self.end_lesson().is_none() {
             return;
         }
         self.drop_lesson_key();
         self.plan_sheet_back();
+        self.result_back();
         self.canvas.fit_view();
     }
 

@@ -1146,9 +1146,10 @@ fn color_moments(dir: &Path) {
         arrive(&mut h, ProbeRoom::Stage(Stage::Drawing));
         h.hide_sheet();
         let c = h.editor().canvas.dbg_rect.center();
+        // Past its start, so the ring closes and a tap fills its inside.
         let ring = |r: f32| -> Vec<egui::Pos2> {
             let at = |n: u32| n as f32 / 32.0 * std::f32::consts::TAU;
-            (0..=32).map(|n| c + r * egui::vec2(at(n).cos(), at(n).sin())).collect()
+            (0..=35).map(|n| c + r * egui::vec2(at(n).cos(), at(n).sin())).collect()
         };
         h.drag_path(&ring(60.0));
         h.run_frames(8);
@@ -1161,7 +1162,7 @@ fn color_moments(dir: &Path) {
         h.editor_mut().strip_open = true;
         h.editor_mut().enter_room(Stage::InkPaint);
         arrive(&mut h, ProbeRoom::Stage(Stage::InkPaint));
-        h.click("colour well: Red");
+        h.click(&format!("{}: Red", crate::vocab::COLOR_WELL));
         h.click_pos(h.editor().canvas.dbg_rect.center());
         h.run_frames(8);
         shoot(&mut h, "color-room");
@@ -1178,6 +1179,8 @@ fn color_moments(dir: &Path) {
         h.perform(Action::HoldPlus);
         h.perform(Action::HoldPlus);
         h.state_mut().goto(1);
+        // The verb's status gives way, and the Say line reads the hold.
+        h.state_mut().status.clear();
         shoot(&mut h, "color-beside");
         drop(h);
         let comic = crate::templates::ALL[crate::templates::COMIC].build();
@@ -1423,6 +1426,22 @@ fn uishot_rooms() {
     check_shots(&dir, &tail_owed()).expect("the twelve rows and the hold keys");
     color_moments(&dir);
     check_shots(&dir, &color_owed()).expect("the Color step");
+}
+
+/// Only the ignored pass takes them, so this holds it to them: all five of
+/// the Color step's moments, at both sizes, taken and then checked.
+#[test]
+fn aucolor_the_ignored_pass_owes_the_color_shots() {
+    let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
+    let taken = pass.find("color_moments(&dir);").expect("it takes them");
+    let checked = pass.find("check_shots(&dir, &color_owed())").expect("it checks them");
+    assert!(taken < checked, "taken, then checked");
+    let owed = color_owed();
+    assert_eq!(owed.len(), 10);
+    for moment in COLOR {
+        assert!(owed.contains(&(format!("{moment}.png"), 1600, 900)), "{moment} at 1600");
+        assert!(owed.contains(&(format!("{moment}-1280.png"), 1280, 800)), "{moment} at 1280");
+    }
 }
 
 #[test]

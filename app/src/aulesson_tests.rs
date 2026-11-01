@@ -1792,7 +1792,7 @@ fn aulesson_broken_list_survives_a_finish() {
 /// and arms the lesson's ink.
 #[test]
 fn aulesson_night_chip_arms_the_ink() {
-    let chip = format!("colour well: {}", lesson::NIGHT);
+    let chip = format!("{}: {}", vocab::COLOR_WELL, lesson::NIGHT);
     let mut h = opened("probe");
     assert!(!h.has(&chip), "no task rings it");
     let rung = Task { ring: &[Target::Named(lesson::CHIP)], done: Done::OnStep(Stage::Drawing), step: Stage::Drawing, ..NEVER };

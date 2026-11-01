@@ -26,20 +26,31 @@ use crate::vocab;
 pub(crate) const NO_COLORS: &str = "No colors yet.";
 /// The character `Add color` makes the first time, unasked.
 pub(crate) const DEFAULT_CHARACTER: &str = "Colors";
-/// A starter swatch's cell stands this wide at the most, five to the row.
+/// A starter swatch's cell stands this wide at the most.
 const WIDEST_SWATCH: f32 = 44.0;
+/// A swatch's cell stands this wide at the least, for a pen to find.
+const NARROWEST_SWATCH: f32 = plate::CTRL_H - 4.0;
 /// A pot: the room's most clicked non-canvas target (XL law).
 const POT: egui::Vec2 = vec2(44.0, 30.0);
+/// The wheel beside a pot in `Edit colors`.
+const CHANGE_COLOR: &str = "Change this color everywhere it is used.";
 /// The popover's area.
 pub(crate) const ADDING: &str = "add color popover";
-/// The picker's square, big enough for a pen.
-const PICKER_W: f32 = 200.0;
+/// The picker's square: as wide as egui's row of numbers over it, so it leaves
+/// no gutter.
+pub(crate) const PICKER_W: f32 = 254.0;
+/// A kept color's chip in the popover.
+const KEPT: egui::Vec2 = vec2(24.0, 20.0);
+/// The chips a popover shows, the newest last.
+const KEPT_ROW: usize = 8;
 
 /// What the Colors panel reads from the Editor.
 #[derive(Clone, Copy, Default)]
 pub struct View {
     /// `Result beside`, in the Color step, the one place it means anything.
     pub beside: Option<bool>,
+    /// `Result beside` brings the Timing sheet in this document.
+    pub beside_sheet: bool,
     /// The frozen boot keeps the fold open (spec 1.5.2).
     pub more_default: bool,
 }
@@ -56,16 +67,19 @@ fn swatch_handle(name: &str) -> Option<Target> {
     }
 }
 
-/// The ten starters, two rows of five: a click arms the color and nothing
-/// else, so the document does not change.
+/// The ten starters, five to the row where a pane has the width, and four or
+/// three where it does not: a click arms the color and nothing else, so the
+/// document does not change.
 fn starters(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
-    let gap = ui.spacing().item_spacing.x;
-    let cell = ((ui.available_width() - 4.0 * gap) / 5.0).clamp(plate::CTRL_H - 4.0, WIDEST_SWATCH);
-    for row in plate::STARTER_SWATCHES.chunks(5) {
+    let (gap, room) = (ui.spacing().item_spacing.x, ui.available_width());
+    let needs = |n: usize| n as f32 * NARROWEST_SWATCH + (n - 1) as f32 * gap;
+    let columns = [5, 4].into_iter().find(|n| needs(*n) <= room).unwrap_or(3);
+    let cell = ((room - (columns - 1) as f32 * gap) / columns as f32).clamp(NARROWEST_SWATCH, WIDEST_SWATCH);
+    for row in plate::STARTER_SWATCHES.chunks(columns) {
         ui.horizontal(|ui| {
             for (name, color) in row {
                 let held = canvas.brush_color == color.to_array();
-                let resp = plate::swatch_cell(ui, vec2(cell, plate::CTRL_H), *color, held, name);
+                let resp = plate::swatch_cell(ui, vec2(cell, plate::CTRL_H), *color, held, name).card(*name);
                 if let Some(handle) = swatch_handle(name) {
                     plate::mark(ui, resp.rect, handle);
                 }
@@ -100,6 +114,26 @@ fn add_color(state: &mut AppState, canvas: &CanvasView) {
     state.meta_dirty = true;
 }
 
+/// What the popover would otherwise hide on the board under it: the new
+/// color's name, then the character's latest colors, the new one ringed. A
+/// press on `Add color` shows here at once, whatever color it took.
+fn kept_ui(ui: &mut egui::Ui, roles: &[ColorRole], newest: usize) {
+    ui.label(egui::RichText::new(&roles[newest].name).font(plate::Role::Chrome.font()).color(plate::INK));
+    ui.horizontal(|ui| {
+        for (ri, role) in roles.iter().enumerate().skip(roles.len().saturating_sub(KEPT_ROW)) {
+            let (at, resp) = ui.allocate_exact_size(KEPT, Sense::hover());
+            let new = ri == newest;
+            plate::speak(&resp, egui::WidgetType::Label, Some(new), &format!("{}: {}", vocab::KEPT_COLOR, role.name));
+            let well = at.shrink(2.0);
+            let p = ui.painter();
+            p.rect_filled(well, plate::R_SHEET, plate::chip([role.color[0], role.color[1], role.color[2], 255]));
+            let (ring, ink) = if new { (2.0, plate::BLUE) } else { (1.0, plate::INK3) };
+            p.rect_stroke(well, plate::R_SHEET, egui::Stroke::new(ring, ink), egui::StrokeKind::Outside);
+        }
+    });
+    ui.add_space(2.0);
+}
+
 /// The popover over the newest color: egui's own picker, which stays open
 /// across picks. Only a press elsewhere or Esc closes it: a press on `Add
 /// color` starts the next color under it.
@@ -107,12 +141,11 @@ fn adding_ui(ui: &egui::Ui, state: &mut AppState, canvas: &mut CanvasView, add: 
     let Some((ci, ri)) = state.palette_adding else {
         return;
     };
-    let role = state.palettes.characters.get_mut(ci).and_then(|c| c.roles.get_mut(ri));
-    let Some(role) = role else {
+    let Some(roles) = state.palettes.characters.get(ci).map(|c| &c.roles).filter(|r| ri < r.len()) else {
         state.palette_adding = None;
         return;
     };
-    let mut color = plate::chip(role.color);
+    let mut color = plate::chip(roles[ri].color);
     let mut open = true;
     let shown = egui::Popup::from_response(add)
         .id(egui::Id::new(ADDING))
@@ -120,14 +153,16 @@ fn adding_ui(ui: &egui::Ui, state: &mut AppState, canvas: &mut CanvasView, add: 
         .close_behavior(egui::PopupCloseBehavior::IgnoreClicks)
         .show(|ui| {
             ui.spacing_mut().slider_width = PICKER_W;
+            kept_ui(ui, roles, ri);
             color_picker_color32(ui, &mut color, Alpha::Opaque)
         });
     let Some(shown) = shown else {
         return;
     };
     if shown.inner {
-        role.color = color.to_srgba_unmultiplied();
-        canvas.brush_color = role.color;
+        let chosen = color.to_srgba_unmultiplied();
+        state.palettes.characters[ci].roles[ri].color = chosen;
+        canvas.brush_color = chosen;
         state.meta_dirty = true;
     }
     let keeps = |at: egui::Pos2| shown.response.rect.contains(at) || add.rect.contains(at);
@@ -147,12 +182,12 @@ fn pot(ui: &mut egui::Ui, role: &ColorRole, armed: bool) -> egui::Response {
     plate::speak(&presp, egui::WidgetType::Button, Some(armed), &format!("paint pot: {}", role.name));
     let p = ui.painter();
     let well = pr.shrink(2.0);
-    p.rect_filled(well.expand(2.0), 0.0, plate::WELL);
-    p.rect_filled(well, 0.0, plate::chip([role.color[0], role.color[1], role.color[2], 255]));
+    p.rect_filled(well.expand(2.0), plate::R_SHEET, plate::WELL);
+    p.rect_filled(well, plate::R_SHEET, plate::chip([role.color[0], role.color[1], role.color[2], 255]));
     if armed {
-        p.rect_stroke(well.expand(1.0), 0.0, egui::Stroke::new(2.0, plate::TALLY), egui::StrokeKind::Outside);
+        p.rect_stroke(well.expand(1.0), plate::R_SHEET, egui::Stroke::new(2.0, plate::BLUE), egui::StrokeKind::Outside);
     } else {
-        p.rect_stroke(well, 0.0, egui::Stroke::new(1.0, plate::LEGEND), egui::StrokeKind::Inside);
+        p.rect_stroke(well, plate::R_SHEET, egui::Stroke::new(1.0, plate::INK2), egui::StrokeKind::Inside);
     }
     presp
 }
@@ -181,10 +216,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view
     adding_ui(ui, state, canvas, &add.inner);
     let mut beside = view.beside.unwrap_or(false);
     let beside_row = view.beside.map(|_| plate::latch(ui, &mut beside, vocab::RESULT_BESIDE));
-    let asked = beside_row.is_some_and(|row| {
-        row.card("Show the Timing sheet, Layers and the Result beside the paper.").clicked()
-    });
+    let beside_card = if view.beside_sheet {
+        "Show the Timing sheet, Layers and the Result beside the paper."
+    } else {
+        "Show Layers and the Result beside the paper."
+    };
+    let asked = beside_row.is_some_and(|row| row.card(beside_card).clicked());
     ui.add_space(2.0);
+    // Above the scroll: an edit far down a long board raises this in view.
+    recolour_offer_ui(ui, state);
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| board(ui, state, canvas, view));
@@ -198,14 +238,14 @@ fn board(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view:
     if n_chars > 0 && state.active_character >= n_chars {
         state.active_character = n_chars - 1;
     }
-    recolour_offer_ui(ui, state);
     let edit = state.palette_edit;
     let mut more = false;
     if n_chars == 0 {
         ui.label(egui::RichText::new(NO_COLORS).color(plate::legend_dim()));
     } else {
         more = state.palette_more.unwrap_or(view.more_default);
-        if plate::fold_row(ui, vocab::COLOR_DETAILS, ui.available_width(), more).clicked() {
+        // `Edit colors` shows it all, so the fold would do nothing.
+        if !edit && plate::fold_row(ui, vocab::COLOR_DETAILS, ui.available_width(), more).clicked() {
             more = !more;
             state.palette_more = Some(more);
         }
@@ -273,7 +313,7 @@ fn board(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view:
                         // Edit colors: the wheel lives here and only here;
                         // edits propagate everywhere.
                         let mut rgb = [role.color[0], role.color[1], role.color[2]];
-                        if ui.color_edit_button_srgb(&mut rgb).changed() {
+                        if ui.color_edit_button_srgb(&mut rgb).card(CHANGE_COLOR).changed() {
                             let old = role.color;
                             role.color = [rgb[0], rgb[1], rgb[2], role.color[3]];
                             chip_changed = Some((ri, old, role.color));
@@ -281,7 +321,9 @@ fn board(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view:
                         }
                         if plate::text_field(
                             ui,
-                            egui::TextEdit::singleline(&mut role.name).desired_width(72.0),
+                            egui::TextEdit::singleline(&mut role.name)
+                                .hint_text(vocab::COLOR_NAME)
+                                .desired_width(72.0),
                         )
                         .changed()
                         {
@@ -291,24 +333,17 @@ fn board(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView, view:
                             remove_role = Some(ri);
                         }
                     } else {
-                        // Mid-metronome: the name, Struck (the
-                        // colour designer authored it), nothing else.
+                        // Mid-metronome: the name, in full ink (the colour
+                        // designer authored it), nothing else.
                         ui.label(
                             egui::RichText::new(role.name.clone())
                                 .font(plate::Role::Small.font())
-                                .color(plate::STRUCK),
+                                .color(plate::INK),
                         );
                     }
                 });
             });
             ui.add_space(4.0);
-        }
-        if edit && ui.button(format!("+ {}", vocab::COLOR_NAME)).clicked() {
-            ch.roles.push(ColorRole {
-                name: "color".into(),
-                color: [200, 200, 200, 255],
-            });
-            model_changed = true;
         }
     }
     if let Some(ri) = remove_role {

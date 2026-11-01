@@ -55,6 +55,10 @@ const PICTURE_FOOT: f32 = 2.0;
 const PICTURE_SIDE: f32 = 4.0;
 /// A picture's largest size in pixels, twice what it stands at on the sheet.
 const PICTURE_PX: [usize; 2] = [96, 52];
+/// What a covered cell shows of its ink at the least, times the strongest
+/// pixel in it: a thin line reads at 3:1 on its sheet, and a pale wash, whose
+/// strongest pixel is pale too, stays pale.
+const INK_FLOOR: f32 = 0.8;
 
 /// One sheet: a run of the active track.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,13 +245,17 @@ fn texel(tile: &TileData, x: usize, y: usize, opacity: f32) -> [f32; 4] {
 
 /// The drawing's visible layers on white paper, small: every pixel on the
 /// paper is composited, then averaged into its cell. A thin line must still
-/// read at a twentieth of its size, so what covers a cell is lifted. None when
-/// nothing is drawn on the paper. Runs on the job's thread.
+/// read at a twentieth of its size, so what covers a cell is lifted, and on a
+/// shrunk paper it takes the cells round it too: drawn at half the texture's
+/// size, a line one cell wide falls between the screen's pixels. A paper
+/// smaller than a picture keeps its own pixels, each with its own cell. None
+/// when nothing is drawn on the paper. Runs on the job's thread.
 pub(crate) fn picture(layers: &[PictureLayer], paper: [usize; 2]) -> Option<egui::ColorImage> {
     let [width, height] = paper.map(|side| side.max(1));
     let fit = (PICTURE_PX[0] as f32 / width as f32).min(PICTURE_PX[1] as f32 / height as f32);
-    let cells = [width, height].map(|side| ((side as f32 * fit).round() as usize).max(1));
+    let cells = [width, height].map(|side| ((side as f32 * fit).round() as usize).clamp(1, side));
     let mut sums = vec![[0.0f32; 4]; cells[0] * cells[1]];
+    let mut peaks = vec![0.0f32; cells[0] * cells[1]];
     let mut coords: Vec<TileCoord> = layers.iter().flat_map(|(tiles, _)| tiles.keys().copied()).collect();
     coords.sort_unstable();
     coords.dedup();
@@ -270,10 +278,11 @@ pub(crate) fn picture(layers: &[PictureLayer], paper: [usize; 2]) -> Option<egui
                     let s = texel(tile, x, y, *opacity);
                     over = std::array::from_fn(|c| s[c] + over[c] * (1.0 - s[3]));
                 }
-                let sum = &mut sums[row * cells[0] + px as usize * cells[0] / width];
+                let cell = row * cells[0] + px as usize * cells[0] / width;
                 for c in 0..4 {
-                    sum[c] += over[c];
+                    sums[cell][c] += over[c];
                 }
+                peaks[cell] = peaks[cell].max(over[3]);
             }
         }
     }
@@ -284,19 +293,34 @@ pub(crate) fn picture(layers: &[PictureLayer], paper: [usize; 2]) -> Option<egui
         spans
     };
     let (wide, tall) = (spans(width, cells[0]), spans(height, cells[1]));
-    let mut drawn = false;
-    let pixels = sums
+    // Each cell's ink, unmixed, and how much of it shows.
+    let inks: Vec<[f32; 4]> = sums
         .iter()
+        .zip(&peaks)
         .enumerate()
-        .map(|(at, sum)| {
+        .map(|(at, (sum, peak))| {
             let cover = (sum[3] / (wide[at % cells[0]] * tall[at / cells[0]])).clamp(0.0, 1.0);
-            if cover <= 0.0 {
+            let a = sum[3].max(f32::EPSILON);
+            [sum[0] / a, sum[1] / a, sum[2] / a, cover.sqrt().max(INK_FLOOR * peak.min(1.0))]
+        })
+        .collect();
+    let reach = usize::from(fit < 1.0);
+    let strongest = |at: usize| {
+        let (x, y) = (at % cells[0], at / cells[0]);
+        let around = |here: usize, side: usize| here.saturating_sub(reach)..=(here + reach).min(side - 1);
+        let near = around(y, cells[1]).flat_map(|y| around(x, cells[0]).map(move |x| y * cells[0] + x));
+        near.fold(inks[at], |best, cell| if inks[cell][3] > best[3] { inks[cell] } else { best })
+    };
+    let mut drawn = false;
+    let pixels = (0..inks.len())
+        .map(|at| {
+            let [r, g, b, shown] = strongest(at);
+            if shown <= 0.0 {
                 return plate::ON_FILL;
             }
             drawn = true;
-            let (lifted, a) = (cover.sqrt(), sum[3].max(f32::EPSILON));
-            let shade = |c: f32| (((c / a).clamp(0.0, 1.0) * lifted + 1.0 - lifted) * 255.0).round() as u8;
-            plate::chip([shade(sum[0]), shade(sum[1]), shade(sum[2]), 255])
+            let shade = |c: f32| ((c.clamp(0.0, 1.0) * shown + 1.0 - shown) * 255.0).round() as u8;
+            plate::chip([shade(r), shade(g), shade(b), 255])
         })
         .collect();
     drawn.then_some(egui::ColorImage { size: cells, source_size: vec2(cells[0] as f32, cells[1] as f32), pixels })
@@ -881,12 +905,22 @@ fn edge_grip(painter: &egui::Painter, at: Rect) {
     }
 }
 
-/// Where `texture` stands on a sheet: under the peg hole, at its own shape.
-fn picture_rect(at: Rect, texture: &egui::TextureHandle) -> Rect {
+/// Where a picture of `size` stands on a sheet: under the peg hole, at its own
+/// shape.
+pub(crate) fn picture_rect(at: Rect, size: egui::Vec2) -> Rect {
     let room = vec2(at.width() - 2.0 * PICTURE_SIDE, SHEET_H - PICTURE_TOP - PICTURE_FOOT);
-    let size = texture.size_vec2();
     let fit = (room.x / size.x).min(room.y / size.y);
     Rect::from_min_size(pos2(at.left() + PICTURE_SIDE, at.top() + PICTURE_TOP), size * fit)
+}
+
+/// A sheet's number on its picture, where the sheet has no room beside it: on
+/// the left, clear of `Used twice`'s mark and the current sheet's grip.
+fn number_chip(painter: &egui::Painter, picture: Rect, number: u32) {
+    let galley = painter.layout_no_wrap(number.to_string(), plate::Role::Small.font(), plate::INK2);
+    let size = galley.size() + vec2(4.0, 0.0);
+    let chip = Rect::from_min_size(picture.left_bottom() - vec2(0.0, size.y), size);
+    painter.rect_filled(chip, plate::R_SHEET, plate::PAPER);
+    painter.galley(chip.min + vec2(2.0, 0.0), galley, plate::INK2);
 }
 
 fn paint_sheet(
@@ -911,24 +945,30 @@ fn paint_sheet(
     let twice = drawings.get(&id).is_some_and(|t| t.uses > 1);
     let worded = twice && at.width() >= WORDED;
     let texture = pictures.held.get(&id).and_then(|(_, texture)| texture.as_ref()).filter(|_| at.width() >= PICTURED);
-    let beside = texture.map(|texture| {
-        let shown = picture_rect(at, texture);
+    let shown = texture.map(|texture| {
+        let shown = picture_rect(at, texture.size_vec2());
         let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
         painter.image(texture.id(), shown, uv, plate::ON_FILL);
-        painter.rect_stroke(shown, 0.0, Stroke::new(1.0, plate::LEGEND), StrokeKind::Outside);
-        shown.right()
+        painter.rect_stroke(shown, 0.0, Stroke::new(1.0, plate::INK2), StrokeKind::Outside);
+        shown
     });
-    // The picture takes the number's place when the sheet holds no room for
-    // both.
-    if at.width() >= NUMBERED && beside.is_none_or(|right| at.right() - right >= NUMBERED) {
-        // Beside the badge's words when they show, in the middle when not.
-        let (x, align) = match beside {
-            Some(right) => (right + 6.0, Align2::LEFT_CENTER),
-            None if worded => (at.left() + 8.0, Align2::LEFT_CENTER),
-            None => (at.center().x, Align2::CENTER_CENTER),
+    if at.width() >= NUMBERED {
+        // Beside the badge's words when they show, in the middle when not,
+        // and on the picture when the sheet holds no room for both.
+        let number = number_of(drawings, id);
+        let at_rest = match shown {
+            Some(picture) if at.right() - picture.right() < NUMBERED => {
+                number_chip(painter, picture, number);
+                None
+            }
+            Some(picture) => Some((picture.right() + 6.0, Align2::LEFT_CENTER)),
+            None if worded => Some((at.left() + 8.0, Align2::LEFT_CENTER)),
+            None => Some((at.center().x, Align2::CENTER_CENTER)),
         };
-        let font = plate::Role::Chrome.font();
-        painter.text(pos2(x, at.top() + SHEET_ROW), align, number_of(drawings, id).to_string(), font, plate::INK2);
+        if let Some((x, align)) = at_rest {
+            let font = plate::Role::Chrome.font();
+            painter.text(pos2(x, at.top() + SHEET_ROW), align, number.to_string(), font, plate::INK2);
+        }
     }
     if twice {
         twice_badge(painter, at, worded);

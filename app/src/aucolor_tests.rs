@@ -3,7 +3,7 @@
 
 use anim_core::ids::DrawingId;
 use anim_core::model::LayerRole;
-use anim_core::raster::{TILE, TILE_LEN, TileData, f32_to_f16_bits};
+use anim_core::raster::{TILE, TILE_LEN, TileCoord, TileData, f16_bits_to_f32, f32_to_f16_bits};
 use anim_core::xsheet::Exposure;
 use eframe::egui;
 use egui::{Key, Pos2, Rect, vec2};
@@ -14,14 +14,16 @@ use crate::config::Config;
 use crate::doc::{self, AppState};
 use crate::measure::{self, Act, Recorder};
 use crate::palette::{CharacterPalette, ColorRole};
-use crate::palette_panel::{ADDING, DEFAULT_CHARACTER, NO_COLORS};
+use crate::palette_panel::{ADDING, DEFAULT_CHARACTER, NO_COLORS, PICKER_W};
 use crate::strip::{self, Strip};
 use crate::testkit::{EditorHarness, PanelHarness};
 use crate::workspace::{Pane, Stage};
-use crate::{plate, rail, same_shape, templates, vocab};
+use crate::{auguide_tests, aulesson_tests, plate, rail, same_shape, say, templates, vocab};
 
 const SIZES: [(f32, f32); 2] = [(1600.0, 900.0), (1280.0, 800.0)];
 const INK: [f32; 4] = [0.1, 0.1, 0.1, 1.0];
+/// The sentence Color's Say line opens on (spec AU13 item 7).
+const PICK_THEN_TAP: &str = "Pick a color, then tap an area.";
 
 fn settle(h: &mut EditorHarness) {
     h.run();
@@ -40,6 +42,14 @@ fn enter(h: &mut EditorHarness, stage: Stage) {
 
 fn color_room(w: f32, tall: f32) -> EditorHarness {
     let mut h = EditorHarness::as_shipped();
+    sized(&mut h, w, tall);
+    enter(&mut h, Stage::InkPaint);
+    h
+}
+
+/// The Color step of a new animation.
+fn film_color_room(w: f32, tall: f32) -> EditorHarness {
+    let mut h = EditorHarness::with_state_shipped(auguide_tests::film().build());
     sized(&mut h, w, tall);
     enter(&mut h, Stage::InkPaint);
     h
@@ -65,7 +75,11 @@ fn in_pane(h: &EditorHarness, pane: Pane, name: &str) {
 }
 
 fn well(name: &str) -> String {
-    format!("colour well: {name}")
+    format!("{}: {name}", vocab::COLOR_WELL)
+}
+
+fn kept(name: &str) -> String {
+    format!("{}: {name}", vocab::KEPT_COLOR)
 }
 
 /// A blot of ink at `x`, on the armed layer.
@@ -135,10 +149,11 @@ fn aucolor_recipe_is_canvas_and_right_tabs() {
     assert!(same_shape(&h.editor().dock, &Stage::dock_with_result()));
 }
 
-/// One click brings the old split back, and one click takes it away.
+/// One click brings the old split back on an animation, and one click takes
+/// it away.
 #[test]
 fn aucolor_result_beside_restores_todays_split() {
-    let mut h = color_room(1600.0, 900.0);
+    let mut h = film_color_room(1600.0, 900.0);
     let plain = Stage::InkPaint.dock();
     h.click(vocab::RESULT_BESIDE);
     settle(&mut h);
@@ -154,7 +169,7 @@ fn aucolor_result_beside_restores_todays_split() {
 /// The choice stands across the steps, and it reaches the disk at the click.
 #[test]
 fn aucolor_result_beside_is_remembered() {
-    let mut h = color_room(1600.0, 900.0);
+    let mut h = film_color_room(1600.0, 900.0);
     assert!(!Config::load_from(h.data_dir()).0.ui.result_in_color);
     h.click(vocab::RESULT_BESIDE);
     settle(&mut h);
@@ -165,7 +180,8 @@ fn aucolor_result_beside_is_remembered() {
     assert!(same_shape(&h.editor().dock, &Stage::dock_with_result()), "{:?}", panes(&h));
 }
 
-/// The sheet's restart test, on this choice.
+/// The sheet's restart test, on this choice. The ready paper is a drawing, so
+/// the choice comes back without a sheet.
 #[test]
 fn aucolor_result_choice_survives_a_restart() {
     let mut first = EditorHarness::as_shipped();
@@ -176,7 +192,7 @@ fn aucolor_result_choice_survives_a_restart() {
     let mut second = EditorHarness::with_dir_shipped(first.quit());
     settle(&mut second);
     enter(&mut second, Stage::InkPaint);
-    assert!(same_shape(&second.editor().dock, &Stage::dock_with_result()), "held over the restart");
+    assert!(same_shape(&second.editor().dock, &Stage::dock_with_result_no_sheet()), "held over the restart");
     second.click(vocab::RESULT_BESIDE);
     settle(&mut second);
     assert!(!Config::load_from(second.data_dir()).0.ui.result_in_color, "saved at the click");
@@ -201,14 +217,133 @@ fn aucolor_protect_line_art_is_still_forced() {
     assert!(!h.state().view.line_guard, "Color's own");
 }
 
-/// AU18's review: a comic's Color has no sheet in it.
+fn comic() -> AppState {
+    templates::ALL[templates::COMIC].build()
+}
+
+#[track_caller]
+fn beside_with_no_sheet(h: &EditorHarness) {
+    assert!(same_shape(&h.editor().dock, &Stage::dock_with_result_no_sheet()), "{:?}", panes(h));
+    assert!(!panes(h).contains(&Pane::XSheet), "{:?}", panes(h));
+    for pane in [Pane::Layers, Pane::Viewer(0), Pane::Palette, Pane::PaintCheck] {
+        assert!(panes(h).contains(&pane), "{pane:?}");
+    }
+}
+
+/// AU18's review: a comic's Color has no sheet in it, and neither has a
+/// drawing's, with `Result beside` on or off.
 #[test]
 fn aucolor_comic_color_has_no_sheet() {
-    let mut h = EditorHarness::with_state_shipped(templates::ALL[templates::COMIC].build());
+    for mut h in [EditorHarness::with_state_shipped(comic()), EditorHarness::as_shipped()] {
+        sized(&mut h, 1600.0, 900.0);
+        enter(&mut h, Stage::InkPaint);
+        assert_eq!(panes(&h), [Pane::Canvas, Pane::Palette, Pane::PaintCheck, Pane::Viewer(0)]);
+        assert!(h.has(vocab::ADD_COLOR));
+        h.click(vocab::RESULT_BESIDE);
+        settle(&mut h);
+        beside_with_no_sheet(&h);
+        h.click(vocab::RESULT_BESIDE);
+        settle(&mut h);
+        assert_eq!(panes(&h), [Pane::Canvas, Pane::Palette, Pane::PaintCheck, Pane::Viewer(0)]);
+    }
+}
+
+/// The memory is global: one press on an animation reaches every later
+/// document, and it brings a sheet only where a sheet belongs.
+#[test]
+fn aucolor_animation_memory_puts_no_sheet_on_a_page() {
+    let mut film = film_color_room(1600.0, 900.0);
+    film.click(vocab::RESULT_BESIDE);
+    settle(&mut film);
+    assert!(panes(&film).contains(&Pane::XSheet));
+    let mut h = EditorHarness::with_dir_shipped(film.quit());
     sized(&mut h, 1600.0, 900.0);
+    assert!(h.rig().config.ui.result_in_color, "the memory stands");
     enter(&mut h, Stage::InkPaint);
-    assert_eq!(panes(&h), [Pane::Canvas, Pane::Palette, Pane::PaintCheck, Pane::Viewer(0)]);
-    assert!(h.has(vocab::ADD_COLOR));
+    beside_with_no_sheet(&h);
+    h.rebuild_editor(comic());
+    settle(&mut h);
+    enter(&mut h, Stage::InkPaint);
+    beside_with_no_sheet(&h);
+    h.rebuild_editor(auguide_tests::film().build());
+    settle(&mut h);
+    enter(&mut h, Stage::InkPaint);
+    assert!(same_shape(&h.editor().dock, &Stage::dock_with_result()), "an animation's own: {:?}", panes(&h));
+}
+
+/// The card says what the latch brings, on each kind.
+#[test]
+fn aucolor_result_card_says_what_it_brings() {
+    const SHEET: &str = "Show the Timing sheet, Layers and the Result beside the paper.";
+    const NO_SHEET: &str = "Show Layers and the Result beside the paper.";
+    for (mut h, words, not) in
+        [(film_color_room(1600.0, 900.0), SHEET, NO_SHEET), (color_room(1600.0, 900.0), NO_SHEET, SHEET)]
+    {
+        h.hover(vocab::RESULT_BESIDE);
+        settle(&mut h);
+        assert!(says(&h, words), "{:?}", h.painted_text());
+        assert!(!says(&h, not));
+    }
+}
+
+/// Feedback spec 3.10's rule on this memory: it stops at a lesson's door, the
+/// strip a Color task walks stands, a press holds for the run alone, and Leave
+/// gives the person's memory back.
+#[test]
+fn aucolor_result_memory_stays_out_of_a_lesson() {
+    let mut h = film_color_room(1600.0, 900.0);
+    h.click(vocab::RESULT_BESIDE);
+    settle(&mut h);
+    assert!(h.editor().sheet_on_screen(), "the person's own");
+    enter(&mut h, Stage::Drawing);
+    // This asserts the step's own recipe, and raises the strip.
+    auguide_tests::strip_up_for_color(&mut h);
+    assert!(same_shape(&h.editor().dock, &Stage::InkPaint.dock()), "{:?}", panes(&h));
+    let ring = h.ring_rect().expect("strip.next stands on the strip");
+    assert!(plate::strip_sheets(&h.ctx()).iter().any(|sheet| sheet.intersects(ring)), "{ring:?}");
+    h.click(vocab::RESULT_BESIDE);
+    settle(&mut h);
+    assert!(h.editor().sheet_on_screen(), "the key works");
+    assert!(h.rig().config.ui.result_in_color && h.editor().result_in_color, "and the memory stands");
+    h.click(vocab::RESULT_BESIDE);
+    settle(&mut h);
+    assert!(!h.editor().sheet_on_screen(), "and back");
+    assert!(h.rig().config.ui.result_in_color && h.editor().result_in_color, "the press was the run's");
+    assert!(Config::load_from(h.data_dir()).0.ui.result_in_color, "on the disk too");
+    h.editor_mut().leave_lesson();
+    settle(&mut h);
+    assert!(same_shape(&h.editor().dock, &Stage::dock_with_result()), "Leave: {:?}", panes(&h));
+}
+
+/// The other way round: with the memory off a press in a run stores nothing.
+#[test]
+fn aucolor_a_press_in_a_lesson_is_not_remembered() {
+    let mut h = film_color_room(1600.0, 900.0);
+    auguide_tests::strip_up_for_color(&mut h);
+    h.click(vocab::RESULT_BESIDE);
+    settle(&mut h);
+    assert!(h.editor().sheet_on_screen());
+    assert!(!h.rig().config.ui.result_in_color && !h.editor().result_in_color);
+    assert!(!Config::load_from(h.data_dir()).0.ui.result_in_color);
+    h.editor_mut().leave_lesson();
+    settle(&mut h);
+    assert!(same_shape(&h.editor().dock, &Stage::InkPaint.dock()), "Leave: {:?}", panes(&h));
+}
+
+/// Color's memory stays Color's: Draw's paper and the pen's canvas read the
+/// same with it on, on the screen a person draws on.
+#[test]
+fn aucolor_draw_shares_do_not_move() {
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1600.0, 900.0);
+    let before = measure::paper_share(&h);
+    assert!(before.paper >= 63.0 && before.pen_land >= 82.5, "{before:?}");
+    enter(&mut h, Stage::InkPaint);
+    h.click(vocab::RESULT_BESIDE);
+    settle(&mut h);
+    enter(&mut h, Stage::Drawing);
+    assert_eq!(panes(&h), [Pane::Canvas]);
+    assert_eq!(measure::paper_share(&h), before);
 }
 
 // ---- the swatches ----
@@ -228,6 +363,35 @@ fn aucolor_swatch_changes_no_document() {
     }
     assert_eq!(h.state().engine.position(), mark);
     assert!(h.state().palettes.characters.is_empty(), "no character came of it");
+}
+
+/// The tightest room a swatch stands in: Color beside the lesson card at
+/// 832×520. Every well, lesson swatches among them, is whole in the pane.
+#[test]
+fn aucolor_swatches_stand_whole_in_the_tightest_pane() {
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 832.0, 520.0);
+    aulesson_tests::open(&mut h, "probe-film");
+    enter(&mut h, Stage::InkPaint);
+    let room = pane_rect(&h, Pane::Palette);
+    assert!(room.width() < 160.0, "the fixture's premise: {room:?}");
+    for (name, _) in plate::STARTER_SWATCHES {
+        in_pane(&h, Pane::Palette, &well(name));
+    }
+    let side = |name: &str| h.rect(&well(name)).width();
+    assert!(side("Red") >= plate::CTRL_H - 4.0, "the pen's floor: {}", side("Red"));
+    h.click(&well("Brown"));
+    settle(&mut h);
+    assert_eq!(h.editor().canvas.brush_color, plate::STARTER_SWATCHES[9].1.to_array());
+}
+
+/// Each starter says its name on a pointer's rest.
+#[test]
+fn aucolor_swatch_says_its_name() {
+    let mut h = color_room(1600.0, 900.0);
+    h.hover(&well("Peach"));
+    settle(&mut h);
+    assert!(says(&h, "Peach"), "{:?}", h.painted_text());
 }
 
 /// The spec's ten, to the digit.
@@ -352,6 +516,74 @@ fn aucolor_popover_stays_open_across_picks() {
     assert_eq!(h.editor().canvas.brush_color, plate::STARTER_SWATCHES[6].1.to_array(), "and it did its own work");
 }
 
+/// The popover stands over the board, so it shows what the board would: the
+/// new color's name and the character's colors, the newest ringed. A second
+/// press in the color the brush already holds changes the bar over them not
+/// at all, so this is all that says it happened.
+#[test]
+fn aucolor_popover_shows_what_it_keeps() {
+    let mut h = color_room(1600.0, 900.0);
+    h.click(vocab::ADD_COLOR);
+    settle(&mut h);
+    let at = popover(&h).expect("the popover");
+    assert!(at.contains_rect(h.rect(&kept("Color 1"))), "{at:?}");
+    assert!(h.painted_text_in(at).iter().any(|w| w == "Color 1"), "{:?}", h.painted_text_in(at));
+    h.click(vocab::ADD_COLOR);
+    settle(&mut h);
+    let at = popover(&h).expect("the popover");
+    assert!(h.painted_text_in(at).iter().any(|w| w == "Color 2"), "{:?}", h.painted_text_in(at));
+    assert!(!h.painted_text_in(at).iter().any(|w| w == "Color 1"), "one heading");
+    let (old, new) = (h.rect(&kept("Color 1")), h.rect(&kept("Color 2")));
+    assert!(at.contains_rect(old) && at.contains_rect(new), "{at:?} {old:?} {new:?}");
+    assert!(old.right() <= new.left(), "the newest is last");
+    assert_eq!(h.node_toggled(&kept("Color 2")), Some(true), "and ringed");
+    assert_eq!(h.node_toggled(&kept("Color 1")), Some(false));
+    for _ in 0..8 {
+        h.click(vocab::ADD_COLOR);
+        settle(&mut h);
+    }
+    let at = popover(&h).expect("the popover");
+    assert!(at.contains_rect(h.rect(&kept("Color 10"))), "the newest of many");
+    assert!(!h.has(&kept("Color 1")), "the row holds the latest");
+}
+
+/// The square meets the row of numbers over it, and the taller popover stands
+/// on the smallest window.
+#[test]
+fn aucolor_popover_has_no_gutter_and_fits() {
+    let mut h = color_room(1600.0, 900.0);
+    h.click(vocab::ADD_COLOR);
+    settle(&mut h);
+    let wide = popover(&h).expect("the popover").width();
+    assert!(wide - PICKER_W <= 16.0, "{wide} over {PICKER_W}");
+    let mut h = color_room(832.0, 520.0);
+    h.click(vocab::ADD_COLOR);
+    settle(&mut h);
+    let at = popover(&h).expect("the popover");
+    assert!(h.ctx().content_rect().contains_rect(at), "{at:?}");
+}
+
+/// A step key leaves no press behind, so the popover goes with the step, and
+/// it does not come back on its own over a color that may be painted by then.
+#[test]
+fn aucolor_popover_goes_with_its_step() {
+    let mut h = color_room(1600.0, 900.0);
+    h.click(vocab::ADD_COLOR);
+    settle(&mut h);
+    assert!(popover(&h).is_some());
+    enter(&mut h, Stage::Drawing);
+    assert_eq!(h.state().palette_adding, None);
+    enter(&mut h, Stage::InkPaint);
+    assert!(popover(&h).is_none(), "not unasked");
+    // Colors gone with no step change, as a dock swap does it.
+    h.click(vocab::ADD_COLOR);
+    settle(&mut h);
+    assert!(h.state().palette_adding.is_some());
+    h.editor_mut().dock = Stage::Drawing.dock();
+    settle(&mut h);
+    assert_eq!(h.state().palette_adding, None);
+}
+
 /// Spec AU13 item 4: the header is above the scroll, however long the board.
 #[test]
 fn aucolor_edit_colors_is_never_below_the_fold() {
@@ -388,6 +620,10 @@ fn aucolor_edit_colors_is_never_below_the_fold() {
         settle(&mut h);
         in_pane(&h, Pane::Palette, vocab::EDIT_COLORS);
         in_pane(&h, Pane::Palette, "REMOVE CHARACTER");
+        // An edit far down the board raises its offer where it can be seen.
+        for name in ["Recolor this shot", "Keep paint"] {
+            in_pane(&h, Pane::Palette, name);
+        }
     }
     // The narrowest, shortest pane the dock allows.
     let mut s = AppState::new_project("t", 64, 48, 24, 72.0);
@@ -399,6 +635,31 @@ fn aucolor_edit_colors_is_never_below_the_fold() {
     });
     let (add, edit) = (p.rect(vocab::ADD_COLOR), p.rect(vocab::EDIT_COLORS));
     assert!(edit.bottom() <= size.y && add.bottom() <= size.y, "{add:?} {edit:?}");
+}
+
+/// Edit colors holds one way to add a color and no fold that does nothing, and
+/// the wheel beside a pot says what it is.
+#[test]
+fn aucolor_edit_mode_has_one_add_and_no_dead_fold() {
+    let mut h = color_room(1600.0, 900.0);
+    let mut ana = CharacterPalette::new("Ana");
+    ana.roles = vec![ColorRole { name: "skin".into(), color: [240, 200, 160, 255] }];
+    h.state_mut().palettes.characters.push(ana);
+    settle(&mut h);
+    assert!(h.has(vocab::COLOR_DETAILS));
+    h.click(vocab::EDIT_COLORS);
+    settle(&mut h);
+    assert!(!h.has(vocab::COLOR_DETAILS), "Edit colors shows it all");
+    assert!(!h.has(&format!("+ {}", vocab::COLOR_NAME)), "{}", h.describe());
+    assert!(h.has("remove"));
+    h.click(vocab::ADD_COLOR);
+    settle(&mut h);
+    assert_eq!(role_names(&h), ["skin", "Color 2"], "named as Add color names it");
+    h.key(Key::Escape);
+    settle(&mut h);
+    h.click(vocab::EDIT_COLORS);
+    settle(&mut h);
+    assert!(h.has(vocab::COLOR_DETAILS), "and it comes back");
 }
 
 /// Disclosed: names and groups stay out of the way until they are asked for.
@@ -428,8 +689,12 @@ fn beside_on(h: &mut EditorHarness) {
     settle(h);
 }
 
+fn hint(h: &EditorHarness) -> Option<String> {
+    h.editor().say.hint.as_ref().map(|s| s.words.clone())
+}
+
 /// Spec AU13 item 6: on a held frame the Layers pane has one row, which
-/// changes nothing, and the Say lane reads the hold.
+/// changes nothing, and the Say line reads the hold, in Color.
 #[test]
 fn aucolor_held_frame_row_is_read_only() {
     let mut h = EditorHarness::with_state_shipped(two_inked(3));
@@ -437,13 +702,55 @@ fn aucolor_held_frame_row_is_read_only() {
     beside_on(&mut h);
     assert!(!h.has(vocab::GO_TO_THIS_DRAWING), "a key has its layers");
     h.state_mut().goto(1);
+    h.state_mut().status.clear();
     settle(&mut h);
     assert!(h.state().strip_layers().is_empty());
     assert!(h.has(vocab::GO_TO_THIS_DRAWING), "{}", h.describe());
-    assert!(h.painted_text().iter().any(|w| w.starts_with("Held from frame 1")), "{:?}", h.painted_text());
-    let mark = h.state().engine.position();
+    let words = h.painted_text().into_iter().find(|w| w.starts_with("Held from frame 1"));
+    let words = words.unwrap_or_else(|| panic!("{:?}", h.painted_text()));
+    const HELD: &str = "This drawing stays on screen for 3 frames.";
+    assert_eq!(hint(&h).as_deref(), Some(HELD));
+    assert!(says(&h, HELD), "{:?}", h.painted_text());
+    // A press on the row itself changes nothing.
+    let (mark, row) = (h.state().engine.position(), h.painted_block(&words).0);
+    h.click_pos(row.center());
     settle(&mut h);
     assert_eq!(h.state().engine.position(), mark);
+    assert_eq!(h.state().view.frame, 1, "it is a row, not a button");
+    assert!(h.has(vocab::GO_TO_THIS_DRAWING));
+}
+
+/// A drawing with vector ink alone lists no layers on its own key frame. That
+/// frame is held by nothing, so the row does not stand there.
+#[test]
+fn aucolor_held_row_is_for_a_held_frame() {
+    let mut s = two_inked(3);
+    s.goto(0);
+    let id = s.own_key_drawing().expect("a key");
+    let at = s.at();
+    let cut = s.engine.project.cut_mut(at.scene, at.cut).expect("the cut");
+    cut.drawings.iter_mut().find(|d| d.id == id).expect("in the cut").layers.clear();
+    assert!(s.strip_layers().is_empty() && s.exposure_here().is_some());
+    let mut h = EditorHarness::with_state_shipped(s);
+    sized(&mut h, 1600.0, 900.0);
+    beside_on(&mut h);
+    assert!(!h.has(vocab::GO_TO_THIS_DRAWING), "{}", h.describe());
+}
+
+/// Spec AU13 item 7: Color opens on the sentence that teaches it, with art on
+/// the paper, and with none it stays quiet.
+#[test]
+fn aucolor_hint_says_pick_then_tap() {
+    let h = color_room(1600.0, 900.0);
+    assert_ne!(hint(&h).as_deref(), Some(PICK_THEN_TAP), "nothing to fill yet");
+    let mut h = EditorHarness::with_state_shipped(two_inked(3));
+    sized(&mut h, 1600.0, 900.0);
+    enter(&mut h, Stage::InkPaint);
+    assert_eq!(hint(&h).as_deref(), Some(PICK_THEN_TAP));
+    h.state_mut().status.clear();
+    settle(&mut h);
+    assert!(says(&h, PICK_THEN_TAP), "{:?}", h.painted_text());
+    assert_eq!(h.editor().say.hint.as_ref().and_then(|s| s.bit), Some(say::COLOR));
 }
 
 /// The row's button goes to the drawing's first frame, and waits for a pen.
@@ -612,6 +919,27 @@ fn aucolor_narrow_sheet_keeps_its_number() {
     assert!(!h.state().1.pictured(ids[0]));
 }
 
+/// The commonest state of a working animator: one frame a drawing, and no room
+/// beside the picture. The number stands on it.
+#[test]
+fn aucolor_a_sheet_of_one_frame_keeps_picture_and_number() {
+    let mut s = two_inked(1);
+    s.set_cut_length(12);
+    let ids = drawing_ids(&s);
+    let mut h = bare(s, true);
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(ids.iter().all(|id| h.state().1.pictured(*id)));
+    let wide = plate::strip_sheets(&h.ctx)[0].width();
+    assert!(wide < 56.0, "the fixture's premise: {wide}");
+    let painted: Vec<String> = h.output().shapes.iter().filter_map(|c| match &c.shape {
+        egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+        _ => None,
+    }).collect();
+    assert!(["1", "2"].iter().all(|n| painted.iter().any(|w| w == n)), "{painted:?}");
+}
+
 fn opaque(rgba: [f32; 4]) -> Arc<TileData> {
     let bits = rgba.map(f32_to_f16_bits);
     let tile: Vec<u16> = (0..TILE_LEN).map(|i| bits[i % 4]).collect();
@@ -626,7 +954,7 @@ fn aucolor_picture_is_the_drawing_on_white() {
     assert_eq!(image.size, [96, 48]);
     let at = |x: usize, y: usize| image.pixels[y * image.size[0] + x];
     assert_eq!(at(10, 10).to_array(), [255, 0, 0, 255]);
-    assert_eq!(at(60, 10).to_array(), [255; 4], "the paper");
+    assert_eq!(at(70, 10).to_array(), [255; 4], "the paper");
     // Half a layer over it is half-way there.
     let over = (std::iter::once(((0, 0), opaque([0.0, 0.0, 0.5, 0.5]))).collect(), 1.0);
     let image = strip::picture(&[red.clone(), over], [TILE * 2, TILE]).expect("a picture");
@@ -636,28 +964,114 @@ fn aucolor_picture_is_the_drawing_on_white() {
     let off = (std::iter::once(((5, 5), opaque([1.0, 0.0, 0.0, 1.0]))).collect(), 1.0);
     assert!(strip::picture(&[off], [TILE, TILE]).is_none());
     assert!(strip::picture(&[], [TILE, TILE]).is_none());
-    // A one-pixel line on a big frame still shows.
-    let bits = [0.0f32, 0.0, 0.0, 1.0].map(f32_to_f16_bits);
-    let mut tile = vec![0u16; TILE_LEN];
-    for x in 0..TILE {
-        tile[(30 * TILE + x) * 4..][..4].copy_from_slice(&bits);
+    // A pale wash stays pale: it is no line to be lifted.
+    let wash = (std::iter::once(((0, 0), opaque([0.05, 0.0, 0.0, 0.05]))).collect(), 1.0);
+    let image = strip::picture(&[wash], [TILE, TILE]).expect("a picture");
+    assert!(image.pixels.iter().all(|p| p.g() >= 180), "{:?}", image.pixels[0]);
+}
+
+/// Every paper the New Project form allows, from 16 on a side: more picture
+/// than paper leaves no cell empty, so a blank one has no picture and an inked
+/// one has its ink and only that.
+#[test]
+fn aucolor_small_paper_has_a_true_picture() {
+    let red: strip::PictureLayer = (std::iter::once(((0, 0), opaque([1.0, 0.0, 0.0, 1.0]))).collect(), 1.0);
+    for paper in [[16, 16], [64, 48], [95, 51], [96, 52], [16, 16384], [16384, 16], [40, 300], [300, 40]] {
+        assert!(strip::picture(&[], paper).is_none(), "{paper:?}: blank");
+        let empty = (std::iter::once(((0, 0), opaque([0.0; 4]))).collect(), 1.0);
+        assert!(strip::picture(&[empty], paper).is_none(), "{paper:?}: a tile of nothing");
+        let image = strip::picture(std::slice::from_ref(&red), paper).expect("a picture");
+        assert!(image.size[0] <= paper[0] && image.size[1] <= paper[1], "{paper:?}: {:?}", image.size);
+        let black = image.pixels.iter().filter(|p| p.r() == 0).count();
+        assert_eq!(black, 0, "{paper:?}: red or the paper, never a dark cell");
     }
-    let tile = Arc::new(TileData::from_vec(tile));
-    let line = ((0..30).map(|tx| ((tx, 8), tile.clone())).collect(), 1.0);
-    let image = strip::picture(&[line], [1920, 1080]).expect("a picture");
-    let darkest = image.pixels.iter().map(|p| p.r()).min().unwrap();
-    assert!(darkest < 200, "{darkest}");
+    // At its own size a picture is the paper, pixel for pixel.
+    let image = strip::picture(std::slice::from_ref(&red), [TILE / 2, TILE / 2]).expect("a picture");
+    assert_eq!(image.size, [TILE / 2, TILE / 2]);
+    assert!(image.pixels.iter().all(|p| p.to_array() == [255, 0, 0, 255]));
+}
+
+/// How far one pixel of `image` stands from white, against black's 21:1.
+fn contrast_on_white(luminance: f32) -> f32 {
+    1.05 / (luminance + 0.05)
+}
+
+fn linear(byte: u8) -> f32 {
+    let c = byte as f32 / 255.0;
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
+/// The darkest a picture stands at the size a sheet draws it, read as the
+/// renderer reads it: bilinear, in linear light, with no smaller copies of the
+/// texture to read, from `shift` of a screen pixel along.
+fn darkest_drawn(image: &egui::ColorImage, drawn: egui::Vec2, shift: f32) -> f32 {
+    let [w, h] = image.size.map(|n| n as isize);
+    let at = |x: isize, y: isize| linear(image.pixels[(y.clamp(0, h - 1) * w + x.clamp(0, w - 1)) as usize].g());
+    let across = |n: f32, cells: f32, side: f32| (n + 0.5 + shift) * cells / side - 0.5;
+    let mut darkest = 1.0f32;
+    for py in 0..drawn.y as usize {
+        for px in 0..drawn.x as usize {
+            let (u, v) = (across(px as f32, w as f32, drawn.x), across(py as f32, h as f32, drawn.y));
+            let (x, y, fx, fy) = (u.floor() as isize, v.floor() as isize, u - u.floor(), v - v.floor());
+            let top = at(x, y) * (1.0 - fx) + at(x + 1, y) * fx;
+            let foot = at(x, y + 1) * (1.0 - fx) + at(x + 1, y + 1) * fx;
+            darkest = darkest.min(top * (1.0 - fy) + foot * fy);
+        }
+    }
+    darkest
+}
+
+/// A one-pixel line of the default ink on full HD reads at 3:1 or better on a
+/// sheet of one frame, wherever it falls and whichever way it runs.
+#[test]
+fn aucolor_a_thin_line_reads_on_its_sheet() {
+    let ink = canvas_ink();
+    let sheet = Rect::from_min_size(Pos2::ZERO, vec2(46.0, strip::SHEET_H));
+    for offset in [0, 1, 3, 7, 11, 13, 17, 19] {
+        let (flat, upright) = (TILE * 8 + offset, TILE * 12 + offset);
+        let rows = (0..1080).map(|y| (y, upright)).collect::<Vec<_>>();
+        let cols = (0..1920).map(|x| (flat, x)).collect::<Vec<_>>();
+        for line in [line_layer(&cols, ink), line_layer(&rows, ink)] {
+            let image = strip::picture(&[line], [1920, 1080]).expect("a picture");
+            let drawn = strip::picture_rect(sheet, vec2(image.size[0] as f32, image.size[1] as f32)).size();
+            assert!(drawn.x < 42.0, "the fixture's premise: {drawn:?}");
+            for shift in [0.0, 0.25, 0.5, 0.75] {
+                let contrast = contrast_on_white(darkest_drawn(&image, drawn, shift));
+                assert!(contrast >= 3.0, "{contrast:.2} at offset {offset}, shift {shift}");
+            }
+        }
+    }
+}
+
+/// The ink a new canvas holds, stored as a new project stores it.
+fn canvas_ink() -> [f32; 4] {
+    crate::canvas::SWATCHES[0].map(|c| c as f32 / 255.0)
+}
+
+/// One pixel of `ink` at each (row, column).
+fn line_layer(pixels: &[(usize, usize)], ink: [f32; 4]) -> strip::PictureLayer {
+    let bits = ink.map(f32_to_f16_bits);
+    let mut tiles: std::collections::BTreeMap<TileCoord, Vec<u16>> = Default::default();
+    for (y, x) in pixels {
+        let tile = tiles.entry(((x / TILE) as i32, (y / TILE) as i32)).or_insert_with(|| vec![0; TILE_LEN]);
+        tile[((y % TILE) * TILE + x % TILE) * 4..][..4].copy_from_slice(&bits);
+    }
+    (tiles.into_iter().map(|(at, tile)| (at, Arc::new(TileData::from_vec(tile)))).collect(), 1.0)
 }
 
 // ---- the journey ----
 
-/// A closed ring of ink round the paper's middle, drawn with the pen.
+/// A closed ring of ink round the paper's middle, drawn with the pen. The
+/// paper point it hands back is the ring's middle: a step's panes move the
+/// paper on the screen, so a tap is worked out from it when it happens.
 fn ringed_paper() -> (EditorHarness, Pos2) {
     let mut h = EditorHarness::with_gpu_ready();
     sized(&mut h, 1600.0, 900.0);
     assert!(h.editor().canvas.raster, "a paint layer is up");
     let c = h.editor().canvas.dbg_rect.center();
-    let points: Vec<Pos2> = (0..=40)
+    // Past its start: a stroke tapers at both ends, and a ring that only
+    // meets itself leaks.
+    let points: Vec<Pos2> = (0..=44)
         .map(|n| {
             let at = n as f32 / 40.0 * std::f32::consts::TAU;
             c + 120.0 * vec2(at.cos(), at.sin())
@@ -666,13 +1080,30 @@ fn ringed_paper() -> (EditorHarness, Pos2) {
     h.drag_path(&points);
     h.run_frames(8);
     assert_eq!(h.state().strokes_done, 1, "{}", h.state().status);
-    (h, c)
+    let middle = h.editor().canvas.view_xform().screen_to_paper(c);
+    (h, middle)
 }
 
 fn color_tiles(h: &EditorHarness) -> usize {
     let at = h.state().current_drawing().expect("the drawing");
     let d = h.state().cut().drawing(at).expect("in the cut");
     d.layers.iter().filter(|l| l.props.role == LayerRole::Color).map(|l| l.raster.tiles.len()).sum()
+}
+
+/// The ring's middle took the color and the paper's corner, far outside it,
+/// holds none: the fill stayed inside its lines.
+#[track_caller]
+fn stayed_in_the_ring(h: &EditorHarness, middle: Pos2) {
+    let at = h.state().current_drawing().expect("the drawing");
+    let d = h.state().cut().drawing(at).expect("in the cut");
+    let colored = |tile: TileCoord| {
+        let colors = d.layers.iter().filter(|l| l.props.role == LayerRole::Color);
+        let solid = |t: &Arc<TileData>| t.rgba.chunks(4).any(|px| f16_bits_to_f32(px[3]) > 0.0);
+        colors.filter_map(|l| l.raster.tiles.get(&tile)).any(solid)
+    };
+    let size = anim_core::raster::TILE as f32;
+    assert!(colored(((middle.x / size) as i32, (middle.y / size) as i32)), "the ring's inside");
+    assert!(!colored((0, 0)), "the fill leaked out of the ring");
 }
 
 fn line_tiles(h: &EditorHarness) -> Vec<u64> {
@@ -688,11 +1119,18 @@ fn line_tiles(h: &EditorHarness) -> Vec<u64> {
 #[test]
 #[ignore = "needs a GPU adapter"]
 fn aucolor_fill_journey() {
-    fn tap<'a>(at: Pos2) -> Act<'a> {
-        Act::Answer(Box::new(move |h: &mut EditorHarness| h.click_pos(at)))
+    fn tap<'a>(paper: Pos2) -> Act<'a> {
+        Act::Answer(Box::new(move |h: &mut EditorHarness| {
+            let at = h.editor().canvas.view_xform().paper_to_screen(paper);
+            h.click_pos(at)
+        }))
     }
     fn lane(h: &EditorHarness, read: &mut Vec<String>) {
         read.extend(h.editor().say.hint.as_ref().map(|s| s.words.clone()));
+    }
+    // What the picker itself paints, the row of numbers over its square.
+    fn popover_words(h: &EditorHarness, read: &mut Vec<String>) {
+        read.extend(popover(h).map(|at| h.painted_text_in(at)).unwrap_or_default());
     }
     let mut read: Vec<String> = ["Color", "Red", vocab::ADD_COLOR].map(String::from).to_vec();
     let mut concepts = Vec::new();
@@ -705,7 +1143,7 @@ fn aucolor_fill_journey() {
     settle(r.harness());
     lane(r.harness(), &mut read);
     concepts.push("a color fills up to the lines");
-    r.act("pick red", Act::Click("colour well: Red"));
+    r.act("pick red", Act::Click("color well: Red"));
     settle(r.harness());
     lane(r.harness(), &mut read);
     r.act("tap the ring's inside", tap(c));
@@ -717,6 +1155,7 @@ fn aucolor_fill_journey() {
     assert!(h.state().fills_done >= 1, "{} / {}", h.state().refusal, h.state().status);
     assert!(color_tiles(&h) > 0, "pixels on the color layer");
     assert_eq!(line_tiles(&h), lines, "and none on the line art");
+    stayed_in_the_ring(&h, c);
     drop(h);
 
     // Three colors of one's own.
@@ -730,6 +1169,7 @@ fn aucolor_fill_journey() {
         r.act("add a color", Act::Click(vocab::ADD_COLOR));
         settle(r.harness());
         lane(r.harness(), &mut read);
+        popover_words(r.harness(), &mut read);
         r.act("pick it", Act::Answer(Box::new(move |h: &mut EditorHarness| pick(h, x, y))));
         lane(r.harness(), &mut read);
         assert_eq!(r.harness().state().palettes.characters[0].roles.len(), n + 1);
@@ -745,6 +1185,7 @@ fn aucolor_fill_journey() {
     assert!(h.state().fills_done >= 1, "{} / {}", h.state().refusal, h.state().status);
     assert!(color_tiles(&h) > 0);
     assert_eq!(line_tiles(&h), lines);
+    stayed_in_the_ring(&h, c);
     assert!(concepts.len() <= 2, "{concepts:?}");
     let jargon = measure::jargon_in(&read);
     assert!(jargon.len() <= 1, "{jargon:?} in {read:?}");
@@ -758,9 +1199,9 @@ fn aucolor_no_journey_control_behind_hover_or_scroll() {
         let h = color_room(w, tall);
         let window = h.ctx().content_rect();
         let views = plate::viewports(&h.ctx());
-        let controls = [vocab::ADD_COLOR, vocab::EDIT_COLORS, "colour well: Red", "colour well: Black"];
+        let controls = [vocab::ADD_COLOR.into(), vocab::EDIT_COLORS.into(), well("Red"), well("Black")];
         for name in controls {
-            let at = h.rect(name);
+            let at = h.rect(&name);
             assert!(window.contains_rect(at), "{name}: {at:?}");
             let scrolled = views.iter().find(|v| v.rect.contains(at.center()));
             assert!(scrolled.is_none(), "{name} at {at:?} in {:?}", scrolled.map(|v| v.rect));

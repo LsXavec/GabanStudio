@@ -229,6 +229,18 @@ impl Stage {
         ds
     }
 
+    /// AU13: `Result beside` on a drawing or a comic, which have no frames to
+    /// time, so no sheet (feedback spec 1.4): Layers at the left, the canvas,
+    /// and the result over the colors and the paint check.
+    pub fn dock_with_result_no_sheet() -> DockState<Pane> {
+        let mut ds = DockState::new(vec![Pane::Canvas]);
+        let tree = ds.main_surface_mut();
+        let [canvas, _layers] = tree.split_left(NodeIndex::root(), 0.18, vec![Pane::Layers]);
+        let [_canvas, side] = tree.split_right(canvas, 0.58, vec![Pane::Viewer(0)]);
+        tree.split_below(side, 0.55, vec![Pane::Palette, Pane::PaintCheck]);
+        ds
+    }
+
     /// The stage's opinionated default layout.
     /// (fraction = share of the top/left child of the split.)
     pub fn dock(self) -> DockState<Pane> {

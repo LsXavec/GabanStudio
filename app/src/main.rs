@@ -5331,6 +5331,9 @@ impl Editor {
     /// of here under a live stroke (`stroke_guarded`).
     fn enter_room(&mut self, st: Stage) {
         let st = self.step_for(st);
+        // The popover belongs to the step it opened in: a step key leaves it
+        // with no press to close it.
+        self.state.palette_adding = None;
         if st == Stage::Export {
             return self.enter_export();
         }
@@ -5578,14 +5581,30 @@ impl Editor {
     /// Reset all read it, so they agree. AU19: `Stage::Layout`'s arm is Plan's
     /// one source. A saved `sheet_in_draw` does nothing on a drawing, which
     /// has no button to undo it, and nothing on an animation, whose memory is
-    /// `plan_sheet_hidden`.
+    /// `plan_sheet_hidden`. AU13: Result beside's sheet is the one memory a
+    /// drawing and a comic must not inherit from an animation.
     fn recipe(&self, st: Stage) -> DockState<Pane> {
         match st {
             Stage::Drawing if self.is_animation() && !self.plan_sheet_off() => Stage::Layout.dock(),
             Stage::Drawing if self.kind_unset && self.sheet_in_draw => Stage::dock_with_sheet(),
-            Stage::InkPaint if self.result_in_color => Stage::dock_with_result(),
+            Stage::InkPaint if self.result_on() && self.result_has_sheet() => Stage::dock_with_result(),
+            Stage::InkPaint if self.result_on() => Stage::dock_with_result_no_sheet(),
             _ => st.dock(),
         }
+    }
+
+    /// AU13: `Result beside` as this moment reads it. A lesson's Color stands
+    /// as the step's own, with the strip its tasks walk, whatever the memory
+    /// says (feedback spec 3.10): only a press during the run sets it, for the
+    /// run.
+    fn result_on(&self) -> bool {
+        self.lesson.as_ref().map_or(self.result_in_color, |run| run.result_on)
+    }
+
+    /// AU13: `Result beside` brings the Timing sheet here: the frozen boot's
+    /// unset kind keeps today's arrangement.
+    fn result_has_sheet(&self) -> bool {
+        self.kind_unset || self.is_animation()
     }
 
     /// AU19: Plan opens without its sheet: the memory says so, and no
@@ -5761,7 +5780,7 @@ impl Editor {
     /// memory says.
     fn locked_panes(&mut self) -> &[Pane] {
         let plan_sheet = self.in_plan() && self.dock.find_tab(&Pane::XSheet).is_some();
-        let key = (self.stage, self.sheet_in_draw, self.result_in_color, self.plan_sheet_off(), self.kind(), plan_sheet);
+        let key = (self.stage, self.sheet_in_draw, self.result_on(), self.plan_sheet_off(), self.kind(), plan_sheet);
         if self.held_for != Some(key) {
             let dock = self.stage.map(|st| if plan_sheet { Stage::Layout.dock() } else { self.recipe(st) });
             let dock = dock.as_ref().or(self.place_dock.as_ref());
@@ -5813,12 +5832,23 @@ impl Editor {
     }
 
     /// AU13: `Result beside`, pressed in Color: the step's other arrangement,
-    /// remembered. A dock that is neither recipe was arranged by hand, so it
-    /// stays, and the next entry reads the choice.
+    /// remembered. During a lesson it works and remembers nothing, as the
+    /// sheet's key does (feedback spec 3.10).
     fn switch_result(&mut self, on: bool) {
-        self.result_in_color = on;
-        self.result_request = Some(on);
-        let plain = [Stage::InkPaint.dock(), Stage::dock_with_result()];
+        if let Some(run) = self.lesson.as_mut() {
+            run.result_on = on;
+        } else {
+            self.result_in_color = on;
+            self.result_request = Some(on);
+        }
+        self.result_back();
+    }
+
+    /// AU13: Color stands as `result_on` says. A dock that is no recipe of the
+    /// step was arranged by hand, so it stays, and the next entry reads the
+    /// choice.
+    fn result_back(&mut self) {
+        let plain = [Stage::InkPaint.dock(), Stage::dock_with_result(), Stage::dock_with_result_no_sheet()];
         if self.stage == Some(Stage::InkPaint) && plain.iter().any(|d| same_shape(&self.dock, d)) {
             self.dock = self.recipe(Stage::InkPaint);
         }
@@ -9637,7 +9667,8 @@ impl Editor {
         self.lesson_guide(ui.ctx());
         let export_view = self.export_view();
         let colors_view = palette_panel::View {
-            beside: (self.stage == Some(Stage::InkPaint)).then_some(self.result_in_color),
+            beside: (self.stage == Some(Stage::InkPaint)).then_some(self.result_on()),
+            beside_sheet: self.result_has_sheet(),
             more_default: self.more_default,
         };
         let strokes = self.state.strokes_done;
@@ -9692,6 +9723,11 @@ impl Editor {
             .show_inside(ui, &mut tabs);
         if let Some(on) = tabs.result_asked {
             self.switch_result(on);
+        }
+        // A popover hangs from a pane that is drawn. The tab behind or gone,
+        // nothing would close it, and it would come back unasked.
+        if !panes.contains(&Pane::Palette) {
+            self.state.palette_adding = None;
         }
         // AU19: the sheet's leaf drew before the canvas took the pen up, so
         // this frame goes round once more and the key stands on its row in

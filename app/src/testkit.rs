@@ -1064,6 +1064,23 @@ impl EditorHarness {
         found.unwrap_or_else(|| panic!("{word:?} was not painted"))
     }
 
+    /// AU13: the words painted inside `within`: what a popover says, without
+    /// the screen behind it.
+    pub fn painted_text_in(&self, within: egui::Rect) -> Vec<String> {
+        fn walk(s: &egui::Shape, within: egui::Rect, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, within, out)),
+                egui::Shape::Text(t) if within.contains(t.pos) => out.push(t.galley.text().to_string()),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for c in &self.h.output().shapes {
+            walk(&c.shape, within, &mut out);
+        }
+        out
+    }
+
     /// AU4: the words the last frame painted, nested shapes included: a word
     /// painted by hand speaks to no tree.
     pub fn painted_text(&self) -> Vec<String> {
@@ -1482,8 +1499,8 @@ mod tests {
         assert!(p.has("first frame"), "{tree}");
         assert!(p.has("fill"), "{tree}");
         assert!(p.has("lasso fill") && !p.has("lasso"), "{tree}");
-        assert!(p.has("colour well: skin shadow"), "{tree}");
-        let hex = format!("colour well: {}", crate::plate::AKA.to_hex());
+        assert!(p.has(&format!("{}: skin shadow", crate::vocab::COLOR_WELL)), "{tree}");
+        let hex = format!("{}: {}", crate::vocab::COLOR_WELL, crate::plate::AKA.to_hex());
         assert!(p.has(&hex), "{tree}");
     }
 

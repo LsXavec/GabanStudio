@@ -1352,7 +1352,7 @@ const TODAY_DECK: [DeckRow; 15] = {
             home: "Color float",
             from: Paint,
             room: Drawing,
-            path: &[On("Brush color"), On("colour well: Red: correction")],
+            path: &[On("Brush color"), On("color well: Red: correction")],
             read: |h| h.editor().canvas.brush_color == SWATCHES[2],
         },
         DeckRow {

@@ -2281,8 +2281,8 @@ fn ghost(ui: &Ui, resp: &Response) -> (Color32, Color32) {
 /// A colour swatch: an 18×18 fill with its `INK3` ring, so a pale colour
 /// still has an edge on an island; the armed swatch is ringed in blue. The
 /// hit target is larger than the fill (the owner's amendment). It answers to
-/// "colour well: <name>" (the role or colour name; empty = the hex value),
-/// so a palette's wells are told apart by name, not position.
+/// "color well: <name>" (the role or color name; empty = the hex value), so a
+/// palette's wells are told apart by name, not position.
 pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::splat(CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
@@ -2311,13 +2311,14 @@ pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response 
             );
         }
     }
+    let well = crate::vocab::COLOR_WELL;
     let name = if name.is_empty() {
-        format!("colour well: {}", color.to_hex())
+        format!("{well}: {}", color.to_hex())
     } else {
-        format!("colour well: {name}")
+        format!("{well}: {name}")
     };
     speak(&resp, egui::WidgetType::Button, Some(armed), &name);
-    describe(resp, "SWATCH swatch", "colour well")
+    describe(resp, "SWATCH swatch", well)
 }
 
 /// AU13: a [`swatch`] that fills a cell of `size`, for a pen to find: the
@@ -2330,13 +2331,14 @@ pub fn swatch_cell(ui: &mut Ui, size: Vec2, color: Color32, armed: bool, name: &
         p.rect_filled(well, R_SHEET, color);
         p.rect_stroke(well, R_SHEET, Stroke::new(1.0, at_rest(ui, INK3)), StrokeKind::Outside);
         if armed {
-            p.rect_stroke(well.expand(2.0), R_INPUT, Stroke::new(2.0, at_rest(ui, TALLY)), StrokeKind::Outside);
+            p.rect_stroke(well.expand(2.0), R_INPUT, Stroke::new(2.0, at_rest(ui, BLUE)), StrokeKind::Outside);
         } else if resp.hovered() {
-            p.rect_stroke(well.expand(2.0), R_INPUT, Stroke::new(1.0, STRUCK), StrokeKind::Outside);
+            p.rect_stroke(well.expand(2.0), R_INPUT, Stroke::new(1.0, INK), StrokeKind::Outside);
         }
     }
-    speak(&resp, egui::WidgetType::Button, Some(armed), &format!("colour well: {name}"));
-    describe(resp, "SWATCH swatch_cell", "colour well")
+    let well = crate::vocab::COLOR_WELL;
+    speak(&resp, egui::WidgetType::Button, Some(armed), &format!("{well}: {name}"));
+    describe(resp, "SWATCH swatch_cell", well)
 }
 
 /// RAIL — a bounded value the hand drags (the plate's fourth and last

@@ -2406,6 +2406,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     // AU13: a held frame has no layers of its own to touch: one read-only row
     // says whose they are and goes there.
     if rows.is_empty()
+        && state.own_key_drawing().is_none()
         && state.current_drawing().is_some()
         && let Some((key, _)) = state.exposure_here()
     {

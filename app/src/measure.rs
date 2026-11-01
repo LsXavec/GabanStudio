@@ -201,6 +201,8 @@ pub const TERMS: &[(&str, &[Hit], Tier)] = &[
     ("hokori", &[Word("hokori")], J),
     ("hinoko", &[Word("hinoko")], J),
     ("haikei", &[Word("haikei")], J),
+    // AU13: egui's picker heads its row of numbers with this.
+    ("U8", &[Whole("u8")], U),
 ];
 
 /// How many of `TERMS` the journeys counted by. The baseline stays read

@@ -732,7 +732,7 @@ mod tests {
                 crate::palette_panel::ui(ui, st, cv, Default::default());
             },
         );
-        p.click(&format!("+ {}", crate::vocab::COLOR_NAME));
+        p.click(crate::vocab::ADD_COLOR);
         assert!(p.state().0.meta_dirty && p.state().0.is_dirty(), "a palette edit is unsaved work");
         // The paint dish writes the palettes too: the row's held DERIVE and
         // the eye's held SET (they once bypassed the mark).
