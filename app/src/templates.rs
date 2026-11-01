@@ -6,7 +6,8 @@
 //! the editor enters it. AU6: `INTENTS` are the float's own cards, outside
 //! `ALL`, at one frame and one track: a person's first document, not a
 //! studio's cut. AU18: each stamps its project's kind, but the ready paper,
-//! which `READY` makes.
+//! which `READY` makes. AU26: `Animation` has 12 rows, one second at 12 fps,
+//! because rows stop at the cut's length and a key pose needs one to land on.
 
 use anim_core::color::ColorLaw;
 use anim_core::manga::Page;
@@ -153,7 +154,7 @@ const PICTURE_KIND: Option<ProjectKind> = Some(ProjectKind::Drawing);
 
 /// AU6: what the Start float's cards make (spec 8.1).
 pub const INTENTS: &[Template] = &[
-    intent("Animation", Some(ProjectKind::Animation), 1280, 720),
+    Template { cut_frames: 12, ..intent("Animation", Some(ProjectKind::Animation), 1280, 720) },
     intent("Picture", PICTURE_KIND, 1920, 1080),
     intent("Square picture", PICTURE_KIND, 2048, 2048),
     intent("Tall picture", PICTURE_KIND, 1080, 1920),

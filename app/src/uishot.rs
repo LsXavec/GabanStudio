@@ -835,6 +835,44 @@ fn keys_moments(dir: &Path) {
     }
 }
 
+/// AU26: a new animation's twelve rows, three drawings and the blank tail they
+/// leave, and Timing's two hold keys over them.
+const TAIL: [(&str, u32, u32); 6] = [
+    ("tail-twelve-rows", 1600, 900),
+    ("tail-three-drawings", 1600, 900),
+    ("tail-hold-keys", 1600, 900),
+    ("tail-twelve-rows-1280", 1280, 800),
+    ("tail-three-drawings-1280", 1280, 800),
+    ("tail-hold-keys-1280", 1280, 800),
+];
+
+fn tail_owed() -> Vec<(String, u32, u32)> {
+    TAIL.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn tail_moments(dir: &Path) {
+    let mut shots = TAIL.iter().map(|(state, w, h)| (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32)));
+    for _ in 0..2 {
+        let mut shoot = |h: &mut EditorHarness, room: Stage| {
+            let (name, size) = shots.next().expect("a shot owed");
+            h.kit_mut().set_size(size);
+            arrive(h, ProbeRoom::Stage(room));
+            h.shot(size, &name);
+        };
+        let mut h = EditorHarness::with_gpu_animation();
+        shoot(&mut h, Stage::Drawing);
+        crate::ausay_tests::raster_line(&mut h);
+        for _ in 0..2 {
+            h.perform(Action::AddDrawingAfter);
+            h.run_frames(4);
+            crate::ausay_tests::raster_line(&mut h);
+        }
+        shoot(&mut h, Stage::Drawing);
+        h.perform(Action::RoomEdit);
+        shoot(&mut h, Stage::Edit);
+    }
+}
+
 /// AU8: the queue's preset row with its last two chips, wrapped: the tab in
 /// its room, where the pane is narrow, and the pane alone.
 const QUEUE: [(&str, u32, u32); 4] = [
@@ -1064,6 +1102,22 @@ fn uishot_rooms() {
     check_shots(&dir, &keys_owed()).expect("the chords that moved");
     kinds_moments(&dir);
     check_shots(&dir, &kinds_owed()).expect("the three bars");
+    tail_moments(&dir);
+    check_shots(&dir, &tail_owed()).expect("the twelve rows and the hold keys");
+}
+
+#[test]
+fn autail_the_ignored_pass_owes_the_tail_shots() {
+    let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
+    let taken = pass.find("tail_moments(&dir);").expect("it takes them");
+    let checked = pass.find("check_shots(&dir, &tail_owed())").expect("it checks them");
+    assert!(taken < checked, "taken, then checked");
+    let owed = tail_owed();
+    assert_eq!(owed.len(), 6);
+    for moment in ["tail-twelve-rows", "tail-three-drawings", "tail-hold-keys"] {
+        assert!(owed.contains(&(format!("{moment}.png"), 1600, 900)), "{moment} at 1600");
+        assert!(owed.contains(&(format!("{moment}-1280.png"), 1280, 800)), "{moment} at 1280");
+    }
 }
 
 /// Only the ignored pass takes them, so this holds it to them, at both sizes:

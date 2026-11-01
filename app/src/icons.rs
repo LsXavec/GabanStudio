@@ -231,6 +231,8 @@ pub enum Icon {
     Fit,
     /// Plus — add.
     Plus,
+    /// Minus — one less, the Plus's partner on the band.
+    Minus,
     /// A hooked arrow, back and forward — the top row's history keys.
     Undo,
     Redo,
@@ -445,6 +447,9 @@ pub fn paint(p: &Painter, rect: Rect, ink: Color32, icon: Icon) {
         }
         Icon::Plus => {
             p.line_segment([at(0.5, 0.12), at(0.5, 0.88)], s);
+            p.line_segment([at(0.12, 0.5), at(0.88, 0.5)], s);
+        }
+        Icon::Minus => {
             p.line_segment([at(0.12, 0.5), at(0.88, 0.5)], s);
         }
         Icon::Undo => {

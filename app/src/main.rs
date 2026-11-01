@@ -64,6 +64,8 @@ mod aukind_tests;
 #[cfg(test)]
 mod auplan_tests;
 #[cfg(test)]
+mod autail_tests;
+#[cfg(test)]
 #[path = "../../crates/anim-core/tests/support/gif_decode.rs"]
 mod gif_decode;
 #[cfg(test)]
@@ -6220,14 +6222,20 @@ impl Editor {
 
     /// AU8: the seam behind the save dialog: what happens to the path a person
     /// chose, so a test can end in a real file with no dialog. AU9: the job
-    /// starts where the person stands, with no pane opened.
+    /// starts where the person stands, with no pane opened. AU26: a plain
+    /// export stops at the last drawing (spec 3.8), unless `File ▸ Export`'s
+    /// range says otherwise. A shot with no blank tail asks for no range, so
+    /// its job stays the whole cut, however long that is when it starts.
     pub(crate) fn export_to(
         &mut self,
         ctx: &egui::Context,
         kind: render_queue::ExportKind,
         path: &std::path::Path,
     ) {
-        self.start_export(ctx, kind, path, false);
+        let shown = self.state.shown_length();
+        let tail = shown < self.state.frame_count();
+        let frames = self.export_range.or(tail.then_some((0, shown - 1)));
+        self.start_export(ctx, kind, path, frames, false);
     }
 
     /// GM11: File ▸ Export…'s PNG sequence (`dest` a folder), or its MP4, GIF
@@ -6241,7 +6249,7 @@ impl Editor {
         kind: render_queue::ExportKind,
         dest: &std::path::Path,
     ) {
-        self.start_export(ctx, kind, dest, true);
+        self.start_export(ctx, kind, dest, self.export_range, true);
     }
 
     fn start_export(
@@ -6249,10 +6257,10 @@ impl Editor {
         ctx: &egui::Context,
         kind: render_queue::ExportKind,
         dest: &std::path::Path,
+        frames: Option<(u32, u32)>,
         queue_forward: bool,
     ) {
-        let Some(i) = render_queue::export_job(&mut self.state, kind, dest, self.export_range)
-        else {
+        let Some(i) = render_queue::export_job(&mut self.state, kind, dest, frames) else {
             return;
         };
         if queue_forward {
@@ -8058,7 +8066,7 @@ impl Editor {
         let prev = self.state.view.frame;
         if playing && !self.play_running {
             self.play_dropped = 0;
-            // A run started past the loop range plays on to the cut's end
+            // A run started past the loop range plays on to the last drawing
             // (play from the cursor never jumps back).
             self.play_whole = prev > self.state.play_range().1;
         }
@@ -8068,7 +8076,9 @@ impl Editor {
         if !playing {
             self.state.board.episode_play = false;
         }
-        let whole = (0, self.state.frame_count() - 1);
+        // AU26: "whole" stops at the last drawing, but in an episode, where
+        // a cut runs its full length.
+        let whole = (0, if episode { self.state.frame_count() } else { self.state.shown_length() } - 1);
         let range = if self.play_whole || episode {
             whole
         } else {
@@ -8183,6 +8193,9 @@ impl Editor {
             if !fold {
                 self.sound_keys(ui);
             }
+            if self.stage == Some(Stage::Edit) {
+                self.hold_keys(ui);
+            }
         } else {
             if !fold {
                 if arrived {
@@ -8208,6 +8221,41 @@ impl Editor {
             let dropped = format!("dropped {}", self.play_dropped);
             playback::readout(ui, &dropped, 96.0, plate::LEGEND)
                 .card("Frames passed over to keep up with the sound.");
+        }
+    }
+
+    /// AU26 (spec 3.9): Timing's `Longer` and `Shorter`, right to left, on the
+    /// run under the cursor. The strip's edge is hidden here, and `HoldPlus`
+    /// refuses the last run, so these go through `set_run_length`, which grows
+    /// the cut for it. They never fold.
+    fn hold_keys(&mut self, ui: &mut egui::Ui) {
+        let keys = [
+            (Icon::Minus, vocab::SHORTER, Action::HoldMinus, -1),
+            (Icon::Plus, vocab::LONGER, Action::HoldPlus, 1),
+        ];
+        for (icon, word, action, by) in keys {
+            let key = plate::band_action(ui, icon, word, &format!("{word} (band)"));
+            if menus::hover_tip(key, action, "").clicked() {
+                self.hold_by(by);
+            }
+        }
+    }
+
+    fn hold_by(&mut self, by: i64) {
+        let frame = self.state.view.frame;
+        let run = self.state.run_at(frame);
+        if self.canvas.stroke_active() {
+            self.state.refuse(doc::FINISH_STROKE);
+        } else if let Err(why) = self.can_perform(Action::HoldMinus) {
+            // The sheet's own words: `HoldPlus` adds only the refusal these
+            // keys are here to get past.
+            self.state.refuse(format!("refused — {why}"));
+        } else if let Some((_, len, _)) = run {
+            if len == 1 && by < 0 {
+                self.state.status = doc::SHORTEST_HOLD.into();
+            } else {
+                self.state.set_run_length(frame, (len as i64 + by) as u32);
+            }
         }
     }
 

@@ -70,7 +70,7 @@ impl Offer {
 
 /// Art that no drawing holds, on its way to the Result: an image, a sequence,
 /// a generator or a 3D model. A `Solid` is a page's paper, not art.
-fn shows_a_source(cut: &Cut) -> bool {
+pub(crate) fn shows_a_source(cut: &Cut) -> bool {
     let graph = &cut.graph;
     let is_output = |id: &NodeId| graph.node(*id).is_ok_and(|n| matches!(n.kind, NodeKind::Output));
     graph.nodes().any(|n| {

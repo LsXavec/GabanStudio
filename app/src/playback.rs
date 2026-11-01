@@ -943,7 +943,8 @@ impl LipForm {
             .map(|(i, _, _)| i)?;
         let column = state.view.active_column;
         let ds = column_drawings(cut, column);
-        let (from, to) = state.play_range();
+        // AU26: over the sound, so a blank tail is still frames to write on.
+        let (from, to) = play_range(state.loop_range(), state.frame_count());
         Some(LipForm {
             at: state.at(),
             track,
@@ -1148,7 +1149,7 @@ impl crate::Editor {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use anim_core::command::Command;
     use std::sync::atomic::AtomicUsize;
@@ -1340,7 +1341,7 @@ mod tests {
         anim_core::model::AudioClip::from_bytes("serifu.wav", wav_of(&samples)).expect("the line decodes")
     }
 
-    fn clip() -> anim_core::model::AudioClip {
+    pub(crate) fn clip() -> anim_core::model::AudioClip {
         anim_core::model::AudioClip::from_bytes("ramp.wav", wav_bytes()).expect("the ramp decodes")
     }
 
@@ -1517,6 +1518,8 @@ mod tests {
         s.engine
             .apply("len", vec![Command::SetFrameCount { at, frames: 24 }])
             .unwrap();
+        // AU26: a drawing to the end, as a blank cut has no frames to run.
+        s.new_drawing_at_frame();
         s.goto(5);
         s.set_loop_in();
         s.goto(10);
@@ -1527,6 +1530,7 @@ mod tests {
         let (scene, first) = (s.view.scene, s.view.cut);
         s.new_cut(scene);
         assert_ne!(s.view.cut, first);
+        s.new_drawing_at_frame();
         assert_eq!(s.loop_range(), None);
         assert_eq!(s.play_range(), (0, s.frame_count() - 1));
         s.goto_cut(scene, first);

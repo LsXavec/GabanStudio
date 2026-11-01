@@ -707,7 +707,8 @@ fn austart_intents_are_the_table() {
     assert_eq!(table, want);
     assert!(templates::INTENTS.len() >= 2);
     for t in templates::INTENTS {
-        assert_eq!((t.fps, t.cut_frames, t.room), (12, 1, Stage::Drawing), "{}", t.name);
+        let rows = if t.name == "Animation" { 12 } else { 1 };
+        assert_eq!((t.fps, t.cut_frames, t.room), (12, rows, Stage::Drawing), "{}", t.name);
         assert!(!t.sheet_on && t.page.is_none(), "{}", t.name);
         assert_eq!(t.columns.iter().map(|c| c.0).collect::<Vec<_>>(), ["A"], "{}", t.name);
     }
@@ -715,7 +716,7 @@ fn austart_intents_are_the_table() {
     // The ready paper is the first card's paper, and its own row: no stamp.
     let ready = &templates::READY;
     let card = &templates::INTENTS[templates::ANIMATION];
-    assert_eq!((ready.width, ready.height, ready.fps, ready.cut_frames), (card.width, card.height, card.fps, card.cut_frames));
+    assert_eq!((ready.width, ready.height, ready.fps, ready.cut_frames), (card.width, card.height, card.fps, 1));
     assert_eq!(ready.columns.iter().map(|c| c.0).collect::<Vec<_>>(), ["A"]);
     assert!(ready.kind.is_none() && card.kind.is_some());
     // Outside `ALL`, which stays what the New form lists.

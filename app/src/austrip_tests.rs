@@ -1413,8 +1413,8 @@ fn austrip_add_drawing_after_one_drawing_across_the_shot() {
     let mut s = timed(&[48]);
     assert!(s.add_drawing_after());
     assert!(s.add_drawing_after());
-    assert_eq!(holds(&s), [1, 1, 1, 46]);
-    assert_eq!(s.frame_count(), 49);
+    assert_eq!(holds(&s), [1, 1, 1, 45]);
+    assert_eq!(s.frame_count(), 48);
 }
 
 // ---- the band's words and cards ----
