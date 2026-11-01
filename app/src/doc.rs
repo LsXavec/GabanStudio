@@ -576,6 +576,9 @@ pub struct AppState {
     /// Transient layer-strip UI state: an in-progress opacity drag
     /// (layer, live value) — committed as ONE SetCelLayerProps at gesture end.
     pub strip_opacity: Option<(LayerId, f32)>,
+    /// AU10: that drag's rail was drawn this frame: without it, a frame's end
+    /// drops the drag.
+    pub strip_opacity_drawn: bool,
     /// PSD-cel-layers: the stack (bottom → top, structure only) a stroke
     /// on an empty frame creates when there's no held cel to clone. Set
     /// by the App from the chosen stack preset every frame; defaults to
@@ -755,6 +758,7 @@ impl AppState {
             strip_rename: None,
             drawing_rename: None,
             strip_opacity: None,
+            strip_opacity_drawn: false,
             new_cel_template: solo_template(),
             new_cel_active: ("line".into(), anim_core::model::LayerRole::Line),
             stacks: Vec::new(),
@@ -857,6 +861,7 @@ impl AppState {
             strip_rename: None,
             drawing_rename: None,
             strip_opacity: None,
+            strip_opacity_drawn: false,
             new_cel_template: solo_template(),
             new_cel_active: ("line".into(), anim_core::model::LayerRole::Line),
             stacks: Vec::new(),

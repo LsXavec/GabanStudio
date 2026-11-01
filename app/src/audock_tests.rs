@@ -46,7 +46,7 @@ fn workspace(name: &str, dock: DockState<Pane>) -> Workspace {
 }
 
 /// Null `x` and `y` anywhere under `v`: a rect that cannot be read back.
-fn null_rects(v: &serde_json::Value) -> usize {
+pub(crate) fn null_rects(v: &serde_json::Value) -> usize {
     match v {
         serde_json::Value::Object(map) => map
             .iter()

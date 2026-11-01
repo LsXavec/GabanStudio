@@ -1370,6 +1370,22 @@ impl Action {
         )
     }
 
+    /// AU10: one press, one run. A held key repeats, which a frame step may
+    /// follow; these rearrange the screen, so a key held past the typematic
+    /// delay would flip the tools and rebuild the dock at its repeat rate.
+    pub fn once_a_press(self) -> bool {
+        matches!(
+            self,
+            Action::HideTools
+                | Action::RoomLayout
+                | Action::RoomDrawing
+                | Action::RoomEdit
+                | Action::RoomFinishing
+                | Action::RoomComposite
+                | Action::RoomExport
+        )
+    }
+
     /// GM3: the verb that arms pencil-box slot `digit` (1-based), if any.
     pub fn preset_slot(digit: usize) -> Option<Action> {
         use Action::*;
@@ -1813,6 +1829,18 @@ impl Chord {
             matches!(egui::Key::from_name(name), Some(ArrowDown | ArrowLeft | ArrowRight | ArrowUp))
         };
         self.keys.iter().any(arrow)
+    }
+
+    /// AU10: its key only repeated this frame: held down, with no new press.
+    /// egui's `key_pressed` counts both; its events tell them apart.
+    pub(crate) fn only_repeats(&self, i: &egui::InputState) -> bool {
+        let mut presses = i.events.iter().filter_map(|e| match e {
+            egui::Event::Key { key, pressed: true, repeat, .. } if self.keys.iter().any(|k| k == key.name()) => {
+                Some(*repeat)
+            }
+            _ => None,
+        });
+        presses.next().is_some_and(|repeat| repeat) && presses.all(|repeat| repeat)
     }
 
     /// Fires when every key is held, at least one was pressed THIS frame, and
@@ -2945,7 +2973,7 @@ impl Config {
     }
 
     /// No data dir at all: a fresh install with nothing older to move.
-    fn fresh() -> Self {
+    pub(crate) fn fresh() -> Self {
         let mut cfg = Self::default();
         cfg.ui.keymap_rev = KEYMAP_REV;
         cfg.fill_missing(false);

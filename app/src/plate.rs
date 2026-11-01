@@ -617,7 +617,7 @@ fn card_at(
     let (font, limit) = (egui::TextStyle::Body.resolve(&style), style.spacing.tooltip_width);
     let galley = ctx.fonts_mut(|f| f.layout(words.clone(), font, INK, limit));
     let (pivot, at) = place(galley.size().x + frame.total_margin().sum().x);
-    card_area(&ctx, id, pivot, at, |ui| {
+    card_area(&ctx, id, frame, pivot, at, |ui| {
         ui.label(words);
     });
     resp
@@ -628,8 +628,14 @@ fn card_frame(style: &egui::Style) -> egui::Frame {
 }
 
 /// A card's own layer: over everything, and the pen passes through it.
-fn card_area(ctx: &egui::Context, id: egui::Id, pivot: egui::Align2, at: Pos2, add: impl FnOnce(&mut Ui)) {
-    let frame = card_frame(&ctx.global_style());
+fn card_area(
+    ctx: &egui::Context,
+    id: egui::Id,
+    frame: egui::Frame,
+    pivot: egui::Align2,
+    at: Pos2,
+    add: impl FnOnce(&mut Ui),
+) {
     egui::Area::new(id)
         .order(egui::Order::Tooltip)
         .interactable(false)
@@ -645,11 +651,32 @@ fn card_area(ctx: &egui::Context, id: egui::Id, pivot: egui::Align2, at: Pos2, a
         });
 }
 
-/// AU10: what stands beside the return dot with no pointer on it. A card
-/// that needs no resting, clear of the dot as any card is.
-pub fn dot_card(dot: &Response, add: impl FnOnce(&mut Ui)) {
-    let at = dot.rect.right_top() + Vec2::new(8.0, 0.0);
-    card_area(&dot.ctx, dot.id.with("dot_card"), egui::Align2::LEFT_TOP, at, add);
+/// AU10: the layer of what stands beside the return dot.
+pub fn dot_card_id() -> egui::Id {
+    egui::Id::new("return_dot").with("card")
+}
+
+/// AU10: a card that needs no resting, clear of the dot as any card is, and
+/// level with it however many lines its words take.
+fn dot_card_in(dot: &Response, frame: egui::Frame, add: impl FnOnce(&mut Ui)) {
+    let at = dot.rect.right_center() + Vec2::new(8.0, 0.0);
+    card_area(&dot.ctx, dot_card_id(), frame, egui::Align2::LEFT_CENTER, at, add);
+}
+
+/// AU10: what stands beside the return dot with no pointer on it.
+pub fn dot_card(dot: &Response, words: &str) {
+    dot_card_in(dot, card_frame(&dot.ctx.global_style()), |ui| {
+        ui.label(words);
+    });
+}
+
+/// AU10: a refusal beside the return dot: the card is its wash, so the words
+/// stand in one outline, not a pill in a card.
+pub fn dot_refusal(dot: &Response, words: &str) {
+    let frame = card_frame(&dot.ctx.global_style()).fill(RED_WASH);
+    dot_card_in(dot, frame, |ui| {
+        ui.horizontal(|ui| refusal_words(ui, words));
+    });
 }
 
 /// The ink a rail key stands in: solid blue armed, the wash while it holds a
@@ -972,12 +999,14 @@ pub fn refusal(ui: &mut Ui, words: &str) -> Response {
         .fill(RED_WASH)
         .corner_radius(R_PILL)
         .inner_margin(egui::Margin::symmetric(8, 1))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            refusal_mark(ui);
-            say(ui, words, RED)
-        })
+        .show(ui, |ui| refusal_words(ui, words))
         .inner
+}
+
+fn refusal_words(ui: &mut Ui, words: &str) -> Response {
+    ui.spacing_mut().item_spacing.x = 4.0;
+    refusal_mark(ui);
+    say(ui, words, RED)
 }
 
 fn refusal_mark(ui: &mut Ui) {
@@ -1764,6 +1793,9 @@ pub const RETURN_DOT_AT: Pos2 = Pos2::new(8.0, 8.0);
 /// The width the dock leaves it: the dot and its margin on each side.
 pub const RETURN_DOT_ROOM: i8 = (RETURN_DOT_AT.x * 2.0 + PILL_H) as i8;
 pub const SHOW_TOOLS: &str = "Show tools";
+/// The window with its tools (spec 2.7), never More tools' dots: this key
+/// wears no word to tell the two apart.
+pub const RETURN_DOT_ICON: crate::icons::Icon = crate::icons::Icon::Hide;
 
 /// AU10: the one thing Hide tools leaves on the screen: a `PILL_H` round key
 /// on its own island, so it reads on paper and on the desk alike.
@@ -1775,7 +1807,7 @@ pub fn return_dot(ui: &mut Ui) -> Response {
         p.rect_filled(rect, R_PILL, ISLAND);
         let (fill, ink) = ghost(ui, &resp);
         p.rect_filled(rect, R_PILL, fill);
-        crate::icons::paint(p, egui::Rect::from_center_size(rect.center(), Vec2::splat(BAR_ICON)), ink, crate::icons::Icon::Dots);
+        crate::icons::paint(p, egui::Rect::from_center_size(rect.center(), Vec2::splat(BAR_ICON)), ink, RETURN_DOT_ICON);
     }
     speak(&resp, egui::WidgetType::Button, None, SHOW_TOOLS);
     describe(resp, "ACTION return_dot", SHOW_TOOLS)

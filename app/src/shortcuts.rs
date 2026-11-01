@@ -12,7 +12,9 @@
 //! uses fires anywhere, as before.
 //!
 //! AU10: while any widget has keyboard focus the arrows are its own: a
-//! slider steps, and egui walks the focus on from a button.
+//! slider steps, and egui walks the focus on from a button. And a key that is
+//! held repeats a frame step, but no verb that rearranges the screen
+//! ([`Action::once_a_press`]).
 
 use eframe::egui;
 
@@ -88,6 +90,7 @@ fn fired(
                 (!typing || fires_over_field(c))
                     && !(focused && c.has_arrow())
                     && c.matches(i)
+                    && !(a.once_a_press() && c.only_repeats(i))
                     && !(hand_dragged && c.is_space_tap())
                     && aimed_here(*a, c, binds, here)
             })

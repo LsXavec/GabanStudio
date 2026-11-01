@@ -2160,6 +2160,7 @@ fn opacity_cells(
         }
     } else if resp.dragged() {
         state.strip_opacity = Some((lid, live));
+        state.strip_opacity_drawn = true;
     } else if resp.changed() {
         // Click-to-set (no drag): apply immediately.
         state.layer_set_props(

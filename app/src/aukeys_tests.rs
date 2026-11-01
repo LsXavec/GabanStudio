@@ -7,12 +7,15 @@ use egui::{Key, Modifiers, Rect, Vec2, vec2};
 use egui_kittest::kittest::NodeT;
 use serde_json::{Value, json};
 
+use crate::audock_tests::null_rects;
+use crate::ausay_tests::{line, raster_line};
 use crate::config::{self, Action, Chord, Config, Ctx, KEYMAP_REV, Keymap};
+use crate::floats::Float;
 use crate::measure::{self, Act, Recorder};
 use crate::say;
 use crate::shortcuts;
 use crate::testkit::{CTRL, EditorHarness};
-use crate::workspace::Stage;
+use crate::workspace::{Stage, Workspace, Workspaces};
 use crate::{Pane, Performed, plate, visible_panes};
 
 /// v0.5.0's primary chords as `git show ebbc5fc:app/src/config.rs` has them:
@@ -148,6 +151,17 @@ fn write(dir: &std::path::Path, config: &Value) {
     assert!(!text.contains("api_key") && !text.contains("totp_secret"), "goldens hold no secrets");
     std::fs::write(dir.join("config.json"), text).expect("a golden on disk");
 }
+
+/// A v0.5.0 data dir, on its way to this build's first launch.
+pub(crate) fn upgraders_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("a data dir");
+    write(dir.path(), &golden("Gaban"));
+    dir
+}
+
+/// What that launch says: each chord that moved, in one sentence.
+pub(crate) const KEYS_MOVED: &str =
+    "Column kind: Book (overlay) moved from Alt+K to Alt+O · Column kind: BG (haikei) moved from Alt+B to Alt+W";
 
 /// The file's bytes, read the way the app reads them, once.
 fn loaded(config: &Value) -> (tempfile::TempDir, Config) {
@@ -345,6 +359,12 @@ fn aukeys_fresh_install_stamps_and_moves_nothing() {
     let fresh = Config::load_in(dir.path());
     assert!(!dir.path().join("config.json").exists(), "nothing to save yet");
     assert_eq!(fresh.ui.keymap_rev, KEYMAP_REV);
+    // `Config::load`'s other road: no data dir at all.
+    let bare = Config::fresh();
+    assert_eq!(bare.ui.keymap_rev, KEYMAP_REV, "stamped, or the next launch would migrate it");
+    assert!(bare.load_notes.is_empty(), "{:?}", bare.load_notes);
+    assert!(!bare.migrated);
+    assert_eq!(bare.keybinds, config::default_binds(Keymap::Gaban));
 }
 
 /// Reset and a keymap switch reach the same chords a migration does, and
@@ -674,6 +694,131 @@ fn aukeys_hide_tools_hides_and_returns() {
     chrome_here(&h);
 }
 
+/// How many of `frames` moved the pane, and the paper, each read on its own.
+fn frames_moved(h: &mut EditorHarness, frames: usize, mut step: impl FnMut(&mut EditorHarness)) -> (usize, usize) {
+    let (mut pane, mut zoom) = (h.editor().canvas.dbg_rect, paper_zoom(h));
+    let mut moved = (0, 0);
+    for _ in 0..frames {
+        step(h);
+        let (now, refit) = (h.editor().canvas.dbg_rect, paper_zoom(h));
+        moved.0 += usize::from(now != pane);
+        moved.1 += usize::from(refit != zoom);
+        (pane, zoom) = (now, refit);
+    }
+    moved
+}
+
+/// A key held past the typematic delay: the pane grows once and the paper
+/// refits once, the first time, card's room and all, and every time after, and
+/// the way back is one move too.
+#[test]
+fn aukeys_hide_tools_refits_once_for_a_held_key() {
+    let mut h = shipped();
+    for time in ["with the card", "without it"] {
+        assert_eq!(frames_moved(&mut h, 8, |h| h.hold_key(Key::T)), (1, 1), "{time}");
+        assert_eq!(h.editor().is_on(Action::HideTools), Some(true), "{time}");
+        h.release_key(Key::T);
+        settle(&mut h);
+        assert_eq!(frames_moved(&mut h, 8, |h| h.hold_key(Key::T)), (1, 1), "{time}: the way back");
+        assert_eq!(h.editor().is_on(Action::HideTools), Some(false), "{time}");
+        h.release_key(Key::T);
+        settle(&mut h);
+    }
+}
+
+/// A held key repeats. What rearranges the screen answers the press, and only
+/// the press; a frame step is what a repeat is for, and keeps it.
+#[test]
+fn aukeys_held_key_runs_a_screen_verb_once() {
+    fn runs(h: &EditorHarness, verb: Action) -> usize {
+        h.performed().iter().filter(|(a, _)| *a == verb).count()
+    }
+    // One frame with these keys going down, in this order; egui marks which repeat.
+    fn frame_of(h: &mut EditorHarness, keys: [Key; 2]) {
+        let modifiers = Modifiers::NONE;
+        for key in keys {
+            let press = egui::Event::Key { key, physical_key: Some(key), pressed: true, repeat: false, modifiers };
+            h.kit_mut().input_mut().events.push(press);
+        }
+        h.kit_mut().step();
+    }
+    let mut h = shipped();
+    for _ in 0..6 {
+        h.hold_key(Key::T);
+    }
+    assert_eq!(runs(&h, Action::HideTools), 1, "one press, five repeats");
+    frame_of(&mut h, [Key::Q, Key::T]);
+    assert_eq!(runs(&h, Action::HideTools), 1, "another key's press is not its own");
+    h.release_key(Key::Q);
+    h.release_key(Key::T);
+    h.key(Key::T);
+    assert_eq!(runs(&h, Action::HideTools), 2, "a new press is a new run");
+    for (step, key, _) in SIX_STEPS {
+        let key = Key::from_name(key).expect("a key");
+        for _ in 0..4 {
+            h.hold_key(key);
+        }
+        h.release_key(key);
+        assert_eq!(runs(&h, step), 1, "{step:?}");
+    }
+    let mut h = stepped();
+    for frame in 6..9 {
+        h.hold_key(Key::ArrowRight);
+        assert_eq!(h.state().view.frame, frame, "a repeat steps");
+    }
+
+    // A chord of two: the key pressed while the other repeats is a press,
+    // whichever comes first in the frame, and two keys that only repeat are not.
+    let mut h = shipped();
+    let both = Chord { keys: vec!["Q".into(), "W".into()], ctrl: false, shift: false, alt: false };
+    h.rig_mut().config.binding_mut(Action::HideTools).chord = Some(both);
+    for (turn, keys) in [[Key::Q, Key::W], [Key::W, Key::Q]].into_iter().enumerate() {
+        h.hold_key(Key::Q);
+        frame_of(&mut h, keys);
+        assert_eq!(runs(&h, Action::HideTools), turn + 1, "{keys:?}: the second key is a press");
+        frame_of(&mut h, keys);
+        assert_eq!(runs(&h, Action::HideTools), turn + 1, "{keys:?}: and then both repeat");
+        h.release_key(Key::W);
+        h.release_key(Key::Q);
+    }
+
+    // Bare Space answers its release, a frame with no press in it at all.
+    let mut h = shipped();
+    h.rig_mut().config.binding_mut(Action::HideTools).chord = Some(chord("Space"));
+    h.key(Key::Space);
+    assert_eq!(runs(&h, Action::HideTools), 1, "a tap is a press");
+}
+
+/// Hide tools takes the chrome off and leaves the dock: it draws on every
+/// frame, so a step's recipe swapped in under it has rects by its next frame,
+/// and nothing saved from it was never drawn.
+#[test]
+fn aukeys_hide_tools_still_draws_the_dock() {
+    let mut h = shipped();
+    h.key(Key::T);
+    settle(&mut h);
+    for (step, _, stage) in SIX_STEPS {
+        let recipe = serde_json::to_value(stage.dock()).expect("json");
+        assert!(null_rects(&recipe) > 0, "{step:?}: a recipe has no rects till it draws");
+        h.perform(step);
+        settle(&mut h);
+        assert_eq!(h.editor().stage, Some(stage), "{step:?}");
+        assert!(h.has(plate::SHOW_TOOLS), "{step:?}: still hidden");
+        let live = serde_json::to_value(&h.editor().dock).expect("json");
+        assert_eq!(null_rects(&live), 0, "{step:?}: drawn");
+        assert!(!plate::pane_bodies(&h.ctx()).is_empty(), "{step:?}");
+    }
+    let dock = h.editor().dock.clone();
+    let list = vec![Workspace { name: "hidden".into(), dock, preset: None, view: None }];
+    let dir = tempfile::tempdir().expect("a data dir");
+    Workspaces { list }.save_to(dir.path()).expect("saved");
+    let text = std::fs::read_to_string(Workspaces::path_in(dir.path())).expect("the file");
+    assert_eq!(null_rects(&serde_json::from_str(&text).expect("json")), 0);
+    let (back, notes) = Workspaces::load_from(dir.path());
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(back.list.len(), 1, "it reads back");
+}
+
 /// A closed strip's room is the paper's with the rest: Fit runs to the whole
 /// pane, not to the rail's reach, and the latch stands for the way back.
 #[test]
@@ -824,7 +969,46 @@ fn aukeys_hide_tools_refused_mid_stroke() {
     h.key(Key::T);
     assert_eq!(h.editor().is_on(Action::HideTools), Some(true));
     settle_painted(&mut h, "finish the stroke first");
+    // Nor does what wants the chrome bring it back under the pen: two of the
+    // four are refused, which leaves nothing owed at pen-up.
+    let dock = h.editor().canvas.dbg_rect;
+    for verb in [Action::GoToFrame, Action::WelcomeScreen] {
+        assert_eq!(h.editor().can_perform(verb), Err("finish the stroke first"), "{verb:?}");
+        assert_eq!(h.perform(verb), Performed::Ignored, "{verb:?}");
+        assert_eq!(h.editor().is_on(Action::HideTools), Some(true), "{verb:?}");
+        assert_eq!(h.editor().canvas.dbg_rect, dock, "{verb:?}: no pane regrown under the pen");
+    }
     h.release(at + vec2(30.0, 10.0));
+    settle(&mut h);
+    assert_eq!(h.editor().is_on(Action::HideTools), Some(true), "nothing owed");
+
+    // The other two wait for pen-up (spec 4.5), and the tools wait with them.
+    type Opened = fn(&EditorHarness) -> bool;
+    let opened: [(Action, Opened); 2] = [
+        (Action::CanvasOptions, |h| h.editor().floats.is_open(Float::CanvasOptions)),
+        (Action::WhatsNew, |h| h.editor().start.is_some()),
+    ];
+    for (verb, open) in opened {
+        let mut h = shipped();
+        h.perform(Action::HideTools);
+        settle(&mut h);
+        let at = h.editor().canvas.dbg_rect.center();
+        h.press_and_move(at, at + vec2(30.0, 10.0), 4);
+        let dock = h.editor().canvas.dbg_rect;
+        assert_eq!(h.perform(verb), Performed::Done, "{verb:?}");
+        h.run_frames(3);
+        assert!(!open(&h), "{verb:?} waits for the pen");
+        assert_eq!(h.editor().is_on(Action::HideTools), Some(true), "{verb:?}");
+        assert_eq!(h.editor().canvas.dbg_rect, dock, "{verb:?}: no pane regrown under the pen");
+        h.release(at + vec2(30.0, 10.0));
+        settle(&mut h);
+        assert!(open(&h), "{verb:?} at pen-up");
+        assert_eq!(h.editor().is_on(Action::HideTools), Some(false), "{verb:?}: and what it opened shows");
+        assert!(h.has("Search"), "{verb:?}");
+        h.perform(Action::HideTools);
+        settle(&mut h);
+        assert_eq!(h.editor().is_on(Action::HideTools), Some(true), "{verb:?}: owed once, not for good");
+    }
 }
 
 /// One frame more until `words` paint, and a look at them.
@@ -874,6 +1058,7 @@ fn aukeys_hide_tools_card_teaches_once() {
     h.perform(Action::HideTools);
     settle(&mut h);
     assert!(!h.painted_text().iter().any(|t| t.contains("Tap the dot")));
+    assert_eq!(h.editor().canvas.dbg_rect.top(), 0.0, "and no band kept for a card that will not stand");
     h.click(plate::SHOW_TOOLS);
     settle(&mut h);
     assert!(h.has("Search"));
@@ -885,9 +1070,7 @@ fn aukeys_hide_tools_card_teaches_once() {
     h.perform(Action::HideTools);
     settle(&mut h);
     assert!(!h.painted_text().iter().any(|t| t == ROW), "hints off");
-    let dir = tempfile::tempdir().expect("a data dir");
-    write(dir.path(), &golden("Gaban"));
-    let mut h = EditorHarness::with_dir_shipped(dir);
+    let mut h = EditorHarness::with_dir_shipped(upgraders_dir());
     h.perform(Action::HideTools);
     settle(&mut h);
     assert!(h.has(plate::SHOW_TOOLS));
@@ -924,7 +1107,13 @@ fn aukeys_hide_tools_stops_the_read_clock() {
     assert_ne!(h.rig().config.ui.hints_seen & say::HELD, 0, "the time back was");
 }
 
-/// The card stands off the dot, and the pen draws through it.
+/// Where the card on the dot stands.
+fn dot_card(h: &EditorHarness) -> Rect {
+    h.ctx().memory(|m| m.area_rect(plate::dot_card_id())).expect("a card on the dot")
+}
+
+/// The card stands off the dot, and the pen draws through it, here above the
+/// pane and, for a refusal once the row is answered, over it.
 #[test]
 fn aukeys_hide_tools_card_stops_no_pen() {
     let mut h = shipped();
@@ -934,28 +1123,259 @@ fn aukeys_hide_tools_card_stops_no_pen() {
     let words = h.painted_at(ROW);
     assert!(words.x >= dot.right() + 8.0, "clear of the dot: {words:?} {dot:?}");
     let canvas = h.editor().canvas.dbg_rect;
-    assert!(canvas.contains(words), "over the canvas");
+    let host = h.ctx().layer_id_at(canvas.center()).expect("the canvas's layer");
+    assert_eq!(h.ctx().layer_id_at(words), Some(host), "the pen sees through it");
+    assert_ne!(h.ctx().layer_id_at(dot.center()), Some(host), "the dot is no hole in the pane");
+
+    h.key(Key::T);
+    settle(&mut h);
+    h.key(Key::T);
+    settle(&mut h);
+    h.state_mut().refuse("refused — a test's reason");
+    h.run_frames(3);
+    let words = h.painted_at("refused — a test's reason");
+    let canvas = h.editor().canvas.dbg_rect;
+    assert!(canvas.contains(words), "no room left for it: {words:?} in {canvas:?}");
     let host = h.ctx().layer_id_at(canvas.center()).expect("the canvas's layer");
     assert_eq!(h.ctx().layer_id_at(words), Some(host), "the pen sees paper through it");
-    assert_ne!(h.ctx().layer_id_at(dot.center()), Some(host), "the dot is no hole in the pane");
+}
+
+/// Spec 8.5, nothing over art. Until something answers it, the card has a band
+/// above the pane: at Fit the paper starts under it at every size, and no pan
+/// or zoom can bring art beneath it. The first stroke answers it on either
+/// road, and takes no room back, so the paper does not refit under the pen.
+#[test]
+fn aukeys_hide_tools_card_stands_on_no_art() {
+    let roads: [fn(&mut EditorHarness); 2] = [line, raster_line];
+    for size in [vec2(1600.0, 900.0), vec2(1720.0, 960.0), vec2(1280.0, 800.0)] {
+        for road in roads {
+            let mut h = shipped();
+            h.kit_mut().set_size(size);
+            settle(&mut h);
+            let open = h.editor().canvas.dbg_rect;
+            h.key(Key::T);
+            settle(&mut h);
+            assert!(h.painted_text().iter().any(|t| t == ROW), "{size:?}: {:?}", h.painted_text());
+            let (card, canvas, zoom) = (dot_card(&h), h.editor().canvas.dbg_rect, paper_zoom(&h));
+            let xf = h.editor().canvas.view_xform();
+            assert!(!card.intersects(xf.paper_bounds()), "{card:?} on {:?} at {size:?}", xf.paper_bounds());
+            assert!(card.bottom() <= canvas.top(), "{card:?} above {canvas:?} at {size:?}");
+            assert!(h.filled_rects(plate::DESK).iter().any(|r| r.contains_rect(card)), "the band is desk");
+            let fit = (canvas.width() / xf.paper.x).min(canvas.height() / xf.paper.y) * 0.94;
+            assert!((zoom - fit).abs() < 1e-4, "at Fit: {zoom} of {fit} in {canvas:?}");
+            assert!(canvas.height() > open.height(), "and the pane still grew: {open:?} to {canvas:?}");
+
+            road(&mut h);
+            assert!(!h.painted_text().iter().any(|t| t == ROW), "{size:?}: a stroke answers it");
+            assert_ne!(h.rig().config.ui.hints_seen & say::HIDE_TOOLS, 0, "{size:?}: and it stays answered");
+            assert_eq!(h.editor().canvas.dbg_rect, canvas, "{size:?}: the room stays while the tools are off");
+            assert_eq!(paper_zoom(&h), zoom, "{size:?}: no refit under the pen");
+
+            h.key(Key::T);
+            settle(&mut h);
+            h.key(Key::T);
+            settle(&mut h);
+            assert!(!h.painted_text().iter().any(|t| t == ROW), "{size:?}: once");
+            let whole = h.editor().canvas.dbg_rect;
+            assert_eq!(whole.top(), canvas.top() - f32::from(plate::RETURN_DOT_ROOM), "{size:?}: the room has gone");
+        }
+    }
+
+    // A stroke with the tools showing answers nothing: the card has not stood.
+    let mut h = shipped();
+    line(&mut h);
+    raster_line(&mut h);
+    assert_eq!(h.rig().config.ui.hints_seen & say::HIDE_TOOLS, 0, "{:?}", h.rig().config.ui.hints_seen);
+    h.key(Key::T);
+    settle(&mut h);
+    assert!(h.painted_text().iter().any(|t| t == ROW), "still to teach");
+
+    // Hints switched on with the tools off: no room was left, so no card.
+    let mut h = shipped();
+    h.perform(Action::ToggleHints);
+    settle(&mut h);
+    h.perform(Action::HideTools);
+    settle(&mut h);
+    let pane = h.editor().canvas.dbg_rect;
+    h.perform(Action::ToggleHints);
+    settle(&mut h);
+    assert!(!h.painted_text().iter().any(|t| t == ROW), "it waits for the room");
+    assert_eq!(h.editor().canvas.dbg_rect, pane, "and none opens under the pen");
+
+    // In every step: what a dock shows starts below the card.
+    for (step, _, _) in SIX_STEPS {
+        let mut h = shipped();
+        h.perform(step);
+        settle(&mut h);
+        h.perform(Action::HideTools);
+        settle(&mut h);
+        assert!(h.painted_text().iter().any(|t| t == ROW), "{step:?}");
+        let cut = cut_by_the_dot(&h, dot_card(&h));
+        assert_eq!(cut.iter().filter(|w| *w != ROW).count(), 0, "{step:?}: {cut:?}");
+    }
 }
 
 /// A refusal under Hide tools still says why, on the dot's card, for as long
 /// as the lane would have held it, and it does not stand behind the dot's row.
+/// It is one red card, not a pill in a card, level with the dot as the row is.
 #[test]
 fn aukeys_hide_tools_refusals_have_a_voice() {
     let mut h = shipped();
     h.key(Key::T);
     settle(&mut h);
+    let dot = h.rect(plate::SHOW_TOOLS);
+    assert!((dot_card(&h).center().y - dot.center().y).abs() < 1.0, "{:?} by {dot:?}", dot_card(&h));
     h.state_mut().refuse("refused — a test's reason");
     h.run_frames(3);
     assert!(h.painted_text().iter().any(|t| t == "refused — a test's reason"), "{:?}", h.painted_text());
     assert!(!h.painted_text().iter().any(|t| t == ROW), "one voice");
+    assert!((dot_card(&h).center().y - dot.center().y).abs() < 1.0, "{:?} by {dot:?}", dot_card(&h));
+    let wash = h.filled_rects(plate::RED_WASH);
+    assert_eq!(wash.len(), 1, "one outline: {wash:?}");
+    assert!((wash[0].height() - dot_card(&h).height()).abs() < 1.0, "the card is the wash: {wash:?}");
+    assert!(measure::clip_here(&h, measure::Scope::Chrome).clipped == 0, "the refusal fits");
+    // Two lines are level too, and a long reason stands inside the window.
+    let long = "refused — a reason long enough to run past one line of a card, however wide the card may stand on \
+                this window, and still have words left for the second line of it";
+    h.state_mut().refuse(long);
+    h.run_frames(3);
+    let card = dot_card(&h);
+    assert!((card.center().y - dot.center().y).abs() < 1.0, "{card:?} by {dot:?}");
+    assert!(card.height() > dot.height(), "two lines: {card:?}");
+    assert!(card.top() >= 0.0, "{card:?}");
     h.wait(4.2);
     settle(&mut h);
-    assert!(!h.painted_text().iter().any(|t| t == "refused — a test's reason"), "its dwell ended");
+    assert!(!h.painted_text().iter().any(|t| t == long), "its dwell ended");
     assert!(h.painted_text().iter().any(|t| t == ROW), "the row stood by");
     assert!(measure::clip_here(&h, measure::Scope::Chrome).clipped == 0, "the card fits");
+}
+
+/// The lane is gone, and a stroke tried on the Plan preview still gets its
+/// answer, on the dot's card, every time. The hint keeps for a lane to teach on.
+#[test]
+fn aukeys_hide_tools_answers_a_plan_stroke() {
+    let plan = say::PLAN_WORDS.to_lowercase();
+    let mut h = shipped();
+    h.editor_mut().enter_room(Stage::Layout);
+    settle(&mut h);
+    h.key(Key::T);
+    settle(&mut h);
+    let preview = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Canvas);
+    let at = preview.map(|(_, r, _)| r.center() - vec2(0.0, 80.0)).expect("the preview");
+    for _ in 0..2 {
+        h.drag_path(&[at, at + vec2(30.0, 0.0), at + vec2(60.0, 10.0)]);
+        settle_painted(&mut h, &plan);
+        assert!(!h.painted_text().iter().any(|t| t == ROW), "one voice");
+        h.wait(4.2);
+        settle(&mut h);
+        assert!(!h.painted_text().iter().any(|t| t.to_lowercase() == plan), "its dwell ended");
+    }
+    assert_eq!(h.rig().config.ui.hints_seen & say::PLAN, 0, "the hint keeps");
+    h.key(Key::T);
+    settle(&mut h);
+    assert!(!h.painted_text().iter().any(|t| t.to_lowercase() == plan), "no answer owed");
+    h.drag_path(&[at, at + vec2(30.0, 0.0), at + vec2(60.0, 10.0)]);
+    settle_painted(&mut h, &plan);
+}
+
+/// A key takes a Layers rail away mid-drag. Its release will land nowhere, so
+/// nothing waits for one and nothing is committed: the tools come back on the
+/// document's own value. The same goes for a step that takes the docked pane.
+#[test]
+fn aukeys_hide_tools_drops_an_opacity_drag() {
+    fn layered() -> EditorHarness {
+        let mut state = crate::doc::AppState::new_project("t", 640, 480, 24, 72.0);
+        state.new_drawing_at_frame();
+        let mut h = EditorHarness::with_state_shipped(state);
+        h.kit_mut().set_size(vec2(1600.0, 900.0));
+        settle(&mut h);
+        h
+    }
+    /// A drag begun on the row's rail: the percentage stands just past it.
+    fn drag(h: &mut EditorHarness) -> egui::Pos2 {
+        let at = h.painted_at("100%") + vec2(-24.0, 8.0);
+        let to = at - vec2(20.0, 0.0);
+        h.press_and_move(at, to, 4);
+        assert!(h.state().strip_opacity.is_some(), "a drag in hand");
+        h.run_frames(2);
+        assert!(h.state().strip_opacity.is_some(), "a held pointer holds it");
+        to
+    }
+    let mut h = layered();
+    h.open_float(Float::Layers);
+    let to = drag(&mut h);
+    h.key(Key::T);
+    assert!(h.has(plate::SHOW_TOOLS));
+    assert_eq!(h.state().strip_opacity, None, "gone with its rail");
+    h.release(to);
+    h.key(Key::T);
+    settle(&mut h);
+    assert_eq!(h.state().strip_opacity, None);
+    assert_eq!(h.state().active_layer_props().map(|p| p.opacity), Some(1.0), "nothing committed");
+    assert!(h.painted_text().iter().any(|t| t == "100%"), "{:?}", h.painted_text());
+
+    let mut h = layered();
+    h.editor_mut().open_pane(Pane::Layers);
+    settle(&mut h);
+    let to = drag(&mut h);
+    h.key(Key::from_name(SIX_STEPS[1].1).expect("a key"));
+    assert_eq!(visible_panes(&h.editor().dock), [Pane::Canvas], "Draw's lone canvas, and no rail");
+    assert_eq!(h.state().strip_opacity, None, "gone with its rail");
+    h.release(to);
+    settle(&mut h);
+    assert_eq!(h.state().strip_opacity, None);
+    assert_eq!(h.state().active_layer_props().map(|p| p.opacity), Some(1.0), "nothing committed");
+}
+
+/// What the last frame painted on `key`: its masks by name, and its dots.
+fn icon_on(h: &EditorHarness, key: Rect) -> (Vec<String>, usize) {
+    fn walk(s: &egui::Shape, key: Rect, masks: &mut Vec<egui::TextureId>, dots: &mut usize) {
+        match s {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, key, masks, dots)),
+            egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default() && key.contains_rect(m.calc_bounds()) => {
+                masks.push(m.texture_id);
+            }
+            egui::Shape::Circle(c) if key.contains(c.center) => *dots += 1,
+            _ => {}
+        }
+    }
+    let (mut masks, mut dots) = (Vec::new(), 0);
+    h.kit().output().shapes.iter().for_each(|c| walk(&c.shape, key, &mut masks, &mut dots));
+    let textures = h.ctx().tex_manager();
+    let textures = textures.read();
+    (masks.iter().filter_map(|t| textures.meta(*t)).map(|m| m.name.clone()).collect(), dots)
+}
+
+/// Spec 2.7: the dot has no word on it, so its shape is all it has, and that
+/// shape is its own: the hide mask, not the three dots of More tools.
+#[test]
+fn aukeys_hide_tools_dot_wears_its_own_icon() {
+    let mut h = shipped();
+    h.key(Key::T);
+    settle(&mut h);
+    assert_eq!(icon_on(&h, h.rect(plate::SHOW_TOOLS)), (vec!["icon:hide:24".to_string()], 0));
+    let mut h = shipped();
+    h.kit_mut().set_size(vec2(1280.0, 480.0));
+    settle(&mut h);
+    assert_eq!(icon_on(&h, h.rect("More tools")), (Vec::new(), 3), "the dots stay More tools'");
+}
+
+/// The chords that moved, joined, on every window from the Lead's largest to
+/// the smallest the app opens: the sentence stands whole, on the refusal's
+/// lane, and waits for the artist as any notice does.
+#[test]
+fn aukeys_chords_that_moved_fit_the_lane() {
+    for size in [vec2(1600.0, 900.0), vec2(1280.0, 800.0), vec2(1280.0, 720.0), vec2(1024.0, 640.0)] {
+        let mut h = EditorHarness::with_dir_shipped(upgraders_dir());
+        h.kit_mut().set_size(size);
+        h.kit_mut().set_pixels_per_point(1.0);
+        settle(&mut h);
+        h.wait(6.0);
+        assert_eq!(h.state().refusal, KEYS_MOVED, "{size:?}");
+        assert!(h.painted_text().iter().any(|t| t == KEYS_MOVED), "{size:?}: {:?}", h.painted_text());
+        let clip = measure::clip_here(&h, measure::Scope::Chrome);
+        assert_eq!((clip.clipped, clip.elided), (0, 0), "{size:?}: {:?}", clip.found);
+    }
 }
 
 /// The Start float goes with the tools and comes back with them, and what opens

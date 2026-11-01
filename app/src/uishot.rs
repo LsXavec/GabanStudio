@@ -630,12 +630,18 @@ fn hide_moments(dir: &Path) {
         };
         h.perform(Action::HideTools);
         shoot(&mut h, Some(draw));
-        // After `arrive`, whose frames outlast the four seconds it dwells.
-        h.state_mut().refuse(crate::doc::FINISH_STROKE);
-        h.run_frames(2);
-        let refused = h.painted_text().join(" ");
-        assert!(refused.contains(crate::doc::FINISH_STROKE), "on the dot's card: {refused}");
+        // T under a live stroke, after `arrive`, whose frames outlast the four
+        // seconds it dwells. The shot's own frames do not.
+        let at = h.editor().canvas.view_xform().paper_bounds().center();
+        let to = at + egui::vec2(120.0, 30.0);
+        h.press_and_move(at, to, 4);
+        assert!(h.editor().canvas.stroke_active(), "a live stroke");
+        h.hold_key(egui::Key::T);
         shoot(&mut h, None);
+        let refused = h.painted_text().join(" ");
+        assert!(refused.contains("finish the stroke first"), "on the dot's card: {refused}");
+        h.release_key(egui::Key::T);
+        h.release(to);
         // Past the refusal's dwell, and back once: the row has been answered.
         h.wait(4.2);
         h.perform(Action::HideTools);
@@ -645,6 +651,26 @@ fn hide_moments(dir: &Path) {
         let timing = ProbeRoom::Stage(Stage::Edit);
         timing.enter(h.editor_mut());
         shoot(&mut h, Some(timing));
+    }
+}
+
+/// AU10: an upgrader's first launch: both chords that moved, in the one
+/// sentence the lane holds until the artist acts.
+const KEYS: [(&str, u32, u32); 2] = [("say-keys-moved", 1600, 900), ("say-keys-moved-1280", 1280, 800)];
+
+fn keys_owed() -> Vec<(String, u32, u32)> {
+    KEYS.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn keys_moments(dir: &Path) {
+    for (state, w, height) in KEYS {
+        let size = egui::vec2(w as f32, height as f32);
+        let mut h = EditorHarness::with_gpu_dir_shipped(crate::aukeys_tests::upgraders_dir());
+        h.kit_mut().set_size(size);
+        arrive(&mut h, ProbeRoom::Stage(Stage::Drawing));
+        h.shot(size, &dir.join(format!("{state}.png")));
+        let said = h.painted_text().join(" ");
+        assert!(said.contains(crate::aukeys_tests::KEYS_MOVED), "on the lane: {said}");
     }
 }
 
@@ -871,22 +897,43 @@ fn uishot_rooms() {
     check_shots(&dir, &export_owed()).expect("the Export step's moments");
     hide_moments(&dir);
     check_shots(&dir, &hide_owed()).expect("Hide tools' moments");
+    keys_moments(&dir);
+    check_shots(&dir, &keys_owed()).expect("the chords that moved");
 }
 
-/// Only the ignored pass takes them, so this holds it to them, at both sizes.
+/// Only the ignored pass takes them, so this holds it to them, at both sizes:
+/// it takes every one, then checks the folder, and the check misses any one of
+/// them, which is what `shots-after/` gets a copy of.
 #[test]
 fn aukeys_the_ignored_pass_owes_the_hide_tools_shots() {
     let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
-    let taken = pass.find("hide_moments(&dir);").expect("it takes them");
-    let checked = pass.find("check_shots(&dir, &hide_owed())").expect("it checks them");
-    assert!(taken < checked, "taken, then checked");
-    let owed = hide_owed();
-    for moment in ["hide-tools", "hide-refusal", "hide-dot", "hide-timing"] {
+    for group in ["hide", "keys"] {
+        let taken = pass.find(&format!("{group}_moments(&dir);")).expect("it takes them");
+        let checked = pass.find(&format!("check_shots(&dir, &{group}_owed())")).expect("it checks them");
+        assert!(taken < checked, "taken, then checked");
+    }
+    let owed: Vec<_> = hide_owed().into_iter().chain(keys_owed()).collect();
+    assert_eq!(owed.len(), 10);
+    for moment in ["hide-tools", "hide-refusal", "hide-dot", "hide-timing", "say-keys-moved"] {
         assert!(owed.contains(&(format!("{moment}.png"), 1600, 900)), "{moment} at 1600");
         assert!(owed.contains(&(format!("{moment}-1280.png"), 1280, 800)), "{moment} at 1280");
     }
     let names: BTreeSet<&str> = owed.iter().map(|o| o.0.as_str()).collect();
     assert_eq!(names.len(), owed.len(), "no two shots share a name: {names:?}");
+    let elsewhere = say_owed().into_iter().chain(export_owed()).chain(queue_owed());
+    assert!(elsewhere.into_iter().all(|o| !names.contains(o.0.as_str())), "no name is another group's");
+    let dir = tempfile::tempdir().unwrap();
+    for (name, w, h) in &owed {
+        tiny_png(&dir.path().join(name), *w, *h);
+    }
+    assert_eq!(check_shots(dir.path(), &owed), Ok(()));
+    for (name, w, h) in &owed {
+        let file = dir.path().join(name);
+        std::fs::remove_file(&file).unwrap();
+        let missing = check_shots(dir.path(), &owed);
+        assert!(missing.is_err_and(|e| e.starts_with(name.as_str())), "{name} not there");
+        tiny_png(&file, *w, *h);
+    }
 }
 
 #[test]

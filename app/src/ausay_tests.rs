@@ -64,14 +64,14 @@ fn paper_middle(h: &EditorHarness) -> egui::Pos2 {
 }
 
 /// A line drawn the way a hand draws it.
-fn line(h: &mut EditorHarness) {
+pub(crate) fn line(h: &mut EditorHarness) {
     let from = paper_middle(h);
     h.drag_path(&[from, from - vec2(30.0, 0.0), from - vec2(60.0, 10.0)]);
     settle(h);
 }
 
 /// What a raster stroke lands, at pen-up.
-fn raster_line(h: &mut EditorHarness) {
+pub(crate) fn raster_line(h: &mut EditorHarness) {
     paint_texels(h.state_mut(), &[(10, 10), (11, 10), (12, 10)], [0.0, 0.0, 0.0, 1.0]);
     settle(h);
 }

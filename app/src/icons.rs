@@ -159,6 +159,12 @@ const MASKS: &[(Icon, &str, &[u8], &[u8])] = &[
         mask_bytes!("sound", 24),
         mask_bytes!("sound", 48),
     ),
+    (
+        Icon::Hide,
+        "hide",
+        mask_bytes!("hide", 24),
+        mask_bytes!("hide", 48),
+    ),
 ];
 
 /// Decode a white-alpha PNG mask into a texture, cached per-Context. The
@@ -242,6 +248,8 @@ pub enum Icon {
     Ghosts,
     /// A speaker and its waves — sound while dragging.
     Sound,
+    /// A window with its top row and its side rail — the tools, to bring back.
+    Hide,
     /// Three dots — what a popover keeps.
     Dots,
     /// A cross — a float's close key.
@@ -481,6 +489,11 @@ pub fn paint(p: &Painter, rect: Rect, ink: Color32, icon: Icon) {
             p.add(Shape::closed_line(horn, s));
             p.add(Shape::line(vec![at(0.65, 0.38), at(0.7, 0.5), at(0.65, 0.62)], s));
             p.add(Shape::line(vec![at(0.76, 0.27), at(0.85, 0.5), at(0.76, 0.73)], s));
+        }
+        Icon::Hide => {
+            p.rect_stroke(Rect::from_min_max(at(0.15, 0.19), at(0.85, 0.81)), 1.0, s, StrokeKind::Middle);
+            p.line_segment([at(0.15, 0.4), at(0.85, 0.4)], s);
+            p.line_segment([at(0.38, 0.4), at(0.38, 0.81)], s);
         }
         Icon::Dots => {
             for x in [0.2f32, 0.5, 0.8] {

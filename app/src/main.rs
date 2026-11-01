@@ -3136,9 +3136,12 @@ impl Editor {
             return;
         }
         // AU10: what these show stands in the chrome, so the tools come back
-        // with it.
+        // with it. Canvas options and What's new wait for pen-up (spec 4.5),
+        // so the tools wait with them: no pane regrown under a live stroke.
         if shows_on_chrome(action) {
-            self.tools_hidden = false;
+            let busy = self.canvas.stroke_active();
+            self.tools_at_pen_up = busy && self.tools_hidden;
+            self.tools_hidden &= busy;
         }
         // GM3: the chrome's own verbs — windows, panes and rooms; the
         // document is untouched.
@@ -4469,6 +4472,9 @@ struct Editor {
     /// AU10: Hide tools: the top row, band, rail and floats are off the
     /// screen. Never stored: a session opens with its tools.
     tools_hidden: bool,
+    /// AU10: a verb that shows on the chrome ran under a live stroke, and what
+    /// it opens waits for pen-up: the tools come back then too.
+    tools_at_pen_up: bool,
     /// AU1: every action `perform` answered `Ignored`, however it ran (a
     /// key, a click, the palette). The journey `Recorder` reads it.
     #[cfg(test)]
@@ -4594,10 +4600,14 @@ fn dock_style(base: &egui::Style, dock: &DockState<Pane>) -> egui_dock::Style {
 /// AU10: the dock's share of the return dot's corner. A lone canvas has desk
 /// round its paper; anything else reaches the corner with a tab or a pane's
 /// first control, so the dock stands out from under the dot, which stays
-/// where the spec puts it.
-fn dot_room(dock: &DockState<Pane>) -> Option<egui::Margin> {
+/// where the spec puts it. Its first-time card stands to the dot's right, so
+/// while that is `card`, every dock stands below the dot's row: the paper at
+/// Fit starts under it, and no pan or zoom can bring art beneath it.
+fn dot_room(dock: &DockState<Pane>, card: bool) -> Option<egui::Margin> {
     let lone_canvas = dock.iter_all_tabs().map(|(_, pane)| pane).eq([&Pane::Canvas]);
-    (!lone_canvas).then_some(egui::Margin { left: plate::RETURN_DOT_ROOM, ..egui::Margin::ZERO })
+    let room = |needed| if needed { plate::RETURN_DOT_ROOM } else { 0 };
+    let margin = egui::Margin { left: room(!lone_canvas), top: room(card), ..egui::Margin::ZERO };
+    (margin != egui::Margin::ZERO).then_some(margin)
 }
 
 /// AU3: `a` and `b` are one arrangement: the same leaves, tabs and splits,
@@ -5572,6 +5582,7 @@ impl Editor {
             was_playing: false,
             frame_entry: None,
             tools_hidden: false,
+            tools_at_pen_up: false,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -5682,6 +5693,7 @@ impl Editor {
             was_playing: false,
             frame_entry: None,
             tools_hidden: false,
+            tools_at_pen_up: false,
             #[cfg(test)]
             ignored: Vec::new(),
             #[cfg(test)]
@@ -8292,13 +8304,9 @@ impl Editor {
             .inner;
         // What stands beside it outranks its own tip, which would stand there.
         if refusing {
-            plate::dot_card(&dot, |ui| {
-                ui.horizontal(|ui| plate::refusal(ui, &self.state.refusal));
-            });
+            plate::dot_refusal(&dot, &self.state.refusal);
         } else if let Some(row) = &row {
-            plate::dot_card(&dot, |ui| {
-                ui.label(&row.words);
-            });
+            plate::dot_card(&dot, &row.words);
         } else {
             plate::hover_card(dot.clone(), || {
                 let chord = menus::chord_label(ctx, Action::HideTools);
@@ -8705,7 +8713,12 @@ impl Editor {
         let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
         self.play_tick(dt);
         let row_frame = plate::desk_frame(ui.style()).inner_margin(egui::Margin::symmetric(8, 6));
+        if self.tools_at_pen_up && !self.canvas.stroke_active() {
+            self.tools_at_pen_up = false;
+            self.tools_hidden = false;
+        }
         let hidden = self.tools_hidden;
+        self.say.card_room = hidden.then(|| self.say.card_room.unwrap_or_else(|| self.dot_card_due(ui.ctx())));
         let top = egui::Panel::top("top_bar").frame(row_frame).exact_size(44.0).show_separator_line(false);
         chrome_panel(top, hidden, ui, |ui| {
             // Owner's directive (2026-08-17): the bar read small. The Chrome
@@ -9596,13 +9609,12 @@ impl Editor {
         };
         let mut dock_style = dock_style(ui.style().as_ref(), &self.dock);
         if hidden {
-            dock_style.dock_area_padding = dot_room(&self.dock);
+            dock_style.dock_area_padding = dot_room(&self.dock, self.say.card_room == Some(true));
         }
         let dock_rect = ui.available_rect_before_wrap();
         plate::note_dock(ui, dock_rect);
-        if let Some(room) = dock_style.dock_area_padding {
-            let desk = dock_rect.with_max_x(dock_rect.left() + f32::from(room.left));
-            ui.painter().rect_filled(desk, 0.0, plate::DESK);
+        if dock_style.dock_area_padding.is_some() {
+            ui.painter().rect_filled(dock_rect, 0.0, plate::DESK);
         }
         // UI lock (Settings -> UI Features): the layout freezes — no tab
         // dragging and no splits, and the recipe's panes stay open — but the
@@ -9732,6 +9744,11 @@ impl Editor {
             if !open {
                 self.float_canvas.open = false;
             }
+        }
+        // AU10: an opacity drag whose rail was not drawn (a key took the float
+        // or the pane away) has no release to wait for, and lands nowhere.
+        if !std::mem::take(&mut self.state.strip_opacity_drawn) {
+            self.state.strip_opacity = None;
         }
     }
 }

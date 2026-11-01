@@ -128,8 +128,8 @@ pub struct Facts {
     pub flat_pen: bool,
     /// A refusal said twice running.
     pub refused_twice: Option<String>,
-    /// Hide tools is on.
-    pub tools_hidden: bool,
+    /// The dock left room for the dot's first-time card (see [`Say::card_room`]).
+    pub card_room: bool,
     /// `ui.hints_seen`, as the frame began.
     pub seen: u32,
     /// The row last on the lane stood long enough to read.
@@ -176,14 +176,16 @@ const TRANSPORT: &[Stage] = &[Stage::Drawing, Stage::Edit];
 const ON_A_FRAME: &[Stage] = &[Stage::Drawing, Stage::Edit, Stage::InkPaint];
 
 pub const HINTS: [Hint; 15] = [
-    // First, or a row with nowhere to stand would keep it from the dot.
+    // First, or a row with nowhere to stand would keep it from the dot. The
+    // first stroke answers it too: whoever draws has read it, or has no need
+    // to. Only one made under the card: `read` asks every row, shown or not.
     Hint {
         bit: HIDE_TOOLS,
         words: Words::Chord("Tap the dot, or press ", Action::HideTools, ", to bring the tools back."),
         verb: None,
         steps: &[],
-        shows: |f| f.tools_hidden,
-        answered: |f| f.tools_back,
+        shows: |f| f.card_room,
+        answered: |f| f.tools_back || (f.card_room && f.stroked),
         passes: false,
     },
     Hint {
@@ -449,6 +451,11 @@ pub struct Say {
     pub dots_painted: bool,
     /// Hide tools was on at the last reading.
     pub tools_were_hidden: bool,
+    /// AU10: the dock leaves the dot's first-time card its room (spec 8.5:
+    /// nothing over art). Settled as the tools go and kept until they are back,
+    /// or the stroke that answers the card would refit the paper under the pen.
+    /// `None`: the tools are showing.
+    pub card_room: Option<bool>,
     /// A sentence a test holds on the lane, whatever the document says.
     #[cfg(test)]
     pub pin: Option<Spoken>,
@@ -634,14 +641,26 @@ impl Editor {
     }
 
     /// A stroke tried on the Plan preview always gets an answer: a hint the
-    /// first time, then the same sentence as a remark.
+    /// first time, then the same sentence as a remark. Under Hide tools neither
+    /// has a lane, so the dot says it and the hint keeps for later. That is an
+    /// answer, not a refusal to count: said twice, it would use up the lesson.
     fn say_plan(&mut self) {
         let tried = self.viewers.get_mut(&u8::MAX).is_some_and(|vs: &mut ViewerView| std::mem::take(&mut vs.tried));
-        if tried && (self.say.off || self.say.seen & PLAN != 0) {
+        if tried && self.tools_hidden {
+            self.state.refuse(PLAN_WORDS);
+            self.say.refusal_seq = self.state.refusal_seq;
+        } else if tried && (self.say.off || self.say.seen & PLAN != 0) {
             self.state.status = PLAN_WORDS.into();
             self.status_seen.clear();
         }
-        self.say.plan_tried = (self.say.plan_tried || tried) && self.stage == Some(Stage::Layout);
+        let due = tried && !self.tools_hidden;
+        self.say.plan_tried = (self.say.plan_tried || due) && self.stage == Some(Stage::Layout);
+    }
+
+    /// AU10: will the dot wear its first-time card? Asked once each time the
+    /// tools go. With no chord to name the row has no sentence.
+    pub(crate) fn dot_card_due(&self, ctx: &eframe::egui::Context) -> bool {
+        !self.say.off && self.say.seen & HIDE_TOOLS == 0 && menus::chord_label(ctx, Action::HideTools).is_some()
     }
 
     fn say_facts(&mut self, stroked: bool, filled: bool, exported: bool) -> Facts {
@@ -678,7 +697,7 @@ impl Editor {
             plan_tried: self.say.plan_tried,
             flat_pen: self.say.flat_strokes >= FLAT_STROKES,
             refused_twice: (self.say.refusals >= 2).then(|| self.say.refusal.clone()),
-            tools_hidden: self.tools_hidden,
+            card_room: self.say.card_room == Some(true),
             seen: self.say.seen,
             stood: self.say.stood,
             stroked,

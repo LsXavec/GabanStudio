@@ -305,6 +305,12 @@ impl EditorHarness {
         Self::build(None, tempfile::tempdir().expect("temp data dir"), Boot::Shipped, Some(gpu()))
     }
 
+    /// The ready paper on a real device, over a data dir the test prepared: an
+    /// upgrader's pictures.
+    pub fn with_gpu_dir_shipped(dir: tempfile::TempDir) -> Self {
+        Self::build(None, dir, Boot::Shipped, Some(gpu()))
+    }
+
     /// A first launch on a real device: the Start float's pictures.
     pub fn with_gpu_first_run() -> Self {
         Self::build(None, tempfile::tempdir().expect("temp data dir"), Boot::FirstRun, Some(gpu()))
@@ -2484,8 +2490,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 864;
-    const ASSERT_FLOOR: usize = 5274;
+    const TEST_FLOOR: usize = 872;
+    const ASSERT_FLOOR: usize = 5365;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");
