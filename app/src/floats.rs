@@ -8,6 +8,7 @@
 use eframe::egui;
 use egui::{Pos2, Rect, Vec2, pos2, vec2};
 
+use crate::plate::Card;
 use crate::rail::OverlayArgs;
 use crate::{Pane, plate, vocab, xsheet_panel};
 
@@ -26,7 +27,7 @@ pub const GUTTER: f32 = 10.0;
 /// The Start float's rule: the peg bar, cut down to a line (spec 2.1).
 const PEG_RULE_H: f32 = 8.0;
 /// The `Area` of the Pocket tier's `…` popover, which rail.rs draws.
-const POPOVER: &str = "rail_popover";
+pub const POPOVER: &str = "rail_popover";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Float {
@@ -98,6 +99,8 @@ pub struct Floats {
     /// AU20: Start was just opened: a left float under it makes way, where a
     /// left float opened over it closes it.
     pub start_fresh: bool,
+    /// AU20: the `Area` of what last stood on the left, drawn.
+    left_met: Option<egui::Id>,
 }
 
 impl Floats {
@@ -155,14 +158,27 @@ impl Floats {
         }
     }
 
-    /// AU20: what stands on the left now, as it was last drawn.
-    pub fn left_rect(&self, ctx: &egui::Context) -> Option<Rect> {
+    /// AU20: what stands on the left, as this frame drew it, and whether that
+    /// is news: asked once a frame, after the panes. An `Area` keeps its rect
+    /// when it stops being drawn, and `more` outlives the Pocket tier, so only
+    /// a layer with widgets this frame counts. What has not been drawn yet
+    /// stays news until it is.
+    pub fn left_drawn(&mut self, ctx: &egui::Context) -> (Option<Rect>, bool) {
         let area = match self.left {
-            Some(f) => area_id(f.heading()),
-            None if self.more => egui::Id::new(POPOVER),
-            None => return None,
+            Some(f) => Some(area_id(f.heading())),
+            None if self.more => Some(egui::Id::new(POPOVER)),
+            None => None,
         };
-        ctx.memory(|m| m.area_rect(area))
+        let drawn = |id: &egui::Id| {
+            let layer = egui::LayerId::new(egui::Order::Middle, *id);
+            ctx.viewport(|v| v.this_pass.widgets.get_layer(layer).next().is_some())
+        };
+        let rect = area.filter(drawn).and_then(|id| ctx.memory(|m| m.area_rect(id)));
+        let news = rect.is_some() && area != self.left_met;
+        if rect.is_some() || area.is_none() {
+            self.left_met = area;
+        }
+        (rect, news)
     }
 
     /// AU20: the left float, or the `…` popover in its place, makes way.
@@ -197,7 +213,7 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
     let id = area_id(f.heading());
     let tall = ctx.memory(|m| m.area_rect(id)).map_or(size.y, |r| r.height().min(size.y));
     let pos = f.pos(host, rail_top, vec2(size.x, tall));
-    let head = Head { id: f.heading(), words: f.heading(), role: plate::Role::Heading, start: false, page: 0, top: false };
+    let head = Head { id: f.heading(), words: f.heading(), role: plate::Role::Heading, start: false, page: 0, top: false, latch: None };
     let (shown, close) = frame(ctx, head, pos, size, host, |ui| body(ui, f, args));
     if close {
         args.floats.close(f);
@@ -207,21 +223,13 @@ fn show_float(ctx: &egui::Context, args: &mut OverlayArgs, f: Float, host: Rect,
     }
 }
 
-/// AU20: where the Start float stands, dead centre on the dock rect `pane`, at
-/// its largest, and that size (spec 4.1). A card that ends short of the cap
-/// stays centred on its own height: [`start_rect`].
+/// AU20: where the Start float stands, dead centre on the dock rect `pane`, and
+/// its size (spec 4.1). Each page fills it, so no page and no `More sizes`
+/// moves a row under the pointer.
 pub fn start_place(pane: Rect) -> (Pos2, Vec2) {
     let w = (pane.width() - 2.0 * LEFT_X).clamp(240.0, 600.0);
     let h = (pane.height() - 2.0 * INSET).min(300.0);
     (pane.center() - vec2(w, h) / 2.0, vec2(w, h))
-}
-
-/// AU20: the rect the Start float, named `id`, stands in now: as tall as it
-/// was last frame, within the cap. And the cap.
-pub fn start_rect(ctx: &egui::Context, id: &str, pane: Rect) -> (Rect, Vec2) {
-    let (pos, size) = start_place(pane);
-    let tall = ctx.memory(|m| m.area_rect(area_id(id))).map_or(size.y, |r| r.height().min(size.y));
-    (Rect::from_min_size(pos + vec2(0.0, (size.y - tall) / 2.0), vec2(size.x, tall)), size)
 }
 
 /// A float's `Area`.
@@ -235,7 +243,9 @@ fn area_id(name: &str) -> egui::Id {
 /// margin: the handle lives there, so a body that starts to scroll moves
 /// nothing sideways. `page` is the body's tab: each keeps its own scroll, or a
 /// tab opens part way down, with its way back out of sight. `top` puts the
-/// body back at its head, for a float that has just opened.
+/// body back at its head, for a float that has just opened. `latch`, its value,
+/// words and hover, stands beside the close key, in reach whatever the body's
+/// scroll.
 pub struct Head<'a> {
     pub id: &'a str,
     pub words: &'a str,
@@ -243,6 +253,7 @@ pub struct Head<'a> {
     pub start: bool,
     pub page: usize,
     pub top: bool,
+    pub latch: Option<(&'a mut bool, &'a str, &'a str)>,
 }
 
 /// A float's frame, each float's and the Start float's: an `Area` at `Middle`,
@@ -281,6 +292,9 @@ pub fn frame(
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(reach);
                         close = plate::close_key(ui, &format!("Close {heading}")).clicked();
+                        if let Some((on, words, card)) = head.latch {
+                            plate::quiet_latch(ui, on, words).card(card);
+                        }
                     });
                 });
                 if head.start {
@@ -307,7 +321,7 @@ pub fn frame(
                     .id_salt(("float_scroll", heading, head.page))
                     .scroll_source(egui::scroll_area::ScrollSource::ALL)
                     .max_height((size.y - spent).max(40.0))
-                    .auto_shrink([false, true]);
+                    .auto_shrink([false, !head.start]);
                 if head.top {
                     area = area.vertical_scroll_offset(0.0);
                 }

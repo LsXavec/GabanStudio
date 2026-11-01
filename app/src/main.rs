@@ -8872,6 +8872,7 @@ impl Editor {
     /// in (spec 4), and what ends it: a finished stroke, the Layers float
     /// opening, a left float opened over it, its `×`.
     fn start_ui(&mut self, ctx: &egui::Context, dock: egui::Rect) {
+        let (left, left_news) = self.floats.left_drawn(ctx);
         let stroked = self.state.strokes_done != self.strokes_seen;
         self.strokes_seen = self.state.strokes_done;
         // A finished stroke accepts the paper under it, and stays on it. One
@@ -8900,23 +8901,26 @@ impl Editor {
             return;
         }
         let Some(mut w) = self.start.take() else { return };
-        let (card, size) = floats::start_rect(ctx, welcome::HEADING, dock);
-        // A left float over the card ends it, as Layers does. Start opened
-        // over one is the newer of the two, and that one makes way.
-        let over = self.floats.left_rect(ctx).is_some_and(|float| float.intersects(card));
+        let (pos, size) = floats::start_place(dock);
+        // A left float opened over the card ends it, as Layers does. Start
+        // opened over one is the newer of the two, and that one makes way.
+        // Two that come to overlap some other way, by a narrower window or
+        // another room, both stand: nothing was opened.
+        let over = left.is_some_and(|float| float.intersects(egui::Rect::from_min_size(pos, size)));
         let top = std::mem::take(&mut self.floats.start_fresh);
         if top && over {
             self.floats.close_left();
-        } else if over {
+        } else if over && left_news {
             return;
         }
         let page = w.tab as usize;
-        let words = if w.tab == welcome::WelcomeTab::Lessons { welcome::LESSONS_HEADING } else { welcome::HEADING };
-        let head = floats::Head { id: welcome::HEADING, words, role: plate::Role::Title, start: true, page, top };
+        let words = w.heading();
         let mut show = self.show_start;
+        let latch = (w.tab == welcome::WelcomeTab::Start).then_some((&mut show, welcome::LATCH, welcome::LATCH_CARD));
+        let head = floats::Head { id: welcome::HEADING, words, role: plate::Role::Title, start: true, page, top, latch };
         let mut action = None;
-        let (shown, close) = floats::frame(ctx, head, card.min, size, dock, |ui| {
-            action = welcome::float_body(ui, &mut w, &mut show);
+        let (shown, close) = floats::frame(ctx, head, pos, size, dock, |ui| {
+            action = welcome::float_body(ui, &mut w);
         });
         // Over a canvas's room it speaks for the panes it covers, so a chord
         // over it acts as it would with the card closed. With no canvas on

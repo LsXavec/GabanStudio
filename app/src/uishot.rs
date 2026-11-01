@@ -486,9 +486,13 @@ fn strip_moments(dir: &Path) {
 /// AU6: the Start float: a fresh install's, at its worst case with two
 /// recents, with `More sizes` open, on What's New, and a pen check's answer;
 /// on the narrowest window, where its body scrolls.
-const START: [(&str, u32, u32); 12] = [
+const START: [(&str, u32, u32); 16] = [
     ("start-fresh", 1600, 900),
     ("start-fresh-1280", 1280, 800),
+    ("start-follow", 1600, 900),
+    ("start-follow-1280", 1280, 800),
+    ("start-lessons", 1600, 900),
+    ("start-lessons-1280", 1280, 800),
     ("start-recents", 1600, 900),
     ("start-recents-1280", 1280, 800),
     ("start-more-sizes", 1600, 900),
@@ -523,12 +527,19 @@ fn start_float(dir: &Path) {
         let size = egui::vec2(w as f32, height as f32);
         h.kit_mut().set_size(size);
         let mut w = crate::welcome::Welcome::new(&[]);
-        if !state.contains("fresh") {
+        if !["fresh", "follow", "lessons"].iter().any(|tag| state.contains(tag)) {
             w = crate::welcome::Welcome::new(&recent);
         }
         w.more_open = state.contains("more-sizes");
         if state.contains("whats-new") {
             w.tab = crate::welcome::WelcomeTab::WhatsNew;
+        }
+        // AU20: on the stand-in table, until a lesson ships.
+        if state.contains("follow") || state.contains("lessons") {
+            w.lessons = crate::lessons::STAND_IN;
+        }
+        if state.contains("lessons") {
+            w.tab = crate::welcome::WelcomeTab::Lessons;
         }
         let pens = [("pen-fix", PenCheck::NoPressure), ("pen-mouse", PenCheck::Mouse), ("pen-works", PenCheck::Works)];
         if let Some((_, said)) = pens.iter().find(|(tag, _)| state.contains(tag)) {

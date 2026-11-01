@@ -497,6 +497,8 @@ pub fn start_place(pane: Rect) -> (Pos2, Vec2) {
 
 `pane` is always the dock rect, never `canvas.dbg_rect`, which removes `start_ui`'s `host` branch. The size comes from the cap, not from last frame, so `More sizes` cannot move the card: it scrolls. `auto_shrink` lets a fresh card end short of the cap, and the card stays centred on its own height.
 
+Note, AU20: Start's card fills the cap on every page, so nothing here ends short. With the latch in the heading a fresh card stood about 35 pt shorter, and pressing `More sizes` then moved every row about 17 pt, which is the thing the rule above forbids. The fresh card is therefore 300 tall, and the paper uncovered reads 60.84% at 1600×900 fresh and at the cap alike.
+
 **This departs from the engine study,** which kept the bottom edge above the paper's centre. That left a 168-tall card at the smallest size and, at 1600×900, a card about 160 pt above the middle of the window. The Lead said centred. The cost is that a pen pressed on the card itself draws nothing, and every other point of the paper still takes a first stroke.
 
 ### 4.2 Geometry at every gated size and scale
@@ -522,6 +524,10 @@ Stored scales above the gated three clip nothing, because the same `min` caps th
 
 **New closing rule.** A left float spans x 76 to 356, so it can overlap the card on a dock under 1312 wide. Opening one that intersects the card closes Start, as Layers does.
 
+Note, AU20: the table's "rail clear everywhere", and the part's "at 1600×900 it does not intersect", hold only on a dock with no left column. Where the dock has one, the rail and the left floats stand on the canvas beside it while the card stays centred on the whole dock, so in Plan the rail lies under the card on 12 of the 13 rows `austart_clears_the_rail` walks, 1600×900 at 100 being the clear one, and Brushes at 1600×900 intersects the card and closes it. 4.1 wins: moving the card would break centred. Under the card a press belongs to the card, and the rail answers once Start closes. The rule covers the rail's Pocket popover too, and it is about opening: a float already standing closes nothing when the card meets it, whether the window narrowed, `More sizes` was pressed, or tools came back from Hide tools.
+
+Note, AU20: the worst size's free paper is less than the table's, because the paper there is 680×382, not 735×413: about 41 above and below, about 40 at each side.
+
 ### 4.3 Body
 
 | Row | Height | Contents |
@@ -534,6 +540,8 @@ Stored scales above the gated three clip nothing, because the same `min` caps th
 | Foot | 32, 24 | `Check your pen`, `What's new`, then `Show at startup` |
 
 If `A drawing` and its two chips miss one 188-wide card, the chips move under the card.
+
+Note, AU20: `Show at startup` stands in the heading beside `×`, and the two recent rows stand side by side, so two recents stand unscrolled at every size. In the worst case the foot is a scroll away: the body is 246 under a 229 viewport, and the words of its row show cut at the fold. On a fresh card the foot rests on the card's last line. The `Check your pen` answer brings the body with it.
 
 ### 4.4 Budget
 
@@ -558,6 +566,8 @@ If `A drawing` and its two chips miss one 188-wide card, the chips move under th
 | C, D, E | 60 each, gap 6 | One row per type, three cards, each a vector thumbnail from the lesson's art and its title, with `A drawing`, `An animation`, `A comic` in a 72-wide gutter |
 
 That is 12 controls and 38 words, and it stands unscrolled in 300. Hover card: one sentence, minutes, and what file it ends in. A finished lesson shows a small tick from `lessons.txt`. From anywhere else: `Help ▸ Lessons`, or the palette.
+
+Note, AU20: the sums above do not fit the 229 under the heading, so rows C, D and E are 56 and row A is 28. The page counts 44 words, not 38, inside the ≤48 of 4.4. Each picture is cached by lesson and stays inside its card.
 
 A click sends `WelcomeAction::Lesson(i)`, listed in `replaces_document`, so the Leave guard, the guest refusal and an untouched blank's silence all come free.
 

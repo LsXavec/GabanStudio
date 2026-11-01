@@ -9,7 +9,7 @@ use crate::aurail_tests::{paper_share_sweep, window};
 use crate::canvas::extpaper_tests::paint_texels;
 use crate::config::{Action, Config, Ctx, Keymap, UiConfig};
 use crate::floats::{self, Float};
-use crate::measure::{self, Census, Reading, Scope};
+use crate::measure::{self, Census, Reading, Row, Scope};
 use crate::testkit::{Boot, CTRL, EditorHarness};
 use crate::welcome::{self, HEADING, LESSONS_HEADING, PenCheck, Welcome, WelcomeAction, WelcomeTab};
 use crate::workspace::Stage;
@@ -108,6 +108,35 @@ fn float_census(h: &mut EditorHarness) -> Census {
     let (ctx, rect) = (h.ctx(), float_open(h));
     let layer = LayerId::new(Order::Middle, start_id());
     let reading = Reading::of_float(&ctx, &h.kit().output().shapes, layer, rect);
+    reading.census(measure::TERMS.len())
+}
+
+/// The float as built, on the same count: egui paints nothing wholly outside a
+/// clip, so `float_census` misses a row below the fold, and a row it misses
+/// cannot break a budget. The accessibility tree has every row. The close
+/// key's name is the one word it holds that no eye reads: that paints as `×`.
+fn built_census(h: &mut EditorHarness) -> Census {
+    use egui::accesskit::Role;
+    use egui_kittest::kittest::{NodeT, Queryable};
+    settle(h);
+    let float = start_id().accesskit_id();
+    let mut reading = Reading { area: h.ctx().content_rect().area(), ..Reading::default() };
+    for role in [Role::Button, Role::CheckBox, Role::Label] {
+        for node in h.kit().query_all_by_role(role) {
+            let tree = node.accesskit_node();
+            if !std::iter::successors(Some(tree), |n| n.parent()).any(|n| n.locate().0 == float) {
+                continue;
+            }
+            let words = tree.label().or_else(|| tree.value()).unwrap_or_default();
+            let at = node.rect();
+            if role != Role::Label {
+                reading.rows.push(Row { w: at.width(), h: at.height(), focus: true, enabled: true });
+            }
+            if !words.starts_with("Close ") {
+                reading.texts.push((at.height(), words));
+            }
+        }
+    }
     reading.census(measure::TERMS.len())
 }
 
@@ -310,12 +339,36 @@ fn austart_stands_centred() {
             assert!(pane.contains_rect(card), "inside the dock: {at}");
             assert!(card.left() >= if stored == 2.0 { 79.5 } else { 115.5 }, "{at}");
         }
-        // A card that ends short of the cap stays centred on its own height.
+        // A fresh card stands at the same size, so nothing it opens moves it.
         ready.editor_mut().start = Some(Welcome::new(&[]));
         settle(&mut ready);
         let (card, pane) = (float_open(&ready), dock(&ready));
-        assert!(card.height() < 300.0, "the fresh card ends short: {card:?}");
+        assert!((card.height() - 300.0).abs() < 0.5, "the fresh card fills to the cap: {card:?}");
         assert!((card.center() - pane.center()).length() <= 1.0, "{w}×{tall}: {card:?} in {pane:?}");
+    }
+}
+
+/// A returning animator's two files stand whole, and the way to turn the card
+/// off needs no scroll, at every size.
+#[test]
+fn austart_recents_stand_unscrolled() {
+    for (w, tall, stored, ..) in PLACES {
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = EditorHarness::as_first_run();
+        window(&mut h, w, tall, stored);
+        with_recents(&mut h, dir.path());
+        let (card, ppp) = (float_open(&h), h.ctx().pixels_per_point());
+        let rows = RECENT.map(|name| h.rect(name) / ppp);
+        let at = format!("{w}×{tall} at {stored}: {rows:?} in {card:?}");
+        for row in rows {
+            assert!(card.contains_rect(row) && row.bottom() <= card.bottom() - 12.0, "{at}");
+        }
+        assert!(rows[0].top() == rows[1].top() && rows[0].right() < rows[1].left(), "{at}");
+        let half = h.rect("More sizes") / ppp;
+        assert_eq!((rows[1].left(), rows[1].width()), (half.left(), half.width()), "{at}");
+        let (latch, close) = (h.rect("Show at startup") / ppp, h.rect("Close Start") / ppp);
+        assert!(card.contains_rect(latch) && latch.bottom() < (h.rect("A drawing") / ppp).top(), "{at}");
+        assert!(latch.right() <= close.left() && (latch.center().y - close.center().y).abs() <= 1.0, "{at}");
     }
 }
 
@@ -327,7 +380,7 @@ fn austart_opens_at_its_head() {
     let mut h = first_run();
     with_recents(&mut h, dir.path());
     let head = h.rect("A drawing");
-    h.scroll_to("Show at startup");
+    h.scroll_to("What's new");
     settle(&mut h);
     assert_ne!(h.rect("A drawing"), head, "it did scroll");
     h.click("Close Start");
@@ -337,31 +390,79 @@ fn austart_opens_at_its_head() {
     assert_eq!(h.rect("A drawing"), head);
 }
 
-/// `More sizes` scrolls, so opening it leaves the card's width and centre.
+/// `More sizes` scrolls, and the card stands at one size on every page, so
+/// neither moves a row under the pointer.
 #[test]
 fn austart_more_sizes_keeps_it_centred() {
     let mut h = first_run();
-    let shut = float_open(&h);
+    let (shut, row) = (float_open(&h), h.rect("More sizes"));
+    assert_eq!(shut.height(), 300.0, "a fresh card fills to the cap");
     h.click("More sizes");
     settle(&mut h);
-    let open = float_open(&h);
-    assert_eq!(open.height(), 300.0, "the cap, and the rows scroll under it");
-    assert_eq!((open.left(), open.right()), (shut.left(), shut.right()));
-    assert!((open.center().y - shut.center().y).abs() <= 1.0, "{open:?} {shut:?}");
+    assert_eq!(float_open(&h), shut, "the cap, and the rows scroll under it");
+    assert_eq!(h.rect("More sizes"), row, "the row the pointer is on stays under it");
+    for tab in [WelcomeTab::WhatsNew, WelcomeTab::Lessons] {
+        stand_in(&mut h, tab);
+        assert_eq!(float_open(&h), shut, "{tab:?}");
+    }
 }
 
+/// A fresh card fills to its cap, so its foot takes the last line and the gap
+/// falls above the foot, not under it.
 #[test]
-fn austart_clears_the_rail() {
+fn austart_foot_takes_the_last_line() {
     for (w, tall, stored, ..) in PLACES {
         let mut h = EditorHarness::as_first_run();
         window(&mut h, w, tall, stored);
-        h.editor_mut().floats.more = false;
-        settle(&mut h);
-        let rail = h.ctx().memory(|m| m.area_rect(Id::new("rail"))).expect("the rail");
-        let card = float_open(&h);
+        let (card, ppp) = (float_open(&h), h.ctx().pixels_per_point());
+        let (above, foot) = (h.rect("Open a project") / ppp, h.rect("Check your pen") / ppp);
+        let at = format!("{w}×{tall} at {stored}: {foot:?} {card:?}");
+        println!("{at}");
+        assert_eq!(foot.top(), (h.rect("What's new") / ppp).top(), "{at}");
+        assert!(card.bottom() - foot.bottom() < 16.0, "{at}");
+        assert!(foot.top() - above.bottom() > 16.0, "{at}");
+    }
+}
+
+/// The rail's rect and the card's, at a window of `PLACES`, with `h`'s room.
+fn rail_and_card(h: &mut EditorHarness, w: f32, tall: f32, stored: f32) -> (Rect, Rect) {
+    window(h, w, tall, stored);
+    h.editor_mut().floats.more = false;
+    h.editor_mut().open_start(Welcome::new(&[]));
+    settle(h);
+    let rail = h.ctx().memory(|m| m.area_rect(Id::new("rail"))).expect("the rail");
+    (rail, float_open(h))
+}
+
+/// Clear of the rail on a dock with no left column, spec 4.2's case. Where the
+/// dock has one, the rail and the left floats stand on the canvas beside it,
+/// and spec 4.1's centre is the dock's: in Plan only the widest row clears it.
+/// Pinned as measured, for the Lead's list: its keys answer again when Start
+/// closes.
+#[test]
+fn austart_clears_the_rail() {
+    for (w, tall, stored, ..) in PLACES {
+        let (rail, card) = rail_and_card(&mut EditorHarness::as_first_run(), w, tall, stored);
         assert!(rail.right() <= 68.5, "{w}×{tall} at {stored}: {rail:?}");
         assert!(!rail.intersects(card), "{w}×{tall} at {stored}: {rail:?} {card:?}");
     }
+    for (w, tall, stored, ..) in PLACES {
+        let (rail, card) = rail_and_card(&mut EditorHarness::as_animation(), w, tall, stored);
+        let at = format!("Plan at {w}×{tall}, {stored}: {rail:?} {card:?}");
+        println!("{at}");
+        assert_eq!(rail.intersects(card), (w, stored) != (1600.0, 1.0), "{at}");
+    }
+    let mut h = EditorHarness::as_animation();
+    rail_and_card(&mut h, 1024.0, 640.0, 1.0);
+    let held = h.editor().canvas.tool;
+    h.click("Select");
+    settle(&mut h);
+    assert_eq!(h.editor().canvas.tool, held, "the card takes the press");
+    h.click("Close Start");
+    settle(&mut h);
+    h.click("Select");
+    settle(&mut h);
+    assert_ne!(h.editor().canvas.tool, held, "and with Start closed the rail answers");
 }
 
 /// The card lies wholly on the ready paper, so it costs its own area and no
@@ -378,7 +479,12 @@ fn austart_paper_uncovered() {
     let share = measure::paper_share(&h);
     println!("paper uncovered at 1600×900, at the cap: {share:?}");
     assert!(share.paper >= 58.0, "paper uncovered at 1600×900: {share:?}");
-    assert!(fresh.paper > share.paper, "{fresh:?} {share:?}");
+    // The card is one size, and the reading sees it: closed, the paper is back.
+    assert!((fresh.paper - share.paper).abs() < 0.05, "{fresh:?} {share:?}");
+    h.click("Close Start");
+    settle(&mut h);
+    let closed = measure::paper_share(&h);
+    assert!(closed.paper > share.paper + 10.0, "{closed:?} {share:?}");
     let mut h = EditorHarness::as_first_run();
     window(&mut h, 1024.0, 640.0, 1.5);
     at_the_cap(&mut h, dir.path());
@@ -406,8 +512,10 @@ fn austart_stored_200_clips_nothing() {
     assert!(dock(&h).contains_rect(float_open(&h)));
 }
 
-/// A left float standing on the card ends it, as Layers does, whichever float;
-/// one beside it shares the screen. At 1600×900 none reaches it.
+/// A left float opened on the card ends it, as Layers does, whichever float;
+/// one beside it shares the screen. On a dock with no left column none reaches
+/// it at 1600×900. Plan's left column puts the float further in: there it does,
+/// pinned as measured, for the Lead's list.
 #[test]
 fn austart_left_float_closes_it() {
     let lefts = [Float::Brushes, Float::Color, Float::ToolOptions, Float::CanvasOptions];
@@ -451,15 +559,101 @@ fn austart_left_float_closes_it() {
     h.perform(Action::WelcomeScreen);
     settle(&mut h);
     assert!(is_open(&h) && h.editor().floats.is_open(Float::Brushes));
-    // The Pocket tier's `…` stands where a left float does.
+    // Plan at 1600×900: the sheet's column carries the float onto the card.
+    let mut h = EditorHarness::as_animation();
+    sized(&mut h, 1600.0, 900.0);
+    h.editor_mut().open_start(Welcome::new(&[]));
+    settle(&mut h);
+    assert!(is_open(&h));
+    h.open_float(Float::Brushes);
+    settle(&mut h);
+    assert!(!is_open(&h), "opened over the card, the float ends it");
+    h.editor_mut().open_start(Welcome::new(&[]));
+    settle(&mut h);
+    assert!(is_open(&h), "Start stands");
+    assert!(!h.editor().floats.is_open(Float::Brushes), "opened over the float, it makes way");
+}
+
+/// The popover's rect, if this frame's layers hold it.
+fn popover(h: &EditorHarness) -> Option<Rect> {
+    let id = Id::new(floats::POPOVER);
+    let shown = |m: &egui::Memory| m.areas().visible_layer_ids().iter().any(|l| l.id == id);
+    h.ctx().memory(|m| shown(m).then(|| m.area_rect(id)).flatten())
+}
+
+/// The Pocket tier's `…` stands where a left float does, and trades places
+/// with the card as one. That tier needs a short window: 420 tall is
+/// `aurail_pocket_reaches_every_verb_in_two_taps`'s.
+#[test]
+fn austart_pocket_popover_closes_it() {
     let mut h = EditorHarness::as_first_run();
-    window(&mut h, 1024.0, 640.0, 1.5);
+    sized(&mut h, 832.0, 420.0);
+    let card = float_open(&h);
     h.editor_mut().floats.toggle_more();
     settle(&mut h);
-    let popover = h.ctx().memory(|m| m.area_rect(Id::new("rail_popover")));
-    if popover.is_some_and(|p| p.right() > 116.0) {
-        assert!(!is_open(&h), "{popover:?}");
-    }
+    let shown = popover(&h).expect("the Pocket tier's popover");
+    assert!(shown.intersects(card), "{shown:?} {card:?}");
+    assert!(!is_open(&h), "opened over the card, it ends it");
+    assert!(h.editor().floats.more, "and stands");
+    // Start opened over it is the newer of the two.
+    h.editor_mut().open_start(Welcome::new(&[]));
+    settle(&mut h);
+    assert!(is_open(&h), "Start stands");
+    assert!(!h.editor().floats.more && popover(&h).is_none(), "the popover made way");
+}
+
+/// Only an opening closes the card. The two can come to overlap with nothing
+/// opened, and then the card stays, as a stale rect does not end it.
+#[test]
+fn austart_only_an_opening_closes_it() {
+    // A narrower window brings a float that stood beside the card onto it.
+    let mut h = first_run();
+    h.open_float(Float::Brushes);
+    settle(&mut h);
+    assert!(is_open(&h));
+    sized(&mut h, 1024.0, 640.0);
+    let area = Id::new(("float", Float::Brushes.heading()));
+    let float = h.ctx().memory(|m| m.area_rect(area)).expect("the float");
+    assert!(float.intersects(float_open(&h)), "{float:?} {:?}", float_open(&h));
+    assert!(is_open(&h) && h.editor().floats.is_open(Float::Brushes), "both stand");
+    // Hide tools takes the float off and brings it back: nothing opened.
+    h.editor_mut().tools_hidden = true;
+    settle(&mut h);
+    h.editor_mut().tools_hidden = false;
+    settle(&mut h);
+    assert!(is_open(&h) && h.editor().floats.is_open(Float::Brushes), "both come back");
+    // Pressing a row grows nothing into a float at this size.
+    h.click("More sizes");
+    settle(&mut h);
+    assert!(is_open(&h));
+    // The popover keeps its area rect, and `more`, past the Pocket tier.
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1280.0, 420.0);
+    h.editor_mut().floats.toggle_more();
+    settle(&mut h);
+    let last = popover(&h).expect("the Pocket tier's popover");
+    assert!(is_open(&h), "beside the card: {last:?} {:?}", float_open(&h));
+    sized(&mut h, 832.0, 570.0);
+    assert!(h.editor().floats.more && popover(&h).is_none(), "Compact draws none");
+    assert!(last.intersects(float_open(&h)), "{last:?} {:?}", float_open(&h));
+    assert!(is_open(&h), "a popover not drawn closes nothing");
+    // A float opened under Hide tools is an opening, the frame it first stands.
+    // Its rect is still in memory from last time, and that is no such frame.
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1024.0, 640.0);
+    h.open_float(Float::Brushes);
+    settle(&mut h);
+    h.editor_mut().floats.close_left();
+    h.editor_mut().open_start(Welcome::new(&[]));
+    settle(&mut h);
+    assert!(is_open(&h));
+    h.editor_mut().tools_hidden = true;
+    settle(&mut h);
+    h.open_float(Float::Brushes);
+    settle(&mut h);
+    h.editor_mut().tools_hidden = false;
+    settle(&mut h);
+    assert!(h.editor().floats.is_open(Float::Brushes) && !is_open(&h), "it ends the card on showing");
 }
 
 /// The nine rows on `h`'s float, on `tab`.
@@ -510,19 +704,127 @@ fn austart_row_two_waits_for_lessons() {
 fn austart_page_budget() {
     let mut h = first_run();
     stand_in(&mut h, WelcomeTab::Lessons);
-    let page = float_census(&mut h);
+    let page = built_census(&mut h);
     println!("Lessons page: {} controls, {} words", page.controls, page.words);
     assert!(page.controls <= 12 && page.words <= 48, "{page:?}");
+    let shown = float_census(&mut h);
+    assert_eq!((shown.controls, shown.words), (page.controls, page.words), "unscrolled: all of it shows");
+    assert!(!h.has("Show at startup"), "the latch is the Start page's: this page's budget has no room");
     // `Follow a lesson` takes the place of `Open the example`, one for one.
     let dir = tempfile::tempdir().unwrap();
     stand_in(&mut h, WelcomeTab::Start);
-    let fresh = float_census(&mut h);
+    let fresh = built_census(&mut h);
+    println!("Start with lessons: {} controls, {} words", fresh.controls, fresh.words);
     assert!(fresh.controls <= 12 && fresh.words <= 25, "{fresh:?}");
     let mut w = Welcome::new(&recents(dir.path()));
     w.lessons = lessons::STAND_IN;
     h.editor_mut().start = Some(w);
-    let worst = float_census(&mut h);
+    let worst = built_census(&mut h);
+    println!("Start with lessons, worst case: {} controls, {} words", worst.controls, worst.words);
     assert!(worst.controls <= 14 && worst.words <= 30, "{worst:?}");
+    assert!(worst.controls > fresh.controls && worst.words > fresh.words, "{fresh:?} {worst:?}");
+}
+
+/// The words the last frame painted as `word`, by the lines it took.
+fn lines_of(h: &EditorHarness, word: &str) -> usize {
+    fn walk(s: &egui::Shape, word: &str) -> Option<usize> {
+        match s {
+            egui::Shape::Vec(v) => v.iter().find_map(|s| walk(s, word)),
+            egui::Shape::Text(t) if t.galley.text() == word => Some(t.galley.rows.len()),
+            _ => None,
+        }
+    }
+    let found = h.kit().output().shapes.iter().find_map(|c| walk(&c.shape, word));
+    found.unwrap_or_else(|| panic!("{word:?} was not painted"))
+}
+
+/// The ink lines the last frame painted, by their bounds.
+fn ink_lines(h: &EditorHarness) -> Vec<Rect> {
+    fn walk(s: &egui::Shape, out: &mut Vec<Rect>) {
+        match s {
+            egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            egui::Shape::Path(p) if p.stroke.color == egui::epaint::ColorMode::Solid(plate::INK) => {
+                out.push(s.visual_bounding_rect());
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    h.kit().output().shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+    out
+}
+
+static ART_BUILT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn counted_art() -> Vec<lessons::Path> {
+    ART_BUILT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let points = vec![[0.0, 0.0, 1.0], [10.0, 5.0, 1.0], [20.0, 10.0, 1.0]];
+    vec![lessons::Path { points, width: 2.0 }]
+}
+
+static COUNTED: [lessons::Lesson; 1] = [lessons::Lesson {
+    id: "counted",
+    kind: crate::steps::ProjectKind::Drawing,
+    class: lessons::Class::Rookie,
+    title: "Counted",
+    hover: "",
+    art: counted_art,
+    finish: &[0],
+}];
+
+/// Each card's picture is drawn from its lesson's paths, on its paper square,
+/// and the paths are built once however long the page stands: spec 5 makes
+/// `art` a lesson's whole set.
+#[test]
+fn austart_page_cards_hold_their_pictures() {
+    for lesson in lessons::ALL.iter().chain(lessons::STAND_IN) {
+        let art = (lesson.art)();
+        assert!(!lesson.finish.is_empty(), "{}", lesson.title);
+        assert!(lesson.finish.iter().all(|i| usize::from(*i) < art.len()), "{}", lesson.title);
+    }
+    let mut h = first_run();
+    stand_in(&mut h, WelcomeTab::Lessons);
+    let lines = ink_lines(&h);
+    for lesson in lessons::STAND_IN {
+        let card = h.rect(lesson.title);
+        let side = card.height() - 2.0 * plate::PICTURE_INSET;
+        let at = card.left_top() + vec2(plate::PICTURE_INSET, plate::PICTURE_INSET);
+        let paper = Rect::from_min_size(at, vec2(side, side));
+        let drawn = lines.iter().find(|line| paper.contains_rect(**line));
+        let drawn = drawn.unwrap_or_else(|| panic!("{}: no ink on {paper:?} in {lines:?}", lesson.title));
+        assert!(drawn.width() >= side / 2.0, "{}: {drawn:?} on {paper:?}", lesson.title);
+    }
+    let mut w = Welcome::new(&[]);
+    w.lessons = &COUNTED;
+    w.tab = WelcomeTab::Lessons;
+    h.editor_mut().start = Some(w);
+    h.run_frames(6);
+    settle(&mut h);
+    assert_eq!(ART_BUILT.load(std::sync::atomic::Ordering::SeqCst), 1, "once, not once a frame");
+}
+
+/// The page's edges line up: a class's word on its column's thumbnails, the
+/// kinds on one line each in the gutter of 72, and the two ways out read as
+/// keys over the bold legends.
+#[test]
+fn austart_page_lines_up() {
+    let mut h = first_run();
+    stand_in(&mut h, WelcomeTab::Lessons);
+    for (class, lesson) in lessons::Class::ALL.into_iter().zip(lessons::STAND_IN) {
+        let picture = h.rect(lesson.title).left() + plate::PICTURE_INSET;
+        assert_eq!(h.painted_at(class.word()).x, picture, "{class:?}");
+    }
+    let edge = float_open(&h).left() + 12.0 + plate::CARD_PAD;
+    for word in ["A drawing", "An animation", "A comic"] {
+        assert_eq!(lines_of(&h, word), 1, "{word}");
+        assert_eq!(h.painted_at(word).x, edge, "{word}");
+    }
+    let kind = h.rect(lessons::STAND_IN[0].title).left() - plate::CARD_PAD - edge + 12.0 + plate::CARD_PAD;
+    assert!(kind >= 72.0, "the gutter's text box: {kind}");
+    let keys = h.filled_rects(plate::WELL);
+    for row in ["Back to Start", "Open the example"] {
+        assert!(keys.contains(&h.rect(row)), "{row} has a ground at rest: {keys:?}");
+    }
 }
 
 /// The nine cards stand whole in the card at every size: nothing to scroll,
@@ -543,7 +845,7 @@ fn austart_grid_stands_unscrolled() {
             let row = h.rect(lesson.title) / ppp;
             let at = format!("{} {row:?} in {at}", lesson.title);
             assert!((row.height() - welcome::PAGE_ROW_H).abs() < 0.1, "{at}");
-            assert!(row.bottom() <= card.bottom() - 8.0, "{at}");
+            assert!(row.bottom() <= card.bottom() - 12.0, "inside the body's viewport: {at}");
             assert!(card.contains_rect(row), "{at}");
         }
         let clip = measure::clip_here(&h, Scope::All);
@@ -1054,8 +1356,10 @@ fn austart_more_sizes_rows_say_their_size() {
     h.click("More sizes");
     settle(&mut h);
     let wide = h.rect("More sizes").right() - h.rect("Open a project").left();
-    let painted = h.painted_text();
     for t in &templates::ALL[..3] {
+        h.scroll_to(t.name);
+        settle(&mut h);
+        let painted = h.painted_text();
         let size = format!("{}×{}", t.width, t.height);
         assert!(painted.contains(&size), "{}: {size} in {painted:?}", t.name);
         assert!(h.has(t.name) && !h.has(&size), "it speaks the name alone");
@@ -1136,28 +1440,34 @@ fn austart_intents_are_the_table() {
 fn austart_float_budget_at_worst_case() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = first_run();
-    let fresh = float_census(&mut h);
+    let fresh = built_census(&mut h);
+    let shown = float_census(&mut h);
     let tall = float_open(&h).height();
     println!("fresh install: {} controls, {} words, {tall} tall", fresh.controls, fresh.words);
     assert!(tall <= 300.5, "fresh install: {tall}");
     assert!(fresh.controls <= 12 && fresh.words <= 25, "fresh install: {fresh:?}");
+    assert_eq!((shown.controls, shown.words), (fresh.controls, fresh.words), "all of it shows, on one count");
     // A fresh card's body fits: its last row stands in the float unscrolled.
-    let last = h.rect("Show at startup");
-    assert!(last.bottom() <= float_open(&h).bottom() - 8.0, "{last:?} in {:?}", float_open(&h));
+    let last = h.rect("What's new");
+    assert!(last.bottom() <= float_open(&h).bottom() - 12.0, "{last:?} in {:?}", float_open(&h));
     with_recents(&mut h, dir.path());
-    let worst = float_census(&mut h);
+    let worst = built_census(&mut h);
+    let shown = float_census(&mut h);
     assert!(worst.controls <= 14, "controls: {worst:?}");
     assert!(worst.words <= 30, "words: {worst:?}");
+    assert!(worst.controls > fresh.controls && worst.words > fresh.words, "{fresh:?} {worst:?}");
     let tall = float_open(&h).height();
     println!("worst case: {} controls, {} words, {tall} tall", worst.controls, worst.words);
+    println!("worst case, painted: {} controls, {} words", shown.controls, shown.words);
     assert!(tall <= 300.5, "worst case: {tall}");
-    // Two recents pass the cap of spec 4.1: the last row is a scroll away, and
-    // the head, with the way to close it, stands.
-    h.scroll_to("Show at startup");
+    // Two recents pass the cap of spec 4.1: the foot is a scroll away, and the
+    // head, with the way to close it and the latch, stands.
+    h.scroll_to("What's new");
     settle(&mut h);
-    let last = h.rect("Show at startup");
-    assert!(last.bottom() <= float_open(&h).bottom() - 8.0, "{last:?} in {:?}", float_open(&h));
+    let last = h.rect("What's new");
+    assert!(last.bottom() <= float_open(&h).bottom() - 12.0, "{last:?} in {:?}", float_open(&h));
     assert!(float_open(&h).contains_rect(h.rect("Close Start")));
+    assert!(float_open(&h).contains_rect(h.rect("Show at startup")));
 }
 
 #[test]
@@ -1180,7 +1490,7 @@ fn austart_words_stand_on_one_edge() {
     let mut h = first_run();
     with_recents(&mut h, dir.path());
     let edge = float_open(&h).left() + 12.0 + plate::CARD_PAD;
-    for word in ["Start", "A drawing", "Open the example", "Open a project", "Recent", RECENT[0], RECENT[1]] {
+    for word in ["Start", "A drawing", "Open the example", "Open a project", "Recent", RECENT[0]] {
         assert_eq!(h.painted_at(word).x, edge, "{word}");
     }
     // Each column keeps its own: a card's, a half row's.
@@ -1189,11 +1499,11 @@ fn austart_words_stand_on_one_edge() {
     }
     let half = h.rect("More sizes").left() + plate::CARD_PAD;
     assert_eq!(h.painted_at("More sizes").x, half);
+    assert_eq!(h.painted_at(RECENT[1]).x, half, "the recents stand on the half rows' edges");
     h.scroll_to("Check your pen");
     settle(&mut h);
     assert_eq!(h.painted_at("Check your pen").x, edge);
     assert_eq!(h.painted_at("What's new").x, half, "the two half rows share their edges");
-    assert_eq!(h.rect("Show at startup").left(), edge, "the latch's box");
     // On the other tab too, and in the answer to a check.
     let w = h.editor_mut().start.as_mut().expect("open");
     (w.pen, w.pen_said) = (PenCheck::Mouse, true);
@@ -1659,6 +1969,59 @@ fn austart_over_no_canvas_the_focused_pane_has_the_keys() {
     assert_eq!(h.editor_mut().shortcut_ctx(&ctx), Ctx::Canvas);
 }
 
+/// What this part stores: nothing. One Action joins, with no chord; the stored
+/// words stand; and going through every page moves neither the project, its
+/// file nor the config. The latch alone writes, the one key it always wrote.
+#[test]
+fn austart_saved_data_stands() {
+    let rooms = [Stage::Layout, Stage::Drawing, Stage::InkPaint, Stage::Composite, Stage::Edit, Stage::Manga];
+    let keys = rooms.map(|room| crate::stage_key(Some(room)));
+    assert_eq!(keys, ["layout", "drawing", "finishing", "composite", "edit", "manga"]);
+    let ui = serde_json::to_value(UiConfig::default()).unwrap();
+    let mut keys: Vec<_> = ui.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    let shape = [
+        "exact_descriptions", "hints_off", "hints_seen", "keymap_rev", "lock_positions", "quick_start", "scale",
+        "sheet_in_draw", "show_welcome", "whats_new_seen",
+    ];
+    assert_eq!(keys, shape, "the ui section's shape");
+    let store = include_str!("../../crates/anim-core/src/store.rs");
+    assert!(store.contains("const SCHEMA_VERSION: i64 = 11;"), "the .animproj format stands");
+    assert!(Action::ALL.contains(&Action::OpenLessons));
+    for keymap in [Keymap::Gaban, Keymap::Industry] {
+        let binds = crate::config::default_binds(keymap);
+        assert_eq!(crate::cmdpal::chord_of(&binds, Action::OpenLessons), None, "no chord, so no keymap moves");
+    }
+    let mut h = first_run();
+    let config = serde_json::to_value(&h.rig().config).unwrap();
+    let project = h.state_mut().snapshot_project();
+    stand_in(&mut h, WelcomeTab::Start);
+    h.click("More sizes");
+    h.click("More sizes");
+    h.click("Follow a lesson");
+    settle(&mut h);
+    h.click("Back to Start");
+    settle(&mut h);
+    h.click("What's new");
+    settle(&mut h);
+    h.click("Back to Start");
+    settle(&mut h);
+    let after = h.state_mut().snapshot_project();
+    assert!(after == project, "the project did not move");
+    assert!(after.app_meta.keys().all(|key| !key.contains("lesson")), "{:?}", after.app_meta);
+    assert_eq!(serde_json::to_value(&h.rig().config).unwrap(), config, "nor the config");
+    let dir = h.data_dir().to_path_buf();
+    let (was, now) = (dir.join("was.animproj"), dir.join("now.animproj"));
+    anim_core::store::save(&project, &was).expect("saved");
+    anim_core::store::save(&after, &now).expect("saved");
+    assert_eq!(std::fs::read(&was).unwrap(), std::fs::read(&now).unwrap(), "the same file");
+    h.click("Show at startup");
+    settle(&mut h);
+    let mut want = config;
+    want["ui"]["show_welcome"] = false.into();
+    assert_eq!(serde_json::to_value(&h.rig().config).unwrap(), want, "the latch's one key");
+}
+
 /// The float's cost: no window, no shader, one branch while it is closed, and
 /// while open no look at the disk: its rows are what it read when it opened.
 #[test]
@@ -1666,8 +2029,12 @@ fn austart_float_opens_no_window_and_adds_no_shader() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = first_run();
     with_recents(&mut h, dir.path());
-    let windows = &h.kit().output().viewport_output;
-    assert!(windows.len() == 1 && windows.contains_key(&egui::ViewportId::ROOT));
+    for tab in [WelcomeTab::Start, WelcomeTab::Lessons, WelcomeTab::WhatsNew] {
+        let windows = &h.kit().output().viewport_output;
+        assert!(windows.len() == 1 && windows.contains_key(&egui::ViewportId::ROOT), "{tab:?}");
+        stand_in(&mut h, tab);
+    }
+    with_recents(&mut h, dir.path());
     let doors = [
         concat!("show_", "viewport"),
         concat!("Viewport", "Builder"),
@@ -1676,7 +2043,7 @@ fn austart_float_opens_no_window_and_adds_no_shader() {
         concat!(".w", "gsl"),
     ];
     let (body, frame) = (include_str!("welcome.rs"), include_str!("floats.rs"));
-    for text in [body, frame] {
+    for text in [body, frame, include_str!("lessons.rs")] {
         let found: Vec<_> = doors.iter().filter(|door| text.contains(**door)).collect();
         assert!(found.is_empty(), "{found:?}");
     }
@@ -1723,7 +2090,9 @@ fn austart_menu_rows_open_the_float_with_no_modal() {
     h.click("What's new");
     settle(&mut h);
     assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::WhatsNew));
-    h.click("Close Start");
+    assert!(h.has(welcome::WHATS_NEW_HEADING) && !h.has("Close Start"), "the page says what it is");
+    assert!(!h.has("Show at startup"), "the latch is the Start page's");
+    h.click("Close What's new");
     settle(&mut h);
     // Over unsaved work the row still asks nothing. A card that replaces the
     // cut does, once.

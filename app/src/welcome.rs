@@ -28,8 +28,12 @@ pub const THUMB_MAX_BYTES: usize = 64 * 1024;
 pub const RECENT_CARDS: usize = 12;
 /// AU6: the Start float's heading.
 pub const HEADING: &str = "Start";
-/// AU20: its heading on the Lessons page.
+/// AU20: its heading on the Lessons page, and on What's New.
 pub const LESSONS_HEADING: &str = "Lessons";
+pub const WHATS_NEW_HEADING: &str = "What's new";
+/// AU20: the latch in its heading row, and that latch's hover.
+pub const LATCH: &str = "Show at startup";
+pub const LATCH_CARD: &str = "Off: the app opens on the same paper, without this panel";
 /// AU6: the Start float's recent rows; the rest are under File ▸ Open recent.
 const RECENT_ROWS: usize = 2;
 
@@ -509,6 +513,8 @@ pub struct Welcome {
     pub pen_said: bool,
     /// AU20: the Lessons page's table. Empty, the page cannot be reached.
     pub lessons: &'static [Lesson],
+    /// AU20: each lesson's picture, built once by its id.
+    pictures: HashMap<&'static str, Picture>,
 }
 
 /// AU6: `Check your pen`: the next line drawn is read, and the row below says
@@ -578,6 +584,16 @@ impl Welcome {
             pen: PenCheck::Idle,
             pen_said: false,
             lessons: lessons::ALL,
+            pictures: HashMap::new(),
+        }
+    }
+
+    /// AU20: the float's heading on this page.
+    pub fn heading(&self) -> &'static str {
+        match self.tab {
+            WelcomeTab::Start => HEADING,
+            WelcomeTab::WhatsNew => WHATS_NEW_HEADING,
+            WelcomeTab::Lessons => LESSONS_HEADING,
         }
     }
 
@@ -637,9 +653,10 @@ const ROW_GAP: f32 = 2.0;
 const GROUP_GAP: f32 = 4.0;
 /// `Open the example`'s hover, on either page.
 const EXAMPLE_CARD: &str = "A ball bounce to look through and draw on";
-/// The Lessons page (spec 4.5): the legends over its columns, its gutter of
-/// kinds, its rows and the gap between them. Under a cap of 300 the head and
-/// the margins leave the body 229: rows of 56, not 60, keep the grid unscrolled.
+/// The Lessons page (spec 4.5): the legends over its columns, the words of its
+/// gutter of kinds, its rows and the gap between them. Under a cap of 300 the
+/// head and the margins leave the body 229: rows of 56, not 60, keep the grid
+/// unscrolled.
 const PAGE_LEGEND_H: f32 = 16.0;
 const PAGE_GUTTER: f32 = 72.0;
 pub const PAGE_ROW_H: f32 = 56.0;
@@ -652,12 +669,10 @@ fn on_edge<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 }
 
 /// AU6: the Start float's body, inside the frame's scroll: spec 8.1's entries
-/// in its budget's order. `show_at_startup` is the latch's.
-pub fn float_body(
-    ui: &mut egui::Ui,
-    w: &mut Welcome,
-    show_at_startup: &mut bool,
-) -> Option<WelcomeAction> {
+/// in its budget's order. AU20: the latch stands in the heading row, so it
+/// never needs a scroll, and the recents stand as a half row, so a returning
+/// animator's files stand whole under the cap.
+pub fn float_body(ui: &mut egui::Ui, w: &mut Welcome) -> Option<WelcomeAction> {
     let wide = ui.available_width();
     ui.spacing_mut().item_spacing.y = ROW_GAP;
     if w.tab == WelcomeTab::WhatsNew {
@@ -692,15 +707,19 @@ pub fn float_body(
         if open.card("Open a project saved on this computer").clicked() {
             out = Some(WelcomeAction::Open);
         }
-        if plate::ghost_row(ui, "More sizes", half, Some(w.more_open)).clicked() {
+        if plate::fold_row(ui, "More sizes", half, w.more_open).clicked() {
             w.more_open = !w.more_open;
         }
     });
     if w.more_open {
         more_sizes(ui, wide, &mut out);
     }
-    recent_rows(ui, w, wide, &mut out);
-    ui.add_space(GROUP_GAP);
+    recent_rows(ui, w, half, &mut out);
+    // The card stands at its cap, so the foot takes the card's last line while
+    // the body leaves room, and an answer takes that room from it.
+    let last = ui.clip_rect().bottom() - ui.visuals().clip_rect_margin - plate::CTRL_H;
+    let free = if w.pen.verdict().is_none() { last - ui.cursor().top() } else { 0.0 };
+    ui.add_space(free.max(GROUP_GAP));
     ui.horizontal(|ui| {
         let check = if w.pen == PenCheck::Waiting {
             plate::current_row(ui, w.pen.words(), half)
@@ -722,11 +741,9 @@ pub fn float_body(
             }
         });
     }
-    let latch = on_edge(ui, |ui| plate::quiet_latch(ui, show_at_startup, "Show at startup"));
-    let latch = latch.card("Off: the app opens on the same paper, without this panel");
     // To the body's end, not the answer's: that leaves its last line in the fade.
     if std::mem::take(&mut w.pen_said) {
-        latch.scroll_to_me(Some(egui::Align::Max));
+        ui.scroll_to_cursor(Some(egui::Align::Max));
     }
     out
 }
@@ -779,20 +796,22 @@ fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcome
     let mut out = None;
     let half = (wide - ui.spacing().item_spacing.x) / 2.0;
     ui.horizontal(|ui| {
-        if plate::ghost_row(ui, "Back to Start", half, None).clicked() {
+        if plate::filled_row(ui, "Back to Start", half).clicked() {
             w.tab = WelcomeTab::Start;
         }
-        let sample = plate::ghost_row(ui, "Open the example", half, None);
+        let sample = plate::filled_row(ui, "Open the example", half);
         if sample.card(EXAMPLE_CARD).clicked() {
             out = Some(WelcomeAction::Sample);
         }
     });
-    let across = (wide - PAGE_GUTTER - 3.0 * PAGE_GAP) / 3.0;
+    let lessons = w.lessons;
+    let gutter_right = plate::CARD_PAD + PAGE_GUTTER;
+    let across = (wide - gutter_right - 3.0 * PAGE_GAP) / 3.0;
     let tall = PAGE_LEGEND_H + ROW_GAP + 3.0 * PAGE_ROW_H + 2.0 * PAGE_GAP;
     let (grid, _) = ui.allocate_exact_size(egui::vec2(wide, tall), egui::Sense::hover());
-    let column = |c: usize| grid.left() + PAGE_GUTTER + PAGE_GAP + c as f32 * (across + PAGE_GAP);
+    let column = |c: usize| grid.left() + gutter_right + PAGE_GAP + c as f32 * (across + PAGE_GAP);
     for (c, class) in Class::ALL.into_iter().enumerate() {
-        let at = egui::pos2(column(c) + plate::CARD_PAD, grid.top());
+        let at = egui::pos2(column(c) + plate::PICTURE_INSET, grid.top());
         let cell = egui::Rect::from_min_size(at, egui::vec2(across, PAGE_LEGEND_H));
         ui.scope_builder(egui::UiBuilder::new().max_rect(cell), |ui| plate::legend(ui, class.word()));
     }
@@ -801,18 +820,18 @@ fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcome
         let top = grid.top() + PAGE_LEGEND_H + ROW_GAP + r as f32 * (PAGE_ROW_H + PAGE_GAP);
         let gutter = egui::Rect::from_min_size(
             egui::pos2(grid.left() + plate::CARD_PAD, top),
-            egui::vec2(PAGE_GUTTER - plate::CARD_PAD, PAGE_ROW_H),
+            egui::vec2(PAGE_GUTTER, PAGE_ROW_H),
         );
         ui.scope_builder(egui::UiBuilder::new().max_rect(gutter).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             plate::legend(ui, word);
         });
         for (c, class) in Class::ALL.into_iter().enumerate() {
-            let Some(i) = w.lessons.iter().position(|l| l.kind == kind && l.class == class) else { continue };
-            let lesson = &w.lessons[i];
+            let Some(i) = lessons.iter().position(|l| l.kind == kind && l.class == class) else { continue };
+            let lesson = &lessons[i];
             let at = egui::pos2(column(c), top);
             let rect = egui::Rect::from_min_size(at, egui::vec2(across, PAGE_ROW_H));
-            let card = plate::picture_card(ui, rect, lesson.title, |p, paper| lesson_picture(p, paper, lesson));
+            let picture = w.pictures.entry(lesson.id).or_insert_with(|| Picture::of(lesson));
+            let card = plate::picture_card(ui, rect, lesson.title, |p, paper| picture.paint(p, paper));
             if card.card(lesson.hover).clicked() {
                 out = Some(WelcomeAction::Lesson(i));
             }
@@ -821,30 +840,43 @@ fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcome
     out
 }
 
-/// A lesson's finish, drawn small: its paths, fitted to `paper` and kept to
-/// their own shape.
-fn lesson_picture(p: &egui::Painter, paper: egui::Rect, lesson: &Lesson) {
-    let art = (lesson.art)();
-    let paths: Vec<_> = lesson.finish.iter().filter_map(|i| art.get(*i as usize)).collect();
-    let at = |q: &[f32; 3]| egui::pos2(q[0], q[1]);
-    let mut bounds = egui::Rect::NOTHING;
-    for q in paths.iter().flat_map(|path| &path.points) {
-        bounds.extend_with(at(q));
+/// A lesson's finish, read once: `art` is the whole lesson's paths, too much
+/// to build on each repaint.
+struct Picture {
+    /// Each line, and its width.
+    lines: Vec<(Vec<egui::Pos2>, f32)>,
+    bounds: egui::Rect,
+}
+
+impl Picture {
+    fn of(lesson: &Lesson) -> Self {
+        let art = (lesson.art)();
+        let at = |q: &[f32; 3]| egui::pos2(q[0], q[1]);
+        let paths = lesson.finish.iter().filter_map(|i| art.get(*i as usize));
+        let lines: Vec<_> = paths.map(|path| (path.points.iter().map(at).collect::<Vec<_>>(), path.width)).collect();
+        let mut bounds = egui::Rect::NOTHING;
+        lines.iter().flat_map(|(line, _)| line).for_each(|q| bounds.extend_with(*q));
+        Self { lines, bounds }
     }
-    if !bounds.is_positive() {
-        return;
-    }
-    let room = paper.shrink(6.0);
-    let scale = (room.width() / bounds.width()).min(room.height() / bounds.height());
-    let place = |q: &[f32; 3]| room.center() + (at(q) - bounds.center()) * scale;
-    for path in paths {
-        let line = path.points.iter().map(place).collect();
-        p.add(egui::Shape::line(line, egui::Stroke::new((path.width * scale).max(1.0), plate::INK)));
+
+    /// Drawn small: fitted to `paper` and kept to its own shape.
+    fn paint(&self, p: &egui::Painter, paper: egui::Rect) {
+        if !self.bounds.is_positive() {
+            return;
+        }
+        let room = paper.shrink(6.0);
+        let scale = (room.width() / self.bounds.width()).min(room.height() / self.bounds.height());
+        for (line, width) in &self.lines {
+            let placed = line.iter().map(|q| room.center() + (*q - self.bounds.center()) * scale).collect();
+            p.add(egui::Shape::line(placed, egui::Stroke::new((width * scale).max(1.0), plate::INK)));
+        }
     }
 }
 
-/// `More sizes`: every template, then the form.
+/// `More sizes`: every template, then the form, under their own legend: the
+/// list opens under `Open a project`, and it is none of those.
 fn more_sizes(ui: &mut egui::Ui, wide: f32, out: &mut Option<WelcomeAction>) {
+    on_edge(ui, |ui| plate::legend(ui, "Sizes"));
     for (i, t) in templates::ALL.iter().enumerate() {
         let row = plate::noted_row(ui, t.name, &format!("{}×{}", t.width, t.height), wide);
         if row.card(format!("{}\n{}", t.summary(), t.tooltip())).clicked() {
@@ -857,22 +889,25 @@ fn more_sizes(ui: &mut egui::Ui, wide: f32, out: &mut Option<WelcomeAction>) {
     }
 }
 
-/// The last files still on disk, by name; hidden when there are none.
-fn recent_rows(ui: &mut egui::Ui, w: &Welcome, wide: f32, out: &mut Option<WelcomeAction>) {
+/// The last files still on disk, by name, side by side, `half` wide each;
+/// hidden when there are none.
+fn recent_rows(ui: &mut egui::Ui, w: &Welcome, half: f32, out: &mut Option<WelcomeAction>) {
     let mut rows = w.cards.iter().filter(|c| !c.missing).take(RECENT_ROWS).peekable();
     if rows.peek().is_none() {
         return;
     }
     ui.add_space(GROUP_GAP);
     on_edge(ui, |ui| plate::legend(ui, "Recent"));
-    for c in rows {
-        let name = c.path.file_stem().map(|s| s.to_string_lossy().into_owned());
-        let name = name.unwrap_or_else(|| c.path.display().to_string());
-        let row = plate::ghost_row(ui, &name, wide, None);
-        if row.card(c.path.display().to_string()).clicked() {
-            *out = Some(WelcomeAction::OpenRecent(c.path.clone()));
+    ui.horizontal(|ui| {
+        for c in rows {
+            let name = c.path.file_stem().map(|s| s.to_string_lossy().into_owned());
+            let name = name.unwrap_or_else(|| c.path.display().to_string());
+            let row = plate::ghost_row(ui, &name, half, None);
+            if row.card(c.path.display().to_string()).clicked() {
+                *out = Some(WelcomeAction::OpenRecent(c.path.clone()));
+            }
         }
-    }
+    });
 }
 
 /// The Welcome screen, drawn into the central area (or a modal over an

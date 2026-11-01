@@ -1553,7 +1553,7 @@ pub const RING_GAP: f32 = 2.0;
 /// A card chip's height.
 pub const CHIP_H: f32 = CHROME_H - 4.0;
 /// A picture card's picture, from its edges, and its words from the picture.
-const PICTURE_INSET: f32 = 6.0;
+pub const PICTURE_INSET: f32 = 6.0;
 /// A ghost row's words, from its ends: a card's edge, so the two line up.
 const ROW_PAD: f32 = CARD_PAD;
 
@@ -1689,6 +1689,23 @@ pub fn ghost_row(ui: &mut Ui, label: &str, width: f32, open: Option<bool>) -> Re
     }
     speak(&resp, egui::WidgetType::Button, open, label);
     describe(resp, "ACTION ghost_row", label)
+}
+
+/// AU20: a [`ghost_row`] that opens something, where the row's far end is too
+/// far from its words to read as theirs: the chevron follows the words.
+pub fn fold_row(ui: &mut Ui, label: &str, width: f32, open: bool) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let (fill, ink) = ghost(ui, &resp);
+        row_words(ui, rect, label, ICON + 4.0, fill, ink);
+        let words = ui.painter().layout_no_wrap(label.to_string(), Role::Chrome.font(), ink).size().x;
+        let centre = Pos2::new(rect.left() + ROW_PAD + words + 4.0 + ICON / 2.0, rect.center().y);
+        let mark = egui::Rect::from_center_size(centre, Vec2::splat(ICON));
+        let icon = if open { crate::icons::Icon::Up } else { crate::icons::Icon::Down };
+        crate::icons::paint(ui.painter(), mark, ink, icon);
+    }
+    speak(&resp, egui::WidgetType::Button, Some(open), label);
+    describe(resp, "ACTION fold_row", label)
 }
 
 /// AU9: a [`ghost_row`] with a ground at rest: one action among plain words,
