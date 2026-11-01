@@ -79,6 +79,10 @@ pub const EXPORT_QUEUE: &str = "Export queue";
 pub const EFFECTS_GRAPH: &str = "Effects graph";
 pub const FULL_FINISHING_SETUP: &str = "Full finishing setup";
 pub const REBUILD_FROM_LAYERS: &str = "Rebuild from layers";
+// The Effects shelf's own words (AU14). Its effects read `fx` below.
+pub const STRENGTH: &str = "Strength";
+pub const ADD_EFFECT: &str = "Add effect";
+pub const CAMERA_MOVE: &str = "Camera move";
 pub const RESULT: &str = "Result";
 /// The Layout room's canvas pane: the shot's preview, under the Canvas tab.
 pub const PREVIEW: &str = "Preview";
@@ -349,6 +353,9 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("EXPORT_QUEUE", EXPORT_QUEUE, "Export queue"),
     ("EFFECTS_GRAPH", EFFECTS_GRAPH, "Effects graph"),
     ("FULL_FINISHING_SETUP", FULL_FINISHING_SETUP, "Full finishing setup"),
+    ("STRENGTH", STRENGTH, "Strength"),
+    ("ADD_EFFECT", ADD_EFFECT, "Add effect"),
+    ("CAMERA_MOVE", CAMERA_MOVE, "Camera move"),
     ("REBUILD_FROM_LAYERS", REBUILD_FROM_LAYERS, "Rebuild from layers"),
     ("RESULT", RESULT, "Result"),
     ("PREVIEW", PREVIEW, "Preview"),

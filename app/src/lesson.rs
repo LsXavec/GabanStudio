@@ -111,9 +111,9 @@ pub(crate) const WORDS: &[(&str, &str)] = &[
     ("Export pages", "Export pages"),
     // The Effects step's.
     ("Glow", "Glow"),
-    ("Strength", "Strength"),
-    ("Add effect", "Add effect"),
-    ("Camera move", "Camera move"),
+    ("Strength", crate::vocab::STRENGTH),
+    ("Add effect", crate::vocab::ADD_EFFECT),
+    ("Camera move", crate::vocab::CAMERA_MOVE),
     // The comic's.
     ("Split across", "Split across"),
     ("Split down", "Split down"),
@@ -438,7 +438,7 @@ fn ink_in(layer: &CelLayer, b: [f32; 4]) -> u32 {
 }
 
 /// The nodes `graph` draws from its Output.
-fn reached(graph: &Graph) -> Vec<&NodeKind> {
+pub(crate) fn reached(graph: &Graph) -> Vec<&NodeKind> {
     let mut seen = Vec::new();
     let mut walk: Vec<_> = graph.output.into_iter().collect();
     let mut out = Vec::new();

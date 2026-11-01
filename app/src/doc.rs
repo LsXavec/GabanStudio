@@ -31,6 +31,22 @@ pub enum StackRequest {
     Save(String),
 }
 
+/// AU14: why the Effects shelf stands disabled on a hand-built graph.
+pub const NO_OUTPUT_FOR_EFFECTS: &str = "Add an Output node to use effects here.";
+/// AU14: how far the Output moves on when a node takes its place.
+const OUTPUT_STEP: f32 = 220.0;
+/// AU14: the tracks `camera_move` adds, as the sheet names them.
+const CAMERA_TRACKS: [&str; 3] = ["Camera pan x", "Camera pan y", "Camera zoom"];
+
+/// AU14: `name`, numbered past any track that already has it.
+fn track_name(name: &str, taken: &[String]) -> String {
+    let free = |n: &String| !taken.contains(n);
+    std::iter::once(name.to_string())
+        .chain((2..).map(|i| format!("{name} {i}")))
+        .find(free)
+        .expect("the numbers run on")
+}
+
 /// GM8 auto-comp ("Build composite from sheet"): a DrawingSource for each
 /// rendered column in `render_order()` (bottom → top), chained with Normal
 /// Blends (input 0 below, input 1 above) into a fresh Output. The cut's old
@@ -5201,6 +5217,221 @@ impl AppState {
             self.selected_node = Some(id);
         }
         self.report(r, "node added");
+    }
+
+    /// AU14: why the Effects shelf cannot add here: a graph a hand built with
+    /// no Output has nowhere for an effect to go. None when it can.
+    pub fn shelf_refusal(&self) -> Option<&'static str> {
+        let graph = &self.cut().graph;
+        (graph.output.is_none() && graph.nodes().next().is_some()).then_some(NO_OUTPUT_FOR_EFFECTS)
+    }
+
+    /// AU14: the Output a new node goes over and the pin that feeds it. With
+    /// no graph at all the sheet's composite is built first (into `cmds`, the
+    /// edge into its Output left to the caller). A graph a hand built without
+    /// an Output is None. `wire_under_composite` answers the same three cases
+    /// for the import, and stays as the import wrote it.
+    fn over_output(&mut self, cmds: &mut Vec<Command>) -> Option<(NodeId, Option<(NodeId, u16)>)> {
+        let at = self.at();
+        if let Some(out) = self.cut().graph.output {
+            let feed = self.cut().graph.node(out).ok().and_then(|n| n.inputs.first().copied().flatten());
+            return Some((out, feed));
+        }
+        if self.cut().graph.nodes().next().is_some() {
+            return None;
+        }
+        let n = self.cut().render_order().len();
+        let ids: Vec<NodeId> = (0..2 * n + 1).map(|_| self.engine.alloc_node_id()).collect();
+        let mut ids = ids.into_iter();
+        let mut built = build_auto_comp(self.cut(), at, || ids.next().expect("ids for every node"));
+        let out = built.iter().find_map(|c| match c {
+            Command::SetOutput { node: Some(o), .. } => Some(*o),
+            _ => None,
+        })?;
+        let feed = built.iter().find_map(|c| match c {
+            Command::Connect { from, from_pin, to, to_pin: 0, .. } if *to == out => Some((*from, *from_pin)),
+            _ => None,
+        });
+        built.retain(|c| !matches!(c, Command::Connect { to, .. } if *to == out));
+        cmds.append(&mut built);
+        Some((out, feed))
+    }
+
+    /// AU14: where the Output stands now: a new node takes its place and it
+    /// moves on one column, so the chain still reads left to right. An Output
+    /// the batch is only building stands where `ensure_node_layout` puts it.
+    fn output_place(&self, out: NodeId) -> (f32, f32) {
+        if self.cut().graph.node(out).is_ok() { self.node_pos(out) } else { (480.0, 40.0) }
+    }
+
+    /// AU14: the edits (appended to `cmds`, the add's batch) that put new node
+    /// `node` on the picture in series: the old feed goes to its input 0 and
+    /// it feeds the Output. With a bare Output it feeds it; with no graph the
+    /// sheet's composite is built first. A graph a hand built without an
+    /// Output is left as it is: false.
+    fn wire_over_output(&mut self, node: NodeId, cmds: &mut Vec<Command>) -> bool {
+        let at = self.at();
+        let Some((out, feed)) = self.over_output(cmds) else {
+            return false;
+        };
+        if let Some((from, from_pin)) = feed {
+            cmds.push(Command::Connect { at, from, from_pin, to: node, to_pin: 0 });
+        }
+        cmds.push(Command::Connect { at, from: node, from_pin: 0, to: out, to_pin: 0 });
+        let here = self.output_place(out);
+        cmds.extend(self.layout_edit(node, Some(here)));
+        cmds.extend(self.layout_edit(out, Some((here.0 + OUTPUT_STEP, here.1))));
+        true
+    }
+
+    /// AU14: [`Self::wire_over_output`] for a node with no picture input (a
+    /// generator): a Normal Blend takes the old feed under it (input 0, the
+    /// layer underneath) and the node over it (input 1) into the Output, the
+    /// page stack's shape. With nothing to lay it over, it feeds the Output.
+    fn wire_over(&mut self, node: NodeId, cmds: &mut Vec<Command>) -> bool {
+        use anim_core::graph::{BlendMode, NodeKind};
+        let at = self.at();
+        let Some((out, feed)) = self.over_output(cmds) else {
+            return false;
+        };
+        let here = self.output_place(out);
+        let Some((from, from_pin)) = feed else {
+            cmds.push(Command::Connect { at, from: node, from_pin: 0, to: out, to_pin: 0 });
+            cmds.extend(self.layout_edit(node, Some(here)));
+            cmds.extend(self.layout_edit(out, Some((here.0 + OUTPUT_STEP, here.1))));
+            return true;
+        };
+        let blend = self.engine.alloc_node_id();
+        cmds.push(Command::AddNode { at, id: blend, kind: NodeKind::Blend { mode: BlendMode::Normal } });
+        cmds.push(Command::Connect { at, from, from_pin, to: blend, to_pin: 0 });
+        cmds.push(Command::Connect { at, from: node, from_pin: 0, to: blend, to_pin: 1 });
+        cmds.push(Command::Connect { at, from: blend, from_pin: 0, to: out, to_pin: 0 });
+        cmds.extend(self.layout_edit(blend, Some(here)));
+        cmds.extend(self.layout_edit(node, Some((here.0, here.1 + 120.0))));
+        cmds.extend(self.layout_edit(out, Some((here.0 + OUTPUT_STEP, here.1))));
+        true
+    }
+
+    /// AU14: a shelf tap or an `Add effect` pick: `kind` on the picture at
+    /// once, no wires, one undo step, and selected so `Strength` reads it. A
+    /// generator lays over the feed; everything else goes in series.
+    pub fn shelf_add(&mut self, kind: anim_core::graph::NodeKind) -> Option<NodeId> {
+        use anim_core::graph::NodeKind;
+        if let Some(why) = self.shelf_refusal() {
+            self.refuse(why);
+            return None;
+        }
+        self.ensure_node_layout();
+        let at = self.at();
+        let id = self.engine.alloc_node_id();
+        let word = crate::vocab::fx(kind.name()).to_string();
+        let over = matches!(&kind, NodeKind::Generator { generator, .. } if !generator.input_names().contains(&"image"));
+        let mut cmds = vec![Command::AddNode { at, id, kind }];
+        let wired = if over { self.wire_over(id, &mut cmds) } else { self.wire_over_output(id, &mut cmds) };
+        if !wired {
+            self.refuse(NO_OUTPUT_FOR_EFFECTS);
+            return None;
+        }
+        let r = self.engine.apply("add effect", cmds);
+        let added = r.is_ok();
+        self.report(r, &format!("{word} added"));
+        added.then(|| {
+            self.selected_node = Some(id);
+            id
+        })
+    }
+
+    /// AU14: `Camera move`: the camera feeding the Output, or a new one in
+    /// series with its first plane; each of pan x, pan y and zoom not yet on a
+    /// track gets one, keyed here with its value now. One undo step, and none
+    /// when the camera already moves. False when no camera could stand here.
+    pub fn camera_move(&mut self) -> bool {
+        use anim_core::camera::{CameraState, output_camera};
+        use anim_core::graph::NodeKind;
+        use anim_core::xsheet::ParamInterp;
+        if let Some(why) = self.shelf_refusal() {
+            self.refuse(why);
+            return false;
+        }
+        self.ensure_node_layout();
+        let at = self.at();
+        let frame = self.view.frame;
+        let found = output_camera(self.cut());
+        let (id, mut kind, now) = match found.and_then(|id| Some((id, self.cut().graph.node(id).ok()?))) {
+            Some((id, node)) => (id, node.kind.clone(), CameraState::at(self.cut(), id, frame)),
+            None => (self.engine.alloc_node_id(), NodeKind::camera(), None),
+        };
+        let now = now.unwrap_or_else(|| CameraState::defaults(frame));
+        let NodeKind::Camera { binds, .. } = &mut kind else {
+            return false;
+        };
+        let mut cmds = Vec::new();
+        let mut names: Vec<String> = self.cut().xsheet.params.iter().map(|p| p.name.clone()).collect();
+        let base = names.len();
+        for (i, (key, value)) in [("pan_x", now.pan_x), ("pan_y", now.pan_y), ("zoom", now.zoom)].into_iter().enumerate() {
+            if binds.get(key).is_some_and(|p| self.cut().xsheet.param(p).is_some()) {
+                continue;
+            }
+            let column = self.engine.alloc_param_id();
+            let name = track_name(CAMERA_TRACKS[i], &names);
+            let index = names.len();
+            names.push(name.clone());
+            cmds.push(Command::AddParamColumn { at, index, column: ParamColumn::new(column, name) });
+            let key_now = ParamKey { value, interp: ParamInterp::Linear, handles: None };
+            cmds.push(Command::SetParamKey { at, column, frame, key: Some(key_now) });
+            binds.set(key, Some(column));
+        }
+        let grew = names.len() > base;
+        if found.is_none() {
+            cmds.push(Command::AddNode { at, id, kind });
+            if !self.wire_over_output(id, &mut cmds) {
+                self.refuse(NO_OUTPUT_FOR_EFFECTS);
+                return false;
+            }
+        } else if grew {
+            cmds.push(Command::SetNodeKind { at, id, kind });
+        }
+        if !cmds.is_empty() {
+            let r = self.engine.apply("camera move", cmds);
+            let ok = r.is_ok();
+            self.report(r, "camera keyed: drag the frame on the Result");
+            if !ok {
+                return false;
+            }
+        }
+        self.selected_node = Some(id);
+        true
+    }
+
+    /// AU14: one framing on the Result's box: keys at its frame on the three
+    /// tracks `camera_move` bound, through [`Self::set_param_keys`], one undo
+    /// step. A key that stands there keeps its easing, a new one runs
+    /// straight to the next (the sheet's Hold would never move).
+    pub fn frame_camera(&mut self, framing: &crate::viewer::Framing) {
+        use anim_core::camera::{CameraState, output_camera};
+        use anim_core::graph::NodeKind;
+        use anim_core::xsheet::ParamInterp;
+        let frame = framing.frame;
+        let Some(id) = output_camera(self.cut()) else {
+            return;
+        };
+        let Some(cam) = CameraState::at(self.cut(), id, frame) else {
+            return;
+        };
+        let Ok(NodeKind::Camera { binds, .. }) = self.cut().graph.node(id).map(|n| &n.kind) else {
+            return;
+        };
+        let (pan_x, pan_y, zoom) = framing.on(&cam);
+        let mut keys = Vec::new();
+        for (key, value) in [("pan_x", pan_x), ("pan_y", pan_y), ("zoom", zoom)] {
+            let Some(column) = binds.get(key) else {
+                return;
+            };
+            let held = self.cut().xsheet.param(column).and_then(|p| p.key_at(frame));
+            let interp = held.map_or(ParamInterp::Linear, |k| k.interp);
+            keys.push((column, frame, ParamKey { value, interp, handles: held.and_then(|k| k.handles) }));
+        }
+        self.set_param_keys("frame camera", keys);
     }
 
     /// GM9: the cut's saved node layout (its `graph.layout.<id>` keys).

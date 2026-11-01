@@ -45,6 +45,11 @@ pub struct GraphUi {
     /// GM17: an ImageSequence's "pick a frame…" was clicked — the shell's
     /// picker names the run from the file picked.
     pub sequence_pick: Option<NodeId>,
+    /// AU14: `Add effect` was pressed: the same menu opens here, and what it
+    /// adds goes on the picture.
+    effect_at: Option<Pos2>,
+    /// AU14: Camera move is armed: the Result shows the frame box.
+    pub frame_box: bool,
 }
 
 impl GraphUi {
@@ -54,6 +59,30 @@ impl GraphUi {
         self.ask_menu = true;
     }
 }
+
+/// AU14: the Effects step's shelf over the graph, and what it offers here.
+#[derive(Clone, Copy)]
+pub struct Shelf {
+    /// `Camera move`: an animation's alone (feedback 1.9).
+    pub camera: bool,
+}
+
+const SHELF_H: f32 = 40.0;
+const SHELF_GAP: f32 = 4.0;
+/// The shelf's effects, most asked first: a narrow pane folds the rest into
+/// `More` from the end.
+const SHELF_EFFECTS: [FxKind; 4] = [FxKind::Glow, FxKind::Diffusion, FxKind::Blur, FxKind::Grade];
+/// `Strength`'s slot at the shelf's right end: the least a hand can drag, and
+/// the most it needs.
+const STRENGTH_SLOT: (f32, f32) = (136.0, 240.0);
+/// The least track `Strength` stands on.
+const STRENGTH_TRACK: f32 = 56.0;
+/// What the shelf's `More` answers to: the top row has a `More` of its own.
+pub const SHELF_MORE: &str = "More effects tools";
+/// What the empty graph's button answers to: the Result's empty state beside
+/// it says the same word.
+pub const GRAPH_SET_UP: &str = "Set up standard composite in the graph";
+pub const FULL_SETUP_WARNS: &str = "Replaces this graph with the whole finishing chain. Undo brings it back.";
 
 pub struct AddMenu {
     /// Where it opened: the screen point, and the graph point a new node
@@ -66,6 +95,8 @@ pub struct AddMenu {
     fresh: bool,
     /// The menu's rect last frame: a press outside it closes the menu.
     rect: Option<Rect>,
+    /// AU14: opened by `Add effect`: what it adds goes on the picture.
+    wired: bool,
 }
 
 pub struct NodeDrag {
@@ -368,7 +399,7 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
         .show(&ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_width(260.0);
-                crate::plate::legend(ui, "add node");
+                crate::plate::legend(ui, if menu.wired { crate::vocab::ADD_EFFECT } else { "add node" });
                 let field = crate::plate::text_field(
                     ui,
                     egui::TextEdit::singleline(&mut menu.query)
@@ -423,6 +454,20 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
     menu.rect = Some(area.response.rect);
     if let Some(e) = pick.and_then(|i| rows.into_iter().nth(i)) {
         match e.make {
+            // AU14: what changes the picture goes on it; a source or a Blend
+            // has no one place there, so it lands as the hand path lands it.
+            Make::Node(kind)
+                if menu.wired
+                    && matches!(
+                        kind,
+                        NodeKind::Effect { .. }
+                            | NodeKind::Transform { .. }
+                            | NodeKind::Camera { .. }
+                            | NodeKind::Generator { .. }
+                    ) =>
+            {
+                state.shelf_add(kind);
+            }
             Make::Node(kind) => state.graph_add_node(kind, menu.world),
             Make::Image => {
                 // GM17: a JPEG or TIFF is stored as the PNG it decodes to.
@@ -525,9 +570,14 @@ fn node_title(kind: &NodeKind) -> String {
     name.to_string()
 }
 
-pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
+/// `shelf`: the Effects step's header in place of the bare toolbar. Outside
+/// that step the pane stands as the hand-wiring path always had it.
+pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
     state.ensure_node_layout();
-    toolbar(ui, state);
+    match shelf {
+        Some(offer) => shelf_ui(ui, state, offer),
+        None => toolbar(ui, state),
+    }
     inspector_row(ui, state);
     ui.separator();
     let rect = ui.available_rect_before_wrap();
@@ -551,7 +601,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     // right-click on empty graph space opens it there.
     let hover = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
     let asked = std::mem::take(&mut state.graph_ui.ask_menu);
-    let open_at = if response.secondary_clicked() {
+    let effect_at = state.graph_ui.effect_at.take();
+    let open_at = if effect_at.is_some() {
+        effect_at
+    } else if response.secondary_clicked() {
         response.interact_pointer_pos()
     } else if asked {
         Some(hover.unwrap_or_else(|| rect.center()))
@@ -565,13 +618,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         state.graph_ui.drag = None;
     }
     if let Some(p) = open_at {
+        let wired = effect_at.is_some();
+        // Opened from the shelf, a node that lands by hand lands in the graph.
+        let spot = if wired { rect.center() } else { p };
         state.graph_ui.add_menu = Some(AddMenu {
             screen: p,
-            world: (p.x - origin.x, p.y - origin.y),
+            world: (spot.x - origin.x, spot.y - origin.y),
             query: String::new(),
             sel: 0,
             fresh: true,
             rect: None,
+            wired,
         });
     }
     state.graph_ui.node_rects.clear();
@@ -823,13 +880,195 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         let add = crate::menus::chord_label(ui.ctx(), crate::config::Action::AddNode)
             .map(|c| format!("{c} or right-click"))
             .unwrap_or_else(|| "Right-click".into());
+        let gap = crate::plate::CTRL_H * 0.5 + 2.0;
         painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
+            rect.center() - vec2(0.0, gap),
+            egui::Align2::CENTER_BOTTOM,
             format!("{add} to add an effect: this shot's effects graph lives here"),
             crate::plate::Role::Panel.font(),
             crate::plate::LEGEND,
         );
+        // AU14: the way on, as the Result's empty state offers it.
+        let word = crate::viewer::SET_UP_COMPOSITE;
+        let wide = crate::plate::filled_row_width(ui, word);
+        let can = !state.cut().render_order().is_empty();
+        let at = Rect::from_center_size(rect.center() + vec2(0.0, 6.0), vec2(wide, crate::plate::CTRL_H));
+        let button = ui.put(at, |ui: &mut egui::Ui| {
+            ui.add_enabled_ui(can, |ui| crate::plate::filled_named(ui, word, GRAPH_SET_UP, wide)).inner
+        });
+        if button.on_disabled_hover_text("No track reaches the final picture.").clicked() {
+            state.request_auto_comp();
+        }
+    }
+    // AU14: why the shelf stands disabled, said where the hand is looking.
+    if let Some(why) = state.shelf_refusal().filter(|_| shelf.is_some()) {
+        painter.text(
+            rect.left_top() + vec2(8.0, 8.0),
+            egui::Align2::LEFT_TOP,
+            why,
+            crate::plate::Role::Panel.font(),
+            crate::plate::LEGEND,
+        );
+    }
+}
+
+/// AU14: one filled control of the shelf: disabled, it says why.
+fn shelf_button(ui: &mut egui::Ui, word: &str, why: Option<&str>) -> egui::Response {
+    let wide = crate::plate::filled_row_width(ui, word);
+    let r = ui.add_enabled_ui(why.is_none(), |ui| crate::plate::filled_row(ui, word, wide)).inner;
+    match why {
+        Some(why) => r.on_disabled_hover_text(why),
+        None => r,
+    }
+}
+
+/// AU14: the Effects step's header. A tap puts an effect on the picture
+/// (`AppState::shelf_add`), `Camera move` arms the Result's frame box, and the
+/// right end holds the selected effect's `Strength`. As the pane narrows the
+/// middle effects fold into `More`; the marked controls always stand.
+fn shelf_ui(ui: &mut egui::Ui, state: &mut AppState, offer: Shelf) {
+    use crate::lessons::Target;
+    use crate::plate::{self, Card as _};
+    use crate::vocab;
+    let word = |fx: FxKind| vocab::fx(fx.name());
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), SHELF_H), Sense::hover());
+    let why = state.shelf_refusal();
+    let more_wide = plate::filled_row_width(ui, vocab::MENU_MORE);
+    let mut room = row.width() - STRENGTH_SLOT.0 - more_wide - SHELF_GAP;
+    room -= plate::filled_row_width(ui, word(SHELF_EFFECTS[0])) + SHELF_GAP;
+    room -= plate::filled_row_width(ui, vocab::ADD_EFFECT) + SHELF_GAP;
+    if offer.camera {
+        room -= plate::filled_row_width(ui, vocab::CAMERA_MOVE) + SHELF_GAP;
+    }
+    let mut stand = 1;
+    while let Some(fx) = SHELF_EFFECTS.get(stand) {
+        room -= plate::filled_row_width(ui, word(*fx)) + SHELF_GAP;
+        if room < 0.0 {
+            break;
+        }
+        stand += 1;
+    }
+    let (standing, folded) = SHELF_EFFECTS.split_at(stand);
+    let strip = egui::UiBuilder::new()
+        .max_rect(row)
+        .layout(egui::Layout::left_to_right(egui::Align::Center));
+    ui.scope_builder(strip, |ui| {
+        ui.spacing_mut().item_spacing.x = SHELF_GAP;
+        let mut add = None;
+        for &fx in standing {
+            // The studio word stays off the control, as on the menu's rows.
+            let card = match fx.term() {
+                Some(term) => format!("{}\nStudio word: {term}", fx.help()),
+                None => fx.help().to_string(),
+            };
+            let r = shelf_button(ui, word(fx), why).card(card);
+            if fx == FxKind::Glow {
+                plate::mark(ui, r.interact_rect, Target::Named("shelf.glow"));
+            }
+            if r.clicked() {
+                add = Some(fx);
+            }
+        }
+        if offer.camera {
+            let armed = state.graph_ui.frame_box;
+            let r = shelf_button(ui, vocab::CAMERA_MOVE, why)
+                .card("Add a camera, then frame the start and the end on the Result.");
+            plate::speak(&r, egui::WidgetType::Button, Some(armed), vocab::CAMERA_MOVE);
+            if armed {
+                let edge = Stroke::new(2.0, plate::TALLY);
+                ui.painter().rect_stroke(r.rect, plate::R_CONTROL, edge, egui::StrokeKind::Inside);
+            }
+            plate::mark(ui, r.interact_rect, Target::Named("shelf.camera"));
+            if r.clicked() {
+                state.graph_ui.frame_box = !armed && state.camera_move();
+            }
+        }
+        let r = shelf_button(ui, vocab::ADD_EFFECT, why).card("Every effect by name, in a list you can search.");
+        plate::mark(ui, r.interact_rect, Target::Named("shelf.add"));
+        if r.clicked() {
+            state.graph_ui.frame_box = false;
+            state.graph_ui.effect_at = Some(r.rect.left_bottom());
+        }
+        let more = ui.menu_button(vocab::MENU_MORE, |ui| {
+            ui.set_min_width(260.0);
+            shelf_more(ui, state, folded, why, &mut add);
+        });
+        plate::speak(&more.response, egui::WidgetType::Button, None, SHELF_MORE);
+        if let Some(fx) = add {
+            state.graph_ui.frame_box = false;
+            state.shelf_add(NodeKind::effect(fx));
+        }
+        strength_slot(ui, state);
+    });
+}
+
+/// AU14: the shelf's `More`: what a narrow pane folded, and the graph-wide
+/// verbs that replace the graph, each with what it does.
+fn shelf_more(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    folded: &[FxKind],
+    why: Option<&str>,
+    add: &mut Option<FxKind>,
+) {
+    use crate::config::Action;
+    for &fx in folded {
+        let row = ui.add_enabled(why.is_none(), egui::Button::new(crate::vocab::fx(fx.name())));
+        if row.on_hover_text(fx.help()).clicked() {
+            *add = Some(fx);
+            ui.close();
+        }
+    }
+    if !folded.is_empty() {
+        ui.separator();
+    }
+    let refused = state.satsuei_refusal();
+    let row = ui.add_enabled(refused.is_none(), egui::Button::new(Action::BuildSatsuei.label()));
+    let row = match refused {
+        Some(refused) => row.on_disabled_hover_text(refused),
+        None => row.on_hover_text(Action::BuildSatsuei.help()),
+    };
+    if row.clicked() {
+        state.request_satsuei();
+        ui.close();
+    }
+    ui.label(egui::RichText::new(FULL_SETUP_WARNS).color(crate::plate::legend_dim()));
+    ui.separator();
+    let can = !state.cut().render_order().is_empty();
+    let row = ui.add_enabled(can, egui::Button::new(Action::BuildComposite.label()));
+    let row = if can {
+        row.on_hover_text(Action::BuildComposite.help())
+    } else {
+        row.on_disabled_hover_text("No track reaches the final picture.")
+    };
+    if row.clicked() {
+        state.request_auto_comp();
+        ui.close();
+    }
+}
+
+/// AU14: the right end of the shelf: the selected effect's `Strength`, its
+/// word beside its track. The slot stays empty until an effect has one.
+fn strength_slot(ui: &mut egui::Ui, state: &mut AppState) {
+    use crate::plate;
+    let room = ui.available_rect_before_wrap();
+    let slot = Rect::from_min_max(pos2(room.right() - room.width().min(STRENGTH_SLOT.1), room.top()), room.right_bottom());
+    let words = ui.painter().layout_no_wrap(crate::vocab::STRENGTH.to_string(), plate::Role::Small.font(), plate::legend_dim());
+    // The narrowest pane gives the word's room to the track: it still answers
+    // to the name, and its card says what it is.
+    let spoken = words.size().x + 2.0 * SHELF_GAP;
+    let worded = slot.width() - spoken >= STRENGTH_TRACK;
+    let track = if worded { slot.width() - spoken } else { slot.width().max(STRENGTH_TRACK) };
+    let strip = egui::UiBuilder::new()
+        .max_rect(if worded { slot.with_min_x(slot.left() + spoken) } else { slot })
+        .layout(egui::Layout::left_to_right(egui::Align::Center));
+    let inner = ui.scope_builder(strip, |ui| crate::fxui::strength(ui, state, track));
+    if let Some(r) = inner.inner {
+        if worded {
+            let at = pos2(slot.left(), slot.center().y - words.size().y / 2.0);
+            ui.painter().galley(at, words, plate::legend_dim());
+        }
+        plate::mark(ui, r.interact_rect, crate::lessons::Target::Named("shelf.strength"));
     }
 }
 

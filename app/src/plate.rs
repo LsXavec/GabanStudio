@@ -2095,13 +2095,25 @@ pub fn fold_row(ui: &mut Ui, label: &str, width: f32, open: bool) -> Response {
 /// AU9: a [`ghost_row`] with a ground at rest: one action among plain words,
 /// which a ghost would leave reading as one more of them.
 pub fn filled_row(ui: &mut Ui, label: &str, width: f32) -> Response {
+    filled_named(ui, label, label, width)
+}
+
+/// AU14: the width a [`filled_row`] needs for `label`, whole.
+pub fn filled_row_width(ui: &Ui, label: &str) -> f32 {
+    let words = ui.fonts_mut(|f| f.layout_no_wrap(label.to_string(), Role::Chrome.font(), INK));
+    words.size().x + 2.0 * ROW_PAD
+}
+
+/// AU14: a [`filled_row`] that answers to `name`, where the word it paints is
+/// another control's on the same screen.
+pub fn filled_named(ui: &mut Ui, label: &str, name: &str, width: f32) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
         let (fill, ink) = filled(&resp);
         row_words(ui, rect, label, 0.0, fill, ink);
     }
-    speak(&resp, egui::WidgetType::Button, None, label);
-    describe(resp, "ACTION filled_row", label)
+    speak(&resp, egui::WidgetType::Button, None, name);
+    describe(resp, "ACTION filled_row", name)
 }
 
 /// AU6: a [`ghost_row`] with a dim note at its right end, which the row's

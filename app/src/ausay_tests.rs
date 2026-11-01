@@ -1364,8 +1364,7 @@ fn ausay_the_action_button_stands_after_its_words() {
     assert!(button.right() < h.rect("Add drawing (band)").left() - plate::SAY_DOTS, "{button:?}");
 }
 
-/// Spec 8.2's Effects row, in the words that are true until AU14's shelf: the
-/// graph is on screen, and the chord is the live one.
+/// Spec 8.2's Effects row, in its own words now the shelf they point at stands.
 #[test]
 fn ausay_effects_hint_names_what_the_step_has() {
     let mut h = EditorHarness::with_state_shipped(one_drawing_at(0));
@@ -1374,10 +1373,10 @@ fn ausay_effects_hint_names_what_the_step_has() {
     settle(&mut h);
     quiet(&mut h);
     assert!(visible_panes(&h.editor().dock).contains(&Pane::NodeGraph));
-    let chord_words = crate::menus::chord_label(&h.ctx(), Action::AddNode).expect("bound");
-    let words = format!("Press {chord_words} over the graph to add an effect.");
-    assert_eq!(picked(&h).as_deref(), Some(words.as_str()));
-    assert!(says(&h, &words), "{:?}", h.painted_text());
+    let words = "Pick an effect to add it to the picture.";
+    assert_eq!(picked(&h).as_deref(), Some(words));
+    assert!(says(&h, words), "{:?}", h.painted_text());
+    assert!(h.has(crate::vocab::fx("Glow")), "the shelf it points at");
 }
 
 /// AU7's 16 named tests and its shots stand: the spec's list, read from the

@@ -1192,6 +1192,46 @@ fn color_moments(dir: &Path) {
     }
 }
 
+/// AU14: the Effects step: an empty graph, the shelf with an effect on the
+/// picture, its More open, and the frame box on the Result.
+const FX: [&str; 4] = ["fx-empty", "fx-shelf", "fx-more", "fx-frame-box"];
+
+pub(crate) fn fx_owed() -> Vec<(String, u32, u32)> {
+    let sized = |state: &&str| COLOR_SIZES.map(|(suffix, w, h)| (format!("{state}{suffix}.png"), w, h));
+    FX.iter().flat_map(sized).collect()
+}
+
+fn fx_moments(dir: &Path) {
+    for (suffix, w, tall) in COLOR_SIZES {
+        let size = egui::vec2(w as f32, tall as f32);
+        let shoot = |h: &mut EditorHarness, state: &str| {
+            h.run_frames(6);
+            h.shot(size, &dir.join(format!("{state}{suffix}.png")));
+        };
+        let mut h = EditorHarness::with_gpu_shipped(crate::auguide_tests::film().build());
+        h.kit_mut().set_size(size);
+        arrive(&mut h, ProbeRoom::Stage(Stage::Drawing));
+        h.hide_sheet();
+        let c = h.editor().canvas.dbg_rect.center();
+        let ring: Vec<egui::Pos2> = (0..=35)
+            .map(|n| c + 70.0 * egui::Vec2::angled(n as f32 / 32.0 * std::f32::consts::TAU))
+            .collect();
+        h.drag_path(&ring);
+        h.run_frames(8);
+        h.editor_mut().enter_room(Stage::Composite);
+        arrive(&mut h, ProbeRoom::Stage(Stage::Composite));
+        shoot(&mut h, "fx-empty");
+        h.click("Glow");
+        shoot(&mut h, "fx-shelf");
+        h.click(crate::nodegraph_panel::SHELF_MORE);
+        shoot(&mut h, "fx-more");
+        h.key(egui::Key::Escape);
+        h.run_frames(4);
+        h.click(crate::vocab::CAMERA_MOVE);
+        shoot(&mut h, "fx-frame-box");
+    }
+}
+
 /// AU8: the queue's preset row with its last two chips, wrapped: the tab in
 /// its room, where the pane is narrow, and the pane alone.
 const QUEUE: [(&str, u32, u32); 4] = [
@@ -1426,6 +1466,8 @@ fn uishot_rooms() {
     check_shots(&dir, &tail_owed()).expect("the twelve rows and the hold keys");
     color_moments(&dir);
     check_shots(&dir, &color_owed()).expect("the Color step");
+    fx_moments(&dir);
+    check_shots(&dir, &fx_owed()).expect("the Effects step");
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of

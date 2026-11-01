@@ -11,6 +11,8 @@
 //! finished export's file on disk.
 
 use anim_core::command::CutRef;
+use anim_core::generator::GenKind;
+use anim_core::graph::NodeKind;
 use anim_core::manga;
 
 use crate::config::{Action, UiConfig};
@@ -290,10 +292,9 @@ pub const HINTS: [Hint; 16] = [
         answered: |f| f.filled,
         passes: false,
     },
-    // Spec 8.2's own sentence comes with AU14's shelf, the thing it points at.
     Hint {
         bit: EFFECTS,
-        words: Words::Chord("Press ", Action::AddNode, " over the graph to add an effect."),
+        words: Words::Plain("Pick an effect to add it to the picture."),
         verb: None,
         steps: &[Stage::Composite],
         kinds: ANY_KIND,
@@ -541,7 +542,9 @@ pub struct Say {
     pub pin: Option<Spoken>,
     strokes: Option<u64>,
     fills: Option<u64>,
-    nodes: Option<usize>,
+    /// Effects reaching the Output, and the cut and the revision that count is of.
+    effects: Option<usize>,
+    effects_at: Option<(CutRef, u64)>,
     /// A comic's panels, and the page and the revision that count is of.
     panels: Option<usize>,
     panels_at: Option<(CutRef, u64)>,
@@ -554,6 +557,16 @@ pub struct Say {
     refusals: u32,
     revision: u64,
     frame: u32,
+}
+
+/// AU14: what `effect_added` counts: what changes the picture. The nodes that
+/// make it (a source, a Blend, a comic's panels) are no effect.
+fn is_an_effect(kind: &NodeKind) -> bool {
+    match kind {
+        NodeKind::Effect { .. } | NodeKind::Camera { .. } => true,
+        NodeKind::Generator { generator, .. } => *generator != GenKind::Panels,
+        _ => false,
+    }
 }
 
 /// Pen strokes with no pressure before the hint says so (spec 8.2).
@@ -591,8 +604,8 @@ impl Say {
 
     /// Another document: nothing that differs from the last one is an outcome.
     pub fn new_document(&mut self) {
-        (self.strokes, self.fills, self.nodes, self.panels) = (None, None, None, None);
-        self.panels_at = None;
+        (self.strokes, self.fills, self.effects, self.panels) = (None, None, None, None);
+        (self.effects_at, self.panels_at) = (None, None);
         self.exported = None;
     }
 
@@ -798,13 +811,19 @@ impl Editor {
         }
         let state = &self.state;
         let cut = state.cut();
-        let nodes = cut.graph.nodes().count();
-        let effect_added = self.say.nodes.is_some_and(|before| nodes > before);
-        self.say.nodes = Some(nodes);
+        // AU14: an effect reaching the Output, not a node count: a wire or a
+        // source adds no effect, and the walk runs only after an edit.
+        let here = (state.at(), state.engine.revision());
+        let mut effect_added = false;
+        if self.say.effects_at != Some(here) {
+            let now = crate::lesson::reached(&cut.graph).iter().filter(|n| is_an_effect(n)).count();
+            let same_cut = self.say.effects_at.is_some_and(|(at, _)| at == here.0);
+            effect_added = same_cut && self.say.effects.is_some_and(|before| now > before);
+            (self.say.effects, self.say.effects_at) = (Some(now), Some(here));
+        }
         // AU18: a comic's cut into panels by the count, read on a comic alone
         // and only after an edit: `panels_of` clones them, and this runs per
         // frame. A page with more panels than the last one is no outcome.
-        let here = (state.at(), state.engine.revision());
         let mut panel_added = false;
         if self.kind() == Some(ProjectKind::Comic) && self.say.panels_at != Some(here) {
             let now = manga::panels_of(cut).map_or(0, |(_, polys)| polys.len());

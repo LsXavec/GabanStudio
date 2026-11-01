@@ -1617,7 +1617,7 @@ fn aulesson_no_old_words() {
 
 /// Controls `WORDS` names that a later part builds. A word that lands in the
 /// sources has to leave this list.
-const LATER: [&str; 5] = ["Custom layer", "Strength", "Add effect", "Camera move", "See the page"];
+const LATER: [&str; 2] = ["Custom layer", "See the page"];
 
 /// Spec 5.3: `WORDS`' literals are the controls' own labels: each stands in
 /// the app's sources as a label, or a later part owes it.

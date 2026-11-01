@@ -2695,8 +2695,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 1117;
-    const ASSERT_FLOOR: usize = 6850;
+    const TEST_FLOOR: usize = 1170;
+    const ASSERT_FLOOR: usize = 6900;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

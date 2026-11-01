@@ -937,6 +937,8 @@ pub enum Act<'a> {
     Chord(egui::Modifiers, egui::Key),
     /// A pen stroke along these points.
     Stroke(&'a [Pos2]),
+    /// AU14: one drag along these points that lays no stroke: a slider, a box.
+    Drag(&'a [Pos2]),
     /// A dialog answered: `h.click` on a button, or the seam behind an OS
     /// dialog. One action, whatever it takes to answer it.
     Answer(Box<dyn FnOnce(&mut EditorHarness) + 'a>),
@@ -1006,6 +1008,10 @@ impl<'h> Recorder<'h> {
             Act::Stroke(path) => {
                 self.h.drag_path(path);
                 self.tally.strokes += 1;
+            }
+            Act::Drag(path) => {
+                self.h.drag_path(path);
+                self.tally.clicks += 1;
             }
             Act::Answer(answer) => {
                 answer(self.h);

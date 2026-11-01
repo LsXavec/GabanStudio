@@ -121,6 +121,7 @@ pub fn camera_inspector(
             Some((n, k, FxValue::Float(v))) if *n == id && *k == key => *v,
             _ => plane.depth,
         };
+        make_room(ui);
         crate::plate::legend(ui, name).on_hover_text(PLANE_HELP);
         let r = crate::plate::field(
             ui,
@@ -141,6 +142,7 @@ pub fn camera_inspector(
         }
         state.graph_ui.fx.fields.push((name, r.rect));
     }
+    make_room(ui);
     ui.horizontal(|ui| {
         let add = ui
             .add_enabled(planes.len() < MAX_PLANES, egui::Button::new("+ plane"))
@@ -229,6 +231,80 @@ fn commit_kind(state: &mut AppState, id: NodeId, kind: NodeKind) {
     }
 }
 
+/// AU14: what the shelf's one `Strength` moves on each kind, its first key the
+/// one it reads. Blur moves both radii as one: its stored pair would streak
+/// sideways with the first alone. A kind with no single amount has none.
+pub fn strength_keys(fx: FxKind) -> &'static [&'static str] {
+    match fx {
+        FxKind::Glow | FxKind::LightWrap | FxKind::Rim => &["intensity"],
+        FxKind::Diffusion | FxKind::Lut => &["mix"],
+        FxKind::Grade => &["saturation"],
+        FxKind::Blur => &["radius_x", "radius_y"],
+        FxKind::Para | FxKind::Vignette | FxKind::Grain => &["amount"],
+        _ => &[],
+    }
+}
+
+/// AU14: `Strength` for the selected effect, `width` wide: a drag shows live
+/// and lands as one undo step on release, the inspector's law. None when the
+/// selection has no strength. A value a track drives stands disabled.
+pub fn strength(ui: &mut egui::Ui, state: &mut AppState, width: f32) -> Option<egui::Response> {
+    use crate::plate::Card as _;
+    let id = state.selected_node?;
+    let NodeKind::Effect { fx, params, binds } = state.cut().graph.node(id).ok()?.kind.clone() else {
+        return None;
+    };
+    let keys = strength_keys(fx);
+    let key = *keys.first()?;
+    let spec = fx.specs().iter().find(|s| s.key == key)?;
+    let ParamKind::Float { min, max, .. } = spec.kind else {
+        return None;
+    };
+    let FxValue::Float(stored) = spec.read(params.get(key)) else {
+        return None;
+    };
+    let mut value = match &state.graph_ui.fx.live {
+        Some((n, k, FxValue::Float(v))) if *n == id && k == key => *v,
+        _ => stored,
+    };
+    let free = keys.iter().all(|k| binds.get(k).is_none());
+    let r = ui
+        .add_enabled_ui(free, |ui| {
+            ui.spacing_mut().slider_width = width;
+            let slider = egui::Slider::new(&mut value, min..=max).show_value(false).logarithmic(max >= 100.0);
+            crate::plate::field(ui, slider)
+        })
+        .inner;
+    crate::plate::speak(&r, egui::WidgetType::Slider, None, crate::vocab::STRENGTH);
+    let r = r.card(spec.help).on_disabled_hover_text("A track on the Timing sheet drives this.");
+    let live = state.graph_ui.fx.live.as_ref().is_some_and(|(n, k, _)| *n == id && k == key);
+    if r.is_pointer_button_down_on() {
+        if r.changed() {
+            state.graph_ui.fx.live = Some((id, key.to_string(), FxValue::Float(value)));
+        }
+    } else if live || r.changed() {
+        state.graph_ui.fx.live = None;
+        let mut next = params;
+        for k in keys {
+            next.set(k, FxValue::Float(value));
+        }
+        commit_kind(state, id, NodeKind::Effect { fx, params: next, binds });
+    }
+    Some(r)
+}
+
+/// What a legend and its field want of a row: the longest legend and a field.
+const PARAM_ROOM: f32 = 140.0;
+
+/// Break the inspector's wrapped row before a parameter that would not fit.
+/// A field sits in its own scope, and egui's wrap measures only the widgets it
+/// places itself, so a row left alone runs the field off the pane.
+fn make_room(ui: &mut egui::Ui) {
+    if ui.available_size_before_wrap().x < PARAM_ROOM {
+        ui.end_row();
+    }
+}
+
 /// A parameter's legend. The camera's one stored `zoom` says which way it is
 /// set (spec 3: T.U. is Zoom in, T.B. is Zoom out).
 pub(crate) fn param_legend(node: &str, key: &str, label: &'static str, value: &FxValue) -> &'static str {
@@ -277,6 +353,7 @@ fn specs_ui(
             _ => None,
         };
         let shown = live.clone().unwrap_or_else(|| now.clone());
+        make_room(ui);
         if !matches!(spec.kind, ParamKind::Bool { .. }) {
             crate::plate::legend(ui, param_legend(node_name, spec.key, spec.label, &shown)).on_hover_text(spec.help);
         }

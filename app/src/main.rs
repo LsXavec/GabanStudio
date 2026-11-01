@@ -66,6 +66,8 @@ mod aukind_tests;
 #[cfg(test)]
 mod aucolor_tests;
 #[cfg(test)]
+mod aufx_tests;
+#[cfg(test)]
 mod auplan_tests;
 #[cfg(test)]
 mod autail_tests;
@@ -4437,6 +4439,8 @@ struct Editor {
     /// unset, so nothing is stamped or promoted and each rule stands as it
     /// stood. Only the top row still reads the project (spec 1.13).
     kind_unset: bool,
+    /// AU14: the canvas tool the frame box was armed under: another tool ends it.
+    frame_box_tool: canvas::CanvasTool,
     /// AU3: the panes the lock holds, and the stage, sheet choices and kind
     /// they were read for. The dock asks every frame; the recipe changes
     /// rarely.
@@ -5084,6 +5088,8 @@ struct EditorTabs<'a> {
     colors_view: palette_panel::View,
     /// AU13: `Result beside`, pressed this frame, for after the dock.
     result_asked: Option<bool>,
+    /// AU14: the graph pane's shelf, in the Effects step alone.
+    effects_shelf: Option<nodegraph_panel::Shelf>,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -5144,7 +5150,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 let asked = palette_panel::ui(ui, self.state, self.canvas, self.colors_view);
                 self.result_asked = asked.or(self.result_asked);
             }
-            Pane::NodeGraph => nodegraph_panel::ui(ui, self.state),
+            Pane::NodeGraph => nodegraph_panel::ui(ui, self.state, self.effects_shelf),
             Pane::Curves => {
                 let gesture_safe = !self.canvas.stroke_active();
                 curves_panel::ui(ui, self.state, gesture_safe)
@@ -5200,6 +5206,9 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             Pane::Viewer(id) => {
                 let vs = self.viewers.entry(*id).or_default();
                 viewer::ui(ui, self.state, self.graph, vs, self.final_look);
+                if let Some(framing) = vs.framed.take() {
+                    self.state.frame_camera(&framing);
+                }
             }
         }
     }
@@ -5369,6 +5378,22 @@ impl Editor {
     /// boot's seam reads None, so each rule that asks stands as it stood.
     pub(crate) fn kind(&self) -> Option<ProjectKind> {
         (!self.kind_unset).then(|| ProjectKind::of(&self.state.engine.project))
+    }
+
+    /// AU14: the frame box stands until another tool: the step left, the
+    /// canvas's tool changed since it was armed, or the camera gone.
+    fn watch_frame_box(&mut self) {
+        let tool = self.canvas.tool;
+        let armed = &mut self.state.graph_ui.frame_box;
+        if *armed && (self.stage != Some(Stage::Composite) || tool != self.frame_box_tool) {
+            *armed = false;
+        }
+        if !*armed {
+            self.frame_box_tool = tool;
+        }
+        if self.state.graph_ui.frame_box && anim_core::camera::output_camera(self.state.cut()).is_none() {
+            self.state.graph_ui.frame_box = false;
+        }
     }
 
     /// AU19: this document is an animation. Unlike `animated`, the frozen
@@ -5921,6 +5946,7 @@ impl Editor {
             export_from: None,
             more_default: false,
             kind_unset: false,
+            frame_box_tool: canvas::CanvasTool::Paint,
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -6041,6 +6067,7 @@ impl Editor {
             export_from: None,
             more_default: false,
             kind_unset: false,
+            frame_box_tool: canvas::CanvasTool::Paint,
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -9672,6 +9699,11 @@ impl Editor {
             more_default: self.more_default,
         };
         let strokes = self.state.strokes_done;
+        // The frozen boot's unset kind keeps the bare toolbar.
+        let effects_shelf = self.kind().filter(|_| self.stage == Some(Stage::Composite)).map(|kind| nodegraph_panel::Shelf {
+            camera: kind == ProjectKind::Animation,
+        });
+        self.watch_frame_box();
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -9698,6 +9730,7 @@ impl Editor {
             plan,
             colors_view,
             result_asked: None,
+            effects_shelf,
         };
         let mut dock_style = dock_style(ui.style().as_ref(), &self.dock);
         if hidden {

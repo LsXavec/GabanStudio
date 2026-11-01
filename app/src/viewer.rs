@@ -6,6 +6,8 @@
 //!
 //! Interaction: wheel = zoom at cursor, any drag = pan, double-click = fit.
 //! No document mutation happens here, so none of the canvas guards apply.
+//! AU14: while Camera move is armed the frame box takes the primary drag and
+//! the wheel; a finished framing is handed to the Editor (`ViewerView::framed`).
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
@@ -197,7 +199,7 @@ impl FinalLook {
 
 /// Per-instance view state (keyed by the pane's viewer id; session-only).
 pub struct ViewerView {
-    zoom: f32,
+    pub(crate) zoom: f32,
     pan: egui::Vec2,
     /// GM10: the safe-frame overlay (action 93 %, title 90 %) is on.
     pub safe: bool,
@@ -205,6 +207,16 @@ pub struct ViewerView {
     pub(crate) drawn_safe: Option<anim_core::camera::SafeFrames>,
     /// AU7: the verb an empty state's button asked for.
     pub(crate) asked: Option<Action>,
+    /// AU14: the frame box's gesture in progress: how far it moved (screen
+    /// px), how much it zoomed in, the frame it began on, the last wheel tick.
+    box_drag: egui::Vec2,
+    box_zoom: f32,
+    box_frame: u32,
+    wheel_at: f64,
+    /// AU14: the frame box as drawn this frame, on screen.
+    pub(crate) drawn_box: Option<Rect>,
+    /// AU14: a framing finished this frame, for the Editor to key.
+    pub(crate) framed: Option<Framing>,
 }
 
 impl Default for ViewerView {
@@ -215,13 +227,57 @@ impl Default for ViewerView {
             safe: false,
             drawn_safe: None,
             asked: None,
+            box_drag: egui::Vec2::ZERO,
+            box_zoom: 1.0,
+            box_frame: 0,
+            wheel_at: 0.0,
+            drawn_box: None,
+            framed: None,
         }
     }
 }
 
+/// AU14: one framing on the Result's box. The box is the camera's frame, so
+/// moving it right moves the camera right and shrinking it zooms in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Framing {
+    /// The frame it was made on: its keys land there, wherever the playhead
+    /// went since.
+    pub frame: u32,
+    /// How far the box moved, in frame pixels.
+    pub shift: (f32, f32),
+    /// How much the box zoomed in.
+    pub factor: f32,
+}
+
+impl Framing {
+    /// The pan x, pan y and zoom this framing makes of `cam`: the shift read
+    /// the way the sample map reads an output point, each kept to its
+    /// parameter's range.
+    pub fn on(&self, cam: &anim_core::camera::CameraState) -> (f32, f32, f32) {
+        let held = |key: &str, v: f32| match anim_core::camera::spec(key).map(|s| s.kind) {
+            Some(anim_core::fx::ParamKind::Float { min, max, .. }) => v.clamp(min, max),
+            _ => v,
+        };
+        let (dx, dy) = (self.shift.0 / cam.zoom, self.shift.1 / cam.zoom);
+        let (sin, cos) = cam.rotate_deg.to_radians().sin_cos();
+        (
+            held("pan_x", cam.pan_x + cos * dx - sin * dy),
+            held("pan_y", cam.pan_y + sin * dx + cos * dy),
+            held("zoom", cam.zoom * self.factor),
+        )
+    }
+}
+
+/// AU14: a wheel gesture ends when the wheel has rested this long, so a run
+/// of ticks is one framing and one undo step.
+const WHEEL_REST: f64 = 0.3;
+/// AU14: what the frame box says it takes, while it stands on the Result.
+pub const FRAME_BOX_SAYS: &str = "Drag to frame, scroll to zoom";
+
 /// AU7: the Result's empty state (spec 8.4).
 pub const NOTHING_TO_SHOW: &str = "Nothing to show yet.";
-const SET_UP_COMPOSITE: &str = "Set up standard composite";
+pub const SET_UP_COMPOSITE: &str = "Set up standard composite";
 
 /// AU7: an empty view: its sentence, and the one way on under it.
 fn empty_state(ui: &mut egui::Ui, rect: Rect, words: &str, button: &str, verb: Action, vs: &mut ViewerView) {
@@ -255,9 +311,32 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
     let origin = rect.center() - vec2(paper_w, paper_h) * scale * 0.5 + vs.pan;
     let to_screen = |p: Pos2| -> Pos2 { origin + p.to_vec2() * scale };
 
+    // AU14: Camera move armed: the box takes the wheel and the primary drag.
+    let armed = state.graph_ui.frame_box && anim_core::camera::output_camera(state.cut()).is_some();
+    let framing = armed && response.dragged_by(egui::PointerButton::Primary);
+    let frame = state.view.frame;
+    let begins = |vs: &ViewerView| vs.box_drag == egui::Vec2::ZERO && vs.box_zoom == 1.0;
+    if armed && response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.0 {
+            if begins(vs) {
+                vs.box_frame = frame;
+            }
+            vs.box_zoom *= (scroll * 0.0015).exp();
+            vs.wheel_at = ui.input(|i| i.time);
+        }
+    }
+    if framing {
+        if begins(vs) {
+            vs.box_frame = frame;
+        }
+        vs.box_drag += response.drag_delta();
+    }
+
     // Zoom at cursor; any drag pans (the viewer is read-only, so the primary
     // button is free); double-click refits.
-    if response.hovered() {
+    if response.hovered() && !armed {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll.abs() > 0.0
             && let Some(mouse) = response.hover_pos()
@@ -270,7 +349,7 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
             vs.pan += mouse - after;
         }
     }
-    if response.dragged() {
+    if response.dragged() && !framing {
         vs.pan += response.drag_delta();
     }
     if response.double_clicked() {
@@ -330,6 +409,31 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
         for r in [s.action, s.title] {
             let pts = r.corners().iter().map(|&(x, y)| to_screen(pos2(x, y))).collect();
             painter.add(egui::Shape::closed_line(pts, g));
+        }
+    }
+    // AU14: the frame box: the frame the Result shows, moved and scaled by
+    // the gesture in hand. A finished one goes to the Editor, and the Result
+    // comes back through the new keys with the box home around it.
+    vs.drawn_box = armed.then(|| Rect::from_center_size(paper_rect.center() + vs.box_drag, paper_rect.size() / vs.box_zoom));
+    if let Some(boxed) = vs.drawn_box {
+        painter.rect_stroke(boxed, 0, egui::Stroke::new(2.0, crate::plate::TALLY), egui::StrokeKind::Outside);
+        crate::plate::picture_tag(&painter, pos2(boxed.left() + 8.0, boxed.top() + 30.0), FRAME_BOX_SAYS);
+    }
+    if !armed {
+        vs.box_drag = egui::Vec2::ZERO;
+        vs.box_zoom = 1.0;
+    } else if !begins(vs) && !framing {
+        let rested = ui.input(|i| i.time) - vs.wheel_at >= WHEEL_REST;
+        if rested || vs.box_drag != egui::Vec2::ZERO || vs.box_frame != frame {
+            vs.framed = Some(Framing {
+                frame: vs.box_frame,
+                shift: (vs.box_drag.x / scale, vs.box_drag.y / scale),
+                factor: vs.box_zoom,
+            });
+            vs.box_drag = egui::Vec2::ZERO;
+            vs.box_zoom = 1.0;
+        } else {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(WHEEL_REST));
         }
     }
     // The latches ride on a float their own size: the neutral grey around the
