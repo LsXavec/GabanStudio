@@ -118,8 +118,8 @@ pub(crate) const WORDS: &[(&str, &str)] = &[
     ("Split across", "Split across"),
     ("Split down", "Split down"),
     ("panel 3", "panel 3"),
-    ("See the page", "See the page"),
-    ("Speed lines", "Speed lines"),
+    ("See the page", vocab::SEE_THE_PAGE),
+    ("Speed lines", vocab::SPEED_LINES),
     // This card's.
     ("Night", NIGHT),
     ("Show me", SHOW_ME),
@@ -459,10 +459,12 @@ fn generator_reached(cut: &Cut, kind: GenKind) -> bool {
     reached(&cut.graph).iter().any(|n| matches!(n, NodeKind::Generator { generator, .. } if *generator == kind))
 }
 
-/// The last words a person typed into the page.
+/// The last words a person typed into the page. `Add text`'s stand-in is no
+/// one's words, and nor is the node's own default.
 fn words_on_page(cut: &Cut) -> bool {
+    let own = |text: &str| !text.trim().is_empty() && text != crate::manga_tools::TEXT_START && !text.starts_with("セリフ");
     let typed = |params: &anim_core::fx::FxParams| {
-        params.0.values().any(|v| matches!(v, anim_core::fx::FxValue::Text { text, .. } if !text.trim().is_empty()))
+        params.0.values().any(|v| matches!(v, anim_core::fx::FxValue::Text { text, .. } if own(text)))
     };
     reached(&cut.graph).iter().any(|n| {
         matches!(n, NodeKind::Generator { generator: GenKind::Text | GenKind::Balloon, params, .. } if typed(params))

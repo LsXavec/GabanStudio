@@ -2742,8 +2742,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 1170;
-    const ASSERT_FLOOR: usize = 6900;
+    const TEST_FLOOR: usize = 1230;
+    const ASSERT_FLOOR: usize = 7400;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");
@@ -3166,7 +3166,8 @@ mod tests {
         ("workspace.rs", "    pub fn load_from", 0x329c11389bcffa7f),
         ("workspace.rs", "    pub fn save_to", 0x18ceee7d714dc4d4),
         // AU4: `seen_pen` latches past the layer gate, and only there.
-        ("canvas.rs", "    fn handle_pen(", 0x272b108d35771002),
+        // AU22: a pen on `See the page` is refused in that step's words.
+        ("canvas.rs", "    fn handle_pen(", 0x3477b50ad706c0f5),
         ("main.rs", "fn pump_tablet(", 0x16ed0af8f504e210),
     ];
 

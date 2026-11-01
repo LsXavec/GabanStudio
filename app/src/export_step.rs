@@ -14,7 +14,9 @@ use eframe::egui;
 use crate::config::Action;
 use crate::doc::AppState;
 use crate::lessons::Target;
+use crate::manga_tools;
 use crate::plate::{self, Card as _};
+use crate::vocab;
 use crate::AppRequest;
 use crate::render_queue::{self, JobState, Landed};
 
@@ -183,6 +185,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View, open: bool) {
         Offer::NoArt => no_art(ui, state, view, lead),
         Offer::Comic => {
             lead_choice(ui, state, Action::ExportPages.label(), Action::ExportPages, lead);
+            mono_row(ui, state);
             other_formats(ui, state, wide, open);
         }
         Offer::OneFrame => {
@@ -297,6 +300,30 @@ fn video_row(ui: &mut egui::Ui, state: &mut AppState) {
     if plate::filled_row(ui, GIF_INSTEAD, wide).card(Action::ExportGif.help()).clicked() {
         state.render_queue.panel.ask(Ask::Do(Action::ExportGif));
     }
+}
+
+/// AU22: `Mono` and its threshold, where a comic's pages go out: the very
+/// options the Manga pane's export rows read and write, so the two show one
+/// state. Off is the colour page: `in grey` stays the pane's.
+fn mono_row(ui: &mut egui::Ui, state: &mut AppState) {
+    use anim_core::deliver::PageMode;
+    let o = &mut state.manga.export;
+    let mut mono = o.mode == PageMode::Mono;
+    let panel = &mut state.render_queue.panel;
+    on_text_edge(ui, |ui| {
+        ui.horizontal(|ui| {
+            let latch = plate::latch(ui, &mut mono, vocab::MONO);
+            plate::mark_row(&latch, Target::Named("export.page.mono"));
+            if latch.card(manga_tools::MONO_CARD).changed() {
+                o.mode = if mono { PageMode::Mono } else { PageMode::Color };
+                panel.ring = false;
+            }
+            plate::legend(ui, "threshold").on_hover_text(manga_tools::THRESHOLD_CARD);
+            plate::field_if(ui, mono, egui::DragValue::new(&mut o.threshold).range(0.0..=1.0).speed(0.01).max_decimals(2))
+                .on_hover_text(manga_tools::THRESHOLD_CARD)
+                .on_disabled_hover_text("Mono only: colour keeps every tone.");
+        });
+    });
 }
 
 /// A short document's other choices live with the queue's, so with the fold

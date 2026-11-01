@@ -68,6 +68,8 @@ mod aucolor_tests;
 #[cfg(test)]
 mod aufx_tests;
 #[cfg(test)]
+mod aupage_tests;
+#[cfg(test)]
 mod auplan_tests;
 #[cfg(test)]
 mod autail_tests;
@@ -3471,7 +3473,9 @@ impl Editor {
         if action == Action::ToggleCompositeView {
             if !ed.canvas.stroke_active() {
                 ed.canvas.composite_view = !ed.canvas.composite_view;
-                ed.state.status = if ed.canvas.composite_view {
+                ed.state.status = if ed.canvas.composite_view && ed.stage == Some(Stage::Manga) {
+                    manga_tools::SEE_PAGE_SAYS.into()
+                } else if ed.canvas.composite_view {
                     "Preview final: the Effects graph's output (C to edit)".into()
                 } else {
                     "edit view".into()
@@ -5172,7 +5176,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             Pane::Manga => {
                 let gesture_safe = !self.canvas.stroke_active();
                 let koma_armed = self.canvas.tool == canvas::CanvasTool::Panel;
-                manga_tools::ui(ui, self.state, gesture_safe, koma_armed)
+                manga_tools::ui(ui, self.state, gesture_safe, koma_armed, self.canvas.composite_view)
             }
             Pane::Canvas if self.float_canvas_open => {
                 ui.centered_and_justified(|ui| {
@@ -9713,6 +9717,7 @@ impl Editor {
         // AU19: Plan's point is one timeline: the sheet stands alone there.
         let plan = self.in_plan();
         self.canvas.sheet_shown = panes.contains(&Pane::XSheet) && !plan;
+        self.canvas.page_step = self.stage == Some(Stage::Manga);
         // The frozen boot keeps today's Fit. A floated canvas hosts its rail
         // too, so the paper clears it there as well.
         let rail_shows = !rail_off && !hidden;

@@ -1065,6 +1065,52 @@ fn kinds_moments(dir: &Path) {
     }
 }
 
+/// AU22: the Comic step: a lettered page, its rows and its handle, and the same
+/// page as it will print.
+const PAGE: [(&str, u32, u32); 4] = [
+    ("page-lettered", 1600, 900),
+    ("page-see", 1600, 900),
+    ("page-lettered-1280", 1280, 800),
+    ("page-see-1280", 1280, 800),
+];
+
+fn page_owed() -> Vec<(String, u32, u32)> {
+    PAGE.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn page_moments(dir: &Path) {
+    use crate::aupage_tests::{press, type_words};
+    let room = ProbeRoom::Stage(Stage::Manga);
+    let lettered = |size: egui::Vec2| {
+        let mut h = EditorHarness::with_gpu_ready();
+        h.kit_mut().set_size(size);
+        h.run_frames(4);
+        h.answer_start(crate::welcome::WelcomeAction::Template(crate::templates::COMIC));
+        h.run_frames(4);
+        let ink: Vec<(i32, i32)> = (420..1200).flat_map(|x| (900..940).map(move |y| (x, y))).collect();
+        crate::canvas::extpaper_tests::paint_texels(h.state_mut(), &ink, [0.1, 0.1, 0.12, 1.0]);
+        press(&mut h, crate::vocab::SPEED_LINES);
+        press(&mut h, crate::vocab::ADD_BALLOON);
+        type_words(&mut h, "Is this the only word?");
+        h
+    };
+    for pair in PAGE.chunks(2) {
+        let size = egui::vec2(pair[0].1 as f32, pair[0].2 as f32);
+        let mut h = lettered(size);
+        arrive(&mut h, room);
+        h.shot(size, &dir.join(format!("{}.png", pair[0].0)));
+        press(&mut h, crate::vocab::SEE_THE_PAGE);
+        // `Ready` is the picture asked for, not the queue done: a shot taken
+        // sooner runs out kittest's ten-second wait on this size of page.
+        for _ in 0..800 {
+            std::thread::sleep(Duration::from_millis(25));
+            h.run_frames(1);
+        }
+        arrive(&mut h, room);
+        h.shot(size, &dir.join(format!("{}.png", pair[1].0)));
+    }
+}
+
 /// AU10: an upgrader's first launch: both chords that moved, in the one
 /// sentence the lane holds until the artist acts.
 const KEYS: [(&str, u32, u32); 2] = [("say-keys-moved", 1600, 900), ("say-keys-moved-1280", 1280, 800)];
@@ -1503,6 +1549,8 @@ fn uishot_rooms() {
     check_shots(&dir, &keys_owed()).expect("the chords that moved");
     kinds_moments(&dir);
     check_shots(&dir, &kinds_owed()).expect("the three bars");
+    page_moments(&dir);
+    check_shots(&dir, &page_owed()).expect("the comic step");
     tail_moments(&dir);
     check_shots(&dir, &tail_owed()).expect("the twelve rows and the hold keys");
     color_moments(&dir);

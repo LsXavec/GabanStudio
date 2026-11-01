@@ -1076,6 +1076,11 @@ pub struct CanvasView {
     ruler_snap: Option<anim_core::manga::Snap>,
     /// GM18: the panel tool's live drag (paper px), committed at its end.
     pub(crate) koma: Option<crate::manga_tools::KomaDrag>,
+    /// AU22: the drag on the selected generator's handle (paper px), landed
+    /// at its end.
+    pub(crate) letter: Option<crate::manga_tools::LetterDrag>,
+    /// AU22: the Manga step stands: the finished picture is its `See the page`.
+    pub(crate) page_step: bool,
     /// GM4: an OPTIONS-row stabilizer change for the app to save.
     pub(crate) stabilizer_request: Option<u8>,
     /// GM4: the dab edge (MyPaint hardness) and the aliased toggle.
@@ -1258,6 +1263,8 @@ impl CanvasView {
             snap_rulers: None,
             ruler_snap: None,
             koma: None,
+            letter: None,
+            page_step: false,
             stabilizer_request: None,
             brush_hardness: crate::config::default_hardness(),
             brush_aliased: false,
@@ -1546,6 +1553,12 @@ impl CanvasView {
             || self.sel_draft.is_some()
             || self.floating.as_ref().is_some_and(|f| f.drag.is_some())
             || self.koma.is_some()
+            || self.letter.is_some()
+    }
+
+    /// AU22: what a pen is told while the finished picture shows.
+    fn view_refusal(&self) -> &'static str {
+        if self.page_step { crate::doc::SEE_PAGE_ON } else { crate::doc::READ_ONLY_VIEW }
     }
 
     /// GM20: the side the paint layer paints at most — the room's limit
@@ -1612,6 +1625,7 @@ impl CanvasView {
             || self.sel_draft.is_some()
             || self.floating.is_some()
             || self.koma.is_some()
+            || self.letter.is_some()
     }
 
     /// GM22: why View ▸ 3D underlay, ticked, shows nothing (its menu note):
@@ -1680,6 +1694,7 @@ impl CanvasView {
                 .into(),
         };
         self.koma = None;
+        self.letter = None;
     }
 
     /// Capture the tool/view state a workspace restores (LENS-DOCK: a
@@ -1752,7 +1767,7 @@ impl CanvasView {
         poly: Option<&[Pos2]>,
     ) -> bool {
         if self.composite_view {
-            state.refuse(crate::doc::READ_ONLY_VIEW);
+            state.refuse(self.view_refusal());
             return false;
         }
         if !self.raster {
@@ -4194,6 +4209,8 @@ impl CanvasView {
             && !self.pen_busy();
         if hand && !state.view.playing {
             // GM4: the Space hand has the pointer — no tool input, no tap.
+        } else if !state.view.playing && self.letter_input(ui, &response, &to_paper, state) {
+            // AU22: the selected generator's handle has the pointer.
         } else if tracing {
             self.shift_trace_input(ui, &response, &to_paper, pos2(paper_w * 0.5, paper_h * 0.5), state);
             // The move hand, not the brush ring: a drag shifts the pin.
@@ -4234,6 +4251,7 @@ impl CanvasView {
             self.touch_active = false;
             // GM18: a panel-tool drag under playback lands nowhere.
             self.koma = None;
+            self.letter = None;
             // Playback started under a live gesture (e.g. the top-bar play
             // button): commit the floating transform to its LATCHED target
             // rather than leaving a lifted patch over a moving frame.
@@ -4268,6 +4286,7 @@ impl CanvasView {
                     composite_note =
                         Some("Preview final: the effects could not run (C to edit)");
                 }
+                GV::NoGpu if self.page_step => composite_note = Some(crate::manga_tools::SEE_PAGE_NO_GPU),
                 GV::NoGpu => {
                     composite_note = Some("Preview final needs the GPU: showing the drawing");
                 }
@@ -4937,6 +4956,7 @@ impl CanvasView {
         if let Some(page) = anim_core::manga::Page::of(state.cut()) {
             let armed = self.tool == CanvasTool::Panel;
             crate::manga_tools::paint_page(ui, &painter, state, &page, &to_screen, armed, self.koma.as_ref());
+            crate::manga_tools::paint_letters(&painter, state, &to_screen, self.letter.as_ref());
         }
 
         // AU7: the one thing that paints on the paper (spec 8.4), on a cell
@@ -6062,7 +6082,7 @@ impl CanvasView {
             }
             // The fill tool's guards, in the fill tool's order.
             if self.composite_view {
-                state.refuse(crate::doc::READ_ONLY_VIEW);
+                state.refuse(self.view_refusal());
                 return;
             }
             if state.active_layer_props().is_some_and(|p| !p.visible) {
@@ -6169,6 +6189,59 @@ impl CanvasView {
             self.koma = None;
             crate::manga_tools::koma_gesture(state, k);
         }
+    }
+
+    /// AU22: the selected generator's handle: a press within
+    /// [`crate::manga_tools::HANDLE_REACH`] of it on screen holds it, ahead of
+    /// the tool, and the generator moves once, by the paper delta, when the
+    /// drag lands (one undo step, [`crate::manga_tools::letter_moved`]); Esc
+    /// drops it. True while it has the pointer. The panel tool keeps its own
+    /// drags: a ruler's handle may stand under this one.
+    fn letter_input(
+        &mut self,
+        ui: &egui::Ui,
+        response: &egui::Response,
+        to_paper: &impl Fn(Pos2) -> Pos2,
+        state: &mut AppState,
+    ) -> bool {
+        use crate::manga_tools::{self, HANDLE_REACH, LetterDrag};
+        let Some(k) = &mut self.letter else {
+            if self.tool == CanvasTool::Panel || self.pen_busy() {
+                return false;
+            }
+            let Some(handle) = manga_tools::letter_handle(state) else {
+                return false;
+            };
+            // From where the press landed, not where the drag was seen.
+            let Some(at) = ui.input(|i| i.pointer.press_origin().or(i.pointer.latest_pos())) else {
+                return false;
+            };
+            let from = to_paper(at);
+            let reach = HANDLE_REACH / self.xf.zoom.max(1e-6);
+            if (from.x - handle[0]).hypot(from.y - handle[1]) > reach || !response.hovered() && !response.dragged() {
+                return false;
+            }
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                self.letter = Some(LetterDrag { from: [from.x, from.y], to: [from.x, from.y] });
+            }
+            return true;
+        };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.letter = None;
+            return true;
+        }
+        if let Some(pos) = response.interact_pointer_pos().or(ui.input(|i| i.pointer.latest_pos())) {
+            let p = to_paper(pos);
+            k.to = [p.x, p.y];
+        }
+        if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+            let k = *k;
+            self.letter = None;
+            manga_tools::letter_moved(state, k);
+        }
+        true
     }
 
     /// Rasterize the loop (scanline), feather inward (chamfer signed
@@ -6544,7 +6617,7 @@ impl CanvasView {
             // AUDIT [7]: the pen is his primary instrument — its refusal
             // must reach the Aka lane and flash the canvas edge, exactly
             // as the mouse path and the hidden-layer guard already do.
-            state.refuse(crate::doc::READ_ONLY_VIEW);
+            state.refuse(self.view_refusal());
             return None;
         }
         if self.is_guest && !self.guest_ready {
@@ -6966,7 +7039,7 @@ impl CanvasView {
             }
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if self.composite_view {
-                    state.refuse(crate::doc::READ_ONLY_VIEW);
+                    state.refuse(self.view_refusal());
                     return;
                 }
                 // GM5: the column lock, as at the pen's pen-down.

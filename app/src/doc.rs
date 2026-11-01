@@ -461,6 +461,8 @@ pub const NOTHING_TO_PLAY: &str = "Nothing to play yet. Draw something first.";
 /// AU7: the canvas's refusal, by name, because one Action answers it
 /// (`say::fix_of`). The pen route says it itself, and stays as it stood.
 pub const READ_ONLY_VIEW: &str = "refused — Preview final is read-only (C to edit)";
+/// AU22: the same refusal on the Manga step, where the latch has this name.
+pub const SEE_PAGE_ON: &str = "Turn off See the page to draw.";
 
 /// GM20: a tool used on the paper past a capped painting window (a paper
 /// wider or taller than the GPU paints) — the Aka lane.
@@ -4570,6 +4572,58 @@ impl AppState {
     pub fn page_hand_built(&self) -> Option<usize> {
         let cut = self.cut();
         anim_core::manga::page_graph_hand_built(cut).filter(|_| auto_chain(&cut.graph).is_none())
+    }
+
+    /// AU22: `kind` on the open page as one undo step: the page stack rebuilt
+    /// through [`anim_core::manga::page_graph`] with it on top, so the page
+    /// stays the page graph and Clip to panels stays quiet. A graph a hand
+    /// shaped loses nothing: the new node lays over its feed. The rebuild
+    /// gives every node a new id, so the selection follows by place in the
+    /// stack: the new node, or with `stay` the one that was selected.
+    pub fn add_to_page(&mut self, label: &str, kind: anim_core::graph::NodeKind, stay: bool) -> Option<NodeId> {
+        use anim_core::graph::Node;
+        use anim_core::manga::{self, Page};
+        let Some(page) = Page::of(self.cut()) else {
+            self.refuse("refused — this shot is no page (New page makes one)");
+            return None;
+        };
+        let at = self.at();
+        if self.page_hand_built().is_some() {
+            self.ensure_node_layout();
+            let id = self.engine.alloc_node_id();
+            let mut cmds = vec![Command::AddNode { at, id, kind }];
+            if !self.wire_over(id, &mut cmds) {
+                self.refuse(NO_OUTPUT_FOR_EFFECTS);
+                return None;
+            }
+            let r = self.engine.apply(label, cmds);
+            let added = r.is_ok();
+            self.report(r, &format!("{label} added"));
+            if added && !stay {
+                self.selected_node = Some(id);
+            }
+            return added.then_some(id);
+        }
+        let place = |cut: &Cut, id| crate::manga_tools::letters(cut).iter().position(|(n, _)| Some(*n) == id);
+        let kept = place(self.cut(), self.selected_node).filter(|_| stay);
+        let id = self.engine.alloc_node_id();
+        let mut cut = self.cut().clone();
+        cut.graph.add_node(Node::new(id, kind.clone()));
+        let border = page.px(manga::BORDER_MM);
+        let mut cmds = vec![Command::AddNode { at, id, kind }];
+        cmds.extend(manga::page_graph(&cut, at, || self.engine.alloc_node_id(), vec![page.first_panel()], border));
+        let r = self.engine.apply(label, cmds);
+        let added = r.is_ok();
+        self.report(r, &format!("{label} added"));
+        if !added {
+            return None;
+        }
+        let letters = crate::manga_tools::letters(self.cut());
+        let new = letters.last().map(|(n, _)| *n);
+        if !stay || kept.is_some() {
+            self.selected_node = kept.and_then(|i| letters.get(i).map(|(n, _)| *n)).or(new);
+        }
+        new
     }
 
     /// GM18: why Export pages cannot run now (None: it can) — one export

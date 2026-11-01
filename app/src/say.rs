@@ -453,7 +453,7 @@ fn reason(refusal: &str) -> String {
 pub fn fix_of(refusal: &str) -> Option<Action> {
     match refusal {
         doc::HELD_FRAME | doc::BLANK_FRAME => Some(Action::NewDrawing),
-        doc::READ_ONLY_VIEW => Some(Action::ToggleCompositeView),
+        doc::READ_ONLY_VIEW | doc::SEE_PAGE_ON => Some(Action::ToggleCompositeView),
         _ => None,
     }
 }

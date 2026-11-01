@@ -433,7 +433,7 @@ fn tone_of(cut: &Cut, column: ColumnId) -> Option<NodeKind> {
 
 /// A generator nothing feeds, other than the Panels — a balloon, a line of
 /// text, speed lines added by hand: the page graph keeps it, on top.
-fn is_free_generator(n: &Node) -> bool {
+pub fn is_free_generator(n: &Node) -> bool {
     matches!(&n.kind, NodeKind::Generator { generator, .. } if !matches!(generator, GenKind::Panels))
         && n.inputs.iter().all(Option::is_none)
 }
