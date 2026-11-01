@@ -28,11 +28,15 @@ fn settle(h: &mut EditorHarness) {
     h.run_frames(4);
 }
 
-/// A window `w`×`h` points at 100%, at a stored scale, as the App zooms it.
+/// A window `w`×`h` points at 100%, at a stored scale, as the App zooms it. The
+/// harness holds the size in zoomed points. AU19: a new zoom lands on the next
+/// frame, and egui rewrites that frame's size from the last one, so the size
+/// goes in after it, or a walk never leaves the room it started in.
 pub(crate) fn window(harness: &mut EditorHarness, w: f32, h: f32, stored: f32) {
     let scale = crate::effective_scale(stored, w, h);
-    harness.kit_mut().set_size(vec2(w / scale, h / scale));
     harness.kit_mut().set_pixels_per_point(scale);
+    harness.run_frames(1);
+    harness.kit_mut().set_size(vec2(w / scale, h / scale));
     settle(harness);
 }
 
@@ -530,8 +534,16 @@ fn rail_total(tier: Tier, keys: usize) -> f32 {
 #[test]
 fn aurail_rail_fits_every_room() {
     let mut found = Vec::new();
-    for doc in [sample::build_sample(), crate::newproject::NewProjectForm::default().new_state()] {
+    // AU19: both animations stand in Plan, so the drawing keeps the lone canvas
+    // in the walk, and the hidden sheet Plan's own open paper.
+    for (doc, hide) in [
+        (sample::build_sample(), false),
+        (crate::newproject::NewProjectForm::default().new_state(), false),
+        (crate::templates::READY.build(), false),
+        (sample::build_sample(), true),
+    ] {
         let mut h = EditorHarness::with_state_shipped(doc);
+        h.editor_mut().plan_sheet_hidden = hide;
         for (w, tall) in SIZES {
             for stored in PROBE_SCALES {
                 window(&mut h, w, tall, stored);

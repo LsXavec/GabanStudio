@@ -4314,9 +4314,12 @@ struct Editor {
     /// `from_state` see no config. AU19: only the frozen boot reads it.
     sheet_in_draw: bool,
     /// AU19: Plan's sheet is on for every animation, and this is a person's
-    /// hiding it: `ui.panel_more`'s key, mirrored as `sheet_in_draw` is. A
-    /// template that starts the sheet on clears it here, for this project.
+    /// hiding it: `ui.panel_more`'s key, mirrored as `sheet_in_draw` is.
     plan_sheet_hidden: bool,
+    /// AU19: the document a template started with its sheet on (its
+    /// `untitled_group`). That is this project's, not the memory's, so the
+    /// next document in this Editor reads the memory again.
+    template_sheet: Option<String>,
     /// AU3: the Timing sheet button's choice, for the App and the Rig to
     /// remember. Only the button asks.
     sheet_request: Option<bool>,
@@ -4342,7 +4345,7 @@ struct Editor {
     /// they were read for. The dock asks every frame; the recipe changes
     /// rarely.
     held: Vec<Pane>,
-    held_for: Option<(Option<Stage>, bool, bool, Option<ProjectKind>)>,
+    held_for: Option<(Option<Stage>, bool, bool, Option<ProjectKind>, bool)>,
     /// Named, persisted workspaces (%APPDATA%/AnimStudio/workspaces.json).
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
@@ -4886,6 +4889,11 @@ fn guard_gesture(canvas: &mut canvas::CanvasView, state: &mut AppState) -> bool 
     }
 }
 
+/// AU19: this leaf is the Timing sheet and nothing else.
+fn sheet_alone(node: &egui_dock::Node<Pane>) -> bool {
+    node.tabs() == Some(&[Pane::XSheet])
+}
+
 /// The ACTIVE tab of every dock leaf — the panes actually rendered this
 /// frame. Tabs hidden behind another in a stack don't render, so they must
 /// not consume per-frame work (graph executions).
@@ -5319,7 +5327,8 @@ impl Editor {
             self.enter_room(first);
         } else if self.stage == Some(Stage::Drawing) && !guest && sheet(&self.dock) != sheet(&self.recipe(Stage::Drawing)) {
             // AU19: one step on two recipes, so the dock swaps and nothing is
-            // re-armed: every animation opened from Draw passes here.
+            // re-armed, against spec 2.6's first wording (see its note): every
+            // animation opened from Draw passes here, and a door moves panes.
             self.dock = self.recipe(Stage::Drawing);
         } else if self.stage == Some(Stage::Export) {
             // The way back and its dock are this document's. A guest keeps one
@@ -5443,17 +5452,23 @@ impl Editor {
     /// `plan_sheet_hidden`.
     fn recipe(&self, st: Stage) -> DockState<Pane> {
         match st {
-            Stage::Drawing if self.is_animation() && !self.plan_sheet_hidden => Stage::Layout.dock(),
+            Stage::Drawing if self.is_animation() && !self.plan_sheet_off() => Stage::Layout.dock(),
             Stage::Drawing if self.kind_unset && self.sheet_in_draw => Stage::dock_with_sheet(),
             _ => st.dock(),
         }
+    }
+
+    /// AU19: Plan opens without its sheet: the memory says so, and no
+    /// template started this document with it on.
+    fn plan_sheet_off(&self) -> bool {
+        self.plan_sheet_hidden && self.template_sheet.as_ref() != Some(&self.state.untitled_group)
     }
 
     /// AU3: a template's project opens in the template's first step, its
     /// Timing sheet on where the template starts it on. That is this
     /// project's; the remembered choice is the button's alone.
     fn enter_template(&mut self, t: &templates::Template) {
-        self.plan_sheet_hidden &= !t.sheet_on;
+        self.template_sheet = t.sheet_on.then(|| self.state.untitled_group.clone());
         self.enter_room(t.room);
         // AU6: Timing opens on its Viewer with Select armed: an Animatic's
         // first move is a stroke on the board, so the canvas comes forward
@@ -5595,11 +5610,14 @@ impl Editor {
     }
 
     /// AU3: the panes Lock UI positions holds: the current recipe's, or the
-    /// place's off the spine.
+    /// place's off the spine. AU19: a sheet a verb brought back into Plan
+    /// stands where the recipe's stands, so it holds the same, whatever the
+    /// memory says.
     fn locked_panes(&mut self) -> &[Pane] {
-        let key = (self.stage, self.sheet_in_draw, self.plan_sheet_hidden, self.kind());
+        let plan_sheet = self.in_plan() && self.dock.find_tab(&Pane::XSheet).is_some();
+        let key = (self.stage, self.sheet_in_draw, self.plan_sheet_off(), self.kind(), plan_sheet);
         if self.held_for != Some(key) {
-            let dock = self.stage.map(|st| self.recipe(st));
+            let dock = self.stage.map(|st| if plan_sheet { Stage::Layout.dock() } else { self.recipe(st) });
             let dock = dock.as_ref().or(self.place_dock.as_ref());
             self.held = dock.map_or(Vec::new(), |d| d.iter_all_tabs().map(|(_, t)| *t).collect());
             self.held_for = Some(key);
@@ -5701,6 +5719,7 @@ impl Editor {
             stage: Some(Stage::Drawing),
             sheet_in_draw: false,
             plan_sheet_hidden: false,
+            template_sheet: None,
             sheet_request: None,
             plan_sheet_request: None,
             place: String::new(),
@@ -5815,6 +5834,7 @@ impl Editor {
             stage: Some(Stage::Drawing),
             sheet_in_draw: false,
             plan_sheet_hidden: false,
+            template_sheet: None,
             sheet_request: None,
             plan_sheet_request: None,
             place: String::new(),
@@ -6155,7 +6175,8 @@ impl Editor {
     /// GM3: open a pane, or bring it to the front when it is already
     /// docked. A new one tabs in beside the layer strip (or the sheet);
     /// AU3: on a dock of one leaf it splits off to the right, so the paper
-    /// stays in view.
+    /// stays in view. AU19: a sheet alone in its leaf, Plan's, is never tabbed
+    /// over: that would cover the one timeline and refit the paper.
     pub fn open_pane(&mut self, pane: Pane) {
         if let Some(path) = self.dock.find_tab(&pane) {
             let _ = self.dock.set_active_tab(path);
@@ -6164,7 +6185,8 @@ impl Editor {
         }
         let beside = [Pane::Layers, Pane::XSheet]
             .iter()
-            .find_map(|p| self.dock.find_tab(p));
+            .find_map(|p| self.dock.find_tab(p))
+            .filter(|path| !sheet_alone(&self.dock[path.node_path()]));
         match beside {
             Some(path) => self.dock[path.node_path()].append_tab(pane),
             None => self.add_pane(pane),
@@ -6173,20 +6195,25 @@ impl Editor {
 
     /// AU3: a pane with nowhere to tab in: split a dock of one leaf, else
     /// join the focused leaf. The Canvas leaf is never the one: a click on
-    /// the paper focuses it, and a tab there would cover the paper.
+    /// the paper focuses it, and a tab there would cover the paper. AU19: nor
+    /// a sheet alone: with no other leaf the pane splits off under the sheet,
+    /// at the classic draw room's share, and the paper does not move.
     fn add_pane(&mut self, pane: Pane) {
         let tree = self.dock.main_surface_mut();
         if tree.iter().filter(|n| n.is_leaf()).count() == 1 {
             tree.split_right(egui_dock::NodeIndex::root(), 0.70, vec![pane]);
             return;
         }
-        let free = |n: &egui_dock::Node<Pane>| n.tabs().is_some_and(|t| !t.contains(&Pane::Canvas));
+        let free = |n: &egui_dock::Node<Pane>| n.tabs().is_some_and(|t| !t.contains(&Pane::Canvas) && !sheet_alone(n));
         let leaf = tree
             .focused_leaf()
             .filter(|&i| free(&tree[i]))
             .or_else(|| (0..tree.len()).map(egui_dock::NodeIndex).find(|&i| free(&tree[i])));
         if let Some(leaf) = leaf {
             tree.set_focused_node(leaf);
+        } else if let Some(sheet) = (0..tree.len()).map(egui_dock::NodeIndex).find(|&i| sheet_alone(&tree[i])) {
+            tree.split_below(sheet, 0.62, vec![pane]);
+            return;
         }
         tree.push_to_focused_leaf(pane);
     }
@@ -8591,6 +8618,7 @@ impl Editor {
     fn switch_sheet(&mut self, shown: bool) {
         let with_sheet = if self.in_plan() {
             self.plan_sheet_hidden = shown;
+            self.template_sheet = None;
             self.plan_sheet_request = Some(shown);
             Stage::Layout.dock()
         } else {
@@ -9820,8 +9848,9 @@ impl Editor {
         // AU19: Plan's point is one timeline: the sheet stands alone there.
         let plan = self.in_plan();
         self.canvas.sheet_shown = panes.contains(&Pane::XSheet) && !plan;
-        // The frozen boot keeps today's Fit, and an OS window has no rail.
-        let rail_shows = !rail_off && !hidden && !self.float_canvas.open;
+        // The frozen boot keeps today's Fit. A floated canvas hosts its rail
+        // too, so the paper clears it there as well.
+        let rail_shows = !rail_off && !hidden;
         self.canvas.rail_reserve = panes.contains(&Pane::XSheet) && rail_shows && !self.kind_unset;
         self.canvas.empty_cell_hint = self.say.empty_cell_due(&self.state) && self.animated();
         let export_view = self.export_view();

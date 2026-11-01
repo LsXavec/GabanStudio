@@ -156,6 +156,8 @@ pub struct Facts {
     pub stood: bool,
     // ---- this frame's outcomes ----
     pub stroked: bool,
+    /// A row of the Timing sheet took a click.
+    pub row_clicked: bool,
     pub added: bool,
     pub filled: bool,
     pub effect_added: bool,
@@ -206,7 +208,7 @@ const ANY_KIND: &[ProjectKind] = &ProjectKind::ALL;
 const ANIMATION: &[ProjectKind] = &[ProjectKind::Animation];
 const ON_PAPER: &[ProjectKind] = &[ProjectKind::Drawing, ProjectKind::Animation];
 
-pub const HINTS: [Hint; 17] = [
+pub const HINTS: [Hint; 16] = [
     // First, or a row with nowhere to stand would keep it from the dot. The
     // first stroke answers it too: whoever draws has read it, or has no need
     // to. Only one made under the card: `read` asks every row, shown or not.
@@ -293,26 +295,18 @@ pub const HINTS: [Hint; 17] = [
         answered: |f| f.effect_added,
         passes: true,
     },
-    // AU19: Plan's lesson stands where the paper's would: one bit, two rows,
-    // for Show me's circle goes on blank paper and never over art.
-    Hint {
-        bit: PLAN_ROWS,
-        words: Words::Plain(PLAN_ROW_WORDS),
-        verb: Some(Verb::Show(0)),
-        steps: DRAW,
-        kinds: ANIMATION,
-        shows: |f| f.plan_sheet && !f.art,
-        answered: |f| f.stroked,
-        passes: false,
-    },
+    // AU19: Plan's lesson stands where the paper's would. No Show me: its
+    // circle teaches the paper, and the row after this one offers it. A click,
+    // Play or a stroke in Plan answers it; a stroke anywhere else, on the ready
+    // paper say, was made before it stood (`read` asks every row).
     Hint {
         bit: PLAN_ROWS,
         words: Words::Plain(PLAN_ROW_WORDS),
         verb: None,
         steps: DRAW,
         kinds: ANIMATION,
-        shows: |f| f.plan_sheet && f.art,
-        answered: |f| f.stroked,
+        shows: |f| f.plan_sheet,
+        answered: |f| f.plan_sheet && (f.stroked || f.row_clicked || f.playing),
         passes: false,
     },
     // Quick Start's chain, in its own order.
@@ -775,6 +769,7 @@ impl Editor {
 
     fn say_facts(&mut self, stroked: bool, filled: bool, exported: bool) -> Facts {
         let added = std::mem::take(&mut self.say.added);
+        let row_clicked = std::mem::take(&mut self.state.sheet_ui.row_clicked);
         // Work goes on, and the report has been overtaken.
         if stroked || added {
             self.say.exported = None;
@@ -823,6 +818,7 @@ impl Editor {
             seen: self.say.seen,
             stood: self.say.stood,
             stroked,
+            row_clicked,
             added,
             filled,
             effect_added,

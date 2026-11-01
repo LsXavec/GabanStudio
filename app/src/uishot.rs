@@ -620,15 +620,20 @@ fn say_moments(dir: &Path) {
 }
 
 /// AU19: Plan past its two room pictures: the sheet hidden, a new animation
-/// with the row's lesson, and the paper shapes the rail meets differently.
-const PLAN: [(&str, u32, u32); 7] = [
+/// with the row's lesson, also at the tightest room (1024×640 at 150% lays out
+/// 832×520), the paper shapes the rail meets differently, and the Layers float
+/// over the sheet, Plan's one road to the layers.
+const PLAN: [(&str, u32, u32); 10] = [
     ("plan-hidden", 1600, 900),
     ("plan-hidden-1280", 1280, 800),
     ("plan-new", 1600, 900),
     ("plan-new-1280", 1280, 800),
+    ("plan-new-832", 832, 520),
     ("plan-4x3", 1600, 900),
     ("plan-1x1", 1600, 900),
     ("plan-9x16", 1280, 800),
+    ("plan-layers", 1600, 900),
+    ("plan-layers-832", 832, 520),
 ];
 
 fn plan_owed() -> Vec<(String, u32, u32)> {
@@ -659,6 +664,7 @@ fn plan_moments(dir: &Path) {
     let mut h = EditorHarness::with_gpu_animation();
     shoot(&mut h);
     shoot(&mut h);
+    shoot(&mut h);
     drop(h);
     for (width, height) in [(1440, 1080), (1080, 1080), (1080, 1920)] {
         let mut s = NewProjectForm { width, height, ..Default::default() }.new_state();
@@ -667,6 +673,11 @@ fn plan_moments(dir: &Path) {
         draw.enter(h.editor_mut());
         shoot(&mut h);
     }
+    let mut h = EditorHarness::with_gpu_shipped(crate::sample::build_sample());
+    draw.enter(h.editor_mut());
+    h.open_float(Float::Layers);
+    shoot(&mut h);
+    shoot(&mut h);
 }
 
 /// AU10: Hide tools: the first time, with its card; a refusal on that card;

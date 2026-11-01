@@ -286,6 +286,8 @@ The opened-document block in `Editor::ui` (`opened_doc`, `untitled_group`) is th
 4. `export_from` is rewritten to `(first_step(), recipe(first_step()))` if the document was replaced while on Export, so the way back and its dock are this document's. This is what `export_view`'s comment asks for and today's stored dock does not give.
 5. Read `app.lesson` (5.11).
 
+Note, AU19: step 2 as built does not call `enter_room`. The door swaps the dock to `recipe` and re-arms nothing. `enter_room` re-arms the step's tools, so with the door firing on every Draw opening each animation lost its Select shape to Rect. A place off the spine still stays, and a drawing opened from Plan and an animation opened from Draw get the sheet this section asks for.
+
 ### 2.7 Transitions
 
 **Drawing to Animation or Comic.** One per-frame rule beside the `full_band` latch:
@@ -382,6 +384,8 @@ fn recipe(&self, st: Stage) -> DockState<Pane> {
 | Node Graph | Leaves | It belongs to Effects. The Window menu still adds it |
 | Presets, Forge | Not added | Brushes float, Brush maker place |
 
+Note, AU19: the sheet is the whole left column, so a pane opened from the Window menu never tabs onto its leaf. With no other free leaf it splits under the sheet at 0.62, and the sheet stays on screen. Lock holds the same two panes, and a lock in Plan keeps the sheet whether a verb or the recipe brought it.
+
 ### 3.4 Regions, 100% scale, 16:9 document at Fit
 
 | Region | 1600×900 | 1280×800 |
@@ -399,6 +403,8 @@ fn recipe(&self, st: Stage) -> DockState<Pane> {
 Other shapes, share at 1600×900, 1280×800, 1280×720, 1024×640: 16:9 50.0, 43.5, 48.3, 41.6. 4:3 50.5, 54.1, 46.9, 49.7. 1:1 37.9, 40.6, 35.2, 37.3. 9:16 21.3, 22.8, 19.8, 21.0.
 
 The canvas keeps its 34 pt tab bar. `tab_style_override` with `Margin::ZERO` for `Pane::Canvas` in this recipe returns 12 wide and 12 tall.
+
+Measured, AU19, 16:9 at Fit. 1600×900: pane 355–1600 by 78–864, paper 431.0–1562.7 by 152.7–789.3, share 49.997%, 33 rows. 1280×800: pane 285–1280 by 78–764, paper 361.0–1250.2 by 170.9–671.1, share 43.555%, 28 rows. The tightest room, 832×520 (1024×640 at 125% and 150%): pane 186.1–832 by 78–484.2, paper 262.1–812.6 by 126.3–436.0, 550.5×309.7, paper under chrome 0. The table's shares round these. The gate's floors are the first measured value less 0.5 (1.10): 49.5 and 43.05.
 
 ### 3.5 Fit clears the rail
 
@@ -427,9 +433,11 @@ let arrived = rows || self.full_band;   // Previous and Next from the first fram
 
 The Plan column of 1.4 is the result. `sheet_button` adds `in_plan()`. The 12 pt mirror goes in Plan. Loop keys stay in Timing and on `Animation ▸ Play`. Say's new row is `Click a row, then draw on it.`
 
+Note, AU19: the row carries no Show me, since no single verb does both halves of it. It stays until a click on a row, Play, or a stroke with the sheet on screen answers it, and a stroke made before Plan's sheet shows does not count.
+
 ### 3.7 Twelve rows
 
-`INTENTS[ANIMATION].cut_frames` is 12, one second at 12 fps, because rows stop at `frame_count` and a key pose needs a row to land on. Other intents stay at 1. Cell selection, held cells, `raster_new_cel` and `land_raster` need no new rule: drawing on a held or empty row makes a key, splits the run, and is one undo. A second click on the cursor's own cell focuses `entry_field`, which is why lesson text says click once. `entry_field` takes a drawing's name, and `next_drawing_name` makes names like `D1A`, so a bare `1` makes a new blank drawing called `1` through `expose_by_name`. Lesson text never tells anyone to type a number.
+`INTENTS[ANIMATION].cut_frames` is 12, one second at 12 fps, because rows stop at `frame_count` and a key pose needs a row to land on. Other intents stay at 1. Cell selection, held cells, `raster_new_cel` and `land_raster` need no new rule: drawing on a held or empty row makes a key, splits the run, and is one undo. A second click on the cursor's own cell focuses `entry_field`, which is why lesson text says click once; as built, a first click on the cell the cursor rests on selects it and only the second types. `entry_field` takes a drawing's name, and `next_drawing_name` makes names like `D1A`, so a bare `1` makes a new blank drawing called `1` through `expose_by_name`. Lesson text never tells anyone to type a number.
 
 `show_sheet` calls `open_pane` in an animation, so reopening a closed sheet saves nothing that means nothing. The `RoomLayout` help text is rewritten. Palette aliases add `genga` and keep `lo`, `layout`.
 
@@ -458,6 +466,8 @@ A background track that holds to the end means no tail, so a character may leave
 `ui.sheet_in_draw` defaults false and upgraders hold it false, so it cannot mean "on". A new `ui` bool would change the section's shape. `ui.panel_more`, already listed in main spec 1.4 and not yet built, lands here with one key, `plan_sheet_hidden`. `Editor.plan_sheet_hidden` mirrors it through `apply_ui`, as `sheet_in_draw` does. The Panels part inherits the field.
 
 The memory is global, so it must not reach a lesson: a learner who once hid the sheet would open Still in the Coat's first task with no row to click. While a lesson stands `recipe` reads the sheet as on, and `open_lesson` does not touch the stored value. If the learner hides the sheet during a lesson, the task's chain rings `Timing sheet` (5.5).
+
+Note, AU19: a template whose recipe shows the sheet must not spend the stored memory either. `Editor.template_sheet` holds the untitled group of the project it opened, so `plan_sheet_off()` reads the sheet as on for that project only, and a click on `Timing sheet` in Plan clears it.
 
 ### 3.11 What goes with the preview
 

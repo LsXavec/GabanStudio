@@ -11,7 +11,7 @@ use crate::aurail_tests::window;
 use crate::config::{Action, Config};
 use crate::doc::AppState;
 use crate::newproject::NewProjectForm;
-use crate::say::{self, Verb};
+use crate::say;
 use crate::steps::{self, ProjectKind};
 use crate::testkit::EditorHarness;
 use crate::workspace::{Pane, Stage};
@@ -268,7 +268,8 @@ fn auplan_paper_clears_the_rail() {
 #[test]
 fn auplan_paper_share() {
     let mut shares = Vec::new();
-    for ((w, tall), floor) in [((1600.0, 900.0), 49.5), ((1280.0, 800.0), 43.0)] {
+    // Spec 1.10: the first measured value less 0.5: 49.997 and 43.555.
+    for ((w, tall), floor) in [((1600.0, 900.0), 49.5), ((1280.0, 800.0), 43.05)] {
         let mut h = plan(paper(PAPERS[0]));
         sized(&mut h, w, tall);
         h.perform(Action::ZoomFit);
@@ -455,7 +456,9 @@ fn auplan_one_timeline() {
 /// Acceptance 10: the band's keys, in their order, and only those.
 #[test]
 fn auplan_band_keeps_the_drawing_keys() {
-    let h = plan(two_keys(4));
+    let mut h = plan(two_keys(4));
+    h.wait(4.2);
+    settle(&mut h);
     let lane = ["previous frame (S)", "play (Space)", "next frame (F)", "Frame 1 of 8"];
     let right = ["Add drawing (band)", "Ghost frames toggle", "Speed", vocab::HIDE_TIMING_SHEET];
     let mut last = f32::MIN;
@@ -466,6 +469,10 @@ fn auplan_band_keeps_the_drawing_keys() {
         assert!((at.center().y - 882.0).abs() < 10.0, "{key} on the band: {at:?}");
         last = at.right();
     }
+    // Say stands between them, in the middle of the band.
+    let say = h.painted_at(say::PLAN_ROW_WORDS).x;
+    let (counter, add) = (h.rect("Frame 1 of 8").right(), h.rect("Add drawing (band)").left());
+    assert!(counter < say && say < add, "the counter ends at {counter}, Say starts at {say}, Add drawing at {add}");
     for gone in ["first frame (Home)", "last frame (End)", "clear loop range", vocab::SOUND_WHILE_DRAGGING, vocab::LOOP] {
         assert!(!h.has(gone), "{gone}");
     }
@@ -518,12 +525,124 @@ fn auplan_panes_follow_the_recipe() {
     assert!(crate::same_shape(&h.editor().dock, &Stage::Layout.dock()), "the sheet at the left, not a split on the right");
     settle(&mut h);
     assert!(h.rig().config.ui.plan_sheet_hidden(), "the verb remembered nothing");
+    // It holds under the lock as the button's does: one sheet, one close key.
+    assert!(h.editor_mut().locked_panes().contains(&Pane::XSheet), "a verb's sheet is Plan's");
+    h.rig_mut().config.ui.lock_positions = true;
+    settle(&mut h);
+    crate::audock_tests::middle_click_tab(&mut h, Pane::XSheet);
+    assert!(h.editor().sheet_on_screen(), "the tab has no live close under the lock");
+}
+
+/// A pane opened in Plan keeps both halves in view: Window's Node Graph, which
+/// spec 3.3 keeps, or a chord's. A tab on the sheet's leaf would cover the one
+/// timeline, bring the strip back and refit the paper.
+#[test]
+fn auplan_a_new_pane_keeps_the_sheet() {
+    let mut h = plan(two_keys(4));
+    let (paper, rows) = (h.editor().canvas.view_xform().paper_bounds(), row(&h, 0));
+    h.editor_mut().open_pane(Pane::History);
+    settle(&mut h);
+    let shown = crate::visible_panes(&h.editor().dock);
+    assert!(shown.contains(&Pane::XSheet) && shown.contains(&Pane::Canvas) && shown.contains(&Pane::History), "{shown:?}");
+    assert!(pane_rect(&h, Pane::History).top() > pane_rect(&h, Pane::XSheet).bottom(), "under the sheet");
+    assert_eq!(h.editor().canvas.view_xform().paper_bounds(), paper, "the paper did not move");
+    assert_eq!(row(&h, 0), rows, "nor the sheet's first row");
+    assert!(h.editor().canvas.rail_reserve && h.editor().strip.rect().is_none());
+    assert!(h.has(vocab::HIDE_TIMING_SHEET));
+    // The next one joins it, on no recipe's leaf, wherever the focus stands.
+    let at = paper_middle(&h);
+    h.pen_tap(at);
+    settle(&mut h);
+    for pane in [Pane::NodeGraph, Pane::Layers] {
+        h.editor_mut().open_pane(pane);
+        settle(&mut h);
+        let shown = crate::visible_panes(&h.editor().dock);
+        assert!(shown.contains(&Pane::XSheet) && shown.contains(&Pane::Canvas) && shown.contains(&pane), "{pane:?}: {shown:?}");
+    }
+    assert_eq!(h.editor().dock.main_surface().iter().filter(|n| n.is_leaf()).count(), 3, "one leaf for them all");
+    assert_eq!(h.editor().canvas.view_xform().paper_bounds(), paper);
+    // Reset is the recipe again.
+    h.perform(Action::ResetLayout);
+    settle(&mut h);
+    assert!(crate::same_shape(&h.editor().dock, &Stage::Layout.dock()));
+}
+
+/// Spec 1.11 and 3.5: Hide tools gives the paper the rail's room, with the
+/// sheet on. Without this the drop is one word in `rail_shows`.
+#[test]
+fn auplan_hide_tools_drops_the_reserve() {
+    let mut h = plan(paper(PAPERS[0]));
+    h.perform(Action::ZoomFit);
+    settle(&mut h);
+    assert!(h.editor().canvas.rail_reserve, "the sheet is on and the rail shows");
+    let with_rail = h.editor().canvas.view_xform().paper_bounds();
+    let pane = h.editor().canvas.dbg_rect;
+    h.key(Key::T);
+    settle(&mut h);
+    assert!(h.editor().tools_hidden && h.editor().sheet_on_screen(), "the sheet stays");
+    assert!(!h.editor().canvas.rail_reserve, "no rail, nothing to clear");
+    let bare = h.editor().canvas.view_xform().paper_bounds();
+    let pane_now = h.editor().canvas.dbg_rect;
+    assert!(bare.width() > with_rail.width(), "the paper grew: {bare:?} from {with_rail:?}");
+    assert!((bare.center().x - pane_now.center().x).abs() < 1.0, "it fits the whole pane: {bare:?} in {pane_now:?}");
+    h.key(Key::T);
+    settle(&mut h);
+    assert!(h.editor().canvas.rail_reserve, "the reserve is back with the rail");
+    assert_eq!(h.editor().canvas.view_xform().paper_bounds(), with_rail, "the paper it left");
+    assert_eq!(h.editor().canvas.dbg_rect, pane);
+}
+
+/// The floated canvas hosts its rail too, so spec 3.5's formula has no third
+/// case: the paper clears the rail there as well.
+#[test]
+fn auplan_float_keeps_the_reserve() {
+    let mut h = plan(paper(PAPERS[0]));
+    h.editor_mut().float_canvas.open = true;
+    settle(&mut h);
+    assert!(h.editor().sheet_on_screen());
+    assert!(h.editor().canvas.rail_reserve);
+}
+
+/// The walks' own premise: `window` reaches the room it names, whatever room
+/// it comes from. The frame a zoom lands on rewrites the size it was given.
+#[test]
+fn auplan_window_reaches_every_room() {
+    let mut h = EditorHarness::with_state_shipped(paper(PAPERS[0]));
+    let mut found = Vec::new();
+    for (w, tall) in SIZES {
+        for stored in PROBE_SCALES {
+            window(&mut h, w, tall, stored);
+            let scale = crate::effective_scale(stored, w, tall);
+            let (room, ppp) = (h.ctx().content_rect().size(), h.ctx().pixels_per_point());
+            found.push(format!("{w}×{tall} at {stored}: room {room:?} at {ppp}"));
+            assert_eq!(ppp, scale, "{}", found.join("\n"));
+            assert!((room - vec2(w, tall) / scale).length() < 0.5, "{}", found.join("\n"));
+        }
+    }
+    println!("{}", found.join("\n"));
+}
+
+/// The size a person with a small screen sees at 150%: no test reads more
+/// than the clip; this one reads the paper (spec 3.4).
+#[test]
+fn auplan_tightest_paper_reads() {
+    let mut h = EditorHarness::with_state_shipped(paper(PAPERS[0]));
+    window(&mut h, 1024.0, 640.0, 1.5);
+    h.perform(Action::ZoomFit);
+    settle(&mut h);
+    assert!(h.editor().sheet_on_screen());
+    let (pane, bounds) = (h.editor().canvas.dbg_rect, h.editor().canvas.view_xform().paper_bounds());
+    let (room, ppp) = (h.ctx().content_rect(), h.ctx().pixels_per_point());
+    println!("Plan at 832×520: room {room:?} at {ppp}, pane {pane:?}, paper {bounds:?}");
+    assert!((room.size() - vec2(832.0, 520.0)).length() < 0.5, "{room:?}");
+    assert_eq!(measure::paper_share(&h).paper_under_chrome, 0);
+    assert!(bounds.width() >= 400.0 && bounds.height() >= 225.0, "{bounds:?} in {pane:?}");
 }
 
 // ---- the Say row ----
 
-/// Spec 8.2's new row: Plan with the sheet on, once. The circle of Show me
-/// goes on blank paper and never over art.
+/// Spec 8.2's new row: Plan with the sheet on, once. No Show me: its circle
+/// never shows a row being clicked.
 #[test]
 fn auplan_row_hint_once() {
     let says = |h: &EditorHarness| h.editor().say.hint.as_ref().map(|s| s.words.clone());
@@ -535,8 +654,8 @@ fn auplan_row_hint_once() {
     assert_eq!(spoken.words, say::PLAN_ROW_WORDS);
     assert_eq!(spoken.bit, Some(say::PLAN_ROWS));
     assert_eq!(spoken.bit, Some(1 << 23), "a stored bit keeps its number");
-    assert_eq!(spoken.verb, Some(Verb::Show(0)));
-    assert!(h.has("Show me (say line)"), "{}", h.describe());
+    assert_eq!(spoken.verb, None);
+    assert!(!h.has("Show me (say line)"), "{}", h.describe());
     // The sheet hidden, there are no rows to click.
     h.click(vocab::HIDE_TIMING_SHEET);
     settle(&mut h);
@@ -553,7 +672,7 @@ fn auplan_row_hint_once() {
     h.perform(Action::RoomDrawing);
     settle(&mut h);
     assert_ne!(says(&h).as_deref(), Some(say::PLAN_ROW_WORDS), "once");
-    // Over art it keeps the sentence and drops the button.
+    // Over art it speaks the same.
     let mut h = plan(two_keys(4));
     h.wait(4.2);
     settle(&mut h);
@@ -570,6 +689,114 @@ fn auplan_row_hint_once() {
         assert_ne!(hint.bit, 1 << 5);
         assert_ne!(hint.bit, 1 << 15);
     }
+}
+
+/// The AU10 trap: a row answered by a common act counts only where it stood. A
+/// person who draws first, the most common route, still reads it in Plan.
+#[test]
+fn auplan_row_hint_outlives_a_stroke_on_the_ready_paper() {
+    let says = |h: &EditorHarness| h.editor().say.hint.as_ref().map(|s| s.words.clone());
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1600.0, 900.0);
+    assert_eq!(h.editor().kind(), Some(ProjectKind::Drawing));
+    let path = line(&h);
+    h.drag_path(&path);
+    settle(&mut h);
+    assert_eq!(h.rig().config.ui.hints_seen & say::PLAN_ROWS, 0, "no row stood to answer");
+    // It grows into an animation; the stage stays, and the sheet is a press away.
+    h.perform(Action::AddDrawingAfter);
+    settle(&mut h);
+    assert_eq!(h.editor().kind(), Some(ProjectKind::Animation));
+    assert_eq!(h.rig().config.ui.hints_seen & say::PLAN_ROWS, 0, "no sheet, no row yet");
+    h.perform(Action::RoomFinishing);
+    h.perform(Action::RoomDrawing);
+    h.wait(4.2);
+    settle(&mut h);
+    assert!(h.editor().in_plan() && h.editor().sheet_on_screen());
+    assert_eq!(says(&h).as_deref(), Some(say::PLAN_ROW_WORDS), "it speaks after all");
+}
+
+/// Over art the row must not hold the lane against a working animator: a click
+/// on a row or Play answers it, and the next row takes the lane.
+#[test]
+fn auplan_row_hint_answers_a_click_or_play() {
+    let three = || {
+        let mut s = two_keys(4);
+        s.set_cut_length(12);
+        s.goto(8);
+        s.new_drawing_at_frame();
+        s.commit_stroke(stroke(250.0));
+        s.goto(0);
+        s
+    };
+    for act in 0..2 {
+        let mut h = plan(three());
+        h.wait(4.2);
+        settle(&mut h);
+        assert_eq!(h.editor().say.hint.as_ref().map(|s| s.words.as_str()), Some(say::PLAN_ROW_WORDS));
+        if act == 0 {
+            let at = row(&h, 5);
+            h.click_pos(at);
+        } else {
+            h.perform(Action::PlayPause);
+            h.run_frames(2);
+            h.perform(Action::PlayPause);
+        }
+        settle(&mut h);
+        assert_ne!(h.rig().config.ui.hints_seen & say::PLAN_ROWS, 0, "act {act} answers it");
+        let spoken = h.editor().say.hint.as_ref().map(|s| s.words.clone()).unwrap_or_default();
+        assert_ne!(spoken, say::PLAN_ROW_WORDS, "act {act}");
+    }
+}
+
+/// The first instruction's own row: a new animation has one, and the cursor
+/// rests on it. A click there chooses it and takes no typing; the second types.
+#[test]
+fn auplan_click_on_the_resting_row_selects() {
+    let mut h = plan(one_run(3));
+    let at = row(&h, 0);
+    h.click_pos(at);
+    settle(&mut h);
+    assert!(!h.typing(), "a click on the resting cell is no typing\n{}", h.describe());
+    assert_ne!(h.rig().config.ui.hints_seen & say::PLAN_ROWS, 0, "and it answers the row");
+    h.key(Key::Space);
+    settle(&mut h);
+    assert!(h.state().view.playing, "Space still plays");
+    h.key(Key::Space);
+    settle(&mut h);
+    let strokes = h.state().strokes_done;
+    let path = line(&h);
+    h.drag_path(&path);
+    settle(&mut h);
+    assert_eq!(h.state().strokes_done, strokes + 1, "and the next stroke lands");
+    // Spec 3.7's second click still types.
+    let at = row(&h, h.state().view.frame);
+    h.click_pos(at);
+    settle(&mut h);
+    h.click_pos(at);
+    settle(&mut h);
+    assert!(h.typing(), "{}", h.describe());
+}
+
+/// A template's sheet is its project's: the next document in the same Editor
+/// reads the memory again, without a restart.
+#[test]
+fn auplan_template_sheet_stays_with_its_project() {
+    let mut hidden = crate::config::UiConfig::default();
+    hidden.set_plan_sheet_hidden(true);
+    let t = crate::templates::ALL.iter().position(|t| t.sheet_on).expect("a template with its sheet on");
+    let mut h = EditorHarness::as_animation();
+    h.click(vocab::HIDE_TIMING_SHEET);
+    settle(&mut h);
+    *h.editor_mut() = crate::open_template(t, None, Some(h.data_dir()), &hidden);
+    settle(&mut h);
+    assert!(h.editor().sheet_on_screen(), "the template's project");
+    let next = paper(PAPERS[0]);
+    h.editor_mut().state = next;
+    settle(&mut h);
+    assert!(h.editor().in_plan());
+    assert!(!h.editor().sheet_on_screen(), "the next one reads the memory: {:?}", panes(&h));
+    assert!(h.editor().plan_sheet_hidden);
 }
 
 /// F4 is the bar's first step, F5 Draw's old key, and on an animation they are

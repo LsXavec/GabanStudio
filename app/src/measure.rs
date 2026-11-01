@@ -1869,11 +1869,17 @@ mod tests {
         }
     }
 
-    /// A blank document and the sample, in every room.
+    /// A blank document and the sample, in every room. AU19: the frozen boot
+    /// has no kind, so the shipped sample walks with them: its Plan is the real
+    /// one, the sheet on.
     fn in_every_room(mut look: impl FnMut(&str, &mut EditorHarness)) {
-        let docs = [("blank", NewProjectForm::default().new_state()), ("sample", crate::sample::build_sample())];
-        for (doc, state) in docs {
-            let mut h = EditorHarness::with_state(state);
+        let shipped = EditorHarness::with_state_shipped(crate::sample::build_sample());
+        let docs = [
+            ("blank", EditorHarness::with_state(NewProjectForm::default().new_state())),
+            ("sample", EditorHarness::with_state(crate::sample::build_sample())),
+            ("shipped", shipped),
+        ];
+        for (doc, mut h) in docs {
             h.kit_mut().set_size(vec2(1600.0, 900.0));
             for room in PROBE_ROOMS {
                 room.enter(h.editor_mut());

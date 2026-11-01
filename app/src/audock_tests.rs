@@ -5,6 +5,7 @@ use eframe::egui;
 use egui::vec2;
 use egui_dock::{DockState, Node};
 
+use crate::aurail_tests::window;
 use crate::config::{self, Action, Config};
 use crate::doc::AppState;
 use crate::measure::{self, Scope};
@@ -25,15 +26,6 @@ fn settle(h: &mut EditorHarness) {
 
 fn panes(h: &EditorHarness) -> Vec<Pane> {
     h.editor().dock.iter_all_tabs().map(|(_, p)| *p).collect()
-}
-
-/// A window `w`×`h` points at 100%, at a stored scale: the App's zoom, capped
-/// by the window. The harness holds the size in zoomed points.
-fn window(harness: &mut EditorHarness, w: f32, h: f32, stored: f32) {
-    let scale = crate::effective_scale(stored, w, h);
-    harness.kit_mut().set_size(vec2(w / scale, h / scale));
-    harness.kit_mut().set_pixels_per_point(scale);
-    settle(harness);
 }
 
 /// The rect of a named widget in points: the harness names them in pixels.
@@ -269,15 +261,17 @@ fn audock_lock_holds_the_recipe_and_lets_a_hand_panel_go() {
     let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
-    h.hide_sheet();
+    let recipe = panes(&h);
     h.rig_mut().config.ui.lock_positions = true;
     settle(&mut h);
     h.editor_mut().open_pane(Pane::History);
     settle(&mut h);
+    let opened = panes(&h);
+    assert_eq!(opened.len(), recipe.len() + 1, "{opened:?}");
     middle_click_tab(&mut h, Pane::Canvas);
-    assert_eq!(panes(&h), [Pane::Canvas, Pane::History]);
+    assert_eq!(panes(&h), opened);
     middle_click_tab(&mut h, Pane::History);
-    assert_eq!(panes(&h), [Pane::Canvas], "a hand-opened panel closes under the lock");
+    assert_eq!(panes(&h), recipe, "a hand-opened panel closes under the lock");
     // Off the spine the place's own panes are the ones it holds.
     h.perform(Action::Layout3dRoom);
     settle(&mut h);
@@ -292,10 +286,10 @@ fn audock_lock_holds_the_recipe_and_lets_a_hand_panel_go() {
     assert_eq!(h.editor_mut().locked_panes(), forge, "a second place");
     h.perform(Action::RoomDrawing);
     settle(&mut h);
-    assert_eq!(h.editor_mut().locked_panes(), [Pane::Canvas], "a step");
-    h.click(vocab::SHOW_TIMING_SHEET);
+    assert_eq!(h.editor_mut().locked_panes(), recipe, "a step");
+    h.click(vocab::HIDE_TIMING_SHEET);
     settle(&mut h);
-    assert!(h.editor_mut().locked_panes().contains(&Pane::XSheet), "the sheet switch");
+    assert_eq!(h.editor_mut().locked_panes(), [Pane::Canvas], "the sheet switch");
 }
 
 // ---- Draw and the sheet ----
@@ -467,7 +461,8 @@ fn audock_templates_start_the_sheet_where_they_say() {
     hidden.set_plan_sheet_hidden(true);
     for (i, t) in templates::ALL.iter().enumerate() {
         let ed = crate::open_template(i, None, None, &hidden);
-        assert_eq!(ed.plan_sheet_hidden, !t.sheet_on, "{}", t.name);
+        assert_eq!(ed.plan_sheet_off(), !t.sheet_on, "{}", t.name);
+        assert!(ed.plan_sheet_hidden, "{}: the memory stands", t.name);
         assert_eq!(ed.stage, Some(t.room), "{}", t.name);
     }
     let on: Vec<&str> = templates::ALL.iter().filter(|t| t.sheet_on).map(|t| t.name).collect();
@@ -930,8 +925,17 @@ fn audock_zoom_follows_the_window_and_the_stored_scale_stays() {
 #[test]
 fn audock_chrome_clip_audit_passes() {
     let mut found = Vec::new();
-    for doc in [sample::build_sample(), crate::newproject::NewProjectForm::default().new_state()] {
+    // AU19: both animations stand in Plan, so the drawing keeps the lone canvas
+    // in the walk, and the hidden sheet Plan's own open paper.
+    for (doc, hide) in [
+        (sample::build_sample(), false),
+        (crate::newproject::NewProjectForm::default().new_state(), false),
+        (crate::templates::READY.build(), false),
+        (sample::build_sample(), true),
+    ] {
         let mut h = EditorHarness::with_state_shipped(doc);
+        h.editor_mut().plan_sheet_hidden = hide;
+        h.editor_mut().enter_room(Stage::Drawing);
         for (w, tall) in SIZES {
             for stored in PROBE_SCALES {
                 window(&mut h, w, tall, stored);

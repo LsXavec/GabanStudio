@@ -585,8 +585,6 @@ fn austrip_enter_opens_the_sheet_and_starts_typing() {
 fn austrip_rebound_type_chord_still_works() {
     let mut h = strip_up(&[4, 4]);
     h.rig_mut().config.binding_mut(Action::TypeIntoCell).chord = free_chord();
-    // AU19: a new pane lands on the sheet's leaf, and would cover the sheet.
-    h.rig_mut().config.binding_mut(Action::ShowEpisode).chord = None;
     let at = on_sheet(&h, 1);
     h.point_at(at);
     h.key(Key::Enter);

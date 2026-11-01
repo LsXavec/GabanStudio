@@ -59,6 +59,8 @@ pub struct SheetUi {
     pub clip_text: Option<String>,
     /// The Type-into-cell verb asked for the entry (taken next frame).
     type_asked: bool,
+    /// A row took a click this frame (AU19: Say's Plan row reads it).
+    pub row_clicked: bool,
     /// The cursor (cut, frame) the sheet last scrolled to: a new one is
     /// scrolled into view, so the entry stays laid out under the keys.
     followed: Option<(anim_core::ids::CutId, u32)>,
@@ -337,14 +339,23 @@ fn start_typing(ui: &mut egui::Ui, state: &mut AppState, cells: Rect) {
     edit.store(ui.ctx(), id);
 }
 
+/// AU19: the last plain click chose the cursor's cell.
+fn chosen(state: &AppState) -> bool {
+    state.sheet_ui.anchor == Some((state.view.active_column, state.view.frame))
+}
+
 /// GM14: the typed entry on the cursor's cell — a text field, so a
 /// single-key shortcut never fires while it types. A drawing name and
 /// Enter exposes it ("x" = empty) and moves down; Tab enters and moves to
 /// the next column; Escape or a click away drops the text. Resting, a
 /// dim caret marks the cell that takes typing; typing, a frame rings it.
+/// AU19: it takes a click only on a cell a click chose (`chosen`): the
+/// cursor's resting place falls through to the sheet, so `Click a row` on a
+/// new animation's one row selects it, and a second click types (spec 3.7).
 fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe: bool) {
     let id = egui::Id::new(ENTRY_ID);
-    if ui.memory(|m| m.has_focus(id)) {
+    let typing = ui.memory(|m| m.has_focus(id));
+    if typing {
         ui.painter().rect_filled(cell, 0.0, plate::WELL);
         ui.painter().rect_stroke(
             cell,
@@ -359,11 +370,13 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
             egui::Stroke::new(1.0, plate::INK3),
         );
     }
+    let live = typing || chosen(state);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(cell));
     let resp = child
         .add(
             egui::TextEdit::singleline(&mut state.sheet_ui.entry)
                 .id(id)
+                .interactive(live)
                 .frame(egui::Frame::NONE)
                 .lock_focus(true)
                 .desired_width(cell.width())
@@ -1022,14 +1035,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 if cresp.clicked()
                     && let Some(p) = cresp.interact_pointer_pos()
                 {
+                    state.sheet_ui.row_clicked = true;
                     match cell_at(p) {
                         (Some(col), f, _) => {
                             let shift = ui.input(|i| i.modifiers.shift);
                             let cursor = (state.view.active_column, state.view.frame);
-                            // A click on the cursor's own cell — anywhere
-                            // on it — types into it (focused once the entry
-                            // has drawn: it gives up focus to a click off it).
-                            type_here |= !shift && (col, f) == cursor;
+                            // A second click on the cursor's own cell —
+                            // anywhere on it — types into it (focused once
+                            // the entry has drawn: it gives up focus to a
+                            // click off it).
+                            type_here |= !shift && (col, f) == cursor && chosen(state);
                             let live = state.sheet_ui.head == Some(cursor);
                             let anchor = match state.sheet_ui.anchor {
                                 Some(a) if shift && live => a,
