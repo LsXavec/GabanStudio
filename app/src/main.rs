@@ -62,6 +62,8 @@ mod auexport_tests;
 #[cfg(test)]
 mod aukind_tests;
 #[cfg(test)]
+mod auplan_tests;
+#[cfg(test)]
 #[path = "../../crates/anim-core/tests/support/gif_decode.rs"]
 mod gif_decode;
 #[cfg(test)]
@@ -4309,15 +4311,17 @@ struct Editor {
     /// room I'm working from", not "the layout is pixel-identical".
     stage: Option<Stage>,
     /// AU3: `ui.sheet_in_draw`, mirrored here because `enter_room` and
-    /// `from_state` see no config. A template's sheet stays on this field,
-    /// for this project.
+    /// `from_state` see no config. AU19: only the frozen boot reads it.
     sheet_in_draw: bool,
-    /// AU18: that choice, held aside while a drawing stands: a drawing has no
-    /// button to undo it, so a saved choice does nothing there (spec 3.2).
-    sheet_held: bool,
+    /// AU19: Plan's sheet is on for every animation, and this is a person's
+    /// hiding it: `ui.panel_more`'s key, mirrored as `sheet_in_draw` is. A
+    /// template that starts the sheet on clears it here, for this project.
+    plan_sheet_hidden: bool,
     /// AU3: the Timing sheet button's choice, for the App and the Rig to
     /// remember. Only the button asks.
     sheet_request: Option<bool>,
+    /// AU19: the same button in Plan: true when it hid the sheet.
+    plan_sheet_request: Option<bool>,
     /// AU3: where the arrangement came from while `stage` is None: the
     /// off-spine pill's name, and the arrangement it opened with. Reset goes
     /// back to it, and the lock keeps its panes (a panel opened by hand
@@ -4334,11 +4338,11 @@ struct Editor {
     /// unset, so nothing is stamped or promoted and each rule stands as it
     /// stood. Only the top row still reads the project (spec 1.13).
     kind_unset: bool,
-    /// AU3: the panes the lock holds, and the stage, sheet choice and kind
+    /// AU3: the panes the lock holds, and the stage, sheet choices and kind
     /// they were read for. The dock asks every frame; the recipe changes
     /// rarely.
     held: Vec<Pane>,
-    held_for: Option<(Option<Stage>, bool, Option<ProjectKind>)>,
+    held_for: Option<(Option<Stage>, bool, bool, Option<ProjectKind>)>,
     /// Named, persisted workspaces (%APPDATA%/AnimStudio/workspaces.json).
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
@@ -4959,6 +4963,8 @@ struct EditorTabs<'a> {
     locked: &'a [Pane],
     /// AU9: what the Export panel reads from the Editor.
     export_view: export_step::View,
+    /// AU19: this is Plan: an animation's `Stage::Drawing`.
+    plan: bool,
 }
 
 impl egui_dock::TabViewer for EditorTabs<'_> {
@@ -5038,48 +5044,45 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 });
             }
             Pane::Canvas => {
-                if self.stage == Some(Stage::Layout) {
-                    // Owner (2026-08-17): the Layout room's blank canvas is
-                    // the cut's PREVIEW — the animation plays here, composed
-                    // by the node graph, while drawing stays in genga.
-                    // The preview fills the pane: its rect is the drawing
-                    // area the layout probe measures here.
-                    self.canvas.dbg_rect = ui.available_rect_before_wrap();
-                    self.canvas.dbg_layer = ui.layer_id();
-                    self.canvas.dbg_preview = true;
-                    let vs = self.viewers.entry(u8::MAX).or_default();
-                    viewer::ui(ui, self.state, self.graph, vs, self.final_look, true);
-                } else {
-                    self.canvas.ui(
-                        ui,
-                        self.state,
-                        self.paint.as_deref_mut(),
-                        self.graph,
-                        self.pen,
-                        self.layers_cfg,
-                        self.native_pen,
-                    );
-                    let host = self.canvas.dbg_rect;
-                    let args = &mut rail::OverlayArgs {
-                        raster_available: self.paint.is_some(),
-                        canvas: self.canvas,
-                        state: self.state,
-                        presets: self.presets,
-                        floats: self.floats,
-                        manga: self.stage == Some(Stage::Manga),
-                        rail_off: self.rail_off,
-                        full_band: self.full_band,
-                        layers_docked: self.layers_docked,
-                        pane_rects: Some(self.pane_rects),
-                    };
-                    rail::overlay(ui, args, host);
-                }
+                self.canvas.ui(
+                    ui,
+                    self.state,
+                    self.paint.as_deref_mut(),
+                    self.graph,
+                    self.pen,
+                    self.layers_cfg,
+                    self.native_pen,
+                );
+                let host = self.canvas.dbg_rect;
+                let args = &mut rail::OverlayArgs {
+                    raster_available: self.paint.is_some(),
+                    canvas: self.canvas,
+                    state: self.state,
+                    presets: self.presets,
+                    floats: self.floats,
+                    manga: self.stage == Some(Stage::Manga),
+                    rail_off: self.rail_off,
+                    full_band: self.full_band,
+                    layers_docked: self.layers_docked,
+                    pane_rects: Some(self.pane_rects),
+                };
+                rail::overlay(ui, args, host);
             }
             Pane::Viewer(id) => {
                 let vs = self.viewers.entry(*id).or_default();
-                viewer::ui(ui, self.state, self.graph, vs, self.final_look, false);
+                viewer::ui(ui, self.state, self.graph, vs, self.final_look);
             }
         }
+    }
+
+    /// AU19: Plan's canvas keeps its tab, and its body meets the pane's edges:
+    /// 12 wide and 12 tall for the paper (spec 3.4).
+    fn tab_style_override(&self, tab: &Pane, global: &egui_dock::TabStyle) -> Option<egui_dock::TabStyle> {
+        (self.plan && *tab == Pane::Canvas).then(|| {
+            let mut style = global.clone();
+            style.tab_body.inner_margin = egui::Margin::ZERO;
+            style
+        })
     }
 
     // Everything except the canvas can be closed (re-add from the "panes"
@@ -5220,13 +5223,13 @@ impl Editor {
 
     /// AU18: F4 and F5 are not refusals (spec 2.8): each runs the bar's first
     /// step. `Stage::Layout` is on no bar, and a comic has no `Stage::Drawing`.
-    /// Every caller that names `Stage::Drawing` comes through this line.
+    /// Every caller that names `Stage::Drawing` comes through this line. AU19:
+    /// the frozen boot too: no road leaves `self.stage` on `Stage::Layout`.
     fn step_for(&self, st: Stage) -> Stage {
         match (self.kind(), st) {
-            (None, _) => st,
             (Some(ProjectKind::Comic), Stage::Layout | Stage::Drawing) => Stage::Manga,
-            (Some(_), Stage::Layout) => Stage::Drawing,
-            (Some(_), _) => st,
+            (_, Stage::Layout) => Stage::Drawing,
+            _ => st,
         }
     }
 
@@ -5234,6 +5237,17 @@ impl Editor {
     /// boot's seam reads None, so each rule that asks stands as it stood.
     pub(crate) fn kind(&self) -> Option<ProjectKind> {
         (!self.kind_unset).then(|| ProjectKind::of(&self.state.engine.project))
+    }
+
+    /// AU19: this document is an animation. Unlike `animated`, the frozen
+    /// boot's unset kind is no animation: it keeps today's recipes.
+    fn is_animation(&self) -> bool {
+        self.kind() == Some(ProjectKind::Animation)
+    }
+
+    /// AU19: Plan: `Stage::Drawing` on an animation (spec 3.1).
+    fn in_plan(&self) -> bool {
+        self.stage == Some(Stage::Drawing) && self.is_animation()
     }
 
     /// AU18: the frozen boot's seam goes on. The boot read `recipe` with a
@@ -5291,11 +5305,6 @@ impl Editor {
         if kind == ProjectKind::Comic || (kind == ProjectKind::Drawing && !grown) {
             (self.strip_open, self.full_band) = (false, false);
         }
-        if kind == ProjectKind::Drawing {
-            self.sheet_held |= std::mem::take(&mut self.sheet_in_draw);
-        } else {
-            self.sheet_in_draw |= std::mem::take(&mut self.sheet_held);
-        }
         let first = self.first_step();
         let said = self.state.status.clone();
         let on_bar = steps::bar(kind).iter().any(|s| Some(s.stage) == self.stage);
@@ -5309,7 +5318,9 @@ impl Editor {
         } else if self.stage.is_some() && !on_bar {
             self.enter_room(first);
         } else if self.stage == Some(Stage::Drawing) && !guest && sheet(&self.dock) != sheet(&self.recipe(Stage::Drawing)) {
-            self.enter_room(Stage::Drawing);
+            // AU19: one step on two recipes, so the dock swaps and nothing is
+            // re-armed: every animation opened from Draw passes here.
+            self.dock = self.recipe(Stage::Drawing);
         } else if self.stage == Some(Stage::Export) {
             // The way back and its dock are this document's. A guest keeps one
             // whose pill stands: the join opened nothing.
@@ -5337,7 +5348,6 @@ impl Editor {
         let Some(kind) = ProjectKind::grown(project) else { return };
         kind.stamp(project);
         self.state.meta_dirty = true;
-        self.sheet_in_draw |= std::mem::take(&mut self.sheet_held);
         if kind == ProjectKind::Comic {
             let off_bar = |st| !steps::bar(kind).iter().any(|s| Some(s.stage) == st);
             let back = self.export_from.as_ref().and_then(|(from, _)| *from);
@@ -5427,10 +5437,14 @@ impl Editor {
     }
 
     /// AU3: the arrangement `st` opens in. Entering a step, booting and
-    /// Reset all read it, so they agree.
+    /// Reset all read it, so they agree. AU19: `Stage::Layout`'s arm is Plan's
+    /// one source. A saved `sheet_in_draw` does nothing on a drawing, which
+    /// has no button to undo it, and nothing on an animation, whose memory is
+    /// `plan_sheet_hidden`.
     fn recipe(&self, st: Stage) -> DockState<Pane> {
         match st {
-            Stage::Drawing if self.sheet_in_draw => Stage::dock_with_sheet(),
+            Stage::Drawing if self.is_animation() && !self.plan_sheet_hidden => Stage::Layout.dock(),
+            Stage::Drawing if self.kind_unset && self.sheet_in_draw => Stage::dock_with_sheet(),
             _ => st.dock(),
         }
     }
@@ -5439,7 +5453,7 @@ impl Editor {
     /// Timing sheet on where the template starts it on. That is this
     /// project's; the remembered choice is the button's alone.
     fn enter_template(&mut self, t: &templates::Template) {
-        self.sheet_in_draw |= t.sheet_on;
+        self.plan_sheet_hidden &= !t.sheet_on;
         self.enter_room(t.room);
         // AU6: Timing opens on its Viewer with Select armed: an Animatic's
         // first move is a stroke on the board, so the canvas comes forward
@@ -5512,13 +5526,17 @@ impl Editor {
         visible_panes(&self.dock).contains(&Pane::XSheet)
     }
 
-    /// AU5: the one way a verb brings the Timing sheet up: Draw's own switch
-    /// in Draw, which the room remembers, and the pane anywhere else. AU18: a
-    /// drawing remembers nothing here: it has no such switch.
+    /// AU5: the one way a verb brings the Timing sheet up: the frozen boot's
+    /// switch in its Draw, which the room remembers, and the pane anywhere
+    /// else. AU19: a verb's reopening saves nothing in an animation: only the
+    /// button is a person's choice. In Plan the sheet comes back to its own
+    /// place at the left, not beside the paper as a new pane would.
     fn show_sheet(&mut self) {
-        let draw = self.stage == Some(Stage::Drawing) && self.kind() != Some(ProjectKind::Drawing);
-        if draw && self.dock.find_tab(&Pane::XSheet).is_none() {
+        let frozen_draw = self.stage == Some(Stage::Drawing) && self.kind_unset;
+        if frozen_draw && self.dock.find_tab(&Pane::XSheet).is_none() {
             self.switch_sheet(false);
+        } else if self.in_plan() && same_shape(&self.dock, &Stage::Drawing.dock()) {
+            self.dock = Stage::Layout.dock();
         } else {
             self.open_pane(Pane::XSheet);
         }
@@ -5544,10 +5562,9 @@ impl Editor {
     }
 
     /// AU4: a drawing canvas stands somewhere this frame, for a float to
-    /// open over: not Plan's preview, unless the OS window has it.
+    /// open over.
     fn canvas_shown(&self) -> bool {
-        self.float_canvas.open
-            || (self.stage != Some(Stage::Layout) && visible_panes(&self.dock).contains(&Pane::Canvas))
+        self.float_canvas.open || visible_panes(&self.dock).contains(&Pane::Canvas)
     }
 
     /// AU4: `Make a brush`, and the arrangement menu's Brush maker row.
@@ -5580,7 +5597,7 @@ impl Editor {
     /// AU3: the panes Lock UI positions holds: the current recipe's, or the
     /// place's off the spine.
     fn locked_panes(&mut self) -> &[Pane] {
-        let key = (self.stage, self.sheet_in_draw, self.kind());
+        let key = (self.stage, self.sheet_in_draw, self.plan_sheet_hidden, self.kind());
         if self.held_for != Some(key) {
             let dock = self.stage.map(|st| self.recipe(st));
             let dock = dock.as_ref().or(self.place_dock.as_ref());
@@ -5618,8 +5635,10 @@ impl Editor {
     /// then differs.
     fn apply_ui(&mut self, ui: &config::UiConfig) {
         self.say.feed(ui);
-        let changed = self.sheet_in_draw != ui.sheet_in_draw;
+        let hidden = ui.plan_sheet_hidden();
+        let changed = self.sheet_in_draw != ui.sheet_in_draw || self.plan_sheet_hidden != hidden;
         self.sheet_in_draw = ui.sheet_in_draw;
+        self.plan_sheet_hidden = hidden;
         if changed && let Some(st @ Stage::Drawing) = self.stage {
             self.dock = self.recipe(st);
         }
@@ -5681,8 +5700,9 @@ impl Editor {
             dock: Stage::Drawing.dock(),
             stage: Some(Stage::Drawing),
             sheet_in_draw: false,
-            sheet_held: false,
+            plan_sheet_hidden: false,
             sheet_request: None,
+            plan_sheet_request: None,
             place: String::new(),
             place_dock: None,
             export_from: None,
@@ -5794,8 +5814,9 @@ impl Editor {
             dock: Stage::Drawing.dock(),
             stage: Some(Stage::Drawing),
             sheet_in_draw: false,
-            sheet_held: false,
+            plan_sheet_hidden: false,
             sheet_request: None,
+            plan_sheet_request: None,
             place: String::new(),
             place_dock: None,
             export_from: None,
@@ -7037,6 +7058,11 @@ impl eframe::App for App {
                 self.config.ui.sheet_in_draw = on;
                 self.config.save();
             }
+            // AU19: and in Plan.
+            if let Some(hidden) = editor.plan_sheet_request.take() {
+                self.config.ui.set_plan_sheet_hidden(hidden);
+                self.config.save();
+            }
             // AU6: the Start float's latch, and the lock's verb.
             if let Some(on) = editor.show_start_request.take() {
                 self.config.ui.show_welcome = on;
@@ -7581,9 +7607,10 @@ enum ProbeRoom {
     Layout3d,
 }
 
-/// Every room: the CLI probe and the ship tests walk these.
-const PROBE_ROOMS: [ProbeRoom; 9] = [
-    ProbeRoom::Stage(Stage::Layout),
+/// Every room: the CLI probe and the ship tests walk these. AU19: `Stage::Drawing`
+/// on an animation is Plan with its sheet on, and `Stage::Layout` has no room of
+/// its own: it lands there.
+const PROBE_ROOMS: [ProbeRoom; 8] = [
     ProbeRoom::Stage(Stage::Drawing),
     ProbeRoom::Stage(Stage::InkPaint),
     ProbeRoom::Stage(Stage::Composite),
@@ -8096,19 +8123,23 @@ impl Editor {
     }
 
     /// THE TRANSPORT ROW (spec 4.4): always the band's last 36, plain with
-    /// the sheet off screen and full with it on. The right lane is laid out
+    /// the sheet off screen and full with it on. AU19: Plan keeps the drawing
+    /// keys beside its sheet, and with the frames all on screen Previous and
+    /// Next stand from the first frame (spec 3.6). The right lane is laid out
     /// FIRST from the row's right edge so a long Say line can never push it
     /// off the screen (the clipping the owner's frame_007 debug outlines
     /// caught).
     fn transport_row(&mut self, ui: &mut egui::Ui) {
-        let full = self.sheet_on_screen();
+        let rows = self.sheet_on_screen();
+        let full = rows && !self.in_plan();
+        let arrived = rows || self.full_band;
         // Under the fold width the rarer keys wait behind one `…`.
         let fold = ui.ctx().content_rect().width() < steps::FOLD;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.band_right(ui, full, fold);
+                self.band_right(ui, full, arrived, fold);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    self.band_left(ui, full, fold);
+                    self.band_left(ui, full, arrived, fold);
                     self.say_line(ui);
                 });
             });
@@ -8117,7 +8148,7 @@ impl Editor {
 
     /// The band's right slots, last first. On a blank document the plain
     /// ones wait in reserved slots, and arrive with the second drawing.
-    fn band_right(&mut self, ui: &mut egui::Ui, full: bool, fold: bool) {
+    fn band_right(&mut self, ui: &mut egui::Ui, full: bool, arrived: bool, fold: bool) {
         ui.add_space(8.0);
         self.sheet_button(ui);
         self.relaunch_key(ui);
@@ -8127,7 +8158,7 @@ impl Editor {
             }
         } else {
             if !fold {
-                if self.full_band {
+                if arrived {
                     self.speed_key(ui);
                     self.ghost_key(ui);
                 } else {
@@ -8154,9 +8185,8 @@ impl Editor {
     }
 
     /// The band's left slots: the transport, and the frame.
-    fn band_left(&mut self, ui: &mut egui::Ui, full: bool, fold: bool) {
+    fn band_left(&mut self, ui: &mut egui::Ui, full: bool, arrived: bool, fold: bool) {
         let gesture = self.canvas.stroke_active();
-        let arrived = full || self.full_band;
         if full && !fold {
             self.first_frame_key(ui);
         }
@@ -8519,13 +8549,13 @@ impl Editor {
         }
     }
 
-    /// AU3: the Timing sheet button: one click, remembered in Draw. Absent
-    /// in Plan and Timing, whose recipes hold the sheet; everywhere else a
-    /// plain action that opens the pane, and never lit, because a click
-    /// there cannot hide it. AU18: absent on a drawing and on a comic, which
-    /// have no timing: Window and View still reach the pane.
+    /// AU3: the Timing sheet button: one click, remembered in Plan. Absent
+    /// in Timing, whose recipe holds the sheet; everywhere else a plain
+    /// action that opens the pane, and never lit, because a click there
+    /// cannot hide it. AU18: absent on a drawing and on a comic, which have
+    /// no timing: Window and View still reach the pane.
     fn sheet_button(&mut self, ui: &mut egui::Ui) {
-        if matches!(self.stage, Some(Stage::Layout | Stage::Edit)) || !self.animated() {
+        if self.stage == Some(Stage::Edit) || !self.animated() {
             return;
         }
         let draw = self.stage == Some(Stage::Drawing);
@@ -8554,15 +8584,21 @@ impl Editor {
         }
     }
 
-    /// AU3: Draw with the sheet or without it, remembered. A dock that is
-    /// neither recipe was arranged by hand, so only the sheet's tab comes or
-    /// goes and the rest of the arrangement stays.
+    /// AU3: the step with the sheet or without it, remembered: Plan in
+    /// `plan_sheet_hidden`, the frozen boot's Draw in `sheet_in_draw`. A dock
+    /// that is neither recipe was arranged by hand, so only the sheet's tab
+    /// comes or goes and the rest of the arrangement stays.
     fn switch_sheet(&mut self, shown: bool) {
-        self.sheet_in_draw = !shown;
-        self.sheet_request = Some(!shown);
-        if same_shape(&self.dock, &Stage::Drawing.dock())
-            || same_shape(&self.dock, &Stage::dock_with_sheet())
-        {
+        let with_sheet = if self.in_plan() {
+            self.plan_sheet_hidden = shown;
+            self.plan_sheet_request = Some(shown);
+            Stage::Layout.dock()
+        } else {
+            self.sheet_in_draw = !shown;
+            self.sheet_request = Some(!shown);
+            Stage::dock_with_sheet()
+        };
+        if same_shape(&self.dock, &Stage::Drawing.dock()) || same_shape(&self.dock, &with_sheet) {
             self.dock = self.recipe(Stage::Drawing);
         } else if let Some(tab) = self.dock.find_tab(&Pane::XSheet) {
             self.dock.remove_tab(tab);
@@ -9663,12 +9699,7 @@ impl Editor {
             self.dock.remove_tab(loc);
         }
         let visible = visible_panes(&self.dock);
-        let viewers_open = visible.iter().any(|t| matches!(t, Pane::Viewer(_)))
-            // The Layout room's canvas renders the preview, so it consumes
-            // the graph exactly like a viewer pane.
-            ||
-            (
-            self.stage == Some(Stage::Layout) && visible.contains(&Pane::Canvas));
+        let viewers_open = visible.iter().any(|t| matches!(t, Pane::Viewer(_)));
         // The dock's Canvas tab renders a placeholder (not canvas.ui) whenever
         // the canvas is floated — its dock-visibility no longer reflects
         // whether canvas.ui will actually run this frame, so OR in the float
@@ -9786,9 +9817,15 @@ impl Editor {
         // Hide tools gives the paper the strip's room too.
         self.canvas.strip_closed = self.strip_closed() && !hidden;
         self.canvas.tools_hidden = hidden;
-        self.canvas.sheet_shown = panes.contains(&Pane::XSheet);
+        // AU19: Plan's point is one timeline: the sheet stands alone there.
+        let plan = self.in_plan();
+        self.canvas.sheet_shown = panes.contains(&Pane::XSheet) && !plan;
+        // The frozen boot keeps today's Fit, and an OS window has no rail.
+        let rail_shows = !rail_off && !hidden && !self.float_canvas.open;
+        self.canvas.rail_reserve = panes.contains(&Pane::XSheet) && rail_shows && !self.kind_unset;
         self.canvas.empty_cell_hint = self.say.empty_cell_due(&self.state) && self.animated();
         let export_view = self.export_view();
+        let strokes = self.state.strokes_done;
         let mut tabs = EditorTabs {
             stage: self.stage,
             state: &mut self.state,
@@ -9812,6 +9849,7 @@ impl Editor {
             layers_docked,
             locked: if ui_lock { &self.held } else { &[] },
             export_view,
+            plan,
         };
         let mut dock_style = dock_style(ui.style().as_ref(), &self.dock);
         if hidden {
@@ -9835,6 +9873,12 @@ impl Editor {
                 egui_dock::AllowedSplits::All
             })
             .show_inside(ui, &mut tabs);
+        // AU19: the sheet's leaf drew before the canvas took the pen up, so
+        // this frame goes round once more and the key stands on its row in
+        // the frame the stroke lands (spec 3.8).
+        if self.state.strokes_done != strokes && self.sheet_on_screen() {
+            ui.ctx().request_discard("the sheet reads the stroke");
+        }
         // GM14: the verbs a pane asked for (the curves pane's F and its
         // key menu) run through the one dispatch, as a menu item does (D6).
         for action in std::mem::take(&mut self.state.curves.asked) {

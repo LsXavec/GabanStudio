@@ -540,7 +540,7 @@ fn austart_animatic_lands_with_the_brush_on_the_canvas() {
         h.answer_start(WelcomeAction::Template(i));
         settle(&mut h);
         assert_eq!(h.editor().stage, Some(Stage::Drawing), "{name}");
-        assert!(h.editor().sheet_in_draw && h.editor().sheet_on_screen(), "{name}");
+        assert!(!h.editor().plan_sheet_hidden && h.editor().sheet_on_screen(), "{name}");
     }
 }
 

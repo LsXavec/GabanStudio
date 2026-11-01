@@ -44,15 +44,22 @@ fn out_dir() -> PathBuf {
     dir
 }
 
+/// AU19: Plan's picture keeps number 0 and the file name `shots-before` gave
+/// it: `plan_moments` takes it, on an animation, for no probe stands in Plan.
+fn plan_shot(suffix: &str) -> String {
+    format!("room-0-Layout{suffix}.png")
+}
+
 fn shot_name(i: usize, room: ProbeRoom, suffix: &str) -> String {
-    format!("room-{i}-{}{suffix}.png", room_tag(room))
+    format!("room-{}-{}{suffix}.png", i + 1, room_tag(room))
 }
 
 /// Every picture a run owes: its file name and its size in pixels.
 fn shots_owed() -> Vec<(String, u32, u32)> {
     let rooms = PROBE_ROOMS.into_iter().enumerate();
     let owed = SIZES.iter().flat_map(|(w, h, suffix)| {
-        rooms.clone().map(move |(i, room)| (shot_name(i, room, suffix), *w, *h))
+        let room_rows = rooms.clone().map(move |(i, room)| (shot_name(i, room, suffix), *w, *h));
+        std::iter::once((plan_shot(suffix), *w, *h)).chain(room_rows)
     });
     owed.collect()
 }
@@ -254,6 +261,8 @@ fn shipped_owed() -> Vec<(String, u32, u32)> {
 
 fn shipped(dir: &Path) {
     let mut h = EditorHarness::with_gpu_shipped(crate::sample::build_sample());
+    // AU19: an animation opens on its sheet: these start with it hidden.
+    h.click(crate::vocab::HIDE_TIMING_SHEET);
     let draw = ProbeRoom::Stage(Stage::Drawing);
     let mut shots = SHIPPED.iter().map(|(state, w, h)| (shipped_name(state), egui::vec2(*w as f32, *h as f32)));
     let mut shoot = |h: &mut EditorHarness, room: ProbeRoom| {
@@ -367,6 +376,7 @@ fn moments(h: &mut EditorHarness, dir: &Path) {
 
 fn rail_and_floats(dir: &Path) {
     let mut h = EditorHarness::with_gpu_shipped(crate::sample::build_sample());
+    h.click(crate::vocab::HIDE_TIMING_SHEET);
     let draw = ProbeRoom::Stage(Stage::Drawing);
     h.run_frames(4);
     for (w, height, suffix) in SIZES {
@@ -430,6 +440,7 @@ fn timed_shot() -> AppState {
 
 fn strip_moments(dir: &Path) {
     let mut h = EditorHarness::with_gpu_shipped(timed_shot());
+    h.click(crate::vocab::HIDE_TIMING_SHEET);
     let draw = ProbeRoom::Stage(Stage::Drawing);
     let shots: Vec<_> = STRIP
         .iter()
@@ -564,6 +575,10 @@ fn say_moments(dir: &Path) {
     };
     let draw = ProbeRoom::Stage(Stage::Drawing);
     let mut h = EditorHarness::with_gpu_animation();
+    // AU19: an animation opens with the sheet on: the paper's own row is what
+    // it says with the sheet hidden.
+    h.run_frames(4);
+    h.click(crate::vocab::HIDE_TIMING_SHEET);
     for _ in 0..3 {
         shoot(&mut h, draw);
     }
@@ -574,7 +589,12 @@ fn say_moments(dir: &Path) {
     h.editor_mut().say.pin = Some(Spoken { bit: None, words: crate::doc::HELD_FRAME.into(), verb });
     shoot(&mut h, draw);
     h.editor_mut().say.pin = None;
-    for stage in [Stage::Layout, Stage::Layout, Stage::Edit, Stage::InkPaint, Stage::Composite, Stage::Composite] {
+    // AU19: the sheet back, for Plan's own row.
+    h.editor_mut().show_sheet();
+    for _ in 0..2 {
+        shoot(&mut h, draw);
+    }
+    for stage in [Stage::Edit, Stage::InkPaint, Stage::Composite, Stage::Composite] {
         let room = ProbeRoom::Stage(stage);
         room.enter(h.editor_mut());
         shoot(&mut h, room);
@@ -590,12 +610,63 @@ fn say_moments(dir: &Path) {
     crate::canvas::extpaper_tests::paint_texels(&mut s, &[(10, 10)], [0.0, 0.0, 0.0, 1.0]);
     s.goto(0);
     let mut h = EditorHarness::with_gpu_shipped(s);
+    h.click(crate::vocab::HIDE_TIMING_SHEET);
     draw.enter(h.editor_mut());
     for _ in 0..2 {
         shoot(&mut h, draw);
     }
     h.editor_mut().show_me(crate::welcome::EXPORT_STEP);
     shoot(&mut h, ProbeRoom::Stage(Stage::Export));
+}
+
+/// AU19: Plan past its two room pictures: the sheet hidden, a new animation
+/// with the row's lesson, and the paper shapes the rail meets differently.
+const PLAN: [(&str, u32, u32); 7] = [
+    ("plan-hidden", 1600, 900),
+    ("plan-hidden-1280", 1280, 800),
+    ("plan-new", 1600, 900),
+    ("plan-new-1280", 1280, 800),
+    ("plan-4x3", 1600, 900),
+    ("plan-1x1", 1600, 900),
+    ("plan-9x16", 1280, 800),
+];
+
+fn plan_owed() -> Vec<(String, u32, u32)> {
+    PLAN.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn plan_moments(dir: &Path) {
+    let draw = ProbeRoom::Stage(Stage::Drawing);
+    let mut h = EditorHarness::with_gpu_shipped(crate::sample::build_sample());
+    draw.enter(h.editor_mut());
+    for (w, height, suffix) in SIZES {
+        let size = egui::vec2(w as f32, height as f32);
+        h.kit_mut().set_size(size);
+        arrive(&mut h, draw);
+        h.shot(size, &dir.join(plan_shot(suffix)));
+    }
+    let mut shots = PLAN.iter().map(|(state, w, h)| (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32)));
+    let mut shoot = |h: &mut EditorHarness| {
+        let (name, size) = shots.next().expect("a shot owed");
+        h.kit_mut().set_size(size);
+        arrive(h, draw);
+        h.shot(size, &name);
+    };
+    h.click(crate::vocab::HIDE_TIMING_SHEET);
+    shoot(&mut h);
+    shoot(&mut h);
+    drop(h);
+    let mut h = EditorHarness::with_gpu_animation();
+    shoot(&mut h);
+    shoot(&mut h);
+    drop(h);
+    for (width, height) in [(1440, 1080), (1080, 1080), (1080, 1920)] {
+        let mut s = NewProjectForm { width, height, ..Default::default() }.new_state();
+        crate::steps::ProjectKind::Animation.stamp(&mut s.engine.project);
+        let mut h = EditorHarness::with_gpu_shipped(s);
+        draw.enter(h.editor_mut());
+        shoot(&mut h);
+    }
 }
 
 /// AU10: Hide tools: the first time, with its card; a refusal on that card;
@@ -957,9 +1028,11 @@ fn uishot_rooms() {
         walk(&mut h, &dir, size, suffix);
         states(&mut h, &dir, size, suffix);
     }
-    check_shots(&dir, &shots_owed()).expect("the shots the spec lists");
     check_shots(&dir, &states_owed()).expect("the states the look reaches");
     drop(h);
+    plan_moments(&dir);
+    check_shots(&dir, &shots_owed()).expect("the shots the spec lists");
+    check_shots(&dir, &plan_owed()).expect("Plan's moments");
     shipped(&dir);
     check_shots(&dir, &shipped_owed()).expect("what only a shipped editor shows");
     rail_and_floats(&dir);

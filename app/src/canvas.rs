@@ -141,6 +141,12 @@ const TILT_ASPECT_GAIN: f32 = 1.5;
 /// near-vertical pen has no meaningful direction to point.
 const TILT_NEEDLE_MIN: f32 = 0.05;
 
+/// AU19: the room Fit has for the paper when it clears the rail: the pane
+/// less the rail's band on the left, a 3% margin across and 6% down.
+fn fit_room(rect: Rect) -> egui::Vec2 {
+    vec2(rect.width() * 0.97 - crate::floats::LEFT_X, rect.height() * 0.94)
+}
+
 /// GM4: the keyed zoom stops, in screen points per paper px (1.0 = 100%).
 pub const ZOOM_LADDER: [f32; 14] = [
     0.125,
@@ -854,8 +860,12 @@ pub struct CanvasView {
     pub(crate) strip_closed: bool,
     /// AU10: Hide tools is on: the overlay stands down. The host sets it.
     pub(crate) tools_hidden: bool,
-    /// AU4: the sheet is on screen: the rule's mirror stands beside it.
+    /// AU4: the sheet is on screen: the rule's mirror stands beside it. AU19:
+    /// not in Plan, whose sheet is the one timeline.
     pub(crate) sheet_shown: bool,
+    /// AU19: Fit keeps the paper clear of the rail: the sheet is on screen,
+    /// the rail shows and the tools are not hidden. The host sets it.
+    pub(crate) rail_reserve: bool,
     /// AU7: the empty cell's line is due: hints on, its once-only bit unset,
     /// and the document holds a drawing. The host sets it before `ui`.
     pub(crate) empty_cell_hint: bool,
@@ -951,9 +961,6 @@ pub struct CanvasView {
     /// AU1: the layer `dbg_rect` lives on — the paper-share audit's "is this
     /// the canvas" (`layer_id_at` names a layer, never a widget).
     pub dbg_layer: egui::LayerId,
-    /// AU1: `dbg_rect` holds Layout's preview, not this view: no paper in it,
-    /// and `view_xform` is whatever room drew last.
-    pub dbg_preview: bool,
     /// Set once a pen comes down on the canvas's own layer. After that, the
     /// mouse-drawing fallback is disabled so Windows' synthesized pen→mouse
     /// clicks (e.g. from a fast light double-tap) can't paint flat-pressure
@@ -1126,6 +1133,7 @@ impl CanvasView {
             strip_closed: false,
             tools_hidden: false,
             sheet_shown: false,
+            rail_reserve: false,
             empty_cell_hint: false,
             dbg_empty_line: false,
             flash_seq: 0,
@@ -1166,7 +1174,6 @@ impl CanvasView {
             eye_sync_rgb: [0, 0, 0],
             dbg_rect: Rect::NOTHING,
             dbg_layer: egui::LayerId::background(),
-            dbg_preview: false,
             seen_pen: false,
             native_active: false,
             stroke_from_mouse: false,
@@ -1302,17 +1309,27 @@ impl CanvasView {
 
     /// GM4: the relative zoom that fits the turned paper — its screen box,
     /// (w|cos|+h|sin|) × (w|sin|+h|cos|), against the pane, over the
-    /// upright fit. Exactly 1 upright (and before the first frame).
+    /// upright fit. Exactly 1 upright (and before the first frame). AU19: with
+    /// the rail's room reserved the box fits what Fit leaves, both ways round
+    /// the centre Fit moved past the rail.
     fn turned_fit(&self) -> f32 {
         let (w, h) = (self.xf.paper.x, self.xf.paper.y);
-        let pane = self.dbg_rect.size();
+        let mut pane = self.dbg_rect.size();
+        if self.rail_reserve {
+            pane = fit_room(self.dbg_rect);
+        }
         if self.rotation_deg == 0.0 || w <= 0.0 || h <= 0.0 || pane.x <= 0.0 || pane.y <= 0.0 {
             return 1.0;
+        }
+        let upright = (pane.x / w).min(pane.y / h);
+        if self.rail_reserve {
+            let past_rail = self.dbg_rect.left() + crate::floats::LEFT_X;
+            pane.x = pane.x.min(2.0 * (self.xf.center.x - past_rail));
         }
         let (s, c) = self.rotation_deg.to_radians().sin_cos();
         let (s, c) = (s.abs(), c.abs());
         let (bw, bh) = (w * c + h * s, w * s + h * c);
-        (pane.x / bw).min(pane.y / bh) / (pane.x / w).min(pane.y / h)
+        (pane.x / bw).min(pane.y / bh) / upright
     }
 
     /// GM4: the view as last drawn (screen ↔ paper).
@@ -3770,7 +3787,6 @@ impl CanvasView {
         let rect = ui.available_rect_before_wrap();
         self.dbg_rect = rect;
         self.dbg_layer = ui.layer_id();
-        self.dbg_preview = false;
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         self.clipboard_events(ui, rect, state);
@@ -3783,13 +3799,21 @@ impl CanvasView {
         // user's zoom / pan / turn / mirror on top. AU4: with the strip closed
         // the pane stands 56 taller than the strip will leave it, and that can
         // run a page under the rail: Fit stops at the rail's reach, and never
-        // under the page's strip-open size (spec 13, the AU4 notes).
+        // under the page's strip-open size (spec 13, the AU4 notes). AU19:
+        // with the rail's room reserved the paper starts past the rail, and
+        // the open canvas's Fit stays as it stood (spec 3.5).
         let fit_in = |tall: f32| (rect.width() / paper_w).min(tall / paper_h) * 0.94;
-        let strip_open = fit_in(crate::rail::reference(rect.height(), self.strip_closed));
-        let clear = (rect.width() - 2.0 * crate::floats::LEFT_X) / paper_w;
-        let fit = clear.clamp(strip_open, fit_in(rect.height())).max(0.01);
+        let (fit, cx) = if self.rail_reserve {
+            let fit = (fit_room(rect).x / paper_w).min(fit_room(rect).y / paper_h).max(0.01);
+            let past_rail = rect.left() + crate::floats::LEFT_X + fit * paper_w / 2.0;
+            (fit, rect.center().x.max(past_rail))
+        } else {
+            let strip_open = fit_in(crate::rail::reference(rect.height(), self.strip_closed));
+            let clear = (rect.width() - 2.0 * crate::floats::LEFT_X) / paper_w;
+            (clear.clamp(strip_open, fit_in(rect.height())).max(0.01), rect.center().x)
+        };
         self.last_fit = fit;
-        self.xf.center = rect.center();
+        self.xf.center = pos2(cx, rect.center().y);
         self.xf.paper = vec2(paper_w, paper_h);
         self.sync_xf();
 
@@ -3828,7 +3852,9 @@ impl CanvasView {
                 if m.shift
                     && let Some(p) = pointer
                 {
-                    let c = rect.center();
+                    // The paper's own centre, which Fit may have moved past
+                    // the rail, so the turn does not swing it.
+                    let c = self.xf.center;
                     let ang = (p.y - c.y).atan2(p.x - c.x).to_degrees();
                     let (start, start_ang, start_pan) =
                         *self.hand_turn.get_or_insert((self.rotation_deg, ang, self.pan));

@@ -339,9 +339,7 @@ fn aukind_door_lands_on_the_first_step() {
     assert!(h.has(&name), "{}", h.describe());
 }
 
-/// Spec 2.6: one stage on two bars with two recipes, and no boot between. Until
-/// the next part turns Plan's sheet on, an animation's sheet is the remembered
-/// choice.
+/// Spec 2.6: one stage on two bars with two recipes, and no boot between.
 #[test]
 fn aukind_door_swaps_draw_and_plan_docks() {
     let dir = tempfile::tempdir().unwrap();
@@ -349,7 +347,6 @@ fn aukind_door_swaps_draw_and_plan_docks() {
     let cut = saved(&an_animation(), dir.path(), "cut");
     let mut h = EditorHarness::as_shipped();
     settle(&mut h);
-    h.editor_mut().sheet_in_draw = true;
     assert!(!has_sheet(&h), "a drawing has no button for it");
     open(&mut h, &cut);
     assert_eq!(h.editor().stage, Some(Stage::Drawing));
@@ -357,7 +354,7 @@ fn aukind_door_swaps_draw_and_plan_docks() {
     open(&mut h, &picture);
     assert_eq!(h.editor().stage, Some(Stage::Drawing));
     assert!(!has_sheet(&h), "a drawing from Plan: {:?}", panes(&h));
-    // The saved choice does nothing on a drawing, which has no button to undo it.
+    // Plan's sheet is no drawing's: it has no button to undo it.
     h.perform(Action::RoomFinishing);
     h.perform(Action::RoomDrawing);
     settle(&mut h);
@@ -397,13 +394,12 @@ fn aukind_door_rewrites_the_way_back() {
     assert!(same_shape(&h.editor().dock, &Stage::Drawing.dock()), "{:?}", panes(&h));
     assert_eq!(h.node_toggled(vocab::STEP_DRAW), Some(true));
     // Back the other way: Plan's own recipe, the way it reads for this project.
-    h.editor_mut().sheet_in_draw = true;
     h.perform(Action::RoomExport);
     settle(&mut h);
     open(&mut h, &cut);
     assert_eq!(back_word(&h).as_deref(), Some(vocab::STEP_PLAN));
     press_back(&mut h);
-    assert!(same_shape(&h.editor().dock, &Stage::dock_with_sheet()), "{:?}", panes(&h));
+    assert!(same_shape(&h.editor().dock, &Stage::Layout.dock()), "{:?}", panes(&h));
     // A guest's snapshot opens nothing: the way back stands while its pill does.
     h.perform(Action::RoomEdit);
     settle(&mut h);
@@ -673,7 +669,9 @@ fn aukind_frozen_boot_reads_no_kind() {
     assert_eq!(h.editor().can_perform(Action::RoomEdit), Ok(()));
     h.perform(Action::RoomLayout);
     settle(&mut h);
-    assert_eq!(h.editor().stage, Some(Stage::Layout), "no redirect");
+    // AU19: the door turns everyone from `Stage::Layout`; no kind asked.
+    assert_eq!(h.editor().stage, Some(Stage::Drawing), "no refusal");
+    assert_eq!(h.state().refusal, "");
     h.state_mut().set_cut_length(4);
     settle(&mut h);
     assert_eq!(stored(h.state()), None, "no promotion");
@@ -1232,7 +1230,7 @@ fn aukind_a_drawing_never_hears_of_frames() {
     // An animation's stand.
     let mut h = EditorHarness::as_animation();
     settle(&mut h);
-    assert!(h.has("Add drawing (band)") && h.has(vocab::SHOW_TIMING_SHEET), "{}", h.describe());
+    assert!(h.has("Add drawing (band)") && h.has(vocab::HIDE_TIMING_SHEET), "{}", h.describe());
 }
 
 #[test]

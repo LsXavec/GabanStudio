@@ -743,7 +743,7 @@ impl Action {
             Quit => "Close the app (asks first about unsaved work).",
             ResetLayout => "Put this step's panes back where they started.",
             ZoomFit => "Fit the whole paper back in its pane, centred; a turned view keeps its turn.",
-            RoomLayout => "Open the Plan step: the cut's preview and timing.",
+            RoomLayout => "Open the project's first step. On an animation that is Plan: the sheet and the paper.",
             RoomDrawing => "Open the Draw step: the paper, one drawing at a time.",
             RoomFinishing => "Open the Color step: palettes and fill.",
             RoomComposite => "Open the Effects step: the node graph, curves and the result.",
@@ -1127,7 +1127,7 @@ impl Action {
             MirrorView => &["flop", "reverse view", "flip horizontal", "hanten", "flip canvas"],
             BrushSmaller | BrushBigger => &["size", "brush size", "bracket"],
             // The studio's words and the old room names still find the steps.
-            RoomLayout => &["lo", "layout", "room"],
+            RoomLayout => &["genga", "lo", "layout", "room"],
             RoomDrawing => &["drawing", "douga", "genga", "room"],
             RoomFinishing => &["paint", "ink", "colour", "shiage", "finishing", "room"],
             RoomComposite => &["composite", "compositing", "photography", "satsuei", "room"],
@@ -2688,9 +2688,16 @@ pub struct UiConfig {
     #[serde(default)]
     pub exact_descriptions: bool,
     /// AU3: the Timing sheet in Draw, the band's one click, remembered.
-    /// `Editor.sheet_in_draw` mirrors it (see `Editor::boot`).
+    /// `Editor.sheet_in_draw` mirrors it (see `Editor::boot`). AU19: read on
+    /// the frozen boot alone: Plan's memory is `panel_more`.
     #[serde(default)]
     pub sheet_in_draw: bool,
+    /// AU19: what a person left each panel's disclosure at, by key. Plan's
+    /// sheet lands here first, as [`PLAN_SHEET_HIDDEN`]: `sheet_in_draw`
+    /// defaults false and upgraders hold it false, so it cannot mean "on".
+    /// Empty, it writes nothing: the section keeps its saved shape.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub panel_more: std::collections::BTreeMap<String, bool>,
     /// AU7: the hints already answered, one bit each (see `say::HINTS`).
     /// Each is once-only, never timed. `Editor.say.seen` mirrors it.
     #[serde(default)]
@@ -2708,6 +2715,9 @@ pub struct UiConfig {
 /// AU10: [`Config::migrate_keymap`] brings a config older than this up to it.
 pub const KEYMAP_REV: u32 = 1;
 
+/// AU19: `ui.panel_more`'s key: a person hid Plan's sheet.
+pub const PLAN_SHEET_HIDDEN: &str = "plan_sheet_hidden";
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -2718,6 +2728,7 @@ impl Default for UiConfig {
             lock_positions: false,
             exact_descriptions: false,
             sheet_in_draw: false,
+            panel_more: Default::default(),
             hints_seen: 0,
             hints_off: false,
             keymap_rev: 0,
@@ -2733,6 +2744,15 @@ impl UiConfig {
             self.hints_seen = 0;
         }
         self.hints_off = !on;
+    }
+
+    /// AU19: Plan's sheet starts on, so a missing key reads shown.
+    pub fn plan_sheet_hidden(&self) -> bool {
+        self.panel_more.get(PLAN_SHEET_HIDDEN).copied().unwrap_or(false)
+    }
+
+    pub fn set_plan_sheet_hidden(&mut self, hidden: bool) {
+        self.panel_more.insert(PLAN_SHEET_HIDDEN.to_string(), hidden);
     }
 }
 

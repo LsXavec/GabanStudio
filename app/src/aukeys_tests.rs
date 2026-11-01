@@ -675,6 +675,7 @@ fn chrome_here(h: &EditorHarness) {
 #[test]
 fn aukeys_hide_tools_hides_and_returns() {
     let mut h = animation();
+    h.hide_sheet();
     chrome_here(&h);
     let (pane, zoom) = (h.editor().canvas.dbg_rect, paper_zoom(&h));
     assert!(!h.has(plate::SHOW_TOOLS));
@@ -821,10 +822,7 @@ fn aukeys_held_key_runs_a_screen_verb_once() {
 /// and nothing saved from it was never drawn.
 #[test]
 fn aukeys_hide_tools_still_draws_the_dock() {
-    let mut h = shipped();
-    // Every stage's recipe, today's Plan preview with them: only the seam
-    // reaches that one until Plan's own part replaces it.
-    h.editor_mut().unset_kind();
+    let mut h = animation();
     h.key(Key::T);
     settle(&mut h);
     for (step, _, stage) in SIX_STEPS {
@@ -832,6 +830,8 @@ fn aukeys_hide_tools_still_draws_the_dock() {
         assert!(null_rects(&recipe) > 0, "{step:?}: a recipe has no rects till it draws");
         h.perform(step);
         settle(&mut h);
+        // Plan's recipe stands on `Stage::Drawing`.
+        let stage = if stage == Stage::Layout { Stage::Drawing } else { stage };
         assert_eq!(h.editor().stage, Some(stage), "{step:?}");
         assert!(h.has(plate::SHOW_TOOLS), "{step:?}: still hidden");
         let live = serde_json::to_value(&h.editor().dock).expect("json");
@@ -856,6 +856,8 @@ fn aukeys_hide_tools_fit_takes_the_whole_pane() {
     let mut h = EditorHarness::with_state_shipped(crate::doc::AppState::new_project("t", 1920, 1080, 24, 72.0));
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     h.kit_mut().set_pixels_per_point(1.0);
+    settle(&mut h);
+    h.hide_sheet();
     h.editor_mut().strip_open = false;
     settle(&mut h);
     assert!(h.editor().strip_closed(), "the latch holds it");
@@ -1280,33 +1282,23 @@ fn aukeys_hide_tools_refusals_have_a_voice() {
     assert!(measure::clip_here(&h, measure::Scope::Chrome).clipped == 0, "the card fits");
 }
 
-/// The lane is gone, and a stroke tried on the Plan preview still gets its
-/// answer, on the dot's card, every time. The hint keeps for a lane to teach on.
+/// AU19: Plan has no preview to refuse a stroke: with the lane gone a stroke
+/// in it simply lands, and the dot's card has nothing to answer.
 #[test]
-fn aukeys_hide_tools_answers_a_plan_stroke() {
-    let plan = say::PLAN_WORDS.to_lowercase();
-    let mut h = shipped();
-    h.editor_mut().unset_kind();
-    h.editor_mut().enter_room(Stage::Layout);
+fn aukeys_hide_tools_draws_in_plan() {
+    let mut h = EditorHarness::as_animation();
     settle(&mut h);
     h.key(Key::T);
     settle(&mut h);
-    let preview = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Canvas);
-    let at = preview.map(|(_, r, _)| r.center() - vec2(0.0, 80.0)).expect("the preview");
-    for _ in 0..2 {
+    let canvas = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Canvas);
+    let at = canvas.map(|(_, r, _)| r.center()).expect("the canvas");
+    let before = h.state().strokes_done;
+    for done in 1..=2 {
         h.drag_path(&[at, at + vec2(30.0, 0.0), at + vec2(60.0, 10.0)]);
-        settle_painted(&mut h, &plan);
-        assert!(!h.painted_text().iter().any(|t| t == ROW), "one voice");
-        h.wait(4.2);
         settle(&mut h);
-        assert!(!h.painted_text().iter().any(|t| t.to_lowercase() == plan), "its dwell ended");
+        assert_eq!(h.state().strokes_done, before + done, "it lands");
+        assert!(h.state().refusal.is_empty(), "{}", h.state().refusal);
     }
-    assert_eq!(h.rig().config.ui.hints_seen & say::PLAN, 0, "the hint keeps");
-    h.key(Key::T);
-    settle(&mut h);
-    assert!(!h.painted_text().iter().any(|t| t.to_lowercase() == plan), "no answer owed");
-    h.drag_path(&[at, at + vec2(30.0, 0.0), at + vec2(60.0, 10.0)]);
-    settle_painted(&mut h, &plan);
 }
 
 /// A key takes a Layers rail away mid-drag. Its release will land nowhere, so
@@ -1350,7 +1342,7 @@ fn aukeys_hide_tools_drops_an_opacity_drag() {
     settle(&mut h);
     let to = drag(&mut h);
     h.key(Key::from_name(SIX_STEPS[1].1).expect("a key"));
-    assert_eq!(visible_panes(&h.editor().dock), [Pane::Canvas], "Draw's lone canvas, and no rail");
+    assert_eq!(visible_panes(&h.editor().dock), [Pane::XSheet, Pane::Canvas], "Plan's recipe, and no rail");
     assert_eq!(h.state().strip_opacity, None, "gone with its rail");
     h.release(to);
     settle(&mut h);

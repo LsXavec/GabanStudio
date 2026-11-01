@@ -256,8 +256,6 @@ fn audock_lock_holds_the_recipe_and_lets_a_hand_panel_go() {
     let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
-    h.click(vocab::SHOW_TIMING_SHEET);
-    settle(&mut h);
     h.rig_mut().config.ui.lock_positions = true;
     settle(&mut h);
     middle_click_tab(&mut h, Pane::XSheet);
@@ -270,6 +268,8 @@ fn audock_lock_holds_the_recipe_and_lets_a_hand_panel_go() {
     // A panel opened by hand still goes under the lock, and the Canvas stays.
     let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
+    settle(&mut h);
+    h.hide_sheet();
     h.rig_mut().config.ui.lock_positions = true;
     settle(&mut h);
     h.editor_mut().open_pane(Pane::History);
@@ -326,57 +326,60 @@ fn audock_draw_is_canvas_alone_when_shipped() {
 fn audock_sheet_button_is_one_click_and_remembered() {
     let mut h = EditorHarness::as_animation();
     settle(&mut h);
-    assert!(!h.has(vocab::HIDE_TIMING_SHEET));
-    h.click(vocab::SHOW_TIMING_SHEET);
-    settle(&mut h);
-    assert!(panes(&h).contains(&Pane::XSheet));
-    assert!(h.has(vocab::HIDE_TIMING_SHEET), "{}", h.describe());
-    assert!(h.rig().config.ui.sheet_in_draw, "remembered");
-    let saved = Config::load_from(h.data_dir()).0;
-    assert!(saved.ui.sheet_in_draw, "and saved");
-    // Out to a step and back, it is still there.
-    h.perform(Action::RoomFinishing);
-    h.perform(Action::RoomDrawing);
-    settle(&mut h);
-    assert!(panes(&h).contains(&Pane::XSheet));
+    assert!(panes(&h).contains(&Pane::XSheet), "the sheet starts on: {:?}", panes(&h));
+    assert!(!h.has(vocab::SHOW_TIMING_SHEET));
     h.click(vocab::HIDE_TIMING_SHEET);
     settle(&mut h);
     assert_eq!(panes(&h), [Pane::Canvas]);
-    assert!(!h.rig().config.ui.sheet_in_draw);
-    assert!(!Config::load_from(h.data_dir()).0.ui.sheet_in_draw);
-    // Absent where the recipe holds the sheet. Today's Layout recipe, which
-    // only the seam reaches until Plan's own part replaces it.
-    h.editor_mut().unset_kind();
-    for action in [Action::RoomLayout, Action::RoomEdit] {
-        h.perform(action);
-        settle(&mut h);
-        assert!(!h.has(vocab::SHOW_TIMING_SHEET) && !h.has(vocab::HIDE_TIMING_SHEET), "{action:?}");
-    }
-    // Elsewhere it opens the pane, and the Draw choice stays what it was.
+    assert!(h.has(vocab::SHOW_TIMING_SHEET), "{}", h.describe());
+    assert!(h.rig().config.ui.plan_sheet_hidden(), "remembered");
+    let saved = Config::load_from(h.data_dir()).0;
+    assert!(saved.ui.plan_sheet_hidden(), "and saved");
+    // Out to a step and back, it is still gone.
+    h.perform(Action::RoomFinishing);
+    h.perform(Action::RoomDrawing);
+    settle(&mut h);
+    assert_eq!(panes(&h), [Pane::Canvas]);
+    h.click(vocab::SHOW_TIMING_SHEET);
+    settle(&mut h);
+    assert!(panes(&h).contains(&Pane::XSheet));
+    assert!(!h.rig().config.ui.plan_sheet_hidden());
+    assert!(!Config::load_from(h.data_dir()).0.ui.plan_sheet_hidden());
+    // Absent where the recipe holds the sheet for good.
+    h.perform(Action::RoomEdit);
+    settle(&mut h);
+    assert!(!h.has(vocab::SHOW_TIMING_SHEET) && !h.has(vocab::HIDE_TIMING_SHEET));
+    h.perform(Action::RoomDrawing);
+    settle(&mut h);
+    h.click(vocab::HIDE_TIMING_SHEET);
+    settle(&mut h);
+    // Elsewhere it opens the pane, and the Plan choice stays what it was.
     h.perform(Action::Layout3dRoom);
     settle(&mut h);
     h.click(vocab::SHOW_TIMING_SHEET);
     settle(&mut h);
     assert!(panes(&h).contains(&Pane::XSheet));
-    assert!(!h.rig().config.ui.sheet_in_draw);
+    assert!(h.rig().config.ui.plan_sheet_hidden());
 }
 
 #[test]
 fn audock_sheet_choice_survives_a_restart() {
     let mut first = EditorHarness::as_animation();
     settle(&mut first);
-    first.click(vocab::SHOW_TIMING_SHEET);
+    first.click(vocab::HIDE_TIMING_SHEET);
     settle(&mut first);
     assert!(config::config_path_in(first.data_dir()).exists(), "saved at the click");
     let h = EditorHarness::with_dir_animation(first.quit());
     assert_eq!(h.editor().stage, Some(Stage::Drawing));
-    assert!(panes(&h).contains(&Pane::XSheet), "{:?}", panes(&h));
-    assert!(h.has(vocab::HIDE_TIMING_SHEET));
+    assert_eq!(panes(&h), [Pane::Canvas]);
+    assert!(h.has(vocab::SHOW_TIMING_SHEET));
 }
 
 #[test]
 fn audock_sheet_button_keeps_a_hand_arrangement() {
     let mut h = EditorHarness::as_animation();
+    settle(&mut h);
+    h.click(vocab::HIDE_TIMING_SHEET);
     settle(&mut h);
     h.editor_mut().open_pane(Pane::History);
     settle(&mut h);
@@ -386,11 +389,11 @@ fn audock_sheet_button_keeps_a_hand_arrangement() {
     assert_eq!(panes(&h).len(), 3, "{:?}", panes(&h));
     assert!(panes(&h).contains(&Pane::History) && panes(&h).contains(&Pane::XSheet));
     assert!(paper_in_view(&h), "the sheet lands beside the paper: {:?}", crate::visible_panes(&h.editor().dock));
-    assert!(h.rig().config.ui.sheet_in_draw);
+    assert!(!h.rig().config.ui.plan_sheet_hidden());
     h.click(vocab::HIDE_TIMING_SHEET);
     settle(&mut h);
     assert_eq!(panes(&h), [Pane::Canvas, Pane::History], "only the sheet left");
-    assert!(!h.rig().config.ui.sheet_in_draw);
+    assert!(h.rig().config.ui.plan_sheet_hidden());
     // A recipe whose divider moved is still the recipe.
     h.perform(Action::ResetLayout);
     h.click(vocab::SHOW_TIMING_SHEET);
@@ -408,7 +411,7 @@ fn audock_sheet_button_keeps_a_hand_arrangement() {
 fn audock_sheet_button_outside_draw_is_a_plain_action() {
     let mut h = EditorHarness::as_animation();
     settle(&mut h);
-    assert_eq!(h.node_toggled(vocab::SHOW_TIMING_SHEET), Some(false), "a latch in Draw");
+    assert_eq!(h.node_toggled(vocab::HIDE_TIMING_SHEET), Some(true), "a latch in Plan");
     for action in [Action::RoomFinishing, Action::RoomComposite, Action::Layout3dRoom] {
         h.perform(action);
         settle(&mut h);
@@ -422,7 +425,7 @@ fn audock_sheet_button_outside_draw_is_a_plain_action() {
         h.hover("first frame (Home)");
         h.run_frames(2);
         assert_eq!(grounds_on(&h, vocab::SHOW_TIMING_SHEET), [plate::WELL], "{action:?}: unlit");
-        assert!(!h.rig().config.ui.sheet_in_draw, "{action:?}: the Draw choice stays");
+        assert!(!h.rig().config.ui.plan_sheet_hidden(), "{action:?}: the Plan choice stays");
     }
 }
 
@@ -430,15 +433,16 @@ fn audock_sheet_button_outside_draw_is_a_plain_action() {
 fn audock_reset_reads_the_sheet_switch() {
     let mut h = EditorHarness::as_animation();
     settle(&mut h);
-    h.editor_mut().open_pane(Pane::History);
-    h.perform(Action::ResetLayout);
-    assert_eq!(panes(&h), [Pane::Canvas]);
-    h.click(vocab::SHOW_TIMING_SHEET);
-    settle(&mut h);
     let with_sheet = panes(&h);
+    assert!(with_sheet.contains(&Pane::XSheet));
     h.editor_mut().open_pane(Pane::History);
     h.perform(Action::ResetLayout);
     assert_eq!(panes(&h), with_sheet);
+    h.click(vocab::HIDE_TIMING_SHEET);
+    settle(&mut h);
+    h.editor_mut().open_pane(Pane::History);
+    h.perform(Action::ResetLayout);
+    assert_eq!(panes(&h), [Pane::Canvas]);
 }
 
 #[test]
@@ -457,9 +461,13 @@ fn audock_frozen_boot_keeps_the_sheet() {
 
 #[test]
 fn audock_templates_start_the_sheet_where_they_say() {
+    // AU19: an animation's sheet is on, so a template has only a hidden sheet
+    // to start on.
+    let mut hidden = config::UiConfig::default();
+    hidden.set_plan_sheet_hidden(true);
     for (i, t) in templates::ALL.iter().enumerate() {
-        let ed = crate::open_template(i, None, None, &Default::default());
-        assert_eq!(ed.sheet_in_draw, t.sheet_on, "{}", t.name);
+        let ed = crate::open_template(i, None, None, &hidden);
+        assert_eq!(ed.plan_sheet_hidden, !t.sheet_on, "{}", t.name);
         assert_eq!(ed.stage, Some(t.room), "{}", t.name);
     }
     let on: Vec<&str> = templates::ALL.iter().filter(|t| t.sheet_on).map(|t| t.name).collect();
@@ -467,15 +475,13 @@ fn audock_templates_start_the_sheet_where_they_say() {
     // The sheet is that project's: an explicit Hide outlives the template.
     let mut h = EditorHarness::as_animation();
     settle(&mut h);
-    h.click(vocab::SHOW_TIMING_SHEET);
-    settle(&mut h);
     h.click(vocab::HIDE_TIMING_SHEET);
     settle(&mut h);
-    assert!(!Config::load_from(h.data_dir()).0.ui.sheet_in_draw);
-    *h.editor_mut() = crate::open_template(0, None, Some(h.data_dir()), &Default::default());
+    assert!(Config::load_from(h.data_dir()).0.ui.plan_sheet_hidden());
+    *h.editor_mut() = crate::open_template(0, None, Some(h.data_dir()), &hidden);
     settle(&mut h);
-    assert!(!h.rig().config.ui.sheet_in_draw, "the template leaves the memory alone");
-    assert!(!Config::load_from(h.data_dir()).0.ui.sheet_in_draw, "and the file");
+    assert!(h.rig().config.ui.plan_sheet_hidden(), "the template leaves the memory alone");
+    assert!(Config::load_from(h.data_dir()).0.ui.plan_sheet_hidden(), "and the file");
     h.perform(Action::RoomFinishing);
     h.perform(Action::RoomDrawing);
     settle(&mut h);
@@ -486,12 +492,12 @@ fn audock_templates_start_the_sheet_where_they_say() {
     assert_eq!(panes(&h), [Pane::Canvas]);
     h.click(vocab::SHOW_TIMING_SHEET);
     settle(&mut h);
-    assert!(h.rig().config.ui.sheet_in_draw, "the click is remembered");
-    assert!(Config::load_from(h.data_dir()).0.ui.sheet_in_draw, "and saved");
+    assert!(!h.rig().config.ui.plan_sheet_hidden(), "the click is remembered");
+    assert!(!Config::load_from(h.data_dir()).0.ui.plan_sheet_hidden(), "and saved");
     h.click(vocab::HIDE_TIMING_SHEET);
     settle(&mut h);
     // A blank project after it opens by the remembered choice.
-    *h.editor_mut() = crate::open_template(0, None, Some(h.data_dir()), &Default::default());
+    *h.editor_mut() = crate::open_template(0, None, Some(h.data_dir()), &hidden);
     settle(&mut h);
     h.rebuild_editor(sample::build_sample());
     settle(&mut h);
@@ -514,6 +520,7 @@ fn audock_a_new_pane_leaves_the_paper_in_view() {
     let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
+    h.hide_sheet();
     h.editor_mut().open_pane(Pane::History);
     settle(&mut h);
     assert_eq!(crate::visible_panes(&h.editor().dock), [Pane::Canvas, Pane::History]);
@@ -837,15 +844,15 @@ fn audock_bar_and_band_icons_stand_twenty() {
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
     let images = measure::images_of(&h.kit().output().shapes);
-    for key in ["Undo (toolbar)", "Redo (toolbar)", "Search", vocab::SHOW_TIMING_SHEET] {
+    for key in ["Undo (toolbar)", "Redo (toolbar)", "Search", vocab::HIDE_TIMING_SHEET] {
         let at = points(&h, key);
         let icon = images.iter().find(|r| at.contains_rect(**r));
         let icon = icon.unwrap_or_else(|| panic!("{key} has no icon"));
         assert_eq!(icon.size(), vec2(plate::BAR_ICON, plate::BAR_ICON), "{key}");
     }
     // The transport's keys are drawn, not cut: they stand on the same number.
-    // Five of them stand only with the sheet up (spec 4.4).
-    h.editor_mut().show_sheet();
+    // Five of them stand only on the Timing step's full band (spec 4.4, 3.6).
+    h.perform(Action::RoomEdit);
     settle(&mut h);
     for key in ["first frame (Home)", "previous frame (S)", "play (Space)", "next frame (F)", "last frame (End)"] {
         assert_eq!(points(&h, key).width(), 6.0 + plate::BAR_ICON + 6.0, "{key}");
@@ -939,7 +946,9 @@ fn audock_chrome_clip_audit_passes() {
 #[test]
 fn audock_band_lanes_keep_apart() {
     let mut h = EditorHarness::with_state_shipped(sample::build_sample());
-    // The full transport is the longer one, and it stands with the sheet up.
+    // The full transport is the longer one. Plan keeps the plain band and the
+    // Timing step has no sheet key, so this is Color with the sheet brought up.
+    h.perform(Action::RoomFinishing);
     h.editor_mut().show_sheet();
     for (w, tall) in SIZES {
         for stored in PROBE_SCALES {
@@ -947,7 +956,7 @@ fn audock_band_lanes_keep_apart() {
             let wide = h.ctx().content_rect().width() >= steps::FOLD;
             let last = if wide { "clear loop range" } else { "…" };
             let left = points(&h, last).right();
-            let lane = if wide { vocab::SOUND_WHILE_DRAGGING } else { vocab::HIDE_TIMING_SHEET };
+            let lane = if wide { vocab::SOUND_WHILE_DRAGGING } else { vocab::SHOW_TIMING_SHEET };
             let right = points(&h, lane).left();
             assert!(left <= right, "{last} runs into the right lane at {w}×{tall} at {stored}");
             assert_eq!(h.has("first frame (Home)"), wide);
@@ -982,7 +991,7 @@ fn audock_long_refusal_stays_in_its_lane() {
         h.state_mut().status = "a word of chatter".into();
         h.state_mut().refuse(LONG);
         settle(&mut h);
-        let lane = points(&h, vocab::SHOW_TIMING_SHEET).left();
+        let lane = points(&h, vocab::HIDE_TIMING_SHEET).left();
         let words = points(&h, LONG);
         assert!(words.right() <= lane, "{w}: the words end at {} past the lane at {lane}", words.right());
         let rects = measure::rects_of(&h.kit().output().shapes);

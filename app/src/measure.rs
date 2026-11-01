@@ -505,13 +505,11 @@ pub struct Share {
 const GRID: f32 = 4.0;
 
 /// The 4 pt grid of 4.8 over the window. Never a pane's share: the window is
-/// what the person has. A room with no paper scores nothing: no canvas pane,
-/// or Layout's, which holds the preview and leaves `view_xform` as the room
-/// before it left it.
+/// what the person has. A room with no canvas pane has no paper and scores
+/// nothing.
 pub fn paper_share(h: &EditorHarness) -> Share {
     let editor = h.editor();
-    let canvas = editor.pane_rects.iter().any(|(p, ..)| *p == Pane::Canvas);
-    if !canvas || editor.canvas.dbg_preview {
+    if !editor.pane_rects.iter().any(|(p, ..)| *p == Pane::Canvas) {
         return Share::default();
     }
     let ctx = h.ctx();
@@ -1183,9 +1181,7 @@ mod tests {
                     "clip_chrome": [chrome.clipped, chrome.outside, chrome.elided],
                     "contrast": [contrast.checked, contrast.failures.len(), contrast.unknown.len()],
                     "canvas": format!("{:?}", h.editor().canvas.dbg_rect),
-                    // Layout's pane is the preview: no paper, no zoom.
-                    "preview": h.editor().canvas.dbg_preview,
-                    "zoom": (!h.editor().canvas.dbg_preview).then(|| h.editor().canvas.view_xform().zoom),
+                    "zoom": h.editor().canvas.view_xform().zoom,
                     "clip_found": clip.found,
                     "contrast_failures": contrast.failures,
                 }));
@@ -1273,41 +1269,15 @@ mod tests {
         assert_eq!(paper_share(&h), Share::default());
     }
 
-    /// Layout's Canvas pane holds the preview: no paper, whatever the room
-    /// before it left in the canvas's transform.
-    #[test]
-    fn auseam_paper_share_reads_no_paper_in_layouts_preview() {
-        let mut readings = Vec::new();
-        for from in [Stage::Drawing, Stage::InkPaint] {
-            let mut h = blank_drawing();
-            h.editor_mut().enter_room(from);
-            settle(&mut h);
-            let before = paper_share(&h);
-            assert!(before.paper > 0.0, "{from:?} has paper: {before:?}");
-            readings.push(before);
-            h.editor_mut().enter_room(Stage::Layout);
-            settle(&mut h);
-            assert!(h.editor().pane_rects.iter().any(|(p, ..)| *p == Pane::Canvas));
-            assert_eq!(paper_share(&h), Share::default(), "Layout after {from:?}");
-        }
-        assert_ne!(readings[0], readings[1], "two different rooms to come from");
-        // Back on a real canvas the reading returns.
-        let mut h = blank_drawing();
-        let clean = paper_share(&h);
-        h.editor_mut().enter_room(Stage::Layout);
-        settle(&mut h);
-        h.editor_mut().enter_room(Stage::Drawing);
-        settle(&mut h);
-        assert_eq!(paper_share(&h), clean);
-    }
-
     /// 4.1's arithmetic on the screen the person has: the App lays out from
     /// the window's edge, and the share is of the whole window.
     #[test]
     fn auseam_paper_share_reads_the_persons_window() {
         let mut h = EditorHarness::as_shipped();
-        // The frozen boot keeps the sheet: like for like (AU3).
+        // The frozen boot keeps the sheet: like for like (AU3). AU19: only with
+        // no kind stamped, so that goes too.
         h.editor_mut().sheet_in_draw = true;
+        h.editor_mut().unset_kind();
         h.editor_mut().enter_room(Stage::Drawing);
         h.kit_mut().set_size(vec2(1600.0, 900.0));
         settle(&mut h);

@@ -16,7 +16,6 @@ use anim_core::manga;
 use crate::config::{Action, UiConfig};
 use crate::render_queue::Landed;
 use crate::steps::{self, ProjectKind};
-use crate::viewer::ViewerView;
 use crate::welcome::{self, PenCheck};
 use crate::workspace::Stage;
 use crate::{AppRequest, Editor, Pane, Performed, doc, export_step, menus, visible_panes};
@@ -27,18 +26,17 @@ pub const GO_TO_DRAW: &str = "Go to Draw";
 pub const GO_TO_MANGA: &str = "Go to Manga";
 pub const FIX_IT: &str = "Fix it";
 
-/// The Plan preview's answer to a stroke, whether or not a hint can say it.
-pub const PLAN_WORDS: &str = "This step shows a preview. Drawing happens in Draw.";
+/// AU19: what Plan teaches, once.
+pub const PLAN_ROW_WORDS: &str = "Click a row, then draw on it.";
 
 // The stored bits, one for each row of spec 8.2. 15 was AU7's stand-in for the
-// Export step: it may stand set in a config, so it is not given to another
-// row.
+// Export step and 5 the Plan preview's row: either may stand set in a config,
+// so neither is given to another row.
 pub const NEW_PAPER: u32 = 1 << 0;
 pub const ADD_DRAWING: u32 = 1 << 1;
 pub const NEXT_POSE: u32 = 1 << 2;
 pub const PLAY: u32 = 1 << 3;
 pub const SHARE: u32 = 1 << 4;
-pub const PLAN: u32 = 1 << 5;
 pub const REFUSED_TWICE: u32 = 1 << 6;
 pub const FLAT_PEN: u32 = 1 << 7;
 /// Never stored: a finished export is news each time, not a lesson.
@@ -56,6 +54,7 @@ pub const TWO_DRAWINGS: u32 = 1 << 16;
 /// is one array, an animation's, so these keep theirs here (spec 2.10).
 pub const DRAWING_SLOTS: [u32; 3] = [1 << 17, 1 << 18, 1 << 19];
 pub const COMIC_SLOTS: [u32; 3] = [1 << 20, 1 << 21, 1 << 22];
+pub const PLAN_ROWS: u32 = 1 << 23;
 /// AU18: the drawing grew into an animation: a remark, said once.
 pub const GREW: u32 = 1 << 24;
 pub const GREW_WORDS: &str = "Two drawings make an animation. Plan and Timing are here now.";
@@ -143,8 +142,8 @@ pub struct Facts {
     pub queue_up: bool,
     /// A finished export's name, until something else has happened.
     pub report: Option<String>,
-    /// A stroke was tried on the Plan preview.
-    pub plan_tried: bool,
+    /// AU19: this is Plan with the sheet on.
+    pub plan_sheet: bool,
     /// Three pen strokes with no pressure in them.
     pub flat_pen: bool,
     /// A refusal said twice running.
@@ -207,7 +206,7 @@ const ANY_KIND: &[ProjectKind] = &ProjectKind::ALL;
 const ANIMATION: &[ProjectKind] = &[ProjectKind::Animation];
 const ON_PAPER: &[ProjectKind] = &[ProjectKind::Drawing, ProjectKind::Animation];
 
-pub const HINTS: [Hint; 16] = [
+pub const HINTS: [Hint; 17] = [
     // First, or a row with nowhere to stand would keep it from the dot. The
     // first stroke answers it too: whoever draws has read it, or has no need
     // to. Only one made under the card: `read` asks every row, shown or not.
@@ -220,16 +219,6 @@ pub const HINTS: [Hint; 16] = [
         shows: |f| f.card_room,
         answered: |f| f.tools_back || (f.card_room && f.stroked),
         passes: false,
-    },
-    Hint {
-        bit: PLAN,
-        words: Words::Plain(PLAN_WORDS),
-        verb: Some(Verb::GoToDraw),
-        steps: &[Stage::Layout],
-        kinds: ANY_KIND,
-        shows: |f| f.plan_tried,
-        answered: never,
-        passes: true,
     },
     Hint {
         bit: REFUSED_TWICE,
@@ -303,6 +292,28 @@ pub const HINTS: [Hint; 16] = [
         shows: |f| f.art,
         answered: |f| f.effect_added,
         passes: true,
+    },
+    // AU19: Plan's lesson stands where the paper's would: one bit, two rows,
+    // for Show me's circle goes on blank paper and never over art.
+    Hint {
+        bit: PLAN_ROWS,
+        words: Words::Plain(PLAN_ROW_WORDS),
+        verb: Some(Verb::Show(0)),
+        steps: DRAW,
+        kinds: ANIMATION,
+        shows: |f| f.plan_sheet && !f.art,
+        answered: |f| f.stroked,
+        passes: false,
+    },
+    Hint {
+        bit: PLAN_ROWS,
+        words: Words::Plain(PLAN_ROW_WORDS),
+        verb: None,
+        steps: DRAW,
+        kinds: ANIMATION,
+        shows: |f| f.plan_sheet && f.art,
+        answered: |f| f.stroked,
+        passes: false,
     },
     // Quick Start's chain, in its own order.
     Hint {
@@ -529,7 +540,6 @@ pub struct Say {
     /// A comic's panels, and the page and the revision that count is of.
     panels: Option<usize>,
     panels_at: Option<(CutRef, u64)>,
-    plan_tried: bool,
     flat_strokes: u32,
     pen_answered: bool,
     /// The canvas line has painted (spec 8.4).
@@ -666,7 +676,6 @@ impl Editor {
     /// speaks next. Runs after the dock, where a stroke lands.
     pub(crate) fn say_read(&mut self, ctx: &eframe::egui::Context) {
         let (stroked, filled, exported) = self.say_outcomes();
-        self.say_plan();
         self.say.count_refusals(&self.state);
         let facts = self.say_facts(stroked, filled, exported);
         let mut seen = self.say.seen;
@@ -758,23 +767,6 @@ impl Editor {
         }
     }
 
-    /// A stroke tried on the Plan preview always gets an answer: a hint the
-    /// first time, then the same sentence as a remark. Under Hide tools neither
-    /// has a lane, so the dot says it and the hint keeps for later. That is an
-    /// answer, not a refusal to count: said twice, it would use up the lesson.
-    fn say_plan(&mut self) {
-        let tried = self.viewers.get_mut(&u8::MAX).is_some_and(|vs: &mut ViewerView| std::mem::take(&mut vs.tried));
-        if tried && self.tools_hidden {
-            self.state.refuse(PLAN_WORDS);
-            self.say.refusal_seq = self.state.refusal_seq;
-        } else if tried && (self.say.off || self.say.seen & PLAN != 0) {
-            self.state.status = PLAN_WORDS.into();
-            self.status_seen.clear();
-        }
-        let due = tried && !self.tools_hidden;
-        self.say.plan_tried = (self.say.plan_tried || due) && self.stage == Some(Stage::Layout);
-    }
-
     /// AU10: will the dot wear its first-time card? Asked once each time the
     /// tools go. With no chord to name the row has no sentence.
     pub(crate) fn dot_card_due(&self, ctx: &eframe::egui::Context) -> bool {
@@ -824,7 +816,7 @@ impl Editor {
             twice: shown.is_some_and(|d| keys(d) > 1),
             queue_up: visible_panes(&self.dock).contains(&Pane::RenderQueue),
             report: self.say.exported.as_ref().map(|file| file.name.clone()),
-            plan_tried: self.say.plan_tried,
+            plan_sheet: self.in_plan() && self.sheet_on_screen(),
             flat_pen: self.say.flat_strokes >= FLAT_STROKES,
             refused_twice: (self.say.refusals >= 2).then(|| self.say.refusal.clone()),
             card_room: self.say.card_room == Some(true),
@@ -857,9 +849,6 @@ impl Editor {
             }
             Verb::GoToDraw => {
                 self.invoke(Action::RoomDrawing, ctx);
-                if self.say.standing == Some(PLAN) {
-                    self.say_answered(PLAN);
-                }
             }
             Verb::Fix(action) => {
                 self.invoke(action, ctx);

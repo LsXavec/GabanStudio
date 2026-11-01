@@ -203,8 +203,9 @@ impl Stage {
     }
 
     /// AU1: the classic draw room, with the Timing sheet; presets tabbed
-    /// behind the layer strip (each drawing pass keeps its own pencil). AU3:
-    /// `Editor::recipe` picks it when `sheet_in_draw` is on.
+    /// behind the layer strip (each drawing pass keeps its own pencil). AU19:
+    /// the frozen boot's alone: `Editor::recipe` picks it there when
+    /// `sheet_in_draw` is on.
     pub fn dock_with_sheet() -> DockState<Pane> {
         let mut ds = DockState::new(vec![Pane::Canvas]);
         let tree = ds.main_surface_mut();
@@ -217,17 +218,14 @@ impl Stage {
     /// (fraction = share of the top/left child of the split.)
     pub fn dock(self) -> DockState<Pane> {
         match self {
+            // AU19: Plan's one source, read by `Editor::recipe`: the sheet whole
+            // at the left and a live canvas. No step stands on `Stage::Layout`.
             Stage::Layout => {
-                // Big canvas; node graph tabbed behind the sheet (reference
-                // images are graph nodes).
                 let mut ds = DockState::new(vec![Pane::Canvas]);
-                let tree = ds.main_surface_mut();
-                let [_canvas, rail] =
-                    tree.split_left(NodeIndex::root(), 0.22, vec![Pane::XSheet, Pane::NodeGraph]);
-                tree.split_below(rail, 0.6, vec![Pane::Layers]);
+                ds.main_surface_mut().split_left(NodeIndex::root(), 0.22, vec![Pane::XSheet]);
                 ds
             }
-            // AU3: the paper alone; `dock_with_sheet` is one click away.
+            // AU3: the paper alone.
             Stage::Drawing => DockState::new(vec![Pane::Canvas]),
             Stage::InkPaint => {
                 // Edit canvas + live composite viewer SIDE BY SIDE (the A2

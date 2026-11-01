@@ -42,10 +42,12 @@ fn ready() -> EditorHarness {
     h
 }
 
-/// The same install after `An animation`: the rows a drawing never hears.
+/// The same install after `An animation`: the rows a drawing never hears. AU19:
+/// its sheet hidden by hand, where these rows speak of the paper alone.
 fn animation() -> EditorHarness {
     let mut h = EditorHarness::as_animation();
     sized(&mut h, 1600.0, 900.0);
+    h.hide_sheet();
     h
 }
 
@@ -140,11 +142,9 @@ fn ausay_priority() {
     assert!(h.has(SHOW_ME));
 
     // The table's own order, read with no editor.
-    let f = at_step(Stage::Layout, Facts { plan_tried: true, flat_pen: true, ..Facts::default() });
-    let spoken = say::read(&f, &mut 0, None, chord).expect("a row applies");
-    assert_eq!(spoken.words, say::PLAN_WORDS);
+    let f = at_step(Stage::Drawing, Facts { flat_pen: true, ..Facts::default() });
+    assert_eq!(say::read(&f, &mut 0, None, chord).expect("a row applies").bit, Some(say::FLAT_PEN));
     let f = Facts { refused_twice: Some(doc::HELD_FRAME.into()), ..f };
-    let f = Facts { plan_tried: false, ..f };
     assert_eq!(say::read(&f, &mut 0, None, chord).expect("a row").bit, Some(say::REFUSED_TWICE));
 }
 
@@ -242,6 +242,7 @@ fn ausay_a_passing_row_waits_to_be_read() {
     const HELD: &str = "This drawing stays on screen for 6 frames.";
     let mut h = EditorHarness::with_state_shipped(one_drawing_at(0));
     sized(&mut h, 1600.0, 900.0);
+    h.hide_sheet();
     quiet(&mut h);
     let lane = picked(&h);
     assert_eq!(lane.as_deref(), Some("Next: add a drawing."));
@@ -254,7 +255,9 @@ fn ausay_a_passing_row_waits_to_be_read() {
     assert_eq!(h.state().view.frame, 0);
     assert_eq!(picked(&h), lane);
 
-    // With it up, a stop stays where it lands.
+    // With it up, a stop stays where it lands. AU19: Plan's row answered, or
+    // the lane would teach it.
+    h.rig_mut().config.ui.hints_seen |= say::PLAN_ROWS;
     h.editor_mut().show_sheet();
     settle(&mut h);
     h.state_mut().view.playing = true;
@@ -802,6 +805,7 @@ fn ausay_a_circle_in_a_session_rides_the_mirror_a_fill_rides() {
 fn empty_cell() -> EditorHarness {
     let mut h = EditorHarness::with_state_shipped(one_drawing_at(3));
     sized(&mut h, 1600.0, 900.0);
+    h.hide_sheet();
     h
 }
 
@@ -853,6 +857,7 @@ fn ausay_empty_cell_line_waits_for_a_first_drawing() {
     state.goto(0);
     let mut h = EditorHarness::with_state_shipped(state);
     sized(&mut h, 1600.0, 900.0);
+    h.hide_sheet();
     quiet(&mut h);
     assert!(!h.state().has_art() && h.state().current_drawing().is_none());
     assert!(says(&h, "Draw on the paper to begin."));
@@ -878,12 +883,10 @@ fn ausay_another_document_is_no_outcome() {
     assert_ne!(h.editor().say.seen & say::EMPTY_CELL, 0, "a stroke in it counts");
 }
 
-/// A blank document says something in every step, hints on or off; and a
-/// stroke tried on the Plan preview always gets an answer.
+/// A blank document says something in every step, hints on or off.
 #[test]
 fn ausay_no_step_is_silent() {
     let empty = [
-        (Stage::Layout, "Nothing here yet."),
         (Stage::Drawing, "Draw on the paper to begin."),
         (Stage::Edit, "Add a second drawing to set timing."),
         (Stage::InkPaint, "Nothing to color yet."),
@@ -896,9 +899,6 @@ fn ausay_no_step_is_silent() {
                 continue; // A hint, and the only sentence off silences.
             }
             let mut h = ready();
-            // Today's Plan preview, which only the seam reaches until Plan's
-            // own part replaces it.
-            h.editor_mut().unset_kind();
             if off {
                 h.perform(Action::ToggleHints);
                 settle(&mut h);
@@ -907,88 +907,16 @@ fn ausay_no_step_is_silent() {
             settle(&mut h);
             quiet(&mut h);
             assert!(says(&h, words), "{stage:?} off={off}: {:?}", h.painted_text());
-            // The Plan preview's and the Export panel's button are the pane's
-            // own, and off has no action button.
+            // The Export panel's button is the pane's own, and off has no
+            // action button.
             let button = match stage {
-                Stage::Layout | Stage::Export => h.has(say::GO_TO_DRAW),
+                Stage::Export => h.has(say::GO_TO_DRAW),
                 Stage::Drawing => !h.has(LANE_GO_TO_DRAW),
                 _ => h.has(LANE_GO_TO_DRAW) != off,
             };
             assert!(button, "{stage:?} off={off}");
         }
     }
-
-    // Plan, a stroke attempt: the hint first, then the same sentence as a
-    // remark, every time.
-    for off in [false, true] {
-        let mut h = in_plan(off);
-        let at = plan_preview(&h);
-        for _ in 0..3 {
-            h.drag_path(&[at, at + vec2(30.0, 0.0), at + vec2(60.0, 10.0)]);
-            settle(&mut h);
-            assert!(says(&h, say::PLAN_WORDS), "off={off}: {:?}", h.painted_text());
-            quiet(&mut h);
-        }
-    }
-}
-
-/// A shipped editor on the Plan preview, its remarks gone.
-fn in_plan(off: bool) -> EditorHarness {
-    let mut h = ready();
-    h.editor_mut().unset_kind();
-    if off {
-        h.perform(Action::ToggleHints);
-        settle(&mut h);
-    }
-    h.editor_mut().enter_room(Stage::Layout);
-    settle(&mut h);
-    quiet(&mut h);
-    h
-}
-
-/// A place on the preview clear of its empty state's button.
-fn plan_preview(h: &EditorHarness) -> egui::Pos2 {
-    let preview = h.editor().pane_rects.iter().find(|(p, ..)| *p == Pane::Canvas);
-    preview.map(|(_, r, _)| r.center() - vec2(0.0, 80.0)).expect("the preview")
-}
-
-/// A stroke tried is the drawing hand's drag. A tap, a double-click or a drag
-/// with another button is no attempt to draw, and asks nothing.
-#[test]
-fn ausay_plan_hears_only_a_stroke() {
-    let mut h = in_plan(false);
-    let at = plan_preview(&h);
-    let quiet_lane = picked(&h);
-    h.click_pos(at);
-    settle(&mut h);
-    h.click_pos(at);
-    h.click_pos(at);
-    settle(&mut h);
-    h.right_click_pos(at);
-    settle(&mut h);
-    h.middle_click_pos(at);
-    settle(&mut h);
-    for button in [egui::PointerButton::Secondary, egui::PointerButton::Middle] {
-        let event = |pos, pressed| egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE };
-        h.event(egui::Event::PointerMoved(at));
-        h.event(event(at, true));
-        h.run_frames(2);
-        h.event(egui::Event::PointerMoved(at + vec2(60.0, 10.0)));
-        h.run_frames(2);
-        h.event(event(at + vec2(60.0, 10.0), false));
-        settle(&mut h);
-    }
-    assert_eq!(picked(&h), quiet_lane, "no attempt");
-    assert!(!says(&h, say::PLAN_WORDS), "{:?}", h.painted_text());
-
-    h.drag_path(&[at, at + vec2(30.0, 0.0), at + vec2(60.0, 10.0)]);
-    settle(&mut h);
-    assert_eq!(picked(&h).as_deref(), Some(say::PLAN_WORDS), "the drawing hand's drag is one");
-    // Pressed at once, the row was read: it needs no time on the lane.
-    h.click(LANE_GO_TO_DRAW);
-    settle(&mut h);
-    assert_eq!(h.editor().stage, Some(Stage::Drawing));
-    assert_ne!(h.rig().config.ui.hints_seen & say::PLAN, 0, "the press answered it");
 }
 
 /// Spec 8.4's Result: its sentence, and the button that answers it.
@@ -1004,17 +932,6 @@ fn ausay_result_empty_state_builds_the_composite() {
     settle(&mut h);
     assert!(h.state().cut().graph.output.is_some(), "the button built it");
     assert!(!says(&h, crate::viewer::NOTHING_TO_SHOW), "{:?}", h.painted_text());
-}
-
-/// Spec 8.4's Plan preview: its sentence, and the button that takes the
-/// person to the paper.
-#[test]
-fn ausay_plan_empty_state_goes_to_draw() {
-    let mut h = in_plan(false);
-    assert!(says(&h, crate::viewer::NOTHING_HERE), "{:?}", h.painted_text());
-    h.click(say::GO_TO_DRAW);
-    settle(&mut h);
-    assert_eq!(h.editor().stage, Some(Stage::Drawing));
 }
 
 /// Spec 8.4's Motion curves, with nothing keyed.

@@ -174,6 +174,13 @@ impl Rig {
                 self.config.save_to(dir).expect("the rig's config saves");
             }
         }
+        // AU19: Plan's own, likewise.
+        if let Some(hidden) = self.editor.plan_sheet_request.take() {
+            self.config.ui.set_plan_sheet_hidden(hidden);
+            if let Some(dir) = &self.editor.data_dir {
+                self.config.save_to(dir).expect("the rig's config saves");
+            }
+        }
         // AU6: the Start float's latch and the lock's verb, likewise.
         let (show, lock) = (self.editor.show_start_request.take(), self.editor.lock_request.take());
         if let Some(on) = show {
@@ -287,6 +294,15 @@ impl EditorHarness {
         let mut me = Self::with_dir_shipped(dir);
         me.answer_start(crate::welcome::WelcomeAction::Intent(crate::templates::ANIMATION));
         me
+    }
+
+    /// AU19: an animation opens on its sheet: this is a person hiding it, for
+    /// the tests that stand on the open paper and the strip.
+    #[track_caller]
+    pub fn hide_sheet(&mut self) {
+        self.click(crate::vocab::HIDE_TIMING_SHEET);
+        self.run();
+        self.run_frames(4);
     }
 
     /// What a fresh install's first launch shows: the ready paper, and the
@@ -2285,8 +2301,10 @@ mod tests {
         ] {
             // Exhaustive: a new Stage fails to compile until it is listed.
             match st {
-                Stage::Layout
-                | Stage::Drawing
+                // AU19: no room: the door sends it to Draw, which on an
+                // animation is Plan.
+                Stage::Layout => assert!(!stages.contains(&st), "nothing probes a stage nobody can stand in"),
+                Stage::Drawing
                 | Stage::InkPaint
                 | Stage::Composite
                 | Stage::Edit
@@ -2525,8 +2543,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 872;
-    const ASSERT_FLOOR: usize = 5365;
+    const TEST_FLOOR: usize = 925;
+    const ASSERT_FLOOR: usize = 5757;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

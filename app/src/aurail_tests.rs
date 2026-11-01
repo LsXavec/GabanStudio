@@ -53,9 +53,13 @@ fn sized(harness: &mut EditorHarness, w: f32, h: f32) {
     settle(harness);
 }
 
-/// The sample cut, shipped, at 1600×900: a rail with its ninth key.
+/// The sample cut, shipped, at 1600×900: a rail with its ninth key. AU19: an
+/// animation opens on its sheet, so this is that sheet hidden by hand, the
+/// open canvas these tests read (spec 1.13's `strip_of` seam).
 fn drawn() -> EditorHarness {
     let mut h = EditorHarness::with_state_shipped(sample::build_sample());
+    h.editor_mut().plan_sheet_hidden = true;
+    h.editor_mut().dock = Stage::Drawing.dock();
     window(&mut h, 1600.0, 900.0, 1.0);
     h
 }
@@ -528,9 +532,6 @@ fn aurail_rail_fits_every_room() {
     let mut found = Vec::new();
     for doc in [sample::build_sample(), crate::newproject::NewProjectForm::default().new_state()] {
         let mut h = EditorHarness::with_state_shipped(doc);
-        // Today's Plan preview, which only the seam reaches until Plan's own
-        // part replaces it.
-        h.editor_mut().unset_kind();
         for (w, tall) in SIZES {
             for stored in PROBE_SCALES {
                 window(&mut h, w, tall, stored);
@@ -538,12 +539,8 @@ fn aurail_rail_fits_every_room() {
                     room.enter(h.editor_mut());
                     settle(&mut h);
                     let at = format!("{w}×{tall} at {stored} in {}", room.name());
-                    // Plan's Canvas is a preview, the Brush maker and 3D
-                    // switch the rail off.
-                    let off = matches!(
-                        room,
-                        ProbeRoom::Forge | ProbeRoom::Layout3d | ProbeRoom::Stage(Stage::Layout)
-                    );
+                    // The Brush maker and 3D switch the rail off.
+                    let off = matches!(room, ProbeRoom::Forge | ProbeRoom::Layout3d);
                     let hosted = !off && crate::visible_panes(&h.editor().dock).contains(&Pane::Canvas);
                     let host = h.editor().canvas.dbg_rect;
                     let reference = rail::reference(host.height(), h.editor().strip_closed());
@@ -1468,7 +1465,8 @@ fn aurail_both_canvas_hosts_call_one_overlay() {
 
 /// The rule's mirror stands with the sheet it mirrors, and only there: with
 /// the sheet off screen it is 14 pt of unnamed marks. Beside the sheet it
-/// keeps to the inset the rail leaves it.
+/// keeps to the inset the rail leaves it. AU19's exception: Plan keeps one
+/// timeline, so there the sheet stands without it.
 #[test]
 fn aurail_mirror_stands_with_the_sheet() {
     let mirror = |h: &EditorHarness| {
@@ -1478,15 +1476,19 @@ fn aurail_mirror_stands_with_the_sheet() {
     };
     let mut h = blank();
     assert!(mirror(&h).is_none(), "shipped Draw has no sheet");
-    for room in PROBE_ROOMS {
-        room.enter(h.editor_mut());
-        settle(&mut h);
-        let panes = crate::visible_panes(&h.editor().dock);
-        // Plan's Canvas is a preview: it draws no rule at all.
-        let plan = matches!(room, ProbeRoom::Stage(Stage::Layout));
-        if panes.contains(&Pane::Canvas) && !plan {
-            let owed = panes.contains(&Pane::XSheet) && !h.editor().canvas.composite_view;
-            assert_eq!(mirror(&h).is_some(), owed, "in {}", room.name());
+    let mut animation = EditorHarness::as_animation();
+    window(&mut animation, 1600.0, 900.0, 1.0);
+    assert!(animation.editor().in_plan() && mirror(&animation).is_none(), "one timeline");
+    for h in [&mut h, &mut animation] {
+        for room in PROBE_ROOMS {
+            room.enter(h.editor_mut());
+            settle(h);
+            let panes = crate::visible_panes(&h.editor().dock);
+            if panes.contains(&Pane::Canvas) {
+                let sheet = panes.contains(&Pane::XSheet) && !h.editor().in_plan();
+                let owed = sheet && !h.editor().canvas.composite_view;
+                assert_eq!(mirror(h).is_some(), owed, "in {}", room.name());
+            }
         }
     }
     let mut h = blank();

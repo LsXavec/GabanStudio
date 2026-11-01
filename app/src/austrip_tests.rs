@@ -37,9 +37,13 @@ fn timed(holds: &[u32]) -> AppState {
     s
 }
 
-/// `state`, shipped: the sheet off screen and the strip up.
+/// `state`, shipped: the sheet off screen and the strip up. AU19: a shipped
+/// document of many frames is an animation and opens on its sheet, so this is
+/// that sheet hidden by hand: the one state the strip stands in.
 fn strip_of(state: AppState) -> EditorHarness {
     let mut h = EditorHarness::with_state_shipped(state);
+    h.editor_mut().plan_sheet_hidden = true;
+    h.editor_mut().dock = Stage::Drawing.dock();
     h.kit_mut().set_size(vec2(1280.0, 800.0));
     settle(&mut h);
     assert!(!h.editor().sheet_on_screen() && h.editor().strip_open, "the strip is up");
@@ -48,6 +52,16 @@ fn strip_of(state: AppState) -> EditorHarness {
 
 fn strip_up(holds: &[u32]) -> EditorHarness {
     strip_of(timed(holds))
+}
+
+/// The full transport, where it stands now: AU19 keeps the plain band in Plan
+/// beside its sheet, so this is Color with the sheet brought up, the band
+/// that keeps its sheet key.
+fn full_transport(h: &mut EditorHarness) {
+    h.perform(Action::RoomFinishing);
+    h.editor_mut().show_sheet();
+    settle(h);
+    assert!(h.editor().sheet_on_screen());
 }
 
 fn holds(state: &AppState) -> Vec<u32> {
@@ -91,7 +105,7 @@ fn steps(h: &EditorHarness) -> usize {
     h.state().engine.position()
 }
 
-/// A chord the defaults leave free.
+/// A chord for a rebound key. The Episode pane holds it too by default.
 fn free_chord() -> Option<config::Chord> {
     Some(config::Chord { keys: vec!["T".to_string()], ctrl: true, shift: true, alt: false })
 }
@@ -571,6 +585,8 @@ fn austrip_enter_opens_the_sheet_and_starts_typing() {
 fn austrip_rebound_type_chord_still_works() {
     let mut h = strip_up(&[4, 4]);
     h.rig_mut().config.binding_mut(Action::TypeIntoCell).chord = free_chord();
+    // AU19: a new pane lands on the sheet's leaf, and would cover the sheet.
+    h.rig_mut().config.binding_mut(Action::ShowEpisode).chord = None;
     let at = on_sheet(&h, 1);
     h.point_at(at);
     h.key(Key::Enter);
@@ -625,8 +641,7 @@ fn austrip_band_follows_the_sheet() {
     }
     let loop_start = vocab::LOOP_START;
     assert!(!h.has("first frame (Home)") && !h.has(loop_start) && !h.has(vocab::SOUND_WHILE_DRAGGING));
-    h.editor_mut().show_sheet();
-    settle(&mut h);
+    full_transport(&mut h);
     let full = [
         "first frame (Home)",
         "last frame (End)",
@@ -658,8 +673,7 @@ fn austrip_transport_row_stays_on_the_bottom_edge() {
     settle(&mut h);
     assert_eq!(points(&h, "play (Space)"), up, "the strip goes above it, and nothing moves");
     h.editor_mut().strip_open = true;
-    h.editor_mut().show_sheet();
-    settle(&mut h);
+    full_transport(&mut h);
     assert_eq!(points(&h, "play (Space)").bottom(), up.bottom(), "the full row stands on the same edge");
 }
 
@@ -674,6 +688,7 @@ fn austrip_full_band_latch_moves_nothing() {
     let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
+    h.hide_sheet();
     h.state_mut().new_drawing_at_frame();
     settle(&mut h);
     for key in ["previous frame (S)", "next frame (F)", "Ghost frames toggle", "Speed"] {
@@ -700,6 +715,7 @@ fn austrip_strip_opens_with_one_refit_at_pen_up() {
     let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
+    h.hide_sheet();
     h.editor_mut().strip_open = false;
     settle(&mut h);
     let was = band_keys(&h);
@@ -835,9 +851,7 @@ fn austrip_strip_predicate_table() {
 
 #[test]
 fn austrip_census_counts_strip_cells() {
-    let mut h = EditorHarness::with_state_shipped(timed(&[1; 20]));
-    h.kit_mut().set_size(vec2(1280.0, 800.0));
-    settle(&mut h);
+    let h = strip_up(&[1; 20]);
     assert_eq!(plate::strip_sheets(&h.ctx()).len(), 20, "every sheet on screen is one");
     let shapes = h.kit().output().shapes.clone();
     let reading = crate::measure::Reading::of_frame(&h.ctx(), &shapes);
@@ -846,6 +860,7 @@ fn austrip_census_counts_strip_cells() {
     let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1280.0, 800.0));
     settle(&mut h);
+    h.hide_sheet();
     let shapes = h.kit().output().shapes.clone();
     let reading = crate::measure::Reading::of_frame(&h.ctx(), &shapes);
     assert_eq!(rows(&reading), 1, "a blank document adds one");
@@ -873,8 +888,7 @@ fn austrip_every_icon_has_a_card_and_a_name() {
     h.run_frames(3);
     assert!(h.has(&words), "Speed has no card\n{}", h.describe());
     assert!(!points(&h, &words).intersects(points(&h, "Speed")), "it covers its own key");
-    h.editor_mut().show_sheet();
-    settle(&mut h);
+    full_transport(&mut h);
     for (key, action) in [("first frame (Home)", Action::FirstFrame), ("last frame (End)", Action::LastFrame)] {
         h.hover(key);
         h.wait(plate::CARD_DELAY + 0.1);
@@ -1011,7 +1025,9 @@ fn austrip_say_line_is_one_lane_and_wraps_to_two_rows() {
 
 /// The Say lane: from the left lane's last key to the right lane's first.
 fn say_lane(h: &EditorHarness) -> f32 {
-    let (full, wide) = (h.editor().sheet_on_screen(), h.ctx().content_rect().width() >= steps::FOLD);
+    // AU19: Plan's sheet keeps the drawing keys.
+    let full = h.editor().sheet_on_screen() && !h.editor().in_plan();
+    let wide = h.ctx().content_rect().width() >= steps::FOLD;
     let counter = format!("Frame 1 of {}", h.state().frame_count());
     let (last, first) = match (full, wide) {
         (true, true) => ("clear loop range", vocab::SOUND_WHILE_DRAGGING),
@@ -1112,10 +1128,19 @@ fn austrip_speed_works_inside_the_fold() {
 
 #[test]
 fn austrip_show_sheet_is_draws_switch_and_a_pane_elsewhere() {
-    let mut h = strip_up(&[4, 4]);
+    // The frozen boot's Draw keeps the switch that remembers.
+    let mut h = EditorHarness::with_state(timed(&[4, 4]));
+    h.editor_mut().sheet_in_draw = false;
+    h.editor_mut().dock = Stage::Drawing.dock();
     assert_eq!(h.editor().stage, Some(Stage::Drawing));
     h.editor_mut().show_sheet();
     assert!(h.editor().sheet_in_draw, "Draw remembers");
+    // Plan's sheet comes back to its recipe, and a verb saves nothing.
+    let mut h = strip_up(&[4, 4]);
+    h.editor_mut().show_sheet();
+    settle(&mut h);
+    assert!(crate::same_shape(&h.editor().dock, &Stage::Layout.dock()), "its own place at the left");
+    assert!(h.editor().plan_sheet_hidden, "only the button is a choice");
     h.perform(Action::RoomFinishing);
     settle(&mut h);
     let remembered = h.editor().sheet_in_draw;
@@ -1456,14 +1481,14 @@ fn austrip_no_band_control_goes_without_a_card() {
         s
     };
     let plain = ["play (Space)", "Frame 1 of 8", "Add drawing (band)", vocab::SHOW_TIMING_SHEET, "Track A"];
-    let full = ["clear loop range", "24 fps", "—", vocab::SOUND_WHILE_DRAGGING, vocab::HIDE_TIMING_SHEET];
+    let full = ["clear loop range", "24 fps", "—", vocab::SOUND_WHILE_DRAGGING, vocab::SHOW_TIMING_SHEET];
     let forms: [(f32, bool, &[&str]); 7] = [
         (1280.0, false, &plain),
         (832.0, false, &plain),
         (1280.0, true, &full),
         (steps::SOUND_WORDS - 1.0, true, &full),
         (steps::FOLD, true, &full),
-        (832.0, true, &["…", vocab::LOOP, vocab::HIDE_TIMING_SHEET]),
+        (832.0, true, &["…", vocab::LOOP, vocab::SHOW_TIMING_SHEET]),
         (1280.0, false, &["Speed", "Ghost frames toggle", "Drawing 2, frames 5 to 8"]),
     ];
     let mut tally = Vec::new();
@@ -1472,8 +1497,7 @@ fn austrip_no_band_control_goes_without_a_card() {
         h.kit_mut().set_size(vec2(w, 800.0));
         settle(&mut h);
         if sheet {
-            h.editor_mut().show_sheet();
-            settle(&mut h);
+            full_transport(&mut h);
         }
         let row = points(&h, "play (Space)").top() - 2.0;
         let top = if sheet { row } else { strip_rect(&h).top() };
@@ -1486,6 +1510,16 @@ fn austrip_no_band_control_goes_without_a_card() {
         tally.push(keys.len());
     }
     println!("band controls and readouts, each form: {tally:?}, with no card: 0");
+    // Plan's band beside its sheet: the plain keys, and the latch that hides it.
+    let mut h = EditorHarness::with_state_shipped(tracks());
+    h.kit_mut().set_size(vec2(1280.0, 800.0));
+    settle(&mut h);
+    let keys = band_census(&h, points(&h, "play (Space)").top() - 2.0);
+    for name in ["Speed", "Ghost frames toggle", "Add drawing (band)", vocab::HIDE_TIMING_SHEET] {
+        assert!(keys.iter().any(|(k, _)| k == name), "{name} in {keys:?}");
+    }
+    let none = bare_keys(&mut h, &keys);
+    assert!(none.is_empty(), "in Plan: {none:?} of {keys:?}");
     // What the `…` holds, in both transports.
     for (sheet, inside) in [
         (false, &["Ghost frames toggle", vocab::LOOP][..]),
@@ -1495,8 +1529,7 @@ fn austrip_no_band_control_goes_without_a_card() {
         h.kit_mut().set_size(vec2(832.0, 800.0));
         settle(&mut h);
         if sheet {
-            h.editor_mut().show_sheet();
-            settle(&mut h);
+            full_transport(&mut h);
         }
         h.click("…");
         settle(&mut h);
@@ -1542,8 +1575,7 @@ fn row_words(h: &EditorHarness) -> Vec<String> {
 #[test]
 fn austrip_full_transport_reads_the_spec_words() {
     let mut h = strip_up(&[4, 4]);
-    h.editor_mut().show_sheet();
-    settle(&mut h);
+    full_transport(&mut h);
     let words = row_words(&h);
     for word in [vocab::LOOP, vocab::LOOP_START, vocab::LOOP_END, vocab::SOUND_WHILE_DRAGGING, "24 fps"] {
         assert!(words.iter().any(|w| w == word), "{word} in {words:?}");
@@ -1581,8 +1613,7 @@ fn austrip_full_transport_reads_the_spec_words() {
     let mut h = strip_up(&[4, 4]);
     h.kit_mut().set_size(vec2(steps::FOLD, 800.0));
     settle(&mut h);
-    h.editor_mut().show_sheet();
-    settle(&mut h);
+    full_transport(&mut h);
     assert!(!row_words(&h).iter().any(|w| w == word), "{:?}", row_words(&h));
     h.hover(word);
     h.wait(plate::CARD_DELAY + 0.1);
