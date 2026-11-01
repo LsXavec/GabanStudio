@@ -51,6 +51,13 @@ pub struct Sheet {
     pub shows: Exposure,
 }
 
+/// The range the ruler marks: a loop range that is not the whole cut. AU26: a
+/// blank tail plays short of the cut, but nobody set that, so it marks nothing.
+pub fn marked_range(state: &AppState) -> Option<(u32, u32)> {
+    let range = crate::playback::play_range(state.loop_range(), state.frame_count());
+    (range != (0, state.frame_count() - 1)).then_some(range)
+}
+
 /// The active track's runs, as sheets.
 pub fn sheets(state: &AppState) -> Vec<Sheet> {
     let Some(column) = state.cut().xsheet.column(state.view.active_column) else {
@@ -561,9 +568,7 @@ fn paint(
             free = label.right() + 6.0;
         }
     }
-    // The play range, when it is not the whole cut.
-    let (lo, hi) = state.play_range();
-    if (lo, hi) != (0, ruler.last) {
+    if let Some((lo, hi)) = marked_range(state) {
         let band = Rect::from_min_max(pos2(ruler.x(lo), bar.bottom() - 3.0), pos2(ruler.x(hi + 1), bar.bottom()));
         painter.rect_filled(band, 0.0, plate::BLUE);
     }

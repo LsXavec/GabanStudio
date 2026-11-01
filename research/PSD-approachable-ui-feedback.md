@@ -457,9 +457,19 @@ The twelve rows create a problem no study closed. Three Add drawings on a fresh 
 
 A background track that holds to the end means no tail, so a character may leave the shot and the shot goes on. This is what the End of the Desk lesson needs.
 
+Note, AU26, rule one: the rule above names only the run after the cursor's run, which left a cursor on a blank row inserting past the blanks, so the first press on a new animation gave `[12 blank, 1]` and all twelve played. Read as 1.7 says it, a blank run gives its frames first wherever the cursor stands: on a blank row the new drawing lands on that run's first frame (not the cursor's, or the rows before it would play blank), holds by `hold_to_copy`, and an `Exposure::Empty` key stands after it when frames remain. A fresh animation gives `[1, 11 blank]` on row 1, and a cursor anywhere on the tail of `[1, 1, 1, 9 blank]` gives `[1, 1, 1, 1, 8 blank]`. One exception: a blank one-frame document has no row to give, so the cut grows as before, or Add drawing could not promote it (2.7). "A hold nobody chose" also widens: it is the track's first drawing running on to the cut's end, wherever it starts, so a key pose on row 5 followed by Add drawing stays at 12 rows.
+
+Note, AU26, a stroke: 3.7 says a stroke needs no new rule, and the review showed it does. Clicking rows 1, 2 and 3 and drawing, as Plan's Say line teaches, gave `[1, 1, 10]`, so Play and the GIF ran 12 frames, and in the sheet that looks the same as a real tail. Decided under main spec 1.1(8): a stroke's new key on a blank tail or on an open hold keeps to its row, with an `Exposure::Empty` key after it in the same undo step, so both routes give `[1, 1, 1, 9 blank]`. When the stroke lands past the tail's first row and the drawing before the tail holds one frame, that drawing holds up to the new key, or key poses on rows 1, 5 and 9 would flash white between them: they give `[4, 4, 1, 3 blank]`. Any longer hold before the tail is one a person set, and its blank stays. A stroke on the first drawing of a track still runs on, a hold somebody set still splits as R19 says, and `new_drawing_at_frame` (the sheet's verb, not a stroke) is unchanged. `commit_stroke` and `land_raster` gain one line for this and are re-pinned in `LEFT_ALONE`.
+
+Note, AU26, rule two: `shown_length` is one rule, whether or not a drawing stands. It is the whole cut when a source reaches the Result, and otherwise at least the end of the longest sound that sounds (its offset plus its length, in frames), clamped to the cut. As written, a voice line under three drawings stopped with the third. This extends "or by any track showing art" to sound. A cut with nothing on it, no drawing, sound or source, does not run: Play stays stopped and says `Nothing to play yet. Draw something first.`, as a remark and not a refusal.
+
+Note, AU26, `File ▸ Export`: its rows go through the queue with that form's own range, and the form shows `1–12` before anything is pressed, so they count with the queue's form and keep the whole cut. Its frames fields are how a person stops short. Only the routes with no form in front of them, `Editor::export_to` and the Export step's cards, stop at the last drawing. `Offer::of` reads `shown_length()`, so one drawing with a blank tail is offered as a picture. The ruler marks a loop range only, since a blank tail is no range anybody set. `set_loop_in` with no range runs to `frame_count() - 1`, not to the last drawing.
+
 ### 3.9 Longer and Shorter
 
 `Action::HoldPlus` has no button, and it refuses on the last run with `the last drawing already holds to the end of the cut`. The sheet's edge drag belongs to the strip, which is hidden here. So Timing's band gains two keys, `vocab::LONGER` and `vocab::SHORTER`, calling `state.set_run_length(frame, len ± 1)`, the function that already grows the cut for the last run. Their hover cards name the chords. They act on the active track at the cursor. The Actions and their refusal are unchanged.
+
+Note, AU26: the cards are the keys' own, because `Action::HoldMinus`'s help says a one-frame run goes, and this key stops at one frame. They stand in Timing whatever became of its sheet. A one-frame drawing ending on its own `Empty` key hides the sheet's hold handle until it is reached for, since every animation built with Add drawing has one and nobody pulled it.
 
 ### 3.10 Sheet memory
 
@@ -891,7 +901,7 @@ After this part a new animation has rows to draw on, and blank frames neither pl
 
 ### Must not change
 
-`hold_to_copy`. `Action::HoldPlus`'s refusal. The queue's own range. `frame_count()`, the counter and the sheet's rows.
+`hold_to_copy`. `Action::HoldPlus`'s refusal. The queue's own range. `frame_count()`, the counter and the sheet's rows. `land_raster` keeps its route, gaining the one line 3.8's note on a stroke describes.
 
 ### Leave out
 

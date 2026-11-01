@@ -8077,9 +8077,15 @@ impl Editor {
             self.state.board.episode_play = false;
         }
         // AU26: "whole" stops at the last drawing, but in an episode, where
-        // a cut runs its full length.
-        let whole = (0, if episode { self.state.frame_count() } else { self.state.shown_length() } - 1);
-        let range = if self.play_whole || episode {
+        // a cut runs its full length. A stopped band reads neither: this runs
+        // every frame, and nothing below looks at a range unless playing.
+        let end = match () {
+            _ if episode => self.state.frame_count(),
+            _ if playing => self.state.shown_length(),
+            _ => 1,
+        };
+        let whole = (0, end - 1);
+        let range = if self.play_whole || episode || !playing {
             whole
         } else {
             self.state.play_range()
@@ -8193,9 +8199,6 @@ impl Editor {
             if !fold {
                 self.sound_keys(ui);
             }
-            if self.stage == Some(Stage::Edit) {
-                self.hold_keys(ui);
-            }
         } else {
             if !fold {
                 if arrived {
@@ -8215,6 +8218,10 @@ impl Editor {
                 }
             }
         }
+        // Timing's, whatever became of its sheet (spec 1.4).
+        if self.stage == Some(Stage::Edit) {
+            self.hold_keys(ui);
+        }
         // GM12: frames passed over to keep up with the sound. A clean run
         // says nothing.
         if self.play_dropped > 0 {
@@ -8227,15 +8234,17 @@ impl Editor {
     /// AU26 (spec 3.9): Timing's `Longer` and `Shorter`, right to left, on the
     /// run under the cursor. The strip's edge is hidden here, and `HoldPlus`
     /// refuses the last run, so these go through `set_run_length`, which grows
-    /// the cut for it. They never fold.
+    /// the cut for it. They never fold. Their cards are their own, because
+    /// these keys are not quite the Actions they share a chord with: no run
+    /// goes at one frame, and the last run grows.
     fn hold_keys(&mut self, ui: &mut egui::Ui) {
         let keys = [
-            (Icon::Minus, vocab::SHORTER, Action::HoldMinus, -1),
-            (Icon::Plus, vocab::LONGER, Action::HoldPlus, 1),
+            (Icon::Minus, vocab::SHORTER, Action::HoldMinus, -1, doc::SHORTER_SAYS),
+            (Icon::Plus, vocab::LONGER, Action::HoldPlus, 1, doc::LONGER_SAYS),
         ];
-        for (icon, word, action, by) in keys {
+        for (icon, word, action, by, says) in keys {
             let key = plate::band_action(ui, icon, word, &format!("{word} (band)"));
-            if menus::hover_tip(key, action, "").clicked() {
+            if chord_card(key, word, action, says.to_string()).clicked() {
                 self.hold_by(by);
             }
         }
@@ -8504,10 +8513,18 @@ impl Editor {
         let verb = hint.as_ref().and_then(|h| h.verb);
         let fold = ui.ctx().content_rect().width() < steps::FOLD;
         let counting = !self.animated() || !self.strip_closed() || self.full_band;
-        let dots = !fold && !refusing && counting && lane.width() >= plate::SAY_DOTS_LANE;
+        // AU26: a lane under the floor, as Timing's at 1280 with the hold keys
+        // beside it, keeps them while this frame's words and button leave
+        // them room, so the place does not come and go by step.
+        let wide = lane.width() >= plate::SAY_DOTS_LANE;
+        let button = verb.map_or(0.0, |verb| plate::say_action_width(ui, verb.label(self.kind())) + 6.0);
+        let said = if saying { self.state.status.as_str() } else { hint.as_ref().map_or("", |h| h.words.as_str()) };
+        let beside = plate::say_width(ui, said) + button + plate::SAY_DOTS <= lane.width();
+        let dots = !fold && !refusing && counting && (wide || beside);
         let spare = match verb {
-            _ if dots => plate::SAY_ACTION + plate::SAY_DOTS,
-            Some(verb) => plate::say_action_width(ui, verb.label(self.kind())) + 6.0,
+            _ if dots && wide => plate::SAY_ACTION + plate::SAY_DOTS,
+            _ if dots => button + plate::SAY_DOTS,
+            Some(_) => button,
             None if refusing || hint.is_some() => 0.0,
             None => plate::SAY_ACTION,
         };

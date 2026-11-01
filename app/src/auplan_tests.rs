@@ -349,7 +349,9 @@ fn auplan_click_a_row_and_draw() {
     h.drag_path(&path);
     settle(&mut h);
     assert_eq!(h.state().strokes_done, 2, "{}", h.state().status);
-    assert_eq!(strip::sheets(h.state()).iter().map(|s| (s.from, s.len)).collect::<Vec<_>>(), [(0, 3), (3, 3)]);
+    // AU26: one drawing across the cut was a hold nobody chose, so the new one
+    // keeps to its row and the row after it stays blank.
+    assert_eq!(strip::sheets(h.state()).iter().map(|s| (s.from, s.len)).collect::<Vec<_>>(), [(0, 3), (3, 1), (4, 2)]);
     assert_eq!(h.state().cut().drawings.len(), 2);
     assert_eq!(h.perform(Action::Undo), crate::Performed::Done);
     settle(&mut h);
@@ -416,7 +418,7 @@ fn auplan_stroke_shows_on_the_cursor_row() {
         modifiers: Modifiers::NONE,
     });
     h.kit_mut().step();
-    assert_eq!(strip::sheets(h.state()).iter().map(|s| s.from).collect::<Vec<_>>(), [0, 5], "the run split");
+    assert_eq!(strip::sheets(h.state()).iter().map(|s| s.from).collect::<Vec<_>>(), [0, 5, 6], "the run split");
     let name = h.state().cut().drawings[1].name.clone();
     let shown = h.painted_at(&name);
     assert!((shown.y - row(&h, 5).y).abs() <= 12.0, "{name} at {shown:?}, row 6 at {:?}", row(&h, 5));

@@ -1681,6 +1681,13 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
     });
 }
 
+/// The frames whose hold handle was painted this frame: the rig has no paint
+/// layer to read a ring from.
+#[cfg(test)]
+pub(crate) fn handles_seen() -> egui::Id {
+    egui::Id::new("sheet handles seen")
+}
+
 /// One drawing's exposure span and its optional early-end terminator.
 struct Cont {
     column: anim_core::ids::ColumnId,
@@ -1738,6 +1745,8 @@ fn continuation_handles(
     let mut pending: Vec<(anim_core::ids::ColumnId, Option<u32>, Option<u32>)> = Vec::new();
     let mut mark_positioned: Vec<(anim_core::ids::ColumnId, u32)> = Vec::new();
     let mut unposition: Vec<(anim_core::ids::ColumnId, u32)> = Vec::new();
+    #[cfg(test)]
+    ui.ctx().data_mut(|d| d.remove::<Vec<u32>>(handles_seen()));
     for c in &conts {
         let col_x = cleft + GUTTER_W + c.ci as f32 * COL_W;
         // The handle rides ON the run's rule (spec §5.2 absorbed it): same
@@ -1793,7 +1802,16 @@ fn continuation_handles(
         let near = hover.is_some_and(|p| {
             p.x >= col_x && p.x <= col_x + COL_W && p.y >= rest_y - ROW_H && p.y <= rest_y + ROW_H
         });
-        let show = positioned || hr.dragged() || near;
+        // AU26: a one-frame drawing ending on its own Empty key is what `Add
+        // drawing` leaves on every animation, not a hold anyone pulled, so the
+        // handle rests out of sight until it is reached for.
+        let pulled = state.positioned_holds.contains(&(c.column, c.n));
+        let one_frame = c.terminator == Some(c.n + 1) && !pulled;
+        let show = (positioned && !one_frame) || hr.dragged() || near;
+        #[cfg(test)]
+        if show {
+            ui.ctx().data_mut(|d| d.get_temp_mut_or_default::<Vec<u32>>(handles_seen()).push(c.n));
+        }
         if show {
             let active = hr.dragged() || hr.hovered() || near;
             let col = if active { plate::TALLY } else { plate::AO };

@@ -60,7 +60,8 @@ impl Offer {
             Offer::NoArt
         } else if anim_core::manga::Page::of(state.cut()).is_some() {
             Offer::Comic
-        } else if state.frame_count() > 1 {
+        } else if state.shown_length() > 1 {
+            // AU26: one drawing with a blank tail is a picture.
             Offer::Animation
         } else {
             Offer::OneFrame

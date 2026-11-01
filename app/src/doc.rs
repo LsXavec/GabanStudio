@@ -266,17 +266,17 @@ fn drawing_has_art(d: &anim_core::model::Drawing) -> bool {
 }
 
 /// AU26: one past the last of `count` frames `column` shows a drawing on, 0
-/// when it shows none.
+/// when it shows none. The keys alone tell: the band asks for this every frame.
 fn shown_end(column: &Column, count: u32) -> u32 {
-    let mut at = 0;
-    let mut end = 0;
-    for (exposure, len) in column.runs(0, count) {
-        at += len;
-        if matches!(exposure, Exposure::Drawing(_)) {
-            end = at;
+    let (mut end, mut holding) = (0, false);
+    for (frame, exposure) in column.keys().take_while(|(frame, _)| *frame < count) {
+        match exposure {
+            Exposure::Drawing(_) => holding = true,
+            Exposure::Empty if holding => (end, holding) = (frame, false),
+            Exposure::Empty => {}
         }
     }
-    end
+    if holding { count } else { end }
 }
 
 /// `top` over `under`, both premultiplied.
@@ -305,6 +305,11 @@ pub const FINISH_STROKE: &str = "Finish your stroke first.";
 /// AU26: `Shorter` at one frame. Not a refusal: there is nothing it should
 /// have done.
 pub const SHORTEST_HOLD: &str = "One frame is the shortest a drawing holds.";
+/// AU26: the band's `Longer` and `Shorter`, on their cards.
+pub const LONGER_SAYS: &str = "This drawing stays one frame longer. On the last drawing the cut grows with it.";
+pub const SHORTER_SAYS: &str = "This drawing stays one frame less. It stops at one frame.";
+/// AU26: Play on a cut with nothing on it. Not a refusal either.
+pub const NOTHING_TO_PLAY: &str = "Nothing to play yet. Draw something first.";
 /// AU7: the canvas's refusal, by name, because one Action answers it
 /// (`say::fix_of`). The pen route says it itself, and stays as it stood.
 pub const READ_ONLY_VIEW: &str = "refused — composite view is read-only (C to edit)";
@@ -1180,26 +1185,26 @@ impl AppState {
                 let id = self.engine.alloc_drawing_id();
                 let layers = self.new_cel_layers();
                 let index = self.cut().drawings.len(); // append to the library
-                let r = self.engine.apply(
-                    "draw (new drawing)",
-                    vec![
-                        Command::AddDrawing {
-                            at,
-                            id,
-                            index,
-                            name,
-                            strokes: vec![],
-                            layers,
-                        },
-                        Command::SetCell {
-                            at,
-                            column: self.view.active_column,
-                            frame: self.view.frame,
-                            key: Some(Exposure::Drawing(id)),
-                        },
-                        Command::AddStroke { at, id, stroke },
-                    ],
-                );
+                let tail = self.tail_keys();
+                let mut cmds = vec![
+                    Command::AddDrawing {
+                        at,
+                        id,
+                        index,
+                        name,
+                        strokes: vec![],
+                        layers,
+                    },
+                    Command::SetCell {
+                        at,
+                        column: self.view.active_column,
+                        frame: self.view.frame,
+                        key: Some(Exposure::Drawing(id)),
+                    },
+                    Command::AddStroke { at, id, stroke },
+                ];
+                cmds.extend(tail);
+                let r = self.engine.apply("draw (new drawing)", cmds);
                 if r.is_ok() {
                     self.view.selected_drawing = Some(id);
                     self.strokes_done = self.strokes_done.wrapping_add(1);
@@ -1318,31 +1323,31 @@ impl AppState {
                     .into_iter()
                     .map(|(c, t)| (c, None, Some(t)))
                     .collect();
-                let r = self.engine.apply(
-                    "paint (new cel)",
-                    vec![
-                        Command::AddDrawing {
-                            at,
-                            id,
-                            index,
-                            name,
-                            strokes: vec![],
-                            layers,
-                        },
-                        Command::SetCell {
-                            at,
-                            column: self.view.active_column,
-                            frame: self.view.frame,
-                            key: Some(Exposure::Drawing(id)),
-                        },
-                        Command::PaintTiles {
-                            at,
-                            id,
-                            layer,
-                            diff,
-                        },
-                    ],
-                );
+                let tail = self.tail_keys();
+                let mut cmds = vec![
+                    Command::AddDrawing {
+                        at,
+                        id,
+                        index,
+                        name,
+                        strokes: vec![],
+                        layers,
+                    },
+                    Command::SetCell {
+                        at,
+                        column: self.view.active_column,
+                        frame: self.view.frame,
+                        key: Some(Exposure::Drawing(id)),
+                    },
+                    Command::PaintTiles {
+                        at,
+                        id,
+                        layer,
+                        diff,
+                    },
+                ];
+                cmds.extend(tail);
+                let r = self.engine.apply("paint (new cel)", cmds);
                 let ok = r.is_ok();
                 if ok {
                     self.view.selected_drawing = Some(id);
@@ -2642,6 +2647,43 @@ impl AppState {
         last.map_or(1, |(_, held)| *held)
     }
 
+    /// AU26: is the run a hold nobody chose? The track's first drawing,
+    /// running on to the cut's end because nothing came after it.
+    fn hold_is_open(&self, from: u32, len: u32, shows: Exposure) -> bool {
+        let Some(column) = self.cut().xsheet.column(self.view.active_column) else {
+            return false;
+        };
+        let first = column.keys().take_while(|(key, _)| *key < from).all(|(_, e)| e == Exposure::Empty);
+        first && len > 1 && from + len == self.frame_count() && matches!(shows, Exposure::Drawing(_))
+    }
+
+    /// AU26 (note to spec 3.8): the keys a stroke's new drawing takes with it,
+    /// in its undo step, so clicking rows and drawing ends as `Add drawing`
+    /// does. On a blank tail, or on an open hold, the new drawing keeps to its
+    /// row and the rows after it stay blank. A key pose past the tail's first
+    /// row lets a one-frame drawing before it hold up to it. A hold somebody
+    /// set splits as it always has, and the track's first drawing still runs
+    /// on, because it has no drawing before it to end on.
+    fn tail_keys(&self) -> Vec<Command> {
+        let (at, column, frame) = (self.at(), self.view.active_column, self.view.frame);
+        let Some((from, len, shows)) = self.run_at(frame) else {
+            return Vec::new();
+        };
+        let tail = shows == Exposure::Empty && from > 0 && from + len == self.frame_count();
+        if !tail && !self.hold_is_open(from, len, shows) {
+            return Vec::new();
+        }
+        let cell = |frame, key| Command::SetCell { at, column, frame, key };
+        let mut keys = Vec::new();
+        if tail && frame > from && self.run_at(from - 1).is_some_and(|(_, held, _)| held == 1) {
+            keys.push(cell(from, None));
+        }
+        if frame + 1 < self.frame_count() {
+            keys.push(cell(frame + 1, Some(Exposure::Empty)));
+        }
+        keys
+    }
+
     /// `report` with a sentence for the Say line: `verb` is what a refusal
     /// says did not happen.
     fn report_said(&mut self, r: anim_core::error::Result<()>, said: &str, verb: &str) {
@@ -2667,8 +2709,10 @@ impl AppState {
     /// follows ripples and the cut grows. One drawing across the whole cut
     /// never chose that hold, so the new one takes the next frame for one
     /// frame, the rest of the cut stays and goes empty, and nothing doubles.
-    /// AU26: a blank run after this one gives its frames first (spec 3.8):
-    /// what it has over stays blank, and only what it lacks is inserted.
+    /// AU26: a blank run gives its frames first (spec 3.8), the one under the
+    /// cursor or the one after this run: what it has over stays blank, and
+    /// only what it lacks is inserted. A blank drawing's one frame is no row
+    /// to give: the cut grows, as a drawing asked to animate must (spec 2.7).
     /// True when it landed.
     pub fn add_drawing_after(&mut self) -> bool {
         if self.refuse_locked_track() {
@@ -2679,15 +2723,18 @@ impl AppState {
             return false;
         };
         let length = self.frame_count();
-        let open = len == length && len > 1 && matches!(shows, Exposure::Drawing(_));
-        let next = self.view.frame + 1;
-        let (frame, hold) = if open { (next, 1) } else { (from + len, self.hold_to_copy(from, len, shows)) };
-        // The frames that are there already: the rest of the open run, or the
-        // blank run after this one.
-        let there = match self.run_at(from + len) {
-            _ if open => length - next,
-            Some((_, blank, Exposure::Empty)) => blank,
-            _ => 0,
+        let hold = self.hold_to_copy(from, len, shows);
+        // Where it lands, and the frames there already: the rest of the open
+        // run, the blank run under the cursor, or the one after this run.
+        let (frame, hold, there) = if self.hold_is_open(from, len, shows) {
+            let next = self.view.frame + 1;
+            (next, 1, length - next)
+        } else if shows == Exposure::Empty && length > 1 {
+            (from, hold, len)
+        } else if let Some((_, blank, Exposure::Empty)) = self.run_at(from + len) {
+            (from + len, hold, blank)
+        } else {
+            (from + len, hold, 0)
         };
         let added = hold.saturating_sub(there);
         let at = self.at();
@@ -3086,17 +3133,39 @@ impl AppState {
     /// drawing on, at least 1, at most the cut. What lies past it is the
     /// blank tail: it stays in the sheet, and no run and no plain export
     /// reaches it. A track that holds to the end means no tail, and a track
-    /// whose last key is `Empty` ends there. A cut that shows no drawing has
-    /// no last one to end on, so what else it carries runs whole: a sound, or
-    /// a source in the Result.
+    /// whose last key is `Empty` ends there. What else the cut carries counts
+    /// whether a drawing stands or not (note to spec 3.8): a source in the
+    /// Result shows on every frame, and a sound runs to its own end.
     pub fn shown_length(&self) -> u32 {
-        let count = self.frame_count();
-        let cut = self.cut();
+        let (count, drawn) = (self.frame_count(), self.drawn_end());
+        if drawn >= count || crate::export_step::shows_a_source(self.cut()) {
+            return count;
+        }
+        drawn.max(self.sound_end()).clamp(1, count)
+    }
+
+    /// One past the last frame a rendering track shows a drawing on, 0 with
+    /// none.
+    fn drawn_end(&self) -> u32 {
+        let (count, cut) = (self.frame_count(), self.cut());
         let tracks = cut.xsheet.columns.iter().filter(|c| cut.column_def(c.id).renders());
-        let last = tracks.map(|c| shown_end(c, count)).max().unwrap_or(0);
-        let runs_on = last == 0
-            && (anim_core::audio::tracks_iter(cut).next().is_some() || crate::export_step::shows_a_source(cut));
-        if runs_on { count } else { last.clamp(1, count) }
+        tracks.map(|c| shown_end(c, count)).max().unwrap_or(0)
+    }
+
+    /// One past the frame the cut's last sound ends on, 0 with nothing to
+    /// hear. A muted track, or one a solo silences, ends nothing.
+    fn sound_end(&self) -> u32 {
+        let cut = self.cut();
+        let solo = anim_core::audio::any_solo(cut);
+        let tracks = anim_core::audio::tracks_iter(cut).filter(|(_, props, _)| anim_core::audio::sounds(props, solo));
+        let fps = self.fps() as f64;
+        let ends = tracks.map(|(_, props, clip)| (props.offset as f64 + clip.seconds() as f64 * fps).ceil());
+        ends.fold(0.0, f64::max) as u32
+    }
+
+    /// Nothing to see or hear on this cut, so a run has nothing to do.
+    fn shows_nothing(&self) -> bool {
+        self.drawn_end() == 0 && self.sound_end() == 0 && !crate::export_step::shows_a_source(self.cut())
     }
 
     /// The play range: the loop range when it lies inside the cut, else
@@ -3131,7 +3200,9 @@ impl AppState {
     /// Loop in: the range starts at the cursor (its end moves up to it).
     pub fn set_loop_in(&mut self) {
         let here = self.view.frame;
-        let (_, hi) = self.play_range();
+        // AU26: no range yet, it runs to the cut's end: a blank tail is still
+        // frames, and only a run stops short of them.
+        let hi = self.loop_range().map_or(self.frame_count() - 1, |(_, hi)| hi);
         let r = (here, hi.max(here));
         self.loop_ranges.insert((self.view.scene, self.view.cut), r);
         self.status = format!("loop range {}–{}", r.0 + 1, r.1 + 1);
@@ -4072,6 +4143,11 @@ impl AppState {
         self.goto(f as u32);
     }
     pub fn toggle_play(&mut self) {
+        // AU26: a press with nothing to run is answered, not refused.
+        if !self.view.playing && self.shows_nothing() {
+            self.status = NOTHING_TO_PLAY.into();
+            return;
+        }
         self.view.playing = !self.view.playing;
         // Starting playback parked on the LAST frame (exactly where a
         // non-loop run stops) rewinds to the top first — otherwise the

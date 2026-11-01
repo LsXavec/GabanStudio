@@ -637,8 +637,10 @@ fn ausay_show_me_is_four_of_five() {
     h.wait(30.0);
     assert!(ringed(&h), "and keeps it");
 
-    // Next circle from the first frame goes through Add drawing.
+    // Next circle from the first frame goes through Add drawing, past the
+    // drawing that stands there.
     let mut h = animation();
+    h.state_mut().new_drawing_at_frame();
     assert_ne!(h.editor_mut().show_me(2), Performed::Ignored);
     settle(&mut h);
     assert!(h.state().view.frame >= 1);

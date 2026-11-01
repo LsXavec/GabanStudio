@@ -1036,6 +1036,11 @@ pub fn failure(ui: &mut Ui, words: &str, then: impl FnOnce(&mut Ui)) {
         });
 }
 
+/// How wide the Say line's words stand at their full size.
+pub fn say_width(ui: &Ui, words: &str) -> f32 {
+    text_width(ui, words, SAY_TEXT)
+}
+
 /// How wide a hint's action button stands.
 pub fn say_action_width(ui: &Ui, words: &str) -> f32 {
     text_width(ui, words, CTRL_TEXT) + 2.0 * ui.spacing().button_padding.x

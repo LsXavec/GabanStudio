@@ -1341,8 +1341,13 @@ pub(crate) mod tests {
         anim_core::model::AudioClip::from_bytes("serifu.wav", wav_of(&samples)).expect("the line decodes")
     }
 
-    pub(crate) fn clip() -> anim_core::model::AudioClip {
+    fn clip() -> anim_core::model::AudioClip {
         anim_core::model::AudioClip::from_bytes("ramp.wav", wav_bytes()).expect("the ramp decodes")
+    }
+
+    /// A silent clip `ms` milliseconds long.
+    pub(crate) fn clip_of(ms: usize) -> anim_core::model::AudioClip {
+        anim_core::model::AudioClip::from_bytes("line.wav", wav_of(&vec![0; ms * 8])).expect("the line decodes")
     }
 
     #[test]
@@ -1485,7 +1490,11 @@ pub(crate) mod tests {
 
     #[test]
     fn playback_audio_clock_leads_the_playhead_and_counts_dropped_frames() {
-        let mut h = EditorHarness::with_state(sounding());
+        // AU26: a drawing to the end, as a cut runs only as long as its sound
+        // when nothing else shows.
+        let mut state = sounding();
+        state.new_drawing_at_frame();
+        let mut h = EditorHarness::with_state(state);
         assert!(!h.has("dropped 0"), "a clean run says nothing\n{}", h.describe());
         // The sound is playing (as a device would play it), the UI behind.
         let cursor = Arc::new(AtomicUsize::new(0));

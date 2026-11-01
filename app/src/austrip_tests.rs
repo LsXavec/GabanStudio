@@ -420,13 +420,13 @@ fn austrip_add_drawing_on_an_empty_run_stays_uniform() {
     assert!(s.engine.apply("gap", vec![cmd]).is_ok());
     s.goto(5);
     assert!(s.add_drawing_after());
-    assert_eq!(holds(&s), [2, 2, 3, 2], "a gap has no hold to copy: the track's rhythm goes on");
-    assert_eq!(s.view.frame, 7);
+    assert_eq!(holds(&s), [2, 2, 2, 1], "a gap has no hold to copy: the track's rhythm goes on");
+    assert_eq!(s.view.frame, 4);
     // With no drawing before it, a gap gives the shortest hold.
     let mut blank = AppState::new_project("t", 64, 48, 24, 72.0);
-    let count = blank.frame_count();
+    blank.set_cut_length(12);
     assert!(blank.add_drawing_after());
-    assert_eq!(holds(&blank), [count, 1]);
+    assert_eq!(holds(&blank), [1, 11]);
 }
 
 #[test]

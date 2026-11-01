@@ -7,6 +7,7 @@ use std::path::Path;
 
 use anim_core::command::Command;
 use anim_core::graph::NodeKind;
+use anim_core::model::{Stroke, StrokePoint};
 use anim_core::xsheet::{ColumnDef, ColumnKind, Exposure};
 use eframe::egui;
 use egui::vec2;
@@ -53,6 +54,29 @@ fn drawn(rows: u32, n: u32) -> AppState {
     s
 }
 
+/// The two roads a stroke lands by (main spec 1.5(11)), `x` apart on the paper.
+const ROADS: [fn(&mut AppState, i32); 2] = [
+    |s, x| {
+        let pt = |x: i32| StrokePoint { x: x as f32, y: 18.0, pressure: 1.0, tilt: [0.0, 0.0] };
+        s.commit_stroke(Stroke { points: vec![pt(x), pt(x + 2)], base_width: 2.0, color: [0, 0, 0, 255] });
+    },
+    |s, x| paint_texels(s, &[(x, 18), (x + 1, 18)], INK),
+];
+
+/// An animation of 12 rows with a stroke on each of `rows`, made the way Plan's
+/// Say line teaches: click a row, draw on it.
+fn clicked(rows: &[u32], draw: fn(&mut AppState, i32)) -> AppState {
+    let mut s = AppState::new_project("tail", 64, 36, 12, 72.0);
+    ProjectKind::Animation.stamp(&mut s.engine.project);
+    s.set_cut_length(12);
+    for row in rows {
+        s.goto(*row);
+        draw(&mut s, 2 + 4 * *row as i32);
+    }
+    s.goto(0);
+    s
+}
+
 /// A shot whose active track holds one drawing for each of `holds`.
 fn timed(holds: &[u32]) -> AppState {
     let mut s = AppState::new_project("t", 64, 36, 12, 72.0);
@@ -76,9 +100,9 @@ fn gap_at(mut s: AppState, frame: u32) -> AppState {
     s
 }
 
-/// A sound on `s`'s cut.
-fn sound(s: &mut AppState) {
-    let (at, audio) = (s.at(), Some(crate::playback::tests::clip()));
+/// A sound `ms` long on `s`'s cut.
+fn sound(s: &mut AppState, ms: usize) {
+    let (at, audio) = (s.at(), Some(crate::playback::tests::clip_of(ms)));
     s.engine.apply("set audio", vec![Command::SetCutAudio { at, audio }]).expect("the clip is set");
 }
 
@@ -242,6 +266,119 @@ fn autail_add_drawing_keeps_what_follows_a_gap() {
 }
 
 #[test]
+fn autail_add_drawing_from_a_blank_row() {
+    // The band's main button on a new animation: row 1 takes it.
+    let mut s = templates::INTENTS[templates::ANIMATION].build();
+    assert!(s.add_drawing_after());
+    assert_eq!(holds(&s), [1, 11]);
+    assert_eq!((s.frame_count(), s.view.frame, s.shown_length()), (12, 0, 1));
+    // Parked on the tail, where Next past the last drawing lands, the tail's
+    // first row takes it, or the rows before the cursor would play blank.
+    for cursor in [3, 4, 11] {
+        let mut s = drawn(12, 3);
+        s.goto(cursor);
+        assert!(s.add_drawing_after());
+        assert_eq!(holds(&s), [1, 1, 1, 1, 8], "from frame {cursor}");
+        assert_eq!((s.frame_count(), s.view.frame, s.shown_length()), (12, 3, 4), "from frame {cursor}");
+    }
+    // A gap gives what it has, what it has over stays blank, and what follows
+    // moves only by what it could not give.
+    let mut s = gap_at(timed(&[2, 3, 2]), 2);
+    s.goto(3);
+    assert!(s.add_drawing_after());
+    assert_eq!(holds(&s), [2, 2, 1, 2]);
+    assert_eq!((s.frame_count(), s.view.frame), (7, 2));
+    let mut s = gap_at(timed(&[3, 1, 2]), 3);
+    s.goto(3);
+    assert!(s.add_drawing_after());
+    assert_eq!(holds(&s), [3, 3, 2]);
+    assert_eq!(s.frame_count(), 8);
+    // A blank drawing's one frame is no row to give: the cut must grow, or
+    // the verb could not make an animation of it (spec 2.7).
+    let mut s = templates::READY.build();
+    assert!(s.add_drawing_after());
+    assert_eq!(s.frame_count(), 2);
+    // Neither Play nor the GIF reaches past the new drawing.
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = drawn(12, 3);
+    s.goto(8);
+    assert!(s.add_drawing_after());
+    paint_texels(&mut s, &[(20, 18)], INK);
+    let mut h = shipped(s);
+    h.state_mut().view.loop_playback = false;
+    assert_eq!(run_from(&mut h, 0, 40), [0, 1, 2, 3]);
+    let file = dir.path().join("four.gif");
+    export(&mut h, ExportKind::Gif, &file);
+    let job = h.state().render_queue.queue.jobs.last().expect("the job");
+    assert_eq!((job.frames, job.total()), (Some((0, 3)), 4));
+    assert_eq!(gif(&file).frames.len(), 4);
+}
+
+#[test]
+fn autail_add_drawing_after_a_key_pose_doubles_nothing() {
+    // A first drawing that holds to the cut's end never chose that hold,
+    // wherever it starts.
+    for draw in ROADS {
+        let mut s = clicked(&[4], draw);
+        assert_eq!(holds(&s), [4, 8]);
+        s.goto(4);
+        assert!(s.add_drawing_after());
+        assert_eq!(holds(&s), [4, 1, 1, 6]);
+        assert_eq!(s.frame_count(), 12);
+    }
+    // A second drawing's hold is the rhythm, so it copies as it did.
+    let mut s = timed(&[4, 8]);
+    s.goto(4);
+    assert!(s.add_drawing_after());
+    assert_eq!(holds(&s), [4, 8, 8]);
+}
+
+#[test]
+fn autail_click_a_row_and_draw_keeps_the_tail() {
+    for draw in ROADS {
+        // Rows 1, 2 and 3, as the Say line teaches: what Add drawing leaves.
+        let s = clicked(&[0, 1, 2], draw);
+        assert_eq!(holds(&s), [1, 1, 1, 9]);
+        assert_eq!(s.shown_length(), 3);
+        assert_eq!(strip::sheets(&s)[3].shows, Exposure::Empty);
+        // A key pose: what stands before it holds up to it, and the last
+        // keeps to its row. No white frame plays between two poses.
+        assert_eq!(holds(&clicked(&[0, 4, 8], draw)), [4, 4, 1, 3]);
+        assert_eq!(holds(&clicked(&[4, 8], draw)), [4, 4, 1, 3]);
+        // The last row has nothing after it to blank.
+        assert_eq!(holds(&clicked(&[0, 11], draw)), [11, 1]);
+        // One undo, the blank key with it.
+        let mut s = clicked(&[0, 1], draw);
+        let (before, position) = (s.cut().xsheet.clone(), s.engine.position());
+        s.goto(2);
+        draw(&mut s, 30);
+        assert_eq!(s.engine.position(), position + 1);
+        s.undo();
+        assert_eq!(s.cut().xsheet, before);
+        // The track's first drawing runs on: nothing came before it to end on.
+        assert_eq!(holds(&clicked(&[0], draw)), [12]);
+        // A hold a person set splits as it always has, and a blank a person
+        // left stays blank: a stroke rewrites no row before its own.
+        let mut s = timed(&[2, 3]);
+        s.goto(3);
+        draw(&mut s, 30);
+        assert_eq!(holds(&s), [2, 1, 2]);
+        let mut s = gap_at(timed(&[6, 6]), 6);
+        s.goto(9);
+        draw(&mut s, 30);
+        assert_eq!(holds(&s), [6, 3, 1, 2]);
+        // Play and the GIF stop on the third drawing, as they do by Add drawing.
+        let dir = tempfile::tempdir().unwrap();
+        let mut h = shipped(clicked(&[0, 1, 2], draw));
+        h.state_mut().view.loop_playback = false;
+        assert_eq!(run_from(&mut h, 0, 40), [0, 1, 2]);
+        let file = dir.path().join("three.gif");
+        export(&mut h, ExportKind::Gif, &file);
+        assert_eq!(gif(&file).duration_cs(), 25, "a quarter of a second at 12 fps");
+    }
+}
+
+#[test]
 fn autail_add_drawing_is_one_undo_and_rides_the_loop_only_when_it_inserts() {
     let mut s = gap_at(timed(&[2, 2, 5]), 4);
     s.goto(6);
@@ -333,12 +470,40 @@ fn autail_blank_cut_with_a_sound_or_a_source_plays_whole() {
     assert_eq!(s.shown_length(), 1, "reaching nothing, it shows nothing");
     s.graph_connect(frames, output, 0);
     assert_eq!(s.shown_length(), 12, "the Result shows it on every frame");
-    // A sound is there to be heard before anything is drawn on it.
+    // A sound is there to be heard before anything is drawn on it, to its end.
     let mut s = AppState::new_project("voice", 64, 36, 12, 72.0);
     s.set_cut_length(12);
     assert_eq!(s.shown_length(), 1);
-    sound(&mut s);
+    sound(&mut s, 1000);
     assert_eq!(s.shown_length(), 12);
+    sound(&mut s, 250);
+    assert_eq!(s.shown_length(), 3);
+}
+
+#[test]
+fn autail_play_with_nothing_on_the_cut_says_so() {
+    let mut h = shipped(templates::INTENTS[templates::ANIMATION].build());
+    let refused = h.state().refusal_seq;
+    assert_eq!(h.editor_mut().perform(Action::PlayPause), Performed::Done);
+    assert!(!h.state().view.playing, "the key stays on Play");
+    assert_eq!(h.state().status, doc::NOTHING_TO_PLAY);
+    assert_eq!(h.state().refusal_seq, refused, "a press answered, not a refusal");
+    h.run_frames(2);
+    assert!(h.has(doc::NOTHING_TO_PLAY), "{}", h.describe());
+    // Anything on the cut is something to run: a drawing, even with no ink yet,
+    // or a sound.
+    let mut s = templates::INTENTS[templates::ANIMATION].build();
+    assert!(s.add_drawing_after());
+    s.toggle_play();
+    assert!(s.view.playing);
+    let mut s = templates::INTENTS[templates::ANIMATION].build();
+    sound(&mut s, 1000);
+    s.toggle_play();
+    assert!(s.view.playing);
+    // A stop is always a stop, whatever went from the cut meanwhile.
+    s.undo();
+    s.toggle_play();
+    assert!(!s.view.playing);
 }
 
 #[test]
@@ -354,10 +519,33 @@ fn autail_episode_plays_each_cut_whole() {
 }
 
 #[test]
+fn autail_episode_runs_a_tail_out_on_the_band() {
+    // The app's own road: the band's tick, into the scene's next cut.
+    let mut s = drawn(12, 3);
+    let (scene, first) = (s.view.scene, s.view.cut);
+    s.new_cut(scene);
+    s.goto_cut(scene, first);
+    let mut h = shipped(s);
+    h.state_mut().view.loop_playback = false;
+    h.state_mut().board.episode_play = true;
+    h.state_mut().view.playing = true;
+    let mut last = 0;
+    for _ in 0..40 {
+        h.editor_mut().play_tick(TICK);
+        if h.state().view.cut != first {
+            break;
+        }
+        last = h.state().view.frame;
+    }
+    assert_ne!(h.state().view.cut, first, "it ran on");
+    assert_eq!(last, 11, "the edit reads the cut's length, not its drawings");
+}
+
+#[test]
 fn autail_lip_form_keeps_the_whole_cut() {
     // Lip flap writes over the sound, not over the frames that play.
     let mut s = drawn(48, 3);
-    sound(&mut s);
+    sound(&mut s, 100);
     let form = crate::playback::LipForm::of(&s).expect("a track");
     assert_eq!((form.from, form.to), (0, 47));
 }
@@ -397,6 +585,45 @@ fn autail_background_keeps_the_tail() {
 }
 
 #[test]
+fn autail_sound_and_sources_count_beside_a_drawing() {
+    // A voice line under a few drawings runs to its end, on keys or not.
+    let mut s = drawn(12, 3);
+    sound(&mut s, 1000);
+    assert_eq!(s.shown_length(), 12);
+    let mut h = shipped(s);
+    h.state_mut().view.loop_playback = false;
+    assert_eq!(run_from(&mut h, 0, 40), (0..12).collect::<Vec<_>>());
+    // A short one ends where it ends, and past the last drawing only.
+    let mut s = drawn(12, 3);
+    sound(&mut s, 500);
+    assert_eq!(s.shown_length(), 6);
+    sound(&mut s, 100);
+    assert_eq!(s.shown_length(), 3, "the last drawing outlasts it");
+    // Started late, it ends late. Muted, it ends nothing, and past the cut it
+    // stays inside it.
+    let mut s = drawn(12, 3);
+    sound(&mut s, 250);
+    let at = s.at();
+    s.engine.project.cut_mut(at.scene, at.cut).unwrap().audio_props.offset = 6;
+    assert_eq!(s.shown_length(), 9);
+    s.engine.project.cut_mut(at.scene, at.cut).unwrap().audio_props.offset = 60;
+    assert_eq!(s.shown_length(), 12);
+    s.engine.project.cut_mut(at.scene, at.cut).unwrap().audio_props.mute = true;
+    assert_eq!(s.shown_length(), 3);
+    // A source the Result reads is on every frame, a drawing or no drawing.
+    let mut s = drawn(12, 3);
+    assert!(s.auto_comp());
+    assert_eq!(s.shown_length(), 3);
+    let output = s.cut().graph.nodes().find(|n| n.kind == NodeKind::Output).expect("the composite").id;
+    s.graph_add_node(NodeKind::image_sequence("renders/shot_####.png"), (0.0, 90.0));
+    let frames = s.selected_node.expect("the new node");
+    assert_eq!(s.shown_length(), 3, "reaching nothing, it shows nothing");
+    s.graph_connect(frames, output, 0);
+    assert_eq!(s.shown_length(), 12);
+    assert_eq!(s.play_range(), (0, 11));
+}
+
+#[test]
 fn autail_loop_range_wins_over_the_tail() {
     let mut h = shipped(drawn(12, 3));
     h.state_mut().view.loop_playback = true;
@@ -419,6 +646,45 @@ fn autail_loop_range_wins_over_the_tail() {
     h.state_mut().goto(1);
     h.state_mut().set_loop_out();
     assert_eq!(h.state().play_range(), (1, 1));
+}
+
+#[test]
+fn autail_loop_start_alone_runs_to_the_cut_end() {
+    // A tail is frames, and only a run stops short of them.
+    let mut s = drawn(12, 3);
+    s.goto(4);
+    s.set_loop_in();
+    assert_eq!(s.loop_range(), Some((4, 11)));
+    assert_eq!(s.status, "loop range 5–12");
+    // A range that stands keeps its end.
+    s.goto(6);
+    s.set_loop_out();
+    s.goto(2);
+    s.set_loop_in();
+    assert_eq!(s.loop_range(), Some((2, 6)));
+    // On a blank cut too.
+    let mut s = AppState::new_project("t", 64, 36, 12, 72.0);
+    s.set_cut_length(48);
+    s.goto(10);
+    s.set_loop_in();
+    assert_eq!(s.loop_range(), Some((10, 47)));
+}
+
+#[test]
+fn autail_ruler_marks_only_a_range_somebody_set() {
+    let mut s = drawn(12, 3);
+    assert_eq!(s.play_range(), (0, 2), "the run stops short");
+    assert_eq!(strip::marked_range(&s), None, "and that is no range");
+    s.goto(4);
+    s.set_loop_in();
+    s.goto(7);
+    s.set_loop_out();
+    assert_eq!(strip::marked_range(&s), Some((4, 7)));
+    s.goto(0);
+    s.set_loop_in();
+    s.goto(11);
+    s.set_loop_out();
+    assert_eq!(strip::marked_range(&s), None, "the whole cut marks nothing");
 }
 
 // ---- rule two: plain exports (spec 3.8) ----
@@ -482,6 +748,18 @@ fn autail_six_drawings_at_medium_make_a_second() {
     assert_eq!(six.frames.len(), 6);
     assert!(six.frames.iter().all(|f| (16..=17).contains(&f.delay_cs)));
     assert_eq!(six.duration_cs(), 100, "1.0 s");
+}
+
+#[test]
+fn autail_one_drawing_with_a_tail_is_a_picture() {
+    use crate::export_step::Offer;
+    let mut s = templates::INTENTS[templates::ANIMATION].build();
+    assert!(s.add_drawing_after());
+    paint_texels(&mut s, &[(2, 18)], INK);
+    assert_eq!(holds(&s), [1, 11]);
+    assert_eq!(Offer::of(&s), Offer::OneFrame);
+    assert!(s.add_drawing_after());
+    assert_eq!(Offer::of(&s), Offer::Animation);
 }
 
 #[test]
@@ -574,11 +852,16 @@ fn autail_hold_keys_stand_only_in_timing_and_never_fold() {
     let (a, b) = (h.rect(&long), h.rect(&short));
     let sound = h.rect(vocab::SOUND_WHILE_DRAGGING);
     assert!(a.right() <= b.left() && b.right() <= sound.left(), "{a:?} {b:?} {sound:?}");
-    // Their cards name the chords.
-    for (key, action) in [(&long, Action::HoldPlus), (&short, Action::HoldMinus)] {
+    // Their cards say what these keys do, and name the chords.
+    let cards = [
+        (&long, vocab::LONGER, Action::HoldPlus, doc::LONGER_SAYS),
+        (&short, vocab::SHORTER, Action::HoldMinus, doc::SHORTER_SAYS),
+    ];
+    for (key, word, action, says) in cards {
         h.hover(key);
         h.wait(plate::CARD_DELAY + 0.1);
-        let words = crate::menus::tip(&h.ctx(), action);
+        let chord = crate::menus::chord_label(&h.ctx(), action).expect("a chord");
+        let words = format!("{word} ({chord}) — {says}");
         assert!(h.has(&words), "{key} has no card\n{}", h.describe());
     }
     // Under the fold the sound goes behind `…`, and these stay on the row.
@@ -590,8 +873,17 @@ fn autail_hold_keys_stand_only_in_timing_and_never_fold() {
     assert!(a.left() >= 0.0 && b.right() <= narrow, "{a:?} {b:?}");
     let window = h.ctx().content_rect();
     assert!(window.contains_rect(a) && window.contains_rect(b));
-    // No other step has them, the full band of Color's sheet among them.
     sized(&mut h, 1600.0, 900.0);
+    // Timing keeps them with its sheet closed: nothing else there holds a run.
+    let dock = h.editor().dock.clone();
+    h.editor_mut().dock = egui_dock::DockState::new(vec![crate::workspace::Pane::Canvas]);
+    settle(&mut h);
+    assert!(!h.editor().sheet_on_screen());
+    assert_eq!(h.editor().stage, Some(Stage::Edit));
+    assert!(h.has(&long) && h.has(&short), "{}", h.describe());
+    h.editor_mut().dock = dock;
+    settle(&mut h);
+    // No other step has them, the full band of Color's sheet among them.
     for action in [Action::RoomDrawing, Action::RoomFinishing, Action::RoomComposite, Action::RoomExport] {
         assert_eq!(h.perform(action), Performed::Done);
         settle(&mut h);
@@ -602,6 +894,80 @@ fn autail_hold_keys_stand_only_in_timing_and_never_fold() {
     settle(&mut h);
     assert!(h.editor().sheet_on_screen());
     assert!(!h.has(&long) && !h.has(&short), "{}", h.describe());
+}
+
+#[test]
+fn autail_hold_keys_leave_the_place_on_the_band() {
+    // At 1280 the keys take the lane under `SAY_DOTS_LANE`, with room to spare.
+    let mut h = timing(timed(&[4, 4]));
+    sized(&mut h, 1280.0, 800.0);
+    assert!(h.editor().say.dots_painted, "{}", h.describe());
+    let dots = h.editor().say.dots_at.expect("the dots");
+    assert!(dots.right() <= h.rect(&longer()).left(), "{dots:?}");
+    // A refusal still outranks them.
+    h.editor_mut().state.refuse("refused — nothing is exposed on this frame");
+    h.run_frames(2);
+    assert!(!h.editor().say.dots_painted);
+}
+
+#[test]
+fn autail_hold_handle_rests_out_of_sight_on_one_frame() {
+    let seen = |h: &EditorHarness| {
+        let id = crate::xsheet_panel::handles_seen();
+        h.ctx().data(|d| d.get_temp::<Vec<u32>>(id)).unwrap_or_default()
+    };
+    // What Add drawing leaves on every animation shows no ring.
+    let h = shipped(drawn(12, 3));
+    assert!(h.editor().sheet_on_screen(), "{}", h.describe());
+    assert_eq!(strip::sheets(h.state())[3].shows, Exposure::Empty);
+    assert_eq!(seen(&h), [0u32; 0]);
+    // A hold that ends early still does, and so does one somebody pulled.
+    let h = shipped(gap_at(timed(&[6, 6]), 3));
+    assert!(h.editor().sheet_on_screen(), "{}", h.describe());
+    assert_eq!(seen(&h), [0]);
+    let mut h = shipped(drawn(12, 3));
+    let column = h.state().view.active_column;
+    h.state_mut().positioned_holds.insert((column, 2));
+    settle(&mut h);
+    assert_eq!(seen(&h), [2]);
+}
+
+/// The part's fence (feedback AU26, Must not change): what it could not be
+/// seen to leave alone anywhere else. `aulook_nothing_opens_a_window`,
+/// `aulook_the_seams_stand_as_they_stood` (shaders, wire) and
+/// `aulook_what_was_left_out_stays_out` (Actions, panes) stand behind this one.
+#[test]
+fn autail_stores_nothing_new_and_adds_by_one_apply() {
+    let doc = include_str!("doc.rs");
+    let body = doc.split("pub fn add_drawing_after").nth(1).expect("the verb");
+    let body: String = body.lines().take_while(|l| *l != "    }").collect();
+    assert_eq!(body.matches("engine.apply(").count(), 1, "one undo, by construction");
+    let mut used: Vec<&str> = body.split("Command::").skip(1).map(|c| c.split(' ').next().unwrap()).collect();
+    used.sort();
+    used.dedup();
+    assert_eq!(used, ["AddDrawing", "InsertFrames", "SetCell"], "no new command, so no new wire");
+    // Each road through it, as the engine counts them.
+    let roads = [gap_at(timed(&[2, 2, 5]), 4), gap_at(timed(&[3, 1, 2]), 3), timed(&[2, 2])];
+    for mut s in roads {
+        let position = s.engine.position();
+        assert!(s.add_drawing_after());
+        assert_eq!(s.engine.position(), position + 1);
+    }
+    let mut blank = templates::INTENTS[templates::ANIMATION].build();
+    let position = blank.engine.position();
+    assert!(blank.add_drawing_after());
+    assert_eq!(blank.engine.position(), position + 1);
+    // A tail is cells, in the file's own words: no new stored key, and the
+    // schema stands.
+    let store = include_str!("../../crates/anim-core/src/store.rs");
+    assert!(store.contains("const SCHEMA_VERSION: i64 = 11;"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("tail.animproj");
+    let project = drawn(12, 3).engine.project.clone();
+    anim_core::store::save(&project, &file).expect("saved");
+    let read = anim_core::store::load(&file).expect("read");
+    assert!(read == project, "a tail survives the file whole");
+    assert_eq!(read.app_meta.keys().collect::<Vec<_>>(), ["kind"], "`app.kind`, as AU18 left it");
 }
 
 #[test]

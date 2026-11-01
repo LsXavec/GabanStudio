@@ -2954,9 +2954,10 @@ mod tests {
         ("paint.rs", "const SHADER", 0xa0fde5985464fb0f),
         ("paint.rs", "const COMPOSITE_SHADER", 0x208a30bfac9192e5),
         ("net.rs", "", 0xe23a7ac3a222dd11),
-        ("doc.rs", "    pub fn commit_stroke", 0xa2fcb632dfd8a2a1),
+        // AU26: a stroke's new key takes `tail_keys` into its undo step.
+        ("doc.rs", "    pub fn commit_stroke", 0x22b044538073b7a8),
         ("doc.rs", "    pub fn commit_raster", 0xdc168671a7f290e0),
-        ("doc.rs", "    fn land_raster", 0x39b08904694b93d1),
+        ("doc.rs", "    fn land_raster", 0x5094970bbe999ade),
         ("doc.rs", "    pub fn undo(", 0xe15edd6f411d2b83),
         ("doc.rs", "    pub fn redo(", 0xcaa16d99af9d7dbd),
         ("doc.rs", "    pub fn undo_to(", 0x387309403f18550e),
