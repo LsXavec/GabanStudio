@@ -5,10 +5,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use anim_core::command::CutRef;
 use anim_core::generator::GenKind;
 use anim_core::graph::{Graph, NodeKind};
 use anim_core::manga::{self, Rulers};
-use anim_core::ids::{DrawingId, LayerId, NodeId};
+use anim_core::ids::{ColumnId, DrawingId, LayerId, NodeId};
 use anim_core::model::{CelLayer, Cut, Drawing, DrawingKind, LayerRole};
 use anim_core::raster::TILE;
 use anim_core::xsheet::{Column, Exposure, ParamInterp};
@@ -21,6 +22,7 @@ use crate::lessons::{self, Class, Done, Latch, Lesson, PathKind, Show, Target, T
 use crate::plate::{self, Role};
 use crate::say::Facts;
 use crate::steps;
+use crate::workspace::Stage;
 use crate::{Action, Editor, RenderState, config, menus, vocab, welcome};
 
 /// Where a run stands, `<id>/<task>`, in `app_meta`: outside undo, and no
@@ -61,8 +63,10 @@ const MEET_SPAN: f32 = 0.5;
 const ERASED_LEFT: f32 = 0.1;
 /// Picked: how far from the asked colour a channel may stand.
 const PICK_NEAR: i32 = 8;
-/// Show me's hand: the seconds a stroke takes on the paper (spec 5.9).
+/// Show me's hand: the seconds a stroke takes on the paper (spec 5.9), and a
+/// press of the pen, which is a touch and no stroke.
 pub(crate) const REVEAL_SECS: f64 = 1.5;
+pub(crate) const PRESS_SECS: f64 = 0.3;
 
 /// A control's word, one entry each: the `{Token}` table of the lessons, so no
 /// lesson string holds a name that a rename would leave behind.
@@ -210,13 +214,34 @@ struct Baseline {
     refusals: u32,
 }
 
-/// AU28: `Show me`'s lines on their way. Anything that touches the document
-/// meanwhile cancels them, and a line landing then would land on something
-/// the person never saw it reach for.
+/// AU28: `Show me`'s lines on their way. Anything that moves what they stand
+/// over cancels them: a line landing then would land on something the person
+/// never saw it reach for.
 struct Reveal {
     paths: &'static [u16],
     began: f64,
-    over: (usize, u64, u32),
+    over: Stand,
+}
+
+/// AU28: what a reveal stands over: the document, and where in it the ink
+/// would land. An entered step changes no revision, and arming a step moves
+/// the active layer.
+#[derive(PartialEq)]
+struct Stand {
+    task: usize,
+    revision: u64,
+    step: Option<Stage>,
+    cut: CutRef,
+    frame: u32,
+    column: ColumnId,
+    layer: String,
+    /// The paper is on screen.
+    paper: bool,
+}
+
+/// AU28: what `path` takes on the paper.
+fn reveal_secs(path: &lessons::Path) -> f64 {
+    if path.is_press() { PRESS_SECS } else { REVEAL_SECS }
 }
 
 /// A lesson standing over the open document.
@@ -274,11 +299,7 @@ impl LessonRun {
     /// or the finish, full size, while it is held. A stand-in is the gate's
     /// and a wipe the eraser's: neither stands on the paper.
     fn guide_lines(&self) -> Vec<GuideLine> {
-        let line = |p: &lessons::Path| GuideLine {
-            points: p.points.iter().map(|q| egui::pos2(q[0], q[1])).collect(),
-            width: p.width,
-            over: p.over,
-        };
+        let line = |p: &lessons::Path| GuideLine::of(&p.points, p.width, p.over);
         let path = |i: &u16| self.art.get(usize::from(*i));
         if self.holding {
             return self.lesson.finish.iter().filter_map(path).map(line).collect();
@@ -288,18 +309,25 @@ impl LessonRun {
         guide.iter().filter_map(path).filter(shows).map(line).collect()
     }
 
-    /// The reveal's lines at `shown` strokes along: those done, and the one
-    /// the hand is on as far as it has come.
-    fn revealed(&self, paths: &[u16], shown: f64) -> Vec<GuideLine> {
-        let line = |(i, p): (usize, &lessons::Path)| {
-            let along = (shown - i as f64).clamp(0.0, 1.0);
-            let upto = (p.points.len() as f64 * along).ceil() as usize;
-            let points = p.points[..upto].iter().map(|q| egui::pos2(q[0], q[1])).collect();
-            GuideLine { points, width: p.width, over: false }
-        };
-        let paths = paths.iter().filter_map(|i| self.art.get(usize::from(*i)));
-        let drawn = |p: &&lessons::Path| p.kind != PathKind::Wipe;
-        paths.enumerate().filter(|(_, p)| drawn(p)).map(line).filter(|l| !l.points.is_empty()).collect()
+    /// The reveal `secs` along: those lines done, and the one the hand is on
+    /// as far as it has come, ink first and the eraser's after.
+    fn revealed(&self, paths: &[u16], secs: f64) -> (Vec<GuideLine>, Vec<GuideLine>) {
+        let (mut ink, mut rubbing, mut began) = (Vec::new(), Vec::new(), 0.0);
+        for path in paths.iter().filter_map(|i| self.art.get(usize::from(*i))) {
+            let along = ((secs - began) / reveal_secs(path)).clamp(0.0, 1.0);
+            let upto = (path.points.len() as f64 * along).ceil() as usize;
+            began += reveal_secs(path);
+            if upto > 0 {
+                let line = GuideLine::of(&path.points[..upto], path.width, false);
+                if path.kind == PathKind::Wipe { rubbing.push(line) } else { ink.push(line) }
+            }
+        }
+        (ink, rubbing)
+    }
+
+    /// What the whole of a reveal of `paths` takes.
+    fn reveal_length(&self, paths: &[u16]) -> f64 {
+        paths.iter().filter_map(|i| self.art.get(usize::from(*i))).map(reveal_secs).sum()
     }
 
     /// Whether `paths` are met, each by its own stroke (spec 5.4): an outline
@@ -810,13 +838,12 @@ impl Editor {
     }
 
     /// AU28: the paper's lines for this frame, set as `empty_cell_hint` is,
-    /// and Show me's hand. Pen down cancels it: `stroke_active` is that, and
-    /// the pen's own stroke goes on as it would have (spec 5.9).
+    /// and Show me's hand. Pen down cancels it, and the pen's own stroke goes
+    /// on as it would have (spec 5.9); so does anything that moves what it
+    /// stands over, a pill pressed on the way above all.
     pub(crate) fn lesson_guide(&mut self, ctx: &egui::Context) {
         let Some(run) = self.lesson.as_mut() else {
-            if !self.canvas.guide.lines.is_empty() || !self.canvas.guide.reveal.is_empty() {
-                self.canvas.guide = canvas::Guide::default();
-            }
+            self.canvas.guide = canvas::Guide::default();
             return;
         };
         let wanted = Some((run.task, run.holding));
@@ -824,24 +851,42 @@ impl Editor {
             run.guide_for = wanted;
             self.canvas.guide.lines = run.guide_lines();
         }
-        let here = (run.task, self.state.engine.revision(), self.state.view.frame);
-        let live = run.reveal.as_ref().filter(|r| r.over == here && !self.canvas.stroke_active());
-        let Some(reveal) = live else {
-            run.reveal = None;
-            self.canvas.guide.reveal.clear();
-            return;
-        };
-        let paths = reveal.paths;
-        let shown = (ctx.input(|i| i.time) - reveal.began) / REVEAL_SECS;
-        if shown < paths.len() as f64 {
-            self.canvas.guide.reveal = run.revealed(paths, shown);
+        let task = run.task;
+        let reveal = run.reveal.take();
+        self.canvas.guide.reveal.clear();
+        self.canvas.guide.rubbing.clear();
+        let live = reveal.filter(|r| !self.canvas.stroke_active() && r.over == self.lesson_stand(task));
+        let (Some(reveal), Some(run)) = (live, self.lesson.as_mut()) else { return };
+        let secs = ctx.input(|i| i.time) - reveal.began;
+        if secs < run.reveal_length(reveal.paths) {
+            (self.canvas.guide.reveal, self.canvas.guide.rubbing) = run.revealed(reveal.paths, secs);
             self.canvas.guide.reveal_ink = plate::opaque(self.canvas.brush_color);
+            run.reveal = Some(reveal);
             ctx.request_repaint();
             return;
         }
-        run.reveal = None;
-        self.canvas.guide.reveal.clear();
-        self.lesson_land(paths);
+        self.lesson_land(reveal.paths);
+    }
+
+    /// AU28: the Canvas pane is on screen: a step may hold none, or have it
+    /// behind another tab.
+    fn lesson_paper(&self) -> bool {
+        crate::visible_panes(&self.dock).contains(&crate::Pane::Canvas)
+    }
+
+    /// AU28: what a reveal begun on `task` now would stand over.
+    fn lesson_stand(&self, task: usize) -> Stand {
+        let state = &self.state;
+        Stand {
+            task,
+            revision: state.engine.revision(),
+            step: self.stage,
+            cut: state.at(),
+            frame: state.view.frame,
+            column: state.view.active_column,
+            layer: state.view.active_layer.clone(),
+            paper: self.lesson_paper(),
+        }
     }
 
     /// AU28: `paths` land as Show me's ink: one undo, and a stroke each to the
@@ -880,7 +925,9 @@ impl Editor {
     /// ticks as any other. AU21: `Show me where` rings the control, and that
     /// is all an Experienced lesson's button does (spec 5.2). AU28: a line is
     /// revealed at a hand's pace first, a fill lands at once, and neither
-    /// reaches for a paper the person has left: the card is pointing back.
+    /// reaches for a paper the person has left, or that no pane shows: the
+    /// card is pointing back. A paper the pen would refuse is refused here,
+    /// as the circle's is, before the hand sets out.
     fn lesson_show(&mut self, ctx: &egui::Context) {
         let Some(run) = self.lesson.as_mut() else { return };
         run.asked = true;
@@ -889,7 +936,7 @@ impl Editor {
         }
         let Some(task) = run.current() else { return };
         let on_paper = matches!(task.show, Show::Trace(_) | Show::Fill(_));
-        if on_paper && self.lesson_wandered(task) {
+        if on_paper && (self.lesson_wandered(task) || !self.lesson_paper()) {
             return;
         }
         if on_paper && self.canvas.stroke_active() {
@@ -902,9 +949,11 @@ impl Editor {
             }
             Show::Run(run) => run(self),
             Show::Trace(paths) => {
+                if self.canvas.slot_at_pen_down(true, &mut self.state).is_none() {
+                    return;
+                }
                 let began = ctx.input(|i| i.time);
-                let over = self.lesson.as_ref().map_or(0, |run| run.task);
-                let over = (over, self.state.engine.revision(), self.state.view.frame);
+                let over = self.lesson_stand(self.lesson.as_ref().map_or(0, |run| run.task));
                 if let Some(run) = self.lesson.as_mut() {
                     run.reveal.get_or_insert(Reveal { paths, began, over });
                 }
@@ -1041,8 +1090,9 @@ impl Editor {
         let armed = self.canvas.brush_color == night;
         let where_only = lesson.class == Class::Experienced || matches!(run.current().map(|t| t.show), Some(Show::Where));
         let offered = !where_only || Self::lesson_rings(run.current());
-        // The coat's landmarks stand on the paper; the finish waits behind this.
-        let hold = lesson.class == Class::Amateur && !finished;
+        // The coat's landmarks stand on the paper; the finish waits behind
+        // this. It paints on the paper, so it stands only where one shows.
+        let hold = lesson.class == Class::Amateur && !finished && self.lesson_paper() && !self.canvas.composite_view;
 
         let area = ui.max_rect().shrink(CARD_PAD);
         let foot_rows = if hold { 3.0 } else { 2.0 };

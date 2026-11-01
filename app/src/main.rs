@@ -7700,8 +7700,9 @@ enum ProbeRoom {
     /// it is built for.
     Lessons,
     /// AU27: a step of a kind's bar with the lesson card standing beside it.
+    /// AU28: the class, because an Amateur's foot has a third row.
     #[cfg_attr(not(test), allow(dead_code))]
-    Lesson(&'static str, ProjectKind, Stage),
+    Lesson(&'static str, ProjectKind, Stage, lessons::Class),
 }
 
 /// Every room: the CLI probe and the ship tests walk these. AU19: `Stage::Drawing`
@@ -7724,19 +7725,23 @@ const PROBE_ROOMS: [ProbeRoom; 9] = [
 /// what the clip audit and AU21 the rail's audits walk after the rooms (spec
 /// 1.10). The shots number `PROBE_ROOMS` alone.
 #[cfg(test)]
-const LESSON_ROOMS: [ProbeRoom; 12] = [
-    ProbeRoom::Lesson("lesson card, Draw", ProjectKind::Drawing, Stage::Drawing),
-    ProbeRoom::Lesson("lesson card, Color", ProjectKind::Drawing, Stage::InkPaint),
-    ProbeRoom::Lesson("lesson card, Effects", ProjectKind::Drawing, Stage::Composite),
-    ProbeRoom::Lesson("lesson card, Export", ProjectKind::Drawing, Stage::Export),
-    ProbeRoom::Lesson("lesson card, Plan", ProjectKind::Animation, Stage::Drawing),
-    ProbeRoom::Lesson("lesson card, Timing", ProjectKind::Animation, Stage::Edit),
-    ProbeRoom::Lesson("lesson card, animation Color", ProjectKind::Animation, Stage::InkPaint),
-    ProbeRoom::Lesson("lesson card, animation Effects", ProjectKind::Animation, Stage::Composite),
-    ProbeRoom::Lesson("lesson card, animation Export", ProjectKind::Animation, Stage::Export),
-    ProbeRoom::Lesson("lesson card, Manga", ProjectKind::Comic, Stage::Manga),
-    ProbeRoom::Lesson("lesson card, comic Color", ProjectKind::Comic, Stage::InkPaint),
-    ProbeRoom::Lesson("lesson card, comic Export", ProjectKind::Comic, Stage::Export),
+const LESSON_ROOMS: [ProbeRoom; 15] = [
+    ProbeRoom::Lesson("lesson card, Draw", ProjectKind::Drawing, Stage::Drawing, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, Color", ProjectKind::Drawing, Stage::InkPaint, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, Effects", ProjectKind::Drawing, Stage::Composite, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, Export", ProjectKind::Drawing, Stage::Export, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, Plan", ProjectKind::Animation, Stage::Drawing, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, Timing", ProjectKind::Animation, Stage::Edit, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, animation Color", ProjectKind::Animation, Stage::InkPaint, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, animation Effects", ProjectKind::Animation, Stage::Composite, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, animation Export", ProjectKind::Animation, Stage::Export, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, Manga", ProjectKind::Comic, Stage::Manga, lessons::Class::Rookie),
+    ProbeRoom::Lesson("lesson card, comic Color", ProjectKind::Comic, Stage::InkPaint, lessons::Class::Rookie),
+    // AU28: the foot's third row, wherever a paper stands for it to be.
+    ProbeRoom::Lesson("Amateur card, Draw", ProjectKind::Drawing, Stage::Drawing, lessons::Class::Amateur),
+    ProbeRoom::Lesson("Amateur card, Plan", ProjectKind::Animation, Stage::Drawing, lessons::Class::Amateur),
+    ProbeRoom::Lesson("Amateur card, Manga", ProjectKind::Comic, Stage::Manga, lessons::Class::Amateur),
+    ProbeRoom::Lesson("lesson card, comic Export", ProjectKind::Comic, Stage::Export, lessons::Class::Rookie),
 ];
 
 impl ProbeRoom {
@@ -7778,9 +7783,9 @@ impl ProbeRoom {
                 w.lessons = lessons::STAND_IN;
                 editor.open_start(w.on_lessons());
             }
-            ProbeRoom::Lesson(_, kind, st) => {
+            ProbeRoom::Lesson(_, kind, st, class) => {
                 kind.stamp(&mut editor.state.engine.project);
-                editor.begin_lesson(lessons::Lesson { kind, ..lessons::PROBED }, 0);
+                editor.begin_lesson(lessons::Lesson { kind, class, ..lessons::PROBED }, 0);
                 editor.enter_room(st);
             }
         }
@@ -7789,7 +7794,7 @@ impl ProbeRoom {
     fn probe(self, ppp: f32) -> ProbeRun {
         match self {
             // AU9: this step has no paper: its panel is what must hold still.
-            ProbeRoom::Stage(Stage::Export) | ProbeRoom::Lesson(_, _, Stage::Export) => {
+            ProbeRoom::Stage(Stage::Export) | ProbeRoom::Lesson(_, _, Stage::Export, _) => {
                 probe_run_in(ppp, 100, Pane::RenderQueue, |editor| self.enter(editor))
             }
             ProbeRoom::Stage(st) => probe_run(st, ppp),

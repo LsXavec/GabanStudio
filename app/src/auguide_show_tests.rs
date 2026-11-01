@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use anim_core::camera::IRect;
 use anim_core::fill::{FillOpts, flood_fill_mask_in};
+use anim_core::manga::{Page, slice_webtoon};
 use anim_core::raster::{TILE, TILE_LEN, TileData, f32_to_f16_bits};
 use anim_core::store;
-use eframe::egui::epaint::ColorMode;
+use eframe::egui::epaint::CircleShape;
 use eframe::egui::{self, Pos2, Shape, pos2};
 use egui_kittest::kittest::Queryable;
 
@@ -21,7 +22,7 @@ use crate::canvas::extpaper_tests::{paint_texels, texel};
 use crate::canvas::{CanvasTool, CanvasView, GuideLine, NEEDS_ENGINE};
 use crate::config::Action;
 use crate::doc::{self, AppState, PathInk};
-use crate::lesson::{self, BY_HAND, HOLD, LEAVE, REVEAL_SECS, SHOW_ME};
+use crate::lesson::{self, BY_HAND, HOLD, LEAVE, PRESS_SECS, REVEAL_SECS, SHOW_ME, SHOW_WHERE};
 use crate::lessons::art::{self, Pt};
 use crate::lessons::{self, Class, Done, Lesson, Path, PathKind, Show, Target, Task};
 use crate::measure::{Act, Recorder};
@@ -73,6 +74,15 @@ fn run_of(tasks: &'static [Task]) -> EditorHarness {
     h.editor_mut().begin_lesson(Lesson { tasks, ..probe() }, 0);
     settle(&mut h);
     h
+}
+
+/// The probe's paper with two lines to trace, and with a fill to do: the shots'.
+pub(crate) fn traced_lesson() -> Lesson {
+    Lesson { tasks: TWO_LINES, ..probe() }
+}
+
+pub(crate) fn fill_lesson() -> Lesson {
+    Lesson { tasks: FILL, ..probe() }
 }
 
 /// `points` on the screen as the view stands.
@@ -172,12 +182,26 @@ fn climb(go: &mut Recorder, step: &str, task: &Task) {
     panic!("{step}: {last:?} never got a rect");
 }
 
+/// The task rings a control: the paper is pointed at by the guide or the
+/// sentence, and has no ring.
+fn rings(task: &Task) -> bool {
+    !matches!(task.ring.last(), None | Some(Target::Paper))
+}
+
+/// The ring stands on this task. An Experienced lesson's stands only when asked
+/// (spec 5.2), and a task of theirs on the paper has no button to ask with.
+fn ringed(lesson: &Lesson, task: &Task) -> bool {
+    lesson.class != Class::Experienced || rings(task)
+}
+
 /// The act that answers `task`: the card's button, the pen, or the control the
 /// ring came to.
 fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &Task, hand: Hand) {
-    climb(go, step, task);
+    if ringed(lesson, task) {
+        climb(go, step, task);
+    }
     let shows = lesson.class != Class::Experienced && !matches!(task.show, Show::Where);
-    let control = !matches!(task.ring.last(), None | Some(Target::Paper));
+    let control = rings(task);
     let traced = matches!(task.show, Show::Trace(_));
     if shows && (hand == Hand::ShowMe || !(traced || control)) {
         go.act(step, Act::Click(SHOW_ME));
@@ -209,7 +233,11 @@ fn dialogs(go: &mut Recorder, step: &str, id: &str, dir: &FilePath, files: &mut 
     });
     let Some(asked) = asked else { return };
     let file = match asked {
-        Some(kind @ ExportKind::Png) => File::One(kind, dir.join(format!("{id}-frames"))),
+        Some(kind @ ExportKind::Png) => {
+            let frames = dir.join(format!("{id}-frames"));
+            std::fs::create_dir_all(&frames).expect("the folder a person chose");
+            File::One(kind, frames)
+        }
         Some(kind @ ExportKind::Mp4) => File::One(kind, dir.join(format!("{id}.mp4"))),
         Some(kind @ ExportKind::Gif) => File::One(kind, dir.join(format!("{id}.gif"))),
         Some(kind @ ExportKind::Still) => File::One(kind, dir.join(format!("{id}.png"))),
@@ -255,12 +283,21 @@ impl Picture {
         Picture { size: (info.width, info.height), rgba }
     }
 
-    /// The first frame, and the file's length in hundredths of a second.
-    fn gif(file: &FilePath) -> (Picture, u32) {
+    /// Each picture of the file, and its length in hundredths of a second. A
+    /// held drawing is one GIF frame, standing for its whole run.
+    fn gif(file: &FilePath) -> (Vec<Picture>, u32) {
         let bytes = std::fs::read(file).expect("the GIF");
         let gif = crate::gif_decode::decode(&bytes).expect("a GIF");
-        let rgba = gif.frames[0].rgb.iter().flat_map(|c| [c[0], c[1], c[2], 255]).collect();
-        (Picture { size: (u32::from(gif.size.0), u32::from(gif.size.1)), rgba }, gif.duration_cs())
+        let size = (u32::from(gif.size.0), u32::from(gif.size.1));
+        let picture = |frame: &crate::gif_decode::Frame| Picture { size, rgba: frame.rgb.iter().flat_map(|c| [c[0], c[1], c[2], 255]).collect() };
+        (gif.frames.iter().map(picture).collect(), gif.duration_cs())
+    }
+
+    /// Each PNG in `dir`, by name.
+    fn folder(dir: &FilePath) -> Vec<Picture> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir).expect("the folder").flatten().map(|f| f.path()).collect();
+        files.sort();
+        files.iter().map(|f| Picture::png(f)).collect()
     }
 
     fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
@@ -274,9 +311,12 @@ impl Picture {
 
     /// Something other than the sheet, this near `(x, y)`.
     fn inked_near(&self, x: f32, y: f32, reach: i32) -> bool {
-        let inked = |px: [u8; 4]| px[3] > 128 && px[..3].iter().any(|c| *c < 200);
         let spots = (-reach..=reach).flat_map(|dy| (-reach..=reach).map(move |dx| (dx, dy)));
-        spots.into_iter().any(|(dx, dy)| inked(self.pixel(x as i32 + dx, y as i32 + dy)))
+        spots.into_iter().any(|(dx, dy)| is_ink(self.pixel(x as i32 + dx, y as i32 + dy)))
+    }
+
+    fn blank(&self) -> bool {
+        !self.rgba.chunks_exact(4).any(|px| is_ink([px[0], px[1], px[2], px[3]]))
     }
 
     /// The pixels of this colour, as near as eight bits keep it.
@@ -286,15 +326,62 @@ impl Picture {
     }
 }
 
-/// `lesson`'s finish in `picture`: size is the paper's, and nine samples in ten
-/// of each of its paths fall on ink.
-fn reads_the_finish(lesson: &Lesson, art: &[Path], picture: &Picture, step: &str) {
+fn is_ink(px: [u8; 4]) -> bool {
+    px[3] > 128 && px[..3].iter().any(|c| *c < 200)
+}
+
+/// A lesson's ending, read: `count` pictures, each the paper's size and none of
+/// them blank, and nine samples in ten of each finish path on the ink of one of
+/// them: a path may be any page's or frame's. `Err` says what it is not.
+fn reads_the_finish(lesson: &Lesson, art: &[Path], pictures: &[Picture], count: usize) -> Result<(), String> {
+    if pictures.len() != count {
+        return Err(format!("{} pictures, for {count}", pictures.len()));
+    }
     let paper = (lesson.paper.width, lesson.paper.height);
-    assert_eq!(picture.size, paper, "{step}: the file's size");
+    for (i, picture) in pictures.iter().enumerate() {
+        if picture.size != paper {
+            return Err(format!("picture {i}: {:?}, on a paper of {paper:?}", picture.size));
+        }
+        if picture.blank() {
+            return Err(format!("picture {i}: blank"));
+        }
+    }
     for index in lesson.finish {
         let path = &art[usize::from(*index)];
-        let met = path.points.iter().filter(|p| picture.inked_near(p[0], p[1], 3)).count();
-        assert!(met * 10 >= path.points.len() * 9, "{step}: path {index}: {met} of {} on ink", path.points.len());
+        let on = |picture: &Picture| path.points.iter().filter(|p| picture.inked_near(p[0], p[1], 3)).count();
+        let met = pictures.iter().map(on).max().unwrap_or(0);
+        if met * 10 < path.points.len() * 9 {
+            return Err(format!("path {index}: {met} of {} on ink", path.points.len()));
+        }
+    }
+    Ok(())
+}
+
+/// The page files a book writes: a cut each, a webtoon's in its segments.
+fn pages_owed(h: &EditorHarness) -> usize {
+    let state = h.state();
+    let scene = state.engine.project.scene(state.at().scene).expect("the book");
+    let slices = |c: &anim_core::model::Cut| Page::of(c).and_then(|p| Some(slice_webtoon(p.height, p.segment?).len()));
+    scene.cuts.iter().map(|c| slices(c).unwrap_or(1)).sum()
+}
+
+/// A landed file, decoded: size, frame count, and ink where the paths are.
+fn read_file(h: &EditorHarness, lesson: &Lesson, art: &[Path], file: &File) -> Result<(), String> {
+    let frames = h.state().shown_length();
+    match file {
+        File::One(ExportKind::Still, path) => reads_the_finish(lesson, art, &[Picture::png(path)], 1),
+        File::One(ExportKind::Gif, path) => {
+            let (pictures, length) = Picture::gif(path);
+            let fps = h.state().engine.project.fps;
+            if length != frames * 100 / fps {
+                return Err(format!("the GIF runs {length} cs, for {frames} frames at {fps} fps"));
+            }
+            reads_the_finish(lesson, art, &pictures, pictures.len())
+        }
+        File::One(ExportKind::Png, dir) => reads_the_finish(lesson, art, &Picture::folder(dir), frames as usize),
+        File::Pages(dir) => reads_the_finish(lesson, art, &Picture::folder(dir), pages_owed(h)),
+        // A film needs ffmpeg, and a lesson must not (the lessons file).
+        File::One(ExportKind::Mp4, path) => Err(format!("{path:?}: no lesson ends in a film")),
     }
 }
 
@@ -302,21 +389,8 @@ fn reads_the_finish(lesson: &Lesson, art: &[Path], picture: &Picture, step: &str
 fn read_files(h: &EditorHarness, lesson: &Lesson, art: &[Path], files: &[File], step: &str) {
     assert!(!files.is_empty(), "{step}: no file landed");
     for file in files {
-        match file {
-            File::One(ExportKind::Still, path) => reads_the_finish(lesson, art, &Picture::png(path), step),
-            File::One(ExportKind::Gif, path) => {
-                // A held drawing is one GIF frame, standing for the whole run.
-                let (first, length) = Picture::gif(path);
-                let fps = h.state().engine.project.fps;
-                assert_eq!(length, h.state().frame_count() * 100 / fps, "{step}: the GIF's length");
-                reads_the_finish(lesson, art, &first, step);
-            }
-            File::One(ExportKind::Png, dir) | File::Pages(dir) => {
-                let pngs: Vec<PathBuf> = std::fs::read_dir(dir).expect("the folder").flatten().map(|f| f.path()).collect();
-                assert!(!pngs.is_empty(), "{step}: an empty folder");
-                pngs.iter().for_each(|f| assert!(Picture::png(f).size.0 > 0, "{step}: {f:?}"));
-            }
-            File::One(ExportKind::Mp4, path) => assert!(path.exists(), "{step}: the film landed"),
+        if let Err(why) = read_file(h, lesson, art, file) {
+            panic!("{step}: {why}");
         }
     }
 }
@@ -340,7 +414,12 @@ fn ride(h: &mut EditorHarness, lesson: &Lesson, hand: Hand) {
     for (i, task) in lesson.tasks.iter().enumerate() {
         let step = format!("{} task {i} by {hand:?}", lesson.id);
         assert_eq!(at(go.harness()), i, "{step}: the run stands here");
-        assert!(go.harness().ring_stands().is_some(), "{step}: the ring has a rect");
+        if lesson.class == Class::Experienced && rings(task) {
+            go.act(&step, Act::Click(SHOW_WHERE));
+        }
+        if ringed(lesson, task) {
+            assert!(go.harness().ring_stands().is_some(), "{step}: the ring has a rect");
+        }
         answer(&mut go, &step, lesson, &art, task, hand);
         dialogs(&mut go, &step, lesson.id, dir.path(), &mut files);
         for _ in 0..PLAY_STEPS {
@@ -370,17 +449,32 @@ fn auguide_every_lesson_ends_in_its_file() {
     }
 }
 
+/// Spec 5.15: the loop takes every class: an Experienced lesson asks `Show me
+/// where` before its ring stands, and an Amateur's button still shows.
+#[test]
+fn auguide_gate_rides_every_class() {
+    for id in ["probe-square", "probe-last"] {
+        for hand in [Hand::ShowMe, Hand::Pen] {
+            let lesson = row(id);
+            let mut h = EditorHarness::as_first_run();
+            open(&mut h, id);
+            ride(&mut h, &lesson, hand);
+        }
+    }
+}
+
 /// Spec 5.15: the gate's other endings, so a lesson that lands on them finds
-/// them proved: a GIF of the film, the book's pages to a folder.
+/// them proved: a GIF of the film, its frames, the book's pages to a folder.
 #[test]
 fn auguide_gate_reads_a_gif_and_pages() {
     const TRACE: Task = Task { guide: &[0], ..on_paper(Done::Strokes(1), Show::Trace(&[0])) };
     const GIF: &[Task] = &[TRACE, on_paper(Done::Exported(1), Show::Perform(Action::ExportGif))];
+    const FRAMES: &[Task] = &[TRACE, on_paper(Done::Exported(1), Show::Perform(Action::ExportPngSequence))];
     const PAGES: &[Task] = &[TRACE, Task { step: Stage::Drawing, ..on_paper(Done::Exported(1), Show::Perform(Action::ExportPages)) }];
-    for (id, tasks) in [("probe-film", GIF), ("probe-page", PAGES)] {
+    for (id, tasks) in [("probe-film", GIF), ("probe-film", FRAMES), ("probe-page", PAGES)] {
         let mut h = EditorHarness::as_shipped();
         open(&mut h, id);
-        let lesson = Lesson { tasks, ..row(id) };
+        let lesson = Lesson { tasks, art: panel_art, ..row(id) };
         let step = h.editor().stage.expect("a step");
         let tasks: Vec<Task> = tasks.iter().map(|t| Task { step, ..*t }).collect();
         let lesson = Lesson { tasks: Box::leak(tasks.into_boxed_slice()), ..lesson };
@@ -388,6 +482,57 @@ fn auguide_gate_reads_a_gif_and_pages() {
         settle(&mut h);
         ride(&mut h, &lesson, Hand::ShowMe);
     }
+}
+
+/// One line inside the probe book's first panel, and so on any of their papers:
+/// a page shows no ink past its panels, and the probe's own art runs in the
+/// page's top margin.
+fn panel_art() -> Vec<Path> {
+    vec![art::hand(&[[400.0, 600.0], [1100.0, 600.0]], 8.0, PathKind::Guide, 3)]
+}
+
+/// A white picture of `paper`, with `paths` on it in ink.
+fn drawn(paper: (u32, u32), paths: &[&Path]) -> Picture {
+    let (w, h) = (paper.0 as i32, paper.1 as i32);
+    let mut rgba = vec![255; (paper.0 * paper.1 * 4) as usize];
+    for path in paths {
+        doc::path_cover(&path.points, path.width.max(4.0), |x, y, _| {
+            if (0..w).contains(&x) && (0..h).contains(&y) {
+                rgba[(y * w + x) as usize * 4..][..3].fill(0);
+            }
+        });
+    }
+    Picture { size: paper, rgba }
+}
+
+/// Spec 5.15: an ending that is not the finish fails the reading: a page with
+/// no trace on it, from the real route, and a frame count, a size or a mark
+/// that are not the lesson's.
+#[test]
+fn auguide_gate_fails_a_blank_ending() {
+    let lesson = Lesson { art: panel_art, ..row("probe-page") };
+    let art = (lesson.art)();
+    let dir = tempfile::tempdir().expect("dir");
+    let mut h = EditorHarness::as_shipped();
+    open(&mut h, "probe-page");
+    h.state_mut().begin_page_export(dir.path(), None);
+    h.state_mut().wait_page_export();
+    // The page's own panel lines are ink, so it is the path that reads this.
+    let page = File::Pages(dir.path().to_path_buf());
+    let why = read_file(&h, &lesson, &art, &page).expect_err("a blank page is no finish");
+    assert!(why.contains("path 0"), "{why}");
+    let paper = (lesson.paper.width, lesson.paper.height);
+    let aside = art::hand(&[[400.0, 1900.0], [1100.0, 1900.0]], 8.0, PathKind::Guide, 3);
+    let finish = || vec![drawn(paper, &[&art[0]]), drawn(paper, &[&aside])];
+    assert_eq!(reads_the_finish(&lesson, &art, &finish(), 2), Ok(()), "the reading passes the real thing");
+    assert!(reads_the_finish(&lesson, &art, &finish(), 3).is_err(), "a page short");
+    assert!(reads_the_finish(&lesson, &art, &finish()[1..], 1).is_err(), "ink, but not on the path");
+    let empty = reads_the_finish(&lesson, &art, &[drawn(paper, &[])], 1);
+    assert!(empty.is_err_and(|why| why.contains("blank")), "a white picture");
+    let small = [drawn((paper.0 / 2, paper.1), &[&art[0]])];
+    assert!(reads_the_finish(&lesson, &art, &small, 1).is_err(), "half the paper");
+    let film = File::One(ExportKind::Mp4, dir.path().join("film.mp4"));
+    assert!(read_file(&h, &lesson, &art, &film).is_err(), "no lesson ends in a film");
 }
 
 /// Spec 5.15: every stroke task of every lesson ticks from a pen stroke through
@@ -423,17 +568,38 @@ fn auguide_pen_ticks_every_stroke_task() {
 
 // ---- The guide (spec 5.7) ----
 
-/// The guide's lines as last painted, in paint order.
-fn guide_on_screen(h: &EditorHarness) -> Vec<Vec<Pos2>> {
-    fn walk(s: &Shape, out: &mut Vec<Vec<Pos2>>) {
+/// Every shape of the last frame, flat, in paint order.
+fn painted(h: &EditorHarness) -> Vec<Shape> {
+    fn walk(s: &Shape, out: &mut Vec<Shape>) {
         match s {
             Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
-            Shape::Path(p) if p.stroke.color == ColorMode::Solid(plate::GUIDE) => out.push(p.points.clone()),
-            _ => {}
+            other => out.push(other.clone()),
         }
     }
     let mut out = Vec::new();
     h.kit().output().shapes.iter().for_each(|c| walk(&c.shape, &mut out));
+    out
+}
+
+/// The guide's lines as last painted, in paint order: a ribbon lays a dab on
+/// each sample and a quad between, so a dab with no quad before it starts a
+/// line.
+fn guide_on_screen(h: &EditorHarness) -> Vec<Vec<CircleShape>> {
+    let mut out: Vec<Vec<CircleShape>> = Vec::new();
+    let mut joined = false;
+    for shape in painted(h) {
+        match shape {
+            Shape::Circle(dab) if dab.fill == plate::GUIDE => {
+                if !joined {
+                    out.push(Vec::new());
+                }
+                out.last_mut().expect("a line").push(dab);
+                joined = false;
+            }
+            Shape::Path(quad) if quad.fill == plate::GUIDE => joined = true,
+            _ => {}
+        }
+    }
     out
 }
 
@@ -509,10 +675,11 @@ fn auguide_guide_follows_the_view() {
         assert_eq!(lines.len(), 1, "{how}: the first task's one line");
         let xf = h.editor().canvas.view_xform();
         let want: Vec<Pos2> = line.iter().map(|p| xf.paper_to_screen(*p)).collect();
-        assert_eq!(lines[0].len(), want.len(), "{how}");
-        lines[0].iter().zip(&want).for_each(|(a, b)| assert!(a.distance(*b) < 0.01, "{how}: {a:?} and {b:?}"));
-        assert!(was != lines[0], "{how}: the line moved");
-        was = lines[0].clone();
+        let centres: Vec<Pos2> = lines[0].iter().map(|dab| dab.center).collect();
+        assert_eq!(centres.len(), want.len(), "{how}");
+        centres.iter().zip(&want).for_each(|(a, b)| assert!(a.distance(*b) < 0.01, "{how}: {a:?} and {b:?}"));
+        assert!(was != centres, "{how}: the line moved");
+        was = centres;
     };
     read(&h, "as it opens");
     h.editor_mut().canvas.zoom_in();
@@ -545,28 +712,26 @@ fn auguide_over_paints_above_the_art() {
     let mut h = EditorHarness::as_shipped();
     open(&mut h, "probe");
     pen(&mut h, &along([300.0, 300.0], [800.0, 300.0]));
-    let line = |y: f32, over: bool| GuideLine { points: vec![pos2(300.0, y), pos2(800.0, y)], width: 4.0, over };
+    let line = |y: f32, over: bool| GuideLine::of(&[[300.0, y, 1.0], [800.0, y, 1.0]], 4.0, over);
     h.editor_mut().canvas.guide.lines = vec![line(320.0, true), line(340.0, false)];
     h.run_frames(2);
     let xf = h.editor().canvas.view_xform();
-    let flat = {
-        fn walk(s: &Shape, out: &mut Vec<Shape>) {
-            match s {
-                Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
-                other => out.push(other.clone()),
-            }
-        }
-        let mut out = Vec::new();
-        h.kit().output().shapes.iter().for_each(|c| walk(&c.shape, &mut out));
-        out
-    };
+    let flat = painted(&h);
     let index_of = |y: f32| {
         let at = xf.paper_to_screen(pos2(300.0, y));
-        let found = |s: &Shape| matches!(s, Shape::Path(p) if p.stroke.color == ColorMode::Solid(plate::GUIDE) && p.points[0].distance(at) < 0.5);
+        let found = |s: &Shape| matches!(s, Shape::Circle(c) if c.fill == plate::GUIDE && c.center.distance(at) < 0.5);
         flat.iter().position(found).expect("the line was painted")
     };
-    // The Rig renders no art between them: the render's place is the shot's.
-    assert!(index_of(340.0) < index_of(320.0), "a plain line under an over line");
+    // The pen's stroke is the art here: the Rig's stroke takes the vector route,
+    // which the render paints in its own place.
+    let (left, right) = (xf.paper_to_screen(pos2(300.0, 300.0)).x, xf.paper_to_screen(pos2(800.0, 300.0)).x);
+    let on_the_stroke = |s: &Shape| {
+        let y = xf.paper_to_screen(pos2(300.0, 300.0)).y;
+        matches!(s, Shape::Circle(c) if c.fill != plate::GUIDE && (c.center.y - y).abs() < 2.0 && (left..=right).contains(&c.center.x))
+    };
+    let art = flat.iter().position(on_the_stroke).expect("the art was painted");
+    assert!(index_of(340.0) < art, "a plain line goes under the art");
+    assert!(art < index_of(320.0), "an over line goes above it");
 }
 
 /// Spec 5.6: `Hold to see it` is the Amateur's: the finish, full size, while
@@ -600,6 +765,32 @@ fn auguide_hold_shows_the_finish() {
         open(&mut h, id);
         assert!(h.rects(HOLD).is_empty(), "{id}: an Amateur's row");
     }
+}
+
+/// Spec 5.6: the row shows a finish on the paper, so it stands where a paper
+/// does, and `Leave lesson` stays under the hand when it goes.
+#[test]
+fn auguide_hold_stands_only_over_a_paper() {
+    let mut h = EditorHarness::as_shipped();
+    open(&mut h, "probe-square");
+    h.editor_mut().begin_lesson(row("probe-square"), 1);
+    settle(&mut h);
+    assert_eq!(h.rects(HOLD).len(), 1, "on the paper");
+    let leave = h.rects(LEAVE);
+    let walk = [(Stage::Composite, "behind the Viewer's tab"), (Stage::Export, "no Canvas pane")];
+    for (stage, how) in walk {
+        h.editor_mut().enter_room(stage);
+        settle(&mut h);
+        assert!(!visible_panes(&h.editor().dock).contains(&Pane::Canvas), "{how}: the fixture's premise");
+        assert!(h.rects(HOLD).is_empty(), "{how}: nothing to see, so no row");
+        assert_eq!(h.rects(LEAVE), leave, "{how}: the foot keeps its place");
+    }
+    h.editor_mut().enter_room(Stage::Drawing);
+    settle(&mut h);
+    assert_eq!(h.rects(HOLD).len(), 1, "back on the paper");
+    h.editor_mut().canvas.composite_view = true;
+    settle(&mut h);
+    assert!(h.rects(HOLD).is_empty(), "a composite view hides the guide too");
 }
 
 // ---- Show me (spec 5.9) ----
@@ -680,6 +871,148 @@ fn auguide_pen_down_cancels_the_reveal() {
     assert_eq!(at(&h), 0, "off the two lines, it answers neither");
 }
 
+/// `h`, past any reveal, with nothing to show for it.
+fn landed_nothing(h: &mut EditorHarness, art: &[Path], strokes: u64, how: &str) {
+    assert!(h.editor().canvas.guide.reveal.is_empty(), "{how}: the reveal goes");
+    let undos = h.state().engine.undo_depth_by(None);
+    h.wait(REVEAL_SECS * 3.0);
+    settle(h);
+    assert_eq!(h.state().strokes_done, strokes, "{how}: no stroke");
+    assert_eq!(h.state().engine.undo_depth_by(None), undos, "{how}: no undo");
+    assert_eq!(alpha_along(h, &art[0]) + alpha_along(h, &art[2]), 0, "{how}: no ink");
+}
+
+/// Spec 5.9: a reveal stands over the paper it set out for: a pill pressed on
+/// the way, in any step's arming, lands nothing there, and the task stays open.
+#[test]
+fn auguide_a_pill_cancels_the_reveal() {
+    let art = (probe().art)();
+    for (pill, stage) in [(crate::vocab::STEP_COLOR, Stage::InkPaint), (crate::vocab::STEP_EXPORT, Stage::Export)] {
+        let mut h = run_of(TWO_LINES);
+        let strokes = h.state().strokes_done;
+        press_show_me(&mut h);
+        assert!(!h.editor().canvas.guide.reveal.is_empty(), "{pill}: the hand is on its way");
+        h.kit_mut().get_by_label(pill).click();
+        h.run_frames(3);
+        assert_eq!(h.editor().stage, Some(stage));
+        landed_nothing(&mut h, &art, strokes, pill);
+        assert_eq!(at(&h), 0, "{pill}: the task is still to do");
+    }
+}
+
+/// Spec 5.9: the same for what the ink would land on: the layer or the track
+/// moved under the hand, or the paper gone behind a tab.
+#[test]
+fn auguide_a_moved_layer_cancels_the_reveal() {
+    let art = (probe().art)();
+    let moves: [(&str, fn(&mut EditorHarness)); 3] = [
+        ("the layer", |h| h.state_mut().view.active_layer = "Other".to_string()),
+        ("the track", |h| h.state_mut().view.active_column = anim_core::ids::ColumnId(u64::MAX)),
+        ("the paper", |h| h.editor_mut().dock = Stage::Export.dock()),
+    ];
+    for (how, moved) in moves {
+        let mut h = run_of(TWO_LINES);
+        let strokes = h.state().strokes_done;
+        press_show_me(&mut h);
+        assert!(!h.editor().canvas.guide.reveal.is_empty(), "{how}: the hand is on its way");
+        moved(&mut h);
+        h.run_frames(2);
+        landed_nothing(&mut h, &art, strokes, how);
+    }
+}
+
+/// Spec 5.9: a paper the pen would refuse is refused at the press, as the
+/// circle's is, with no hand sent out first.
+#[test]
+fn auguide_show_me_refuses_at_the_press() {
+    let mut h = run_of(TWO_LINES);
+    h.editor_mut().canvas.composite_view = true;
+    settle(&mut h);
+    let refusals = h.state().refusal_seq;
+    press_show_me(&mut h);
+    assert_eq!(h.state().refusal_seq, refusals + 1, "the pen's own refusal");
+    assert!(h.editor().canvas.guide.reveal.is_empty(), "no hand set out");
+    h.editor_mut().canvas.composite_view = false;
+    settle(&mut h);
+    pen(&mut h, &along([300.0, 800.0], [500.0, 800.0]));
+    let layer = h.state().active_layer_id().expect("the armed layer");
+    let props = anim_core::model::LayerProps { visible: false, ..h.state().active_layer_props().expect("props").clone() };
+    h.state_mut().layer_set_props(layer, props);
+    settle(&mut h);
+    let refusals = h.state().refusal_seq;
+    press_show_me(&mut h);
+    assert_eq!(h.state().refusal_seq, refusals + 1, "a hidden layer");
+    assert!(h.editor().canvas.guide.reveal.is_empty());
+}
+
+/// Deckle on the paper, as the Rookie lessons' guide will stand him.
+fn deckle_art() -> Vec<Path> {
+    art::deckle(&poses()[0], SEED).paths()
+}
+
+const DECKLE_TASKS: &[Task] = &[
+    Task { guide: &[0, 1, 2, 3, 4], ..on_paper(Done::Strokes(5), Show::Trace(&[0, 1, 2, 3, 4])) },
+    NEVER,
+];
+
+/// Deckle's guide, to trace.
+pub(crate) fn deckle_lesson() -> Lesson {
+    Lesson { art: deckle_art, tasks: DECKLE_TASKS, ..probe() }
+}
+
+/// Spec 5.13: a dab stands on the paper as a dot, round and as wide as it lands,
+/// not a sliver of its two samples.
+#[test]
+fn auguide_a_dab_stands_round() {
+    let mut h = EditorHarness::as_shipped();
+    open(&mut h, "probe");
+    h.editor_mut().begin_lesson(deckle_lesson(), 0);
+    settle(&mut h);
+    let art = deckle_art();
+    let zoom = h.editor().canvas.view_xform().zoom;
+    let lines = guide_on_screen(&h);
+    assert_eq!(lines.len(), art.len(), "two lines and three dots");
+    for (dabs, path) in lines[2..].iter().zip(&art[2..]) {
+        assert!(path.is_press(), "the fixture's premise");
+        let full = path.width * zoom * 0.5;
+        assert_eq!(dabs.len(), path.points.len());
+        dabs.iter().for_each(|dab| assert!((dab.radius - full).abs() <= full * 0.15, "{} for {full}", dab.radius));
+    }
+}
+
+/// Spec 5.13: the guide tapers as the pen will: the line thins at its tips, to
+/// the width it lands at.
+#[test]
+fn auguide_guide_tapers_as_it_lands() {
+    let art = (probe().art)();
+    let mut h = EditorHarness::as_shipped();
+    open(&mut h, "probe");
+    h.editor_mut().canvas.zoom_in();
+    settle(&mut h);
+    let zoom = h.editor().canvas.view_xform().zoom;
+    let lines = guide_on_screen(&h);
+    let (tip, body) = (&lines[0][0], &lines[0][lines[0].len() / 2]);
+    assert!(tip.radius < body.radius, "{} and {}", tip.radius, body.radius);
+    let half = |i: usize| art[0].width * art[0].points[i][2] * zoom * 0.5;
+    assert!((body.radius - half(lines[0].len() / 2)).abs() < 0.01, "the width commit_path lands");
+}
+
+/// Spec 5.9: a press is a touch, a fraction of a stroke's time: three dots do
+/// not stand still for four seconds.
+#[test]
+fn auguide_a_press_takes_a_touch() {
+    const DOTS: &[Task] = &[Task { guide: &[2, 3, 4], ..on_paper(Done::Strokes(3), Show::Trace(&[2, 3, 4])) }, NEVER];
+    let mut h = EditorHarness::as_shipped();
+    open(&mut h, "probe");
+    h.editor_mut().begin_lesson(Lesson { art: deckle_art, tasks: DOTS, ..probe() }, 0);
+    settle(&mut h);
+    assert!(PRESS_SECS * 5.0 <= REVEAL_SECS, "a fraction of a stroke");
+    press_show_me(&mut h);
+    h.wait(PRESS_SECS * 3.0 + 0.2);
+    settle(&mut h);
+    assert_eq!(at(&h), 1, "landed");
+}
+
 /// Spec 5.9: an eraser's line: `Trace` of a wipe path takes the ink off, and
 /// `Erased` reads it.
 #[test]
@@ -706,10 +1039,12 @@ fn auguide_a_wipe_erases_and_ticks() {
     assert!(alpha_along(&h, &art[0]) > 0, "the line stands");
     press_show_me(&mut h);
     assert!(h.editor().canvas.guide.reveal.is_empty(), "a wipe is no ink to reveal");
+    assert!(!h.editor().canvas.guide.rubbing.is_empty(), "it is a soft mark on the way");
     h.wait(REVEAL_SECS + 0.2);
     settle(&mut h);
     assert_eq!(at(&h), 2, "the line is gone, and the task reads that");
     assert_eq!(alpha_along(&h, &art[0]), 0);
+    assert!(h.editor().canvas.guide.rubbing.is_empty(), "landed, the mark is gone");
 }
 
 fn fresh(w: u32, h: u32) -> (AppState, usize) {
@@ -768,7 +1103,7 @@ fn auguide_commit_path_keeps_inside() {
 
 const FILL: &[Task] = &[on_paper(Done::Fills(1), Show::Fill([600.0, 450.0])), NEVER];
 
-fn pick_fill(h: &mut EditorHarness) {
+pub(crate) fn pick_fill(h: &mut EditorHarness) {
     let e = h.editor_mut();
     e.canvas.set_tool(CanvasTool::Fill, &mut e.state);
     settle(h);
@@ -863,10 +1198,15 @@ fn xy(path: &Path) -> Vec<Pt> {
     path.points.iter().map(|p| [p[0], p[1]]).collect()
 }
 
-/// Deckle's cut side without the turn round its head.
+/// Deckle's two sides without the turns round his ends: cut, then torn.
+fn sides(pose: &[Pt]) -> [Vec<Pt>; 2] {
+    let deckle = art::deckle(pose, SEED);
+    [xy(&deckle.cut)[..deckle.sides[0]].to_vec(), xy(&deckle.torn)[..deckle.sides[1]].to_vec()]
+}
+
 fn cut_side(pose: &[Pt]) -> Vec<Pt> {
-    let rows = art::spaced(&art::spaced(pose, art::HAND_STEP), art::HAND_STEP).len();
-    xy(&art::deckle(pose, SEED).cut)[..rows].to_vec()
+    let [cut, _] = sides(pose);
+    cut
 }
 
 fn apart(a: Pt, b: Pt) -> f32 {
@@ -887,6 +1227,47 @@ fn auguide_deckle_keeps_its_length() {
         let drawn = art::length(&cut_side(pose));
         assert!((drawn / STRIP - 1.0).abs() <= 0.01, "pose {i}: the drawn side {drawn}");
     }
+    // The torn side is the same paper: its nicks run it long, the same long on
+    // every pose and through the walk's tightest bends.
+    let flat = art::length(&sides(&art::spine([0.0, 0.0], [STRIP, 0.0], STRIP))[1]);
+    let bends = [0.7, 0.45].map(|share| art::spine([0.0, 0.0], [STRIP * share, 0.0], STRIP));
+    for (i, pose) in poses.iter().map(Vec::as_slice).chain(bends.iter().map(Vec::as_slice)).enumerate() {
+        let torn = art::length(&sides(pose)[1]);
+        assert!((torn / flat - 1.0).abs() <= 0.01, "pose {i}: the torn side {torn}, flat {flat}");
+    }
+}
+
+/// Spec 5.13: an eye, not a third hole: well over twice their size, off the
+/// strip's middle line, and in the open; the holes run in a row by the straight
+/// edge, and the torn edge is torn at a glance.
+#[test]
+fn auguide_deckle_has_an_eye_and_a_tear() {
+    const WIDE: f32 = STRIP * 0.2;
+    const TORN_DEEP: f32 = 8.0;
+    let flat = art::spine([0.0, 0.0], [STRIP, 0.0], STRIP);
+    for (i, pose) in std::iter::once(&flat).chain(&poses()).enumerate() {
+        let deckle = art::deckle(pose, SEED);
+        let [cut, torn] = sides(pose);
+        let centre = |p: &Path| [(p.points[0][0] + p.points[1][0]) * 0.5, (p.points[0][1] + p.points[1][1]) * 0.5];
+        let eye = centre(&deckle.eye);
+        assert!(deckle.eye.width >= deckle.holes[0].width * 2.0, "pose {i}: {} and {}", deckle.eye.width, deckle.holes[0].width);
+        let clear = cut.iter().chain(&torn).map(|p| apart(*p, eye)).fold(f32::MAX, f32::min);
+        let touch = (deckle.eye.width + deckle.cut.width) * 0.5;
+        assert!(clear >= touch + 1.0, "pose {i}: the eye touches a side: {clear} for {touch}");
+        for hole in &deckle.holes {
+            let near = cut.iter().map(|p| apart(*p, centre(hole))).fold(f32::MAX, f32::min);
+            assert!(near <= WIDE * 0.3, "pose {i}: a hole {near} off the straight edge");
+        }
+    }
+    let deckle = art::deckle(&flat, SEED);
+    let eye = deckle.eye.points[0][1];
+    let across = |y: f32| -y / WIDE;
+    assert!((across(eye) - 0.5).abs() >= 0.08, "the eye stands on the middle line: {}", across(eye));
+    let holes = deckle.holes.each_ref().map(|hole| hole.points[0][1]);
+    assert!((holes[0] - holes[1]).abs() < 1.0, "a punched row");
+    let [_, torn] = sides(&flat);
+    let (low, high) = torn.iter().fold((f32::MAX, f32::MIN), |(l, h), p| (l.min(p[1]), h.max(p[1])));
+    assert!(high - low >= TORN_DEEP, "the tear is {} deep", high - low);
 }
 
 /// Spec 5.13: from each pose to the next one foot stays put, so nothing skates,
@@ -905,20 +1286,50 @@ fn auguide_deckle_feet_stay_planted() {
     assert!(walked >= 300.0, "it walked {walked}");
 }
 
-/// The art a lesson's gate reads, and Deckle, which every lesson draws from.
-fn every_line() -> Vec<(String, Path)> {
+/// The art a lesson's gate reads.
+fn lesson_lines() -> Vec<(String, Path)> {
     let lessons = lessons::for_gate().iter().flat_map(|l| {
         let art = (l.art)().into_iter().enumerate();
         art.map(|(i, p)| (format!("{} path {i}", l.id), p)).collect::<Vec<_>>()
     });
-    let deckle = poses().into_iter().enumerate().flat_map(|(i, pose)| {
+    lessons.collect()
+}
+
+/// The walk, and these bends: a share of the strip, tail to head.
+fn bent_poses(shares: &[f32]) -> Vec<Vec<Pt>> {
+    let bends = shares.iter().map(|share| art::spine([0.0, 0.0], [STRIP * share, 0.0], STRIP));
+    poses().into_iter().chain(bends).collect()
+}
+
+/// That art, and Deckle, which every lesson draws from.
+fn every_line() -> Vec<(String, Path)> {
+    let deckle = bent_poses(&[1.0, 0.7, 0.45]).into_iter().enumerate().flat_map(|(i, pose)| {
         let lines = art::deckle(&pose, SEED).paths().into_iter().enumerate();
         lines.map(move |(n, p)| (format!("Deckle pose {i} line {n}"), p)).collect::<Vec<_>>()
     });
-    lessons.chain(deckle).collect()
+    lesson_lines().into_iter().chain(deckle).collect()
 }
 
-/// `points` cut where they turn sharply: a corner is the drawing's, no wobble.
+/// That art as a hand reads it. Deckle's corners stand where `sides` says, for
+/// on an arch his end meets the side at so shallow a turn that no bend could
+/// call it one, and a corner is no wobble. The bend at 0.45, past anything the
+/// walk does, turns more than a parabola follows over `WINDOW`: read there, it
+/// would read the arch and not the hand, so it stays out.
+fn hand_lines() -> Vec<(String, Path)> {
+    let deckle = bent_poses(&[1.0, 0.7]).into_iter().enumerate().flat_map(|(i, pose)| {
+        let drawn = art::deckle(&pose, SEED);
+        let [cut, torn] = drawn.sides;
+        let part = |path: &Path, from: usize, to: usize| Path::new(path.points[from..to].to_vec(), path.width);
+        let ends = [part(&drawn.cut, cut, drawn.cut.points.len()), part(&drawn.torn, torn, drawn.torn.points.len())];
+        let lines = [part(&drawn.cut, 0, cut), part(&drawn.torn, 0, torn)].into_iter().chain(ends).enumerate();
+        lines.map(move |(n, p)| (format!("Deckle pose {i} side {n}"), p)).collect::<Vec<_>>()
+    });
+    lesson_lines().into_iter().chain(deckle).collect()
+}
+
+/// `points` cut at every sample that turns sharply: a corner is the drawing's, no
+/// wobble. Two corners can stand a sample or two apart, as the tear's nicks do,
+/// and each sample of a corner is a cut, so what is left between is plain line.
 fn runs(points: &[Pt]) -> Vec<Vec<Pt>> {
     const READ: usize = 2;
     const CORNER: f32 = 0.9;
@@ -926,7 +1337,7 @@ fn runs(points: &[Pt]) -> Vec<Vec<Pt>> {
     let (mut out, mut from) = (Vec::new(), 0);
     for i in READ..points.len().saturating_sub(READ) {
         let bend = heading(points[i], points[i + READ]) - heading(points[i - READ], points[i]);
-        if bend.sin().atan2(bend.cos()).abs() > CORNER && i > from + READ {
+        if bend.sin().atan2(bend.cos()).abs() > CORNER {
             out.push(points[from..=i].to_vec());
             from = i;
         }
@@ -935,45 +1346,77 @@ fn runs(points: &[Pt]) -> Vec<Vec<Pt>> {
     out
 }
 
-/// `stray`'s reach, in samples either side: its window spans 129 px, four of the
-/// hand's runs, so the smooth curve keeps a drawn line and loses the hand.
-const M: i32 = 21;
+/// `stray`'s window, in samples: 129 px, four of the hand's runs, so the smooth
+/// curve keeps a drawn line and loses the hand.
+const WINDOW: usize = 43;
 
-/// How far `points`, evenly sampled, stray from their smooth curve: a quadratic
-/// Savitzky-Golay.
-fn stray(points: &[Pt]) -> f32 {
-    let weight = |k: i32| (3 * M * M + 3 * M - 1 - 5 * k * k) as f32;
-    let total: f32 = (-M..=M).map(weight).sum();
-    let smooth = |i: usize, c: usize| (-M..=M).map(|k| weight(k) * points[(i as i32 + k) as usize][c]).sum::<f32>() / total;
-    let reach = M as usize;
-    let at = reach..points.len().saturating_sub(reach);
-    at.map(|i| apart(points[i], [smooth(i, 0), smooth(i, 1)])).fold(0.0, f32::max)
+/// How far sample `at` of `points` stands from the smooth curve: the parabola
+/// fitted to the samples nearest it, up to `WINDOW`, the ends' window held in
+/// from the end, so a short line and a line's ends are read like its middle.
+fn stray(points: &[Pt], at: usize) -> f32 {
+    let n = WINDOW.min(points.len());
+    let from = at.saturating_sub(n / 2).min(points.len() - n);
+    let window = &points[from..from + n];
+    let xs: Vec<f64> = (0..n).map(|i| i as f64 - (n - 1) as f64 * 0.5).collect();
+    let spread = xs.iter().map(|x| x * x).sum::<f64>() / n as f64;
+    // The three powers, made orthogonal over the window: each reads alone.
+    let bases: [&dyn Fn(f64) -> f64; 3] = [&|_| 1.0, &|x| x, &|x| x * x - spread];
+    let fitted = |c: usize| -> f32 {
+        let term = |base: &&dyn Fn(f64) -> f64| {
+            let top: f64 = xs.iter().zip(window).map(|(x, p)| base(*x) * f64::from(p[c])).sum();
+            let low: f64 = xs.iter().map(|x| base(*x) * base(*x)).sum();
+            top / low.max(1e-9) * base(xs[at - from])
+        };
+        bases.iter().map(term).sum::<f64>() as f32
+    };
+    apart(points[at], [fitted(0), fitted(1)])
 }
 
-/// The hand reading of a whole line: its widest stretch's. A stretch under the
-/// window, however long, has no smooth curve to read against, and no reading.
-fn hand_stray(path: &Path) -> Option<f32> {
-    let long = |run: &&Vec<Pt>| art::length(run) > LONG && run.len() > 2 * M as usize + 1;
-    runs(&xy(path)).iter().filter(long).map(|run| stray(run)).reduce(f32::max)
+/// The hand readings of a line past `LONG`: one per stretch between its corners
+/// that is past it too, and if the corners leave none, one for the line, its
+/// widest stretch's. A line past 60 px always gets a reading.
+fn hand_strays(path: &Path) -> Vec<f32> {
+    let points = xy(path);
+    if art::length(&points) <= LONG {
+        return Vec::new();
+    }
+    let widest = |run: &Vec<Pt>| (0..run.len()).map(|i| stray(run, i)).fold(0.0, f32::max);
+    let stretches = runs(&points);
+    let long: Vec<f32> = stretches.iter().filter(|run| art::length(run) > LONG).map(widest).collect();
+    if long.is_empty() { vec![stretches.iter().map(widest).fold(0.0, f32::max)] } else { long }
+}
+
+/// A line `long` px along, every sample ruled on its place.
+fn ruled(long: f32) -> Path {
+    let samples = (long / art::HAND_STEP) as usize;
+    Path::new((0..=samples).map(|i| [i as f32 * art::HAND_STEP, 100.0, 1.0]).collect(), 2.0)
 }
 
 /// Spec 5.14: 0.4 to 1.6 px from the smooth curve, on every line past 60 px.
 #[test]
 fn auguide_art_wobbles_like_a_hand() {
     let mut read = 0;
-    for (name, path) in every_line() {
-        if let Some(stray) = hand_stray(&path) {
+    for (name, path) in hand_lines() {
+        let strays = hand_strays(&path);
+        assert_eq!(strays.is_empty(), art::length(&xy(&path)) <= LONG, "{name}: no reading");
+        for stray in strays {
             assert!((0.4..=1.6).contains(&stray), "{name}: {stray}");
             read += 1;
         }
     }
     assert!(read >= 14, "{read} lines read");
-    // A ruled line and a shaking one fail it.
-    let ruled: Vec<[f32; 3]> = (0..=60).map(|i| [i as f32 * 3.0, 100.0, 1.0]).collect();
-    let ruled = Path::new(ruled, 2.0);
-    assert!(hand_stray(&ruled).expect("long") < 0.4);
+    // A short line is a hand's too, and a line cut up by corners.
+    for long in [66.0, 100.0, 180.0] {
+        let line = art::hand(&[[0.0, 100.0], [long, 100.0]], 2.0, PathKind::Guide, 4);
+        hand_strays(&line).iter().for_each(|s| assert!((0.4..=1.6).contains(s), "a hand's {long} px: {s}"));
+        assert!(hand_strays(&ruled(long)).iter().all(|s| *s < 0.4), "ruled, {long} px");
+    }
+    assert!(!hand_strays(&ruled(100.0)).is_empty(), "the ruled 100 px line is read");
+    let steps: Vec<[f32; 3]> = (0..=60).map(|i| [i as f32 * 3.0, ((i / 12) % 2 * 30) as f32, 1.0]).collect();
+    let steps = hand_strays(&Path::new(steps, 2.0));
+    assert!(!steps.is_empty() && steps.iter().all(|s| *s < 0.4), "ruled runs, cut at their corners: {steps:?}");
     let shaking: Vec<[f32; 3]> = (0..=60).map(|i| [i as f32 * 3.0, 100.0 + (i % 2) as f32 * 4.0, 1.0]).collect();
-    assert!(hand_stray(&Path::new(shaking, 2.0)).expect("long") > 1.6);
+    assert!(hand_strays(&Path::new(shaking, 2.0)).iter().any(|s| *s > 1.6));
 }
 
 /// `points`' least-squares circle: `(centre, radius)`, Kasa's.
@@ -1011,14 +1454,22 @@ fn turning(points: &[Pt]) -> f32 {
     bends.sum::<f32>().abs().to_degrees()
 }
 
-/// A stock circle: most of the way round, and every sample within 3% of one
-/// circle. Short of going round, any gentle line "fits" some huge circle, so
-/// the turn is what makes the reading mean a circle.
+/// A stock arc: every sample within 3% of one circle, and past `STOCK_TURN` round
+/// it. Below that any gentle curve fits a circle within 3% (a parabola does at
+/// 95 degrees and not at 100), so the reading would not mean a circle.
+const STOCK_TURN: f32 = 100.0;
+
 fn is_stock(points: &[Pt]) -> bool {
     circle_of(points).is_some_and(|(centre, radius)| {
         let near = points.iter().all(|p| (apart(*p, centre) / radius - 1.0).abs() <= 0.03);
-        near && turning(points) >= 270.0
+        near && turning(points) >= STOCK_TURN
     })
+}
+
+/// `degrees` of a compass's circle.
+fn compass(degrees: f32) -> Vec<Pt> {
+    let at = |i: usize| (i as f32 * degrees / 48.0).to_radians();
+    (0..=48).map(at).map(|a| [200.0 + 60.0 * a.cos(), 200.0 + 60.0 * a.sin()]).collect()
 }
 
 /// Spec 5.14: no long line is a stock shape. A press is exempt.
@@ -1030,28 +1481,46 @@ fn auguide_art_has_no_stock_shape() {
             assert!(!is_stock(&points), "{name} fits a circle");
         }
     }
-    let ring: Vec<Pt> = (0..=48).map(|i| (i as f32).to_radians() * 7.5).map(|a| [200.0 + 60.0 * a.cos(), 200.0 + 60.0 * a.sin()]).collect();
-    assert!(is_stock(&ring), "a ruled ring is read");
-    assert!(is_stock(&xy(&art::hand(&ring, 2.0, PathKind::Guide, 4))), "a shaky ring too");
+    for degrees in [360.0, 200.0, 120.0] {
+        assert!(is_stock(&compass(degrees)), "a compass's {degrees} degrees is read");
+        assert!(is_stock(&xy(&art::hand(&compass(degrees), 2.0, PathKind::Guide, 4))), "a shaky {degrees} degrees too");
+    }
+    let straight = art::hand(&[[0.0, 100.0], [300.0, 100.0]], 2.0, PathKind::Guide, 4);
+    assert!(!is_stock(&xy(&straight)), "a straight line is no arc");
+    let parabola = |half: f32| -> Vec<Pt> { (-48..=48).map(|i| i as f32 / 48.0).map(|t| [t * 200.0, t * t * 100.0 * half]).collect() };
+    assert!(!is_stock(&parabola(4.0)), "a steep parabola is no arc");
+    assert!(!is_stock(&parabola(0.7)), "a gentle curve stays under the floor");
+}
+
+/// The most lines a Rookie traces on one drawing, presses not counted.
+fn trace_load(lesson: &Lesson) -> usize {
+    let art = (lesson.art)();
+    let (mut load, mut most) = (0, 0);
+    for task in lesson.tasks {
+        if matches!(task.done, Done::Drawings(_)) {
+            load = 0;
+        }
+        load += own_lines(task).iter().filter(|i| !art[usize::from(**i)].is_press()).count();
+        most = most.max(load);
+    }
+    most
 }
 
 /// Spec 5.14: a Rookie traces at most six lines to a drawing, and none runs off
-/// the paper's margin. Presses do not count.
+/// the paper's margin. Presses do not count; a short line does.
 #[test]
 fn auguide_trace_load_fits_a_rookie() {
     const LOAD: usize = 6;
     const MARGIN: f32 = 0.03;
+    const SEVEN: &[Task] = &[Task { guide: &[0, 1, 2, 3, 4, 5, 6], ..on_paper(Done::Strokes(7), Show::Trace(&[0, 1, 2, 3, 4, 5, 6])) }];
+    fn sevens() -> Vec<Path> {
+        (0..7).map(|i| art::hand(&[[100.0, 100.0 + i as f32 * 20.0], [130.0, 100.0 + i as f32 * 20.0]], 4.0, PathKind::Guide, i)).collect()
+    }
+    assert_eq!(trace_load(&Lesson { art: sevens, tasks: SEVEN, ..probe() }), 7, "seven 30 px lines are seven lines");
+    assert_eq!(trace_load(&Lesson { art: deckle_art, tasks: DECKLE_TASKS, ..probe() }), 2, "two lines and three presses");
     for lesson in lessons::for_gate().iter().filter(|l| l.class == Class::Rookie) {
         let art = (lesson.art)();
-        let inked = |i: &&u16| art::length(&xy(&art[usize::from(**i)])) > LONG;
-        let (mut load, mut most) = (0, 0);
-        for task in lesson.tasks {
-            if matches!(task.done, Done::Drawings(_)) {
-                load = 0;
-            }
-            load += own_lines(task).iter().filter(inked).count();
-            most = most.max(load);
-        }
+        let most = trace_load(lesson);
         assert!(most <= LOAD, "{}: {most} lines on one drawing", lesson.id);
         let (w, h) = (lesson.paper.width as f32, lesson.paper.height as f32);
         let (mx, my) = (w * MARGIN, h * MARGIN);
@@ -1187,50 +1656,129 @@ fn auguide_finishes_differ() {
     assert!(iou(&near, &far) <= 0.45, "{}", iou(&near, &far));
 }
 
-/// Spec 5.14: Deckle's walk and the finishes, on one sheet for the Lead's eye.
-/// A PNG in `UISHOT_DIR`, no window.
+/// A white sheet to draw on for the Lead's eye.
+struct Sheet {
+    w: usize,
+    h: usize,
+    gray: Vec<u8>,
+}
+
+impl Sheet {
+    fn new(w: usize, h: usize) -> Sheet {
+        Sheet { w, h, gray: vec![255; w * h] }
+    }
+
+    fn ink(&mut self, points: &[[f32; 3]], width: f32) {
+        let (w, h, gray) = (self.w, self.h, &mut self.gray);
+        doc::path_cover(points, width, |x, y, cover| {
+            if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                let px = &mut gray[y as usize * w + x as usize];
+                *px = (*px).min(255 - (cover * 235.0) as u8);
+            }
+        });
+    }
+
+    fn line(&mut self, from: Pt, to: Pt, width: f32) {
+        self.ink(&[[from[0], from[1], 1.0], [to[0], to[1], 1.0]], width);
+    }
+
+    fn paths(&mut self, paths: &[Path], scale: f32, place: impl Fn(Pt) -> Pt) {
+        for path in paths {
+            let scaled: Vec<[f32; 3]> = path.points.iter().map(|p| {
+                let q = place([p[0], p[1]]);
+                [q[0], q[1], p[2]]
+            }).collect();
+            self.ink(&scaled, (path.width * scale).max(1.5));
+        }
+    }
+
+    /// `digit` in seven strokes, `size` tall, its top left at `at`.
+    fn digit(&mut self, digit: usize, at: Pt, size: f32) {
+        const STROKES: [[usize; 2]; 7] = [[0, 1], [1, 3], [3, 5], [4, 5], [2, 4], [0, 2], [2, 3]];
+        const LIT: [u8; 10] = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
+        let corner = |i: usize| [at[0] + (i % 2) as f32 * size * 0.55, at[1] + (i / 2) as f32 * size * 0.5];
+        for (n, [from, to]) in STROKES.into_iter().enumerate() {
+            if LIT[digit] >> n & 1 == 1 {
+                self.line(corner(from), corner(to), 2.5);
+            }
+        }
+    }
+
+    fn write(&self, file: &FilePath) {
+        let file = std::fs::File::create(file).expect("the sheet");
+        let mut png = png::Encoder::new(std::io::BufWriter::new(file), self.w as u32, self.h as u32);
+        png.set_color(png::ColorType::Grayscale);
+        png.set_depth(png::BitDepth::Eight);
+        png.write_header().expect("header").write_image_data(&self.gray).expect("pixels");
+    }
+}
+
+/// Which end of `pose` stands where it does in `other`.
+fn planted(pose: &[Pt], other: &[Pt]) -> Pt {
+    let (a, b) = (cut_side(pose), cut_side(other));
+    let (tail, head) = (apart(a[0], b[0]), apart(a[a.len() - 1], b[b.len() - 1]));
+    if tail <= head { a[0] } else { a[a.len() - 1] }
+}
+
+/// Spec 5.14: Deckle's bends, his walk as one film strip on one ground line, and
+/// the finishes, on one sheet for the Lead's eye. Each frame of the strip stands
+/// him where he really is, numbers it and marks the planted foot, read from the
+/// poses. A PNG in `UISHOT_DIR`, no window.
 #[test]
 #[ignore = "needs UISHOT_DIR; writes a PNG"]
 fn uishot_deckle_contact_sheet() {
+    const WIDE: usize = 1800;
+    const MARGIN: f32 = 30.0;
+    const BEND_LINE: f32 = 230.0;
+    const BEND_SCALE: f32 = 0.6;
+    const GROUND: f32 = 380.0;
+    const WALK_SCALE: f32 = 0.27;
+    const FINISHES_AT: usize = 430;
     const COLUMNS: usize = 3;
-    const CELL: (usize, usize) = (520, 300);
+    const CELL: (usize, usize) = (600, 300);
     const SCALE: f32 = 0.5;
     let dir = PathBuf::from(std::env::var("UISHOT_DIR").expect("set UISHOT_DIR to the output folder"));
     std::fs::create_dir_all(&dir).expect("make UISHOT_DIR");
-    let flat = art::spine([0.0, 0.0], [STRIP, 0.0], STRIP);
-    let mut lines: Vec<Vec<Path>> = vec![art::deckle(&flat, SEED).paths()];
-    let bends = [0.7, 0.45];
-    lines.extend(bends.map(|share| art::deckle(&art::spine([0.0, 0.0], [STRIP * share, 0.0], STRIP), SEED).paths()));
-    lines.extend(poses().iter().map(|pose| art::deckle(pose, SEED).paths()));
-    lines.extend(lessons::ALL.iter().map(|l| {
+    let finishes: Vec<Vec<Path>> = lessons::ALL.iter().map(|l| {
         let mut art: Vec<Option<Path>> = (l.art)().into_iter().map(Some).collect();
         l.finish.iter().filter_map(|i| art[usize::from(*i)].take()).collect()
-    }));
-    let rows = lines.len().div_ceil(COLUMNS);
-    let (w, h) = (COLUMNS * CELL.0, rows * CELL.1);
-    let mut gray = vec![255u8; w * h];
-    for (n, paths) in lines.iter().enumerate() {
-        let (cx, cy) = ((n % COLUMNS * CELL.0) as i32, (n / COLUMNS * CELL.1) as i32);
+    }).collect();
+    let mut sheet = Sheet::new(WIDE, FINISHES_AT + finishes.len().div_ceil(COLUMNS) * CELL.1);
+    // The bends: the strip at full size, then two of its arches.
+    let flat = art::spine([0.0, 0.0], [STRIP, 0.0], STRIP);
+    sheet.paths(&art::deckle(&flat, SEED).paths(), 1.0, |p| [MARGIN + p[0], BEND_LINE + p[1]]);
+    for (i, share) in [0.7, 0.45].into_iter().enumerate() {
+        let pose = art::spine([0.0, 0.0], [STRIP * share, 0.0], STRIP);
+        let left = MARGIN + STRIP + 80.0 + i as f32 * STRIP * 0.7;
+        sheet.paths(&art::deckle(&pose, SEED).paths(), BEND_SCALE, |p| [left + p[0] * BEND_SCALE, BEND_LINE + p[1] * BEND_SCALE]);
+    }
+    // The walk.
+    let walk = poses();
+    let [start, _] = [walk[0][0], walk[0][walk[0].len() - 1]];
+    let frame = (WIDE as f32 - 2.0 * MARGIN) / walk.len() as f32;
+    sheet.line([MARGIN, GROUND], [WIDE as f32 - MARGIN, GROUND], 2.0);
+    for (i, pose) in walk.iter().enumerate() {
+        let left = MARGIN + i as f32 * frame;
+        let place = |p: Pt| [left + (p[0] - start[0]) * WALK_SCALE, GROUND + (p[1] - start[1]) * WALK_SCALE];
+        sheet.paths(&art::deckle(pose, SEED).paths(), WALK_SCALE, place);
+        sheet.line([left - 8.0, GROUND - 8.0], [left - 8.0, GROUND + 8.0], 1.5);
+        sheet.digit(i + 1, [left + 2.0, GROUND - 100.0], 20.0);
+        let other = if i + 1 < walk.len() { i + 1 } else { i - 1 };
+        let [x, y] = place(planted(pose, &walk[other]));
+        sheet.line([x - 7.0, y + 16.0], [x, y + 4.0], 2.0);
+        sheet.line([x + 7.0, y + 16.0], [x, y + 4.0], 2.0);
+        sheet.line([x - 7.0, y + 16.0], [x + 7.0, y + 16.0], 2.0);
+    }
+    // Each lesson's finish.
+    for (n, paths) in finishes.iter().enumerate() {
+        let (cx, cy) = ((n % COLUMNS * CELL.0) as f32, (FINISHES_AT + n / COLUMNS * CELL.1) as f32);
         let all: Vec<f32> = paths.iter().flat_map(|p| p.bounds()).collect();
         let (lx, ly) = (all.iter().step_by(2).fold(f32::MAX, |a, b| a.min(*b)), all[1..].iter().step_by(2).fold(f32::MAX, |a, b| a.min(*b)));
         let (rx, ry) = (all.iter().step_by(2).fold(f32::MIN, |a, b| a.max(*b)), all[1..].iter().step_by(2).fold(f32::MIN, |a, b| a.max(*b)));
         let scale = SCALE.min((CELL.0 - 40) as f32 / (rx - lx)).min((CELL.1 - 40) as f32 / (ry - ly));
-        let place = |x: f32, y: f32| [(x - lx) * scale + cx as f32 + 20.0, (y - ly) * scale + cy as f32 + 20.0];
-        for path in paths {
-            let scaled: Vec<[f32; 3]> = path.points.iter().map(|p| { let q = place(p[0], p[1]); [q[0], q[1], p[2]] }).collect();
-            doc::path_cover(&scaled, (path.width * scale).max(1.5), |x, y, cover| {
-                if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                    let px = &mut gray[y as usize * w + x as usize];
-                    *px = (*px).min(255 - (cover * 235.0) as u8);
-                }
-            });
-        }
+        sheet.paths(paths, scale, |p| [(p[0] - lx) * scale + cx + 20.0, (p[1] - ly) * scale + cy + 20.0]);
     }
-    let file = std::fs::File::create(dir.join("deckle-sheet.png")).expect("the sheet");
-    let mut png = png::Encoder::new(std::io::BufWriter::new(file), w as u32, h as u32);
-    png.set_color(png::ColorType::Grayscale);
-    png.set_depth(png::BitDepth::Eight);
-    png.write_header().expect("header").write_image_data(&gray).expect("pixels");
+    sheet.write(&dir.join("deckle-sheet.png"));
 }
 
 /// Spec 5.3, main spec 1.5 rules 5 and 11: on a real device, for each type, the
@@ -1254,6 +1802,12 @@ fn auguide_real_route_with_gpu() {
         pen(&mut h, &along([200.0, 500.0], [700.0, 500.0]));
         assert_eq!(h.state().strokes_done, strokes + 1, "{}: a raster stroke", lesson.id);
         assert!(h.state().active_layer_tiles().is_some_and(|t| !t.is_empty()), "{}: on the layer", lesson.id);
+        pick_fill(&mut h);
+        let fills = h.state().fills_done;
+        let spot = on_screen(&h, &[[450.0, 300.0, 1.0]])[0];
+        h.click_pos(spot);
+        settle(&mut h);
+        assert_eq!(h.state().fills_done, fills + 1, "{}: a real fill", lesson.id);
         let rung = lessons::for_gate().iter().filter(|l| l.kind == kind).flat_map(|l| l.tasks).flat_map(|t| t.ring);
         let rung: Vec<(Target, Stage)> = rung.filter(|t| matches!(t, Target::Rail(_))).map(|t| (*t, Stage::Drawing)).collect();
         let here = h.editor().stage.expect("the lesson's step");
@@ -1265,19 +1819,62 @@ fn auguide_real_route_with_gpu() {
         }
         drop(h); // the device is one at a time: the next harness waits on this one
     }
+    // The select tool's refusal stands past the engine's own gate, so it needs
+    // one: with the raster route off, a lift says what the fill's tap says.
     let mut h = EditorHarness::with_gpu_ready();
     open(&mut h, "probe");
-    pen(&mut h, &along([200.0, 500.0], [700.0, 500.0]));
-    pick_fill(&mut h);
-    let fills = h.state().fills_done;
-    let spot = on_screen(&h, &[[600.0, 300.0, 1.0]])[0];
-    h.click_pos(spot);
+    let e = h.editor_mut();
+    e.canvas.set_tool(CanvasTool::Select, &mut e.state);
+    e.canvas.raster = false;
+    e.canvas.selection = Some(vec![pos2(100.0, 100.0), pos2(900.0, 100.0), pos2(900.0, 800.0), pos2(100.0, 800.0)]);
     settle(&mut h);
-    assert_eq!(h.state().fills_done, fills + 1, "a real fill");
+    pen(&mut h, &along([300.0, 300.0], [500.0, 300.0]));
+    assert!(h.state().refusal.contains(NEEDS_ENGINE), "{}", h.state().refusal);
 }
 
+/// Both refusals say one sentence, kept in one place, and the card answers it.
 #[test]
 fn auguide_refused_words_are_one_sentence() {
     assert!(BY_HAND.contains(SHOW_ME), "the card names its own button");
-    assert!(!NEEDS_ENGINE.is_empty());
+    let sources = ausay_tests::sources();
+    let canvas = &sources.iter().find(|(name, _)| name == "canvas.rs").expect("the canvas").1;
+    assert_eq!(canvas.matches(NEEDS_ENGINE).count(), 1, "the sentence stands once");
+    assert_eq!(canvas.matches("{NEEDS_ENGINE}").count(), 2, "and both refusals say it");
+}
+
+/// The part's own list: the named tests stand, the real route stays out of the
+/// plain run, and the part's floor of tests holds.
+#[test]
+fn auguide_named_tests_stand() {
+    const NAMED: [&str; 13] = [
+        "auguide_every_lesson_ends_in_its_file",
+        "auguide_pen_ticks_every_stroke_task",
+        "auguide_guide_never_exports",
+        "auguide_guide_stays_out_of_render_and_save",
+        "auguide_guide_follows_the_view",
+        "auguide_show_me_is_one_undo",
+        "auguide_pen_down_cancels_the_reveal",
+        "auguide_commit_path_walks_segment_boxes",
+        "auguide_commit_path_keeps_inside",
+        "auguide_fill_at_matches_fill_input",
+        "auguide_refused_fill_points_to_show_me",
+        "auguide_deckle_keeps_its_length",
+        "auguide_deckle_feet_stay_planted",
+    ];
+    const FLOOR: usize = 16;
+    let src = FilePath::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let read = |name: &str| {
+        let file = std::fs::read_to_string(src.join(name)).expect("the tests");
+        file.lines().map(str::trim).collect::<Vec<_>>().join("\n")
+    };
+    let source = ["auguide_show_tests.rs", "auguide_tests.rs", "canvas.rs"].map(read).join("\n");
+    let plain = |name: &str| source.contains(&format!("#[test]\nfn {name}()"));
+    NAMED.iter().for_each(|name| assert!(plain(name), "{name} runs in the plain gate"));
+    let real = "#[test]\n#[ignore = \"needs a GPU\"]\nfn auguide_real_route_with_gpu()";
+    assert!(source.contains(real), "the real route is the ignored one");
+    let tests = source.split("#[test]\n").skip(1).filter(|rest| {
+        let line = rest.lines().find(|l| l.starts_with("fn ")).unwrap_or("");
+        line.starts_with("fn auguide_")
+    });
+    assert!(tests.count() >= FLOOR, "the part owes {FLOOR} tests");
 }

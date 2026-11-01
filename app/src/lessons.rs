@@ -73,6 +73,12 @@ impl Path {
             [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]
         })
     }
+
+    /// Shorter than it is wide: a press of the pen, not a line (spec 5.14).
+    pub fn is_press(&self) -> bool {
+        let long: f32 = self.points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum();
+        long < self.width
+    }
 }
 
 /// AU28: lines by a hand, and Deckle, from curves in code: no binary assets
@@ -86,11 +92,14 @@ pub mod art {
     const CUBIC_ROWS: usize = 32;
     /// The gap between a hand line's samples, in paper units.
     pub const HAND_STEP: f32 = 3.0;
-    /// A hand's wobble: how far it strays, and over what run.
+    /// A hand's wobble: how far it strays, and over what run: a short line
+    /// gets its share of the run too, or it is one bow and reads as a curve.
     const WOBBLE: f32 = 1.0;
     const WOBBLE_RUN: f32 = 34.0;
+    const WOBBLE_RUNS: f32 = 5.0;
     /// A line's ends hold still over this run: a joined line stays joined.
     const WOBBLE_PIN: f32 = 12.0;
+    const WOBBLE_PINS: f32 = 6.0;
     /// The pen on a straight run, full pressure being the middle of a turn.
     const LIGHT: f32 = 0.62;
     /// What a turn over `TURN_READ` samples takes to reach full pressure.
@@ -101,16 +110,27 @@ pub mod art {
     const TIP: f32 = 0.2;
     /// The strip's width, of its length.
     const STRIP_WIDE: f32 = 0.2;
-    /// The torn side's soft tear: how far from straight, and over what run.
-    const TEAR: f32 = 5.0;
-    const TEAR_RUN: f32 = 76.0;
+    /// The tear: fibres pulled one way, so a long easy slope, then a short
+    /// sharp nick back. A slope runs this far, and starts and ends this far
+    /// off the line. Each nick is a corner, so what lies between reads as a
+    /// hand's line, and no run is long enough to count as one on its own.
+    const TEAR_GAP: [f32; 2] = [26.0, 54.0];
+    const TEAR_TOP: [f32; 2] = [7.0, 10.0];
+    const TEAR_FOOT: [f32; 2] = [3.0, 6.0];
+    const TEAR_NICK: f32 = 3.0;
+    /// The wobble's run along the tear: the hand's own would be one bow per
+    /// slope, and a slope that bows is a smooth curve.
+    const TEAR_RUN: f32 = 14.0;
     /// How far a line runs past a corner.
     const OVERSHOOT: f32 = 3.5;
-    /// Where the eye and the two holes stand along the strip, tail to head.
-    const EYE_AT: f32 = 0.84;
-    const HOLES_AT: [f32; 2] = [0.3, 0.57];
-    /// A dab's width, of the strip's.
-    const DAB_WIDE: f32 = 0.2;
+    /// Where the eye and the two holes stand: along the strip, tail to head,
+    /// and across it, cut side to torn. The eye looks up and ahead; the holes
+    /// are the punch's, in a row by the straight edge.
+    const EYE_AT: [f32; 2] = [0.75, 0.6];
+    const HOLES_AT: [[f32; 2]; 2] = [[0.3, 0.2], [0.55, 0.2]];
+    /// A dab's width, of the strip's: an eye is a good deal more than a hole.
+    const EYE_WIDE: f32 = 0.3;
+    const HOLE_WIDE: f32 = 0.13;
     /// The ink line's width, of the strip's.
     const LINE_WIDE: f32 = 0.06;
 
@@ -193,12 +213,19 @@ pub mod art {
 
     /// A hand's wobble along `points`: `WOBBLE` at its widest, gone at the ends.
     pub fn wobble(points: &[Pt], seed: u32) -> Vec<Pt> {
+        wobbled(points, seed, WOBBLE_RUN)
+    }
+
+    /// The wobble at a run of at most `most`.
+    fn wobbled(points: &[Pt], seed: u32, most: f32) -> Vec<Pt> {
         let line = spaced(points, HAND_STEP);
         let last = line.len() - 1;
+        let long = last as f32 * HAND_STEP;
+        let (run, pin) = (most.min(long / WOBBLE_RUNS), WOBBLE_PIN.min(long / WOBBLE_PINS));
         let raw: Vec<f32> = (0..=last)
             .map(|i| {
                 let (from, to) = (i as f32 * HAND_STEP, (last - i) as f32 * HAND_STEP);
-                noise(seed, from / WOBBLE_RUN) * (from.min(to) / WOBBLE_PIN).min(1.0)
+                noise(seed, from / run) * (from.min(to) / pin).min(1.0)
             })
             .collect();
         let peak = raw.iter().fold(0.0f32, |p, v| p.max(v.abs())).max(1e-3);
@@ -283,6 +310,8 @@ pub mod art {
         pub cut: Path,
         /// The torn side, head to tail, then round the tail, which shuts it.
         pub torn: Path,
+        /// The samples of `cut` and `torn` before the turn round their end.
+        pub sides: [usize; 2],
         pub eye: Path,
         pub holes: [Path; 2],
     }
@@ -294,44 +323,72 @@ pub mod art {
         }
     }
 
-    /// Deckle along `spine`, its cut side. Paper does not stretch, so a pose's
-    /// length is the spine's, and the seed tears the same edge on every pose:
-    /// the noise runs along the strip, not across the paper (spec 5.13).
+    /// The tear's level at each whole `HAND_STEP` along a strip this `long`:
+    /// the noise runs along the strip, not across the paper, so the seed tears
+    /// the same edge on every pose (spec 5.13).
+    fn tear(long: f32, seed: u32) -> Vec<f32> {
+        let mix = |[low, high]: [f32; 2], i: i32| low + (high - low) * (lattice(seed, i) + 1.0) * 0.5;
+        let mut knots = vec![(0.0, mix(TEAR_TOP, 0))];
+        let mut tooth = 0;
+        while let Some(&(from, _)) = knots.last() {
+            let to = from + mix(TEAR_GAP, 3 * tooth + 1);
+            if to + TEAR_NICK >= long {
+                break;
+            }
+            knots.push((to, -mix(TEAR_FOOT, 3 * tooth + 2)));
+            knots.push((to + TEAR_NICK, mix(TEAR_TOP, 3 * tooth + 3)));
+            tooth += 1;
+        }
+        knots.push((long, -mix(TEAR_FOOT, 3 * tooth + 2)));
+        let at = |s: f32| {
+            let next = knots.iter().position(|k| k.0 >= s).unwrap_or(knots.len() - 1).max(1);
+            let ((a, from), (b, to)) = (knots[next - 1], knots[next]);
+            from + (to - from) * ((s - a) / (b - a).max(1e-3)).clamp(0.0, 1.0)
+        };
+        (0..=(long / HAND_STEP).round() as usize).map(|i| at(i as f32 * HAND_STEP)).collect()
+    }
+
+    /// Deckle along `spine`, its cut side. Paper does not stretch, so the
+    /// strip's width is one way across the whole pose, as a ribbon's is: the
+    /// torn side is the spine moved, and keeps its length through any bend.
+    /// Pushed out along the bend's normal, the arch's outer side would run
+    /// half as long again (spec 5.13).
     pub fn deckle(spine: &[Pt], seed: u32) -> Deckle {
         let long = length(spine);
         let wide = long * STRIP_WIDE;
         let spine = spaced(spine, HAND_STEP);
         let last = spine.len() - 1;
         // Up off the paper, whichever way the strip is headed.
-        let up = if spine[last][0] < spine[0][0] { -1.0 } else { 1.0 };
-        let share = |i: usize| i as f32 / last as f32;
-        let tear = |i: usize| noise(seed, share(i) * long / TEAR_RUN) * TEAR;
-        let back: Vec<Pt> = pushed(&spine, |i| up * (wide + tear(i)));
+        let chord = [spine[last][0] - spine[0][0], spine[last][1] - spine[0][1]];
+        let reach = chord[0].hypot(chord[1]).max(1e-3);
+        let up = if chord[0] < 0.0 { -1.0 } else { 1.0 };
+        let across = [chord[1] / reach * up, -chord[0] / reach * up];
+        let moved = |p: Pt, by: f32| [p[0] + across[0] * by, p[1] + across[1] * by];
+        let ribbon: Vec<Pt> = spine.iter().map(|p| moved(*p, wide)).collect();
+        let tear = tear(long, seed);
+        let back = pushed(&ribbon, |i| up * tear[i.min(tear.len() - 1)]);
         let line = wide * LINE_WIDE;
-        // On the strip's middle line, this far along it.
-        let stood = |at: f32| {
-            let i = (at * last as f32).round() as usize;
-            let (s, p) = (side(&spine, i), spine[i]);
-            [p[0] + s[0] * up * wide * 0.5, p[1] + s[1] * up * wide * 0.5]
-        };
+        // On the strip: `[along it, tail to head; across it, cut side to torn]`.
+        let stood = |[along, over]: [f32; 2]| moved(spine[(along * last as f32).round() as usize], wide * over);
         let past = |from: Pt, to: Pt| {
             let long = (to[0] - from[0]).hypot(to[1] - from[1]).max(1e-3);
             [to[0] + (to[0] - from[0]) / long * OVERSHOOT, to[1] + (to[1] - from[1]) / long * OVERSHOOT]
         };
-        // A corner's turn is sampled as the line is: `taper` reads samples, and
-        // one long last segment would all be the pen's thin tip, and leak.
-        let round = |from: Pt, to: Pt| spaced(&[from, past(from, to)], HAND_STEP).split_off(1);
+        // A corner is a hand's line too, and sampled as one: `taper` reads
+        // samples, and one long last segment would all be the pen's thin tip,
+        // and leak. Its first sample is the corner, which holds still.
+        let round = |from: Pt, to: Pt, seed: u32| wobbled(&[from, past(from, to)], seed, TEAR_RUN).split_off(1);
         let mut cut = wobble(&spine, seed);
-        cut.extend(round(spine[last], back[last]));
-        let torn_back: Vec<Pt> = back.iter().rev().copied().collect();
-        let mut torn = wobble(&torn_back, seed.wrapping_add(1));
-        torn.extend(round(back[0], spine[0]));
-        let press = wide * DAB_WIDE;
+        let mut torn = wobbled(&back.iter().rev().copied().collect::<Vec<Pt>>(), seed.wrapping_add(1), TEAR_RUN);
+        let sides = [cut.len(), torn.len()];
+        cut.extend(round(spine[last], back[back.len() - 1], seed.wrapping_add(2)));
+        torn.extend(round(back[0], spine[0], seed.wrapping_add(3)));
         Deckle {
             cut: Path { points: taper(&cut), width: line, kind: PathKind::Guide, over: false },
             torn: Path { points: taper(&torn), width: line, kind: PathKind::Guide, over: false },
-            eye: dab(stood(EYE_AT), press, PathKind::Guide),
-            holes: HOLES_AT.map(|at| dab(stood(at), press * 0.85, PathKind::Guide)),
+            sides,
+            eye: dab(stood(EYE_AT), wide * EYE_WIDE, PathKind::Guide),
+            holes: HOLES_AT.map(|at| dab(stood(at), wide * HOLE_WIDE, PathKind::Guide)),
         }
     }
 }

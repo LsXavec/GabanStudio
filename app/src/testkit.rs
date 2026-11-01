@@ -530,6 +530,13 @@ impl EditorHarness {
         image.save(path).expect("write the shot");
     }
 
+    /// The last frame as it stands, as a PNG: no time passes, so a shot can
+    /// catch a thing on its way.
+    pub fn shot_as_it_stands(&mut self, path: &Path) {
+        let image = self.h.render().expect("headless render");
+        image.save(path).expect("write the shot");
+    }
+
     /// Run until egui stops asking for an immediate repaint (bounded; a
     /// live playhead keeps asking, which is not an error here).
     pub fn run(&mut self) {

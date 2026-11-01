@@ -622,10 +622,13 @@ fn lesson_card(dir: &Path) {
     at(&mut h, "lesson-chip", (1280, 800));
     drop(h);
 
-    // AU28: the Amateur's third foot row, held: the finish, blue, on the paper.
+    // AU28: the Amateur's third foot row, held: the finish, blue, on a paper
+    // whose own task draws no line, so what shows is what the row shows.
     let mut h = EditorHarness::with_gpu_ready();
     open(&mut h, "probe-square");
-    for (name, size) in [("lesson-hold", full), ("lesson-hold-small", (1280, 800))] {
+    let square = crate::lessons::table().iter().find(|l| l.id == "probe-square").expect("the row");
+    h.editor_mut().begin_lesson(*square, 1);
+    for (name, size) in [("lesson-hold", full), ("lesson-hold-small", (1280, 800)), ("lesson-hold-pocket", fold)] {
         crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
         let spot = h.rects(crate::lesson::HOLD)[0].center();
         let button = |pressed| egui::Event::PointerButton {
@@ -636,14 +639,51 @@ fn lesson_card(dir: &Path) {
         };
         h.kit_mut().input_mut().events.extend([egui::Event::PointerMoved(spot), button(true)]);
         h.run_frames(3);
-        h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("{name}.png")));
+        assert!(!h.editor().canvas.guide.lines.is_empty(), "the shot stands inside the hold");
+        // A shot's own frames would let go of the row.
+        h.shot_as_it_stands(&dir.join(format!("{name}.png")));
         h.kit_mut().input_mut().events.push(button(false));
         h.run_frames(3);
     }
+    drop(h);
+
+    // AU28: Show me on its way: the ink partway down the first line.
+    use egui_kittest::kittest::Queryable;
+    let mut h = EditorHarness::with_gpu_ready();
+    open(&mut h, "probe");
+    h.editor_mut().begin_lesson(crate::auguide_show_tests::traced_lesson(), 0);
+    crate::aurail_tests::sized(&mut h, full.0 as f32, full.1 as f32);
+    h.kit_mut().get_by_label(crate::lesson::SHOW_ME).click();
+    h.run_frames(8);
+    assert!(!h.editor().canvas.guide.reveal.is_empty(), "the shot stands inside the reveal");
+    h.shot_as_it_stands(&dir.join("lesson-reveal.png"));
+    drop(h);
+
+    // AU28: the tap a machine with no engine refuses, and the card's answer.
+    let mut h = EditorHarness::with_gpu_ready();
+    open(&mut h, "probe");
+    h.editor_mut().begin_lesson(crate::auguide_show_tests::fill_lesson(), 0);
+    h.editor_mut().paint = None;
+    h.editor_mut().canvas.raster = false;
+    crate::aurail_tests::sized(&mut h, full.0 as f32, full.1 as f32);
+    crate::auguide_show_tests::pick_fill(&mut h);
+    let spot = h.editor().canvas.view_xform().paper_to_screen(egui::pos2(600.0, 450.0));
+    h.click_pos(spot);
+    h.run_frames(4);
+    assert!(h.has_text_containing(crate::lesson::BY_HAND), "the card's line");
+    h.shot(egui::vec2(full.0 as f32, full.1 as f32), &dir.join("lesson-by-hand.png"));
+    drop(h);
+
+    // AU28: Deckle as a person traces him: two lines and three dots.
+    let mut h = EditorHarness::with_gpu_ready();
+    open(&mut h, "probe");
+    h.editor_mut().begin_lesson(crate::auguide_show_tests::deckle_lesson(), 0);
+    crate::aurail_tests::sized(&mut h, full.0 as f32, full.1 as f32);
+    h.shot(egui::vec2(full.0 as f32, full.1 as f32), &dir.join("lesson-deckle-guide.png"));
 }
 
 /// AU27: the card's pictures, by file name.
-const LESSON: [(&str, u32, u32); 17] = [
+const LESSON: [(&str, u32, u32); 21] = [
     ("lesson-draw", 1600, 900),
     ("lesson-draw-fold", 832, 520),
     ("lesson-wander", 832, 520),
@@ -661,6 +701,10 @@ const LESSON: [(&str, u32, u32); 17] = [
     ("lesson-chip", 1280, 800),
     ("lesson-hold", 1600, 900),
     ("lesson-hold-small", 1280, 800),
+    ("lesson-hold-pocket", 832, 520),
+    ("lesson-reveal", 1600, 900),
+    ("lesson-by-hand", 1600, 900),
+    ("lesson-deckle-guide", 1600, 900),
 ];
 
 fn lesson_owed() -> Vec<(String, u32, u32)> {

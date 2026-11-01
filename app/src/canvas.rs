@@ -226,14 +226,28 @@ pub fn rotate_vec(v: egui::Vec2, deg: f32) -> egui::Vec2 {
 /// machine with no paint engine (spec 5.9).
 pub(crate) const NEEDS_ENGINE: &str = "needs the GPU brush engine";
 
-/// AU28: a lesson's line, in the paper's units (spec 5.7).
+/// AU28: a lesson's line, in the paper's units (spec 5.7), its pressure the
+/// pen's: on the paper as `commit_path` will land it.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct GuideLine {
-    pub points: Vec<Pos2>,
+    pub points: Vec<StrokePoint>,
     pub width: f32,
     /// Painted above the art, for a line that has to read on an opaque ground.
     pub over: bool,
 }
+
+impl GuideLine {
+    /// `[x, y, pressure]`, as a lesson's `Path` holds it.
+    pub fn of(points: &[[f32; 3]], width: f32, over: bool) -> GuideLine {
+        let point = |p: &[f32; 3]| StrokePoint { x: p[0], y: p[1], pressure: p[2], tilt: [0.0; 2] };
+        GuideLine { points: points.iter().map(point).collect(), width, over }
+    }
+}
+
+/// AU28: the thinnest a guide line's full width stands on screen, in points,
+/// so a far zoom leaves it to read. The pen is light on a straight run, and a
+/// ribbon under a point wide breaks into dashes.
+const GUIDE_THIN: f32 = 2.4;
 
 /// AU28: a lesson's lines on the paper. This lives on the canvas and is painted
 /// by it alone: `Project` never holds it, so no render and no save can reach it.
@@ -244,18 +258,18 @@ pub(crate) struct Guide {
     /// Show me's ink, as far as the hand has come.
     pub reveal: Vec<GuideLine>,
     pub reveal_ink: Color32,
+    /// Show me's eraser, as far as the hand has come: a soft mark on the art.
+    pub rubbing: Vec<GuideLine>,
 }
 
-/// AU28: `lines` through the view, so they follow zoom, turn and mirror.
+/// AU28: `lines` through the view, so they follow zoom, turn and mirror, as
+/// ribbons of the pen's width: a stroke's taper, and a press stays round.
 fn paint_lines(painter: &egui::Painter, xf: &ViewXform, lines: &[GuideLine], over: bool, ink: Color32) {
+    let curve = crate::config::PressureCurve::linear();
+    let to_screen = |p: Pos2| xf.paper_to_screen(p);
     for line in lines.iter().filter(|l| l.over == over) {
-        let width = (line.width * xf.zoom).max(1.0);
-        let on_screen: Vec<Pos2> = line.points.iter().map(|p| xf.paper_to_screen(*p)).collect();
-        if let [dot] = on_screen[..] {
-            painter.circle_filled(dot, width * 0.5, ink);
-        } else {
-            painter.add(egui::Shape::line(on_screen, egui::Stroke::new(width, ink)));
-        }
+        let width = line.width.max(GUIDE_THIN / xf.zoom);
+        fill_stroke(painter, &line.points, width, xf.zoom, ink, &to_screen, &curve);
     }
 }
 
@@ -792,7 +806,7 @@ pub struct CanvasView {
     fill_ref_cel: bool,
     /// Committed selection outline, paper-space polygon (None = no selection).
     /// Survives frame nav — it's a region of PAPER, not of one cel.
-    selection: Option<Vec<Pos2>>,
+    pub(crate) selection: Option<Vec<Pos2>>,
     /// Selection being drawn right now (rect = [anchor, current]).
     sel_draft: Option<Vec<Pos2>>,
     /// Lifted pixels mid-transform. See [`Floating`].
@@ -1745,8 +1759,7 @@ impl CanvasView {
             // AUDIT [34]: an emoji, in the grey lane, naming an
             // internal instead of the switch in Settings.
             state.refuse(
-                "refused — the select tool needs the GPU brush engine \
-                 (Settings › Performance)",
+                format!("refused — the select tool {NEEDS_ENGINE} (Settings › Performance)"),
             );
             return false;
         }
@@ -5017,6 +5030,7 @@ impl CanvasView {
         if edit_view {
             paint_lines(&painter, &xf, &self.guide.lines, true, plate::GUIDE);
             paint_lines(&painter, &xf, &self.guide.reveal, false, self.guide.reveal_ink);
+            paint_lines(&painter, &xf, &self.guide.rubbing, false, plate::RUBBING);
         }
 
         // ---- LASSO FILL preview: the loop so far, blue dashed, closed.
@@ -6415,8 +6429,7 @@ impl CanvasView {
         }
         if !self.raster {
             state.refuse(
-                "refused — the fill tool needs the GPU brush engine \
-                 (Settings › Performance)",
+                format!("refused — the fill tool {NEEDS_ENGINE} (Settings › Performance)"),
             );
             return;
         }

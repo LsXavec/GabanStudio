@@ -104,6 +104,8 @@ pub const CHIP_AKA: [u8; 4] = [228, 82, 47, 255];
 /// AU28: a lesson's blue line (spec 5.7). Non-photo blue, the scaffold's ink:
 /// `AO` is grey now. It never reaches a file.
 pub const GUIDE: Color32 = Color32::from_rgb(CHIP_AO[0], CHIP_AO[1], CHIP_AO[2]);
+/// AU28: `Show me`'s eraser on its way: paper, soft, over the ink it will take.
+pub const RUBBING: Color32 = Color32::from_rgba_premultiplied(190, 190, 190, 190);
 
 /// AU28: the document's ink as the UI paints it: `Show me`'s line on its way.
 pub fn opaque(rgba: [u8; 4]) -> Color32 {

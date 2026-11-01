@@ -605,7 +605,7 @@ fn rail_fits_in(h: &mut EditorHarness, room: ProbeRoom, size: String, found: &mu
         h.pen_tap(dots);
         settle(h);
         // AU21: the card in the Manga step keeps that step's key.
-        let manga = matches!(room, ProbeRoom::Stage(Stage::Manga) | ProbeRoom::Lesson(_, _, Stage::Manga));
+        let manga = matches!(room, ProbeRoom::Stage(Stage::Manga) | ProbeRoom::Lesson(_, _, Stage::Manga, _));
         let nine = if manga { Some("Panel tool") } else { h.editor().full_band.then_some("Flip") };
         for held in ["Hand", "Size", "Layers"].into_iter().chain(nine) {
             if !h.has(held) {
