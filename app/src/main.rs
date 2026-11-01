@@ -598,14 +598,14 @@ impl App {
             config::SessionAction::StartHost => {
                 let cfg = &self.config.session;
                 if cfg.api_key.trim().is_empty() || cfg.totp_secret.trim().is_empty() {
-                    self.session_status = "generate a room key and TOTP secret first".into();
+                    self.session_status = "generate a session key and TOTP secret first".into();
                     return;
                 }
                 match net::Host::start(
                     cfg.host_port,
                     cfg.api_key.trim().to_string(),
                     cfg.totp_secret.trim().to_string(),
-                    format!("{}'s room", cfg.username.trim()),
+                    format!("{}'s session", cfg.username.trim()),
                     !cfg.require_key,
                     cfg.username.trim().to_string(),
                 ) {
@@ -651,7 +651,7 @@ impl App {
     fn session_join(&mut self, addr: String, code: String) {
         let cfg = &self.config.session;
         if cfg.api_key.trim().is_empty() {
-            self.connect_error = "set the room key in Settings -> Session first".into();
+            self.connect_error = "set the session key in Settings › Session first".into();
             return;
         }
         match net::Client::connect(&addr, cfg.api_key.trim(), &code, cfg.username.trim()) {
@@ -673,7 +673,7 @@ impl App {
                 net::slog_ship_arm(true);
                 net::slog("debug channel armed — lines ship to the host");
             }
-            Err(e) => self.connect_error = e,
+            Err(e) => self.connect_error = vocab::session_words(&e),
         }
     }
 
@@ -1567,7 +1567,7 @@ impl App {
                     // AUDIT [44]: this reached Settings only — invisible
                     // to someone who is drawing. Chatter, not a refusal.
                     if let Some(ed) = &mut self.editor {
-                        ed.state.status = format!("{name} joined the room");
+                        ed.state.status = format!("{name} joined the session");
                     }
                     fresh_join = true;
                     joiners.push(id);
@@ -1594,7 +1594,7 @@ impl App {
                         let who = p.name.clone();
                         net::slog(format!("PEER left: {who}"));
                         if let Some(ed) = &mut self.editor {
-                            ed.state.status = format!("{who} left the room");
+                            ed.state.status = format!("{who} left the session");
                         }
                         // v0.2.1 (audit): their mid-flight strokes die
                         // with them — gathers drop, overlays clear, and
@@ -1909,10 +1909,10 @@ impl App {
                     // think is happening — Aka, at the pen.
                     if let Some(ed) = &mut self.editor {
                         ed.state.refuse(
-                            "the room closed — you are working on your own copy again",
+                            "the session closed — you are working on your own copy again",
                         );
                     }
-                    self.session_status = why;
+                    self.session_status = vocab::session_words(&why);
                 }
             }
         }
@@ -2794,7 +2794,7 @@ impl App {
             // "draw" while the select tool was active — a false value in a
             // record whose only job is to be true.
             tool: if ed.canvas.composite_view {
-                "composite view"
+                vocab::PREVIEW_FINAL_SHORT
             } else if ed.canvas.erasing {
                 "eraser"
             } else {
@@ -2802,8 +2802,8 @@ impl App {
                     canvas::CanvasTool::Paint => "brush",
                     canvas::CanvasTool::Select => "select",
                     canvas::CanvasTool::Fill => "fill",
-                    canvas::CanvasTool::LassoFill => "lasso fill",
-                    canvas::CanvasTool::Panel => "panel (koma)",
+                    canvas::CanvasTool::LassoFill => vocab::DRAW_TO_FILL,
+                    canvas::CanvasTool::Panel => "panel",
                 }
             },
             brush: "-",
@@ -2844,7 +2844,7 @@ impl App {
         }
         // GM11: a render queue job is never cut off half-written.
         if editor.state.render_queue.busy() {
-            self.devloop.note = Some("rebuild ready — waiting for the render queue".into());
+            self.devloop.note = Some("rebuild ready — waiting for the Export queue".into());
             return;
         }
         // GM2's modals too: a pending "Save changes?" or recovery offer is
@@ -3270,11 +3270,11 @@ impl Editor {
             Action::ToggleFinalLook => {
                 self.final_look.on = !self.final_look.on;
                 self.state.status = if self.final_look.on {
-                    "final look: the composite as the master delivers it (no rough, reference or \
+                    "full quality: the picture as the export delivers it (no rough, reference or \
                      correction layers)"
                         .into()
                 } else {
-                    "final look off: the composite shows every layer".into()
+                    "full quality off: every layer shows".into()
                 };
             }
             // GM22: the canvas's 3D underlay (a view, kept for the session:
@@ -3286,7 +3286,7 @@ impl Editor {
                 } else {
                     u.on = !u.on;
                     self.state.status = if u.on {
-                        "3D underlay: the cut's model under the drawing (a view, not in the export)".into()
+                        "3D underlay: the shot's model under the drawing (a view, not in the export)".into()
                     } else {
                         "3D underlay off".into()
                     };
@@ -3353,7 +3353,7 @@ impl Editor {
             Action::Layout3dRoom => {
                 self.dock = Pane::layout3d_dock();
                 self.go_off_spine(vocab::LAYOUT_3D);
-                self.state.status = "the 3D layout room".into();
+                self.state.status = format!("{}: {}", vocab::STEP, vocab::LAYOUT_3D);
             }
             // AU11: the forge's room has a row of its own.
             Action::BrushMakerRoom => self.open_brush_maker(),
@@ -3468,7 +3468,7 @@ impl Editor {
             if !ed.canvas.stroke_active() {
                 ed.canvas.composite_view = !ed.canvas.composite_view;
                 ed.state.status = if ed.canvas.composite_view {
-                    "composite view — the node graph's output (C to edit)".into()
+                    "Preview final: the Effects graph's output (C to edit)".into()
                 } else {
                     "edit view".into()
                 };
@@ -3581,9 +3581,9 @@ impl Editor {
                 ed.scrub_audio = !ed.scrub_audio;
                 ed.scrub_request = Some(ed.scrub_audio);
                 s.status = if ed.scrub_audio {
-                    "audio scrub on: a stopped playhead's move sounds its frame".into()
+                    "sound while dragging on: a stopped playhead's move sounds its frame".into()
                 } else {
-                    "audio scrub off".into()
+                    "sound while dragging off".into()
                 };
             }
             Action::RamPreview => s.status = s.ram.toggle().into(),
@@ -3788,7 +3788,7 @@ impl Editor {
                 *out = Performed::Ignored;
             }
             Action::Open | Action::OpenSample if ed.canvas.is_guest => {
-                s.refuse("refused — leave the room first (Settings › Session) to open your own file");
+                s.refuse("refused — leave the shared session first (Settings › Session) to open your own file");
                 *out = Performed::Ignored;
             }
             // GM21: the sample replaces the document, through the guard.
@@ -5079,6 +5079,10 @@ struct EditorTabs<'a> {
 impl egui_dock::TabViewer for EditorTabs<'_> {
     type Tab = Pane;
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
+        // Plan's canvas shows the shot; the pane stays `Pane::Canvas`.
+        if self.plan && *tab == Pane::Canvas {
+            return vocab::PREVIEW.into();
+        }
         tab.title().into()
     }
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
@@ -5231,7 +5235,7 @@ impl EditorTabs<'_> {
             let name = self.preset_name.trim().to_string();
             if ui
                 .button("save current")
-                .on_hover_text("snapshot the current brush as a preset")
+                .on_hover_text("keep the current brush in this list")
                 .clicked()
                 && !name.is_empty()
             {
@@ -5270,7 +5274,7 @@ impl EditorTabs<'_> {
                     }
                 }
                 if self.presets.is_empty() {
-                    ui.label(egui::RichText::new("no presets — save one above").color(plate::legend_dim()));
+                    ui.label(egui::RichText::new("no brushes kept — save one above").color(plate::legend_dim()));
                 }
             });
         plate::note_viewport(ui, scroll.inner_rect, [false, true]);
@@ -5630,7 +5634,7 @@ impl Editor {
     fn choose_start(&mut self, action: welcome::WelcomeAction, ctx: &egui::Context) {
         use welcome::WelcomeAction as Choice;
         if self.canvas.is_guest && (action.replaces_document() || action == Choice::Open) {
-            self.state.refuse("refused — leave the room first (Settings › Session) to open your own file");
+            self.state.refuse("refused — leave the shared session first (Settings › Session) to open your own file");
         } else if action.replaces_document() {
             self.leave(Leave::Start(action), ctx);
         } else {
@@ -5721,7 +5725,7 @@ impl Editor {
             // the Canvas pane stayed the read-only composite PREVIEW instead
             // of test paper — the owner's report.
             self.go_off_spine(vocab::BRUSH_MAKER);
-            self.state.status = "the forge room".into();
+            self.state.status = format!("{}: {}", vocab::STEP, vocab::BRUSH_MAKER);
         }
     }
 
@@ -6125,7 +6129,7 @@ impl Editor {
                     ui.label("fps");
                     plate::field(ui, egui::DragValue::new(&mut form.fps).range(1..=240));
                     ui.end_row();
-                    ui.label("default cut length");
+                    ui.label("Default shot length");
                     plate::field(ui, egui::DragValue::new(&mut form.cut_frames).range(1..=100_000).suffix(" frames"));
                     ui.end_row();
                     ui.label("dpi");
@@ -6263,9 +6267,9 @@ impl Editor {
                 ui.separator();
                 if ui
                     .add_enabled(ok && form.rect != now, egui::Button::new("set paper"))
-                    .on_hover_text("the cut's paper becomes this rect (one undo step)")
+                    .on_hover_text("the shot's paper becomes this rect (one undo step)")
                     .on_disabled_hover_text(if ok {
-                        "this is the cut's paper already"
+                        "this is the shot's paper already"
                     } else {
                         "past the paper's limits (see above)"
                     })
@@ -6810,15 +6814,15 @@ impl Editor {
         let mut choice = None;
         let frame = plate::dialog_frame(&ctx.global_style());
         egui::Modal::new(egui::Id::new("gm8_auto_comp")).frame(frame).show(ctx, |ui| {
-            plate::legend(ui, "build composite from sheet");
-            ui.label(format!("Replace the node graph ({n} nodes)? Undo brings it back."));
+            plate::legend(ui, vocab::REBUILD_FROM_LAYERS);
+            ui.label(format!("Replace the Effects graph ({n} nodes)? Undo brings it back."));
             ui.label(
-                egui::RichText::new("every rendered column, in sheet order, chained into the output")
+                egui::RichText::new("Every track that renders, in sheet order, chained into the Output.")
                     .color(plate::legend_dim()),
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if plate::danger_hint(ui, "Replace", "replaces every node of this cut's graph") {
+                if plate::danger_hint(ui, "Replace", "Replaces every node of this shot's graph.") {
                     choice = Some(true);
                 }
                 if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -6850,19 +6854,19 @@ impl Editor {
         let mut choice = None;
         let frame = plate::dialog_frame(&ctx.global_style());
         egui::Modal::new(egui::Id::new("gm13_satsuei")).frame(frame).show(ctx, |ui| {
-            plate::legend(ui, "build satsuei graph");
+            plate::legend(ui, vocab::FULL_FINISHING_SETUP);
             ui.label(format!(
-                "Replace this hand-built graph ({n} nodes) with the satsuei chain? Undo brings it back."
+                "Replace this hand-built graph ({n} nodes) with the full finishing chain? Undo brings it back."
             ));
             ui.label(
                 egui::RichText::new(
-                    "passes per character, diffusion, para, light wrap, grade, grain and vignette",
+                    "Passes per character, soft focus, color wash, light wrap, color look, grain and vignette.",
                 )
                 .color(plate::legend_dim()),
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if plate::danger_hint(ui, "Replace", "replaces every node of this cut's graph") {
+                if plate::danger_hint(ui, "Replace", "Replaces every node of this shot's graph.") {
                     choice = Some(true);
                 }
                 if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -6907,7 +6911,7 @@ impl Editor {
                 if plate::danger_hint(
                     ui,
                     "Convert",
-                    "rewrites every cel's colours and clears the undo history",
+                    "Rewrites every drawing's colors and clears the undo history.",
                 ) {
                     choice = Some(true);
                 }
@@ -7169,7 +7173,7 @@ impl eframe::App for App {
                     self.session_peers.values().map(peer_tag).collect(),
                 )),
                 net::Session::Joined(_) => Some((
-                    "in a room".to_string(),
+                    "in a shared session".to_string(),
                     self.session_peers.values().map(peer_tag).collect(),
                 )),
                 net::Session::Idle => None,
@@ -7234,7 +7238,8 @@ impl eframe::App for App {
             if let Some(req) = editor.state.stack_request.take() {
                 match req {
                     doc::StackRequest::Pick(name) => {
-                        editor.state.status = format!("new cels in this room get '{name}'");
+                        let shown = vocab::stack(&name);
+                        editor.state.status = format!("new drawings in this step get '{shown}'");
                         self.config
                             .layers
                             .room_stack
@@ -7250,11 +7255,11 @@ impl eframe::App for App {
                                     None => stacks.push(preset),
                                 }
                                 self.config.save();
-                                editor.state.status = format!("stack '{name}' saved");
+                                editor.state.status = format!("layer set '{name}' saved");
                             }
                             None => editor
                                 .state
-                                .refuse("refused — no layered cel on this frame to save"),
+                                .refuse("refused — no layered drawing on this frame to save"),
                         }
                     }
                 }
@@ -7464,7 +7469,7 @@ impl eframe::App for App {
                         if let Some(v) = w.view {
                             let _ = ed.canvas.apply_view(&v, &mut ed.state);
                         }
-                        ed.state.status = format!("layout preset: {name}");
+                        ed.state.status = format!("arrangement: {name}");
                     }
                 }
                 config::LayoutAct::Delete(name) => {
@@ -7811,7 +7816,7 @@ impl ProbeRoom {
         match self {
             ProbeRoom::Stage(st) => st.name(),
             ProbeRoom::Forge => "forge",
-            ProbeRoom::Layout3d => "3D layout (LO)",
+            ProbeRoom::Layout3d => vocab::LAYOUT_3D,
             ProbeRoom::Lessons => "Lessons page",
             ProbeRoom::Lesson(name, ..) => name,
         }
@@ -8990,7 +8995,7 @@ impl Editor {
         let asking = self.shell_asks || self.leave.is_some() || self.leave_after_save.is_some();
         match paths.iter().find(is_project) {
             Some(_) if self.canvas.is_guest => {
-                self.state.refuse("refused — leave the room first (Settings › Session) to open your own file");
+                self.state.refuse("refused — leave the shared session first (Settings › Session) to open your own file");
             }
             Some(_) if asking => self.state.refuse("refused — answer the question on screen first"),
             Some(path) => self.leave(Leave::OpenPath(path.clone()), ctx),
@@ -9559,11 +9564,11 @@ impl Editor {
                     }
                     viewer::GraphView::EvalFailed => {
                         sh.tex = None;
-                        sh.hint = "the graph failed to evaluate — check the Node Graph pane".into();
+                        sh.hint = "The effects could not run. Check the Effects graph.".into();
                     }
                     viewer::GraphView::NoGpu => {
                         sh.tex = None;
-                        sh.hint = "GPU unavailable — the viewer needs wgpu".into();
+                        sh.hint = "GPU unavailable — the Result needs wgpu".into();
                     }
                 }
             }

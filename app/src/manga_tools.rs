@@ -103,8 +103,8 @@ const AXIS_SNAP_DEG: f32 = 4.0;
 pub const CLIP_DANGER: &str = "rebuilds the page graph; nodes you added are removed — Ctrl+Z restores";
 
 /// How a tone column is told: by its name.
-const TONE_NAMING: &str = "A column whose name starts TONE (or トーン) is a tone column: Clip to panels \
-                           puts its art through a Tone, the screen dots; every other column's art stays as drawn.";
+const TONE_NAMING: &str = "A track whose name starts TONE is a tone track: Clip to panels \
+                           puts its art through a Tone, the screen dots; every other track's art stays as drawn.";
 
 impl MangaState {
     /// The rulers the pen holds to on `cut`: its own while the snap is on
@@ -146,11 +146,11 @@ impl PanelOp {
     fn help(self) -> &'static str {
         match self {
             Self::SplitAcross => {
-                "A cut left to right through the selected panel's middle: an upper and a lower panel, \
+                "A split left to right through the selected panel's middle: an upper and a lower panel, \
                  the row gutter between them."
             }
             Self::SplitDown => {
-                "A cut top to bottom through the selected panel's middle: a left and a right panel, \
+                "A split top to bottom through the selected panel's middle: a left and a right panel, \
                  the side gutter between them."
             }
             Self::Add => "Add a panel the size of the page's inner frame.",
@@ -273,7 +273,7 @@ fn handle_name(h: RulerHandle) -> String {
 /// under it.
 pub fn koma_gesture(state: &mut AppState, k: KomaDrag) {
     let Some(page) = Page::of(state.cut()) else {
-        state.refuse("refused — this cut is no page (New page makes one)");
+        state.refuse("refused — this shot is no page (New page makes one)");
         return;
     };
     if let Some(handle) = k.handle {
@@ -296,7 +296,7 @@ pub fn koma_gesture(state: &mut AppState, k: KomaDrag) {
         Some(KomaOp::Split(i, a, b)) => {
             let gutter = manga::gutter_for(a, b, state.manga.side_mm, state.manga.row_mm, page.dpi);
             let Some((first, second)) = manga::split_panel(&polys[i], a, b, gutter) else {
-                state.refuse("refused — split panel: a part would be empty (cut nearer the middle)");
+                state.refuse("refused — split panel: a part would be empty (split nearer the middle)");
                 return;
             };
             let mut next = polys;
@@ -490,7 +490,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, koma_arme
         Edit::Panels(op) => panels(state, op),
         Edit::Tone(key, v) => {
             if tone_now(state.cut()).is_none() {
-                state.refuse("refused — the page has no tone (a TONE column, then Clip to panels)");
+                state.refuse("refused — the page has no tone (a TONE track, then Clip to panels)");
             } else {
                 state.manga_edit("tone", |cut, at| set_tone(cut, at, key, &v));
             }
@@ -510,7 +510,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, koma_arme
                 let px = mm / 25.4 * page.dpi;
                 state.manga_edit("panel border", |cut, at| set_border(cut, at, id, px));
             }
-            (None, _) => state.refuse("refused — this cut is no page (New page makes one)"),
+            (None, _) => state.refuse("refused — this shot is no page (New page makes one)"),
             (_, None) => state.refuse("refused — the page has no panels (Clip to panels makes them)"),
         },
     }
@@ -525,17 +525,17 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
             plate::value(ui, &format!("{} · {}×{} at {} dpi", p.format, p.width, p.height, p.dpi));
         }
         None => {
-            let why = not_a_book.unwrap_or("this cut is no page — New page makes one");
+            let why = not_a_book.unwrap_or("this shot is no page — New page makes one");
             ui.label(egui::RichText::new(why).color(plate::legend_dim()));
         }
     }
     plate::latch(ui, &mut state.manga.guides, "page guides").on_hover_text(
         "The canvas draws the page's bleed edge, trim and inner frame, its panels and its rulers \
-         (the panel tool shows them while it is armed, whatever this says).",
+         (the Panel tool shows them while it is on, whatever this says).",
     );
 
     ui.add_space(6.0);
-    plate::legend(ui, "pages (pēji)");
+    plate::legend(ui, "pages");
     let scene = state.at().scene;
     let pages: Vec<(CutId, String, Page, Vec<Poly>)> = state
         .engine
@@ -573,7 +573,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
     }
 
     ui.add_space(6.0);
-    plate::legend(ui, "panels (koma)");
+    plate::legend(ui, "panels");
     let panels = manga::panels_of(state.cut()).map(|(_, p)| p).unwrap_or_default();
     if state.manga.selected >= panels.len() {
         state.manga.selected = panels.len().saturating_sub(1);
@@ -609,7 +609,9 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
     });
     // The canvas's panel tool: a drag draws, splits or moves a ruler.
     let mut armed = koma_armed;
-    let latch = plate::latch(ui, &mut armed, "koma tool");
+    let latch = plate::latch(ui, &mut armed, "Panel tool");
+    // The rail's key is spoken `Panel tool`; one name, one control.
+    plate::speak(&latch, egui::WidgetType::SelectableLabel, Some(armed), "Panel tool on the page");
     if crate::menus::hover_tip(latch, Action::PanelTool, "").clicked() {
         state.manga.asked.push(Action::PanelTool);
     }
@@ -657,11 +659,11 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, edit: &mut Op
     }
 
     ui.add_space(6.0);
-    plate::legend(ui, "tone (tōn)");
+    plate::legend(ui, "tone");
     let tone = tone_now(state.cut());
     let hint = match &tone {
-        None => "no tone yet — a column named TONE (or トーン), then Clip to panels",
-        Some(_) => "the screen of the TONE (トーン) columns",
+        None => "no tone yet — a track named TONE, then Clip to panels",
+        Some(_) => "the screen of the TONE tracks",
     };
     ui.label(egui::RichText::new(hint).color(plate::legend_dim())).on_hover_text(TONE_NAMING);
     let lpi = tone.as_ref().map(|v| v.float("lpi"));
@@ -959,7 +961,7 @@ pub fn paint_page(
 /// The panel tool's `op` on the open page as one undo step.
 fn panels(state: &mut AppState, op: PanelOp) {
     let Some(page) = Page::of(state.cut()) else {
-        state.refuse("refused — this cut is no page (New page makes one)");
+        state.refuse("refused — this shot is no page (New page makes one)");
         return;
     };
     let Some((id, polys)) = manga::panels_of(state.cut()) else {

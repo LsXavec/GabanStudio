@@ -8,9 +8,6 @@
 //! The maps at the foot turn a stored name into its display word, and an old
 //! word stays a Search alias in `Action::aliases`.
 
-// The table is declared whole; not every row has a panel reading it.
-#![allow(dead_code)]
-
 /// `step`, as the menu and the status line say it.
 pub const STEP: &str = "step";
 /// The network room, as the lamp says it.
@@ -47,6 +44,8 @@ pub const DRAWING: &str = "drawing";
 pub const TRACK: &str = "track";
 pub const TIMING_SHEET: &str = "Timing sheet";
 pub const GHOST_FRAMES: &str = "Ghost frames";
+/// The old `safe` latch, on the canvas and on the Result view.
+pub const MARGINS: &str = "Margins";
 
 // The pencil box, as its legends print the preset names.
 pub const SKETCH_PENCIL: &str = "Sketch pencil";
@@ -58,12 +57,16 @@ pub const KEEP_INSIDE_STROKES: &str = "Keep inside strokes";
 pub const KEEP_INSIDE_STROKES_SHORT: &str = "Keep inside strokes";
 pub const PREVIEW_FINAL: &str = "Preview final";
 pub const PREVIEW_FINAL_SHORT: &str = "Preview final";
+/// The Result's latch and `ToggleFinalLook`: the picture as the export gives it.
+pub const FULL_QUALITY: &str = "Full quality";
 pub const EDGE_SOFTNESS: &str = "Edge softness";
 pub const PIXEL_EDGES: &str = "Pixel edges";
 pub const STEADY_STROKE: &str = "Steady stroke";
 pub const TRACKS: &str = "Tracks";
 pub const LENGTH: &str = "Length";
 pub const NOTES: &str = "Notes";
+/// The sound track kind the old `serifu (dialogue)` label named.
+pub const DIALOGUE: &str = "Dialogue";
 pub const DRAWINGS: &str = "Drawings";
 pub const LAYERS: &str = "Layers";
 pub const BRUSHES: &str = "Brushes";
@@ -143,6 +146,7 @@ pub fn preset(stored: &str) -> &str {
         "genga" => CLEAN_PENCIL,
         "shusei" => CORRECTION_PENCIL,
         "shiage fill" => "Color fill",
+        "shadow airbrush" => "Shadow airbrush",
         other => other,
     }
 }
@@ -155,7 +159,22 @@ pub fn fx(stored: &str) -> &str {
         "Para" => "Color wash",
         "LUT" => "Color table",
         "Matte" => "Cut-out",
+        "DrawingSource" => DRAWINGS,
+        "ImageSource" => "Image",
+        "ImageSequence" => "Image sequence",
+        "Model3D" => "3D model",
         other => other,
+    }
+}
+
+/// A sound track's kind. `TrackKind::key` is what the file stores.
+pub fn track_kind(kind: anim_core::audio::TrackKind) -> &'static str {
+    use anim_core::audio::TrackKind::*;
+    match kind {
+        Dialogue => DIALOGUE,
+        Effects => "Sound effects",
+        Music => "Music",
+        Other => "Other",
     }
 }
 
@@ -228,9 +247,10 @@ pub fn drawing_kind(kind: anim_core::model::DrawingKind) -> &'static str {
 
 /// The studio's own word for a label, for its hover card's second line.
 pub fn studio_word(label: &str) -> Option<&'static str> {
-    Some(match label {
+    // A menu row's "…" is not part of the word (`Lip flap…`).
+    Some(match label.trim_end_matches('…') {
         LENGTH => "shaku",
-        NOTES => "serifu",
+        NOTES | DIALOGUE => "serifu",
         SKETCH_PENCIL => "atari",
         CLEAN_PENCIL | CLEAN_LINE_OVER_ROUGH | "Key poses" => "genga",
         CORRECTION_PENCIL => "shusei",
@@ -251,6 +271,17 @@ pub fn with_studio_word(label: &str, card: &str) -> String {
         Some(word) => format!("{card}\nStudio word: {word}"),
         None => card.to_string(),
     }
+}
+
+/// A parameter track's stored name (found by name in old files), as said.
+pub fn param_track(stored: &str) -> String {
+    stored.replacen("cut camera", "shot camera", 1)
+}
+
+/// The wire's sentences keep their word (net.rs is pinned whole, and the
+/// host's refusal crosses the network); the screen says the plain one.
+pub fn session_words(why: &str) -> String {
+    why.replace("room key", "session key").replace("room closed", "session closed")
 }
 
 /// The final word of every constant above, in the table's order: the pin.
@@ -282,6 +313,7 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("TRACK", TRACK, "track"),
     ("TIMING_SHEET", TIMING_SHEET, "Timing sheet"),
     ("GHOST_FRAMES", GHOST_FRAMES, "Ghost frames"),
+    ("MARGINS", MARGINS, "Margins"),
     ("SKETCH_PENCIL", SKETCH_PENCIL, "Sketch pencil"),
     ("CLEAN_PENCIL", CLEAN_PENCIL, "Clean pencil"),
     ("CORRECTION_PENCIL", CORRECTION_PENCIL, "Correction pencil"),
@@ -290,12 +322,14 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("KEEP_INSIDE_STROKES_SHORT", KEEP_INSIDE_STROKES_SHORT, "Keep inside strokes"),
     ("PREVIEW_FINAL", PREVIEW_FINAL, "Preview final"),
     ("PREVIEW_FINAL_SHORT", PREVIEW_FINAL_SHORT, "Preview final"),
+    ("FULL_QUALITY", FULL_QUALITY, "Full quality"),
     ("EDGE_SOFTNESS", EDGE_SOFTNESS, "Edge softness"),
     ("PIXEL_EDGES", PIXEL_EDGES, "Pixel edges"),
     ("STEADY_STROKE", STEADY_STROKE, "Steady stroke"),
     ("TRACKS", TRACKS, "Tracks"),
     ("LENGTH", LENGTH, "Length"),
     ("NOTES", NOTES, "Notes"),
+    ("DIALOGUE", DIALOGUE, "Dialogue"),
     ("DRAWINGS", DRAWINGS, "Drawings"),
     ("LAYERS", LAYERS, "Layers"),
     ("BRUSHES", BRUSHES, "Brushes"),

@@ -89,7 +89,7 @@ enum Make {
 struct Entry {
     category: &'static str,
     name: String,
-    /// The studio's own word (romaji), shown beside the name (D7 labels).
+    /// The studio's own word, for the row's hover card (AU12).
     term: Option<&'static str>,
     aliases: &'static [&'static str],
     help: &'static str,
@@ -98,7 +98,7 @@ struct Entry {
 
 /// GM10: the Camera node's help (add menu and title tooltip).
 const CAMERA_HELP: &str = "The camera over the paper: it pans, zooms, rotates and shakes, \
-    and each depth input moves and blurs by how far away it sits.";
+    and each plane moves and blurs by how far away it sits.";
 
 /// Every node the add menu offers, in category order: Source, Transform,
 /// Blend, FX, Output (later parts add Generators and 3D).
@@ -122,7 +122,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
         name: "Solid".into(),
         term: None,
         aliases: &["colour", "color", "fill", "constant"],
-        help: "a constant colour layer",
+        help: "A plain color layer.",
         make: Make::Node(NodeKind::Solid {
             rgba: [255, 255, 255, 255],
         }),
@@ -132,8 +132,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
         name: "Image (PNG, JPEG, TIFF)…".into(),
         term: None,
         aliases: &["imagesource", "png", "jpg", "jpeg", "tif", "tiff", "background", "plate", "reference"],
-        help: "import a background plate / reference image into this cut — \
-            stored inside the project file, wired as an ImageSource node",
+        help: "Import a background or reference image into this shot, stored inside the project file.",
         make: Make::Image,
     });
     // GM17: the frames another app rendered, read from disk at render.
@@ -152,7 +151,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
             "exr",
             "shot",
         ],
-        help: "frames another app rendered, one file per frame (renders/shot_####.png)",
+        help: "Frames another app rendered, one file per frame (renders/shot_####.png).",
         make: Make::Node(NodeKind::image_sequence("")),
     });
     v.push(Entry {
@@ -160,7 +159,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
         name: "Transform".into(),
         term: None,
         aliases: &["move", "scale", "rotate", "camera"],
-        help: "moves, scales and rotates its input",
+        help: "Moves, scales and rotates its input.",
         make: Make::Node(NodeKind::Transform {
             translate: (0.0, 0.0),
             scale: 1.0,
@@ -195,7 +194,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
         name: "Blend".into(),
         term: None,
         aliases: &["composite", "over", "merge"],
-        help: "composites its 'over' input on top of its 'under' input",
+        help: "Lays its 'over' input on top of its 'under' input.",
         make: Make::Node(NodeKind::Blend {
             mode: BlendMode::Normal,
         }),
@@ -203,7 +202,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
     for &fx in FxKind::CORE {
         v.push(Entry {
             category: "FX",
-            name: fx.name().into(),
+            name: crate::vocab::fx(fx.name()).into(),
             term: fx.term(),
             aliases: fx.aliases(),
             help: fx.help(),
@@ -215,7 +214,7 @@ fn entries(state: &AppState) -> Vec<Entry> {
         name: "Output".into(),
         term: None,
         aliases: &["result", "final"],
-        help: "the cut's final image",
+        help: "The shot's final image.",
         make: Make::Node(NodeKind::Output),
     });
     v
@@ -230,7 +229,7 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
     for &fx in FxKind::LOOK {
         v.push(Entry {
             category: "Look",
-            name: fx.name().into(),
+            name: crate::vocab::fx(fx.name()).into(),
             term: fx.term(),
             aliases: fx.aliases(),
             help: fx.help(),
@@ -241,7 +240,7 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
     for &fx in FxKind::MANGA {
         v.push(Entry {
             category: "Manga",
-            name: fx.name().into(),
+            name: crate::vocab::fx(fx.name()).into(),
             term: fx.term(),
             aliases: fx.aliases(),
             help: fx.help(),
@@ -276,7 +275,7 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
             name: format!("3D model: {}", m.name),
             term: None,
             aliases: &["model3d", "3d", "layout", "gltf", "obj"],
-            help: "the cut's embedded model, shot by its own camera in the toon look",
+            help: "The shot's 3D model, seen through its own camera in the cartoon look.",
             make: Make::Node(NodeKind::model3d(*id)),
         });
     }
@@ -285,7 +284,7 @@ fn menu_entries(state: &AppState) -> Vec<Entry> {
         name: "3D model from file…".into(),
         term: None,
         aliases: &["model3d", "3d", "import", "gltf", "glb", "obj", "blender"],
-        help: "embeds a glTF or OBJ model in the cut and adds its Model3D node",
+        help: "Embeds a glTF or OBJ model in the shot and adds it to the graph.",
         make: Make::Model,
     });
     v.extend(out);
@@ -373,7 +372,7 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 let field = crate::plate::text_field(
                     ui,
                     egui::TextEdit::singleline(&mut menu.query)
-                        .hint_text("type a node — name, category or alias")
+                        .hint_text("type a name or a category")
                         .desired_width(f32::INFINITY),
                 );
                 if menu.fresh || !field.has_focus() {
@@ -390,16 +389,17 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                     for (i, e) in rows.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            let row = crate::plate::detent(ui, i == menu.sel, &e.name).on_hover_text(e.help);
+                            // The studio word stays off the row (spec 3).
+                            let card = match e.term {
+                                Some(word) => format!("{}\nStudio word: {word}", e.help),
+                                None => e.help.to_string(),
+                            };
+                            let row = crate::plate::detent(ui, i == menu.sel, &e.name).on_hover_text(card);
                             if i == menu.sel && (up || down) {
                                 row.scroll_to_me(None);
                             }
                             if row.clicked() {
                                 pick = Some(i);
-                            }
-                            // GM9: the romaji term beside the English (D7).
-                            if let Some(t) = e.term {
-                                ui.label(egui::RichText::new(format!("· {t}")).color(crate::plate::legend_dim()));
                             }
                             ui.label(egui::RichText::new(e.category).color(crate::plate::legend_dim()));
                         });
@@ -415,7 +415,7 @@ fn add_menu_ui(ui: &mut egui::Ui, state: &mut AppState) {
                 let resp = if can {
                     resp.on_hover_text(action.help())
                 } else {
-                    resp.on_disabled_hover_text("no column reaches the composite")
+                    resp.on_disabled_hover_text("No track reaches the final picture.")
                 };
                 build = resp.clicked();
             });
@@ -458,7 +458,7 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
     let (names, takes): (&[&str], &[&str]) = match kind {
         NodeKind::Blend { .. } => (
             &["under", "over"],
-            &["the layer underneath", "the layer composited on top of it"],
+            &["the layer underneath", "the layer laid on top of it"],
         ),
         NodeKind::Effect { fx, .. } => (fx.input_names(), fx.input_help()),
         NodeKind::Generator { generator, .. } => (generator.input_names(), generator.input_help()),
@@ -468,7 +468,7 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
             return (name, anim_core::camera::PLANE_HELP);
         }
         NodeKind::Transform { .. } => (&["image"], &["the picture it moves, scales and rotates"]),
-        NodeKind::Output => (&["image"], &["the cut's final picture"]),
+        NodeKind::Output => (&["image"], &["the shot's final picture"]),
         NodeKind::DrawingSource { .. }
         | NodeKind::Solid { .. }
         | NodeKind::ImageSource { .. }
@@ -505,9 +505,11 @@ fn kind_color(kind: &NodeKind) -> Color32 {
     }
 }
 
-/// A node's title on the graph: its kind's name, and after it a Text
-/// node's first words (GM16), so lettering nodes tell apart.
+/// A node's title on the graph: its kind's display word, and after it a Text
+/// node's first words (GM16), so lettering nodes tell apart. `kind.name()`
+/// stays the stored word.
 fn node_title(kind: &NodeKind) -> String {
+    let name = crate::vocab::fx(kind.name());
     if let NodeKind::Generator { generator: GenKind::Text, params, .. } = kind
         && let Some(anim_core::fx::FxValue::Text { text }) =
             GenKind::Text.spec("text").map(|s| s.read(params.get("text")))
@@ -518,9 +520,9 @@ fn node_title(kind: &NodeKind) -> String {
         if words.len() < text.trim_end().len() {
             words.push('…');
         }
-        return format!("{}: {words}", kind.name());
+        return format!("{name}: {words}");
     }
-    kind.name().to_string()
+    name.to_string()
 }
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
@@ -859,8 +861,8 @@ fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
                  undo brings the graph back."
             )),
             (None, None) => button.on_hover_text(format!(
-                "{help} The BG goes through the camera (the characters are held to the \
-                 frame); one undo step, every node editable."
+                "{help} The background goes through the camera (the characters stay in the \
+                 frame); one undo step, every effect editable."
             )),
         };
         if button.clicked() {
@@ -896,7 +898,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
         let mut kind = node.kind.clone();
         let mut changed = false;
         let title = ui.label(
-            egui::RichText::new(kind.name())
+            egui::RichText::new(crate::vocab::fx(kind.name()))
                 .strong()
                 .color(kind_color(&kind)),
         );
@@ -966,7 +968,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                     .iter()
                     .map(|p| (p.id, p.name.clone()))
                     .collect();
-                ui.menu_button("binds ▾", |ui| {
+                ui.menu_button(format!("{} ▾", crate::vocab::ANIMATE), |ui| {
                     for (label, slot, fresh) in [
                         ("x", &mut binds.tx, "cam.x"),
                         ("y", &mut binds.ty, "cam.y"),
@@ -992,9 +994,9 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                                     }
                                 }
                                 if ui
-                                    .button(format!("+ new column '{fresh}'"))
+                                    .button(format!("+ new track '{fresh}'"))
                                     .on_hover_text(
-                                        "add a parameter column to the X-sheet and bind it",
+                                        "Add a number track to the Timing sheet and animate this with it.",
                                     )
                                     .clicked()
                                 {
@@ -1075,16 +1077,16 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 })
                 .response
-                .on_hover_text("only these layer roles render: the shadow pass, the highlight pass, paint only, lines only");
-                changed |= crate::plate::latch(ui, absorb_trace, "iro-tore (absorb trace lines)")
+                .on_hover_text("Only these layers render: the shadow pass, the highlight pass, paint only, lines only.");
+                changed |= crate::plate::latch(ui, absorb_trace, "Absorb trace lines")
                     .on_hover_text(
-                        "the shadow and highlight trace lines take the paint colour under them \
-                         (or the nearest within 3 px)",
+                        "The shadow and highlight trace lines take the paint color under them \
+                         (or the nearest within 3 px).\nStudio word: iro-tore",
                     )
                     .changed();
             }
             NodeKind::Output => {
-                ui.label(egui::RichText::new("the cut's final image").color(crate::plate::legend_dim()));
+                ui.label(egui::RichText::new("The shot's final image").color(crate::plate::legend_dim()));
             }
             // GM9: generated from the kind's specs; it commits its own
             // gestures, one undo step each.
@@ -1162,8 +1164,8 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                     *offset = (at - 1) as i32;
                     changed = true;
                 }
-                changed |= crate::plate::latch(ui, hold_last, "hold last")
-                    .on_hover_text("a missing file shows the nearest earlier one (the last frame holds)")
+                changed |= crate::plate::latch(ui, hold_last, "Keep the last frame")
+                    .on_hover_text("A missing file shows the nearest earlier one.")
                     .changed();
                 changed |= crate::plate::latch(ui, fit, "fit to frame")
                     .on_hover_text(
@@ -1216,7 +1218,7 @@ mod tests {
         };
         assert_eq!(names("glo").first().map(String::as_str), Some("Glow"));
         assert_eq!(names("bokashi"), ["Blur"], "a trade word finds its kind");
-        assert_eq!(names("fx"), ["Blur", "Glow", "Diffusion", "Grade"]);
+        assert_eq!(names("fx"), ["Blur", "Glow", crate::vocab::fx("Diffusion"), crate::vocab::fx("Grade")]);
         assert!(names("no such node").is_empty());
         // Empty: everything, in category order.
         let cats: Vec<&str> = ranked(entries(h.state()), "")
@@ -1579,7 +1581,7 @@ mod tests {
         assert_eq!(spell(c, c.graph.output.unwrap()), want);
         let layout = s.graph_layout();
         assert!(c.graph.nodes().all(|n| layout.contains_key(&n.id)), "every node has its place");
-        assert!(s.status.contains("satsuei graph built"), "{}", s.status);
+        assert!(s.status.contains("full finishing setup built"), "{}", s.status);
         // Undo takes the whole graph back, nodes and places.
         h.perform(Action::Undo);
         assert_eq!(h.state().cut().graph, before, "undo restores the graph exactly");
@@ -1606,7 +1608,7 @@ mod tests {
         let s = h.state();
         assert_eq!(s.engine.history_len(), depth);
         assert_eq!(s.cut().graph, graph);
-        assert!(s.refusal.contains("no drawing column"), "the reason is said: {}", s.refusal);
+        assert!(s.refusal.contains("no drawing track"), "the reason is said: {}", s.refusal);
     }
 
     #[test]
@@ -1674,7 +1676,7 @@ mod tests {
         let graph = h.state().cut().graph.clone();
         let depth = h.state().engine.history_len();
         let ask = format!(
-            "Replace this hand-built graph ({n} nodes) with the satsuei chain? Undo brings it back."
+            "Replace this hand-built graph ({n} nodes) with the full finishing chain? Undo brings it back."
         );
         h.click(crate::vocab::FULL_FINISHING_SETUP);
         assert!(h.has(&ask), "{}", h.describe());
@@ -1711,7 +1713,7 @@ mod tests {
         h.hover(Action::BuildSatsuei.label());
         h.wait(1.0);
         assert!(h.has_text_containing(Action::BuildSatsuei.help()), "{}", h.describe());
-        assert!(h.has_text_containing("The BG goes through the camera"), "{}", h.describe());
+        assert!(h.has_text_containing("The background goes through the camera"), "{}", h.describe());
         assert_eq!(Action::BuildSatsuei.menu(), Some("More/Effects setup/Full finishing setup"));
         // A hidden column still counts: the template wires it.
         let s = h.state_mut();
@@ -1744,7 +1746,7 @@ mod tests {
         h.run();
         let s = h.state();
         assert_eq!(s.engine.history_len(), depth + 1, "one undo step: {}", s.refusal);
-        assert_eq!(s.engine.history().last().unwrap().label, "build satsuei graph");
+        assert_eq!(s.engine.history().last().unwrap().label, "full finishing setup");
         assert!(s.cut().graph.nodes().any(|n| matches!(n.kind, NodeKind::Effect { fx: FxKind::Vignette, .. })));
     }
 

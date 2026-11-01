@@ -3086,7 +3086,7 @@ mod tests {
         // AU26: a stroke's new key takes `tail_keys` into its undo step.
         ("doc.rs", "    pub fn commit_stroke", 0x22b044538073b7a8),
         ("doc.rs", "    pub fn commit_raster", 0xdc168671a7f290e0),
-        ("doc.rs", "    fn land_raster", 0x5094970bbe999ade),
+        ("doc.rs", "    fn land_raster", 0x11f436b7099cbc72),
         ("doc.rs", "    pub fn undo(", 0xe15edd6f411d2b83),
         ("doc.rs", "    pub fn redo(", 0xcaa16d99af9d7dbd),
         ("doc.rs", "    pub fn undo_to(", 0x387309403f18550e),
@@ -3094,7 +3094,7 @@ mod tests {
         ("workspace.rs", "    pub fn load_from", 0x329c11389bcffa7f),
         ("workspace.rs", "    pub fn save_to", 0x18ceee7d714dc4d4),
         // AU4: `seen_pen` latches past the layer gate, and only there.
-        ("canvas.rs", "    fn handle_pen(", 0x999c4cb09447e79e),
+        ("canvas.rs", "    fn handle_pen(", 0x272b108d35771002),
         ("main.rs", "fn pump_tablet(", 0x16ed0af8f504e210),
     ];
 
@@ -3148,7 +3148,7 @@ mod tests {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (171, 0x034578ff688e0034), "the Actions, their words, their menus");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (171, 0xe84df822bbc71439), "the Actions, their words, their menus");
         assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x7cfaa85046cd2ab3), "the panes and their titles");
     }
 }

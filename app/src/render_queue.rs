@@ -873,7 +873,7 @@ fn today() -> String {
 pub fn add_job(state: &mut AppState, at: CutRef, frames: Option<(u32, u32)>) -> bool {
     let Some(out) = state.render_queue.out_dir(state.file_path.as_deref()) else {
         state
-            .refuse("the render queue needs an output folder: type one, or save the project first");
+            .refuse("the Export queue needs an output folder: type one, or save the project first");
         return false;
     };
     let d = state.render_queue.draft.clone();
@@ -938,12 +938,12 @@ pub fn add_episode_job(state: &mut AppState, scene: anim_core::ids::SceneId) -> 
         .and_then(|s| s.cuts.first())
         .map(|c| c.id)
     else {
-        state.refuse("refused — the scene has no cut to render");
+        state.refuse("refused — the scene has no shot to render");
         return false;
     };
     let Some(out) = state.render_queue.out_dir(state.file_path.as_deref()) else {
         state
-            .refuse("the render queue needs an output folder: type one, or save the project first");
+            .refuse("the Export queue needs an output folder: type one, or save the project first");
         return false;
     };
     let total = anim_core::board::trt_frames(state.engine.project.scene(scene).expect("found above"));
@@ -958,7 +958,7 @@ pub fn add_episode_job(state: &mut AppState, scene: anim_core::ids::SceneId) -> 
     let name = state.engine.project.scene(scene).map_or("", |s| s.name.as_str());
     let label = format!("episode {name} · {frames}");
     // Said where it went (Render episode brings the queue forward).
-    state.status = format!("episode {name} queued: {frames} — see the Render Queue");
+    state.status = format!("episode {name} queued: {frames} — see the {}", crate::vocab::EXPORT_QUEUE);
     let q = &mut state.render_queue.queue;
     q.push(Job {
         at: CutRef { scene, cut: first },
@@ -1128,7 +1128,7 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
             )
         };
         let Some(mut spec) = spec.map(|s| s.with_base_dir(state.project_dir())) else {
-            match end_job(state, i, Err("its cut is gone".into())) {
+            match end_job(state, i, Err("its shot is gone".into())) {
                 Some(next) => {
                     i = next;
                     continue;
@@ -1146,7 +1146,7 @@ fn launch(state: &mut AppState, mut i: usize, ctx: &egui::Context) {
         state.render_queue.queue.jobs[i].span = spec.frames;
         let note = match anim_core::export::vector_stroke_cels(&spec.cut) {
             0 => String::new(),
-            n => format!(" ({n} cel(s) carry legacy vector strokes — not included)"),
+            n => format!(" ({n} drawing(s) carry legacy vector strokes — not included)"),
         };
         let ffmpeg = state.render_queue.ffmpeg_path();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1287,7 +1287,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
             if !open {
                 return;
             }
-            plate::legend(ui, &format!("{} (delivery)", crate::vocab::EXPORT_QUEUE));
+            plate::legend(ui, crate::vocab::EXPORT_QUEUE);
             ui.separator();
             ui.label("preset");
             ui.horizontal_wrapped(|ui| {
@@ -1338,15 +1338,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
             let out_hint = state.render_queue.out_hint(state.file_path.as_deref());
             let d = &mut state.render_queue.draft;
             ui.horizontal_wrapped(|ui| {
-                ui.label("burn-ins");
+                ui.label("Text on the picture");
                 let b = &mut d.burn_ins;
                 for (on, label, tip) in [
                     (&mut b.project, "project", "the project's name, top left"),
-                    (&mut b.cut, "cut", "the scene and cut, top left"),
+                    (&mut b.cut, crate::vocab::SHOT, "the scene and shot, top left"),
                     (
                         &mut b.frame,
                         "frame (s+k)",
-                        "the frame number and seconds+koma, as the timesheet counts, \
+                        "the frame number and seconds+frames, as the Timing sheet counts, \
                          bottom left",
                     ),
                     (&mut b.timecode, "timecode", "HH:MM:SS:FF non-drop, bottom right"),
@@ -1367,7 +1367,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                      copies of any preset",
                 );
                 ui.label("sound");
-                plate::latch(ui, &mut d.mixdown, "mixdown WAV").on_hover_text(
+                plate::latch(ui, &mut d.mixdown, "Sound file").on_hover_text(
                     "an image sequence also writes the range's sound mix as a WAV beside \
                      its frames (a video carries its sound either way; a GIF or a still \
                      has none)",
@@ -1388,7 +1388,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                     .on_hover_text(
                         "{project} {scene} {cut} {frame} {frame:04}; an image sequence \
                          whose pattern has no frame gets _{frame:04}; a GIF or a still \
-                         has no frame number, so a second one of the same cut replaces \
+                         has no frame number, so a second one of the same shot replaces \
                          the first",
                     );
             });
@@ -1396,9 +1396,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
             let n = state.cut().frame_count.max(1);
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .button("+ this cut")
+                    .button("+ this shot")
                     .on_hover_text(
-                        "the whole current cut (its length when the job starts); a still \
+                        "the whole current shot (its length when the job starts); a still \
                          takes the frame on screen",
                     )
                     .clicked()
@@ -1406,8 +1406,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                     add_job(state, at, None);
                 }
                 if ui
-                    .button("+ every cut in the scene")
-                    .on_hover_text("one job per cut of this scene")
+                    .button("+ every shot in the scene")
+                    .on_hover_text("one job per shot of this scene")
                     .clicked()
                 {
                     let cuts: Vec<CutRef> = state
@@ -1432,11 +1432,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                 }
                 let picked = state.render_queue.draft.picked.len();
                 if ui
-                    .add_enabled(picked > 0, egui::Button::new("+ selected cuts"))
+                    .add_enabled(picked > 0, egui::Button::new("+ selected shots"))
                     .on_hover_text(format!(
-                        "one job per cut picked below ({picked} picked), in the project's order"
+                        "one job per shot picked below ({picked} picked), in the project's order"
                     ))
-                    .on_disabled_hover_text("pick cuts in \"pick cuts\" below first")
+                    .on_disabled_hover_text("pick shots in \"pick shots\" below first")
                     .clicked()
                 {
                     add_picked(state);
@@ -1445,7 +1445,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                 if ui
                     .button("+ episode")
                     .on_hover_text(
-                        "every cut of this scene in order as one sequence or one video, \
+                        "every shot of this scene in order as one sequence or one video, \
                          their sound end to end; a still takes the first frame",
                     )
                     .clicked()
@@ -1472,7 +1472,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                         .collect()
                 })
                 .unwrap_or_default();
-            egui::CollapsingHeader::new("pick cuts")
+            egui::CollapsingHeader::new("pick shots")
                 .id_salt("render queue pick cuts")
                 .default_open(false)
                 .show(ui, |ui| {
@@ -1481,7 +1481,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                         for (c, name) in &scene_cuts {
                             let mut on = picked.contains(c);
                             if plate::latch(ui, &mut on, name)
-                                .on_hover_text("queued by \"+ selected cuts\"")
+                                .on_hover_text("queued by \"+ selected shots\"")
                                 .changed()
                             {
                                 picked.retain(|p| p != c);
@@ -1505,7 +1505,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                 }
                 if ui
                     .button("+ frames")
-                    .on_hover_text("this cut, those frames only; a still takes the first of them")
+                    .on_hover_text("this shot, those frames only; a still takes the first of them")
                     .clicked()
                 {
                     let r = state.render_queue.draft.range;
@@ -1596,8 +1596,8 @@ fn preset_help(p: &Preset) -> String {
     };
     let alpha = if p.alpha { "alpha kept" } else { "on white" };
     let look = match p.purpose {
-        Purpose::Final => "final: no rough, reference or correction (sakkan) layers, no Ref columns",
-        Purpose::View => "view: everything the composite view shows",
+        Purpose::Final => "final: no rough, reference or correction layers, no Reference tracks",
+        Purpose::View => "view: everything Preview final shows",
         Purpose::LineTest => "line test: line layers only, black on white",
     };
     let burn = if p.burn_ins.is_empty() {
@@ -1939,8 +1939,8 @@ mod tests {
         h.state_mut().render_queue.draft.out = dir.path().display().to_string();
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
         h.run();
-        h.scroll_to("+ this cut");
-        h.click("+ this cut");
+        h.scroll_to("+ this shot");
+        h.click("+ this shot");
         h.run();
         assert_eq!(h.state().render_queue.queue.jobs.len(), 1);
         h.scroll_to("Start");
@@ -2170,15 +2170,15 @@ mod tests {
         h.run();
         assert_eq!(Action::ToggleFinalLook.menu(), Some("View/Full quality"));
         assert_eq!(h.editor().is_on(Action::ToggleFinalLook), Some(false));
-        assert_eq!(h.node_toggled("final look"), Some(false), "{}", h.describe());
+        assert_eq!(h.node_toggled(crate::vocab::FULL_QUALITY), Some(false), "{}", h.describe());
         // The viewer's latch turns it on: the frame renders on a worker
         // (no GPU here — the look is the CPU's).
-        h.click("final look");
+        h.click(crate::vocab::FULL_QUALITY);
         assert!(h.editor().final_look.on);
         h.run_frames(2);
         h.editor_mut().final_look.wait();
         h.run();
-        assert_eq!(h.node_toggled("final look"), Some(true));
+        assert_eq!(h.node_toggled(crate::vocab::FULL_QUALITY), Some(true));
         let img = h.editor().final_look.image.clone().expect("a final-look frame");
         assert_eq!(img.size, [64, 36]);
         let alpha = |x: usize, y: usize| img.pixels[y * 64 + x].a();
@@ -2194,7 +2194,7 @@ mod tests {
         h.perform(Action::ToggleFinalLook);
         h.run();
         assert_eq!(h.editor().is_on(Action::ToggleFinalLook), Some(false));
-        assert_eq!(h.node_toggled("final look"), Some(false));
+        assert_eq!(h.node_toggled(crate::vocab::FULL_QUALITY), Some(false));
     }
 
     #[test]
@@ -2264,14 +2264,14 @@ mod tests {
         h.state_mut().render_queue.draft.out = dir.path().display().to_string();
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::RenderQueue]);
         h.run();
-        assert_eq!(h.node_enabled("+ selected cuts"), Some(false), "nothing picked");
-        h.scroll_to("pick cuts");
-        h.click("pick cuts");
+        assert_eq!(h.node_enabled("+ selected shots"), Some(false), "nothing picked");
+        h.scroll_to("pick shots");
+        h.click("pick shots");
         h.click("CUT03");
         h.click("CUT01");
         assert_eq!(h.state().render_queue.draft.picked, vec![cuts[2], cuts[0]]);
-        h.scroll_to("+ selected cuts");
-        h.click("+ selected cuts");
+        h.scroll_to("+ selected shots");
+        h.click("+ selected shots");
         let queued: Vec<CutRef> = h
             .state()
             .render_queue
@@ -2825,12 +2825,12 @@ mod tests {
             (j.label.as_str(), j.span, j.total()),
             (format!("episode SC01 · {total} frames").as_str(), (0, total as u32 - 1), total as usize)
         );
-        assert_eq!(s.status, format!("episode SC01 queued: {total} frames — see the Render Queue"));
+        assert_eq!(s.status, format!("episode SC01 queued: {total} frames — see the Export queue"));
         s.render_queue.draft.preset = preset_at("Still PNG");
         assert!(add_episode_job(&mut s, at.scene));
         let j = &s.render_queue.queue.jobs[1];
         assert_eq!((j.label.as_str(), j.span, j.total()), ("episode SC01 · 1 frame", (0, 0), 1));
-        assert_eq!(s.status, "episode SC01 queued: 1 frame — see the Render Queue");
+        assert_eq!(s.status, "episode SC01 queued: 1 frame — see the Export queue");
     }
 
     #[test]
@@ -2949,9 +2949,9 @@ mod tests {
         h.run();
         for (widget, words) in [
             ("Still PNG", "one PNG of the frame on screen"),
-            ("mixdown WAV", "a video carries its sound either way; a GIF or a still has none"),
-            ("+ this cut", "the whole current cut"),
-            ("+ this cut", "a still takes the frame on screen"),
+            ("Sound file", "a video carries its sound either way; a GIF or a still has none"),
+            ("+ this shot", "the whole current shot"),
+            ("+ this shot", "a still takes the frame on screen"),
             ("+ episode", "a still takes the first frame"),
             ("+ frames", "a still takes the first of them"),
         ] {
@@ -2966,7 +2966,7 @@ mod tests {
         h.kit_mut().input_mut().events.push(egui::Event::PointerMoved(field));
         h.run();
         h.wait(1.0);
-        let words = "a GIF or a still has no frame number, so a second one of the same cut replaces the first";
+        let words = "a GIF or a still has no frame number, so a second one of the same shot replaces the first";
         assert!(h.has_text_containing(words), "{}", h.describe());
     }
 
@@ -2984,8 +2984,8 @@ mod tests {
         h.scroll_to("GIF");
         h.click("GIF");
         assert_eq!(h.state().render_queue.draft.preset, preset_at("GIF"), "{:?}", h.rect("GIF"));
-        h.scroll_to("+ this cut");
-        h.click("+ this cut");
+        h.scroll_to("+ this shot");
+        h.click("+ this shot");
         h.scroll_to("Start");
         h.click("Start");
         h.run_export_to_end();
@@ -2993,8 +2993,8 @@ mod tests {
         h.state_mut().view.frame = 4;
         h.scroll_to("Still PNG");
         h.click("Still PNG");
-        h.scroll_to("+ this cut");
-        h.click("+ this cut");
+        h.scroll_to("+ this shot");
+        h.click("+ this shot");
         h.scroll_to("Start");
         h.click("Start");
         h.run_export_to_end();

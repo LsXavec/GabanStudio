@@ -19,7 +19,7 @@ use crate::palette::{CharacterPalette, ColorRole};
 use crate::plate;
 
 /// AU7: the empty board, naming the two controls under it.
-pub(crate) const NO_CHARACTERS: &str = "No characters yet. Turn on edit model, then + character.";
+pub(crate) const NO_CHARACTERS: &str = "No characters yet. Turn on Edit colors, then + character.";
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     ui.add_space(4.0);
@@ -46,7 +46,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
         ui.label(egui::RichText::new(NO_CHARACTERS).color(plate::legend_dim()));
     }
     recolour_offer_ui(ui, state);
-    ui.add_space(4.0);
+    ui.add_space(2.0);
     let edit = state.palette_edit;
     let ci = state.active_character.min(n_chars.saturating_sub(1));
     let mut remove_role: Option<usize> = None;
@@ -119,11 +119,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                                 armed_pot = Some(ri);
                             }
                             let key_hint = if ri < 8 {
-                                format!(" · key {} with fill", ri + 1)
+                                format!(" · press {} with Fill", ri + 1)
                             } else {
                                 String::new()
                             };
-                            presp.on_hover_text(format!("arm '{}'{key_hint}", role.name));
+                            presp.on_hover_text(format!("Use '{}'{key_hint}", role.name));
                             if edit {
                                 // EDIT MODEL: the wheel lives here and only
                                 // here; edits propagate everywhere.
@@ -158,9 +158,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                     });
                     ui.add_space(4.0);
                 }
-                if edit && ui.button("+ role").clicked() {
+                if edit && ui.button(format!("+ {}", crate::vocab::COLOR_NAME)).clicked() {
                     ch.roles.push(ColorRole {
-                        name: "role".into(),
+                        name: "color".into(),
                         color: [200, 200, 200, 255],
                     });
                     model_changed = true;
@@ -204,9 +204,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     // rare and global; they cost a click).
     ui.separator();
     let mut em = state.palette_edit;
-    plate::latch(ui, &mut em, "edit model").on_hover_text(
-        "open the model for editing — renames, removals and new roles \
-    propagate to every frame using them",
+    plate::latch(ui, &mut em, crate::vocab::EDIT_COLORS).on_hover_text(
+        "Open the colors for editing. Renames, removals and new colors reach every frame that uses them.",
     );
     state.palette_edit = em;
     if state.palette_edit {
@@ -294,7 +293,7 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
                 let mut c = v.colors.get(ri).copied().unwrap_or(*model);
                 if ui
                     .color_edit_button_srgba_unmultiplied(&mut c)
-                    .on_hover_text(format!("{role}: model → {}", v.name))
+                    .on_hover_text(format!("{role}: original → {}", v.name))
                     .changed()
                 {
                     v.colors.resize(ri.max(v.colors.len()), *model);
@@ -348,7 +347,7 @@ fn recolour_offer_ui(ui: &mut egui::Ui, state: &mut AppState) {
         return;
     };
     let hex = |c: [u8; 4]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
-    plate::legend(ui, "recolour paint");
+    plate::legend(ui, "Recolor paint");
     ui.label(
         egui::RichText::new(format!("'{}' {} → {}", o.name, hex(o.from), hex(o.to)))
             .color(plate::legend_dim()),
@@ -370,19 +369,19 @@ fn recolour_offer_ui(ui: &mut egui::Ui, state: &mut AppState) {
         );
     }
     const TOUCHES: &str =
-        "paint layers only (Color/Shadow/Highlight/Custom); line art is never touched; one undo step";
+        "Paint layers only (Color, Shadow, Highlight, Custom). Line art is never touched. One undo step.";
     let (at, scene) = (state.at(), state.view.scene);
     ui.horizontal_wrapped(|ui| {
-        if ui.button("Recolour this cut").on_hover_text(TOUCHES).clicked() {
+        if ui.button("Recolor this shot").on_hover_text(TOUCHES).clicked() {
             state.recolour(RecolourScope::Cut(at));
         }
-        if ui.button("Recolour this scene").on_hover_text(TOUCHES).clicked() {
+        if ui.button("Recolor this scene").on_hover_text(TOUCHES).clicked() {
             state.recolour(RecolourScope::Scene(scene));
         }
-        if ui.button("Recolour project").on_hover_text(TOUCHES).clicked() {
+        if ui.button("Recolor project").on_hover_text(TOUCHES).clicked() {
             state.recolour(RecolourScope::Project);
         }
-        if ui.button("Keep paint").on_hover_text("leave the paint as it is").clicked() {
+        if ui.button("Keep paint").on_hover_text("Leave the paint as it is.").clicked() {
             state.recolour_offer = None;
         }
     });

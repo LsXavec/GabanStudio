@@ -62,7 +62,7 @@ impl FloatViewer {
     pub fn set_open(&self, open: bool) {
         self.open.store(open, Ordering::Relaxed);
     }
-    pub const VIEWPORT_TITLE: &'static str = "AnimStudio — Viewer";
+    pub const VIEWPORT_TITLE: &'static str = "Gaban Studio — Result";
     pub fn viewport_id() -> egui::ViewportId {
         egui::ViewportId::from_hash_of("animstudio_float_viewer")
     }
@@ -144,7 +144,7 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
             crate::plate::picture_tag(
                 &painter,
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
-                "🎬 composite (OS window)",
+                crate::vocab::RESULT,
             );
         }
         None => {

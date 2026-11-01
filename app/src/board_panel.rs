@@ -23,7 +23,7 @@ use eframe::egui;
 
 use crate::config::Action;
 use crate::doc::AppState;
-use crate::plate;
+use crate::{plate, vocab};
 
 /// A card's picture width in pixels.
 pub const THUMB_W: usize = 128;
@@ -105,6 +105,11 @@ struct CardInfo {
     /// The cut is an animatic (it has a BOARD column): its card makes
     /// cuts from its panels.
     panels: bool,
+}
+
+/// A status row's hover card: where the shot stands, and the studio's word.
+fn status_card(word: &str) -> String {
+    vocab::with_studio_word(word, &format!("This shot is at: {word}."))
 }
 
 /// A cut's length as seconds + koma ("1+12" = a second and 12 frames).
@@ -263,7 +268,7 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         .collect();
     let shown: Vec<CutId> = cards.iter().map(|c| c.at.cut).collect();
     refresh_thumbs(ui.ctx(), state, scene_id, &shown, gesture_safe);
-    plate::legend(ui, "shinkō board");
+    plate::legend(ui, vocab::SHOTS).on_hover_text(vocab::with_studio_word(vocab::SHOTS, "Every shot of the scene, by its status."));
     // Filters.
     ui.horizontal_wrapped(|ui| {
         ui.label("status");
@@ -273,7 +278,9 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut state.board.status, None, "any status");
                 for s in CutStatus::ALL {
-                    ui.selectable_value(&mut state.board.status, Some(s), crate::vocab::cut_status(s));
+                    let word = crate::vocab::cut_status(s);
+                    ui.selectable_value(&mut state.board.status, Some(s), word)
+                        .on_hover_text(status_card(word));
                 }
             });
         ui.label("assignee");
@@ -296,7 +303,7 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     // Export does (D6); above the cards, so they never scroll away.
     let name = state.cut().name.clone();
     ui.horizontal_wrapped(|ui| {
-        ui.label(format!("{} of {} cut(s)", cards.len(), total));
+        ui.label(format!("{} of {} shot(s)", cards.len(), total));
         if ui
             .button("export colour sheet")
             .on_hover_text(Action::ExportColorSheet.help())
@@ -382,7 +389,7 @@ fn card_menu(r: &egui::Response, state: &mut AppState, info: &CardInfo) {
         }
         if ui
             .button(format!("export {} as project", info.name))
-            .on_hover_text("the cut, its palettes and the project's settings as a new .animproj in the render folder")
+            .on_hover_text("the shot, its palettes and the project's settings as a new .animproj in the render folder")
             .clicked()
         {
             state.export_cut_project(info.at);
@@ -417,14 +424,14 @@ fn card(
         }
     }
     plate::speak(&pic, egui::WidgetType::Button, None, &format!("{name} picture"));
-    let pic = pic.on_hover_text("open this cut (right-click: a retake note, export it as a project)");
+    let pic = pic.on_hover_text("open this shot (right-click: a retake note, export it as a project)");
     if pic.clicked() {
         *open = Some(at.cut);
     }
     card_menu(&pic, state, info);
     let b = ui
         .button(format!("open {name}"))
-        .on_hover_text("open this cut (right-click: a retake note, export it as a project)");
+        .on_hover_text("open this shot (right-click: a retake note, export it as a project)");
     if b.clicked() {
         *open = Some(at.cut);
     }
@@ -438,7 +445,8 @@ fn card(
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut pick, None, "no status");
             for s in CutStatus::ALL {
-                ui.selectable_value(&mut pick, Some(s), crate::vocab::cut_status(s));
+                let word = crate::vocab::cut_status(s);
+                ui.selectable_value(&mut pick, Some(s), word).on_hover_text(status_card(word));
             }
         });
     if pick != p.status {
@@ -481,12 +489,12 @@ fn card(
         }
     });
     plate::speak(&m.response, egui::WidgetType::Button, None, &format!("{name} {summary}"));
-    m.response.on_hover_text("the cut's retake notes: latch one resolved, or add one");
+    m.response.on_hover_text("the shot's retake notes: latch one resolved, or add one");
     // An animatic's panels become the cuts after it (the editor's verb,
     // on this cut).
     if info.panels
         && ui
-            .button(format!("make cuts from {name}'s panels"))
+            .button(format!("make shots from {name}'s panels"))
             .on_hover_text(Action::MakeCutsFromPanels.help())
             .clicked()
     {
@@ -584,7 +592,7 @@ pub fn note_window(ctx: &egui::Context, state: &mut AppState) {
             }
             let entered = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             plate::latch(ui, &mut form.retake, "set Retake")
-                .on_hover_text("the cut's status goes to Retake with the note, in the same undo step");
+                .on_hover_text("the shot's status goes to Retake with the note, in the same undo step");
             ui.horizontal(|ui| {
                 let typed = !form.text.trim().is_empty();
                 add = ui
@@ -622,7 +630,8 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
         .collect();
     let fps = state.engine.project.fps;
     let trt = board::trt_frames(scene);
-    plate::legend(ui, "henshū timeline");
+    plate::legend(ui, vocab::EPISODE_TIMELINE)
+        .on_hover_text(vocab::with_studio_word(vocab::EPISODE_TIMELINE, "The scene's shots, end to end."));
     ui.horizontal_wrapped(|ui| {
         ui.label(format!("TRT {}", board::format_trt(trt, fps)));
         match board::episode_target(&state.engine.project) {
@@ -668,7 +677,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
     ui.horizontal_wrapped(|ui| {
         let playing = state.board.episode_play && state.view.playing;
         if ui
-            .add_sized([96.0, 20.0], egui::Button::new(if playing { "stop episode" } else { "play episode" }))
+            .add_sized([108.0, 20.0], egui::Button::new(if playing { "stop episode" } else { "play episode" }))
             .on_hover_text(Action::PlayEpisode.help())
             .clicked()
         {
@@ -952,7 +961,7 @@ mod tests {
         h.run_frames(4);
         assert!(h.has("open CUT02"));
         assert!(!h.has("open CUT01") && !h.has("open CUT03"), "{}", h.describe());
-        assert!(h.has_text_containing("1 of 3 cut(s)"));
+        assert!(h.has_text_containing("1 of 3 shot(s)"));
     }
 
     #[test]
@@ -1149,7 +1158,7 @@ mod tests {
         h.click("render episode");
         let s = h.state();
         assert!(s.render_queue.queue.jobs.last().is_some_and(|j| j.episode));
-        assert_eq!(s.status, "episode SC01 queued: 108 frames — see the Render Queue");
+        assert_eq!(s.status, "episode SC01 queued: 108 frames — see the Export queue");
         assert!(h.editor().dock.find_tab(&Pane::RenderQueue).is_some());
         // Export EDL writes <project>_<scene>.edl into the render folder.
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::Episode]);
@@ -1249,9 +1258,9 @@ mod tests {
         let mut h = EditorHarness::with_state(s);
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::Board]);
         h.run();
-        assert!(!h.has_text_containing("make cuts from"), "{}", h.describe());
+        assert!(!h.has_text_containing("make shots from"), "{}", h.describe());
         h.perform(Action::MakeCutsFromPanels);
-        assert_eq!(h.state().refusal, "refused — open the animatic (a cut with a BOARD column) first");
+        assert_eq!(h.state().refusal, "refused — open the animatic (a shot with a BOARD track) first");
         assert_eq!(names(h.state()).len(), 3);
         // CUT01 an animatic: its card names the source, and makes the cuts
         // after it under the free numbers (CUT04 on) as one undo step.
@@ -1259,8 +1268,8 @@ mod tests {
         let second = h.state().engine.project.scene(at.scene).unwrap().cuts[1].id;
         h.state_mut().goto_cut(at.scene, second);
         h.run();
-        h.click("make cuts from CUT01's panels");
-        assert_eq!(h.state().status, "made 3 cut(s) from CUT01's panels");
+        h.click("make shots from CUT01's panels");
+        assert_eq!(h.state().status, "made 3 shot(s) from CUT01's panels");
         assert_eq!(names(h.state()), ["CUT01", "CUT04", "CUT05", "CUT06", "CUT02", "CUT03"]);
         h.state_mut().engine.undo().unwrap();
         assert_eq!(names(h.state()), ["CUT01", "CUT02", "CUT03"]);

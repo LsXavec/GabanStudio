@@ -13,6 +13,9 @@ use crate::doc::AppState;
 use crate::plate;
 use crate::templates;
 
+/// The template row that starts from nothing.
+const BLANK: &str = "blank (one track)";
+
 pub enum FormAction {
     Create,
     Open,
@@ -172,7 +175,7 @@ pub fn form_ui(
                 ui,
                 egui::TextEdit::singleline(&mut form.name)
                     .desired_width(220.0)
-                    .hint_text("the cut's name"),
+                    .hint_text("the shot's name"),
             );
             ui.end_row();
             // GM8: the Welcome's templates — picking one sets the paper and
@@ -180,12 +183,12 @@ pub fn form_ui(
             // and its dpi).
             plate::legend(ui, "start from");
             egui::ComboBox::from_id_salt("np_template")
-                .selected_text(form.template().map_or("blank (one column)", |t| t.name))
+                .selected_text(form.template().map_or(BLANK, |t| t.name))
                 .show_ui(ui, |ui| {
                     // GM21: through pick_template, so a template's paper
                     // does not stay behind on a blank cut.
                     if ui
-                        .selectable_label(form.template.is_none(), "blank (one column)")
+                        .selectable_label(form.template.is_none(), BLANK)
                         .clicked()
                     {
                         form.pick_template(None);
@@ -335,7 +338,7 @@ pub fn form_ui(
                 )
                 .min_size(egui::vec2(140.0, 30.0)),
             )
-            .on_hover_text("create the cut and open the drawing room")
+            .on_hover_text("create the shot and open the Draw step")
             .clicked()
         {
             action = Some(FormAction::Create);

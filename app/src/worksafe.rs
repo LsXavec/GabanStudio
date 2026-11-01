@@ -730,7 +730,7 @@ mod tests {
             (s, CanvasView::new()),
             |ui, (st, cv): &mut (AppState, CanvasView)| crate::palette_panel::ui(ui, st, cv),
         );
-        p.click("+ role");
+        p.click(&format!("+ {}", crate::vocab::COLOR_NAME));
         assert!(p.state().0.meta_dirty && p.state().0.is_dirty(), "a palette edit is unsaved work");
         // The paint dish writes the palettes too: the row's held DERIVE and
         // the eye's held SET (they once bypassed the mark).
@@ -749,7 +749,7 @@ mod tests {
             .push(crate::palette::CharacterPalette::new("zoro"));
         let mut p = dish(s, CanvasView::new());
         assert!(!p.state().0.is_dirty());
-        p.hold("derive");
+        p.hold("Make shadow");
         let role = |s: &AppState, name: &str| {
             s.palettes.characters[0]
                 .roles

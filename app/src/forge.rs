@@ -145,8 +145,8 @@ fn forge_body(
         )
         .changed();
         if ui
-            .button("from armed")
-            .on_hover_text("load the armed brush into the forge as a draft")
+            .button("From the current brush")
+            .on_hover_text("load the current brush into the Brush maker as a draft")
             .clicked()
         {
             let mut base = canvas.snapshot_preset(forge.draft.name.clone());
@@ -287,12 +287,12 @@ fn forge_body(
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         if ui
-            .button("arm draft")
+            .button("Use draft")
             .on_hover_text("paint with the draft now — nothing is saved yet")
             .clicked()
         {
             canvas.apply_preset(&forge.draft);
-            *status = format!("armed the draft '{}'", forge.draft.name);
+            *status = format!("drawing with the draft '{}'", forge.draft.name);
         }
         let name = forge.draft.name.trim().to_string();
         let exists = presets.iter().any(|p| p.name == name);

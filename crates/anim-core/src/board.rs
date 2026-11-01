@@ -765,10 +765,10 @@ pub fn render_color_sheet(palette: &SheetPalette) -> Image {
     put_text(
         &mut img,
         l.title,
-        &format!("iro shitei (colour designation) — {}", palette.name),
+        &format!("Color sheet — {}", palette.name),
         20.0,
     );
-    let mut heads = vec!["chip".to_string(), "role".to_string(), "model".to_string()];
+    let mut heads = vec!["chip".to_string(), "color name".to_string(), "model".to_string()];
     heads.extend(palette.variants.iter().map(|v| v.name.clone()));
     for (r, t) in l.heads.iter().zip(&heads) {
         put_text(&mut img, *r, t, 13.0);
@@ -867,13 +867,13 @@ pub fn cuts_from_panels(
         .cuts
         .iter()
         .position(|c| c.id == at.cut)
-        .ok_or("the cut is gone")?;
+        .ok_or("the shot is gone")?;
     let mut used: std::collections::BTreeSet<String> =
         scene.cuts.iter().map(|c| c.name.clone()).collect();
     let source = scene.cuts[index].clone();
     let panels = panels(&source, column);
     if panels.is_empty() {
-        return Err("the column has no panels (no drawing exposures)".into());
+        return Err("the track has no panels (no drawing exposures)".into());
     }
     let mut groups: BTreeMap<u32, Vec<Panel>> = BTreeMap::new();
     for p in &panels {

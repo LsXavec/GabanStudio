@@ -466,11 +466,11 @@ fn refusals_name_frames_one_based_and_a_frameless_cut_takes_no_insert() {
         cells: vec![CellEdit { column: fx.cols[0], frame: 10, before: Some(Exposure::Empty), after: None }],
     };
     let err = fx.engine.apply("cells", vec![stale]).unwrap_err().to_string();
-    assert!(err.contains("column A, frame 11 changed"), "{err}");
+    assert!(err.contains("track A, frame 11 changed"), "{err}");
     let err = fx.engine.apply("ins", vec![Command::InsertFrames { at, frame: 60, count: 3 }]).unwrap_err().to_string();
-    assert!(err.contains("at frame 61: the cut has 48"), "{err}");
+    assert!(err.contains("at frame 61: the shot has 48"), "{err}");
     let err = fx.engine.apply("del", vec![Command::DeleteFrames { at, frame: 47, count: 2 }]).unwrap_err().to_string();
-    assert!(err.contains("at frame 48: the cut has 48"), "{err}");
+    assert!(err.contains("at frame 48: the shot has 48"), "{err}");
     // A 0-frame cut could not undo an insert (or a length change): no live
     // cut has 0 frames. Scaffolding gives it one, a 0-frame AddCut is
     // refused, and an insert into one (built by hand) is refused too.
@@ -540,7 +540,7 @@ fn hold_on_nothing_or_past_the_last_exposure_says_why() {
     assert!(err.contains("nothing is exposed at frame 2"), "{err}");
     // b holds to the end of the cut: +1 cannot grow it, and says so.
     let err = sheet_ops::hold_delta(project, at, col, 9, 1).unwrap_err().to_string();
-    assert!(err.contains("lengthen the cut first"), "{err}");
+    assert!(err.contains("lengthen the shot first"), "{err}");
     // −1 on that last exposure still ends it a frame early.
     let cmds = sheet_ops::hold_delta(project, at, col, 9, -1).unwrap();
     fx.apply(cmds);
@@ -1084,7 +1084,7 @@ fn locked_column_refuses_layer_edits_removal_and_moves() {
     ];
     for cmd in refused {
         let err = fx.engine.apply("x", vec![cmd.clone()]).unwrap_err().to_string();
-        assert!(err.contains("column A is locked"), "{cmd:?}: {err}");
+        assert!(err.contains("track A is locked"), "{cmd:?}: {err}");
     }
     // A column is added unlocked (its undo, a remove, must always apply).
     let column = Column::new(fx.engine.alloc_column_id(), "L");

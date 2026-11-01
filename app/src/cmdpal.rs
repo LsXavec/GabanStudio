@@ -45,7 +45,7 @@ impl Palette {
 /// matches its letters in order ("ndr" finds "New drawing"), though under any
 /// alias: an old word typed whole finds its command before a stray spelling
 /// does. The first alias is the command's old name and edges out the rest.
-/// Case and the romaji macrons fold away ("shinko" finds "Shinkō board"). Pure.
+/// Case and the romaji macrons fold away ("shinko" finds Shots). Pure.
 pub fn score(query: &str, action: Action) -> Option<i32> {
     const LETTERS: i32 = 50;
     let name = fold(action.label());
@@ -524,9 +524,9 @@ mod tests {
             // AU4: the deck's keys stand on the rail and in the floats.
             (crate::vocab::DRAW_TO_FILL, Action::LassoFillTool, Some(Float::ToolOptions)),
             (crate::vocab::KEEP_INSIDE_STROKES, Action::ToggleAlphaLock, Some(Float::Brushes)),
-            ("miss check", Action::MissCheck, Some(Float::CanvasOptions)),
-            ("onion", Action::ToggleOnion, Some(Float::CanvasOptions)),
-            ("fit", Action::ZoomFit, Some(Float::CanvasOptions)),
+            ("Miss check", Action::MissCheck, Some(Float::CanvasOptions)),
+            (crate::vocab::GHOST_FRAMES, Action::ToggleOnion, Some(Float::CanvasOptions)),
+            ("Fit", Action::ZoomFit, Some(Float::CanvasOptions)),
             (genga.as_str(), genga_preset, Some(Float::Brushes)),
         ] {
             if let Some(float) = float {

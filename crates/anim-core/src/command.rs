@@ -450,7 +450,7 @@ fn refuse_locked_art(cut: &Cut, id: DrawingId) -> Result<()> {
 
 /// GM5: the refusal every locked-column check returns.
 fn locked(name: &str) -> EngineError {
-    EngineError::InvalidCommand(format!("column {name} is locked"))
+    EngineError::InvalidCommand(format!("track {name} is locked"))
 }
 
 /// GM5: an insert or delete at `frame` would move (or remove) the keys of
@@ -1422,7 +1422,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
         Command::AddCut { scene, index, cut } => {
             if cut.frame_count == 0 {
                 return Err(EngineError::InvalidCommand(
-                    "a cut keeps at least one frame".into(),
+                    "a shot keeps at least one frame".into(),
                 ));
             }
             if project
@@ -1511,7 +1511,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
         Command::SetFrameCount { at, frames } => {
             if *frames == 0 {
                 return Err(EngineError::InvalidCommand(
-                    "a cut keeps at least one frame".into(),
+                    "a shot keeps at least one frame".into(),
                 ));
             }
             let cut = cut_mut(project, *at)?;
@@ -1533,7 +1533,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             // every frame, which a cut never allows.
             if *count == 0 || *frame > cut.frame_count || cut.frame_count == 0 {
                 return Err(EngineError::InvalidCommand(format!(
-                    "cannot insert {count} frame(s) at frame {}: the cut has {}",
+                    "cannot insert {count} frame(s) at frame {}: the shot has {}",
                     *frame as u64 + 1,
                     cut.frame_count
                 )));
@@ -1594,7 +1594,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                 || frame.checked_add(*count).is_none_or(|end| end > cut.frame_count)
             {
                 return Err(EngineError::InvalidCommand(format!(
-                    "cannot delete {count} frame(s) at frame {}: the cut has {} and keeps at \
+                    "cannot delete {count} frame(s) at frame {}: the shot has {} and keeps at \
                      least one",
                     *frame as u64 + 1,
                     cut.frame_count
@@ -1718,7 +1718,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
                     .unwrap_or_else(|| col.key_at(c.frame));
                 if now != c.before {
                     return Err(EngineError::InvalidCommand(format!(
-                        "column {}, frame {} changed since this edit was made",
+                        "track {}, frame {} changed since this edit was made",
                         col.name,
                         c.frame as u64 + 1
                     )));
@@ -1936,7 +1936,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             }
             if after.default_cut_frames == Some(0) || !(after.dpi > 0.0) {
                 return Err(EngineError::InvalidCommand(
-                    "cut length and dpi must be positive".into(),
+                    "shot length and dpi must be positive".into(),
                 ));
             }
             project.name = after.name.clone();
@@ -1965,7 +1965,7 @@ pub fn apply_command(project: &mut Project, cmd: &Command) -> Result<AppliedEffe
             let cut = cut_mut(project, *at)?;
             if *index == 0 || *index > cut.tracks.len() + 1 {
                 return Err(EngineError::InvalidCommand(format!(
-                    "track {} out of range (the first track is the cut's audio; {} after it)",
+                    "track {} out of range (the first track is the shot's audio; {} after it)",
                     index,
                     cut.tracks.len()
                 )));

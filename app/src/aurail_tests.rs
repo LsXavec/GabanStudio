@@ -121,7 +121,7 @@ fn stock_tips(h: &EditorHarness) -> Vec<LayerId> {
 fn folds(f: Float) -> &'static [&'static str] {
     match f {
         Float::Brushes => &["More settings"],
-        Float::CanvasOptions => &["Ghost frames depth", "light table", "Mark as"],
+        Float::CanvasOptions => &["Ghost frames depth", "Light table", "Mark as"],
         _ => &[],
     }
 }
@@ -893,7 +893,7 @@ fn aurail_color_float_says_every_role_whole() {
     // `derive` is held, and off the chips: a stray tap on a chip can't reach it.
     h.open_float(Float::Color);
     settle(&mut h);
-    let derive = points(&h, "derive");
+    let derive = points(&h, "Make shadow");
     let name = format!("{} {}", h.state().palettes.characters[0].name, h.state().palettes.characters[0].roles[0].name);
     assert!(derive.bottom() <= points(&h, &name).top(), "on the name's line, over its chips");
 }
@@ -1352,7 +1352,7 @@ const TODAY_DECK: [DeckRow; 15] = {
             home: "Color float",
             from: Paint,
             room: Drawing,
-            path: &[On("Brush color"), On("colour well: aka — correction")],
+            path: &[On("Brush color"), On("colour well: Red: correction")],
             read: |h| h.editor().canvas.brush_color == SWATCHES[2],
         },
         DeckRow {
@@ -1384,7 +1384,7 @@ const TODAY_DECK: [DeckRow; 15] = {
             home: "Canvas options float",
             from: Paint,
             room: Drawing,
-            path: &[On(vocab::MENU_VIEW), On("Canvas options…"), On("miss check")],
+            path: &[On(vocab::MENU_VIEW), On("Canvas options…"), On("Miss check")],
             read: |h| h.editor().canvas.miss_check,
         },
         DeckRow {

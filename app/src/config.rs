@@ -642,7 +642,7 @@ impl Action {
             Action::KindKey => "Mark as key pose",
             Action::KindBreakdown => "Mark as breakdown",
             Action::KindInbetween => "Mark as inbetween",
-            Action::KindUnset => "Mark as unmarked",
+            Action::KindUnset => "Clear the mark",
             Action::PinToLightTable => "Pin this drawing",
             Action::ShiftTrace => "Shift & trace",
             Action::ResetShift => "Reset shift",
@@ -660,7 +660,7 @@ impl Action {
             Action::ToggleHints => "Hints",
             Action::PaperSize => "Paper size…",
             Action::ShowRenderQueue => crate::vocab::EXPORT_QUEUE,
-            Action::ToggleFinalLook => "Full quality",
+            Action::ToggleFinalLook => crate::vocab::FULL_QUALITY,
             Action::ImportSound => "Import sound…",
             Action::AddSoundTrack => "Add sound track…",
             Action::LoopIn => crate::vocab::LOOP_START,
@@ -841,7 +841,7 @@ impl Action {
             ToggleLockPositions => "Keep the panels where they are: tabs stop dragging and the step's panels stay open.",
             ToggleHints => "Show or hide the teaching sentences and the Quick Start dots; turning them on starts them again.",
             PaperSize => "Set the shot's paper: the sheet the camera pans over, larger than the frame for long pans.",
-            ShowRenderQueue => "Open your exports: PNG, TIFF, EXR, ProRes and line test jobs rendered in the background.",
+            ShowRenderQueue => "Open your exports: PNG, TIFF, EXR, ProRes and motion check jobs rendered in the background.",
             ToggleFinalLook => "Show the picture as it will export: no rough, reference or correction layers.",
             ImportSound => "Import a WAV, MP3, OGG or FLAC file as the shot's first (dialogue) track, else a further one.",
             AddSoundTrack => "Add a sound file as a further track (effects, music), its kind guessed from the file name.",
@@ -1160,7 +1160,8 @@ impl Action {
             CommandPalette => &["search", "commands"],
             ShortcutSheet => &["keys", "hotkeys", "cheat sheet"],
             ZoomFit => &["zoom", "reset view"],
-            ZoomIn | ZoomOut => &["magnify", "scale view"],
+            ZoomIn => &["magnify", "scale view", "t.u.", "tu", "track up"],
+            ZoomOut => &["magnify", "scale view", "t.b.", "tb", "track back"],
             Zoom100 => &["100%", "pixel size", "one to one"],
             RotateViewLeft | RotateViewRight | ResetRotation => &["turn", "tilt canvas", "spin"],
             MirrorView => &["flop", "reverse view", "flip horizontal", "hanten", "flip canvas"],
@@ -1301,7 +1302,7 @@ impl Action {
             ExportColorSheet => &["iro shitei", "colour sheet", "color sheet", "designation"],
             ExportCutAsProject => &["freelancer", "send cut", "package cut", "outsource"],
             MakeCutsFromPanels => &["conte", "animatic", "storyboard", "panels", "split cuts"],
-            RenderEpisode => &["episode render", "render all cuts", "export episode"],
+            RenderEpisode => &["episode render", "render episode", "render all cuts", "export episode"],
             AddRetakeNote => &["retake", "note", "fix note", "kantoku", "correction"],
             Import3DModel => &["3d", "gltf", "glb", "obj", "model", "layout", "blender"],
             SetCutCameraFromView => &["set cut camera", "align camera to view", "kamera", "LO camera"],
@@ -2969,8 +2970,8 @@ fn section_name(key: &str) -> &'static str {
         "update_repo" => "update source",
         "pen" => "pen",
         "layers" => "layer settings",
-        "presets" => "brush presets",
-        "onion" => "onion skin",
+        "presets" => "brushes",
+        "onion" => "Ghost frames",
         "light_table" => "light table",
         "render" => "render",
         _ => "settings",
@@ -3414,21 +3415,21 @@ pub fn settings_window(
                     ui.selectable_value(
                         category,
                         SettingsCategory::Shortcuts,
-                        "Keyboard Shortcuts",
+                        "Keyboard shortcuts",
                     );
                     // AUDIT [18]: a mutually-exclusive pick is a DETENT.
                     // As selectables these rendered their labels in Tally,
                     // which is the armed LAMP, never text.
                     for (cat, label) in [
-                        (SettingsCategory::General, "general"),
-                        (SettingsCategory::Performance, "performance"),
-                        (SettingsCategory::Pen, "pen / tablet"),
-                        (SettingsCategory::Layers, "layers"),
-                        (SettingsCategory::Brushes, "brushes"),
+                        (SettingsCategory::General, "General"),
+                        (SettingsCategory::Performance, "Performance"),
+                        (SettingsCategory::Pen, "Pen / tablet"),
+                        (SettingsCategory::Layers, "Layers"),
+                        (SettingsCategory::Brushes, "Brushes"),
                         (SettingsCategory::UiFeatures, "UI features"),
-                        (SettingsCategory::Layout, "layout"),
-                        (SettingsCategory::Session, "session"),
-                        (SettingsCategory::Plugins, "plugins"),
+                        (SettingsCategory::Layout, "Arrangements"),
+                        (SettingsCategory::Session, "Session"),
+                        (SettingsCategory::Plugins, "Plugins"),
                     ] {
                         if crate::plate::detent(ui, *category == cat, label).clicked() {
                             *category = cat;
@@ -3593,7 +3594,7 @@ pub fn connect_window(
     }
     let mut out = None;
     let mut close = false;
-    egui::Window::new("Join a room")
+    egui::Window::new(format!("Join a {}", crate::vocab::SHARED_SESSION))
         .frame(crate::plate::dialog_frame(&ctx.global_style()))
         .collapsible(false)
         .resizable(false)
@@ -3609,7 +3610,7 @@ pub fn connect_window(
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-            ui.label("Room address");
+            ui.label("Session address");
             crate::plate::text_field(
                 ui,
                 egui::TextEdit::singleline(addr)
@@ -3687,7 +3688,7 @@ fn layout_page(
     name_buf: &mut String,
     act: &mut Option<LayoutAct>,
 ) {
-    crate::plate::legend(ui, "layout presets");
+    crate::plate::legend(ui, "Arrangements");
     ui.label(
         egui::RichText::new(
             "save the current arrangement (panes + tool/view) under a \
@@ -3710,7 +3711,7 @@ fn layout_page(
     if host_layout {
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new("host's layout")
+                egui::RichText::new("host's arrangement")
                     .font(crate::plate::Role::Small.font())
                     .color(crate::plate::STRUCK),
             );
@@ -3727,7 +3728,7 @@ fn layout_page(
     }
     if names.is_empty() {
         ui.label(
-            egui::RichText::new("no presets saved yet")
+            egui::RichText::new("no arrangements saved yet")
                 .font(crate::plate::Role::Small.font())
                 .color(crate::plate::legend_dim()),
         );
@@ -3781,14 +3782,14 @@ fn session_page(
         .changed();
     });
     ui.horizontal(|ui| {
-        ui.label("Room key");
+        ui.label("Session key");
         changed |= crate::plate::text_field(
             ui,
             egui::TextEdit::singleline(&mut config.session.api_key)
                 .desired_width(280.0)
                 .password(false),
         )
-        .on_hover_text("the room's API key — the host generates it; a guest pastes it here")
+        .on_hover_text("the session's API key — the host generates it; a guest pastes it here")
         .changed();
     });
     // ENROLLMENT — shown whenever this machine holds a room secret,
@@ -3839,16 +3840,19 @@ fn session_page(
     }
     ui.separator();
     if joined {
-        ui.label(egui::RichText::new("Connected to a room.").color(crate::plate::STRUCK));
+        ui.label(
+            egui::RichText::new(format!("Connected to a {}.", crate::vocab::SHARED_SESSION))
+                .color(crate::plate::STRUCK),
+        );
         if !peer_names.is_empty() {
             ui.label(format!("With: {}", peer_names.join(", ")));
         }
-        if ui.button("Leave room").clicked() {
+        if ui.button(format!("Leave {}", crate::vocab::SHARED_SESSION)).clicked() {
             *action = Some(SessionAction::Leave);
         }
     } else if hosting {
         ui.label(
-            egui::RichText::new("Hosting — share the room key and read codes from your Authy.")
+            egui::RichText::new("Hosting — share the session key and read codes from your Authy.")
                 .color(crate::plate::STRUCK),
         );
         ui.horizontal(|ui| {
@@ -3875,12 +3879,12 @@ fn session_page(
         // click to join — no key, no address.
         if lan_rooms.is_empty() {
             ui.label(
-                egui::RichText::new("no rooms on this network yet")
+                egui::RichText::new("no shared sessions on this network yet")
                     .font(crate::plate::Role::Small.font())
                     .color(crate::plate::legend_dim()),
             );
         } else {
-            crate::plate::legend(ui, "rooms on this network");
+            crate::plate::legend(ui, "Shared sessions on this network");
             for b in lan_rooms {
                 ui.horizontal(|ui| {
                     ui.label(
@@ -3894,7 +3898,7 @@ fn session_page(
                                 .font(crate::plate::Role::Small.font())
                                 .color(crate::plate::LEGEND),
                         )
-                        .on_hover_text("this room requires its key");
+                        .on_hover_text("this session requires its key");
                     }
                     ui.label(
                         egui::RichText::new(format!("v{} · {}", b.version, b.addr))
@@ -3910,19 +3914,15 @@ fn session_page(
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
-                .button("Host a room")
-                .on_hover_text(
-                    "open your file to this network — the room appears in                      everyone's rooms list",
-                )
+                .button(format!("Host a {}", crate::vocab::SHARED_SESSION))
+                .on_hover_text("open your file to this network — the session appears in everyone's list")
                 .clicked()
             {
                 *action = Some(SessionAction::StartHost);
             }
             let mut req = config.session.require_key;
             if crate::plate::latch(ui, &mut req, "require key")
-                .on_hover_text(
-                    "off (testing): anyone on this network joins with one                      click · on: joiners must hold the room key",
-                )
+                .on_hover_text("off (testing): anyone on this network joins with one click · on: joiners must hold the session key")
                 .changed()
             {
                 config.session.require_key = req;
@@ -3949,17 +3949,17 @@ fn session_page(
             }
             if ui
                 .button("Connect")
-                .on_hover_text("join with this address and the room key above")
+                .on_hover_text("join with this address and the session key above")
                 .clicked()
             {
                 *action = Some(SessionAction::OpenConnect);
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Generate a key + secret for a new room:");
+            ui.label(format!("Generate a key + secret for a new {}:", crate::vocab::SHARED_SESSION));
             if ui
                 .button("Generate")
-                .on_hover_text("a fresh room key and authenticator secret")
+                .on_hover_text("a fresh session key and authenticator secret")
                 .clicked()
             {
                 config.session.api_key = crate::net::generate_key();
@@ -4423,8 +4423,8 @@ fn performance_page(
                     )
                     .changed();
                     ui.end_row();
-                    ui.label("Audio scrub")
-                    .on_hover_text("A stopped playhead's move sounds one frame of the cut's mix.");
+                    ui.label(crate::vocab::SOUND_WHILE_DRAGGING)
+                    .on_hover_text("A stopped playhead's move sounds one frame of the shot's mix.");
                     changed |= crate::plate::latch(ui, &mut p.scrub_audio, "").changed();
                     ui.end_row();
             });
@@ -4503,7 +4503,7 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
     ui.add_space(10.0);
     ui.separator();
     ui.label(
-        egui::RichText::new("Not available on this stack:")
+        egui::RichText::new("Not available in this build:")
             .color(crate::plate::legend_dim())
             .italics(),
     );
@@ -4527,12 +4527,12 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
 fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
     let mut changed = false;
     // ---- PSD-cel-layers Stage 4: stack presets + room bindings ----------
-    crate::plate::legend(ui, "layer stacks");
+    crate::plate::legend(ui, "Layer sets");
     ui.label(
         egui::RichText::new(
-            "The layer stack a new cel gets in each room (a held cel's stack is \
+            "The layer set a new drawing gets in each step (a held drawing's set is \
              cloned first). Built-ins follow the modern pipeline; build your own \
-             in the Cel Layers strip and save it from its stack menu.",
+             in Layers and save it from its layer set menu.",
         )
         .font(crate::plate::Role::Small.font())
         .color(crate::plate::legend_dim()),
@@ -4540,23 +4540,23 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
     ui.add_space(4.0);
     let all = config.layers.all_stacks();
     for (room, label) in [
-        ("layout", "layout room"),
-        ("drawing", "genga room"),
-        ("finishing", "shiage room"),
-        ("composite", "satsuei room"),
-        ("edit", "henshū room"),
-        ("custom", "custom rooms"),
+        ("layout", crate::vocab::STEP_PLAN),
+        ("drawing", crate::vocab::STEP_DRAW),
+        ("finishing", crate::vocab::STEP_COLOR),
+        ("composite", crate::vocab::STEP_EFFECTS),
+        ("edit", crate::vocab::STEP_TIMING),
+        ("custom", "Other"),
     ] {
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new(label)
+                egui::RichText::new(format!("{label} {}", crate::vocab::STEP))
                     .font(crate::plate::Role::Small.font())
                     .color(crate::plate::STRUCK),
             );
             let current = config.layers.stack_for_room(room).name;
-            ui.menu_button(current.clone(), |ui| {
+            ui.menu_button(crate::vocab::stack(&current), |ui| {
                 for s in &all {
-                    if crate::plate::detent(ui, s.name == current, &s.name).clicked() {
+                    if crate::plate::detent(ui, s.name == current, crate::vocab::stack(&s.name)).clicked() {
                         config.layers.room_stack.insert(room.to_string(), s.name.clone());
                         changed = true;
                         ui.close();
@@ -4574,7 +4574,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
             && !config.layers.stacks.iter().any(|u| u.name == s.name);
         ui.horizontal(|ui| {
             ui.label(
-                egui::RichText::new(&s.name)
+                egui::RichText::new(crate::vocab::stack(&s.name))
                     .font(crate::plate::Role::Small.font())
                     .color(crate::plate::STRUCK),
             );
@@ -4586,7 +4586,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
                 );
                 if ui
                     .small_button("duplicate")
-                    .on_hover_text("make an editable copy under your own stacks")
+                    .on_hover_text("make an editable copy under your own layer sets")
                     .clicked()
                 {
                     duplicate = Some(s.clone());
@@ -4651,7 +4651,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
     if ui
         .button("Reset to defaults")
         .on_hover_text(
-            "ink line, blue-pencil rough, cool shadow, warm highlight, sakkan-red correction",
+            "ink line, blue-pencil rough, cool shadow, warm highlight, red correction",
         )
         .clicked()
     {
@@ -4667,7 +4667,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
 /// optional colour), reorder implicitly by position (slots 1–8 map to the
 /// number keybinds), and import Krita community brushes (.kpp / .bundle).
 fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
-    crate::plate::legend(ui, "brush presets");
+    crate::plate::legend(ui, crate::vocab::BRUSHES);
     ui.add_space(4.0);
     ui.label(
         egui::RichText::new(
@@ -4694,11 +4694,16 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                             })
                             .color(crate::plate::legend_dim()),
                         );
+                        // The name a file stores stays unless a person types a new one.
+                        let mut shown = crate::vocab::preset(&p.name).to_string();
                         changed |= crate::plate::text_field(
                             ui,
-                            egui::TextEdit::singleline(&mut p.name).desired_width(130.0),
+                            egui::TextEdit::singleline(&mut shown).desired_width(130.0),
                         )
                         .changed();
+                        if shown != crate::vocab::preset(&p.name) {
+                            p.name = shown;
+                        }
                         changed |= crate::plate::field(
                             ui,
                             egui::DragValue::new(&mut p.size_px)
@@ -4708,7 +4713,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                         .changed();
                         // AUDIT [12]: the smallest target in the row,
                         // beside the size field being dragged.
-                        if crate::plate::danger(ui, "DELETE PRESET") {
+                        if crate::plate::danger(ui, "DELETE BRUSH") {
                             remove = Some(i);
                         }
                     });
@@ -4746,7 +4751,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                         // Optional fixed colour.
                         let mut has_color = p.color.is_some();
                         if crate::plate::latch(ui, &mut has_color, "colour")
-                            .on_hover_text("preset sets the brush colour when applied")
+                            .on_hover_text("this brush sets the brush color when applied")
                             .changed()
                         {
                             p.color = has_color.then_some([26, 26, 26, 255]);
@@ -4771,7 +4776,7 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
     }
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        if ui.button("new preset").clicked() {
+        if ui.button("New brush").clicked() {
             config.presets.push(BrushPreset::default());
             changed = true;
         }

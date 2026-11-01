@@ -400,8 +400,9 @@ impl Role {
             Role::Title => 24.0,
             Role::Card => 20.0,
             Role::Heading => 16.0,
-            Role::Chrome | Role::Step => 14.0,
-            Role::Panel => 13.0,
+            // Panel was 13 (spec 2.5): the frozen arrangement read 9 px at it,
+            // and a miss raises `Body` to 14.
+            Role::Chrome | Role::Step | Role::Panel => 14.0,
             Role::Small => 12.0,
         }
     }
@@ -949,7 +950,19 @@ pub fn sentence(text: &str) -> String {
     }
 }
 
-/// Panel titles, column heads, group legends: sentence case, 12 pt SemiBold,
+/// A word field's size (see [`text_field`]).
+pub const FIELD_TEXT: f32 = 13.0;
+
+/// A legend's size. Spec 2.5 gives it 12 or 13; at 13 its capitals paint 9 px,
+/// which keeps the small-text share under the AU12 target.
+pub const LEGEND_SIZE: f32 = 13.0;
+
+/// The legend's font, for a head painted by hand.
+pub fn legend_font() -> FontId {
+    FontId::new(LEGEND_SIZE, semibold())
+}
+
+/// Panel titles, column heads, group legends: sentence case, 13 pt SemiBold,
 /// `INK2`.
 pub fn legend(ui: &mut Ui, text: &str) -> Response {
     let mut job = LayoutJob::default();
@@ -957,7 +970,7 @@ pub fn legend(ui: &mut Ui, text: &str) -> Response {
         &sentence(text),
         0.0,
         TextFormat {
-            font_id: FontId::new(Role::Small.size(), semibold()),
+            font_id: legend_font(),
             color: LEGEND,
             ..Default::default()
         },
@@ -985,7 +998,7 @@ pub const SAY_TEXT: f32 = 14.0;
 pub const SAY_SMALL: f32 = 12.0;
 /// The room held for a hint's action button (spec 8.2): the longest of its
 /// words at control size, its pad and the gap before it.
-pub const SAY_ACTION: f32 = 99.0;
+pub const SAY_ACTION: f32 = 105.0;
 /// Spec 8.3's five dots: the room they take, and the narrowest lane that
 /// keeps the longest sentence on its two rows beside them.
 pub const SAY_DOTS: f32 = 56.0;
@@ -2375,9 +2388,10 @@ pub fn field_if(ui: &mut Ui, enabled: bool, widget: impl egui::Widget) -> Respon
 /// FIELD for words: a `TextEdit` at its row's control height (the panel's 28,
 /// or the sheet head's row), text centred. egui takes a `TextEdit`'s height
 /// from its font and margin (`min_size` is width only), so the margin is what
-/// makes it.
+/// makes it. Margins are whole points: 13 pt's row is whole and lands on the
+/// 28, 14 pt's is 18.19 and cannot, so the field keeps 13 under the 14 pt body.
 pub fn text_field(ui: &mut Ui, edit: egui::TextEdit<'_>) -> Response {
-    fitted_field(ui, edit, Role::Panel.font())
+    fitted_field(ui, edit, FontId::proportional(FIELD_TEXT))
 }
 
 /// [`text_field`] for a file pattern, in the one face that lines its `####`
@@ -2530,9 +2544,9 @@ pub fn danger_hint(ui: &mut Ui, label: &str, hint: &str) -> bool {
         }
     }
     let _ = if hint.is_empty() {
-        resp.card("press and hold to fire — a click does nothing")
+        resp.card("keep it pressed to fire — a click does nothing")
     } else {
-        resp.card(format!("press and hold — {hint}"))
+        resp.card(format!("keep it pressed — {hint}"))
     };
     fired
 }

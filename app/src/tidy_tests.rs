@@ -289,7 +289,7 @@ fn tidy_open_sample_refuses_a_guest() {
     assert!(h.editor().can_perform(Action::OpenSample).is_err());
     assert_eq!(h.perform(Action::OpenSample), Performed::Ignored);
     assert_eq!(h.state().engine.project.width, 1920, "the host's document stays");
-    assert!(h.state().refusal.contains("leave the room first"), "{}", h.state().refusal);
+    assert!(h.state().refusal.contains("leave the shared session first"), "{}", h.state().refusal);
 }
 
 type General = (config::Config, bool, RenderQueue);

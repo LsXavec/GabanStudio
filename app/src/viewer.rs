@@ -297,11 +297,7 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
             let tag = crate::plate::picture_tag(
                 &painter,
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
-                if *final_look {
-                    "🎬 final look"
-                } else {
-                    "🎬 composite"
-                },
+                if *final_look { crate::vocab::FULL_QUALITY } else { crate::vocab::RESULT },
             );
             if matches!(graph, GraphView::Rendering(_)) {
                 // GM9: the lamp, and in words — an FX render is pending
@@ -310,11 +306,7 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
                 crate::plate::picture_tag(
                     &painter,
                     pos2(tag.right() + 28.0, tag.top()),
-                    if *final_look {
-                        "rendering final look…"
-                    } else {
-                        "rendering FX…"
-                    },
+                    if *final_look { "Rendering full quality…" } else { "Rendering effects…" },
                 );
             }
         }
@@ -323,9 +315,9 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
         }
         GraphView::EvalFailed => hint(
             &painter,
-            "the graph failed to evaluate — check the Node Graph pane",
+            "The effects could not run. Check the Effects graph.",
         ),
-        GraphView::NoGpu => hint(&painter, "GPU unavailable — the viewer needs wgpu"),
+        GraphView::NoGpu => hint(&painter, "GPU unavailable: the Result needs wgpu."),
     }
     // GM10: the safe frames over the composite, from the camera module (the
     // canvas's safe toggle draws the same rects); the pane's latch turns
@@ -343,21 +335,21 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
     // The latches ride on a float their own size: the neutral grey around the
     // paper is too close to their words to carry them. Each latch ends in
     // the 8 pt the float starts with.
-    let safe_w = crate::plate::latch_width(ui, "safe");
-    let look_w = crate::plate::latch_width(ui, "final look");
+    let safe_w = crate::plate::latch_width(ui, crate::vocab::MARGINS);
+    let look_w = crate::plate::latch_width(ui, crate::vocab::FULL_QUALITY);
     let row = Rect::from_min_size(rect.left_bottom() + vec2(4.0, -34.0), vec2(8.0 + safe_w + look_w, 34.0));
     crate::plate::float_ground(ui, row);
     let at = Rect::from_min_size(row.min + vec2(8.0, 4.0), vec2(safe_w, crate::plate::CTRL_H));
     ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
-        crate::plate::latch(ui, &mut vs.safe, "safe")
-            .on_hover_text("action safe (93%) and title safe (90%) over the composite")
+        crate::plate::latch(ui, &mut vs.safe, crate::vocab::MARGINS)
+            .on_hover_text("Lines at 93% and 90% of the frame: keep action and titles inside them.")
     });
     // GM11: the delivery's look, beside it (a fixed slot: nothing moves).
     let at = Rect::from_min_size(row.min + vec2(8.0 + safe_w, 4.0), vec2(look_w, crate::plate::CTRL_H));
     ui.scope_builder(egui::UiBuilder::new().max_rect(at), |ui| {
-        crate::plate::latch(ui, final_look, "final look").on_hover_text(
-            "the composite as the master delivers it: no rough, reference or correction \
-             (sakkan) layers, no Ref columns — rendered on a worker",
+        crate::plate::latch(ui, final_look, crate::vocab::FULL_QUALITY).on_hover_text(
+            "The picture as the export delivers it: no rough, reference or correction layers, \
+             no Reference tracks.",
         )
     });
 }

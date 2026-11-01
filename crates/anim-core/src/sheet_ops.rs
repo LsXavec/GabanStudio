@@ -133,7 +133,7 @@ pub fn hold_delta(
         }
         Some((_, None)) if delta > 0 => {
             return Err(EngineError::InvalidCommand(
-                "the last drawing already holds to the end of the cut: lengthen the cut first"
+                "the last drawing already holds to the end of the shot: lengthen the shot first"
                     .into(),
             ));
         }
@@ -320,7 +320,7 @@ pub fn paste_block(
     let width = block.columns.len();
     if start + width > cut.xsheet.columns.len() {
         return Err(EngineError::InvalidCommand(format!(
-            "the block spans {width} columns; only {} from here",
+            "the block spans {width} tracks; only {} from here",
             cut.xsheet.columns.len() - start
         )));
     }

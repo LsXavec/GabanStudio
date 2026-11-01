@@ -434,9 +434,9 @@ pub const WHATS_NEW: [(&str, &[&str]); 6] = [
     (
         "Animator",
         &[
-            "X-sheet editing: insert and delete frames (every column ripples), holds, retimes, typed entry — all undoable",
-            "Light table: onion depth 0–5, keys and inbetweens marked on the sheet, spacing charts, Make inbetweens",
-            "Canvas rotate and mirror, the stabilizer, straight lines, brush size keys, the Alt-click eyedropper",
+            "Timing sheet editing: insert and delete frames (every track ripples), holds, retimes, typed entry — all undoable",
+            "Light table: Ghost frames depth 0–5, key poses and inbetweens marked on the sheet, spacing charts, Make inbetweens",
+            "Canvas rotate and mirror, Steady stroke, straight lines, brush size keys, the Alt-click eyedropper",
             "Menus, the command palette (Ctrl+K), the History pane and the F1 shortcut sheet",
             "Never lose work: the unsaved guard, autosave every 5 minutes, recovery after a crash",
         ],
@@ -444,26 +444,26 @@ pub const WHATS_NEW: [(&str, &[&str]); 6] = [
     (
         "Painter",
         &[
-            "Exact colour: new projects keep chips exactly as picked (older ones convert, with a backup first)",
-            "Recolour by editing a chip, refill, chip pick, and the nuri check (paint check) for holes and strays",
+            "Exact color: new projects keep chips exactly as picked (older ones convert, with a backup first)",
+            "Recolor by editing a chip, refill, chip pick, and the paint check for holes and strays",
             "Palette variants and palette maps",
         ],
     ),
     (
         "Compositor",
         &[
-            "Satsuei FX, the same in the view and the delivery: blur, glow, diffusion, grade and .cube LUTs",
-            "Role passes, light wrap, rim, para, vignette, grain, directional motion blur, the satsuei template",
-            "The camera node: pan, T.U./T.B., rotate and shake over paper larger than the frame; multiplane depth",
-            "Particles, speed lines and focus lines as generator nodes",
-            "The render queue: PNG16, TIFF16 and EXR built in; ProRes, DNxHR, H.264 and H.265 through your ffmpeg, sound muxed",
+            "Effects, the same in the view and the delivery: blur, glow, soft focus, color look and .cube color tables",
+            "Passes by color name, light wrap, rim, color wash, vignette, grain, directional motion blur, the full finishing setup",
+            "The camera: pan, zoom in and out, rotate and shake over paper larger than the frame; multiplane depth",
+            "Particles, speed lines and focus lines as effects",
+            "The Export queue: PNG16, TIFF16 and EXR built in; ProRes, DNxHR, H.264 and H.265 through your ffmpeg, sound muxed",
         ],
     ),
     (
         "3D",
         &[
             "glTF and OBJ import, toon-rendered with outlines and passes",
-            "View3D with Blender navigation; set the cut camera from the view",
+            "View3D with Blender navigation; set the shot camera from the view",
             "Image sequences from other apps referenced on disk, and the canvas 3D underlay",
         ],
     ),
@@ -477,8 +477,8 @@ pub const WHATS_NEW: [(&str, &[&str]); 6] = [
     (
         "Editor",
         &[
-            "Sound tracks (WAV, MP3, OGG, FLAC): waveforms, audio-locked playback, scrub, lip flap, mixdown",
-            "The shinkō board (cut board), the episode timeline with TRT, CMX3600 EDL export",
+            "Sound tracks (WAV, MP3, OGG, FLAC): waveforms, audio-locked playback, sound while dragging, lip flap, sound file",
+            "The Shots board, the Episode timeline with TRT, CMX3600 EDL export",
             "Batch render with no window: animstudio --render <file | --sample> --preset <name> --out <dir>",
         ],
     ),
@@ -940,7 +940,7 @@ pub fn ui(
             // GM19: the tabs sit in the heading's row, so the Start tab's
             // cards stay where they were.
             if plate::detent(ui, w.tab == WelcomeTab::Start, "Start")
-                .on_hover_text("templates, recent cuts and the sample")
+                .on_hover_text("templates, recent shots and the sample")
                 .clicked()
             {
                 w.tab = WelcomeTab::Start;
@@ -956,8 +956,8 @@ pub fn ui(
             }
             if w.over_editor
                 && ui
-                    .button("Back to the cut")
-                    .on_hover_text("closes this screen; the open cut is untouched — Esc")
+                    .button("Back to the shot")
+                    .on_hover_text("closes this screen; the open shot is untouched — Esc")
                     .clicked()
             {
                 out = Some(WelcomeAction::Back);
@@ -1001,8 +1001,8 @@ pub fn ui(
                 out = Some(WelcomeAction::Open);
             }
             if ui
-                .button("Open the sample cut")
-                .on_hover_text("a ball bounce on twos over a BG plate — opens untitled")
+                .button("Open the sample shot")
+                .on_hover_text("a ball bounce on twos over a background plate — opens untitled")
                 .clicked()
             {
                 out = Some(WelcomeAction::Sample);
@@ -1248,7 +1248,7 @@ mod tests {
         for label in [
             "New from template",
             "Open…",
-            "Open the sample cut",
+            "Open the sample shot",
             "Show at startup",
         ] {
             assert!(h.query_by_label(label).is_some(), "no {label:?}");
@@ -1606,7 +1606,7 @@ mod tests {
         h.perform(Action::BuildComposite);
         h.run();
         assert!(h.has(&format!(
-            "Replace the node graph ({n} nodes)? Undo brings it back."
+            "Replace the Effects graph ({n} nodes)? Undo brings it back."
         )));
         assert_eq!(h.state().cut().graph, shaped);
         h.click("Cancel");

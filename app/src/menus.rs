@@ -122,10 +122,10 @@ pub fn sheet_rows(binds: &[Binding], query: &str) -> Vec<(Action, String)> {
 /// keys, so a refill is found where every other key is.
 pub const GESTURES: [(&str, &str); 5] = [
     ("Space+drag", "move the view (Shift+drag turns it)"),
-    ("Alt+click", "pick a colour (a chip's exact colour arms the chip)"),
+    ("Alt+click", "pick a color (a chip's exact color picks the chip)"),
     ("Shift+click with the pen", "rule on from the last stroke"),
-    ("Shift+click with fill", "refill the clicked flat in the brush colour (nuri-naoshi)"),
-    ("Ctrl+Shift+click with fill", "replace that colour on the whole layer"),
+    ("Shift+click with fill", "refill the clicked flat in the brush color"),
+    ("Ctrl+Shift+click with fill", "replace that color on the whole layer"),
 ];
 
 /// The gesture rows for `query`, matched like [`sheet_rows`]. Pure.
@@ -853,13 +853,14 @@ impl crate::Editor {
                 Some(v) => self.canvas.apply_view(&v, &mut self.state),
                 None => !self.canvas.stroke_active(),
             };
-            self.state.status = format!("workspace: {name}");
+            self.state.status = format!("{}: {name}", crate::vocab::ARRANGEMENT);
             if view_ok
                 && let Some(pname) = self.workspaces.list[i].preset.clone()
                 && let Some(p) = presets.iter().find(|p| p.name == pname)
             {
                 self.canvas.apply_preset(p);
-                self.state.status = format!("workspace {name} — brush: {pname}");
+                let shown = crate::vocab::preset(&pname);
+                self.state.status = format!("{} {name} — brush: {shown}", crate::vocab::ARRANGEMENT);
             }
         }
         if let Some((i, pname)) = assign {
@@ -977,8 +978,9 @@ impl crate::Editor {
                             k(NextFrame),
                             k(PrevFrame)
                         ),
-                        "The x-sheet times the drawings: a key holds until the next one.".to_string(),
-                        format!("{} plays the cut; {} latches looping.", k(PlayPause), k(ToggleLoop)),
+                        "The Timing sheet times the drawings: a key pose holds until the next one."
+                            .to_string(),
+                        format!("{} plays the shot; {} latches looping.", k(PlayPause), k(ToggleLoop)),
                     ],
                 };
                 let saves = format!(

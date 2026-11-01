@@ -431,7 +431,7 @@ fn aulesson_card_reads_in_order() {
     let (path, _) = h.painted_block(path_words);
     let (say, say_size) = h.painted_block("Press Color.");
     let (why, why_size) = h.painted_block("Paint goes under the line.");
-    assert_eq!((say_size, why_size), (16.0, 13.0));
+    assert_eq!((say_size, why_size), (16.0, 14.0));
     let order = [title.bottom(), strip.top(), strip.bottom(), path.top(), path.bottom(), say.top(), say.bottom(), why.top()];
     assert!(order.is_sorted(), "{order:?}");
     let view = card_view(&h);

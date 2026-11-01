@@ -42,10 +42,10 @@ pub const MAX_RENDER_W: u32 = 960;
 pub const WORKER_LOST: &str = "the render stopped before it finished";
 
 /// Why a View3D verb has nothing to act on.
-pub const NO_MODEL: &str = "no Model3D node — File ▸ Import ▸ Import 3D model…";
+pub const NO_MODEL: &str = "no 3D model yet — File ▸ Import ▸ Import 3D model…";
 
 /// Why the cut camera is not keyed from an orthographic view.
-pub const ORTHO_REFUSAL: &str = "the cut camera is perspective — press Ortho (numpad 5) to return";
+pub const ORTHO_REFUSAL: &str = "the shot camera is perspective — press Ortho (numpad 5) to return";
 
 /// The pane's navigation, in a dim line under its toolbar.
 pub const NAV_LEGEND: &str = "middle-drag or Alt+drag orbit · Shift pan · Ctrl or wheel zoom";
@@ -273,7 +273,7 @@ const NAV_BUTTONS: &[(&str, &str, Action)] = &[
     ("Bottom", "Ctrl+7 over View3D (Ctrl+numpad 7 in Blender)", Action::View3dBottom),
     (
         "Camera",
-        "look through the cut camera — 0 over View3D (numpad 0 in Blender)",
+        "look through the shot camera — 0 over View3D (numpad 0 in Blender)",
         Action::View3dCamera,
     ),
     (
@@ -514,7 +514,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         }
         ui.separator();
         let set = ui
-            .add_enabled(node.is_some() && !orbit.ortho, egui::Button::new("Set cut camera from view"))
+            .add_enabled(node.is_some() && !orbit.ortho, egui::Button::new("Set shot camera from view"))
             .on_hover_text(
                 "key the cut camera to this view at the current frame (one undo step) — Ctrl+Alt+0 \
                  over View3D (Ctrl+Alt+numpad 0 in Blender)",
@@ -527,7 +527,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(node) = node else {
         ui.centered_and_justified(|ui| {
             ui.label(
-                egui::RichText::new("no 3D model in this cut — File ▸ Import ▸ Import 3D model…")
+                egui::RichText::new("no 3D model in this shot — File ▸ Import ▸ Import 3D model…")
                     .color(crate::plate::legend_dim()),
             );
         });
@@ -575,7 +575,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         match view_job(state.cut(), node, &orbit, frame, size, law, fw) {
             Some(job) => state.view3d.worker.start(ui.ctx(), move || job.render()),
             None => {
-                if let Some(why) = state.view3d.worker.jobs.land(Err("the node's model is missing".into())) {
+                if let Some(why) = state.view3d.worker.jobs.land(Err("the 3D model is missing".into())) {
                     state.refuse(format!("View3D: {why}"));
                 }
             }
@@ -825,7 +825,7 @@ mod tests {
         let mut h = EditorHarness::with_state(state);
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::View3D]);
         h.run_frames(3);
-        assert!(h.has("Set cut camera from view"), "{}", h.describe());
+        assert!(h.has("Set shot camera from view"), "{}", h.describe());
         assert!(h.has("Frame all") && h.has_text_containing(NAV_LEGEND), "{}", h.describe());
         // GM22: the render is the worker's; it lands the frame after.
         h.state_mut().view3d.wait();
@@ -833,14 +833,14 @@ mod tests {
         let size = h.state().view3d.rendered.expect("a render");
         assert!(size.0 > 0 && size.1 > 0 && size.0 <= MAX_RENDER_W);
         let before = h.state().engine.history_len();
-        h.click("Set cut camera from view");
+        h.click("Set shot camera from view");
         h.run_frames(2);
         assert_eq!(h.state().engine.history_len(), before + 1, "one undo step");
         // In ortho the button stands down and says why; the verb refuses.
         h.click("Ortho");
         h.run_frames(2);
         assert!(h.state().view3d.orbit.is_some_and(|o| o.ortho));
-        assert_eq!(h.node_enabled("Set cut camera from view"), Some(false));
+        assert_eq!(h.node_enabled("Set shot camera from view"), Some(false));
         assert_eq!(h.editor().can_perform(Action::SetCutCameraFromView), Err(ORTHO_REFUSAL));
         let len = h.state().engine.history_len();
         assert_eq!(h.perform(Action::SetCutCameraFromView), crate::Performed::Ignored);
@@ -996,7 +996,7 @@ mod tests {
         assert_eq!(blend.inputs[0].map(|p| p.0), Some(node), "the model below");
         let top = blend.inputs[1].expect("the drawings above").0;
         assert!(matches!(state.cut().graph.node(top).unwrap().kind, NodeKind::DrawingSource { .. }));
-        assert!(state.status.contains("under the composite"), "{}", state.status);
+        assert!(state.status.contains("under the picture"), "{}", state.status);
         // A second model goes under the composite as it now stands.
         let path = dir.path().join("cube.obj");
         let second = state.import_model(&path, (40.0, 200.0)).unwrap();
@@ -1013,7 +1013,7 @@ mod tests {
         let lone = bare.import_model(&path, (0.0, 90.0)).unwrap();
         assert!(bare.cut().graph.output.is_none());
         assert!(bare.cut().graph.nodes().all(|n| n.inputs.iter().flatten().all(|p| p.0 != lone)));
-        assert!(bare.status.contains("connect it to the Output in the node graph"), "{}", bare.status);
+        assert!(bare.status.contains("connect it to the Output in the Effects graph"), "{}", bare.status);
     }
 
     #[test]
@@ -1499,13 +1499,13 @@ mod tests {
         h.state_mut().set_column_kind(anim_core::xsheet::ColumnKind::Bg);
         h.run();
         assert!(h.editor().canvas.underlay_drawn.is_some(), "drawn, under the BG");
-        let bg = "under the BG column — hide it in the sheet to see the model";
+        let bg = "under the Background track: hide it on the sheet to see the 3D model";
         assert_eq!(note(&h).as_deref(), Some(bg));
         // A cut with no Model3D node.
         let scene = h.state().view.scene;
         h.state_mut().new_cut(scene);
         h.run();
-        assert_eq!(note(&h).as_deref(), Some("not shown: this cut has no Model3D node"));
+        assert_eq!(note(&h).as_deref(), Some("not shown: this shot has no 3D model"));
         assert!(h.editor().canvas.underlay.on, "still ticked");
     }
 

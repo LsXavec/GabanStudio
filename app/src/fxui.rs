@@ -211,7 +211,7 @@ pub fn model_inspector(
 ) {
     let name = state.cut().models.get(&model).map(|m| m.name.clone());
     ui.label(
-        egui::RichText::new(name.as_deref().unwrap_or("model missing: renders transparent"))
+        egui::RichText::new(name.as_deref().unwrap_or("3D file missing: renders transparent"))
             .color(crate::plate::legend_dim()),
     );
     let resolved = state.cut().model_at(params, binds, state.view.frame).values;
@@ -226,6 +226,16 @@ pub fn model_inspector(
 fn commit_kind(state: &mut AppState, id: NodeId, kind: NodeKind) {
     if state.cut().graph.node(id).is_ok_and(|n| n.kind != kind) {
         state.graph_set_kind(id, kind);
+    }
+}
+
+/// A parameter's legend. The camera's one stored `zoom` says which way it is
+/// set (spec 3: T.U. is Zoom in, T.B. is Zoom out).
+pub(crate) fn param_legend(node: &str, key: &str, label: &'static str, value: &FxValue) -> &'static str {
+    match (node, key, value) {
+        ("Camera", "zoom", FxValue::Float(zoom)) if *zoom < 1.0 => crate::vocab::ZOOM_OUT,
+        ("Camera", "zoom", _) => crate::vocab::ZOOM_IN,
+        _ => label,
     }
 }
 
@@ -268,7 +278,7 @@ fn specs_ui(
         };
         let shown = live.clone().unwrap_or_else(|| now.clone());
         if !matches!(spec.kind, ParamKind::Bool { .. }) {
-            crate::plate::legend(ui, spec.label).on_hover_text(spec.help);
+            crate::plate::legend(ui, param_legend(node_name, spec.key, spec.label, &shown)).on_hover_text(spec.help);
         }
         let rect = match (spec.kind, shown) {
             (ParamKind::Float { min, max, step, .. }, FxValue::Float(mut v)) => {
@@ -305,12 +315,12 @@ fn specs_ui(
                     if bound.is_none() {
                         return chip(ui, edit, id, key.to_string(), first, spec.help, &mut commit);
                     }
-                    let help = "The colour at the column's 0: the column mixes toward the second chip.";
+                    let help = "The color at the track's 0: the track mixes toward the second chip.";
                     let rect = chip(ui, edit, id, key.to_string(), first, help, &mut commit);
                     // The second chip shows only while a column drives the
                     // colour: unbound, nothing reads it (NEVER-DO 1).
                     ui.label("→");
-                    let help = "The colour at the column's 1: between, the chips mix per channel.";
+                    let help = "The color at the track's 1: between, the chips mix per channel.";
                     chip(ui, edit, id, to, second, help, &mut commit);
                     rect
                 })
@@ -438,12 +448,12 @@ fn specs_ui(
             let name = bound
                 .and_then(|b| columns.iter().find(|(p, _)| *p == b))
                 .map(|(_, n)| format!("{n} ▾"))
-                .unwrap_or_else(|| "bind ▾".into());
+                .unwrap_or_else(|| format!("{} ▾", crate::vocab::ANIMATE));
             let help = if matches!(spec.kind, ParamKind::Color { .. }) {
-                "Drive this colour from an X-sheet param column: its 0–1 mixes the first chip \
-                 toward the second. Static = not animated."
+                "Animate this color from a number track on the Timing sheet: its 0–1 mixes the \
+                 first chip toward the second. Static means not animated."
             } else {
-                "Drive this parameter from an X-sheet param column; static = not animated."
+                "Animate this from a number track on the Timing sheet. Static means not animated."
             };
             ui.menu_button(name, |ui| {
                 if ui.selectable_label(bound.is_none(), "static").clicked() {
@@ -458,8 +468,8 @@ fn specs_ui(
                 }
                 let fresh = column_name(node_name, spec, &columns);
                 if ui
-                    .button(format!("+ new column '{fresh}'"))
-                    .on_hover_text("add a parameter column to the X-sheet and bind it")
+                    .button(format!("+ new track '{fresh}'"))
+                    .on_hover_text("Add a number track to the Timing sheet and animate this with it.")
                     .clicked()
                 {
                     if let Some(pid) = state.add_param_column(&fresh) {

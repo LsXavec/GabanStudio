@@ -180,6 +180,27 @@ pub const TERMS: &[(&str, &[Hit], Tier)] = &[
     ("composite", &[Word("composite")], T),
     ("layout", &[Word("layout")], T),
     ("queue", &[Word("queue")], T),
+    // AU12: the words the add menu and the manga strip printed beside a name.
+    ("koma", &[Word("koma")], J),
+    ("peji", &[Word("peji")], J),
+    ("bokashi", &[Word("bokashi")], J),
+    ("tōkakō", &[Word("tōkakō")], J),
+    ("difyūjon", &[Word("difyūjon")], J),
+    ("raito rappu", &[Word("raito rappu")], J),
+    ("rimu raito", &[Word("rimu raito")], J),
+    ("noizu", &[Word("noizu")], J),
+    ("nagashi", &[Word("nagashi")], J),
+    ("tōn", &[Word("tōn"), Word("amiten")], J),
+    ("renban", &[Word("renban")], J),
+    ("kamera", &[Word("kamera")], J),
+    ("ryūsen", &[Word("ryūsen")], J),
+    ("shūchūsen", &[Word("shūchūsen")], J),
+    ("shashoku", &[Word("shashoku")], J),
+    ("fukidashi", &[Word("fukidashi")], J),
+    ("hibana", &[Word("hibana")], J),
+    ("hokori", &[Word("hokori")], J),
+    ("hinoko", &[Word("hinoko")], J),
+    ("haikei", &[Word("haikei")], J),
 ];
 
 /// How many of `TERMS` the journeys counted by. The baseline stays read
@@ -2019,7 +2040,7 @@ mod tests {
             (Role::Heading, 16.0, semibold()),
             (Role::Chrome, 14.0, regular.clone()),
             (Role::Step, 14.0, semibold()),
-            (Role::Panel, 13.0, regular.clone()),
+            (Role::Panel, 14.0, regular.clone()),
             (Role::Small, 12.0, regular),
         ];
         for (role, size, face) in roles {
@@ -2532,7 +2553,7 @@ mod tests {
     fn aulook_danger_words_are_sentence_case() {
         use egui_kittest::kittest::Queryable;
         let names = [
-            "ERASE CEL", "DELETE LAYER", "REMOVE DRAWING", "REMOVE TRACK", "REMOVE NODE", "DELETE PRESET",
+            "ERASE CEL", "DELETE LAYER", "REMOVE DRAWING", "REMOVE TRACK", "REMOVE NODE", "DELETE BRUSH",
             "DELETE ROOM", "RESET SHORTCUTS", "REMOVE BANK", "OVERWRITE", "LIFT KEY", "REMOVE CHARACTER",
             "Don't Save",
         ];

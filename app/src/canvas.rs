@@ -1623,10 +1623,10 @@ impl CanvasView {
         }
         let cut = state.cut();
         if crate::view3d::model_node(cut, state.selected_node).is_none() {
-            return Some("not shown: this cut has no Model3D node");
+            return Some("not shown: this shot has no 3D model");
         }
         if self.composite_shown {
-            return Some("not shown: composite view");
+            return Some("not shown: Preview final is on");
         }
         let frame = state.view.frame;
         let bg = cut.xsheet.columns.iter().any(|c| {
@@ -1634,7 +1634,7 @@ impl CanvasView {
                 && cut.column_renders(c.id)
                 && c.resolve(frame).is_some()
         });
-        bg.then_some("under the BG column — hide it in the sheet to see the model")
+        bg.then_some("under the Background track: hide it on the sheet to see the 3D model")
     }
 
     /// Switch to the Select tool (V) / back to Paint (B). A live stroke
@@ -1662,20 +1662,20 @@ impl CanvasView {
             CanvasTool::Select => "select: drag = select, drag inside = move, corners = scale, \
         just outside corners = rotate; Enter applies, Esc cancels"
                 .into(),
-            CanvasTool::LassoFill => "lasso fill: draw a loop — it fills with the brush             colour; softness feathers inward, grow shifts the edge"
+            CanvasTool::LassoFill => "Draw to fill: draw a loop and it fills with the brush color; softness feathers inward, grow shifts the edge"
                 .into(),
             CanvasTool::Fill => "fill: click a region — line art bounds it; gap closes line \
-            breaks, under tucks the flat beneath the lines; Alt+click picks a colour; \
-            Shift+click refills a painted flat with the brush colour, Ctrl+Shift+click \
-            replaces that colour on the whole layer"
+            breaks, under tucks the flat beneath the lines; Alt+click picks a color; \
+            Shift+click refills a painted flat with the brush color, Ctrl+Shift+click \
+            replaces that color on the whole layer"
                 .into(),
-            CanvasTool::Paint => "paint: Alt+click picks a colour, Shift+click rules on from \
+            CanvasTool::Paint => "paint: Alt+click picks a color, Shift+click rules on from \
             the last stroke, Space+drag pans (Shift+drag turns)"
                 .into(),
             CanvasTool::Panel if anim_core::manga::Page::of(state.cut()).is_none() => {
-                "panel (koma): this cut is no page — New page makes one".into()
+                "Panel tool: this shot is no page. New page makes one.".into()
             }
-            CanvasTool::Panel => "panel (koma): drag on bare paper draws a panel, across a panel \
+            CanvasTool::Panel => "Panel tool: drag on bare paper draws a panel, across a panel \
             splits it at the gutter, from a VP or the horizon moves it — one undo step each"
                 .into(),
         };
@@ -1713,7 +1713,7 @@ impl CanvasView {
         }
         self.sel_draft = None;
         if self.touch_active || !self.current.is_empty() || self.raster_stroke_done {
-            state.status = "workspace switched — tool/view kept (finish the stroke first)".into();
+            state.status = "arrangement switched: tool and view kept (finish the stroke first)".into();
             return false;
         }
         self.lasso_pts.clear();
@@ -1752,7 +1752,7 @@ impl CanvasView {
         poly: Option<&[Pos2]>,
     ) -> bool {
         if self.composite_view {
-            state.refuse("refused — composite view is read-only (C to edit)");
+            state.refuse(crate::doc::READ_ONLY_VIEW);
             return false;
         }
         if !self.raster {
@@ -1921,7 +1921,7 @@ impl CanvasView {
         // gated) and misleading. Hint once on an attempted drag.
         if self.composite_view {
             if response.drag_started_by(egui::PointerButton::Primary) {
-                state.status = "composite view — press C to edit".into();
+                state.status = "Preview final is on: press C to edit".into();
             }
             return;
         }
@@ -2300,8 +2300,8 @@ impl CanvasView {
         match self.tool {
             CanvasTool::Select => "select".into(),
             CanvasTool::Fill => "fill".into(),
-            CanvasTool::LassoFill => "lasso fill".into(),
-            CanvasTool::Panel => "panel (koma)".into(),
+            CanvasTool::LassoFill => crate::vocab::DRAW_TO_FILL.into(),
+            CanvasTool::Panel => "panel".into(),
             _ if self.erasing => "eraser".into(),
             _ => self.armed_preset.clone().unwrap_or_else(|| "brush".into()),
         }
@@ -2557,7 +2557,7 @@ impl CanvasView {
         ui.vertical(|ui| {
             // The Color float's width, even where a host leaves more.
             ui.set_max_width(ui.available_width().min(256.0));
-            plate::legend(ui, "model");
+            plate::legend(ui, "Character colors");
             // AU4: a block to a character: its name and `derive` over its own
             // roles, each chip over its whole word, and as many to a line as
             // the widest word leaves room for.
@@ -2582,7 +2582,7 @@ impl CanvasView {
                         // this row's shadow from its normal, the systematic way.
                         // Held, it overwrites a chosen colour for good: it stays
                         // red, off the chips.
-                        if plate::danger(ui, "derive") {
+                        if plate::danger(ui, "Make shadow") {
                             let normal = state.palettes.characters[ci]
                                 .roles
                                 .iter()
@@ -2609,9 +2609,9 @@ impl CanvasView {
                                     state.offer_recolour(ci, ri, old, sh);
                                 }
                                 state.status =
-                                    format!("{cname}: shadow derived from normal (edit in the eye)");
+                                    format!("{cname}: shadow made from normal (edit in the eye)");
                             } else {
-                                state.refuse("refused — no 'normal' role to derive from");
+                                state.refuse("refused — no 'normal' color to work from");
                             }
                         }
                     });
@@ -2662,7 +2662,7 @@ impl CanvasView {
                             self.brush_color = color;
                         }
                         presp.card(format!(
-                            "{cname} · {rname} — click: arm · double-click: edit in the eye"
+                            "{cname} · {rname}: click to use, double-click to edit in the eye"
                         ));
                     }
                 });
@@ -2674,10 +2674,10 @@ impl CanvasView {
         ui.vertical(|ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                plate::legend(ui, "dish");
+                plate::legend(ui, "Mixing tray");
                 if ui
-                    .button("rinse")
-                    .card("clear the tray (splotches are session-only)")
+                    .button("Clear tray")
+                    .card("Clear the tray. Its colors last only for this session.")
                     .clicked()
                 {
                     self.splotches.clear();
@@ -2943,14 +2943,14 @@ impl CanvasView {
     /// The Canvas options float: onion + strength (with a value line — a
     /// silent dial reads as a bug), paper furniture, view, INPUT.
     pub(crate) fn lightbox_rail_ui(&mut self, ui: &mut egui::Ui, state: &mut AppState) {
-        // THE QUEUE (shiage charter): prev/next CEL at the paper's own
-        // edge, 44x40 — the room's second verb; Q/W are their keys.
-        plate::legend(ui, "queue");
+        // Previous and next drawing at the paper's own edge, 44x40: the step's
+        // second verb; Q/W are their keys.
+        plate::legend(ui, crate::vocab::DRAWINGS);
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             for (icon, fwd, hover) in [
-                (Icon::ChevL, false, "previous cel (Q)"),
-                (Icon::ChevR, true, "next cel (W)"),
+                (Icon::ChevL, false, "Previous drawing (Q)"),
+                (Icon::ChevR, true, "Next drawing (W)"),
             ] {
                 let (cr, cresp) = ui.allocate_exact_size(vec2(44.0, 40.0), Sense::click());
                 plate::speak(&cresp, egui::WidgetType::Button, None, hover);
@@ -2973,24 +2973,24 @@ impl CanvasView {
         // rebound key is named as bound.
         let mut mc = self.miss_check;
         crate::menus::hover_tip(
-            plate::tool_latch(ui, &mut mc, Icon::Hole, "miss check", ""),
+            plate::tool_latch(ui, &mut mc, Icon::Hole, "Miss check", ""),
             Action::MissCheck,
-            "hole-hunt: the ground goes dark; every unpainted pixel reads as a pit",
+            "The ground goes dark, so every unpainted pixel shows.",
         );
         self.miss_check = mc;
         ui.add_space(10.0);
-        plate::legend(ui, "lightbox");
+        plate::legend(ui, "Light box");
         ui.add_space(2.0);
         let mut on = state.view.onion;
         crate::menus::hover_tip(
-            plate::latch(ui, &mut on, "onion"),
+            plate::latch(ui, &mut on, crate::vocab::GHOST_FRAMES),
             Action::ToggleOnion,
-            "ghosts the neighbouring DRAWINGS — a hold of the same drawing has no neighbour to ghost",
+            "Shows the neighboring drawings. One drawing shown for many frames has no neighbor to show.",
         );
         state.view.onion = on;
         let mut lo = state.view.onion_layer_only;
-        plate::latch(ui, &mut lo, "line only")
-            .card("ghost only the layer matching the active layer's name");
+        plate::latch(ui, &mut lo, "This layer only")
+            .card("Show only the layer with the same name as the active one.");
         state.view.onion_layer_only = lo;
         ui.add_space(2.0);
         // GM6: depth, mode, other columns, opacity with falloff — kept in
@@ -3018,9 +3018,11 @@ impl CanvasView {
                     if ui
                         .selectable_label(cfg.mode == m, m.label())
                         .card(match m {
-                            OnionMode::Drawings => "ghost the previous and next distinct drawings",
-                            OnionMode::Frames => "ghost what the column shows 1, 2, … frames away",
-                            OnionMode::Keys => "ghost the previous and next genga (key) drawings",
+                            OnionMode::Drawings => "Show the previous and next different drawings.".to_string(),
+                            OnionMode::Frames => "Show what the track has 1, 2, … frames away.".to_string(),
+                            OnionMode::Keys => {
+                                "Show the previous and next key drawings.\nStudio word: genga".to_string()
+                            }
                         })
                         .clicked()
                     {
@@ -3034,13 +3036,13 @@ impl CanvasView {
                 && !state.cut().drawing_defs.values().any(|d| d.kind == DrawingKind::Key)
             {
                 ui.label(
-                    egui::RichText::new("no drawings marked genga (key) yet — mark one from its cell's menu")
+                    egui::RichText::new("No key drawings yet. Mark one from its cell's menu.")
                         .small()
                         .color(plate::LEGEND),
                 );
             }
-            plate::latch(ui, &mut cfg.other_columns, "other columns")
-                .card("ghost every other column that renders too");
+            plate::latch(ui, &mut cfg.other_columns, "Other tracks")
+                .card("Show every other track that renders too.");
         });
         if cfg != self.onion {
             self.onion = cfg.sane();
@@ -3048,10 +3050,10 @@ impl CanvasView {
         }
 
         // GM6: THE LIGHT TABLE — pins on every frame, shift & trace.
-        egui::CollapsingHeader::new("light table").show(ui, |ui| {
+        egui::CollapsingHeader::new("Light table").show(ui, |ui| {
             if let Some(here) = state.current_drawing() {
                 let pinned = state.view.light.is_pinned(here);
-                let words = if pinned { "unpin this drawing" } else { "pin this drawing" };
+                let words = if pinned { "Unpin this drawing" } else { "Pin this drawing" };
                 if crate::menus::hover_tip(ui.button(words), Action::PinToLightTable, "").clicked() {
                     state.view.light.toggle(state.view.active_column, here);
                 }
@@ -3083,13 +3085,13 @@ impl CanvasView {
             }
             let mut st = state.view.light.shift_trace;
             crate::menus::hover_tip(
-                plate::latch(ui, &mut st, "shift & trace"),
+                plate::latch(ui, &mut st, "Shift & trace"),
                 Action::ShiftTrace,
                 "while on, a drag on the canvas moves the selected pin (Shift+drag turns it); the pen rests",
             );
             state.view.light.shift_trace = st;
             if !state.view.light.offsets.is_empty()
-                && crate::menus::hover_tip(ui.button("reset shift"), Action::ResetShift, "").clicked()
+                && crate::menus::hover_tip(ui.button("Reset shift"), Action::ResetShift, "").clicked()
             {
                 state.view.light.reset();
             }
@@ -3101,7 +3103,7 @@ impl CanvasView {
             let busy = self.stroke_active();
             let fold = egui::CollapsingHeader::new("Mark as").show(ui, |ui| {
                 let kind = state.cut().drawing_kind(here);
-                value_line(ui, "kind", crate::vocab::drawing_kind(kind).to_string());
+                value_line(ui, "Marked", crate::vocab::drawing_kind(kind).to_string());
                 ui.horizontal_wrapped(|ui| {
                     for (k, verb) in [
                         (DrawingKind::Key, Action::KindKey),
@@ -3152,14 +3154,14 @@ impl CanvasView {
                         self.chart_editor(ui, state, here, &c.marks, busy);
                     }
                     if chart.is_some()
-                        && crate::menus::hover_tip(ui.button("make inbetweens"), Action::MakeInbetweens, "")
+                        && crate::menus::hover_tip(ui.button("Make inbetweens"), Action::MakeInbetweens, "")
                             .clicked()
                         && !busy
                     {
                         state.make_inbetweens();
                     }
                 }
-                if crate::menus::hover_tip(ui.button("duplicate cel"), Action::DuplicateCel, "").clicked()
+                if crate::menus::hover_tip(ui.button("Duplicate drawing"), Action::DuplicateCel, "").clicked()
                     && !busy
                 {
                     state.duplicate_cel();
@@ -3172,20 +3174,20 @@ impl CanvasView {
         plate::legend(ui, "paper");
         ui.add_space(2.0);
         let mut f = self.show_field;
-        plate::latch(ui, &mut f, "field")
-            .card("the 12-field chart (field n is n/12 of the frame) + centre cross");
+        plate::latch(ui, &mut f, "Field")
+            .card("The 12-field chart (field n is n/12 of the frame), with a center cross.");
         self.show_field = f;
         let mut sa = self.show_safe;
-        plate::latch(ui, &mut sa, "safe")
-            .card("action safe (93%) and title safe (90%) + centre cross");
+        plate::latch(ui, &mut sa, crate::vocab::MARGINS)
+            .card("Lines at 93% and 90% of the frame, with a center cross: keep action and titles inside them.");
         self.show_safe = sa;
         let mut pg = self.show_peg;
-        plate::latch(ui, &mut pg, "peg").card("the registration peg bar");
+        plate::latch(ui, &mut pg, "Peg").card("The registration peg bar.");
         self.show_peg = pg;
         ui.add_space(10.0);
         plate::legend(ui, "view");
         ui.add_space(2.0);
-        let fit = plate::icon_button(ui, Icon::Fit, "fit", "");
+        let fit = plate::icon_button(ui, Icon::Fit, "Fit", "");
         if crate::menus::hover_tip(fit, Action::ZoomFit, "").clicked() {
             self.fit_view();
         }
@@ -3195,12 +3197,12 @@ impl CanvasView {
         // upright detent (armed when upright; a click turns it back) and
         // the mirror latch.
         value_line(ui, "turn", format!("{:4.0}°", self.rotation_deg));
-        let upright = plate::detent(ui, self.rotation_deg == 0.0, "upright");
+        let upright = plate::detent(ui, self.rotation_deg == 0.0, "Upright");
         if crate::menus::hover_tip(upright, Action::ResetRotation, "").clicked() {
             self.set_view_rotation(0.0);
         }
         let mut mirrored = self.mirror;
-        let flip = plate::latch(ui, &mut mirrored, "mirror");
+        let flip = plate::latch(ui, &mut mirrored, "Mirror");
         crate::menus::hover_tip(flip, Action::MirrorView, "");
         if mirrored != self.mirror {
             self.toggle_mirror();
@@ -3219,7 +3221,7 @@ impl CanvasView {
                 )
                 .sense(Sense::click()),
             )
-            .card("input device — click for pen settings")
+            .card("Input device: click for pen settings.")
             .clicked()
         {
             self.request_pen_settings = true;
@@ -3239,7 +3241,8 @@ impl CanvasView {
         let title = if self.erasing {
             "eraser".to_string()
         } else {
-            self.armed_preset.clone().unwrap_or_else(|| "brush".into())
+            // The stored name stays in the state; the line says its display word.
+            self.armed_preset.as_deref().map_or("brush".to_string(), |p| crate::vocab::preset(p).to_string())
         };
         // Never the bare word: the rail's keys are spoken `Brush` and `Eraser`.
         plate::legend(ui, &format!("{}: {title}", crate::vocab::DRAWING_WITH));
@@ -3334,7 +3337,7 @@ impl CanvasView {
     /// ARMED here; edited only in Settings → Brushes.
     fn brush_library_ui(&mut self, ui: &mut egui::Ui, presets: &[BrushPreset]) {
         ui.add_space(10.0);
-        value_line(ui, "library", format!("{}", presets.len()));
+        value_line(ui, crate::vocab::BRUSHES, format!("{}", presets.len()));
         ui.add_space(2.0);
         if presets.len() > 6 {
             plate::text_field(
@@ -3533,14 +3536,14 @@ impl CanvasView {
             ];
             if ui
                 .color_edit_button_srgb(&mut rgb)
-                .card("brush colour")
+                .card("Brush color")
                 .changed()
             {
                 self.brush_color = [rgb[0], rgb[1], rgb[2], self.brush_color[3]];
             }
             for (i, c) in SWATCHES.iter().enumerate() {
                 let selected = self.brush_color == *c;
-                let hover = ["ink", "ao — construction", "aka — correction", "white"][i];
+                let hover = ["Ink", "Blue: construction", "Red: correction", "White"][i];
                 if plate::swatch(
                     ui,
                     plate::chip([c[0], c[1], c[2], c[3]]),
@@ -3585,7 +3588,7 @@ impl CanvasView {
     pub(crate) fn drawing_with(&self, state: &AppState) -> String {
         let pencil = match &self.armed_preset {
             _ if self.erasing => "eraser",
-            Some(name) => name.as_str(),
+            Some(name) => crate::vocab::preset(name),
             None => "brush",
         };
         let mut line = format!(
@@ -3614,10 +3617,10 @@ impl CanvasView {
                         ui,
                         self.sel_shape == SelShape::Lasso,
                         Icon::Lasso,
-                        "lasso",
-                        "lasso selection",
+                        "Freehand",
+                        "Freehand selection",
                     )
-                    .card("lasso selection")
+                    .card("Freehand selection")
                     .clicked()
                     {
                         self.sel_shape = SelShape::Lasso;
@@ -3683,9 +3686,9 @@ impl CanvasView {
                         self.fill_grow = grow;
                     });
                     ui.horizontal(|ui| {
-                        if plate::detent(ui, self.fill_ref_cel, "cel")
+                        if plate::detent(ui, self.fill_ref_cel, "Drawing")
                             .card(
-                                "boundaries come from the whole cel (all visible layers)",
+                                "Boundaries come from the whole drawing (all visible layers).",
                             )
                             .clicked()
                         {
@@ -3714,7 +3717,7 @@ impl CanvasView {
             // GM18: the panel tool's gestures, said where its options would
             // sit (the gutters are the Manga pane's).
             CanvasTool::Panel => {
-                plate::legend(ui, "panel (koma)");
+                plate::legend(ui, "Panel tool");
                 ui.label(
                     egui::RichText::new(
                         "drag on paper: a panel · across a panel: a split · \
@@ -4259,20 +4262,20 @@ impl CanvasView {
                     composite_pending = true;
                 }
                 GV::NoOutput => {
-                    composite_note = Some("composite view — no graph output wired (C to edit)");
+                    composite_note = Some("Preview final: nothing reaches the Output yet (C to edit)");
                 }
                 GV::EvalFailed => {
                     composite_note =
-                        Some("composite view — the graph failed to evaluate (C to edit)");
+                        Some("Preview final: the effects could not run (C to edit)");
                 }
                 GV::NoGpu => {
-                    composite_note = Some("composite view needs the GPU — showing edit view");
+                    composite_note = Some("Preview final needs the GPU: showing the drawing");
                 }
                 // Off = this canvas wasn't a visible consumer; if it IS being
                 // rendered anyway, fall back honestly.
                 GV::Off => {
                     composite_note =
-                        Some("composite view — nothing rendered this frame (C to edit)");
+                        Some("Preview final: nothing rendered this frame (C to edit)");
                 }
             }
         }
@@ -4670,13 +4673,13 @@ impl CanvasView {
             let tag = plate::picture_tag(
                 &painter,
                 pos2(paper_rect.left() + 8.0, paper_rect.top() + 6.0),
-                "composite view",
+                crate::vocab::PREVIEW_FINAL,
             );
             if composite_pending {
                 // GM9: the lamp, and in words — an FX render is pending
                 // (the last result shows until it lands).
                 painter.circle_filled(pos2(tag.right() + 12.0, tag.center().y), 4.0, crate::plate::TALLY);
-                plate::picture_tag(&painter, pos2(tag.right() + 24.0, tag.top()), "rendering FX…");
+                plate::picture_tag(&painter, pos2(tag.right() + 24.0, tag.top()), "Rendering effects…");
             }
         }
         if let Some(note) = composite_note {
@@ -6047,7 +6050,7 @@ impl CanvasView {
             && !self.lasso_pts.is_empty()
         {
             self.lasso_pts.clear();
-            state.status = "lasso cleared".into();
+            state.status = "selection cleared".into();
             return;
         }
         if response.drag_started_by(egui::PointerButton::Primary) {
@@ -6059,7 +6062,7 @@ impl CanvasView {
             }
             // The fill tool's guards, in the fill tool's order.
             if self.composite_view {
-                state.refuse("refused — composite view is read-only (C to edit)");
+                state.refuse(crate::doc::READ_ONLY_VIEW);
                 return;
             }
             if state.active_layer_props().is_some_and(|p| !p.visible) {
@@ -6138,7 +6141,7 @@ impl CanvasView {
         }
         if response.drag_started_by(egui::PointerButton::Primary) {
             if Page::of(state.cut()).is_none() {
-                state.refuse("refused — this cut is no page (New page makes one)");
+                state.refuse("refused — this shot is no page (New page makes one)");
                 return;
             }
             // From where the press landed, not where the drag was seen.
@@ -6356,7 +6359,7 @@ impl CanvasView {
             state.status = "the loop enclosed nothing".into();
             return;
         }
-        state.commit_fill("lasso fill", did, LayerId(kl), diff);
+        state.commit_fill("draw to fill", did, LayerId(kl), diff);
         self.synced_active = (u64::MAX, u64::MAX, u64::MAX);
     }
 
@@ -6406,7 +6409,7 @@ impl CanvasView {
             return;
         }
         if self.composite_view {
-            state.status = "composite view — press C to edit".into();
+            state.status = "Preview final is on: press C to edit".into();
             return;
         }
         // GM7 REFILL: Shift+click recolours the clicked flat (bounded by the
@@ -6541,7 +6544,7 @@ impl CanvasView {
             // AUDIT [7]: the pen is his primary instrument — its refusal
             // must reach the Aka lane and flash the canvas edge, exactly
             // as the mouse path and the hidden-layer guard already do.
-            state.refuse("refused — composite view is read-only (C to edit)");
+            state.refuse(crate::doc::READ_ONLY_VIEW);
             return None;
         }
         if self.is_guest && !self.guest_ready {
@@ -6569,7 +6572,7 @@ impl CanvasView {
         let slot = state.active_slot_resolved();
         if slot.is_none() {
             state.refuse(format!(
-                "refused — no '{}' layer on this cel (pick one in Cel Layers)",
+                "refused — this drawing has no {} layer. Pick one in Layers.",
                 state.view.active_layer
             ));
         }
@@ -6963,7 +6966,7 @@ impl CanvasView {
             }
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if self.composite_view {
-                    state.refuse("refused — composite view is read-only (C to edit)");
+                    state.refuse(crate::doc::READ_ONLY_VIEW);
                     return;
                 }
                 // GM5: the column lock, as at the pen's pen-down.
@@ -6983,7 +6986,7 @@ impl CanvasView {
                 // UNARMED (defect 16), mouse path: same law as the pen.
                 let Some(resolved_slot) = state.active_slot_resolved() else {
                     state.refuse(format!(
-                        "refused — no '{}' layer on this cel (pick one in Cel Layers)",
+                        "refused — this drawing has no {} layer. Pick one in Layers.",
                         state.view.active_layer
                     ));
                     return;
@@ -7615,9 +7618,9 @@ impl OnionMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            OnionMode::Drawings => "drawings",
-            OnionMode::Frames => "frames",
-            OnionMode::Keys => "keys (genga)",
+            OnionMode::Drawings => "Drawings",
+            OnionMode::Frames => "Frames",
+            OnionMode::Keys => "Key drawings",
         }
     }
 }

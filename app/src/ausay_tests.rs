@@ -978,7 +978,7 @@ fn ausay_false_copy_is_gone() {
         }
     }
     // The sentence that stands in names a control on screen.
-    assert!(crate::palette_panel::NO_CHARACTERS.contains("edit model"));
+    assert!(crate::palette_panel::NO_CHARACTERS.contains(crate::vocab::EDIT_COLORS));
     assert!(crate::palette_panel::NO_CHARACTERS.contains("+ character"));
     // And the status a new project starts with is no teaching at all.
     assert_eq!(AppState::new_project("t", 64, 48, 24, 72.0).status, "");
@@ -1004,8 +1004,8 @@ fn ausay_empty_palette_names_what_is_on_screen() {
         settle(&mut h);
         assert!(h.state().palettes.characters.is_empty());
         assert!(says(&h, crate::palette_panel::NO_CHARACTERS), "{:?}", h.painted_text());
-        on_screen(&h, "edit model");
-        h.click("edit model");
+        on_screen(&h, crate::vocab::EDIT_COLORS);
+        h.click(crate::vocab::EDIT_COLORS);
         settle(&mut h);
         on_screen(&h, "+ character");
         h.state_mut().palette_new_name = "Ana".into();
@@ -1013,7 +1013,7 @@ fn ausay_empty_palette_names_what_is_on_screen() {
         settle(&mut h);
         assert_eq!(h.state().palettes.characters.len(), 1, "the sentence's two steps made one");
         assert!(!says(&h, crate::palette_panel::NO_CHARACTERS));
-        on_screen(&h, "edit model");
+        on_screen(&h, crate::vocab::EDIT_COLORS);
         on_screen(&h, "+ character");
         on_screen(&h, "REMOVE CHARACTER");
     }
@@ -1097,7 +1097,7 @@ pub(crate) fn sources() -> Vec<(String, String)> {
 }
 
 /// A source without its test module.
-fn shipped(source: &str) -> &str {
+pub(crate) fn shipped(source: &str) -> &str {
     source.split("mod tests {").next().expect("a first half")
 }
 
@@ -1204,7 +1204,7 @@ fn ausay_a_refusal_said_twice_stays_with_its_fix() {
     assert!(h.has(FIX_IT));
     assert_eq!(say::fix_of(doc::HELD_FRAME), Some(Action::NewDrawing));
     assert_eq!(say::fix_of(doc::READ_ONLY_VIEW), Some(Action::ToggleCompositeView));
-    assert!(include_str!("canvas.rs").contains(doc::READ_ONLY_VIEW), "the pen route says these very words");
+    assert!(include_str!("canvas.rs").contains("doc::READ_ONLY_VIEW"), "the pen route says these very words");
     assert_eq!(say::fix_of("refused — the layer is locked"), None);
     h.click(FIX_IT);
     settle(&mut h);

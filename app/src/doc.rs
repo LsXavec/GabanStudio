@@ -410,13 +410,13 @@ pub const FINISH_STROKE: &str = "Finish your stroke first.";
 /// have done.
 pub const SHORTEST_HOLD: &str = "One frame is the shortest a drawing holds.";
 /// AU26: the band's `Longer` and `Shorter`, on their cards.
-pub const LONGER_SAYS: &str = "This drawing stays one frame longer. On the last drawing the cut grows with it.";
+pub const LONGER_SAYS: &str = "This drawing stays one frame longer. On the last drawing the shot grows with it.";
 pub const SHORTER_SAYS: &str = "This drawing stays one frame less. It stops at one frame.";
 /// AU26: Play on a cut with nothing on it. Not a refusal either.
 pub const NOTHING_TO_PLAY: &str = "Nothing to play yet. Draw something first.";
 /// AU7: the canvas's refusal, by name, because one Action answers it
 /// (`say::fix_of`). The pen route says it itself, and stays as it stood.
-pub const READ_ONLY_VIEW: &str = "refused — composite view is read-only (C to edit)";
+pub const READ_ONLY_VIEW: &str = "refused — Preview final is read-only (C to edit)";
 
 /// GM20: a tool used on the paper past a capped painting window (a paper
 /// wider or taller than the GPU paints) — the Aka lane.
@@ -1477,12 +1477,12 @@ impl AppState {
                     },
                 ];
                 cmds.extend(tail);
-                let r = self.engine.apply("paint (new cel)", cmds);
+                let r = self.engine.apply("paint (new drawing)", cmds);
                 let ok = r.is_ok();
                 if ok {
                     self.view.selected_drawing = Some(id);
                 }
-                self.report(r, "painted (new cel)");
+                self.report(r, "painted (new drawing)");
                 ok.then_some((id, layer))
             }
             Some(id) => {
@@ -1746,7 +1746,8 @@ impl AppState {
             return false;
         };
         self.refuse(format!(
-            "refused — column {name} is locked: unlock it in the sheet to draw"
+            "refused — {} {name} is locked: unlock it in the sheet to draw",
+            crate::vocab::TRACK
         ));
         true
     }
@@ -1887,8 +1888,8 @@ impl AppState {
         if clears.is_empty() {
             return;
         }
-        let r = self.engine.apply("clear cel", clears);
-        self.report(r, "cel cleared (all layers)");
+        let r = self.engine.apply("clear drawing", clears);
+        self.report(r, "drawing cleared (all layers)");
     }
 
     // ---- Layer strip operations (all one-command = one undo step) ---------
@@ -1932,7 +1933,7 @@ impl AppState {
             return;
         };
         if self.cut().drawing(id).map(|d| d.layers.len()) <= Some(1) {
-            self.refuse("refused — a cel keeps at least one layer");
+            self.refuse("refused — a drawing keeps at least one layer");
             return;
         }
         let at = self.at();
@@ -1998,14 +1999,14 @@ impl AppState {
     /// above the active layer. Arms the new layer. One undo step.
     pub fn layer_add_role(&mut self, role: anim_core::model::LayerRole) {
         let Some(id) = self.own_drawing_id() else {
-            self.refuse("refused — no cel on this frame (draw, or press E)");
+            self.refuse("refused — no drawing on this frame (draw, or press E)");
             return;
         };
         let Some(d) = self.cut().drawing(id) else {
             return;
         };
         if d.layers.len() >= 8 {
-            self.refuse("refused — this cel already has 8 layers");
+            self.refuse("refused — this drawing already has 8 layers");
             return;
         }
         let above_active = self
@@ -2095,29 +2096,30 @@ impl AppState {
             return;
         };
         let Some(id) = self.own_drawing_id() else {
-            self.refuse("refused — no cel on this frame (draw, or press E)");
+            self.refuse("refused — no drawing on this frame (draw, or press E)");
             return;
         };
         let existing: Vec<LayerProps> = match self.cut().drawing(id) {
             Some(d) if !d.layers.is_empty() => d.layers.iter().map(|l| l.props.clone()).collect(),
             _ => {
-                self.refuse("refused — this cel has no layer stack (paint on it first)");
+                self.refuse("refused — this drawing has no layers yet (paint on it first)");
                 return;
             }
         };
         let at = self.at();
         match self.plan_conform(at, id, &existing, &preset) {
             None => self.refuse(format!(
-                "refused — '{}' would take this cel past 8 layers",
-                preset.name
+                "refused — '{}' would take this drawing past 8 layers",
+                crate::vocab::stack(&preset.name)
             )),
             Some(cmds) if cmds.is_empty() => {
-                self.status = format!("this cel already has every '{}' layer", preset.name);
+                self.status =
+                    format!("this drawing already has every '{}' layer", crate::vocab::stack(&preset.name));
             }
             Some(cmds) => {
                 let n = cmds.len();
-                let r = self.engine.apply("apply layer stack", cmds);
-                self.report(r, &format!("added {n} layer(s) from '{}'", preset.name));
+                let r = self.engine.apply("apply layer set", cmds);
+                self.report(r, &format!("added {n} layer(s) from '{}'", crate::vocab::stack(&preset.name)));
             }
         }
     }
@@ -2151,17 +2153,18 @@ impl AppState {
         }
         if cmds.is_empty() {
             self.status = if skipped > 0 {
-                format!("nothing added — {skipped} cel(s) would pass 8 layers")
+                format!("nothing added — {skipped} drawing(s) would pass 8 layers")
             } else {
-                format!("every cel already has the '{}' layers", preset.name)
+                format!("every drawing already has the '{}' layers", crate::vocab::stack(&preset.name))
             };
             return;
         }
-        let r = self.engine.apply("conform cut", cmds);
+        let r = self.engine.apply("match layers in shot", cmds);
+        let shown = crate::vocab::stack(&preset.name);
         let msg = if skipped > 0 {
-            format!("'{}' → {touched} cel(s) conformed, {skipped} skipped (cap 8)", preset.name)
+            format!("'{shown}' → {touched} drawing(s) matched, {skipped} skipped (at most 8 layers)")
         } else {
-            format!("'{}' → {touched} cel(s) conformed", preset.name)
+            format!("'{shown}' → {touched} drawing(s) matched")
         };
         self.report(r, &msg);
     }
@@ -2333,13 +2336,13 @@ impl AppState {
             .drawing_def(from)
             .chart
             .ok_or("this drawing has no spacing chart")?;
-        let col = self.cut().xsheet.column(column).ok_or("no active column")?;
+        let col = self.cut().xsheet.column(column).ok_or("no active track")?;
         let (fa, _) = col.exposure_at(self.view.frame).ok_or("nothing exposed here")?;
         let name_of = |d: DrawingId| self.cut().drawing(d).map(|x| x.name.clone()).unwrap_or_default();
         // The very next key must be the chart's: whatever else sits between
         // the two (a breakdown, a key, earlier inbetweens, a blank) is the
         // animator's work and is never cleared — it refuses instead.
-        let lost = "the chart's next key is not exposed after this one in this column";
+        let lost = "the chart's next key is not exposed after this one in this track";
         let (fb, next) = col.keys().find(|(f, _)| *f > fa).ok_or(lost)?;
         match next {
             Exposure::Drawing(d) if d == chart.to => {}
@@ -2431,7 +2434,7 @@ impl AppState {
     pub fn duplicate_cel(&mut self) {
         let at = self.at();
         let Some(src) = self.current_drawing().and_then(|id| self.cut().drawing(id)).cloned() else {
-            self.refuse("refused — no drawing on this frame to duplicate");
+            self.refuse(format!("refused — no {} on this frame to duplicate", crate::vocab::DRAWING));
             return;
         };
         let name = self.next_drawing_name();
@@ -2470,7 +2473,7 @@ impl AppState {
             frame: self.view.frame,
             key: Some(Exposure::Drawing(id)),
         });
-        let r = self.engine.apply("duplicate cel", cmds);
+        let r = self.engine.apply("duplicate drawing", cmds);
         if r.is_ok() {
             self.view.selected_drawing = Some(id);
         }
@@ -2494,7 +2497,7 @@ impl AppState {
                 true
             }
             None => {
-                self.refuse("refused — no ink in the selection on the armed layer");
+                self.refuse("refused — no ink in the selection on the layer you are drawing on");
                 false
             }
         }
@@ -2533,13 +2536,13 @@ impl AppState {
         if self.own_key_drawing().is_some_and(|id| {
             self.cut().drawing(id).is_some_and(|d| !d.layers.is_empty())
         }) {
-            self.refuse("refused — no armed layer on this cel to paste into");
+            self.refuse("refused — this drawing has no such layer to paste into");
             return;
         }
         // A held / blank frame (or a vector-only cel): the paste becomes
         // the new cel's paint, as a stroke would.
         let Some(slot) = self.active_slot_resolved() else {
-            self.refuse("refused — no armed layer to paste into");
+            self.refuse("refused — pick a layer to paste into");
             return;
         };
         let tiles: Vec<(TileCoord, Arc<TileData>)> =
@@ -2849,7 +2852,7 @@ impl AppState {
             return false;
         }
         let Some((from, len, shows)) = self.run_at(self.view.frame) else {
-            self.refuse("refused — this cut has no track to add a drawing to");
+            self.refuse("refused — this shot has no track to add a drawing to");
             return false;
         };
         let length = self.frame_count();
@@ -3023,7 +3026,7 @@ impl AppState {
     /// Expose the selected library drawing at the current frame (a hold key).
     pub fn expose_selected(&mut self) {
         let Some(id) = self.view.selected_drawing else {
-            self.refuse("refused — pick a drawing in the library first");
+            self.refuse("refused — pick a drawing in Drawings first");
             return;
         };
         let at = self.at();
@@ -3104,7 +3107,7 @@ impl AppState {
             self.view.selected_drawing = None;
         }
         self.view.light.unpin(id);
-        self.report(r, "drawing removed from library");
+        self.report(r, "drawing removed from Drawings");
     }
     pub fn clear_key_at_frame(&mut self) {
         let at = self.at();
@@ -3127,7 +3130,7 @@ impl AppState {
         let name = format!("{}", (b'A' + (index as u8 % 26)) as char);
         let id = self.engine.alloc_column_id();
         let r = self.apply_columns(
-            "add column",
+            "add track",
             vec![Command::AddColumn {
                 at,
                 index,
@@ -3138,7 +3141,7 @@ impl AppState {
         if r.is_ok() {
             self.view.active_column = id;
         }
-        self.report(r, "column added");
+        self.report(r, "track added");
     }
 
     /// GM8: a column scaffolding batch (add, remove, move, kind, hidden)
@@ -3599,11 +3602,11 @@ impl AppState {
         let at = self.at();
         let r = self
             .engine
-            .apply("cut length", vec![Command::SetFrameCount { at, frames }]);
+            .apply("shot length", vec![Command::SetFrameCount { at, frames }]);
         if r.is_ok() {
             self.view.frame = self.view.frame.min(frames.saturating_sub(1));
         }
-        self.report(r, &format!("the cut is {frames} frames"));
+        self.report(r, &format!("the shot is {frames} frames"));
     }
 
     /// Set (or, with blank text, clear) the memo on `frame` — one undo step.
@@ -3772,7 +3775,7 @@ impl AppState {
         };
         let Some(cut) = self.engine.project.cut(job.at.scene, job.at.cut) else {
             self.refuse(format!(
-                "refused — {} did not import (its cut is gone)",
+                "refused — {} did not import (its shot is gone)",
                 job.name
             ));
             return;
@@ -3816,7 +3819,7 @@ impl AppState {
             self.status = format!("{label}: {} ({secs:.1} s)", job.name);
             if first_sound {
                 self.status.push_str(
-                    " — audio scrub sounds each frame you step to (the transport's scrub latch)",
+                    " — sound while dragging sounds each frame you step to (the transport's latch)",
                 );
             }
         }
@@ -3865,7 +3868,7 @@ impl AppState {
         };
         let fps = self.fps();
         let Some(cut) = self.engine.project.cut(form.at.scene, form.at.cut) else {
-            self.refuse("refused — lip flap did not happen (its cut is gone)");
+            self.refuse("refused — lip flap did not happen (its shot is gone)");
             return false;
         };
         if anim_core::audio::track_clip(cut, form.track).is_none() {
@@ -3890,7 +3893,7 @@ impl AppState {
         };
         let span = format!("frames {}–{}", form.from + 1, form.from + mouths.len() as u32);
         if cmds.is_empty() {
-            self.status = format!("lip flap: the column already shows these mouths ({span})");
+            self.status = format!("lip flap: the track already shows these mouths ({span})");
             return true;
         }
         let r = self.engine.apply("lip flap", cmds);
@@ -4040,7 +4043,7 @@ impl AppState {
         let n = cells.len();
         self.goto_cut(scene, cut_id);
         self.status = format!(
-            "imported exposure sheet '{}' — {} column(s), {} cel slot(s); draw into them",
+            "imported exposure sheet '{}' — {} track(s), {} drawing slot(s); draw into them",
             sheet.name,
             sheet.columns.len(),
             n
@@ -4068,18 +4071,18 @@ impl AppState {
     pub fn rename_current_cut(&mut self, name: &str) {
         if self.cut().name == name {
             // Said on the status lane, so the click is not taken as lost.
-            self.status = format!("the cut is already named {name}");
+            self.status = format!("the shot is already named {name}");
             return;
         }
         let at = self.at();
         match self.engine.apply(
-            "rename cut",
+            "rename shot",
             vec![Command::RenameCut {
                 at,
                 name: name.to_string(),
             }],
         ) {
-            Ok(_) => self.status = format!("cut renamed to {name}"),
+            Ok(_) => self.status = format!("shot renamed to {name}"),
             Err(e) => self.status = format!("error: {e}"),
         }
     }
@@ -4101,7 +4104,7 @@ impl AppState {
         let index = self.cut().xsheet.params.len();
         let id = self.engine.alloc_param_id();
         let r = self.engine.apply(
-            "add param column",
+            "add value track",
             vec![Command::AddParamColumn {
                 at,
                 index,
@@ -4109,7 +4112,7 @@ impl AppState {
             }],
         );
         let added = r.is_ok();
-        self.report(r, &format!("param column '{name}' added"));
+        self.report(r, &format!("value track '{name}' added"));
         added.then_some(id)
     }
 
@@ -4145,7 +4148,7 @@ impl AppState {
     /// definition). Keeps at least one column; a locked column refuses.
     pub fn remove_active_column(&mut self) {
         if self.cut().xsheet.columns.len() <= 1 {
-            self.refuse("refused — a cut keeps at least one column");
+            self.refuse("refused — a shot keeps at least one track");
             return;
         }
         let at = self.at();
@@ -4158,12 +4161,12 @@ impl AppState {
             .or_else(|| idx.checked_sub(1).and_then(|i| cols.get(i)))
             .copied()
             .unwrap_or(removed);
-        let r = self.apply_columns("remove column", vec![Command::RemoveColumn { at, id: removed }]);
+        let r = self.apply_columns("remove track", vec![Command::RemoveColumn { at, id: removed }]);
         if r.is_ok() {
             self.view.active_column = new_active;
             self.view.selected_drawing = None;
         }
-        self.report(r, "column removed");
+        self.report(r, "track removed");
     }
     pub fn undo(&mut self) {
         if self.engine.undo().is_ok() {
@@ -4315,7 +4318,7 @@ impl AppState {
             .cut(scene, cut)
             .and_then(|c| c.xsheet.columns.first().map(|col| (col.id, c.name.clone())));
         let Some((column, name)) = found else {
-            self.refuse("refused — that cut has no columns yet (add one first)");
+            self.refuse("refused — that shot has no tracks yet (add one first)");
             return;
         };
         self.view.scene = scene;
@@ -4328,7 +4331,7 @@ impl AppState {
         let (n, r) = self.new_cel_active.clone();
         self.view.active_layer = n;
         self.view.active_role = r;
-        self.status = format!("cut: {name}");
+        self.status = format!("shot: {name}");
     }
 
     /// Add a new scene with a first cut and column, and switch to it — the
@@ -4369,7 +4372,7 @@ impl AppState {
         let column = self.engine.alloc_column_id();
         cut.xsheet.columns.push(Column::new(column, "A"));
         let r = self.engine.apply(
-            "new cut",
+            "new shot",
             vec![Command::AddCut {
                 scene,
                 index,
@@ -4381,7 +4384,7 @@ impl AppState {
                 self.doc_gen = self.doc_gen.wrapping_add(1);
                 self.goto_cut(scene, id);
             }
-            Err(e) => self.refuse(format!("refused — the cut could not be created ({e})")),
+            Err(e) => self.refuse(format!("refused — the shot could not be created ({e})")),
         }
     }
 
@@ -4496,7 +4499,7 @@ impl AppState {
         use anim_core::manga::{self, Page};
         let page = Page::of(self.cut());
         if page.is_none() && manga::panels_of(self.cut()).is_none() {
-            self.refuse("refused — this cut is no page (New page makes one)");
+            self.refuse("refused — this shot is no page (New page makes one)");
             return false;
         }
         let border = page.as_ref().map_or(7.0, |p| p.px(manga::BORDER_MM));
@@ -4607,7 +4610,7 @@ impl AppState {
     /// refused or there was nothing to change.
     fn prod_edit(&mut self, at: CutRef, label: &str, cmds: impl FnOnce(&Cut) -> Vec<Command>) -> bool {
         let Some(cut) = self.engine.project.cut(at.scene, at.cut) else {
-            self.refuse(format!("refused — {label}: that cut is gone"));
+            self.refuse(format!("refused — {label}: that shot is gone"));
             return false;
         };
         let cmds = cmds(cut);
@@ -4622,12 +4625,12 @@ impl AppState {
 
     /// A cut's production status (None clears it) — one undo step.
     pub fn set_cut_status(&mut self, at: CutRef, status: Option<anim_core::board::CutStatus>) {
-        self.prod_edit(at, "cut status", |c| anim_core::board::set_status(c, at, status));
+        self.prod_edit(at, "shot status",|c| anim_core::board::set_status(c, at, status));
     }
 
     /// Who has the cut (empty = nobody) — one undo step.
     pub fn set_cut_assignee(&mut self, at: CutRef, who: &str) {
-        self.prod_edit(at, "cut assignee", |c| anim_core::board::set_assignee(c, at, who));
+        self.prod_edit(at, "shot assignee",|c| anim_core::board::set_assignee(c, at, who));
     }
 
     /// A retake note on `frame`; with `retake` the cut goes to Retake in
@@ -4646,7 +4649,7 @@ impl AppState {
             .cut(at.scene, at.cut)
             .is_some_and(|c| anim_core::board::stored_notes(c).is_none());
         if unreadable {
-            self.refuse("refused — this cut's notes do not read in this build (left as they are)");
+            self.refuse("refused — this shot's notes do not read in this build (left as they are)");
             return false;
         }
         let note = anim_core::board::RetakeNote {
@@ -4671,11 +4674,11 @@ impl AppState {
         }
         let r = self
             .engine
-            .apply("move cut", vec![Command::MoveCut { scene, from, to }]);
+            .apply("move shot", vec![Command::MoveCut { scene, from, to }]);
         if r.is_ok() {
             self.meta_dirty = true;
         }
-        self.report(r, "cut moved");
+        self.report(r, "shot moved");
     }
 
     /// A storyboard panel's cut number (None = its order on the column).
@@ -4690,7 +4693,7 @@ impl AppState {
             return;
         }
         let r = self.engine.apply(
-            "panel cut number",
+            "panel shot number",
             vec![Command::SetDrawingDef {
                 at,
                 drawing,
@@ -4698,7 +4701,7 @@ impl AppState {
                 after,
             }],
         );
-        self.report(r, "panel cut number");
+        self.report(r, "panel shot number");
     }
 
     /// A column whose drawings are storyboard panels: one named BOARD, or
@@ -4728,7 +4731,7 @@ impl AppState {
     /// open cut is not an animatic (see [`Self::panel_column`]).
     pub fn make_cuts_from_panels(&mut self) {
         let Some(column) = self.panel_column() else {
-            self.refuse("refused — open the animatic (a cut with a BOARD column) first");
+            self.refuse("refused — open the animatic (a shot with a BOARD track) first");
             return;
         };
         let at = self.at();
@@ -4736,13 +4739,13 @@ impl AppState {
         match anim_core::board::cuts_from_panels(&mut self.engine.project, at, column) {
             Ok(cmds) => {
                 let n = cmds.len();
-                let r = self.engine.apply("make cuts from panels", cmds);
+                let r = self.engine.apply("make shots from panels", cmds);
                 if r.is_ok() {
                     self.meta_dirty = true;
                 }
-                self.report(r, &format!("made {n} cut(s) from {source}'s panels"));
+                self.report(r, &format!("made {n} shot(s) from {source}'s panels"));
             }
-            Err(e) => self.refuse(format!("refused — no cuts made from {source}'s panels: {e}")),
+            Err(e) => self.refuse(format!("refused — no shots made from {source}'s panels: {e}")),
         }
     }
 
@@ -4764,13 +4767,13 @@ impl AppState {
             .and_then(|s| s.cuts.iter().find(|c| !c.xsheet.columns.is_empty()))
             .map(|c| c.id);
         let Some(first) = first else {
-            self.refuse("refused — the scene has no cut to play");
+            self.refuse("refused — the scene has no shot to play");
             return;
         };
         self.goto_cut(scene, first);
         self.board.episode_play = true;
         self.view.playing = true;
-        self.status = "playing the episode: every cut back to back".into();
+        self.status = "playing the episode: every shot back to back".into();
     }
 
     /// The render folder the editorial's exports land in (refused when
@@ -4827,7 +4830,7 @@ impl AppState {
     /// next free `_2`, `_3` … name instead).
     pub fn export_cut_project(&mut self, at: CutRef) -> bool {
         let Some(name) = self.engine.project.cut(at.scene, at.cut).map(|c| c.name.clone()) else {
-            self.refuse("refused — the cut was not exported: it is gone");
+            self.refuse("refused — the shot was not exported: it is gone");
             return false;
         };
         let Some(dir) = self.export_dir() else {
@@ -4921,11 +4924,11 @@ impl AppState {
         self.palettes.save_into(&mut self.engine.project);
         match anim_core::store::export_cut(&self.engine.project, at.scene, at.cut, path) {
             Ok(()) => {
-                self.status = format!("cut exported: {}", path.display());
+                self.status = format!("shot exported: {}", path.display());
                 true
             }
             Err(e) => {
-                self.refuse(format!("refused — the cut was not exported ({e})"));
+                self.refuse(format!("refused — the shot was not exported ({e})"));
                 false
             }
         }
@@ -5087,9 +5090,9 @@ impl AppState {
             self.view3d.orbit = None;
         }
         let mut said = if wired {
-            "3D model imported under the composite".to_string()
+            "3D model imported under the picture".to_string()
         } else {
-            "3D model imported — connect it to the Output in the node graph".to_string()
+            "3D model imported — connect it to the Output in the Effects graph".to_string()
         };
         if !missing.is_empty() {
             said = format!("{said} (no material library {}: grey)", missing.join(", "));
@@ -5169,8 +5172,8 @@ impl AppState {
         cam.ortho = false;
         match anim_core::r3d::key_camera(self.cut(), at, node, &cam, frame, &mut ids.into_iter()) {
             Ok(cmds) => {
-                let r = self.engine.apply("set cut camera from view", cmds);
-                self.report(r, "cut camera keyed from the view");
+                let r = self.engine.apply("set shot camera from view", cmds);
+                self.report(r, "shot camera keyed from the view");
             }
             Err(e) => self.refuse(e),
         }
@@ -5415,7 +5418,7 @@ impl AppState {
     ) -> Result<(), String> {
         let at = self.at();
         let Some(d) = self.cut().drawing(drawing) else {
-            return Err(format!("drawing {drawing} is not in this cut any more"));
+            return Err(format!("drawing {drawing} is not in this shot any more"));
         };
         let Some(layer) = d
             .layers
@@ -5423,7 +5426,7 @@ impl AppState {
             .find(|l| l.props.name == layer_name)
             .map(|l| l.id)
         else {
-            return Err(format!("no '{layer_name}' layer on that cel"));
+            return Err(format!("no '{layer_name}' layer on that drawing"));
         };
         // The before-state comes from OUR document — the guest's patch is
         // only the after-state, so undo stays exact on the host's truth.
@@ -5794,13 +5797,13 @@ impl AppState {
             return false;
         };
         self.engine.project.next_id = next;
-        match self.engine.apply("build composite from sheet", cmds) {
+        match self.engine.apply("rebuild from layers", cmds) {
             Ok(()) => {
-                self.status = "composite built from the sheet".into();
+                self.status = "rebuilt from the layers".into();
                 true
             }
             Err(e) => {
-                self.refuse(format!("refused — the composite could not be built ({e})"));
+                self.refuse(format!("refused — the graph could not be rebuilt ({e})"));
                 false
             }
         }
@@ -5815,7 +5818,7 @@ impl AppState {
         }
         anim_core::look::template_columns(self.cut())
             .is_empty()
-            .then_some("this cut has no drawing column to build from — add one on the X-sheet")
+            .then_some("this shot has no drawing track to build from — add one on the Timing sheet")
     }
 
     /// GM13 "Build satsuei graph" as the verb runs it: at once over an
@@ -5866,13 +5869,13 @@ impl AppState {
             return false;
         };
         self.engine.project.next_id = next;
-        match self.engine.apply("build satsuei graph", cmds) {
+        match self.engine.apply("full finishing setup", cmds) {
             Ok(()) => {
-                self.status = "satsuei graph built — every node stays editable".into();
+                self.status = "full finishing setup built — every node stays editable".into();
                 true
             }
             Err(e) => {
-                self.refuse(format!("refused — the satsuei graph could not be built ({e})"));
+                self.refuse(format!("refused — the full finishing setup could not be built ({e})"));
                 false
             }
         }
@@ -6164,7 +6167,7 @@ impl AppState {
             return false;
         }
         let r = self.engine.apply("load LUT", cmds);
-        self.report(r, "LUT stored in the cut");
+        self.report(r, "color table stored in the shot");
         true
     }
 
@@ -6803,7 +6806,7 @@ mod sheetedit_tests {
         let why = "the last drawing already lasts to the end of the shot";
         assert_eq!(h.editor().can_perform(Action::HoldPlus), Err(why));
         assert_eq!(h.perform(Action::HoldPlus), Performed::Ignored);
-        assert!(h.state().refusal.contains("lengthen the cut first"), "{}", h.state().refusal);
+        assert!(h.state().refusal.contains("lengthen the shot first"), "{}", h.state().refusal);
         // A locked track refuses timing edits, naming the track.
         assert_eq!(h.perform(Action::ToggleColumnLocked), Performed::Done);
         assert_eq!(h.editor().is_on(Action::ToggleColumnLocked), Some(true));
@@ -6820,7 +6823,7 @@ mod sheetedit_tests {
             let seq = h.state().refusal_seq;
             assert_eq!(h.perform(verb), Performed::Ignored, "{verb:?}");
             assert_ne!(h.state().refusal_seq, seq, "{verb:?} said no");
-            assert!(h.state().refusal.contains("column A is locked"), "{verb:?}: {}", h.state().refusal);
+            assert!(h.state().refusal.contains("track A is locked"), "{verb:?}: {}", h.state().refusal);
         }
         assert_eq!(h.state().engine.position(), steps, "nothing landed");
         // The lock never locks itself: it comes off, and the edit lands.
@@ -6974,7 +6977,7 @@ mod sheetedit_tests {
             let seq = h.state().refusal_seq;
             h.drag_path(&path);
             assert_ne!(h.state().refusal_seq, seq, "frame {frame}: refused");
-            let want = "column A is locked: unlock it in the sheet to draw";
+            let want = "track A is locked: unlock it in the sheet to draw";
             assert!(h.state().refusal.contains(want), "{}", h.state().refusal);
             assert!(h.editor().canvas.stroke_tap.is_empty(), "no stroke began");
         }
@@ -7000,7 +7003,7 @@ mod sheetedit_tests {
         h.perform(Action::ToggleColumnLocked);
         h.state_mut().view.active_column = a;
         h.drag_path(&path);
-        assert!(h.state().refusal.contains("column B is locked"), "{}", h.state().refusal);
+        assert!(h.state().refusal.contains("track B is locked"), "{}", h.state().refusal);
         assert_eq!(strokes(&h), n);
         // Unlocked, the same stroke lands.
         h.state_mut().view.active_column = b;
@@ -7937,8 +7940,8 @@ mod lighttable_tests {
         assert!((moved[1] - 0.6).abs() < 1e-3, "{moved:?}");
         assert_eq!((moved[0], moved[2]), (chart.marks[0], chart.marks[2]));
         // And its inbetweens land between the keys.
-        h.scroll_to("make inbetweens");
-        h.click("make inbetweens");
+        h.scroll_to("Make inbetweens");
+        h.click("Make inbetweens");
         let col = h.state().view.active_column;
         let frames: Vec<u32> = h.state().cut().xsheet.column(col).unwrap().keys().map(|(f, _)| f).collect();
         assert_eq!(frames, vec![0, 2, 4, 6, 8]);

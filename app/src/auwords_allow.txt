@@ -1,0 +1,113 @@
+# Shipped strings that keep a retired word, each under its reason. This list only falls:
+# auwords_retired_words_only_fall fails on a new word and on an entry whose string has gone.
+
+# Stored ids: stack, preset and status keys, file names, default names a file keeps, placeholders of a pattern
+canvas.rs|atari
+canvas.rs|genga
+canvas.rs|shusei
+config.rs|Douga
+config.rs|Genga
+config.rs|Shiage (full)
+config.rs|atari
+config.rs|genga
+config.rs|onion
+config.rs|shiage fill
+config.rs|shusei
+core/audio.rs|serifu
+core/audio.rs|serifu (dialogue)
+core/board.rs|CUT{n:02}
+core/board.rs|douga
+core/board.rs|douga (inbetween)
+core/board.rs|genga
+core/board.rs|genga (key)
+core/board.rs|sakkan
+core/board.rs|sakkan (AD check)
+core/command.rs|unknown param column {column}
+core/deliver.rs|--cut
+core/deliver.rs|cut
+core/deliver.rs|{project}_{scene}_{cut}_{frame:04}
+core/eval.rs|missing-column({column})
+core/model.rs|cut
+core/model.rs|douga
+core/model.rs|douga (inbetween)
+core/model.rs|genga
+core/model.rs|genga (key)
+core/model.rs|sakkan
+core/r3d.rs|cut camera {axis}
+core/r3d.rs|cut camera {label}
+core/xdts.rs|cut
+core/xsheet.rs|cel
+core/xsheet.rs|cel: a drawing column, composited in sheet order
+doc.rs|CUT{:02}
+icons.rs|lasso
+paintcheck.rs|frame {} · {column} {drawing} · {what} · {} px at {}, {}
+render_queue.rs|render queue pick cuts
+sample.rs|sample cut
+templates.rs|opens in the {room} step · tracks {}
+workspace.rs|workspaces.json
+workspace.rs|{said} — the original is kept as workspaces.json.bad
+
+# Core's own label tables: the app reads vocab.rs instead, none reaches a screen
+core/board.rs|satsuei (composite)
+core/board.rs|shiage (paint)
+core/model.rs|correction (sakkan)
+core/xsheet.rs|Cel
+core/xsheet.rs|book: an overlay held above the cels
+core/xsheet.rs|haikei (background): drawn under every cel
+
+# Internal errors: an engine invariant, no path from a control
+canvas.rs|XSHEET {structural} structure cmd(s) from {origin} applying
+core/command.rs|column index {index} out of range (sheet has {})
+core/command.rs|column {} already exists
+core/command.rs|column {} is added unlocked; lock it after
+core/command.rs|cut file '{key}' changed since this edit was made
+core/command.rs|cut index {index} out of range (scene has {})
+core/command.rs|cut meta '{key}' changed since this edit was made
+core/command.rs|cut move {from} -> {to} out of range (scene has {n})
+core/command.rs|cut {} already exists
+core/command.rs|empty cut file key
+core/command.rs|empty cut meta key
+core/command.rs|layer id {id} already exists in this cut
+core/command.rs|param column carries a non-finite key
+core/command.rs|param column index {index} out of range (sheet has {})
+core/command.rs|param column {} already exists
+core/command.rs|unknown param column {id}
+core/command.rs|unknown param column {}
+core/r3d.rs|no param column id left
+core/sheet_ops.rs|unknown param column {pid}
+core/store.rs|audio track {ord} of cut {cut_id}: {e}
+core/store.rs|bad audio track {ord} of cut {cut_id}
+core/store.rs|bad column def for column {col_id}
+doc.rs|cut has no X-sheet columns
+doc.rs|project has no cuts
+main.rs|goto cel frame
+
+# The wire: net.rs is pinned whole and these cross the network; vocab::session_words says them
+net.rs|room
+net.rs|room closed: {e}
+net.rs|the room key was refused
+
+# The command line: --cut is a flag
+core/deliver.rs|no cut named "{n}" — cuts: {}
+core/deliver.rs|the project has no cut
+main.rs|rendering cut "{}" of scene "{}" ({cuts} cuts; --scene / --cut pick another)
+main.rs|the cut is gone
+
+# Plain English: the verb to cut, a column of vertical type, and a Search test's word
+config.rs|Cut
+config.rs|Cut cells
+config.rs|Edit/Clipboard/Cut cells
+config.rs|Edit/Cut
+core/fx.rs|On: outputs the matte itself, white, to drive a grade or a blend. Off: cuts the image by it.
+core/fx.rs|the picture to cut
+core/generator.rs|Horizontal lines, or vertical columns read right to left (tategaki).
+core/generator.rs|Line pitch as a multiple of the size (column pitch in vertical text).
+core/generator.rs|The words. A new line starts the next line, or in vertical text the next column to the left.
+core/generator.rs|Wrap lines at this fraction of the frame width (columns at this fraction of its height); 0 never wraps.
+doc.rs|cells cut
+doc.rs|cut cells
+doc.rs|nothing to cut
+main.rs|pixels have no Cut. Use Copy, then Clear.
+menus.rs|{} cuts the page into panels.
+playback.rs|kuchipaku
+welcome.rs|Cut it into panels

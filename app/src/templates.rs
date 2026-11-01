@@ -211,7 +211,7 @@ impl Template {
         let columns: Vec<&str> = self.columns.iter().map(|(name, _)| *name).collect();
         let bar = self.kind.map_or(&[][..], steps::bar);
         let room = bar.iter().find(|s| s.stage == self.room).map_or(self.room.name(), |s| s.label);
-        format!("opens in the {room} room · columns {}", columns.join(", "))
+        format!("opens in the {room} step · tracks {}", columns.join(", "))
     }
 
     /// A fresh untitled project to this template (history empty).

@@ -178,7 +178,7 @@ pub fn finding_label(state: &AppState, f: &Finding) -> String {
 /// lands there), the canvas framed on its box.
 pub fn jump(state: &mut AppState, canvas: &mut CanvasView, f: &Finding) {
     if state.paintcheck.at != Some(state.at()) {
-        state.refuse("refused — that finding is from another cut (check this one again)");
+        state.refuse("refused — that finding is from another shot (check this one again)");
         return;
     }
     state.goto(f.frame);
@@ -192,17 +192,17 @@ pub fn jump(state: &mut AppState, canvas: &mut CanvasView, f: &Finding) {
         state.arm_layer(&props);
     }
     canvas.look_at_paper(f.bbox);
-    state.status = format!("nuri check: {} px at {}, {}", f.pixels, f.bbox[0], f.bbox[1]);
+    state.status = format!("paint check: {} px at {}, {}", f.pixels, f.bbox[0], f.bbox[1]);
 }
 
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     state.paintcheck.poll();
     let frames = state.frame_count().max(1);
-    plate::legend(ui, "nuri check (paint check)");
+    plate::legend(ui, "paint check");
     let now = state.view.frame;
     ui.horizontal_wrapped(|ui| {
         let pc = &mut state.paintcheck;
-        if plate::detent(ui, !pc.use_range, "whole cut").clicked() {
+        if plate::detent(ui, !pc.use_range, "whole shot").clicked() {
             pc.use_range = false;
         }
         if plate::detent(ui, pc.use_range, "frames").clicked() {
@@ -279,9 +279,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
             .project
             .cut(at.scene, at.cut)
             .map(|c| c.name.as_str())
-            .unwrap_or("another cut");
+            .unwrap_or("another shot");
         ui.label(
-            egui::RichText::new(format!("the last check was of {name} — Check paint for this cut"))
+            egui::RichText::new(format!("the last check was of {name} — Check paint for this shot"))
                 .color(plate::legend_dim()),
         );
         return;
@@ -518,7 +518,7 @@ mod tests {
         h.state_mut().offer_recolour(0, 0, SKIN, new_skin);
         h.run();
         let depth = h.state().engine.history_len();
-        h.click("Recolour this cut");
+        h.click("Recolor this shot");
         h.run();
         assert_eq!(h.state().engine.history_len(), depth + 1, "{}", h.state().refusal);
         let last = h.state().engine.history().last().unwrap().label.clone();
@@ -586,9 +586,9 @@ mod tests {
         h.state_mut().offer_recolour(0, 0, SKIN, [250, 200, 170, 255]);
         h.run();
         assert!(h.has_text_containing("…also used by Ren"), "{}", h.describe());
-        h.hover("Recolour this cut");
+        h.hover("Recolor this shot");
         h.wait(1.0);
-        assert!(h.has_text_containing("line art is never touched; one undo step"), "{}", h.describe());
+        assert!(h.has_text_containing("Line art is never touched. One undo step"), "{}", h.describe());
         // A second chip's edit drops the first offer — and says so.
         h.state_mut().offer_recolour(0, 1, HAIR, [90, 40, 120, 255]);
         assert!(h.state().status.contains("offer for 'skin' dropped"), "{}", h.state().status);
@@ -633,7 +633,7 @@ mod tests {
         assert!(!h.has(&label), "no row of another cut");
         let ed = h.editor_mut();
         jump(&mut ed.state, &mut ed.canvas, &f);
-        assert!(h.state().refusal.contains("another cut"), "{}", h.state().refusal);
+        assert!(h.state().refusal.contains("another shot"), "{}", h.state().refusal);
     }
 
     #[test]
@@ -685,7 +685,7 @@ mod tests {
         let rows = crate::menus::gesture_rows("refill");
         assert!(rows.iter().any(|(g, _)| *g == "Shift+click with fill"), "{rows:?}");
         let rows = crate::menus::gesture_rows("ctrl+shift");
-        assert_eq!(rows, vec![("Ctrl+Shift+click with fill", "replace that colour on the whole layer")]);
+        assert_eq!(rows, vec![("Ctrl+Shift+click with fill", "replace that color on the whole layer")]);
         // F1's sheet lists them under its keys, through the same find.
         h.key(egui::Key::F1);
         h.editor_mut().help.sheet_query = "refill".into();

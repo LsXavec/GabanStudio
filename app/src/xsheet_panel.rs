@@ -234,12 +234,13 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             .id(id)
             .desired_width(44.0),
     )
-    .card(
+    .card(crate::vocab::with_studio_word(
+        crate::vocab::LENGTH,
         "The shot's length: frames (60) or seconds+frames (2+12). Enter sets it, one undo step.",
-    );
+    ));
     ui.label(
         egui::RichText::new(seconds_plus_frames(frames, fps))
-            .font(plate::Role::Small.font())
+            .font(plate::legend_font())
             .color(plate::LEGEND),
     );
     if resp.lost_focus() {
@@ -275,7 +276,10 @@ fn memo_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             .desired_width(130.0)
             .hint_text("dialogue or action"),
     )
-    .card("This frame's notes: dialogue and action. One undo step.\nStudio word: serifu");
+    .card(crate::vocab::with_studio_word(
+        crate::vocab::NOTES,
+        "This frame's notes: dialogue and action. One undo step.",
+    ));
     if resp.lost_focus() {
         let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
         // The field's own Enter, not the sheet's Type-into-cell key.
@@ -441,8 +445,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     if edit_room {
         ui.horizontal(|ui| {
             for (icon, fwd, hover) in [
-                (Icon::ChevL, false, "previous cut (PageUp)"),
-                (Icon::ChevR, true, "next cut (PageDown)"),
+                (Icon::ChevL, false, "Previous shot (PageUp)"),
+                (Icon::ChevR, true, "Next shot (PageDown)"),
             ] {
                 let (cr, cresp) = ui.allocate_exact_size(vec2(44.0, 26.0), Sense::click());
                 let p = ui.painter();
@@ -745,10 +749,13 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             rect.left_center(),
             egui::Align2::LEFT_CENTER,
             crate::vocab::NOTES,
-            plate::Role::Small.font(),
+            plate::legend_font(),
             plate::LEGEND,
         );
-        resp.card("Dialogue and action notes: edit them in the Notes field above.\nStudio word: serifu");
+        resp.card(crate::vocab::with_studio_word(
+            crate::vocab::NOTES,
+            "Dialogue and action notes: edit them in the Notes field above.",
+        ));
     });
     // GM14: each column's kind badge (a click steps Cel → BG → Book →
     // Ref) and its hide and lock toggles — the GM5 verbs, per column.
@@ -1316,7 +1323,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                                 &resp,
                                 egui::WidgetType::Label,
                                 None,
-                                &format!("panel {name} at frame {}: cut {}", p.start + 1, p.cut),
+                                &format!("panel {name} at frame {}: shot {}", p.start + 1, p.cut),
                             );
                         }
                     }
@@ -1465,7 +1472,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         let (mark, note) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
         plate::note_mark(ui.painter(), mark.center(), plate::LEGEND);
         plate::speak(&note, egui::WidgetType::Label, None, "♪");
-        note.card("the sound track the waveform column shows");
+        note.card("the sound the waveform track shows");
         let picker = egui::ComboBox::from_id_salt("sheet_track")
             .selected_text(track_name(cut, t))
             .show_ui(ui, |ui| {
@@ -1485,18 +1492,24 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
                     ui.close();
                 }
             });
+        let kind_card = crate::vocab::with_studio_word(
+            crate::vocab::track_kind(live.kind),
+            "What this sound is: it sorts the mix and the lip flap.",
+        );
         egui::ComboBox::from_id_salt("sheet_track_kind")
-            .selected_text(live.kind.label())
+            .selected_text(crate::vocab::track_kind(live.kind))
             .show_ui(ui, |ui| {
                 for k in TrackKind::ALL {
-                    if ui.selectable_label(live.kind == k, k.label()).clicked() && gesture_safe {
+                    if ui.selectable_label(live.kind == k, crate::vocab::track_kind(k)).clicked() && gesture_safe {
                         commit = Some(anim_core::audio::TrackProps {
                             kind: k,
                             ..now.clone()
                         });
                     }
                 }
-            });
+            })
+            .response
+            .card(kind_card);
         // M and S: painted toggles, as the column heads' H and L.
         for (what, on, name, hover) in [
             (0u8, now.mute, "mute track", "mute: the track never sounds (mute wins over solo)"),
@@ -1544,7 +1557,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
                         .update_while_editing(false),
                 ),
                 "track offset (frames)",
-                "the frame the track's first sample sounds on (below 0 starts before the cut)",
+                "the frame the track's first sample sounds on (below 0 starts before the shot)",
             ),
         ];
         for (r, name, hover) in fields {
@@ -1663,7 +1676,7 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
             (
                 "B",
                 ParamInterp::Bezier,
-                "bezier: shape the curve to the next key with handles in the Curves pane",
+                "bezier: shape the curve to the next key with handles in Motion curves",
             ),
         ] {
             if ui
@@ -1963,11 +1976,11 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
         return;
     };
     let set = cut.drawing_def(panel.drawing).cut.is_some();
-    plate::legend(ui, "panel cut number");
+    plate::legend(ui, "panel shot number");
     ui.horizontal(|ui| {
         let down = ui.add_enabled(panel.cut > 1, egui::Button::new("−"));
-        plate::speak(&down, egui::WidgetType::Button, None, "panel cut number down");
-        if down.card("this panel goes to the cut before").clicked() {
+        plate::speak(&down, egui::WidgetType::Button, None, "panel shot number down");
+        if down.card("this panel goes to the shot before").clicked() {
             state.set_panel_cut(panel.drawing, Some(panel.cut - 1));
         }
         let mut n = match state.sheet_ui.panel_edit {
@@ -1975,7 +1988,7 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
             _ => panel.cut,
         };
         let r = plate::field(ui, egui::DragValue::new(&mut n).range(1..=999).update_while_editing(false))
-            .card("the cut this panel belongs to: drag, or click and type");
+            .card("the shot this panel belongs to: drag, or click and type");
         if r.drag_stopped() {
             if let Some((_, live)) = state.sheet_ui.panel_edit.take() {
                 state.set_panel_cut(panel.drawing, Some(live));
@@ -1988,16 +2001,16 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
             state.set_panel_cut(panel.drawing, Some(n));
         }
         let up = ui.button("+");
-        plate::speak(&up, egui::WidgetType::Button, None, "panel cut number up");
-        if up.card("this panel goes to the next cut").clicked() {
+        plate::speak(&up, egui::WidgetType::Button, None, "panel shot number up");
+        if up.card("this panel goes to the next shot").clicked() {
             state.set_panel_cut(panel.drawing, Some(panel.cut + 1));
         }
     });
-    let how = if set { "set here" } else { "its order on the column" };
-    ui.label(egui::RichText::new(format!("cut {} — {how}", panel.cut)).color(plate::legend_dim()));
+    let how = if set { "set here" } else { "its order on the track" };
+    ui.label(egui::RichText::new(format!("shot {} — {how}", panel.cut)).color(plate::legend_dim()));
     if ui
         .add_enabled(set, egui::Button::new("clear (use panel order)"))
-        .card("the panel's cut number is its order on the column again")
+        .card("the panel's shot number is its order on the track again")
         .clicked()
     {
         state.set_panel_cut(panel.drawing, None);
@@ -2055,10 +2068,10 @@ fn identity_swatches() -> [(&'static str, [u8; 4]); 7] {
         ("struck", plate::CHIP_STRUCK),
         ("legend", plate::CHIP_LEGEND),
         ("paper", plate::CHIP_PAPER),
-        ("ao", plate::CHIP_AO),
-        ("ao, dim", dim(plate::CHIP_AO)),
-        ("aka", plate::CHIP_AKA),
-        ("aka, dim", dim(plate::CHIP_AKA)),
+        ("blue", plate::CHIP_AO),
+        ("blue, dim", dim(plate::CHIP_AO)),
+        ("red", plate::CHIP_AKA),
+        ("red, dim", dim(plate::CHIP_AKA)),
     ]
 }
 
@@ -2082,7 +2095,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
     // ROLE — what drives behaviour. Changing it re-labels only a layer
     // still wearing its old role's default name (a custom name is the
     // artist's; never overwritten).
-    plate::legend(ui, "kind");
+    plate::legend(ui, crate::vocab::COLOR_NAME);
     for role in LayerRole::ALL.iter().rev() {
         let on = props.role == *role;
         ui.horizontal(|ui| {
@@ -2153,7 +2166,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
     // LOCK + ONION — latches, one undo step each.
     let mut locked = props.locked;
     plate::latch(ui, &mut locked, "locked").card(
-        "every painting tool refuses on a locked layer (pen, eraser, fill, lasso, select)",
+        "every painting tool refuses on a locked layer (pen, eraser, fill, draw to fill, select)",
     );
     if locked != props.locked {
         state.layer_set_props(
@@ -2165,8 +2178,8 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
         );
     }
     let mut onion = props.onion;
-    plate::latch(ui, &mut onion, "in onion ghosts")
-        .card("off: this layer never appears in onion-skin ghosts (the flip still shows it)");
+    plate::latch(ui, &mut onion, "In Ghost frames")
+        .card("Off: this layer never appears in Ghost frames (the flip still shows it).");
     if onion != props.onion {
         state.layer_set_props(
             lid,
@@ -2315,7 +2328,10 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             for s in &stacks {
                 let on = s.name == state.stack_current;
                 ui.horizontal(|ui| {
-                    if plate::detent(ui, on, crate::vocab::stack(&s.name)).clicked() && !on {
+                    let shown = crate::vocab::stack(&s.name);
+                    let row = plate::detent(ui, on, shown)
+                        .card(crate::vocab::with_studio_word(shown, "New drawings in this step get this layer set."));
+                    if row.clicked() && !on {
                         state.stack_request = Some(crate::doc::StackRequest::Pick(s.name.clone()));
                     }
                 });
@@ -2561,7 +2577,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                         } else if resp.clicked() {
                             if state.view.line_guard && props.role.is_line() {
                                 state.refuse(
-                                    "refused — line guard is on (unlatch it to arm a line layer)",
+                                    "refused — Protect line art is on (unlatch it to draw on a line layer)",
                                 );
                             } else {
                                 state.arm_layer(&props);
@@ -2991,10 +3007,10 @@ mod sheetui_tests {
         assert!(std::sync::Arc::ptr_eq(&w, &wave(&h).1));
         // The header's picker on the second track: its level, its key.
         let picked = |n: &str| format!("ComboBox = \"{n}\"");
-        assert!(h.describe().contains(&picked("1 dialogue — serifu (dialogue)")), "{}", h.describe());
+        assert!(h.describe().contains(&picked("1 dialogue — Dialogue")), "{}", h.describe());
         h.state_mut().sheet_ui.track = 1;
         h.run();
-        assert!(h.describe().contains(&picked("2 bgm — BGM (music)")), "{}", h.describe());
+        assert!(h.describe().contains(&picked("2 bgm — Music")), "{}", h.describe());
         let (k2, w2) = wave(&h);
         assert_eq!(k2, envelope_key(h.state().cut(), 1, 24));
         assert_eq!(*w2, track_envelope(h.state().cut(), 1, 24));
@@ -3115,29 +3131,29 @@ mod sheetui_tests {
             h.state_mut().goto(f);
             h.run();
             h.right_click_pos(cell(h, 1, f));
-            h.click("panel cut number down");
+            h.click("panel shot number down");
             h.key(egui::Key::Escape);
         };
         step_down(&mut h, 36);
         step_down(&mut h, 60);
         assert_eq!(numbers(&h), [1, 1, 2]);
-        assert!(h.has_text_containing("at frame 61: cut 2"), "{}", h.describe());
+        assert!(h.has_text_containing("at frame 61: shot 2"), "{}", h.describe());
         // "clear" goes back to the order, and the menu stays open to set
         // it again.
         h.state_mut().goto(36);
         h.run();
-        assert!(h.has_text_containing("at frame 37: cut 1"), "{}", h.describe());
+        assert!(h.has_text_containing("at frame 37: shot 1"), "{}", h.describe());
         h.right_click_pos(cell(&h, 1, 36));
         h.click("clear (use panel order)");
         assert_eq!(numbers(&h), [1, 2, 2]);
-        h.click("panel cut number down");
+        h.click("panel shot number down");
         assert_eq!(numbers(&h), [1, 1, 2]);
         h.key(egui::Key::Escape);
         // Make cuts from panels: cut 1 is panels 1 and 2, cut 2 panel 3.
         let source = h.state().cut().name.clone();
         let steps = h.state().engine.position();
         h.perform(Action::MakeCutsFromPanels);
-        assert_eq!(h.state().status, format!("made 2 cut(s) from {source}'s panels"));
+        assert_eq!(h.state().status, format!("made 2 shot(s) from {source}'s panels"));
         let scene = h.state().engine.project.scene(at.scene).unwrap();
         let made: Vec<(&str, u32)> = scene.cuts[1..].iter().map(|c| (c.name.as_str(), c.frame_count)).collect();
         assert_eq!(made, [("CUT02", 60), ("CUT03", 48)]);
@@ -3178,10 +3194,10 @@ mod gm14_minimums {
             ("struck", [228, 225, 214, 255]),
             ("legend", [139, 141, 131, 255]),
             ("paper", [242, 238, 230, 255]),
-            ("ao", [83, 137, 196, 255]),
-            ("ao, dim", [83, 137, 196, 150]),
-            ("aka", [228, 82, 47, 255]),
-            ("aka, dim", [228, 82, 47, 150]),
+            ("blue", [83, 137, 196, 255]),
+            ("blue, dim", [83, 137, 196, 150]),
+            ("red", [228, 82, 47, 255]),
+            ("red, dim", [228, 82, 47, 150]),
         ];
         assert_eq!(super::identity_swatches(), want);
     }

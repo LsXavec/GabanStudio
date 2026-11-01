@@ -695,7 +695,7 @@ impl RamPreview {
         let frames: Vec<u32> = (lo..=hi).collect();
         let evals = evals(engine, look.at, &frames);
         let Some(cut) = engine.project.cut(look.at.scene, look.at.cut) else {
-            return Err("refused — RAM preview: the cut is gone".into());
+            return Err("refused — RAM preview: the shot is gone".into());
         };
         let (lh, mut memo) = (look.hash(), HashMap::new());
         let mut todo = Vec::new();
@@ -885,7 +885,7 @@ pub fn track_envelope(cut: &Cut, track: usize, fps: u32) -> Vec<f32> {
 /// A track as the pickers name it: its number, name and kind.
 pub fn track_name(cut: &Cut, track: usize) -> String {
     match audio::track_props(cut, track) {
-        Some(p) => format!("{} {} — {}", track + 1, p.name, p.kind.label()),
+        Some(p) => format!("{} {} — {}", track + 1, p.name, crate::vocab::track_kind(p.kind)),
         None => format!("{}", track + 1),
     }
 }
@@ -1014,7 +1014,7 @@ impl crate::Editor {
             .show(ctx, |ui| {
                 plate::surface(ui);
                 plate::legend(ui, crate::vocab::LIP_FLAP_TITLE).on_hover_text(
-                    "the mouth column follows the dialogue's level: closed, half or open on each frame",
+                    "the mouth track follows the dialogue's level: closed, half or open on each frame",
                 );
                 egui::Grid::new("lip_flap").num_columns(2).show(ui, |ui| {
                     ui.label("dialogue");
@@ -1026,7 +1026,7 @@ impl crate::Editor {
                             }
                         });
                     ui.end_row();
-                    ui.label("column");
+                    ui.label("track");
                     let col_name = |id: ColumnId| {
                         cut.xsheet
                             .column(id)
@@ -1130,7 +1130,7 @@ impl crate::Editor {
                 let button = ui.add_enabled(ready && safe, egui::Button::new("generate"));
                 plate::mark(ui, button.interact_rect, Target::Named("lip.generate"));
                 if button
-                    .on_hover_text("write the mouths into the column over the frames (one undo step)")
+                    .on_hover_text("write the mouths into the track over the frames (one undo step)")
                     .on_disabled_hover_text(if ready {
                         "not mid-stroke"
                     } else {
@@ -1467,7 +1467,7 @@ pub(crate) mod tests {
             assert!(s.sound_import.is_none());
             assert_eq!(s.engine.position(), steps + 1, "{name}: one undo step");
             // The scrub hint rides the cut's first sound only.
-            assert_eq!(s.status.contains("audio scrub"), i == 0, "{}", s.status);
+            assert_eq!(s.status.contains("sound while dragging"), i == 0, "{}", s.status);
         }
         let got: Vec<(String, TrackKind)> = audio::tracks_iter(s.cut())
             .map(|(_, p, _)| (p.name.clone(), p.kind))
@@ -1726,7 +1726,7 @@ pub(crate) mod tests {
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::XSheet]);
         h.run();
         // The picker's value names the track: number, name, kind.
-        let picked = "ComboBox = \"1 dialogue — serifu (dialogue)\"";
+        let picked = "ComboBox = \"1 dialogue — Dialogue\"";
         assert!(h.describe().contains(picked), "{}", h.describe());
         let steps = h.state().engine.position();
         h.click("mute track");

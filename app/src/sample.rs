@@ -261,7 +261,7 @@ pub fn build_showcase() -> (AppState, Showcase) {
     cut.xsheet.columns.sort_by_key(|c| c.id != bg_col);
     // GM19: the serifu line on the first track, from frame 0.
     cut.audio = Some(AudioClip::from_wav("serifu.wav", dialogue_wav()).expect("the WAV made above reads"));
-    cut.audio_props = TrackProps::new("serifu", TrackKind::Dialogue);
+    cut.audio_props = TrackProps::new("dialogue", TrackKind::Dialogue);
     // GM19: the satsuei showcase, one batch of ordinary, editable nodes,
     // each placed in the graph pane. The BG plate is the paper; the camera
     // films it (plane 0) and pans from its left end onto the frame, eased;

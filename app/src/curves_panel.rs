@@ -500,7 +500,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         .xsheet
         .params
         .iter()
-        .map(|p| (p.id, p.name.clone()))
+        .map(|p| (p.id, crate::vocab::param_track(&p.name)))
         .collect();
     if params.is_empty() {
         plate::legend(ui, "curves");
@@ -517,13 +517,13 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
 
     // The column list: pick which curves show (none picked = all).
     ui.scope_builder(egui::UiBuilder::new().max_rect(list), |ui| {
-        plate::legend(ui, "columns");
+        plate::legend(ui, crate::vocab::TRACKS);
         for (i, (id, name)) in params.iter().enumerate() {
             let on = state.curves.shown.contains(id);
             let text = egui::RichText::new(name).color(ink(i));
             if ui
                 .selectable_label(on, text)
-                .on_hover_text("show this column's curve (none picked = every column)")
+                .on_hover_text("show this track's curve (none picked = every track)")
                 .clicked()
             {
                 if on {

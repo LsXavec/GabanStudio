@@ -208,7 +208,7 @@ const PANEL_SPECS: &[ParamSpec] = &[
     ParamSpec {
         key: "panels",
         label: "panels",
-        help: "The page's panels (koma) in page px: drawn and split with the manga room's panel tool.",
+        help: "The page's panels in page px: drawn and split with the Manga step's panel tool.",
         kind: ParamKind::Polys,
     },
     float("border", "border", "The border's width in px, inside each panel's edge (0.5 mm at 350 dpi is 7).", 0.0, 200.0, 7.0, 0.5),
@@ -255,11 +255,11 @@ impl GenKind {
     pub fn help(self) -> &'static str {
         match self {
             Self::Particles => "Particles from an emitter: sparks, snow, rain, dust, petals, embers. The same on every render, frame by frame.",
-            Self::SpeedLines => "Speed lines (ryūsen) along one direction, tapered at both ends, with an optional clear band.",
-            Self::FocusLines => "Focus lines (shūchūsen) from beyond the frame toward a centre, stopping at a clear ellipse.",
-            Self::Text => "Set lettering (shashoku) for dialogue and captions, horizontal or vertical (tategaki), with an outline; put it over a balloon to letter it.",
-            Self::Balloon => "A speech balloon (fukidashi): ellipse, rounded rect, cloud or burst, with a tail to a point.",
-            Self::Panels => "A manga page's panels (koma): white insides with a border, clear in the gutters.",
+            Self::SpeedLines => "Speed lines along one direction, tapered at both ends, with an optional clear band.",
+            Self::FocusLines => "Focus lines from beyond the frame toward a center, stopping at a clear ellipse.",
+            Self::Text => "Set lettering for dialogue and captions, horizontal or vertical, with an outline; put it over a balloon to letter it.",
+            Self::Balloon => "A speech balloon: ellipse, rounded rect, cloud or burst, with a tail to a point.",
+            Self::Panels => "A manga page's panels: white insides with a border, clear in the gutters.",
         }
     }
 

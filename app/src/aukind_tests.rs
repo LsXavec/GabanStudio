@@ -41,7 +41,7 @@ fn an_animation() -> AppState {
 }
 
 /// A book of one page, its stamp gone: a comic an old build saved.
-fn a_comic() -> AppState {
+pub(crate) fn a_comic() -> AppState {
     let mut state = templates::ALL[templates::COMIC].build();
     state.engine.project.app_meta.remove(KIND_KEY);
     state
@@ -1022,8 +1022,8 @@ fn aukind_go_to_word_follows_the_kind() {
     }
     assert_eq!(Verb::GoToDraw.card(None), Action::RoomDrawing.help(), "the frozen boot");
     // The tooltip of a template names the step it opens on, by kind.
-    assert!(templates::ALL[templates::COMIC].tooltip().contains("opens in the Manga room"));
-    assert!(templates::ALL[0].tooltip().contains("opens in the Plan room"));
+    assert!(templates::ALL[templates::COMIC].tooltip().contains("opens in the Manga step"));
+    assert!(templates::ALL[0].tooltip().contains("opens in the Plan step"));
 }
 
 #[test]

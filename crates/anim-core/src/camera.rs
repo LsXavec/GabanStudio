@@ -87,7 +87,7 @@ pub const PLANE_NAMES: [&str; MAX_PLANES] =
 
 /// What a plane pin takes (its tooltip).
 pub const PLANE_HELP: &str =
-    "one multiplane level: its depth z is 0 at the field, above 0 farther (a pan moves it less), below 0 nearer";
+    "One level of depth: z is 0 at the paper, above 0 farther (a pan moves it less), below 0 nearer.";
 
 /// A rect of whole pixels in frame coordinates (the paper).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -206,7 +206,7 @@ const PAN: f32 = 65536.0;
 pub const CAMERA_SPECS: &[ParamSpec] = &[
     fx::float("pan_x", "pan x", "How far right the camera has moved across the paper, in paper px (a plane at depth z moves 1/(1 + k·z) as far).", -PAN, PAN, 0.0, 1.0),
     fx::float("pan_y", "pan y", "How far down the camera has moved across the paper, in paper px (a plane at depth z moves 1/(1 + k·z) as far).", -PAN, PAN, 0.0, 1.0),
-    fx::float("zoom", "zoom in / zoom out", "1 frames the field; above 1 zooms in, below 1 zooms out.", 0.05, 20.0, 1.0, 0.01),
+    fx::float("zoom", "Zoom in / Zoom out", "1 shows the whole frame; above 1 zooms in, below 1 zooms out.", 0.05, 20.0, 1.0, 0.01),
     fx::float("rotate_deg", "rotate", "Turns the camera clockwise by this many degrees (the picture turns the other way).", -3600.0, 3600.0, 0.0, 0.5),
     fx::float("shake_amp", "shake", "How far the camera shakes, in px; the offset never exceeds it, and 0 is still.", 0.0, 500.0, 0.0, 0.1),
     fx::float("shake_freq", "shake speed", "Shake cycles per frame: 0.25 is one wobble every 4 frames.", 0.0, 0.5, 0.25, 0.005),
