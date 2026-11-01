@@ -261,6 +261,82 @@ pub fn ring_tiles(center: [f32; 2], radius: f32, width: f32, rgba: [f32; 4]) -> 
     tiles.into_iter().map(|(c, v)| (c, Arc::new(TileData::from_vec(v)))).collect()
 }
 
+/// AU28: the longest piece of a segment `path_cover` tests whole: a box around
+/// a long diagonal would hold the page.
+const PATH_PIECE: f32 = 4.0;
+
+/// AU28: every texel near `points`, `[x, y, pressure]`, with its coverage,
+/// soft at both edges by a texel as `ring_tiles` is. Only the boxes of each
+/// segment's short pieces are tested, however far the path runs. Answers how
+/// many texels were tested.
+pub(crate) fn path_cover(points: &[[f32; 3]], width: f32, mut visit: impl FnMut(i32, i32, f32)) -> u64 {
+    let mut tested = 0;
+    let dab = points.first().map(|p| [*p, *p]);
+    let pairs = points.windows(2).map(|w| [w[0], w[1]]);
+    for [a, b] in dab.into_iter().filter(|_| points.len() == 1).chain(pairs) {
+        let piece = PATH_PIECE.max(width);
+        let pieces = ((b[0] - a[0]).hypot(b[1] - a[1]) / piece).ceil().max(1.0) as usize;
+        let at = |t: f32| std::array::from_fn::<f32, 3, _>(|c| a[c] + (b[c] - a[c]) * t);
+        for i in 0..pieces {
+            let (p, q) = (at(i as f32 / pieces as f32), at((i + 1) as f32 / pieces as f32));
+            let reach = width * 0.5 * p[2].max(q[2]) + 1.0;
+            let span = |lo: f32, hi: f32| (lo.min(hi) - reach).floor() as i32..=(lo.max(hi) + reach).ceil() as i32;
+            let (run, rise) = (q[0] - p[0], q[1] - p[1]);
+            let long = run * run + rise * rise;
+            for y in span(p[1], q[1]) {
+                for x in span(p[0], q[0]) {
+                    tested += 1;
+                    let (cx, cy) = (x as f32 + 0.5 - p[0], y as f32 + 0.5 - p[1]);
+                    let t = if long > 0.0 { ((cx * run + cy * rise) / long).clamp(0.0, 1.0) } else { 0.0 };
+                    let half = width * 0.5 * (p[2] + (q[2] - p[2]) * t);
+                    let cover = (half + 0.5 - (cx - run * t).hypot(cy - rise * t)).clamp(0.0, 1.0);
+                    if cover > 0.0 {
+                        visit(x, y, cover);
+                    }
+                }
+            }
+        }
+    }
+    tested
+}
+
+/// AU28: a path as tiles, on the CPU: `ring_tiles` along a line. `rgba` is the
+/// colour as the brush stores it. With `erase` a tile holds only how much goes.
+pub fn path_tiles(points: &[[f32; 3]], width: f32, rgba: [f32; 4], erase: bool) -> BTreeMap<TileCoord, Arc<TileData>> {
+    let t = TILE as i32;
+    let mut covers: BTreeMap<TileCoord, Vec<f32>> = BTreeMap::new();
+    path_cover(points, width, |x, y, cover| {
+        let tile = covers.entry((x.div_euclid(t), y.div_euclid(t))).or_insert_with(|| vec![0.0; TILE * TILE]);
+        let at = (y.rem_euclid(t) * t + x.rem_euclid(t)) as usize;
+        tile[at] = tile[at].max(cover);
+    });
+    let tile_of = |cover: Vec<f32>| {
+        let mut tile = vec![0; TILE_LEN];
+        for (px, cover) in tile.chunks_exact_mut(4).zip(cover) {
+            if cover > 0.0 {
+                let alpha = if erase { cover } else { rgba[3] * cover };
+                for c in 0..3 {
+                    px[c] = if erase { 0 } else { f32_to_f16_bits(rgba[c] * alpha) };
+                }
+                px[3] = f32_to_f16_bits(alpha);
+            }
+        }
+        Arc::new(TileData::from_vec(tile))
+    };
+    covers.into_iter().map(|(c, cover)| (c, tile_of(cover))).collect()
+}
+
+/// One line of a `commit_path`: the path, and how it lands.
+#[derive(Clone, Copy)]
+pub struct PathInk<'a> {
+    pub points: &'a [[f32; 3]],
+    pub width: f32,
+    pub rgba: [f32; 4],
+    pub erase: bool,
+    /// `Keep inside strokes`: a texel with no alpha stays empty.
+    pub inside: bool,
+}
+
 pub(crate) fn drawing_has_art(d: &anim_core::model::Drawing) -> bool {
     !d.strokes.is_empty() || d.layers.iter().any(|l| !l.raster.tiles.is_empty())
 }
@@ -287,6 +363,34 @@ fn tile_over(top: &TileData, under: &TileData) -> Arc<TileData> {
         if keep < 1.0 {
             for c in 0..4 {
                 px[c] = f32_to_f16_bits(f16_bits_to_f32(src[c]) + f16_bits_to_f32(px[c]) * keep);
+            }
+        }
+    }
+    Arc::new(TileData::from_vec(out))
+}
+
+/// AU28: `top`'s alpha taken out of `under`.
+fn tile_cut(top: &TileData, under: &TileData) -> Arc<TileData> {
+    let mut out = under.rgba.to_vec();
+    for (px, src) in out.chunks_exact_mut(4).zip(top.rgba.chunks_exact(4)) {
+        let keep = 1.0 - f16_bits_to_f32(src[3]);
+        if keep < 1.0 {
+            px.iter_mut().for_each(|c| *c = f32_to_f16_bits(f16_bits_to_f32(*c) * keep));
+        }
+    }
+    Arc::new(TileData::from_vec(out))
+}
+
+/// AU28: `top` over `under`, kept to what `under` holds: the lock of the GPU's
+/// `PaintMode::AlphaLock`, on the CPU. No alpha moves, so a texel with none
+/// stays empty.
+fn tile_inside(top: &TileData, under: &TileData) -> Arc<TileData> {
+    let mut out = under.rgba.to_vec();
+    for (px, src) in out.chunks_exact_mut(4).zip(top.rgba.chunks_exact(4)) {
+        let (held, keep) = (f16_bits_to_f32(px[3]), 1.0 - f16_bits_to_f32(src[3]));
+        if held > 0.0 && keep < 1.0 {
+            for c in 0..3 {
+                px[c] = f32_to_f16_bits(f16_bits_to_f32(src[c]) * held + f16_bits_to_f32(px[c]) * keep);
             }
         }
     }
@@ -1295,6 +1399,32 @@ impl AppState {
             tiles.insert(coord, top);
         }
         self.commit_raster(tiles.into_iter().collect(), slot).is_some()
+    }
+
+    /// AU28: `commit_ring` along paths: Show me's lines, by the route a
+    /// finished raster stroke takes. All of `paths` are one undo, and each is
+    /// a stroke to the signal, so a task that wants three dabs reads three.
+    pub fn commit_path(&mut self, paths: &[PathInk], slot: usize) -> bool {
+        let mut tiles = self.commit_target_tiles(slot);
+        for path in paths {
+            for (coord, top) in path_tiles(path.points, path.width, path.rgba, path.erase) {
+                let under = tiles.get(&coord);
+                let landed = match under {
+                    Some(under) if path.erase => tile_cut(&top, under),
+                    Some(under) if path.inside => tile_inside(&top, under),
+                    Some(under) => tile_over(&top, under),
+                    None if path.erase || path.inside => continue,
+                    None => top,
+                };
+                tiles.insert(coord, landed);
+            }
+        }
+        let strokes = self.strokes_done;
+        let landed = self.commit_raster(tiles.into_iter().collect(), slot).is_some();
+        if self.strokes_done != strokes {
+            self.strokes_done = strokes.wrapping_add(paths.len() as u64);
+        }
+        landed
     }
 
     /// AU1: `commit_raster`'s body, the part a paste shares (a paste lands

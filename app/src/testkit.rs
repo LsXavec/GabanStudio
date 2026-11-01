@@ -478,6 +478,18 @@ impl EditorHarness {
         self.run();
     }
 
+    /// AU28: the folder dialog's answer: the logged `ExportPages` runs into
+    /// `dir`, on its worker, to the end, as the App's request does.
+    pub fn answer_pages(&mut self, dir: &std::path::Path) {
+        let rig = self.h.state_mut();
+        let asked = rig.requests.iter().rposition(|r| matches!(r, crate::AppRequest::ExportPages));
+        let asked = asked.unwrap_or_else(|| panic!("no pages were asked for: {:?}", rig.requests));
+        rig.requests.remove(asked);
+        self.state_mut().begin_page_export(dir, None);
+        self.state_mut().wait_page_export();
+        self.run();
+    }
+
     /// AU8: the running export to its end. Only the App polls the queue each
     /// frame, so this drives the same `poll` until no worker is left, with a
     /// ceiling so a stuck job fails instead of hanging the suite.

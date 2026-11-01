@@ -620,10 +620,30 @@ fn lesson_card(dir: &Path) {
     let mut h = EditorHarness::with_gpu_ready();
     open(&mut h, "probe-night");
     at(&mut h, "lesson-chip", (1280, 800));
+    drop(h);
+
+    // AU28: the Amateur's third foot row, held: the finish, blue, on the paper.
+    let mut h = EditorHarness::with_gpu_ready();
+    open(&mut h, "probe-square");
+    for (name, size) in [("lesson-hold", full), ("lesson-hold-small", (1280, 800))] {
+        crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
+        let spot = h.rects(crate::lesson::HOLD)[0].center();
+        let button = |pressed| egui::Event::PointerButton {
+            pos: spot,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        h.kit_mut().input_mut().events.extend([egui::Event::PointerMoved(spot), button(true)]);
+        h.run_frames(3);
+        h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("{name}.png")));
+        h.kit_mut().input_mut().events.push(button(false));
+        h.run_frames(3);
+    }
 }
 
 /// AU27: the card's pictures, by file name.
-const LESSON: [(&str, u32, u32); 15] = [
+const LESSON: [(&str, u32, u32); 17] = [
     ("lesson-draw", 1600, 900),
     ("lesson-draw-fold", 832, 520),
     ("lesson-wander", 832, 520),
@@ -639,6 +659,8 @@ const LESSON: [(&str, u32, u32); 15] = [
     ("lesson-plan", 1600, 900),
     ("lesson-plan-fold", 832, 520),
     ("lesson-chip", 1280, 800),
+    ("lesson-hold", 1600, 900),
+    ("lesson-hold-small", 1280, 800),
 ];
 
 fn lesson_owed() -> Vec<(String, u32, u32)> {

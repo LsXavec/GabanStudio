@@ -38,8 +38,7 @@ impl Class {
     }
 }
 
-/// What a path of a lesson's art is for (spec 5.13). Shown by the guide, which
-/// comes after the frame; the table rules read it today.
+/// What a path of a lesson's art is for (spec 5.13).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PathKind {
     Guide,
@@ -47,6 +46,8 @@ pub enum PathKind {
     StandIn,
     Seed,
     Finish,
+    /// Rubbed out, not drawn: an eraser's stroke (Up Late's `wipe`).
+    Wipe,
 }
 
 /// A line of a lesson's art, in paper units, which are the paper's pixels
@@ -57,7 +58,6 @@ pub struct Path {
     pub width: f32,
     pub kind: PathKind,
     /// The guide paints it above an opaque background.
-    #[allow(dead_code)]
     pub over: bool,
 }
 
@@ -72,6 +72,267 @@ impl Path {
         self.points.iter().fold([f32::MAX, f32::MAX, f32::MIN, f32::MIN], |b, p| {
             [b[0].min(p[0]), b[1].min(p[1]), b[2].max(p[0]), b[3].max(p[1])]
         })
+    }
+}
+
+/// AU28: lines by a hand, and Deckle, from curves in code: no binary assets
+/// (spec 5.13). Nothing here is symmetrical and nothing is ruled.
+pub mod art {
+    use super::{Path, PathKind};
+
+    pub type Pt = [f32; 2];
+
+    /// The samples of one cubic.
+    const CUBIC_ROWS: usize = 32;
+    /// The gap between a hand line's samples, in paper units.
+    pub const HAND_STEP: f32 = 3.0;
+    /// A hand's wobble: how far it strays, and over what run.
+    const WOBBLE: f32 = 1.0;
+    const WOBBLE_RUN: f32 = 34.0;
+    /// A line's ends hold still over this run: a joined line stays joined.
+    const WOBBLE_PIN: f32 = 12.0;
+    /// The pen on a straight run, full pressure being the middle of a turn.
+    const LIGHT: f32 = 0.62;
+    /// What a turn over `TURN_READ` samples takes to reach full pressure.
+    const TURN_FULL: f32 = 0.7;
+    const TURN_READ: usize = 4;
+    /// The share of a line its ends take to swell, and where they start.
+    const TIP_SHARE: f32 = 0.12;
+    const TIP: f32 = 0.2;
+    /// The strip's width, of its length.
+    const STRIP_WIDE: f32 = 0.2;
+    /// The torn side's soft tear: how far from straight, and over what run.
+    const TEAR: f32 = 5.0;
+    const TEAR_RUN: f32 = 76.0;
+    /// How far a line runs past a corner.
+    const OVERSHOOT: f32 = 3.5;
+    /// Where the eye and the two holes stand along the strip, tail to head.
+    const EYE_AT: f32 = 0.84;
+    const HOLES_AT: [f32; 2] = [0.3, 0.57];
+    /// A dab's width, of the strip's.
+    const DAB_WIDE: f32 = 0.2;
+    /// The ink line's width, of the strip's.
+    const LINE_WIDE: f32 = 0.06;
+
+    /// A cubic, sampled.
+    pub fn cubic(p: [Pt; 4]) -> Vec<Pt> {
+        let at = |t: f32| {
+            let s = 1.0 - t;
+            let (a, b, c, d) = (s * s * s, 3.0 * s * s * t, 3.0 * s * t * t, t * t * t);
+            [0, 1].map(|i| a * p[0][i] + b * p[1][i] + c * p[2][i] + d * p[3][i])
+        };
+        (0..=CUBIC_ROWS).map(|i| at(i as f32 / CUBIC_ROWS as f32)).collect()
+    }
+
+    /// Cubics in a chain, from `start`, each `[control, control, end]`.
+    pub fn curve(start: Pt, runs: &[[Pt; 3]]) -> Vec<Pt> {
+        let mut out = vec![start];
+        for [a, b, end] in runs {
+            let from = out[out.len() - 1];
+            out.extend_from_slice(&cubic([from, *a, *b, *end])[1..]);
+        }
+        out
+    }
+
+    pub fn length(points: &[Pt]) -> f32 {
+        points.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).sum()
+    }
+
+    /// `points` again, `step` apart along the line, both ends kept.
+    pub fn spaced(points: &[Pt], step: f32) -> Vec<Pt> {
+        let total = length(points);
+        let rows = ((total / step).round() as usize).max(1);
+        let gap = total / rows as f32;
+        let (mut out, mut walked, mut next) = (Vec::with_capacity(rows + 1), 0.0, 0.0);
+        for w in points.windows(2) {
+            let long = (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]);
+            while out.len() < rows && next <= walked + long && long > 0.0 {
+                let t = (next - walked) / long;
+                out.push([w[0][0] + (w[1][0] - w[0][0]) * t, w[0][1] + (w[1][1] - w[0][1]) * t]);
+                next += gap;
+            }
+            walked += long;
+        }
+        out.extend(points.last());
+        out
+    }
+
+    /// A seeded value at each whole `i`, in -1..1.
+    fn lattice(seed: u32, i: i32) -> f32 {
+        let mut h = (i as u32).wrapping_mul(0x9E37_79B1) ^ seed.wrapping_mul(0x85EB_CA77);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0xC2B2_AE3D);
+        h ^= h >> 13;
+        h as f32 / u32::MAX as f32 * 2.0 - 1.0
+    }
+
+    /// Smooth seeded noise: repeatable, so a pose is the same every run.
+    fn noise(seed: u32, x: f32) -> f32 {
+        let (i, t) = (x.floor(), x - x.floor());
+        let t = t * t * (3.0 - 2.0 * t);
+        let (a, b) = (lattice(seed, i as i32), lattice(seed, i as i32 + 1));
+        a + (b - a) * t
+    }
+
+    /// The way out of a line at sample `i`, a quarter turn from its run.
+    fn side(points: &[Pt], i: usize) -> Pt {
+        let (a, b) = (points[i.saturating_sub(1)], points[(i + 1).min(points.len() - 1)]);
+        let (run, rise) = (b[0] - a[0], b[1] - a[1]);
+        let long = run.hypot(rise).max(1e-3);
+        [rise / long, -run / long]
+    }
+
+    /// `points` pushed out along their sides by `by(i)`.
+    fn pushed(points: &[Pt], by: impl Fn(usize) -> f32) -> Vec<Pt> {
+        let at = |i: usize| {
+            let (s, d) = (side(points, i), by(i));
+            [points[i][0] + s[0] * d, points[i][1] + s[1] * d]
+        };
+        (0..points.len()).map(at).collect()
+    }
+
+    /// A hand's wobble along `points`: `WOBBLE` at its widest, gone at the ends.
+    pub fn wobble(points: &[Pt], seed: u32) -> Vec<Pt> {
+        let line = spaced(points, HAND_STEP);
+        let last = line.len() - 1;
+        let raw: Vec<f32> = (0..=last)
+            .map(|i| {
+                let (from, to) = (i as f32 * HAND_STEP, (last - i) as f32 * HAND_STEP);
+                noise(seed, from / WOBBLE_RUN) * (from.min(to) / WOBBLE_PIN).min(1.0)
+            })
+            .collect();
+        let peak = raw.iter().fold(0.0f32, |p, v| p.max(v.abs())).max(1e-3);
+        pushed(&line, |i| raw[i] / peak * WOBBLE)
+    }
+
+    /// A pen's pressure along `points`: light at the tips, heavier on the turn.
+    pub fn taper(points: &[Pt]) -> Vec<[f32; 3]> {
+        let last = points.len().saturating_sub(1);
+        let heading = |a: Pt, b: Pt| (b[1] - a[1]).atan2(b[0] - a[0]);
+        let turn = |i: usize| {
+            let (before, after) = (i.saturating_sub(TURN_READ), (i + TURN_READ).min(last));
+            if before == i || after == i {
+                return 0.0;
+            }
+            let bend = heading(points[i], points[after]) - heading(points[before], points[i]);
+            bend.sin().atan2(bend.cos()).abs()
+        };
+        let press = |i: usize| {
+            let t = i as f32 / last.max(1) as f32;
+            let tip = (t.min(1.0 - t) / TIP_SHARE).min(1.0);
+            let body = LIGHT + (1.0 - LIGHT) * (turn(i) / TURN_FULL).min(1.0);
+            let p = points[i];
+            [p[0], p[1], body * (TIP + (1.0 - TIP) * tip.sqrt())]
+        };
+        (0..=last).map(press).collect()
+    }
+
+    /// `points` as a person's line.
+    pub fn hand(points: &[Pt], width: f32, kind: PathKind, seed: u32) -> Path {
+        Path { points: taper(&wobble(points, seed)), width, kind, over: false }
+    }
+
+    /// A press of the pen: a dot, a shade off round.
+    pub fn dab(at: Pt, width: f32, kind: PathKind) -> Path {
+        let points = vec![[at[0], at[1], 0.9], [at[0] + width * 0.08, at[1] + width * 0.05, 1.0]];
+        Path { points, width, kind, over: false }
+    }
+
+    /// A spine from `tail` to `head`, `long` along the line wherever they
+    /// stand: nearer than `long`, it arches up off the paper, and more to the
+    /// head than the tail, because the strip is being pushed from behind.
+    pub fn spine(tail: Pt, head: Pt, long: f32) -> Vec<Pt> {
+        const ROWS: usize = 96;
+        const LEAN: f32 = 0.8;
+        let arched = |rise: f32| -> Vec<Pt> {
+            let at = |i: usize| {
+                let t = i as f32 / ROWS as f32;
+                let up = (std::f32::consts::PI * t.powf(LEAN)).sin() * rise;
+                [tail[0] + (head[0] - tail[0]) * t, tail[1] + (head[1] - tail[1]) * t - up]
+            };
+            (0..=ROWS).map(at).collect()
+        };
+        let (mut low, mut high) = (0.0, long);
+        for _ in 0..32 {
+            let mid = (low + high) * 0.5;
+            if length(&arched(mid)) < long {
+                low = mid;
+            } else {
+                high = mid;
+            }
+        }
+        spaced(&arched(low), long / ROWS as f32)
+    }
+
+    /// The walk: flat, then the tail catches up with a head that stays put,
+    /// then flat with the head reaching on and a tail that stays put. Each
+    /// pose keeps one foot of the last. `reach` is how far a stride goes.
+    pub fn walk(tail: Pt, long: f32, reach: f32, poses: usize) -> Vec<Vec<Pt>> {
+        let stride = |i: usize| {
+            let hops = ((i + 1) / 2) as f32 * reach;
+            let from = [tail[0] + hops, tail[1]];
+            let to = [tail[0] + (i / 2) as f32 * reach + long, tail[1]];
+            spine(from, to, long)
+        };
+        (0..poses).map(stride).collect()
+    }
+
+    /// Deckle: two lines and three dots.
+    pub struct Deckle {
+        /// The cut side, the spine itself, tail to head, then round the head.
+        pub cut: Path,
+        /// The torn side, head to tail, then round the tail, which shuts it.
+        pub torn: Path,
+        pub eye: Path,
+        pub holes: [Path; 2],
+    }
+
+    impl Deckle {
+        pub fn paths(self) -> Vec<Path> {
+            let [first, second] = self.holes;
+            vec![self.cut, self.torn, self.eye, first, second]
+        }
+    }
+
+    /// Deckle along `spine`, its cut side. Paper does not stretch, so a pose's
+    /// length is the spine's, and the seed tears the same edge on every pose:
+    /// the noise runs along the strip, not across the paper (spec 5.13).
+    pub fn deckle(spine: &[Pt], seed: u32) -> Deckle {
+        let long = length(spine);
+        let wide = long * STRIP_WIDE;
+        let spine = spaced(spine, HAND_STEP);
+        let last = spine.len() - 1;
+        // Up off the paper, whichever way the strip is headed.
+        let up = if spine[last][0] < spine[0][0] { -1.0 } else { 1.0 };
+        let share = |i: usize| i as f32 / last as f32;
+        let tear = |i: usize| noise(seed, share(i) * long / TEAR_RUN) * TEAR;
+        let back: Vec<Pt> = pushed(&spine, |i| up * (wide + tear(i)));
+        let line = wide * LINE_WIDE;
+        // On the strip's middle line, this far along it.
+        let stood = |at: f32| {
+            let i = (at * last as f32).round() as usize;
+            let (s, p) = (side(&spine, i), spine[i]);
+            [p[0] + s[0] * up * wide * 0.5, p[1] + s[1] * up * wide * 0.5]
+        };
+        let past = |from: Pt, to: Pt| {
+            let long = (to[0] - from[0]).hypot(to[1] - from[1]).max(1e-3);
+            [to[0] + (to[0] - from[0]) / long * OVERSHOOT, to[1] + (to[1] - from[1]) / long * OVERSHOOT]
+        };
+        // A corner's turn is sampled as the line is: `taper` reads samples, and
+        // one long last segment would all be the pen's thin tip, and leak.
+        let round = |from: Pt, to: Pt| spaced(&[from, past(from, to)], HAND_STEP).split_off(1);
+        let mut cut = wobble(&spine, seed);
+        cut.extend(round(spine[last], back[last]));
+        let torn_back: Vec<Pt> = back.iter().rev().copied().collect();
+        let mut torn = wobble(&torn_back, seed.wrapping_add(1));
+        torn.extend(round(back[0], spine[0]));
+        let press = wide * DAB_WIDE;
+        Deckle {
+            cut: Path { points: taper(&cut), width: line, kind: PathKind::Guide, over: false },
+            torn: Path { points: taper(&torn), width: line, kind: PathKind::Guide, over: false },
+            eye: dab(stood(EYE_AT), press, PathKind::Guide),
+            holes: HOLES_AT.map(|at| dab(stood(at), press * 0.85, PathKind::Guide)),
+        }
     }
 }
 

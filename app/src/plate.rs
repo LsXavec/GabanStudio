@@ -101,6 +101,14 @@ pub const CHIP_LEGEND: [u8; 4] = [139, 141, 131, 255];
 pub const CHIP_PAPER: [u8; 4] = [242, 238, 230, 255];
 pub const CHIP_AO: [u8; 4] = [83, 137, 196, 255];
 pub const CHIP_AKA: [u8; 4] = [228, 82, 47, 255];
+/// AU28: a lesson's blue line (spec 5.7). Non-photo blue, the scaffold's ink:
+/// `AO` is grey now. It never reaches a file.
+pub const GUIDE: Color32 = Color32::from_rgb(CHIP_AO[0], CHIP_AO[1], CHIP_AO[2]);
+
+/// AU28: the document's ink as the UI paints it: `Show me`'s line on its way.
+pub fn opaque(rgba: [u8; 4]) -> Color32 {
+    Color32::from_rgb(rgba[0], rgba[1], rgba[2])
+}
 
 /// What a disabled scope dims to. egui's 0.5 leaves `INK` at 2.87 on `DESK`;
 /// at this value `INK` holds 3.0 on all three fills and `INK2` still does

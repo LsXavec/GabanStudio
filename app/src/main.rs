@@ -84,6 +84,8 @@ mod austrip_tests;
 mod aulesson_tests;
 #[cfg(test)]
 mod auguide_tests;
+#[cfg(test)]
+mod auguide_show_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;
@@ -10063,6 +10065,7 @@ impl Editor {
         self.canvas.rail_reserve = reserve && rail_shows && !self.kind_unset;
         self.canvas.empty_cell_hint =
             self.say.empty_cell_due(&self.state) && self.animated() && self.lesson.is_none();
+        self.lesson_guide(ui.ctx());
         let export_view = self.export_view();
         let strokes = self.state.strokes_done;
         let mut tabs = EditorTabs {

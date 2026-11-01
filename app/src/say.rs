@@ -904,7 +904,11 @@ impl Editor {
             self.state.refuse(doc::FINISH_STROKE);
             return Performed::Ignored;
         }
+        // AU28: no lesson calls `enter_room` (spec 5.10): the person walks.
         if !visible_panes(&self.dock).contains(&Pane::Canvas) {
+            if self.lesson.is_some() {
+                return Performed::Ignored;
+            }
             self.enter_room(Stage::Drawing);
         }
         let Some(slot) = self.canvas.slot_at_pen_down(true, &mut self.state) else {
@@ -919,6 +923,12 @@ impl Editor {
         if !self.state.commit_ring(center, radius, stroke, ink, slot) {
             return Performed::Ignored;
         }
+        self.shown_landed();
+        Performed::Done
+    }
+
+    /// What follows a line Show me landed, the circle's or a lesson's.
+    pub(crate) fn shown_landed(&mut self) {
         self.canvas.engine_changed();
         self.say.circle = true;
         // A check listening for a line is listening for the person's. This
@@ -929,7 +939,6 @@ impl Editor {
         }
         // The Help window's row asks with no frame to come yet.
         self.tick_stroke();
-        Performed::Done
     }
 
     /// The next circle: on a drawing past the first frame, where the ticks

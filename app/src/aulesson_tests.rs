@@ -40,9 +40,9 @@ const SQUARE: Template = Template { kind: Some(ProjectKind::Drawing), width: 100
 /// a pass each of its frames.
 const FILM: Template = Template { kind: Some(ProjectKind::Animation), width: 1200, height: 900, cut_frames: 24, fps: 5, ..templates::READY };
 
+/// A hand's line: the art rules of spec 5.14 read the probe too.
 fn line(a: [f32; 2], b: [f32; 2], kind: PathKind) -> Path {
-    let at = |t: f32| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 1.0];
-    Path { points: (0..=8).map(|i| at(i as f32 / 8.0)).collect(), width: 4.0, kind, over: false }
+    lessons::art::hand(&[a, b], 4.0, kind, a[0] as u32 ^ a[1] as u32)
 }
 
 /// A long line, a dab, and the two lines one stroke cannot answer together.
@@ -74,7 +74,10 @@ const TASKS: &[Task] = &[
         ring: &[Target::Step(Stage::Export)],
         ..task("Press {Export}.", Some("A file is what you keep."), Stage::Export, Done::OnStep(Stage::Export), Show::Perform(Action::RoomExport))
     },
-    task("Save it as a picture.", None, Stage::Export, Done::Exported(1), Show::Perform(Action::ExportStill)),
+    Task {
+        ring: &[Target::Action(Action::ExportStill)],
+        ..task("Save it as a picture.", None, Stage::Export, Done::Exported(1), Show::Perform(Action::ExportStill))
+    },
 ];
 
 const PROBE: Lesson = Lesson {

@@ -222,6 +222,43 @@ pub fn rotate_vec(v: egui::Vec2, deg: f32) -> egui::Vec2 {
     vec2(v.x * c - v.y * s, v.x * s + v.y * c)
 }
 
+/// AU28: the refusal's words the card answers: a tap with Fill or Select on a
+/// machine with no paint engine (spec 5.9).
+pub(crate) const NEEDS_ENGINE: &str = "needs the GPU brush engine";
+
+/// AU28: a lesson's line, in the paper's units (spec 5.7).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GuideLine {
+    pub points: Vec<Pos2>,
+    pub width: f32,
+    /// Painted above the art, for a line that has to read on an opaque ground.
+    pub over: bool,
+}
+
+/// AU28: a lesson's lines on the paper. This lives on the canvas and is painted
+/// by it alone: `Project` never holds it, so no render and no save can reach it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Guide {
+    /// The current task's lines, in `plate::GUIDE`.
+    pub lines: Vec<GuideLine>,
+    /// Show me's ink, as far as the hand has come.
+    pub reveal: Vec<GuideLine>,
+    pub reveal_ink: Color32,
+}
+
+/// AU28: `lines` through the view, so they follow zoom, turn and mirror.
+fn paint_lines(painter: &egui::Painter, xf: &ViewXform, lines: &[GuideLine], over: bool, ink: Color32) {
+    for line in lines.iter().filter(|l| l.over == over) {
+        let width = (line.width * xf.zoom).max(1.0);
+        let on_screen: Vec<Pos2> = line.points.iter().map(|p| xf.paper_to_screen(*p)).collect();
+        if let [dot] = on_screen[..] {
+            painter.circle_filled(dot, width * 0.5, ink);
+        } else {
+            painter.add(egui::Shape::line(on_screen, egui::Stroke::new(width, ink)));
+        }
+    }
+}
+
 impl ViewXform {
     pub fn paper_to_screen(&self, p: Pos2) -> Pos2 {
         let mut v = (p - self.paper * 0.5).to_vec2() * self.zoom;
@@ -877,6 +914,8 @@ pub struct CanvasView {
     /// AU7: the empty cell's line is due: hints on, its once-only bit unset,
     /// and the document holds a drawing. The host sets it before `ui`.
     pub(crate) empty_cell_hint: bool,
+    /// AU28: what a lesson stands on the paper. The host sets it before `ui`.
+    pub(crate) guide: Guide,
     /// AU7: that line painted this frame.
     pub(crate) dbg_empty_line: bool,
     /// Refusal edge-flash bookkeeping (seq last seen + when).
@@ -1145,6 +1184,7 @@ impl CanvasView {
             last_stroke_box: None,
             moves_done: 0,
             empty_cell_hint: false,
+            guide: Guide::default(),
             dbg_empty_line: false,
             flash_seq: 0,
             flash_since: -10.0,
@@ -4647,6 +4687,11 @@ impl CanvasView {
             });
         }
 
+        // AU28: the guide, on the paper and under the art.
+        if edit_view {
+            paint_lines(&painter, &xf, &self.guide.lines, false, plate::GUIDE);
+        }
+
         // 1. The columns UNDER the active one (GM5: Cut::render_split, the
         // order export, eval and graphcomp use — BG, then Cel, then Book,
         // each band in sheet order; hidden and Ref columns never draw): each
@@ -4966,6 +5011,12 @@ impl CanvasView {
                 painter.add(egui::Shape::closed_line(xf.paper_corners().to_vec(), flash));
             }
             ui.ctx().request_repaint();
+        }
+
+        // AU28: a guide line over an opaque ground, and Show me's ink on its way.
+        if edit_view {
+            paint_lines(&painter, &xf, &self.guide.lines, true, plate::GUIDE);
+            paint_lines(&painter, &xf, &self.guide.reveal, false, self.guide.reveal_ink);
         }
 
         // ---- LASSO FILL preview: the loop so far, blue dashed, closed.
@@ -6369,6 +6420,13 @@ impl CanvasView {
             );
             return;
         }
+        self.fill_at(to_paper(pos), state);
+    }
+
+    /// AU28: a plain fill at `p` on the paper: `fill_input` past its gate. CPU
+    /// work, so `Show me` can do it on a machine whose pen route refuses.
+    pub(crate) fn fill_at(&mut self, p: Pos2, state: &mut AppState) {
+        let area = self.sync_layer_rect(state).irect();
         if state.active_layer_props().is_some_and(|p| !p.visible) {
             state.status = format!(
                 "layer '{}' is hidden — press A to switch or click its eye",
@@ -6391,7 +6449,6 @@ impl CanvasView {
             state.status = "no raster layer here to fill".into();
             return;
         }
-        let p = to_paper(pos);
         let seed = (p.x.floor() as i32, p.y.floor() as i32);
         let reference = if self.fill_ref_cel {
             state.display_cel_flatten().unwrap_or_default()
@@ -9436,13 +9493,39 @@ pub(crate) mod extpaper_tests {
         v
     }
 
-    fn texel(state: &AppState, x: i32, y: i32) -> [f32; 4] {
+    pub(crate) fn texel(state: &AppState, x: i32, y: i32) -> [f32; 4] {
         let t = TILE as i32;
         let Some(tile) = state.active_layer_tiles().and_then(|m| m.get(&(x.div_euclid(t), y.div_euclid(t)))) else {
             return [0.0; 4];
         };
         let i = ((y.rem_euclid(t) * t + x.rem_euclid(t)) * 4) as usize;
         std::array::from_fn(|c| f16_bits_to_f32(tile.rgba[i + c]))
+    }
+
+    /// AU28: one seed, by the tap and by `fill_at`: the same pixels, and the
+    /// same stroke-free bookkeeping (spec 5.9).
+    #[test]
+    fn auguide_fill_at_matches_fill_input() {
+        let boxed = || {
+            let mut state = wide_state();
+            paint_texels(&mut state, &ring(700, 400, 900, 600), [0.0, 0.0, 0.0, 1.0]);
+            state
+        };
+        let (mut tapped, xf) = fill_rig(boxed());
+        tapped.state_mut().0.tool = CanvasTool::Fill;
+        tapped.step();
+        click(&mut tapped, xf.paper_to_screen(pos2(800.0, 500.0)), Modifiers::NONE);
+        let (mut called, _) = fill_rig(boxed());
+        let (canvas, state) = called.state_mut();
+        canvas.fill_at(pos2(800.0, 500.0), state);
+        let (a, b) = (&tapped.state().1, &called.state().1);
+        assert_eq!(a.fills_done, 1, "the tap filled");
+        assert_eq!(b.fills_done, 1, "and so did the call");
+        let same = |c: &(i32, i32), tile: &Arc<TileData>| b.active_layer_tiles().and_then(|m| m.get(c)).is_some_and(|t| t.rgba == tile.rgba);
+        let tiles = a.active_layer_tiles().expect("the tap's tiles");
+        assert_eq!(tiles.len(), b.active_layer_tiles().expect("the call's tiles").len());
+        assert!(tiles.iter().all(|(c, tile)| same(c, tile)), "identical pixels");
+        assert!(texel(a, 800, 500)[3] > 0.0 && texel(a, 650, 500)[3] == 0.0, "inside the ring, and only there");
     }
 
     /// The canvas's fill input alone, the GPU gate set by hand (the plain

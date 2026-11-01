@@ -8,6 +8,7 @@ use eframe::egui::{self, Color32, Id, LayerId, Order, Rect, Shape, pos2, vec2};
 
 use crate::aulesson_tests::{along, open, pen};
 use crate::aurail_tests::sized;
+use crate::canvas::extpaper_tests::paint_texels;
 use crate::config::Action;
 use crate::floats::Float;
 use crate::lessons::{self, Class, Done, Lesson, Show, Target, Task};
@@ -88,6 +89,13 @@ fn each_task(size: (f32, f32), mut answer: impl FnMut(&mut EditorHarness, &Lesso
             let mut h = EditorHarness::as_shipped();
             sized(&mut h, size.0, size.1);
             open(&mut h, lesson.id);
+            // A task past the first stands on what the first ones drew: the
+            // Export step offers nothing over a blank paper.
+            if i > 0 {
+                let e = h.editor_mut();
+                e.canvas.slot_at_pen_down(true, &mut e.state).expect("a cel to draw on");
+                paint_texels(&mut e.state, &[(10, 10)], [0.0, 0.0, 0.0, 1.0]);
+            }
             let earlier = lesson.tasks[..i].iter().rev().map(|t| t.step).find(|s| *s != task.step);
             let room = if matches!(task.done, Done::OnStep(_)) { earlier } else { Some(task.step) };
             if let Some(room) = room {
