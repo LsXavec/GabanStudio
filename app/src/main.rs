@@ -60,6 +60,8 @@ mod audock_tests;
 #[cfg(test)]
 mod auexport_tests;
 #[cfg(test)]
+mod aukind_tests;
+#[cfg(test)]
 #[path = "../../crates/anim-core/tests/support/gif_decode.rs"]
 mod gif_decode;
 #[cfg(test)]
@@ -100,6 +102,7 @@ use newproject::{FormAction, NewProjectForm};
 use paint::PaintLayer;
 use plate::Card;
 use std::time::Duration;
+use steps::ProjectKind;
 use workspace::{Pane, Stage, Workspace, Workspaces};
 
 /// A peer as the room lamp's hover names them — with their build, so
@@ -3108,8 +3111,12 @@ impl Editor {
         // (a shortcut, a menu or the palette itself).
         if out != Performed::Ignored {
             self.palette.note_run(action);
+            // AU18: a verb that grew a drawing ticks the row it grew into.
+            self.promote();
             // GM8: the first run of a Quick start step's verb ticks it.
-            welcome::tick(&mut self.quick_start, action);
+            if let Some(slot) = self.quick_rows().iter().position(|s| s.ticks_on == Some(action)) {
+                self.tick_slot(slot);
+            }
             self.say.added |= action == Action::AddDrawingAfter;
         }
         #[cfg(test)]
@@ -3132,6 +3139,13 @@ impl Editor {
         // the dock is not rebuilt under a live stroke (D7).
         if self.canvas.stroke_active() && stroke_guarded(action) {
             self.state.refuse("refused — finish the stroke first");
+            *out = Performed::Ignored;
+            return;
+        }
+        // AU18: a chord reaches here past `can_perform`, so a step this bar
+        // lacks is refused here too, in the same sentence.
+        if let Some(why) = self.hidden_step(action) {
+            self.state.refuse(why);
             *out = Performed::Ignored;
             return;
         }
@@ -3262,7 +3276,7 @@ impl Editor {
             Action::ResetLayout => match (self.stage, &self.place_dock) {
                 (Some(st), _) => {
                     self.dock = self.recipe(st);
-                    self.state.status = format!("layout reset: {}", st.name());
+                    self.state.status = format!("layout reset: {}", self.step_name(st));
                 }
                 (None, Some(dock)) => {
                     self.dock = dock.clone();
@@ -4296,6 +4310,9 @@ struct Editor {
     /// `from_state` see no config. A template's sheet stays on this field,
     /// for this project.
     sheet_in_draw: bool,
+    /// AU18: that choice, held aside while a drawing stands: a drawing has no
+    /// button to undo it, so a saved choice does nothing there (spec 3.2).
+    sheet_held: bool,
     /// AU3: the Timing sheet button's choice, for the App and the Rig to
     /// remember. Only the button asks.
     sheet_request: Option<bool>,
@@ -4311,10 +4328,15 @@ struct Editor {
     /// AU9: the panels' folds before anyone presses them: closed for a
     /// person, open under the frozen boot (spec 1.5.2).
     pub(crate) more_default: bool,
-    /// AU3: the panes the lock holds, and the stage and sheet choice they
-    /// were read for. The dock asks every frame; the recipe changes rarely.
+    /// AU18: the frozen boot's seam, set beside `more_default`: the kind reads
+    /// unset, so nothing is stamped or promoted and each rule stands as it
+    /// stood. Only the top row still reads the project (spec 1.13).
+    kind_unset: bool,
+    /// AU3: the panes the lock holds, and the stage, sheet choice and kind
+    /// they were read for. The dock asks every frame; the recipe changes
+    /// rarely.
     held: Vec<Pane>,
-    held_for: Option<(Option<Stage>, bool)>,
+    held_for: Option<(Option<Stage>, bool, Option<ProjectKind>)>,
     /// Named, persisted workspaces (%APPDATA%/AnimStudio/workspaces.json).
     workspaces: Workspaces,
     /// Buffer for the "save workspace as" name field.
@@ -4685,8 +4707,7 @@ fn welcome_show_me(
     (editor, did)
 }
 
-/// AU6: an entry of `INTENTS`: one of the Start float's cards, or the ready
-/// paper, which is the first of them.
+/// AU6: an entry of `INTENTS`: one of the Start float's cards.
 fn open_intent(
     i: usize,
     rs: Option<&RenderState>,
@@ -4696,6 +4717,13 @@ fn open_intent(
     let i = i.min(templates::INTENTS.len() - 1);
     let mut editor = Editor::boot(templates::INTENTS[i].build(), rs, data_dir, ui);
     editor.enter_intent(i);
+    editor
+}
+
+/// AU18: the ready paper, its strip closed.
+fn open_ready(rs: Option<&RenderState>, data_dir: Option<&std::path::Path>, ui: &config::UiConfig) -> Editor {
+    let mut editor = Editor::boot(templates::READY.build(), rs, data_dir, ui);
+    editor.enter_template(&templates::READY);
     editor
 }
 
@@ -5168,6 +5196,7 @@ impl Editor {
     /// tool state (same law as saved workspaces). The room verbs stop short
     /// of here under a live stroke (`stroke_guarded`).
     fn enter_room(&mut self, st: Stage) {
+        let st = self.step_for(st);
         if st == Stage::Export {
             return self.enter_export();
         }
@@ -5182,8 +5211,130 @@ impl Editor {
             // LINE GUARD defaults ON in the ink & paint room (shiage
             // charter) and OFF elsewhere.
             self.state.view.line_guard = matches!(st, Stage::InkPaint);
-            self.state.status = format!("{}: {}", vocab::STEP, st.name());
+            self.state.status = format!("{}: {}", vocab::STEP, self.step_name(st));
             self.export_left();
+        }
+    }
+
+    /// AU18: F4 and F5 are not refusals (spec 2.8): each runs the bar's first
+    /// step. `Stage::Layout` is on no bar, and a comic has no `Stage::Drawing`.
+    /// Every caller that names `Stage::Drawing` comes through this line.
+    fn step_for(&self, st: Stage) -> Stage {
+        match (self.kind(), st) {
+            (None, _) => st,
+            (Some(ProjectKind::Comic), Stage::Layout | Stage::Drawing) => Stage::Manga,
+            (Some(_), Stage::Layout) => Stage::Drawing,
+            (Some(_), _) => st,
+        }
+    }
+
+    /// AU18: what this document is. Nothing caches it (spec 2.2), and the frozen
+    /// boot's seam reads None, so each rule that asks stands as it stood.
+    pub(crate) fn kind(&self) -> Option<ProjectKind> {
+        (!self.kind_unset).then(|| ProjectKind::of(&self.state.engine.project))
+    }
+
+    /// AU18: the frozen boot's seam goes on. The boot read `recipe` with a
+    /// kind, so it is read again without one.
+    #[cfg(test)]
+    pub(crate) fn unset_kind(&mut self) {
+        if !std::mem::replace(&mut self.kind_unset, true) && self.stage == Some(Stage::Drawing) {
+            self.dock = self.recipe(Stage::Drawing);
+        }
+    }
+
+    /// AU18: this document's top row. It is the frozen boot's too: its pills
+    /// are the one thing there that reads the kind.
+    pub(crate) fn bar(&self) -> &'static [steps::Step] {
+        steps::bar(ProjectKind::of(&self.state.engine.project))
+    }
+
+    /// AU18: the stage of the bar's first row.
+    pub(crate) fn first_step(&self) -> Stage {
+        self.kind().map_or(Stage::Drawing, |kind| steps::bar(kind)[0].stage)
+    }
+
+    /// AU18: this kind's word for a stage: `Stage::Drawing` reads Plan on an
+    /// animation's bar and Draw on a drawing's.
+    pub(crate) fn step_name(&self, st: Stage) -> &'static str {
+        let row = self.kind().and_then(|kind| steps::bar(kind).iter().find(|s| s.stage == st));
+        row.map_or(st.name(), |s| s.label)
+    }
+
+    /// AU18: why this step is not on this bar (spec 2.8). `can_perform` and
+    /// `perform` both read it, for one sentence. F4 and F5 never refuse.
+    pub(crate) fn hidden_step(&self, action: Action) -> Option<&'static str> {
+        match (self.kind()?, action) {
+            (ProjectKind::Drawing, Action::RoomEdit) => Some("A single picture has no timing."),
+            (ProjectKind::Comic, Action::RoomEdit) => Some("Comic pages have no timing."),
+            (ProjectKind::Comic, Action::RoomComposite) => {
+                Some("Comic pages get their look from tones on the Manga step.")
+            }
+            _ => None,
+        }
+    }
+
+    /// AU18: the one door (spec 2.6): every document passes here on its first
+    /// frame in this Editor, whichever route brought it. The stamp sets no
+    /// `meta_dirty`: an old file does not turn dirty on open, a derived kind
+    /// cannot flip mid-session, and the next real save writes it. A move here
+    /// is no news, so the route's own remark stands.
+    fn door(&mut self) {
+        let Some(kind) = self.kind() else { return };
+        kind.stamp(&mut self.state.engine.project);
+        if kind == ProjectKind::Drawing {
+            self.sheet_held |= std::mem::take(&mut self.sheet_in_draw);
+        } else {
+            self.sheet_in_draw |= std::mem::take(&mut self.sheet_held);
+        }
+        let first = self.first_step();
+        let said = self.state.status.clone();
+        let on_bar = steps::bar(kind).iter().any(|s| Some(s.stage) == self.stage);
+        let sheet = |dock: &DockState<Pane>| dock.find_tab(&Pane::XSheet).is_some();
+        // A guest's snapshot is the host's fresh truth, not a document opened:
+        // it does not take them off a step they stand on.
+        let comic = kind == ProjectKind::Comic && !self.canvas.is_guest;
+        if comic && self.stage != Some(Stage::Manga) {
+            self.enter_room(Stage::Manga);
+        } else if self.stage.is_some() && !on_bar {
+            self.enter_room(first);
+        } else if self.stage == Some(Stage::Drawing) && sheet(&self.dock) != sheet(&self.recipe(Stage::Drawing)) {
+            self.enter_room(Stage::Drawing);
+        } else if self.stage == Some(Stage::Export) {
+            // The way back and its dock are this document's. A guest keeps one
+            // whose pill stands: the join opened nothing.
+            let held = self.canvas.is_guest
+                && self.export_from.as_ref().is_some_and(|(from, _)| {
+                    steps::bar(kind).iter().any(|s| Some(s.stage) == *from)
+                });
+            if !held {
+                self.export_from = Some((Some(first), self.recipe(first)));
+            }
+        }
+        self.state.status = said;
+    }
+
+    /// AU18: a drawing that has grown stops being one (spec 2.7), one way:
+    /// Undo does not demote. It catches every route, a guest's edit too, with
+    /// no message of its own. The stage stays, so nothing moves under the pen;
+    /// but a comic's bar has neither Draw nor Effects, so that one moves, and
+    /// a stroke in progress ends first.
+    fn promote(&mut self) {
+        if self.kind() != Some(ProjectKind::Drawing) || self.canvas.stroke_active() {
+            return;
+        }
+        let project = &mut self.state.engine.project;
+        let Some(kind) = ProjectKind::grown(project) else { return };
+        kind.stamp(project);
+        self.state.meta_dirty = true;
+        self.sheet_in_draw |= std::mem::take(&mut self.sheet_held);
+        if kind == ProjectKind::Comic {
+            if !steps::bar(kind).iter().any(|s| Some(s.stage) == self.stage) {
+                self.enter_room(Stage::Manga);
+            }
+        } else if !self.say.off && self.say.seen & say::GREW == 0 {
+            self.state.status = say::GREW_WORDS.into();
+            self.say_answered(say::GREW);
         }
     }
 
@@ -5210,7 +5361,7 @@ impl Editor {
 
     /// AU9: where the person is, as the top row names it.
     fn place_here(&self) -> String {
-        self.stage.map_or_else(|| self.place.clone(), |st| st.name().to_string())
+        self.stage.map_or_else(|| self.place.clone(), |st| self.step_name(st).to_string())
     }
 
     /// AU9: the Export panel's reading of the Editor. The way back is worked
@@ -5218,11 +5369,12 @@ impl Editor {
     /// its name with it.
     fn export_view(&self) -> export_step::View {
         let back = (self.stage == Some(Stage::Export)).then(|| match &self.export_from {
-            Some((Some(st), _)) => st.name().to_string(),
+            Some((Some(st), _)) => self.step_name(*st).to_string(),
             Some((None, _)) => self.place.clone(),
-            None => Stage::Drawing.name().to_string(),
+            None => self.step_name(self.first_step()).to_string(),
         });
-        export_step::View { back, more_default: self.more_default, range: self.export_range }
+        let go_first = say::Verb::GoToDraw.label(self.kind());
+        export_step::View { back, go_first, more_default: self.more_default, range: self.export_range }
     }
 
     /// AU9: the step a new Editor carries across a session's join: never
@@ -5230,7 +5382,7 @@ impl Editor {
     fn stage_kept(&self) -> Option<Stage> {
         match (self.stage, &self.export_from) {
             (Some(Stage::Export), Some((from, _))) => *from,
-            (Some(Stage::Export), None) => Some(Stage::Drawing),
+            (Some(Stage::Export), None) => Some(self.first_step()),
             (stage, _) => stage,
         }
     }
@@ -5343,9 +5495,11 @@ impl Editor {
     }
 
     /// AU5: the one way a verb brings the Timing sheet up: Draw's own switch
-    /// in Draw, which the room remembers, and the pane anywhere else.
+    /// in Draw, which the room remembers, and the pane anywhere else. AU18: a
+    /// drawing remembers nothing here: it has no such switch.
     fn show_sheet(&mut self) {
-        if self.stage == Some(Stage::Drawing) && self.dock.find_tab(&Pane::XSheet).is_none() {
+        let draw = self.stage == Some(Stage::Drawing) && self.kind() != Some(ProjectKind::Drawing);
+        if draw && self.dock.find_tab(&Pane::XSheet).is_none() {
             self.switch_sheet(false);
         } else {
             self.open_pane(Pane::XSheet);
@@ -5394,10 +5548,11 @@ impl Editor {
     }
 
     /// AU3: what the off-spine pill says; None on the spine. Manga is a
-    /// stage, but it has no pill of its own.
+    /// stage, but only a comic's bar has a pill for it.
     fn place_name(&self) -> Option<&str> {
+        let on_bar = self.bar().iter().any(|s| Some(s.stage) == self.stage);
         match self.stage {
-            Some(Stage::Manga) => Some(vocab::STEP_MANGA),
+            Some(Stage::Manga) if !on_bar => Some(vocab::STEP_MANGA),
             Some(_) => None,
             None if self.place.is_empty() => Some(vocab::ARRANGEMENT),
             None => Some(&self.place),
@@ -5407,7 +5562,7 @@ impl Editor {
     /// AU3: the panes Lock UI positions holds: the current recipe's, or the
     /// place's off the spine.
     fn locked_panes(&mut self) -> &[Pane] {
-        let key = (self.stage, self.sheet_in_draw);
+        let key = (self.stage, self.sheet_in_draw, self.kind());
         if self.held_for != Some(key) {
             let dock = self.stage.map(|st| self.recipe(st));
             let dock = dock.as_ref().or(self.place_dock.as_ref());
@@ -5508,11 +5663,13 @@ impl Editor {
             dock: Stage::Drawing.dock(),
             stage: Some(Stage::Drawing),
             sheet_in_draw: false,
+            sheet_held: false,
             sheet_request: None,
             place: String::new(),
             place_dock: None,
             export_from: None,
             more_default: false,
+            kind_unset: false,
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -5619,11 +5776,13 @@ impl Editor {
             dock: Stage::Drawing.dock(),
             stage: Some(Stage::Drawing),
             sheet_in_draw: false,
+            sheet_held: false,
             sheet_request: None,
             place: String::new(),
             place_dock: None,
             export_from: None,
             more_default: false,
+            kind_unset: false,
             held: Vec::new(),
             held_for: None,
             status_seen: String::new(),
@@ -5707,10 +5866,19 @@ impl Editor {
     /// The export's enters the Export step with its first choice ringed: the
     /// tick is the person's, when their file lands.
     pub(crate) fn show_me(&mut self, i: usize) -> Performed {
-        match welcome::STEPS.get(i).map(|s| s.show_me) {
+        match self.quick_rows().get(i).map(|s| s.show_me) {
             Some(welcome::ShowMe::Circle) => self.demo_circle(),
             Some(welcome::ShowMe::NextCircle) => self.next_circle(),
-            Some(welcome::ShowMe::Perform(a)) => self.perform(a),
+            Some(welcome::ShowMe::Perform(a)) => {
+                let did = self.perform(a);
+                // AU18: Save it is the shell's, as a menu's Save is.
+                if let Performed::App(request) = &did {
+                    self.requests.push(request.clone());
+                }
+                did
+            }
+            Some(welcome::ShowMe::Panels) if self.canvas.tool == canvas::CanvasTool::Panel => Performed::Done,
+            Some(welcome::ShowMe::Panels) => self.perform(Action::PanelTool),
             Some(welcome::ShowMe::Play) if self.state.view.playing => Performed::Done,
             Some(welcome::ShowMe::Play) => self.perform(Action::PlayPause),
             Some(welcome::ShowMe::Export) => {
@@ -6048,6 +6216,9 @@ impl Editor {
         let guest = self.canvas.is_guest;
         let shared = guest || self.canvas.session_live;
         let s = &self.state;
+        if let Some(why) = self.hidden_step(action) {
+            return Err(why);
+        }
         match action {
             Action::CanvasOptions if !self.canvas_shown() => Err("no canvas here"),
             Action::Undo if !shared && !s.engine.can_undo() => Err("nothing to undo"),
@@ -6750,7 +6921,7 @@ impl eframe::App for App {
         match route {
             Startup::Welcome | Startup::ReadyPaper => {
                 let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
-                let mut paper = open_intent(templates::ANIMATION, rs, dir, &self.config.ui);
+                let mut paper = open_ready(rs, dir, &self.config.ui);
                 // GM19: a new version's first launch opens on What's New.
                 if route == Startup::Welcome && start_over(&mut paper, &mut self.config) {
                     self.config.save();
@@ -7946,9 +8117,13 @@ impl Editor {
                     plate::band_slot(ui, vocab::GHOST_FRAMES);
                 }
             }
-            let add = plate::band_action(ui, Icon::Plus, "Add drawing", "Add drawing (band)");
-            if menus::hover_tip(add, Action::AddDrawingAfter, "").clicked() {
-                self.invoke(Action::AddDrawingAfter, ui.ctx());
+            // AU18: not on a drawing: Alt+A and the menu remain, which is how
+            // a person promotes one on purpose.
+            if self.kind() != Some(ProjectKind::Drawing) {
+                let add = plate::band_action(ui, Icon::Plus, "Add drawing", "Add drawing (band)");
+                if menus::hover_tip(add, Action::AddDrawingAfter, "").clicked() {
+                    self.invoke(Action::AddDrawingAfter, ui.ctx());
+                }
             }
         }
         // GM12: frames passed over to keep up with the sound. A clean run
@@ -8208,7 +8383,7 @@ impl Editor {
         let dots = !fold && !refusing && animating && lane.width() >= plate::SAY_DOTS_LANE;
         let spare = match verb {
             _ if dots => plate::SAY_ACTION + plate::SAY_DOTS,
-            Some(verb) => plate::say_action_width(ui, verb.label()) + 6.0,
+            Some(verb) => plate::say_action_width(ui, verb.label(self.kind())) + 6.0,
             None if refusing || hint.is_some() => 0.0,
             None => plate::SAY_ACTION,
         };
@@ -8228,14 +8403,16 @@ impl Editor {
         let row = egui::Rect::from_min_max(egui::pos2(lane.left(), rule.top()), egui::pos2(lane.right(), rule.bottom()));
         // Spec 8.3: the place, in dots. Painted: no control, no words, and a
         // card for whoever rests on them.
-        self.say.dots_painted = dots && !self.say.off && self.quick_start.iter().any(|done| !done);
+        let ticks = self.ticks();
+        self.say.dots_painted = dots && !self.say.off && ticks.iter().any(|done| !done);
         if self.say.dots_painted {
-            let ticks = self.quick_start;
-            plate::hover_card(plate::say_dots(ui, row, &ticks), || say::place_words(&ticks));
+            let rows = self.quick_rows();
+            plate::hover_card(plate::say_dots(ui, row, &ticks), || say::place_words(rows, &ticks));
         }
         if let Some(verb) = verb {
-            let beside = row.with_max_x(words_end + 6.0 + plate::say_action_width(ui, verb.label()));
-            if plate::say_action(ui, beside, verb.label()).card(verb.card()).clicked() {
+            let label = verb.label(self.kind());
+            let beside = row.with_max_x(words_end + 6.0 + plate::say_action_width(ui, label));
+            if plate::say_action(ui, beside, label).card(verb.card()).clicked() {
                 self.say_act(verb, ui.ctx());
             }
         }
@@ -8321,9 +8498,10 @@ impl Editor {
     /// AU3: the Timing sheet button: one click, remembered in Draw. Absent
     /// in Plan and Timing, whose recipes hold the sheet; everywhere else a
     /// plain action that opens the pane, and never lit, because a click
-    /// there cannot hide it.
+    /// there cannot hide it. AU18: absent on a drawing, which has no timing:
+    /// Window and View still reach the pane.
     fn sheet_button(&mut self, ui: &mut egui::Ui) {
-        if matches!(self.stage, Some(Stage::Layout | Stage::Edit)) {
+        if matches!(self.stage, Some(Stage::Layout | Stage::Edit)) || self.kind() == Some(ProjectKind::Drawing) {
             return;
         }
         let draw = self.stage == Some(Stage::Drawing);
@@ -8587,7 +8765,9 @@ impl Editor {
             self.opened_doc = Some(self.state.untitled_group.clone());
             self.strip_open |= self.state.frame_count() > 1;
             self.strip.opened();
+            self.door();
         }
+        self.promote();
         // The band's keys and the rail's Flip arrive on one frame.
         self.full_band |= self.state.cut().drawings.len() > 1;
         // AU5: the hold trap (R19): with the sheet off screen nothing shows a
@@ -9310,7 +9490,8 @@ impl Editor {
             // tool/view state swap, data never forks. Tool/view restore is
             // all-or-nothing; a live stroke keeps the old tool state (same
             // law as saved workspaces).
-            let steps_width: f32 = steps::STEPS.iter().map(|s| plate::pill_width(ui, s.label)).sum();
+            let bar = self.bar();
+            let steps_width: f32 = bar.iter().map(|s| plate::pill_width(ui, s.label)).sum();
             // AU5: the room lamp stands here only during a session.
             let lamp = egui::Rect::from_center_size(
                 dot.center() - egui::vec2(dot.width() + 2.0, 0.0),
@@ -9333,9 +9514,9 @@ impl Editor {
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             pills.spacing_mut().item_spacing.x = 0.0;
-            for step in &steps::STEPS {
-                let current = step.stage.is_some() && step.stage == self.stage;
-                let primary = step.stage == Some(Stage::Export);
+            for step in bar {
+                let current = Some(step.stage) == self.stage;
+                let primary = step.stage == Stage::Export;
                 if plate::step_pill(&mut pills, step.label, current, primary)
                     .on_hover_ui(|ui| {
                         ui.label(step.card());
@@ -9581,7 +9762,7 @@ impl Editor {
         self.canvas.strip_closed = self.strip_closed() && !hidden;
         self.canvas.tools_hidden = hidden;
         self.canvas.sheet_shown = panes.contains(&Pane::XSheet);
-        self.canvas.empty_cell_hint = self.say.empty_cell_due(&self.state);
+        self.canvas.empty_cell_hint = self.say.empty_cell_due(&self.state) && self.animated();
         let export_view = self.export_view();
         let mut tabs = EditorTabs {
             stage: self.stage,

@@ -9448,6 +9448,32 @@ pub(crate) mod extpaper_tests {
         assert_eq!(h.state().1.refusal, crate::doc::HELD_FRAME);
     }
 
+    /// AU18: the Comic bar keeps Color because this lands: a fill on a page's
+    /// cel, drawn on the Manga step and armed the way the Color step arms it.
+    #[test]
+    fn aukind_fill_lands_on_a_page_cel() {
+        use crate::workspace::Stage;
+        let layers = crate::config::Config::default().layers;
+        let arm = |state: &mut AppState, stage| {
+            let stack = layers.stack_for_room(crate::stage_key(Some(stage)));
+            state.new_cel_template = stack.layers.clone();
+            state.new_cel_active = stack.armed();
+            (state.view.active_layer, state.view.active_role) = stack.armed();
+        };
+        let mut state = crate::templates::ALL[crate::templates::COMIC].build();
+        arm(&mut state, Stage::Manga);
+        state.new_drawing_at_frame();
+        assert!(state.current_drawing().is_some(), "a cel on the page");
+        arm(&mut state, Stage::InkPaint);
+        let fills = state.fills_done;
+        let (mut h, xf) = fill_rig(state);
+        let at = xf.paper_to_screen(pos2(960.0, 540.0));
+        click(&mut h, at, Modifiers::NONE);
+        let state = &h.state().1;
+        assert_eq!(state.fills_done, fills + 1, "{} / {}", state.refusal, state.status);
+        assert!(texel(state, 960, 540)[3] > 0.0, "the paint is on the cel");
+    }
+
     #[test]
     fn auseam_stroke_signal_vector_route() {
         let mut h = EditorHarness::new();

@@ -14,8 +14,8 @@ use eframe::egui;
 use crate::config::Action;
 use crate::doc::AppState;
 use crate::plate::{self, Card as _};
+use crate::AppRequest;
 use crate::render_queue::{self, JobState, Landed};
-use crate::{AppRequest, say};
 
 /// A choice's height: a Start card's.
 pub const CHOICE_H: f32 = 44.0;
@@ -107,6 +107,8 @@ pub struct Failed {
 pub struct View {
     /// The step the back button names. Some only in the Export step.
     pub back: Option<String>,
+    /// AU18: the words that go to the bar's first step.
+    pub go_first: &'static str,
     /// `More options` before any press: the boot's default.
     pub more_default: bool,
     /// `File ▸ Export`'s frame fields, once they are moved: its rows and these
@@ -171,7 +173,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View, open: bool) {
     // Anywhere else the next step's pill leads the screen.
     let lead = view.back.is_some() && state.render_queue.panel.done.is_none();
     match Offer::of(state) {
-        Offer::NoArt => no_art(ui, state, lead),
+        Offer::NoArt => no_art(ui, state, view.go_first, lead),
         Offer::Comic => {
             lead_choice(ui, state, Action::ExportPages.label(), Action::ExportPages, lead);
             other_formats(ui, state, wide, open);
@@ -297,12 +299,12 @@ fn transparent(ui: &mut egui::Ui, state: &mut AppState) {
     }
 }
 
-fn no_art(ui: &mut egui::Ui, state: &mut AppState, lead: bool) {
+fn no_art(ui: &mut egui::Ui, state: &mut AppState, go_first: &str, lead: bool) {
     plain_words(ui, NO_ART, plate::LEGEND);
     let resp = if lead {
-        plate::primary_card(ui, say::GO_TO_DRAW, CHOICE_H, plate::Role::Card)
+        plate::primary_card(ui, go_first, CHOICE_H, plate::Role::Card)
     } else {
-        plate::choice_card(ui, say::GO_TO_DRAW, CHOICE_H)
+        plate::choice_card(ui, go_first, CHOICE_H)
     };
     if resp.card(Action::RoomDrawing.help()).clicked() {
         state.render_queue.panel.ask(Ask::Do(Action::RoomDrawing));

@@ -27,7 +27,7 @@ const VIDEO: &str = "Video (MP4)";
 const SEQUENCE: &str = "Picture sequence (PNG)";
 const STILL: &str = "This frame (PNG)";
 const OPEN: &str = "Open file (say line)";
-const BACK: &str = "Back to Draw";
+const BACK: &str = "Back to Plan";
 
 fn settle(h: &mut EditorHarness) {
     h.run();
@@ -112,7 +112,12 @@ fn file_names(dir: &Path) -> Vec<String> {
 
 /// The panel, as it reads the Editor from the Export step left from Draw.
 fn view() -> export_step::View {
-    export_step::View { back: Some(Stage::Drawing.name().to_string()), more_default: false, range: None }
+    export_step::View {
+        back: Some(Stage::Drawing.name().to_string()),
+        go_first: say::GO_TO_DRAW,
+        more_default: false,
+        range: None,
+    }
 }
 
 /// A shipped comic with ink on its page, from the template a person picks.
@@ -704,11 +709,20 @@ fn auexport_ball_journey() {
     let mut h = EditorHarness::as_first_run();
     sized(&mut h, 1600.0, 900.0);
     assert!(h.editor().start.is_some(), "the Start float stands over the ready paper");
-    let c = h.editor().canvas.dbg_rect.center();
-    let path = [c, c + vec2(30.0, 0.0), c + vec2(60.0, 10.0)];
     let mut read: Vec<String> = Vec::new();
     let mut concepts = Vec::new();
     let mut r = Recorder::new(&mut h, "ball");
+    r.act("say what it is", Act::Click("An animation"));
+    assert_eq!(
+        r.harness().rig().requests,
+        [AppRequest::Start(WelcomeAction::Intent(templates::ANIMATION))],
+        "the card's own request"
+    );
+    r.harness().rig_mut().requests.clear();
+    r.harness().answer_start(WelcomeAction::Intent(templates::ANIMATION));
+    settle(r.harness());
+    let c = r.harness().editor().canvas.dbg_rect.center();
+    let path = [c, c + vec2(30.0, 0.0), c + vec2(60.0, 10.0)];
     read_lane(r.harness(), &mut read);
     for pose in 0..12 {
         if pose == 1 {
@@ -737,7 +751,7 @@ fn auexport_ball_journey() {
     read_lane(r.harness(), &mut read);
 
     let tally = r.tally();
-    assert_eq!(tally.actions(), 27, "{tally:?}");
+    assert_eq!(tally.actions(), 28, "{tally:?}");
     assert!(tally.actions() <= 28);
     assert_eq!(tally.strokes, 12);
     let overhead = tally.actions() - tally.strokes - 11;
@@ -882,7 +896,7 @@ fn auexport_quick_start_ends_in_a_file() {
 #[test]
 fn auexport_show_me_is_five_of_five() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
     sized(&mut h, 1600.0, 900.0);
     for slot in 0..welcome::STEPS.len() {
@@ -908,7 +922,7 @@ fn auexport_show_me_is_five_of_five() {
     assert_eq!(h.editor_mut().show_me(EXPORT_STEP), Performed::Done);
     settle(&mut h);
     assert!(h.state().render_queue.panel.ring_at.is_some());
-    h.click("Draw");
+    h.click(vocab::STEP_PLAN);
     settle(&mut h);
     let panel = &h.state().render_queue.panel;
     assert!(!panel.ring && panel.done.is_none());
@@ -1248,6 +1262,7 @@ fn auexport_the_way_back_outlives_the_document() {
     h.editor_mut().enter_room(Stage::Edit);
     settle(&mut h);
     enter(&mut h);
+    h.editor_mut().canvas.is_guest = true;
     h.editor_mut().state = ball(3);
     h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
     settle(&mut h);
@@ -1255,13 +1270,13 @@ fn auexport_the_way_back_outlives_the_document() {
     assert!(says(&h, "Back to Timing"), "{:?}", h.painted_text());
     assert_eq!(h.editor().stage_kept(), Some(Stage::Edit), "the step it came from");
 
-    // From off the steps there is no step to carry, and Draw is the way back
-    // of an Export step no dock swap entered.
+    // From off the steps there is no step to carry, and the first step is the
+    // way back of an Export step no dock swap entered.
     h.editor_mut().export_from = Some((None, Stage::Drawing.dock()));
     assert_eq!(h.editor().stage_kept(), None);
     h.editor_mut().export_from = None;
     assert_eq!(h.editor().stage_kept(), Some(Stage::Drawing));
-    assert_eq!(h.editor().export_view().back.as_deref(), Some(Stage::Drawing.name()));
+    assert_eq!(h.editor().export_view().back.as_deref(), Some(vocab::STEP_PLAN));
     h.editor_mut().stage = Some(Stage::Edit);
     assert_eq!(h.editor().stage_kept(), Some(Stage::Edit), "any other step is carried as it was");
 }
@@ -1287,7 +1302,7 @@ fn auexport_a_look_at_the_result_costs_nothing() {
 
     // Any other step is entered as ever, with what the step left behind gone.
     enter(&mut h);
-    h.click(vocab::STEP_DRAW);
+    h.click(vocab::STEP_PLAN);
     settle(&mut h);
     assert_eq!(h.editor().stage, Some(Stage::Drawing));
     assert_eq!(visible_panes(&h.editor().dock), visible_panes(&h.editor().recipe(Stage::Drawing)));

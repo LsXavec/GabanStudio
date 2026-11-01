@@ -15,8 +15,8 @@ use eframe::egui;
 use crate::config::Action;
 use crate::plate;
 use crate::plate::Card;
+use crate::steps::ProjectKind;
 use crate::templates;
-use crate::workspace::Stage;
 
 /// The project meta key the thumbnail lives under (`app.thumb` on disk;
 /// `store::load` leaves it out of the document).
@@ -44,6 +44,9 @@ pub enum ShowMe {
     Play,
     /// The Export step, with its first choice ringed (spec 8.3).
     Export,
+    /// AU18: the Panel tool, unless it is already armed: its Action turns it
+    /// back off.
+    Panels,
 }
 
 pub struct Step {
@@ -82,6 +85,74 @@ pub const STEPS: [Step; 5] = [
     },
 ];
 
+/// AU18: a drawing's five. Only slots 0 and 4 share a meaning with `STEPS`, so
+/// slots 1 to 3 keep their ticks in `hints_seen` (`Editor::tick_slot`).
+pub const DRAWING_STEPS: [Step; 5] = [
+    Step {
+        label: "Draw something",
+        ticks_on: None,
+        show_me: ShowMe::Circle,
+    },
+    Step {
+        label: "Color it",
+        ticks_on: None,
+        show_me: ShowMe::Perform(Action::RoomFinishing),
+    },
+    Step {
+        label: "Add an effect",
+        ticks_on: None,
+        show_me: ShowMe::Perform(Action::RoomComposite),
+    },
+    Step {
+        label: "Save it",
+        ticks_on: Some(Action::Save),
+        show_me: ShowMe::Perform(Action::Save),
+    },
+    Step {
+        label: "Export a file",
+        ticks_on: None,
+        show_me: ShowMe::Export,
+    },
+];
+
+/// AU18: a comic's five, the same way.
+pub const COMIC_STEPS: [Step; 5] = [
+    Step {
+        label: "Draw on the page",
+        ticks_on: None,
+        show_me: ShowMe::Circle,
+    },
+    Step {
+        label: "Cut it into panels",
+        ticks_on: None,
+        show_me: ShowMe::Panels,
+    },
+    Step {
+        label: "Add a page",
+        ticks_on: Some(Action::NewPage),
+        show_me: ShowMe::Perform(Action::NewPage),
+    },
+    Step {
+        label: "Save it",
+        ticks_on: Some(Action::Save),
+        show_me: ShowMe::Perform(Action::Save),
+    },
+    Step {
+        label: "Export pages",
+        ticks_on: None,
+        show_me: ShowMe::Export,
+    },
+];
+
+/// AU18: the five of this kind. Unset, an animation's.
+pub fn steps_of(kind: Option<ProjectKind>) -> &'static [Step; 5] {
+    match kind {
+        Some(ProjectKind::Drawing) => &DRAWING_STEPS,
+        Some(ProjectKind::Comic) => &COMIC_STEPS,
+        Some(ProjectKind::Animation) | None => &STEPS,
+    }
+}
+
 /// The drawing steps' ticks: a finished stroke ticks the first, and one past
 /// the first frame ticks the third as well (spec 8.3).
 pub const FIRST_STROKE: usize = 0;
@@ -91,28 +162,17 @@ pub const PLAY_STEP: usize = 3;
 /// The export step (ticked when a finished export's file is on disk).
 pub const EXPORT_STEP: usize = 4;
 
-/// Tick the step `action` belongs to; true when a tick was new.
-pub fn tick(ticks: &mut [bool; 5], action: Action) -> bool {
-    let mut changed = false;
-    for (t, step) in ticks.iter_mut().zip(STEPS.iter()) {
-        if step.ticks_on == Some(action) && !*t {
-            *t = true;
-            changed = true;
-        }
-    }
-    changed
-}
-
 /// The checklist rows: a tick, the step, its chord (from `binds`, so the
 /// keys are learnt with the step) and "Show me". Returns the step whose
 /// button was clicked.
 pub fn checklist_ui(
     ui: &mut egui::Ui,
+    rows: &[Step; 5],
     ticks: &[bool; 5],
     binds: &[crate::config::Binding],
 ) -> Option<usize> {
     let mut clicked = None;
-    for (i, step) in STEPS.iter().enumerate() {
+    for (i, step) in rows.iter().enumerate() {
         ui.horizontal(|ui| {
             let mark = if ticks[i] { "✔" } else { "○" };
             ui.label(egui::RichText::new(mark).color(if ticks[i] {
@@ -124,6 +184,7 @@ pub fn checklist_ui(
             let verb = match step.show_me {
                 ShowMe::Perform(a) => Some(a),
                 ShowMe::Play => Some(Action::PlayPause),
+                ShowMe::Panels => Some(Action::PanelTool),
                 _ => None,
             };
             if let Some(chord) = verb.and_then(|a| crate::cmdpal::chord_of(binds, a)) {
@@ -137,6 +198,7 @@ pub fn checklist_ui(
                     ShowMe::Perform(a) => format!("does it: {}", a.label()),
                     ShowMe::Play => format!("does it: {}", Action::PlayPause.label()),
                     ShowMe::Export => "opens the Export step, with its first choice ringed".to_string(),
+                    ShowMe::Panels => format!("does it: {}", Action::PanelTool.label()),
                 })
                 .clicked()
             {
@@ -838,7 +900,7 @@ pub fn ui(
         });
         ui.add_space(8.0);
         section(ui, "Quick start");
-        if let Some(step) = checklist_ui(ui, ticks, binds) {
+        if let Some(step) = checklist_ui(ui, &STEPS, ticks, binds) {
             out = Some(WelcomeAction::ShowMe(step));
         }
         ui.add_space(8.0);
@@ -853,6 +915,7 @@ pub fn ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace::Stage;
     use anim_core::export::{render_frame, render_graph_frame_law};
     use egui_kittest::kittest::Queryable;
 

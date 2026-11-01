@@ -16,7 +16,7 @@ use crate::say;
 use crate::shortcuts;
 use crate::testkit::{CTRL, EditorHarness};
 use crate::workspace::{Stage, Workspace, Workspaces};
-use crate::{Pane, Performed, plate, visible_panes};
+use crate::{Pane, Performed, plate, templates, visible_panes};
 
 /// v0.5.0's primary chords as `git show ebbc5fc:app/src/config.rs` has them:
 /// the frozen list. Ctrl+1 style names are the key names the file stores.
@@ -523,20 +523,23 @@ fn aukeys_arrows_leave_focused_widgets_alone() {
 
     // A click on a button leaves no focus behind it.
     let mut h = stepped();
-    h.click("Draw");
+    h.click(crate::vocab::STEP_PLAN);
     h.run_frames(2);
     h.key(Key::ArrowRight);
     assert_eq!(h.state().view.frame, 6, "a button click takes no arrows");
 }
 
-/// Every step answers to its key, pressed, in the trade's order.
+/// Every step answers to its key, pressed, in the trade's order. AU18: F4 is
+/// the bar's first step, and each bar reaches all its pills from the keys: J5's
+/// 5 of 5, 4 of 4 and 3 of 3.
 #[test]
-fn aukeys_six_steps_have_keys() {
+fn aukeys_each_bar_has_its_keys() {
     let mut h = stepped();
     for (step, key, stage) in SIX_STEPS {
         let bound = h.rig().config.chord_for(step).expect("a key");
         assert_eq!(bound, &chord(key), "{step:?}");
         h.key(Key::from_name(key).expect("a key"));
+        let stage = if stage == Stage::Layout { Stage::Drawing } else { stage };
         assert_eq!(h.editor().stage, Some(stage), "{key} goes to {step:?}");
     }
     for keymap in Keymap::ALL {
@@ -545,6 +548,20 @@ fn aukeys_six_steps_have_keys() {
             let row = binds.iter().find(|b| b.action == step).expect("a row");
             assert_eq!(row.chord, Some(chord(key)), "{keymap:?} {step:?}");
         }
+    }
+    for t in [&templates::INTENTS[templates::PICTURE], &templates::INTENTS[templates::ANIMATION], &templates::ALL[templates::COMIC]] {
+        let mut h = EditorHarness::with_state_shipped(t.build());
+        h.run();
+        let mut reached = Vec::new();
+        for (_, key, _) in SIX_STEPS {
+            h.key(Key::from_name(key).expect("a key"));
+            let here = h.editor().stage.expect("on a step");
+            if !reached.contains(&here) {
+                reached.push(here);
+            }
+        }
+        let bar: Vec<Stage> = h.editor().bar().iter().map(|step| step.stage).collect();
+        assert_eq!(reached, bar, "{}", t.name);
     }
 }
 
@@ -619,6 +636,16 @@ fn shipped() -> EditorHarness {
     h
 }
 
+/// `shipped`, after `An animation`: the place in dots, and the Timing step.
+fn animation() -> EditorHarness {
+    let mut h = EditorHarness::as_animation();
+    h.kit_mut().set_size(vec2(1600.0, 900.0));
+    h.kit_mut().set_pixels_per_point(1.0);
+    h.run();
+    h.run_frames(4);
+    h
+}
+
 fn settle(h: &mut EditorHarness) {
     h.run();
     h.run_frames(4);
@@ -647,7 +674,7 @@ fn chrome_here(h: &EditorHarness) {
 /// back to the same size, the View row answers, and nothing is stored.
 #[test]
 fn aukeys_hide_tools_hides_and_returns() {
-    let mut h = shipped();
+    let mut h = animation();
     chrome_here(&h);
     let (pane, zoom) = (h.editor().canvas.dbg_rect, paper_zoom(&h));
     assert!(!h.has(plate::SHOW_TOOLS));
@@ -795,6 +822,9 @@ fn aukeys_held_key_runs_a_screen_verb_once() {
 #[test]
 fn aukeys_hide_tools_still_draws_the_dock() {
     let mut h = shipped();
+    // Every stage's recipe, today's Plan preview with them: only the seam
+    // reaches that one until Plan's own part replaces it.
+    h.editor_mut().unset_kind();
     h.key(Key::T);
     settle(&mut h);
     for (step, _, stage) in SIX_STEPS {
@@ -1256,6 +1286,7 @@ fn aukeys_hide_tools_refusals_have_a_voice() {
 fn aukeys_hide_tools_answers_a_plan_stroke() {
     let plan = say::PLAN_WORDS.to_lowercase();
     let mut h = shipped();
+    h.editor_mut().unset_kind();
     h.editor_mut().enter_room(Stage::Layout);
     settle(&mut h);
     h.key(Key::T);
@@ -1460,7 +1491,7 @@ fn aukeys_keyboard_journey() {
 /// by their new keys, and nowhere else.
 #[test]
 fn aukeys_book_and_bg_answer_over_the_sheet_only() {
-    let mut h = shipped();
+    let mut h = animation();
     h.perform(Action::RoomEdit);
     settle(&mut h);
     assert!(visible_panes(&h.editor().dock).contains(&Pane::XSheet));

@@ -967,7 +967,7 @@ pub const SAY_TEXT: f32 = 14.0;
 pub const SAY_SMALL: f32 = 12.0;
 /// The room held for a hint's action button (spec 8.2): the longest of its
 /// words at control size, its pad and the gap before it.
-pub const SAY_ACTION: f32 = 92.0;
+pub const SAY_ACTION: f32 = 99.0;
 /// Spec 8.3's five dots: the room they take, and the narrowest lane that
 /// keeps the longest sentence on its two rows beside them.
 pub const SAY_DOTS: f32 = 56.0;

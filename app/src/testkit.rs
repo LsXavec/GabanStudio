@@ -127,6 +127,10 @@ impl Rig {
         let pen = std::mem::take(&mut self.pen);
         // AU9: the frozen boot keeps every fold open (spec 1.5.2).
         self.editor.more_default = self.boot == Boot::Frozen;
+        // AU18: and it reads no kind, on whatever editor the rig now holds.
+        if self.boot == Boot::Frozen {
+            self.editor.unset_kind();
+        }
         if self.arms {
             self.editor.arm_room(&self.config.layers, &mut self.stack_room_seen);
         }
@@ -271,6 +275,20 @@ impl EditorHarness {
         Self::with_dir_shipped(tempfile::tempdir().expect("temp data dir"))
     }
 
+    /// AU18: a shipped install on `An animation`, the Start card pressed: the
+    /// way in to frames, the strip and the sheet, now the ready paper is a
+    /// drawing.
+    pub fn as_animation() -> Self {
+        Self::with_dir_animation(tempfile::tempdir().expect("temp data dir"))
+    }
+
+    /// `An animation` over a data dir the test prepared.
+    pub fn with_dir_animation(dir: tempfile::TempDir) -> Self {
+        let mut me = Self::with_dir_shipped(dir);
+        me.answer_start(crate::welcome::WelcomeAction::Intent(crate::templates::ANIMATION));
+        me
+    }
+
     /// What a fresh install's first launch shows: the ready paper, and the
     /// Start float over it.
     pub fn as_first_run() -> Self {
@@ -305,6 +323,13 @@ impl EditorHarness {
         Self::build(None, tempfile::tempdir().expect("temp data dir"), Boot::Shipped, Some(gpu()))
     }
 
+    /// `An animation` on a real device: the sheet's and the strip's pictures.
+    pub fn with_gpu_animation() -> Self {
+        let mut me = Self::with_gpu_ready();
+        me.answer_start(crate::welcome::WelcomeAction::Intent(crate::templates::ANIMATION));
+        me
+    }
+
     /// The ready paper on a real device, over a data dir the test prepared: an
     /// upgrader's pictures.
     pub fn with_gpu_dir_shipped(dir: tempfile::TempDir) -> Self {
@@ -330,12 +355,14 @@ impl EditorHarness {
         if boot == Boot::Frozen {
             Self::frozen(&mut config);
         }
-        let paper = crate::templates::ANIMATION;
         let ready = state.is_none() || boot == Boot::FirstRun;
-        let state = state.unwrap_or_else(|| crate::templates::INTENTS[paper].build());
+        let state = state.unwrap_or_else(|| crate::templates::READY.build());
         let mut editor = Editor::boot(state, rs.as_ref(), Some(dir.path()), &config.ui);
+        if boot == Boot::Frozen {
+            editor.unset_kind();
+        }
         if ready {
-            editor.enter_intent(paper);
+            editor.enter_template(&crate::templates::READY);
         }
         // What the App's `Startup::Welcome` does to the paper it made.
         if boot == Boot::FirstRun {
@@ -392,6 +419,9 @@ impl EditorHarness {
         let dir = self.dir.path().to_path_buf();
         let rig = self.h.state_mut();
         rig.editor = Editor::boot(state, rs.as_ref(), Some(&dir), &rig.config.ui);
+        if rig.boot == Boot::Frozen {
+            rig.editor.unset_kind();
+        }
     }
 
     pub fn boot(&self) -> Boot {
@@ -406,7 +436,12 @@ impl EditorHarness {
         let dir = self.dir.path().to_path_buf();
         let rig = self.h.state_mut();
         match crate::apply_start(action, rs.as_ref(), Some(&dir), &rig.config.ui) {
-            crate::StartOutcome::Replace(editor) => rig.editor = *editor,
+            crate::StartOutcome::Replace(editor) => {
+                rig.editor = *editor;
+                if rig.boot == Boot::Frozen {
+                    rig.editor.unset_kind();
+                }
+            }
             crate::StartOutcome::Request(r) => rig.requests.push(r),
             crate::StartOutcome::Failed(why) => rig.notes.push(why),
             crate::StartOutcome::Stay => {}
@@ -1256,7 +1291,7 @@ mod tests {
         assert!(ed.paint.is_none() && ed.graph.is_none(), "a GPU resource was created");
         assert!(ed.audio_out.is_none() && !ed.audio_tried, "an audio device was opened");
         let tree = h.describe();
-        for step in crate::steps::STEPS {
+        for step in h.editor().bar() {
             assert!(h.has(step.label), "step switcher lacks {:?}:\n{tree}", step.label);
         }
         for tool in ["Select", "Fill"] {

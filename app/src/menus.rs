@@ -11,6 +11,7 @@ use eframe::egui;
 
 use crate::config::{Action, Binding, Group};
 use crate::plate;
+use crate::steps::ProjectKind;
 
 /// The help windows the Help menu and F1 open.
 #[derive(Default)]
@@ -259,6 +260,9 @@ impl crate::Editor {
 
     /// The help windows, each when open.
     pub(crate) fn help_windows(&mut self, ctx: &egui::Context, binds: &[Binding]) {
+        let ticks = self.ticks();
+        let rows = self.quick_rows();
+        let kind = self.kind();
         let help = &mut self.help;
         egui::Window::new("Keyboard shortcuts")
             .frame(plate::dialog_frame(&ctx.global_style()))
@@ -304,7 +308,6 @@ impl crate::Editor {
                 });
                 plate::note_viewport(ui, scroll.inner_rect, [false, true]);
             });
-        let ticks = self.quick_start;
         let mut show_me = None;
         egui::Window::new("Quick start")
             .frame(plate::dialog_frame(&ctx.global_style()))
@@ -314,43 +317,56 @@ impl crate::Editor {
                 plate::surface(ui);
                 // GM8: the five first steps, each ticked the first time its
                 // verb runs, each with its chord and "Show me".
-                show_me = crate::welcome::checklist_ui(ui, &ticks, binds);
+                show_me = crate::welcome::checklist_ui(ui, rows, &ticks, binds);
                 ui.separator();
                 // Said in THIS keymap's chords, so it never lies.
                 let k = |a| crate::cmdpal::chord_of(binds, a).unwrap_or_else(|| "—".into());
                 use Action::*;
-                for line in [
-                    format!(
-                        "1. Draw on the canvas with the pen ({} brush, {} eraser).",
-                        k(BrushTool),
-                        k(ToggleEraser)
-                    ),
-                    format!(
-                        "2. {} puts a new drawing on this frame; {} / {} step frames.",
-                        k(NewDrawing),
-                        k(NextFrame),
-                        k(PrevFrame)
-                    ),
-                    "3. The x-sheet times the drawings: a key holds until the next one.".into(),
-                    format!("4. {} plays the cut; {} latches looping.", k(PlayPause), k(ToggleLoop)),
-                    format!(
-                        "5. {} saves. {} finds any command; {} lists every key.",
-                        k(Save),
-                        k(CommandPalette),
-                        k(ShortcutSheet)
-                    ),
-                    // GM4: the canvas gestures no menu shows.
-                    "6. Hold Space and drag the canvas to move the view (Shift+drag turns it); \
-                     Alt+click picks a colour; Shift+click rules on from the last stroke."
-                        .into(),
-                    // GM7: the refill gestures, on the fill tool.
-                    format!(
-                        "7. With fill ({}), Shift+click refills a painted flat in the brush colour; \
-                         Ctrl+Shift+click replaces that colour on the whole layer.",
-                        k(FillTool)
-                    ),
-                ] {
-                    ui.label(line);
+                let first = format!(
+                    "Draw on the canvas with the pen ({} brush, {} eraser).",
+                    k(BrushTool),
+                    k(ToggleEraser)
+                );
+                // AU18: the middle lines by kind: frames, the sheet and Play
+                // are an animation's.
+                let middle = match kind {
+                    Some(ProjectKind::Drawing) => vec![
+                        "Color fills your drawing; Effects adds a look to it.".to_string(),
+                    ],
+                    Some(ProjectKind::Comic) => vec![
+                        format!("{} cuts the page into panels.", k(PanelTool)),
+                        format!("{} adds the next page.", k(NewPage)),
+                    ],
+                    _ => vec![
+                        format!(
+                            "{} puts a new drawing on this frame; {} / {} step frames.",
+                            k(NewDrawing),
+                            k(NextFrame),
+                            k(PrevFrame)
+                        ),
+                        "The x-sheet times the drawings: a key holds until the next one.".to_string(),
+                        format!("{} plays the cut; {} latches looping.", k(PlayPause), k(ToggleLoop)),
+                    ],
+                };
+                let saves = format!(
+                    "{} saves. {} finds any command; {} lists every key.",
+                    k(Save),
+                    k(CommandPalette),
+                    k(ShortcutSheet)
+                );
+                // GM4: the canvas gestures no menu shows.
+                let view = "Hold Space and drag the canvas to move the view (Shift+drag turns it); \
+                            Alt+click picks a colour; Shift+click rules on from the last stroke.";
+                // GM7: the refill gestures, on the fill tool.
+                let fill = format!(
+                    "With fill ({}), Shift+click refills a painted flat in the brush colour; \
+                     Ctrl+Shift+click replaces that colour on the whole layer.",
+                    k(FillTool)
+                );
+                let last = [saves, view.to_string(), fill];
+                let lines = std::iter::once(first).chain(middle).chain(last);
+                for (i, line) in lines.enumerate() {
+                    ui.label(format!("{}. {line}", i + 1));
                 }
             });
         egui::Window::new("About Gaban Studio")

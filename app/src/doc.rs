@@ -5538,6 +5538,10 @@ impl AppState {
     /// GM13: why "Build satsuei graph" cannot run on the current cut (None:
     /// it can). A hidden column still counts — the template wires it.
     pub fn satsuei_refusal(&self) -> Option<&'static str> {
+        // AU18: a page's graph is the page: the rig would write over it.
+        if self.cut().meta.contains_key(anim_core::manga::PAGE_KEY) {
+            return Some("a comic page keeps its own graph — this would write over it");
+        }
         anim_core::look::template_columns(self.cut())
             .is_empty()
             .then_some("this cut has no drawing column to build from — add one on the X-sheet")

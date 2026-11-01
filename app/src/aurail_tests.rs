@@ -526,6 +526,9 @@ fn aurail_rail_fits_every_room() {
     let mut found = Vec::new();
     for doc in [sample::build_sample(), crate::newproject::NewProjectForm::default().new_state()] {
         let mut h = EditorHarness::with_state_shipped(doc);
+        // Today's Plan preview, which only the seam reaches until Plan's own
+        // part replaces it.
+        h.editor_mut().unset_kind();
         for (w, tall) in SIZES {
             for stored in PROBE_SCALES {
                 window(&mut h, w, tall, stored);

@@ -168,7 +168,7 @@ impl Stage {
     ];
 
     /// The step's word on screen. The studio's own word stays in the hover
-    /// card (`steps::STEPS`) and in the aliases.
+    /// card (`steps::CATALOG`) and in the aliases.
     pub fn name(self) -> &'static str {
         match self {
             Stage::Layout => vocab::STEP_PLAN,
@@ -186,9 +186,8 @@ impl Stage {
         self.card().1
     }
 
-    /// GM8 step card: (studio word, one-line purpose, the tools it arms). A
-    /// step on the spine reads its words from `steps::STEPS`; Manga has no
-    /// pill, so its own are here.
+    /// GM8 step card: (studio word, one-line purpose, the tools it arms).
+    /// AU18: every stage reads its words from `steps::CATALOG`.
     pub fn card(self) -> (&'static str, &'static str, &'static str) {
         let arms = match self {
             Stage::Layout => "brush",
@@ -199,10 +198,8 @@ impl Stage {
             Stage::Manga => "brush · panels · rulers",
             Stage::Export => "nothing",
         };
-        match crate::steps::of(self) {
-            Some(step) => (step.studio_words, step.purpose, arms),
-            None => ("manga", "Draw the book's pages, panels and screen tone.", arms),
-        }
+        let (word, purpose) = crate::steps::of(self).map_or(("", ""), |step| (step.studio_words, step.purpose));
+        (word, purpose, arms)
     }
 
     /// AU1: the classic draw room, with the Timing sheet; presets tabbed

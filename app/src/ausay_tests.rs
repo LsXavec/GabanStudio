@@ -12,6 +12,7 @@ use crate::config::{Action, UiConfig};
 use crate::doc::{self, AppState};
 use crate::measure::{self, Scope};
 use crate::say::{self, Facts, Hint, Spoken, Verb, Words};
+use crate::steps::ProjectKind;
 use crate::testkit::EditorHarness;
 use crate::welcome::{self, EXPORT_STEP, ShowMe};
 use crate::workspace::Stage;
@@ -37,6 +38,13 @@ fn sized(h: &mut EditorHarness, w: f32, tall: f32) {
 /// A shipped install at 1600×900, on the ready paper, hints on.
 fn ready() -> EditorHarness {
     let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1600.0, 900.0);
+    h
+}
+
+/// The same install after `An animation`: the rows a drawing never hears.
+fn animation() -> EditorHarness {
+    let mut h = EditorHarness::as_animation();
     sized(&mut h, 1600.0, 900.0);
     h
 }
@@ -144,25 +152,33 @@ fn ausay_priority() {
 /// the person to a step before the one it speaks in.
 #[test]
 fn ausay_hints_never_point_backward() {
-    let place = |word: &str| steps::STEPS.iter().position(|s| s.label == word);
-    let labels: Vec<&str> = steps::STEPS.iter().map(|s| s.label).collect();
-    assert_eq!(labels, ["Plan", "Draw", "Timing", "Color", "Effects", "Export"], "the trade's order");
-    let mut checked = 0;
-    for hint in &say::HINTS {
-        let Words::Plain(words) = hint.words else { continue };
-        let named = words.split(|c: char| !c.is_alphabetic()).filter_map(place).max();
-        let speaks = hint.steps.iter().filter_map(|st| steps::STEPS.iter().position(|s| s.stage == Some(*st)));
-        for here in speaks {
-            if let Some(there) = named {
-                assert!(there >= here, "{words:?} points back from {}", labels[here]);
-                checked += 1;
-            }
-            if hint.verb == Some(Verb::GoToDraw) {
-                assert!(here <= place("Draw").expect("a step"), "{words:?}");
+    let bars = [
+        (ProjectKind::Drawing, vec!["Draw", "Color", "Effects", "Export"]),
+        (ProjectKind::Animation, vec!["Plan", "Timing", "Color", "Effects", "Export"]),
+        (ProjectKind::Comic, vec!["Manga", "Color", "Export"]),
+    ];
+    for (kind, trade) in bars {
+        let bar = steps::bar(kind);
+        let place = |word: &str| bar.iter().position(|s| s.label == word);
+        let labels: Vec<&str> = bar.iter().map(|s| s.label).collect();
+        assert_eq!(labels, trade, "the trade's order");
+        let mut checked = 0;
+        for hint in say::HINTS.iter().filter(|hint| hint.kinds.contains(&kind)) {
+            let Words::Plain(words) = hint.words else { continue };
+            let named = words.split(|c: char| !c.is_alphabetic()).filter_map(place).max();
+            let speaks = hint.steps.iter().filter_map(|st| bar.iter().position(|s| s.stage == *st));
+            for here in speaks {
+                if let Some(there) = named {
+                    assert!(there >= here, "{words:?} points back from {}", labels[here]);
+                    checked += 1;
+                }
+                if hint.verb == Some(Verb::GoToDraw) {
+                    assert_eq!(here, 0, "{words:?}: the first step is the one it names");
+                }
             }
         }
+        assert!(checked >= 1, "{kind:?}: the sentences that name a step: {checked}");
     }
-    assert!(checked >= 4, "the sentences that name a step: {checked}");
     // The Quick Start chain speaks in its own order: each row needs what the
     // one before it taught.
     let chain = [say::NEW_PAPER, say::ADD_DRAWING, say::NEXT_POSE, say::TWO_DRAWINGS, say::PLAY, say::SHARE];
@@ -310,7 +326,7 @@ fn ausay_a_held_sentence_counts_to_the_cut_end() {
 /// else on the screen moves.
 #[test]
 fn ausay_hints_off_changes_no_chrome() {
-    let mut h = ready();
+    let mut h = animation();
     quiet(&mut h);
     let counter = format!("Frame 1 of {}", h.state().frame_count());
     let keys = ["Add drawing (band)", counter.as_str()];
@@ -337,7 +353,7 @@ fn ausay_hints_off_changes_no_chrome() {
 /// Spec 8.5: on again, the hints start again.
 #[test]
 fn ausay_hints_on_starts_again() {
-    let mut h = ready();
+    let mut h = animation();
     quiet(&mut h);
     raster_line(&mut h);
     assert_ne!(h.rig().config.ui.hints_seen, 0);
@@ -580,7 +596,7 @@ fn ausay_show_me_is_four_of_five() {
     assert!(matches!(kinds[3], ShowMe::Play));
     assert!(matches!(kinds[EXPORT_STEP], ShowMe::Export));
 
-    let mut h = ready();
+    let mut h = animation();
     assert_ne!(h.editor_mut().show_me(0), Performed::Ignored);
     settle(&mut h);
     assert_eq!(h.editor().quick_start, [true, false, false, false, false]);
@@ -609,7 +625,7 @@ fn ausay_show_me_is_four_of_five() {
     assert!(ringed(&h), "and keeps it");
 
     // Next circle from the first frame goes through Add drawing.
-    let mut h = ready();
+    let mut h = animation();
     assert_ne!(h.editor_mut().show_me(2), Performed::Ignored);
     settle(&mut h);
     assert!(h.state().view.frame >= 1);
@@ -638,7 +654,7 @@ fn queue_ready(h: &mut EditorHarness, dir: &std::path::Path) {
 #[test]
 fn ausay_show_me_walks_the_whole_chain() {
     let dir = tempfile::tempdir().unwrap();
-    let mut h = ready();
+    let mut h = animation();
     queue_ready(&mut h, dir.path());
     let play = crate::menus::chord_label(&h.ctx(), Action::PlayPause).expect("bound");
     let walk = [
@@ -870,6 +886,9 @@ fn ausay_no_step_is_silent() {
                 continue; // A hint, and the only sentence off silences.
             }
             let mut h = ready();
+            // Today's Plan preview, which only the seam reaches until Plan's
+            // own part replaces it.
+            h.editor_mut().unset_kind();
             if off {
                 h.perform(Action::ToggleHints);
                 settle(&mut h);
@@ -906,6 +925,7 @@ fn ausay_no_step_is_silent() {
 /// A shipped editor on the Plan preview, its remarks gone.
 fn in_plan(off: bool) -> EditorHarness {
     let mut h = ready();
+    h.editor_mut().unset_kind();
     if off {
         h.perform(Action::ToggleHints);
         settle(&mut h);
@@ -1076,7 +1096,7 @@ fn ausay_empty_palette_names_what_is_on_screen() {
 #[test]
 fn ausay_teaching_sentence_stays_until_answered() {
     const HINT: &str = "Draw on the paper to begin.";
-    let mut h = ready();
+    let mut h = animation();
     quiet(&mut h);
     for _ in 0..3 {
         h.wait(120.0);
@@ -1207,7 +1227,7 @@ fn ausay_every_hint_fits_at_the_smallest_sizes() {
                 assert_eq!(clip.clipped, 0, "{w} sheet={sheet} {:?}: {:?}", hint.words, clip.found);
                 let word_at = h.painted_at(&hint.words);
                 if let Some(verb) = hint.verb {
-                    let button = h.rect(&format!("{} (say line)", verb.label()));
+                    let button = h.rect(&format!("{} (say line)", verb.label(h.editor().kind())));
                     let inside = button.bottom() <= tall && button.top() >= tall - plate::BAND_H;
                     assert!(inside && button.right() <= w, "{button:?} at {w}");
                     assert!(word_at.x < button.left(), "{:?} under the button", hint.words);
@@ -1361,7 +1381,7 @@ fn ausay_show_me_leaves_the_pen_check_listening() {
 /// and the last tick ends them.
 #[test]
 fn ausay_dots_show_the_place() {
-    let mut h = ready();
+    let mut h = animation();
     quiet(&mut h);
     assert!(h.editor().say.dots_painted);
     let before = measure::census(&mut h);
@@ -1381,9 +1401,10 @@ fn ausay_dots_show_the_place() {
 /// start's closed strip has no animation for them to count.
 #[test]
 fn ausay_dots_card_says_the_place() {
-    assert_eq!(say::place_words(&[true, true, false, false, false]), "Quick Start: 2 of 5. Next: draw the next pose.");
-    assert_eq!(say::place_words(&[false; 5]), "Quick Start: 0 of 5. Next: draw something.");
-    let mut h = ready();
+    let rows = &welcome::STEPS;
+    assert_eq!(say::place_words(rows, &[true, true, false, false, false]), "Quick Start: 2 of 5. Next: draw the next pose.");
+    assert_eq!(say::place_words(rows, &[false; 5]), "Quick Start: 0 of 5. Next: draw something.");
+    let mut h = animation();
     quiet(&mut h);
     let band_left = h.rect("Add drawing (band)").left();
     h.event(egui::Event::PointerMoved(egui::pos2(band_left - 24.0, h.rect("Add drawing (band)").center().y)));
@@ -1391,7 +1412,7 @@ fn ausay_dots_card_says_the_place() {
     h.wait(1.5);
     assert!(says(&h, "Quick Start: 0 of 5. Next: draw something."), "{:?}", h.painted_text());
 
-    let mut h = ready();
+    let mut h = animation();
     h.editor_mut().strip_open = false;
     h.editor_mut().full_band = false;
     settle(&mut h);
@@ -1406,7 +1427,7 @@ fn ausay_dots_card_says_the_place() {
 /// already is, and the dots keep the lane's far end clear of both.
 #[test]
 fn ausay_the_action_button_stands_after_its_words() {
-    let mut h = ready();
+    let mut h = animation();
     quiet(&mut h);
     let words = h.rect("Draw on the paper to begin.");
     let button = h.rect(SHOW_ME);

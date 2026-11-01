@@ -10,15 +10,20 @@
 //! from outcomes only: the stroke signal, `AddDrawingAfter`, playback and a
 //! finished export's file on disk.
 
+use anim_core::manga;
+
 use crate::config::{Action, UiConfig};
 use crate::render_queue::Landed;
+use crate::steps::ProjectKind;
 use crate::viewer::ViewerView;
 use crate::welcome::{self, PenCheck};
 use crate::workspace::Stage;
 use crate::{AppRequest, Editor, Pane, Performed, doc, export_step, menus, visible_panes};
 
 pub const SHOW_ME: &str = "Show me";
+pub const GO_TO_PLAN: &str = "Go to Plan";
 pub const GO_TO_DRAW: &str = "Go to Draw";
+pub const GO_TO_MANGA: &str = "Go to Manga";
 pub const FIX_IT: &str = "Fix it";
 
 /// The Plan preview's answer to a stroke, whether or not a hint can say it.
@@ -46,6 +51,13 @@ pub const HIDE_TOOLS: u32 = 1 << 13;
 /// The canvas line's bit (spec 8.4).
 pub const EMPTY_CELL: u32 = 1 << 14;
 pub const TWO_DRAWINGS: u32 = 1 << 16;
+/// AU18: Quick Start's slots 1 to 3 on a drawing and on a comic. `ui.quick_start`
+/// is one array, an animation's, so these keep theirs here (spec 2.10).
+pub const DRAWING_SLOTS: [u32; 3] = [1 << 17, 1 << 18, 1 << 19];
+pub const COMIC_SLOTS: [u32; 3] = [1 << 20, 1 << 21, 1 << 22];
+/// AU18: the drawing grew into an animation: a remark, said once.
+pub const GREW: u32 = 1 << 24;
+pub const GREW_WORDS: &str = "Two drawings make an animation. Plan and Timing are here now.";
 
 /// What a hint's button does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,10 +74,15 @@ pub enum Verb {
 }
 
 impl Verb {
-    pub fn label(self) -> &'static str {
+    /// AU18: `GoToDraw` is always the bar's first step, in that step's word.
+    pub fn label(self, kind: Option<ProjectKind>) -> &'static str {
         match self {
             Verb::Show(_) => SHOW_ME,
-            Verb::GoToDraw => GO_TO_DRAW,
+            Verb::GoToDraw => match kind {
+                Some(ProjectKind::Animation) => GO_TO_PLAN,
+                Some(ProjectKind::Comic) => GO_TO_MANGA,
+                Some(ProjectKind::Drawing) | None => GO_TO_DRAW,
+            },
             Verb::Fix(_) | Verb::PenPage => FIX_IT,
             Verb::OpenFile => export_step::OPEN_FILE,
         }
@@ -102,6 +119,8 @@ pub enum Words {
 #[derive(Clone, Debug, Default)]
 pub struct Facts {
     pub stage: Option<Stage>,
+    /// AU18: what the project is. None: no row is filtered.
+    pub kind: Option<ProjectKind>,
     /// Drawings in this cut.
     pub drawings: usize,
     /// One of them holds art.
@@ -150,6 +169,10 @@ impl Facts {
     fn has_seen(&self, bit: u32) -> bool {
         self.seen & bit != 0
     }
+
+    fn animation(&self) -> bool {
+        self.kind.is_none_or(|kind| kind == ProjectKind::Animation)
+    }
 }
 
 /// One row of spec 8.2. `HINTS`' order is its precedence.
@@ -159,6 +182,8 @@ pub struct Hint {
     pub verb: Option<Verb>,
     /// The steps it can speak in; none: any.
     pub steps: &'static [Stage],
+    /// AU18: the kinds it can speak on.
+    pub kinds: &'static [ProjectKind],
     pub shows: fn(&Facts) -> bool,
     pub answered: fn(&Facts) -> bool,
     /// Said for a moment: the moment passing answers it, if it stood to be
@@ -172,8 +197,12 @@ const fn never(_: &Facts) -> bool {
 
 const DRAW: &[Stage] = &[Stage::Drawing];
 const DRAWING_ROOMS: &[Stage] = &[Stage::Drawing, Stage::Manga];
+const DRAWING_ROOMS_AND_TIMING: &[Stage] = &[Stage::Drawing, Stage::Manga, Stage::Edit];
 const TRANSPORT: &[Stage] = &[Stage::Drawing, Stage::Edit];
 const ON_A_FRAME: &[Stage] = &[Stage::Drawing, Stage::Edit, Stage::InkPaint];
+const ANY_KIND: &[ProjectKind] = &ProjectKind::ALL;
+/// A row that names a frame, a drawing's order or Play.
+const ANIMATION: &[ProjectKind] = &[ProjectKind::Animation];
 
 pub const HINTS: [Hint; 15] = [
     // First, or a row with nowhere to stand would keep it from the dot. The
@@ -184,6 +213,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Chord("Tap the dot, or press ", Action::HideTools, ", to bring the tools back."),
         verb: None,
         steps: &[],
+        kinds: ANY_KIND,
         shows: |f| f.card_room,
         answered: |f| f.tools_back || (f.card_room && f.stroked),
         passes: false,
@@ -193,6 +223,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Plain(PLAN_WORDS),
         verb: Some(Verb::GoToDraw),
         steps: &[Stage::Layout],
+        kinds: ANY_KIND,
         shows: |f| f.plan_tried,
         answered: never,
         passes: true,
@@ -202,6 +233,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Reason,
         verb: None,
         steps: &[],
+        kinds: ANY_KIND,
         shows: |f| f.refused_twice.is_some(),
         answered: never,
         passes: true,
@@ -211,6 +243,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Plain("Your pen is drawing without pressure."),
         verb: Some(Verb::PenPage),
         steps: &[],
+        kinds: ANY_KIND,
         shows: |f| f.flat_pen,
         answered: |f| f.pen_works,
         passes: false,
@@ -222,6 +255,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Exported,
         verb: Some(Verb::OpenFile),
         steps: &[],
+        kinds: ANY_KIND,
         shows: |f| f.report.is_some(),
         answered: never,
         passes: false,
@@ -231,6 +265,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Plain("This drawing appears twice. Changes show in both."),
         verb: None,
         steps: ON_A_FRAME,
+        kinds: ANIMATION,
         shows: |f| f.twice && !f.playing,
         answered: never,
         passes: true,
@@ -240,6 +275,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Held,
         verb: None,
         steps: ON_A_FRAME,
+        kinds: ANIMATION,
         shows: |f| f.held.is_some() && !f.playing,
         answered: never,
         passes: true,
@@ -249,6 +285,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Plain("Pick a color, then tap an area."),
         verb: None,
         steps: &[Stage::InkPaint],
+        kinds: ANY_KIND,
         shows: |f| f.art,
         answered: |f| f.filled,
         passes: false,
@@ -259,6 +296,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Chord("Press ", Action::AddNode, " over the graph to add an effect."),
         verb: None,
         steps: &[Stage::Composite],
+        kinds: ANY_KIND,
         shows: |f| f.art,
         answered: |f| f.effect_added,
         passes: true,
@@ -269,6 +307,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Plain("Draw on the paper to begin."),
         verb: Some(Verb::Show(0)),
         steps: DRAWING_ROOMS,
+        kinds: ANY_KIND,
         shows: |f| !f.art,
         answered: |f| f.stroked,
         passes: false,
@@ -278,6 +317,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Plain("Next: add a drawing."),
         verb: Some(Verb::Show(1)),
         steps: DRAW,
+        kinds: ANIMATION,
         shows: |f| f.art && f.drawings == 1 && f.strip,
         answered: |f| f.added,
         passes: false,
@@ -287,6 +327,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Plain("The ghost is your last drawing. Draw the next pose."),
         verb: Some(Verb::Show(2)),
         steps: DRAW,
+        kinds: ANIMATION,
         shows: |f| f.art && f.blank && f.frame >= 1 && f.ghost,
         answered: |f| f.stroked && f.frame >= 1,
         passes: false,
@@ -298,6 +339,7 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Chord("Add another drawing, or press ", Action::PlayPause, " to play."),
         verb: Some(Verb::Show(welcome::PLAY_STEP)),
         steps: TRANSPORT,
+        kinds: ANIMATION,
         shows: |f| f.art && f.drawings == 2 && !f.blank && !f.playing,
         answered: |f| f.playing,
         passes: false,
@@ -307,16 +349,19 @@ pub const HINTS: [Hint; 15] = [
         words: Words::Chord("Press ", Action::PlayPause, " to play."),
         verb: Some(Verb::Show(3)),
         steps: TRANSPORT,
+        kinds: ANIMATION,
         shows: |f| f.drawings >= 3 && !f.blank && !f.playing,
         answered: |f| f.playing,
         passes: false,
     },
+    // AU18: Play is an animation's: a drawing or a comic gets here with art.
     Hint {
         bit: SHARE,
         words: Words::Plain("Ready to share? Go to Export."),
         verb: Some(Verb::Show(welcome::EXPORT_STEP)),
-        steps: TRANSPORT,
-        shows: |f| f.has_seen(PLAY) && f.drawings >= 2 && !f.queue_up,
+        steps: DRAWING_ROOMS_AND_TIMING,
+        kinds: ANY_KIND,
+        shows: |f| !f.queue_up && if f.animation() { f.has_seen(PLAY) && f.drawings >= 2 } else { f.art },
         answered: |f| f.exported,
         passes: false,
     },
@@ -348,7 +393,9 @@ pub struct Spoken {
 
 impl Hint {
     fn applies(&self, f: &Facts) -> bool {
-        (self.steps.is_empty() || f.stage.is_some_and(|s| self.steps.contains(&s))) && (self.shows)(f)
+        (self.steps.is_empty() || f.stage.is_some_and(|s| self.steps.contains(&s)))
+            && f.kind.is_none_or(|kind| self.kinds.contains(&kind))
+            && (self.shows)(f)
     }
 
     fn spoken(&self, f: &Facts, chord: &impl Fn(Action) -> Option<String>) -> Option<Spoken> {
@@ -413,9 +460,9 @@ pub fn empty_step(f: &Facts, hints_off: bool) -> Option<Spoken> {
 }
 
 /// The five dots' card: the place they show, in words.
-pub fn place_words(ticks: &[bool; 5]) -> String {
+pub fn place_words(rows: &[welcome::Step; 5], ticks: &[bool; 5]) -> String {
     let done = ticks.iter().filter(|done| **done).count();
-    let next = ticks.iter().position(|done| !done).map_or("", |i| welcome::STEPS[i].label);
+    let next = ticks.iter().position(|done| !done).map_or("", |i| rows[i].label);
     format!("Quick Start: {done} of 5. Next: {}.", next.to_lowercase())
 }
 
@@ -462,6 +509,7 @@ pub struct Say {
     strokes: Option<u64>,
     fills: Option<u64>,
     nodes: Option<usize>,
+    panels: Option<usize>,
     plan_tried: bool,
     flat_strokes: u32,
     pen_answered: bool,
@@ -491,7 +539,9 @@ impl Say {
         if self.off && !ui.hints_off {
             (self.shown, self.standing, self.stood, self.line_shown) = (None, None, false, false);
         }
-        (self.off, self.seen) = (ui.hints_off, ui.hints_seen);
+        // An answer from outside the frame waits in the request: `perform` ticks
+        // a row before the shell has stored it.
+        (self.off, self.seen) = (ui.hints_off, ui.hints_seen | self.seen_request.unwrap_or(0));
     }
 
     /// What the lane shows this frame, from the shell, with the time. A row
@@ -507,7 +557,7 @@ impl Say {
 
     /// Another document: nothing that differs from the last one is an outcome.
     pub fn new_document(&mut self) {
-        (self.strokes, self.fills, self.nodes) = (None, None, None);
+        (self.strokes, self.fills, self.nodes, self.panels) = (None, None, None, None);
         self.exported = None;
     }
 
@@ -550,6 +600,48 @@ impl Say {
 }
 
 impl Editor {
+    /// AU18: an animation's rules stand here, as they do on the frozen boot.
+    pub(crate) fn animated(&self) -> bool {
+        self.kind().is_none_or(|kind| kind == ProjectKind::Animation)
+    }
+
+    /// AU18: Quick Start's rows for this kind.
+    pub(crate) fn quick_rows(&self) -> &'static [welcome::Step; 5] {
+        welcome::steps_of(self.kind())
+    }
+
+    /// AU18: where a drawing or a comic keeps its slots 1 to 3.
+    fn slot_bits(&self) -> Option<[u32; 3]> {
+        match self.kind() {
+            Some(ProjectKind::Drawing) => Some(DRAWING_SLOTS),
+            Some(ProjectKind::Comic) => Some(COMIC_SLOTS),
+            _ => None,
+        }
+    }
+
+    /// AU18: Quick Start's five, as this kind reads them.
+    pub(crate) fn ticks(&self) -> [bool; 5] {
+        let mut ticks = self.quick_start;
+        if let Some(bits) = self.slot_bits() {
+            for (tick, bit) in ticks[1..4].iter_mut().zip(bits) {
+                *tick = self.say.seen & bit != 0;
+            }
+        }
+        ticks
+    }
+
+    /// AU18: slot `i` is done, where this kind keeps it.
+    pub(crate) fn tick_slot(&mut self, i: usize) {
+        match self.slot_bits() {
+            Some(bits) if (1..4).contains(&i) => {
+                if self.say.seen & bits[i - 1] == 0 {
+                    self.say_answered(bits[i - 1]);
+                }
+            }
+            _ => self.quick_start[i] = true,
+        }
+    }
+
     /// AU7: what this frame came to: Quick Start's ticks, and the row that
     /// speaks next. Runs after the dock, where a stroke lands.
     pub(crate) fn say_read(&mut self, ctx: &eframe::egui::Context) {
@@ -602,7 +694,11 @@ impl Editor {
                 _ => {}
             }
         }
-        self.quick_start[welcome::PLAY_STEP] |= self.state.view.playing;
+        if self.animated() {
+            self.quick_start[welcome::PLAY_STEP] |= self.state.view.playing;
+        } else if filled && self.kind() == Some(ProjectKind::Drawing) {
+            self.tick_slot(1);
+        }
         let exported = self.say_landed();
         (stroked, filled, exported)
     }
@@ -637,7 +733,9 @@ impl Editor {
     /// What a finished stroke ticks (spec 8.3).
     fn tick_stroke(&mut self) {
         self.quick_start[welcome::FIRST_STROKE] = true;
-        self.quick_start[welcome::NEXT_POSE] |= self.state.view.frame >= 1;
+        if self.animated() {
+            self.quick_start[welcome::NEXT_POSE] |= self.state.view.frame >= 1;
+        }
     }
 
     /// A stroke tried on the Plan preview always gets an answer: a hint the
@@ -674,14 +772,20 @@ impl Editor {
         let nodes = cut.graph.nodes().count();
         let effect_added = self.say.nodes.is_some_and(|before| nodes > before);
         self.say.nodes = Some(nodes);
+        // AU18: a comic's cut into panels by the count, read on a comic alone.
+        let comic = self.kind() == Some(ProjectKind::Comic);
+        let panels = comic.then(|| manga::panels_of(cut).map_or(0, |(_, polys)| polys.len()));
+        let panel_added = self.say.panels.zip(panels).is_some_and(|(before, now)| now > before);
+        self.say.panels = panels;
         let shown = state.current_drawing();
         let held = state.own_key_drawing().is_none().then(|| state.exposure_here()).flatten();
         let held = held.filter(|_| shown.is_some());
         let length = state.frame_count();
         let keys = |d| cut.xsheet.column(state.view.active_column).map_or(0, |c| c.keys_referencing(d).len());
         let tools_back = std::mem::replace(&mut self.say.tools_were_hidden, self.tools_hidden) && !self.tools_hidden;
-        Facts {
+        let facts = Facts {
             stage: self.stage,
+            kind: self.kind(),
             drawings: cut.drawings.len(),
             art: state.has_art(),
             frame: state.view.frame,
@@ -707,7 +811,14 @@ impl Editor {
             exported,
             pen_works: std::mem::take(&mut self.say.pen_answered),
             tools_back,
+        };
+        if effect_added && self.kind() == Some(ProjectKind::Drawing) {
+            self.tick_slot(2);
         }
+        if panel_added {
+            self.tick_slot(1);
+        }
+        facts
     }
 
     /// The action button, pressed. It runs what the Help window's rows run;
@@ -742,7 +853,7 @@ impl Editor {
         }
     }
 
-    fn say_answered(&mut self, bit: u32) {
+    pub(crate) fn say_answered(&mut self, bit: u32) {
         self.say.seen |= bit;
         self.say.seen_request = Some(self.say.seen);
     }

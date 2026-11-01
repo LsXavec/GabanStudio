@@ -5,17 +5,21 @@
 //! first room, one a stroke lands in; the room's cel-stack preset arms when
 //! the editor enters it. AU6: `INTENTS` are the float's own cards, outside
 //! `ALL`, at one frame and one track: a person's first document, not a
-//! studio's cut.
+//! studio's cut. AU18: each stamps its project's kind, but the ready paper,
+//! which `READY` makes.
 
 use anim_core::color::ColorLaw;
 use anim_core::manga::Page;
 use anim_core::xsheet::{ColumnDef, ColumnKind};
 
 use crate::doc::AppState;
+use crate::steps::{self, ProjectKind};
 use crate::workspace::Stage;
 
 pub struct Template {
     pub name: &'static str,
+    /// AU18: the kind stamped on the project; None derives at the door.
+    pub kind: Option<ProjectKind>,
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -42,6 +46,7 @@ const D: (&str, ColumnKind) = ("D", ColumnKind::Cel);
 pub const ALL: &[Template] = &[
     Template {
         name: "TV anime HD",
+        kind: Some(ProjectKind::Animation),
         width: 1920,
         height: 1080,
         fps: 24,
@@ -53,6 +58,7 @@ pub const ALL: &[Template] = &[
     },
     Template {
         name: "Web 720p",
+        kind: Some(ProjectKind::Animation),
         width: 1280,
         height: 720,
         fps: 24,
@@ -64,6 +70,7 @@ pub const ALL: &[Template] = &[
     },
     Template {
         name: "Feature UHD",
+        kind: Some(ProjectKind::Animation),
         width: 3840,
         height: 2160,
         fps: 24,
@@ -75,6 +82,7 @@ pub const ALL: &[Template] = &[
     },
     Template {
         name: "Animatic / storyboard",
+        kind: Some(ProjectKind::Animation),
         width: 1920,
         height: 1080,
         fps: 24,
@@ -89,6 +97,7 @@ pub const ALL: &[Template] = &[
     // GM18 (D15): a book of one-frame pages at 350 dpi, in the manga room.
     Template {
         name: "Manga B5",
+        kind: Some(ProjectKind::Comic),
         width: 2591,
         height: 3624,
         fps: 24,
@@ -100,6 +109,7 @@ pub const ALL: &[Template] = &[
     },
     Template {
         name: "Manga A4",
+        kind: Some(ProjectKind::Comic),
         width: 2976,
         height: 4175,
         fps: 24,
@@ -111,6 +121,7 @@ pub const ALL: &[Template] = &[
     },
     Template {
         name: "Webtoon",
+        kind: Some(ProjectKind::Comic),
         width: 800,
         height: 6400,
         fps: 24,
@@ -123,9 +134,10 @@ pub const ALL: &[Template] = &[
 ];
 
 /// AU6: one Draw document for the Start float's cards.
-const fn intent(name: &'static str, width: u32, height: u32) -> Template {
+const fn intent(name: &'static str, kind: Option<ProjectKind>, width: u32, height: u32) -> Template {
     Template {
         name,
+        kind,
         width,
         height,
         fps: 12,
@@ -137,14 +149,20 @@ const fn intent(name: &'static str, width: u32, height: u32) -> Template {
     }
 }
 
-/// AU6: what the Start float's cards make (spec 8.1). The ready paper is the
-/// first of them.
+const PICTURE_KIND: Option<ProjectKind> = Some(ProjectKind::Drawing);
+
+/// AU6: what the Start float's cards make (spec 8.1).
 pub const INTENTS: &[Template] = &[
-    intent("Animation", 1280, 720),
-    intent("Picture", 1920, 1080),
-    intent("Square picture", 2048, 2048),
-    intent("Tall picture", 1080, 1920),
+    intent("Animation", Some(ProjectKind::Animation), 1280, 720),
+    intent("Picture", PICTURE_KIND, 1920, 1080),
+    intent("Square picture", PICTURE_KIND, 2048, 2048),
+    intent("Tall picture", PICTURE_KIND, 1080, 1920),
 ];
+
+/// AU18: the paper a fresh launch opens on. It stamps no kind: it derives a
+/// drawing, and the door stamps that in memory, so it stays not dirty and a
+/// first stroke keeps it a drawing.
+pub const READY: Template = intent("Ready paper", None, 1280, 720);
 
 /// `INTENTS` by name. Animation alone opens the strip.
 pub const ANIMATION: usize = 0;
@@ -187,13 +205,12 @@ impl Template {
     }
 
     /// The card's hover: the room it opens in and the columns it starts with.
+    /// AU18: the room by the word its kind's bar has for it.
     pub fn tooltip(&self) -> String {
         let columns: Vec<&str> = self.columns.iter().map(|(name, _)| *name).collect();
-        format!(
-            "opens in the {} room · columns {}",
-            self.room.name(),
-            columns.join(", ")
-        )
+        let bar = self.kind.map_or(&[][..], steps::bar);
+        let room = bar.iter().find(|s| s.stage == self.room).map_or(self.room.name(), |s| s.label);
+        format!("opens in the {room} room · columns {}", columns.join(", "))
     }
 
     /// A fresh untitled project to this template (history empty).
@@ -244,6 +261,9 @@ impl Template {
             None => {
                 s.auto_comp();
             }
+        }
+        if let Some(kind) = self.kind {
+            kind.stamp(&mut s.engine.project);
         }
         s.engine.clear_history();
         // AU6: what the template built is where the work starts, not work:

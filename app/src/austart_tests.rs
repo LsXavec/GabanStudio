@@ -104,7 +104,7 @@ fn float_census(h: &mut EditorHarness) -> Census {
 fn austart_fresh_launch_opens_on_ready_paper() {
     let h = first_run();
     assert_eq!(h.boot(), Boot::FirstRun);
-    // A blank Draw step: Animation, 1280×720, 12 fps, one track `A`.
+    // A blank Draw step: a drawing, 1280×720, 12 fps, one track `A`.
     let project = &h.state().engine.project;
     assert_eq!((project.width, project.height), (1280, 720));
     assert_eq!(h.state().fps(), 12);
@@ -112,7 +112,7 @@ fn austart_fresh_launch_opens_on_ready_paper() {
     let columns = &h.state().cut().xsheet.columns;
     assert_eq!(columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["A"]);
     assert_eq!(h.editor().stage, Some(Stage::Drawing));
-    assert!(h.editor().strip_open, "the Animation intent opens the strip");
+    assert!(!h.editor().strip_open, "the ready paper's strip is closed");
     // The float sits over it, on its Start tab, and the paper is live.
     assert!(is_open(&h) && h.has("Close Start"));
     assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::Start));
@@ -155,8 +155,8 @@ fn austart_first_stroke_closes_the_float_and_keeps_the_stroke() {
     assert!(!is_open(&h), "the first finished stroke ends it");
     assert!(float_rect(&h).is_none(), "and nothing of it is left on screen");
     assert_eq!(strokes(&h), 1, "the stroke stays");
-    assert_eq!(h.state().untitled_group, group, "on the same paper: Animation accepted");
-    assert!(h.editor().strip_open);
+    assert_eq!(h.state().untitled_group, group, "on the same paper: a drawing accepted");
+    assert!(!h.editor().strip_open);
     // The float is gone for good: the next line finds nothing to close.
     let again = paper_middle(&h) + vec2(0.0, 60.0);
     line_at(&mut h, again);
@@ -320,7 +320,7 @@ fn austart_close_control_closes_the_float() {
     settle(&mut h);
     assert!(!is_open(&h));
     assert_eq!((strokes(&h), h.state().untitled_group.clone()), (before, group), "the paper stays");
-    assert!(h.state().frame_count() == 1 && h.editor().strip_open);
+    assert!(h.state().frame_count() == 1 && !h.editor().strip_open);
     // A click anywhere else is no dismissal.
     let mut h = first_run();
     h.click("Brush");
@@ -386,10 +386,10 @@ fn austart_show_at_startup_off_keeps_the_paper() {
     assert!(is_open(&h), "it takes hold at the next launch");
     // The next launch: the same paper, with no float.
     assert_eq!(startup_route(false, false, None, &stored), Startup::ReadyPaper);
-    let paper = crate::open_intent(templates::ANIMATION, None, Some(h.data_dir()), &stored.ui);
+    let paper = crate::open_ready(None, Some(h.data_dir()), &stored.ui);
     assert!(paper.start.is_none());
     assert_eq!(paper.stage, Some(Stage::Drawing));
-    assert!(paper.strip_open);
+    assert!(!paper.strip_open);
     let project = &paper.state.engine.project;
     assert_eq!((project.width, project.height, paper.state.fps()), (1280, 720, 12));
 }
@@ -711,11 +711,18 @@ fn austart_intents_are_the_table() {
         assert!(!t.sheet_on && t.page.is_none(), "{}", t.name);
         assert_eq!(t.columns.iter().map(|c| c.0).collect::<Vec<_>>(), ["A"], "{}", t.name);
     }
-    assert_eq!(templates::INTENTS[templates::ANIMATION].name, "Animation", "the ready paper");
+    assert_eq!(templates::INTENTS[templates::ANIMATION].name, "Animation", "the first card");
+    // The ready paper is the first card's paper, and its own row: no stamp.
+    let ready = &templates::READY;
+    let card = &templates::INTENTS[templates::ANIMATION];
+    assert_eq!((ready.width, ready.height, ready.fps, ready.cut_frames), (card.width, card.height, card.fps, card.cut_frames));
+    assert_eq!(ready.columns.iter().map(|c| c.0).collect::<Vec<_>>(), ["A"]);
+    assert!(ready.kind.is_none() && card.kind.is_some());
     // Outside `ALL`, which stays what the New form lists.
     let names: Vec<_> = templates::ALL.iter().map(|t| t.name).collect();
     assert_eq!(names.len(), 7);
     assert!(templates::INTENTS.iter().all(|t| !names.contains(&t.name)));
+    assert!(!names.contains(&ready.name) && templates::INTENTS.iter().all(|t| t.name != ready.name));
     assert_eq!(templates::SIZES.len(), 9);
     assert!(templates::ALL.iter().all(|t| t.fps == 24), "studio presets stay at 24");
     assert_eq!(templates::ALL[templates::COMIC].name, "Manga B5");

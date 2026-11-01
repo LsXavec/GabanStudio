@@ -8,6 +8,7 @@ use egui_dock::{DockState, Node};
 use crate::config::{self, Action, Config};
 use crate::doc::AppState;
 use crate::measure::{self, Scope};
+use crate::steps::ProjectKind;
 use crate::testkit::EditorHarness;
 use crate::workspace::{Pane, Stage, Workspace, Workspaces};
 use crate::{PROBE_ROOMS, PROBE_SCALES, plate, probe_run_in, sample, steps, templates, vocab};
@@ -252,7 +253,7 @@ pub(crate) fn middle_click_tab(h: &mut EditorHarness, pane: Pane) {
 
 #[test]
 fn audock_lock_holds_the_recipe_and_lets_a_hand_panel_go() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
     h.click(vocab::SHOW_TIMING_SHEET);
@@ -267,7 +268,7 @@ fn audock_lock_holds_the_recipe_and_lets_a_hand_panel_go() {
     middle_click_tab(&mut h, Pane::XSheet);
     assert!(!panes(&h).contains(&Pane::XSheet), "the same click closes it with the lock off");
     // A panel opened by hand still goes under the lock, and the Canvas stays.
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     h.rig_mut().config.ui.lock_positions = true;
     settle(&mut h);
@@ -323,7 +324,7 @@ fn audock_draw_is_canvas_alone_when_shipped() {
 
 #[test]
 fn audock_sheet_button_is_one_click_and_remembered() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     settle(&mut h);
     assert!(!h.has(vocab::HIDE_TIMING_SHEET));
     h.click(vocab::SHOW_TIMING_SHEET);
@@ -343,7 +344,9 @@ fn audock_sheet_button_is_one_click_and_remembered() {
     assert_eq!(panes(&h), [Pane::Canvas]);
     assert!(!h.rig().config.ui.sheet_in_draw);
     assert!(!Config::load_from(h.data_dir()).0.ui.sheet_in_draw);
-    // Absent where the recipe holds the sheet.
+    // Absent where the recipe holds the sheet. Today's Layout recipe, which
+    // only the seam reaches until Plan's own part replaces it.
+    h.editor_mut().unset_kind();
     for action in [Action::RoomLayout, Action::RoomEdit] {
         h.perform(action);
         settle(&mut h);
@@ -360,12 +363,12 @@ fn audock_sheet_button_is_one_click_and_remembered() {
 
 #[test]
 fn audock_sheet_choice_survives_a_restart() {
-    let mut first = EditorHarness::as_shipped();
+    let mut first = EditorHarness::as_animation();
     settle(&mut first);
     first.click(vocab::SHOW_TIMING_SHEET);
     settle(&mut first);
     assert!(config::config_path_in(first.data_dir()).exists(), "saved at the click");
-    let h = EditorHarness::with_dir_shipped(first.quit());
+    let h = EditorHarness::with_dir_animation(first.quit());
     assert_eq!(h.editor().stage, Some(Stage::Drawing));
     assert!(panes(&h).contains(&Pane::XSheet), "{:?}", panes(&h));
     assert!(h.has(vocab::HIDE_TIMING_SHEET));
@@ -373,7 +376,7 @@ fn audock_sheet_choice_survives_a_restart() {
 
 #[test]
 fn audock_sheet_button_keeps_a_hand_arrangement() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     settle(&mut h);
     h.editor_mut().open_pane(Pane::History);
     settle(&mut h);
@@ -403,7 +406,7 @@ fn audock_sheet_button_keeps_a_hand_arrangement() {
 
 #[test]
 fn audock_sheet_button_outside_draw_is_a_plain_action() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     settle(&mut h);
     assert_eq!(h.node_toggled(vocab::SHOW_TIMING_SHEET), Some(false), "a latch in Draw");
     for action in [Action::RoomFinishing, Action::RoomComposite, Action::Layout3dRoom] {
@@ -425,7 +428,7 @@ fn audock_sheet_button_outside_draw_is_a_plain_action() {
 
 #[test]
 fn audock_reset_reads_the_sheet_switch() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     settle(&mut h);
     h.editor_mut().open_pane(Pane::History);
     h.perform(Action::ResetLayout);
@@ -462,7 +465,7 @@ fn audock_templates_start_the_sheet_where_they_say() {
     let on: Vec<&str> = templates::ALL.iter().filter(|t| t.sheet_on).map(|t| t.name).collect();
     assert_eq!(on, ["TV anime HD", "Feature UHD"]);
     // The sheet is that project's: an explicit Hide outlives the template.
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     settle(&mut h);
     h.click(vocab::SHOW_TIMING_SHEET);
     settle(&mut h);
@@ -508,7 +511,7 @@ fn audock_sheet_recipe_passes_the_layout_probe() {
 
 #[test]
 fn audock_a_new_pane_leaves_the_paper_in_view() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
     h.editor_mut().open_pane(Pane::History);
@@ -555,8 +558,8 @@ fn audock_top_row_is_one_row_at_every_size() {
         for stored in PROBE_SCALES {
             window(&mut h, w, tall, stored);
             let at = format!("{w}×{tall} at {stored}");
-            let row = points(&h, vocab::STEP_DRAW).center().y;
-            for name in [vocab::STEP_PLAN, vocab::STEP_EXPORT, "Undo (toolbar)", "Search"] {
+            let row = points(&h, vocab::STEP_PLAN).center().y;
+            for name in [vocab::STEP_TIMING, vocab::STEP_EXPORT, "Undo (toolbar)", "Search"] {
                 let r = points(&h, name);
                 assert!((r.center().y - row).abs() < 0.5, "{name} off the row at {at}");
                 assert!(r.top() >= 0.0 && r.bottom() <= ROW_H, "{name} at {r:?} at {at}");
@@ -576,21 +579,17 @@ fn audock_top_row_is_one_row_at_every_size() {
 fn audock_steps_show_in_order_and_run_their_actions() {
     let mut h = EditorHarness::with_state_shipped(sample::build_sample());
     settle(&mut h);
-    let lefts: Vec<f32> = steps::STEPS.iter().map(|s| h.rect(s.label).left()).collect();
+    let bar = steps::bar(ProjectKind::Animation);
+    let lefts: Vec<f32> = bar.iter().map(|s| h.rect(s.label).left()).collect();
     assert!(lefts.is_sorted(), "{lefts:?}");
-    let labels: Vec<&str> = steps::STEPS.iter().map(|s| s.label).collect();
-    assert_eq!(labels, ["Plan", "Draw", "Timing", "Color", "Effects", "Export"]);
-    for step in &steps::STEPS {
+    let labels: Vec<&str> = bar.iter().map(|s| s.label).collect();
+    assert_eq!(labels, ["Plan", "Timing", "Color", "Effects", "Export"]);
+    for step in bar {
         h.click(step.label);
         settle(&mut h);
-        match step.stage {
-            Some(st) => {
-                assert_eq!(h.editor().stage, Some(st), "{}", step.label);
-                assert_eq!(h.state().status, format!("step: {}", step.label));
-                assert_eq!(h.node_toggled(step.label), Some(true), "the current pill says so");
-            }
-            None => assert!(panes(&h).contains(&Pane::RenderQueue), "{:?}", panes(&h)),
-        }
+        assert_eq!(h.editor().stage, Some(step.stage), "{}", step.label);
+        assert_eq!(h.state().status, format!("step: {}", step.label));
+        assert_eq!(h.node_toggled(step.label), Some(true), "the current pill says so");
     }
     // The stored words hold still under the new ones.
     assert_eq!(Stage::ALL.len(), 5);
@@ -605,19 +604,21 @@ fn audock_steps_show_in_order_and_run_their_actions() {
 #[test]
 fn audock_step_card_names_the_studio_word() {
     for (label, purpose, word) in [
-        (vocab::STEP_PLAN, "Set up shots, timing and camera before drawing.", "layout"),
-        (vocab::STEP_DRAW, "Draw on the paper, one drawing at a time.", "genga"),
+        (vocab::STEP_PLAN, "Draw your key poses on the frames you choose.", "genga"),
         (vocab::STEP_TIMING, "Arrange when each drawing appears.", "henshū"),
         (vocab::STEP_COLOR, "Fill your drawings with color.", "shiage"),
         (vocab::STEP_EFFECTS, "Add glow, blur and camera moves.", "satsuei"),
+        (vocab::STEP_MANGA, "Draw the book's pages, panels and screen tone.", "manga"),
     ] {
-        let step = steps::STEPS.iter().find(|s| s.label == label).unwrap();
+        let step = steps::CATALOG.iter().find(|s| s.label == label).unwrap();
         assert_eq!(step.card(), format!("{purpose}\nStudio word: {word}"));
     }
-    assert_eq!(steps::STEPS[5].card(), "Save a file to share.");
-    let mut h = EditorHarness::as_shipped();
+    let step = steps::CATALOG.iter().find(|s| s.label == vocab::STEP_DRAW).unwrap();
+    assert_eq!(step.card(), "Draw on the paper.");
+    assert_eq!(steps::CATALOG[6].card(), "Save a file to share.");
+    let mut h = EditorHarness::as_animation();
     settle(&mut h);
-    h.hover(vocab::STEP_DRAW);
+    h.hover(vocab::STEP_PLAN);
     h.run_frames(3);
     let words = measure::reading(&h).texts;
     assert!(words.iter().any(|(_, t)| t.contains("Studio word: genga")), "{words:?}");
@@ -692,7 +693,7 @@ fn audock_reset_off_the_spine_returns_to_the_place() {
         assert!(crate::same_shape(&h.editor().dock, &dock), "{place}: {:?}", panes(&h));
         assert_eq!(h.editor().stage, None, "{place}");
         assert!(h.has(&format!("Current place: {place}")), "{place}\n{}", h.describe());
-        for step in &steps::STEPS {
+        for step in h.editor().bar() {
             assert_ne!(h.node_toggled(step.label), Some(true), "{place}: {} is not lit", step.label);
         }
         assert_eq!(h.state().status, format!("layout reset: {place}"));
@@ -1005,7 +1006,7 @@ const MENUS: [&str; 9] = ["file", "edit", "view", "sheet", "cut", "project", voc
 
 #[test]
 fn audock_narrow_row_collapses_to_menu() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(steps::WIDE, 800.0));
     settle(&mut h);
     assert!(!h.has("Menu") && h.has("file"), "the menus show from 1120");
@@ -1028,7 +1029,7 @@ fn audock_narrow_row_collapses_to_menu() {
     settle(&mut h);
     assert!(h.has("Undo"), "{}", h.describe());
     // The off-spine pill needs its own room.
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.perform(Action::Layout3dRoom);
     h.kit_mut().set_size(vec2(steps::WIDE_PLACE, 800.0));
     settle(&mut h);

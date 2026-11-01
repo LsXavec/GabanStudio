@@ -2,72 +2,169 @@
 //! is a lens on the one document; switching swaps the arrangement and the
 //! tool, and never forks data. `Stage::ALL` keeps the stored order and its
 //! tests; the display order lives here (Timing before Color: the line test
-//! comes before paint).
+//! comes before paint). AU18: each kind of project has its own bar, cut from
+//! one catalog of rows.
+
+use anim_core::manga::PAGE_KEY;
+use anim_core::model::Project;
 
 use crate::config::Action;
 use crate::vocab;
 use crate::workspace::Stage;
 
+/// `project.app_meta`'s key for the kind (`app.kind` on disk).
+pub const KIND_KEY: &str = "kind";
+
+/// AU18: what a project is. The app's word: anim-core holds no app types and
+/// never reads `app_meta`. Nothing caches it, because four routes replace the
+/// document with no boot: the project is the one truth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectKind {
+    Drawing,
+    Animation,
+    Comic,
+}
+
+impl ProjectKind {
+    pub const ALL: [ProjectKind; 3] = [ProjectKind::Drawing, ProjectKind::Animation, ProjectKind::Comic];
+
+    /// The stored value, unknown or absent as None.
+    fn stored(p: &Project) -> Option<ProjectKind> {
+        match p.app_meta.get(KIND_KEY).map(String::as_str) {
+            Some("drawing") => Some(ProjectKind::Drawing),
+            Some("animation") => Some(ProjectKind::Animation),
+            Some("comic") => Some(ProjectKind::Comic),
+            _ => None,
+        }
+    }
+
+    /// The stored kind wins. An old file, and an unknown value, derive.
+    pub fn of(p: &Project) -> ProjectKind {
+        Self::stored(p).unwrap_or_else(|| Self::derive(p))
+    }
+
+    /// Every cut a page: a comic. "Every", not "any": an old animation with
+    /// one page among its cuts keeps its Plan and Timing. This runs per frame,
+    /// so it asks for the key and never parses the page.
+    fn derive(p: &Project) -> ProjectKind {
+        let mut cuts = p.scenes.iter().flat_map(|scene| &scene.cuts);
+        if cuts.clone().next().is_some() && cuts.clone().all(|cut| cut.meta.contains_key(PAGE_KEY)) {
+            ProjectKind::Comic
+        } else if cuts.clone().count() > 1 || cuts.any(|cut| cut.frame_count > 1) {
+            ProjectKind::Animation
+        } else {
+            ProjectKind::Drawing
+        }
+    }
+
+    /// What a drawing has grown into, if it has (spec 2.7). The page check
+    /// comes first, or a New page would promote to Animation by cut count.
+    /// Frames, not drawings: two tracks on one frame are still a picture.
+    pub fn grown(p: &Project) -> Option<ProjectKind> {
+        let mut cuts = p.scenes.iter().flat_map(|scene| &scene.cuts);
+        if cuts.clone().any(|cut| cut.meta.contains_key(PAGE_KEY)) {
+            Some(ProjectKind::Comic)
+        } else if cuts.clone().count() > 1 || cuts.any(|cut| cut.frame_count > 1) {
+            Some(ProjectKind::Animation)
+        } else {
+            None
+        }
+    }
+
+    /// Into `app_meta`. This alone does not mark the document dirty.
+    pub fn stamp(self, p: &mut Project) {
+        let word = match self {
+            ProjectKind::Drawing => "drawing",
+            ProjectKind::Animation => "animation",
+            ProjectKind::Comic => "comic",
+        };
+        p.app_meta.insert(KIND_KEY.to_string(), word.to_string());
+    }
+}
+
 pub struct Step {
-    /// The stage it lenses. AU9: Export's is `Stage::Export`, off the stored
-    /// spine, so every row now names one.
-    pub stage: Option<Stage>,
+    /// The stage it lenses. AU18: Plan and Draw both lens `Stage::Drawing`, on
+    /// two bars, so a stage is not a row's name.
+    pub stage: Stage,
     pub label: &'static str,
     /// The hover card's first line.
     pub purpose: &'static str,
-    /// The hover card's second line; "" for Export.
+    /// The hover card's second line; "" where a row has none.
     pub studio_words: &'static str,
     pub action: Action,
 }
 
-pub const STEPS: [Step; 6] = [
-    Step {
-        stage: Some(Stage::Layout),
-        label: vocab::STEP_PLAN,
-        purpose: "Set up shots, timing and camera before drawing.",
-        studio_words: "layout",
-        action: Action::RoomLayout,
-    },
-    Step {
-        stage: Some(Stage::Drawing),
-        label: vocab::STEP_DRAW,
-        purpose: "Draw on the paper, one drawing at a time.",
-        studio_words: "genga",
-        action: Action::RoomDrawing,
-    },
-    Step {
-        stage: Some(Stage::Edit),
-        label: vocab::STEP_TIMING,
-        purpose: "Arrange when each drawing appears.",
-        studio_words: "henshū",
-        action: Action::RoomEdit,
-    },
-    Step {
-        stage: Some(Stage::InkPaint),
-        label: vocab::STEP_COLOR,
-        purpose: "Fill your drawings with color.",
-        studio_words: "shiage",
-        action: Action::RoomFinishing,
-    },
-    Step {
-        stage: Some(Stage::Composite),
-        label: vocab::STEP_EFFECTS,
-        purpose: "Add glow, blur and camera moves.",
-        studio_words: "satsuei",
-        action: Action::RoomComposite,
-    },
-    Step {
-        stage: Some(Stage::Export),
-        label: vocab::STEP_EXPORT,
-        purpose: "Save a file to share.",
-        studio_words: "",
-        action: Action::RoomExport,
-    },
-];
+const PLAN: Step = Step {
+    stage: Stage::Drawing,
+    label: vocab::STEP_PLAN,
+    purpose: "Draw your key poses on the frames you choose.",
+    studio_words: "genga",
+    action: Action::RoomDrawing,
+};
+const DRAW: Step = Step {
+    stage: Stage::Drawing,
+    label: vocab::STEP_DRAW,
+    purpose: "Draw on the paper.",
+    studio_words: "",
+    action: Action::RoomDrawing,
+};
+const TIMING: Step = Step {
+    stage: Stage::Edit,
+    label: vocab::STEP_TIMING,
+    purpose: "Arrange when each drawing appears.",
+    studio_words: "henshū",
+    action: Action::RoomEdit,
+};
+const COLOR: Step = Step {
+    stage: Stage::InkPaint,
+    label: vocab::STEP_COLOR,
+    purpose: "Fill your drawings with color.",
+    studio_words: "shiage",
+    action: Action::RoomFinishing,
+};
+const EFFECTS: Step = Step {
+    stage: Stage::Composite,
+    label: vocab::STEP_EFFECTS,
+    purpose: "Add glow, blur and camera moves.",
+    studio_words: "satsuei",
+    action: Action::RoomComposite,
+};
+const MANGA: Step = Step {
+    stage: Stage::Manga,
+    label: vocab::STEP_MANGA,
+    purpose: "Draw the book's pages, panels and screen tone.",
+    studio_words: "manga",
+    action: Action::MangaRoom,
+};
+const EXPORT: Step = Step {
+    stage: Stage::Export,
+    label: vocab::STEP_EXPORT,
+    purpose: "Save a file to share.",
+    studio_words: "",
+    action: Action::RoomExport,
+};
 
-/// The step that lenses `stage`, if it is on the spine.
+/// Every row, on a bar or off it.
+pub const CATALOG: [Step; 7] = [PLAN, DRAW, TIMING, COLOR, EFFECTS, MANGA, EXPORT];
+
+static DRAWING_BAR: [Step; 4] = [DRAW, COLOR, EFFECTS, EXPORT];
+static ANIMATION_BAR: [Step; 5] = [PLAN, TIMING, COLOR, EFFECTS, EXPORT];
+static COMIC_BAR: [Step; 3] = [MANGA, COLOR, EXPORT];
+
+/// The top row of a project of this kind.
+pub fn bar(kind: ProjectKind) -> &'static [Step] {
+    match kind {
+        ProjectKind::Drawing => &DRAWING_BAR,
+        ProjectKind::Animation => &ANIMATION_BAR,
+        ProjectKind::Comic => &COMIC_BAR,
+    }
+}
+
+/// The catalog's row for `stage`, so a stage off a bar still finds its words.
+/// By the stage's own name: `Stage::Drawing` is two rows, and it is Draw's, and
+/// no row lenses `Stage::Layout`, which is Plan's.
 pub fn of(stage: Stage) -> Option<&'static Step> {
-    STEPS.iter().find(|s| s.stage == Some(stage))
+    CATALOG.iter().find(|s| s.label == stage.name())
 }
 
 impl Step {

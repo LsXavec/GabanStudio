@@ -16,7 +16,7 @@ pub const STEP: &str = "step";
 pub const SHARED_SESSION: &str = "in a room";
 pub const ARRANGEMENT: &str = "workspace";
 
-// The steps. `Stage::name()` and `steps::STEPS` read these.
+// The steps. `Stage::name()` and `steps::CATALOG` read these.
 pub const STEP_PLAN: &str = "Plan";
 pub const STEP_DRAW: &str = "Draw";
 pub const STEP_COLOR: &str = "Color";

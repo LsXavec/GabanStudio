@@ -563,7 +563,7 @@ fn say_moments(dir: &Path) {
         h.shot(size, &name);
     };
     let draw = ProbeRoom::Stage(Stage::Drawing);
-    let mut h = EditorHarness::with_gpu_ready();
+    let mut h = EditorHarness::with_gpu_animation();
     for _ in 0..3 {
         shoot(&mut h, draw);
     }
@@ -619,7 +619,7 @@ fn hide_moments(dir: &Path) {
     let mut shots = HIDE.iter().map(|(state, w, h)| (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32)));
     let draw = ProbeRoom::Stage(Stage::Drawing);
     for _ in 0..2 {
-        let mut h = EditorHarness::with_gpu_ready();
+        let mut h = EditorHarness::with_gpu_animation();
         let mut shoot = |h: &mut EditorHarness, room: Option<ProbeRoom>| {
             let (name, size) = shots.next().expect("a shot owed");
             h.kit_mut().set_size(size);
@@ -651,6 +651,49 @@ fn hide_moments(dir: &Path) {
         let timing = ProbeRoom::Stage(Stage::Edit);
         timing.enter(h.editor_mut());
         shoot(&mut h, Some(timing));
+    }
+}
+
+/// AU18: the three bars, each on its first step, and a step key a drawing's bar
+/// refuses.
+const KINDS: [(&str, u32, u32); 8] = [
+    ("bar-drawing", 1600, 900),
+    ("bar-refused", 1600, 900),
+    ("bar-animation", 1600, 900),
+    ("bar-comic", 1600, 900),
+    ("bar-drawing-1280", 1280, 800),
+    ("bar-refused-1280", 1280, 800),
+    ("bar-animation-1280", 1280, 800),
+    ("bar-comic-1280", 1280, 800),
+];
+
+fn kinds_owed() -> Vec<(String, u32, u32)> {
+    KINDS.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn kinds_moments(dir: &Path) {
+    let mut shots = KINDS.iter().map(|(state, w, h)| (dir.join(format!("{state}.png")), egui::vec2(*w as f32, *h as f32)));
+    for _ in 0..2 {
+        let mut shoot = |h: &mut EditorHarness, room: Option<Stage>| {
+            let (name, size) = shots.next().expect("a shot owed");
+            h.kit_mut().set_size(size);
+            if let Some(room) = room {
+                arrive(h, ProbeRoom::Stage(room));
+            }
+            h.shot(size, &name);
+        };
+        let mut h = EditorHarness::with_gpu_ready();
+        shoot(&mut h, Some(Stage::Drawing));
+        // Stays where it is: arriving again would wipe the refusal.
+        h.perform(Action::RoomEdit);
+        h.run_frames(4);
+        shoot(&mut h, None);
+        drop(h);
+        let mut h = EditorHarness::with_gpu_animation();
+        shoot(&mut h, Some(Stage::Drawing));
+        drop(h);
+        let mut h = EditorHarness::with_gpu_shipped(crate::templates::ALL[crate::templates::COMIC].build());
+        shoot(&mut h, Some(Stage::Manga));
     }
 }
 
@@ -899,6 +942,8 @@ fn uishot_rooms() {
     check_shots(&dir, &hide_owed()).expect("Hide tools' moments");
     keys_moments(&dir);
     check_shots(&dir, &keys_owed()).expect("the chords that moved");
+    kinds_moments(&dir);
+    check_shots(&dir, &kinds_owed()).expect("the three bars");
 }
 
 /// Only the ignored pass takes them, so this holds it to them, at both sizes:

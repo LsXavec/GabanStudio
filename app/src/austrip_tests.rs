@@ -9,6 +9,7 @@ use egui_kittest::kittest::Queryable;
 use crate::config::{self, Action};
 use crate::doc::{AppState, BLANK_FRAME, HELD_FRAME};
 use crate::say::{Spoken, Verb};
+use crate::steps::ProjectKind;
 use crate::strip::{self, Sheet, Strip};
 use crate::testkit::{EditorHarness, PanelHarness};
 use crate::workspace::Stage;
@@ -670,7 +671,7 @@ fn band_keys(h: &EditorHarness) -> Vec<(String, Rect)> {
 
 #[test]
 fn austrip_full_band_latch_moves_nothing() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
     h.state_mut().new_drawing_at_frame();
@@ -696,7 +697,7 @@ fn austrip_full_band_latch_moves_nothing() {
 
 #[test]
 fn austrip_strip_opens_with_one_refit_at_pen_up() {
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1600.0, 900.0));
     settle(&mut h);
     h.editor_mut().strip_open = false;
@@ -842,7 +843,7 @@ fn austrip_census_counts_strip_cells() {
     let reading = crate::measure::Reading::of_frame(&h.ctx(), &shapes);
     let rows = |r: &crate::measure::Reading| r.rows.iter().filter(|row| row.h == strip::SHEET_H).count();
     assert_eq!(rows(&reading), strip::CENSUS_CAP, "the census stops at 12");
-    let mut h = EditorHarness::as_shipped();
+    let mut h = EditorHarness::as_animation();
     h.kit_mut().set_size(vec2(1280.0, 800.0));
     settle(&mut h);
     let shapes = h.kit().output().shapes.clone();
@@ -1638,14 +1639,20 @@ fn austrip_say_words_leave_the_action_slot_free() {
     // The slot holds the longest of 8.2's words as a band key: the 10 pt pad
     // of every button either side, and the gap before it.
     let font = plate::Role::Panel.font();
-    let word = h.ctx().fonts_mut(|f| f.layout_no_wrap("Go to Draw".to_string(), font, plate::ON_FILL).size().x);
-    assert!(plate::SAY_ACTION >= word + 20.0 + 6.0, "{} for a word of {word}", plate::SAY_ACTION);
+    let width = |h: &EditorHarness, word: &str| {
+        h.ctx().fonts_mut(|f| f.layout_no_wrap(word.to_string(), font.clone(), plate::ON_FILL).size().x)
+    };
+    let verb = Verb::GoToDraw;
+    for kind in ProjectKind::ALL {
+        let word = width(&h, verb.label(Some(kind)));
+        assert!(plate::SAY_ACTION >= word + 20.0 + 6.0, "{} for {kind:?}'s word of {word}", plate::SAY_ACTION);
+    }
+    let word = width(&h, verb.label(h.editor().kind()));
     let slot = points(&h, "Add drawing (band)").left() - plate::SAY_ACTION;
     h.state_mut().status = LONG.into();
     settle(&mut h);
     assert!(points(&h, LONG).right() <= slot, "{:?} past {slot}", points(&h, LONG));
-    let verb = Verb::GoToDraw;
-    let name = format!("{} (say line)", verb.label());
+    let name = format!("{} (say line)", verb.label(h.editor().kind()));
     let spoken = Spoken { bit: None, words: LONG.into(), verb: Some(verb) };
     h.editor_mut().say.pin = Some(spoken);
     h.wait(4.2);
