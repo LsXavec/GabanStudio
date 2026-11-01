@@ -1720,7 +1720,7 @@ impl CanvasView {
     /// floating patch with its preview texture, and return the layer's
     /// tiles with the hole punched for the display. None = refused (the
     /// status line says why).
-    fn lift_floating(
+    pub(crate) fn lift_floating(
         &mut self,
         state: &mut AppState,
         ctx: &egui::Context,

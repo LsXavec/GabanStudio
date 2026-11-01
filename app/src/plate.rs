@@ -1666,7 +1666,7 @@ pub fn lesson_words(ui: &mut Ui, words: &str, role: Role, ink: Color32) -> Respo
 }
 
 /// AU27: the lesson's steps in bar order, on a line that wraps; the open one
-/// stands in ink.
+/// stands in deep ink on the wash, as the bar's pill does: never colour alone.
 pub fn lesson_path(ui: &mut Ui, steps: &[(&str, bool)]) -> Response {
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = ui.available_width();
@@ -1675,50 +1675,113 @@ pub fn lesson_path(ui: &mut Ui, steps: &[(&str, bool)]) -> Response {
         if i > 0 {
             job.append("  ", 0.0, format(INK3));
         }
-        job.append(name, 0.0, format(if *open { BLUE_DEEP } else { INK3 }));
+        let word = if *open {
+            egui::TextFormat { background: BLUE_WASH, ..format(BLUE_DEEP) }
+        } else {
+            format(INK3)
+        };
+        job.append(name, 0.0, word);
     }
     ui.add(egui::Label::new(job))
 }
 
-/// AU27: one tick a task, and Deckle on the strip, who moves a tick for each
-/// finished task, flat and arched by turns, and stands up on the last. Off
-/// white, one eye, two holes (spec 5.6).
+/// AU27: the strip's height: room for Deckle stood up over the ticks.
+const STRIP_TALL: f32 = 36.0;
+/// From the strip's foot up to its line of ticks.
+const STRIP_FOOT: f32 = 3.0;
+/// Deckle stands this far over the ticks' line.
+const DECKLE_LIFT: f32 = 4.0;
+/// Below this pitch a dot would touch the next: short upright ticks instead.
+pub(crate) const TICK_PITCH: f32 = 7.0;
+/// Deckle, in every pose: paper does not stretch.
+pub(crate) const DECKLE_LONG: f32 = 28.0;
+const DECKLE_WIDE: f32 = 10.0;
+/// The arch's half angle: how far round the strip bends.
+const DECKLE_BEND: f32 = 1.2;
+
+/// AU27: where the strip's stops stand across `width`, the first before the
+/// first tick, then one per task: its inset, and what a tick has to itself.
+pub(crate) fn strip_stops(width: f32, total: usize) -> (f32, f32) {
+    let inset = DECKLE_LONG / 2.0;
+    (inset, (width - 2.0 * inset) / total.max(1) as f32)
+}
+
+/// AU27: one tick a task, lit once it is finished, and Deckle on the strip,
+/// who starts before the first and moves a tick for each finished task, flat
+/// and arched by turns, and stands up on the last. An off-white strip, one eye,
+/// two holes (spec 5.1, 5.6).
 pub fn lesson_strip(ui: &mut Ui, width: f32, done: usize, total: usize) -> Response {
-    const TALL: f32 = 28.0;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, TALL), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, STRIP_TALL), Sense::hover());
+    speak(&resp, egui::WidgetType::Image, None, &format!("{done} of {total} done"));
     let p = ui.painter();
-    let base = rect.bottom() - 2.0;
-    let inset = 12.0;
-    let step = (rect.width() - 2.0 * inset) / total.max(1) as f32;
-    let at = |i: usize| rect.left() + inset + step * i as f32;
-    p.line_segment([Pos2::new(at(0), base), Pos2::new(at(total), base)], Stroke::new(1.0, RULE));
-    for i in 0..=total {
-        let tick = Pos2::new(at(i), base);
-        p.circle_filled(tick, 2.0, if i <= done { BLUE } else { RULE });
+    let base = rect.bottom() - STRIP_FOOT;
+    let (inset, pitch) = strip_stops(rect.width(), total);
+    let at = |i: usize| Pos2::new(rect.left() + inset + pitch * i as f32, base);
+    p.line_segment([at(0), at(total)], Stroke::new(1.0, RULE));
+    for i in 1..=total {
+        let ink = if i <= done { BLUE } else { INK3 };
+        if pitch < TICK_PITCH {
+            p.line_segment([at(i) - Vec2::new(0.0, 3.0), at(i) + Vec2::new(0.0, 3.0)], Stroke::new(1.5, ink));
+        } else {
+            p.circle_filled(at(i), 2.0, ink);
+        }
     }
-    let (body, eye) = deckle(Pos2::new(at(done.min(total)), base - 2.0), done, done >= total);
-    p.add(egui::Shape::line(body.clone(), Stroke::new(5.0, INK2)));
-    p.add(egui::Shape::line(body.clone(), Stroke::new(3.0, PAPER)));
-    p.circle_filled(eye, 1.0, INK);
-    for hole in [body[1], body[body.len() - 2]] {
-        p.circle_filled(hole, 0.75, HOVER);
-    }
+    let foot = at(done.min(total)) - Vec2::new(0.0, DECKLE_LIFT);
+    paint_deckle(p, foot, done, done >= total);
     resp
 }
 
-/// Deckle's spine at `foot`, and its eye: a strip of paper, flat or arched,
-/// stood up at the finish.
-fn deckle(foot: Pos2, pose: usize, standing: bool) -> (Vec<Pos2>, Pos2) {
-    let spine: [Vec2; 5] = if standing {
-        [Vec2::new(0.0, 0.0), Vec2::new(0.0, -5.0), Vec2::new(0.0, -10.0), Vec2::new(0.0, -15.0), Vec2::new(1.0, -20.0)]
-    } else if pose % 2 == 1 {
-        [Vec2::new(-9.0, 0.0), Vec2::new(-6.0, -6.0), Vec2::new(0.0, -9.0), Vec2::new(6.0, -6.0), Vec2::new(9.0, 0.0)]
-    } else {
-        [Vec2::new(-10.0, 0.0), Vec2::new(-5.0, -1.0), Vec2::new(0.0, -1.0), Vec2::new(5.0, -1.0), Vec2::new(10.0, -1.0)]
+/// Deckle's spine, up from its foot at the origin, head last. Every pose is
+/// `DECKLE_LONG` along the spine and keeps the strip's underside on the foot.
+pub(crate) fn deckle_spine(pose: usize, standing: bool) -> Vec<Vec2> {
+    const ROWS: usize = 12;
+    let half = DECKLE_LONG / 2.0;
+    let share = |i: usize| i as f32 / ROWS as f32;
+    let row = |i: usize| {
+        if standing {
+            // It leans a little: nothing here is ruled.
+            let lean = 2.0;
+            let rise = (DECKLE_LONG * DECKLE_LONG - lean * lean).sqrt();
+            Vec2::new(lean * share(i), -rise * share(i))
+        } else if pose % 2 == 1 {
+            let radius = half / DECKLE_BEND;
+            let turn = DECKLE_BEND * (2.0 * share(i) - 1.0);
+            let rise = radius * (turn.cos() - DECKLE_BEND.cos());
+            Vec2::new(radius * turn.sin(), -rise - DECKLE_WIDE / 2.0)
+        } else {
+            Vec2::new(DECKLE_LONG * share(i) - half, -DECKLE_WIDE / 2.0)
+        }
     };
-    let body: Vec<Pos2> = spine.iter().map(|v| foot + *v).collect();
-    let eye = body[4] + Vec2::new(-1.0, 0.0);
-    (body, eye)
+    (0..=ROWS).map(row).collect()
+}
+
+/// Deckle at `foot`: a filled strip with a thin edge, one eye by the head and
+/// two punched holes along the spine.
+fn paint_deckle(p: &egui::Painter, foot: Pos2, pose: usize, standing: bool) {
+    let spine: Vec<Pos2> = deckle_spine(pose, standing).iter().map(|v| foot + *v).collect();
+    let last = spine.len() - 1;
+    let side = |i: usize| {
+        let along = (spine[(i + 1).min(last)] - spine[i.saturating_sub(1)]).normalized();
+        Vec2::new(-along.y, along.x) * (DECKLE_WIDE / 2.0)
+    };
+    let mut body = egui::Mesh::default();
+    for i in 0..=last {
+        body.colored_vertex(spine[i] + side(i), PAPER);
+        body.colored_vertex(spine[i] - side(i), PAPER);
+        if i > 0 {
+            let at = 2 * i as u32;
+            body.add_triangle(at - 2, at - 1, at);
+            body.add_triangle(at - 1, at, at + 1);
+        }
+    }
+    p.add(body);
+    let near = (0..=last).map(|i| spine[i] + side(i));
+    let far = (0..=last).rev().map(|i| spine[i] - side(i));
+    p.add(egui::Shape::closed_line(near.chain(far).collect(), Stroke::new(1.0, INK3)));
+    p.circle_filled(spine[last - 2], 2.0, INK);
+    for hole in [spine[3], spine[6]] {
+        p.circle_filled(hole, 1.25, INK3);
+    }
 }
 
 /// AU27: the finish picture on a square of paper, centred in `rect`.

@@ -932,6 +932,22 @@ impl EditorHarness {
         found.unwrap_or_else(|| panic!("{word:?} was not painted"))
     }
 
+    /// AU27: the box `word` painted in, and its first font's size.
+    pub fn painted_block(&self, word: &str) -> (egui::Rect, f32) {
+        fn walk(s: &egui::Shape, word: &str) -> Option<(egui::Rect, f32)> {
+            match s {
+                egui::Shape::Vec(v) => v.iter().find_map(|s| walk(s, word)),
+                egui::Shape::Text(t) if t.galley.text() == word => {
+                    let box_ = egui::Rect::from_min_size(t.pos, t.galley.size());
+                    Some((box_, t.galley.job.sections[0].format.font_id.size))
+                }
+                _ => None,
+            }
+        }
+        let found = self.h.output().shapes.iter().find_map(|c| walk(&c.shape, word));
+        found.unwrap_or_else(|| panic!("{word:?} was not painted"))
+    }
+
     /// AU4: the words the last frame painted, nested shapes included: a word
     /// painted by hand speaks to no tree.
     pub fn painted_text(&self) -> Vec<String> {
@@ -2290,7 +2306,7 @@ mod tests {
                 crate::ProbeRoom::Forge
                 | crate::ProbeRoom::Layout3d
                 | crate::ProbeRoom::Lessons
-                | crate::ProbeRoom::Lesson(_) => None,
+                | crate::ProbeRoom::Lesson(..) => None,
             })
             .collect();
         for st in [
@@ -2546,8 +2562,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 950;
-    const ASSERT_FLOOR: usize = 5900;
+    const TEST_FLOOR: usize = 1027;
+    const ASSERT_FLOOR: usize = 6400;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

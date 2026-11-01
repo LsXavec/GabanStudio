@@ -7,14 +7,15 @@ use std::path::Path;
 use anim_core::generator::GenKind;
 use anim_core::graph::{Graph, NodeKind};
 use anim_core::manga::{self, Rulers};
-use anim_core::ids::NodeId;
-use anim_core::model::{Cut, Drawing, DrawingKind, LayerRole};
+use anim_core::ids::{DrawingId, LayerId, NodeId};
+use anim_core::model::{CelLayer, Cut, Drawing, DrawingKind, LayerRole};
 use anim_core::raster::TILE;
 use anim_core::xsheet::{Column, Exposure, ParamInterp};
 use eframe::egui;
 
+use crate::config::BrushPreset;
 use crate::doc::{AppState, drawing_has_art};
-use crate::lessons::{self, Class, Done, Lesson, Show, Target, Task};
+use crate::lessons::{self, Class, Done, Latch, Lesson, Show, Target, Task};
 use crate::plate::{self, Role};
 use crate::say::Facts;
 use crate::steps;
@@ -40,8 +41,11 @@ pub const MADE: &str = "You made that. It is a real file.";
 /// The card's width, spec 5.6.
 const CARD_MIN: f32 = 180.0;
 const CARD_MAX: f32 = 220.0;
-const CARD_PAD: f32 = 12.0;
+const CARD_PAD: f32 = 8.0;
 const CARD_GAP: f32 = 8.0;
+/// Between the card's title, strip and path, which read as one heading: the
+/// longest sentence at the worst size needs what this and the pad give back.
+const HEAD_GAP: f32 = 4.0;
 /// A lesson's picture on the card.
 const PICTURE_H: f32 = 72.0;
 /// The share of the paper a path's box grows by when a stroke is met.
@@ -55,7 +59,7 @@ const PICK_NEAR: i32 = 8;
 
 /// A control's word, one entry each: the `{Token}` table of the lessons, so no
 /// lesson string holds a name that a rename would leave behind.
-const WORDS: &[(&str, &str)] = &[
+pub(crate) const WORDS: &[(&str, &str)] = &[
     ("Draw", vocab::STEP_DRAW),
     ("Color", vocab::STEP_COLOR),
     ("Effects", vocab::STEP_EFFECTS),
@@ -148,20 +152,29 @@ pub fn card_width(window_w: f32) -> f32 {
 /// The ids in `lessons.txt`. Missing or unreadable means nothing ticked.
 pub fn finished(dir: Option<&Path>) -> Vec<String> {
     let Some(dir) = dir else { return Vec::new() };
-    let text = std::fs::read_to_string(dir.join(FINISHED_FILE)).unwrap_or_default();
+    ids_in(&std::fs::read_to_string(dir.join(FINISHED_FILE)).unwrap_or_default())
+}
+
+fn ids_in(text: &str) -> Vec<String> {
     text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect()
 }
 
 /// `id` joins `lessons.txt`, once. A write that fails costs a tick, not the
-/// person's finish.
+/// person's finish. A file that cannot be read is no empty list: the ids in it
+/// are not this write's to lose.
 fn write_finished(dir: Option<&Path>, id: &str) {
     let Some(dir) = dir else { return };
-    let mut ids = finished(Some(dir));
+    let path = dir.join(FINISHED_FILE);
+    let mut ids = match std::fs::read_to_string(&path) {
+        Ok(text) => ids_in(&text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return,
+    };
     if ids.iter().any(|have| have == id) {
         return;
     }
     ids.push(id.to_string());
-    let _ = std::fs::write(dir.join(FINISHED_FILE), ids.join("\n") + "\n");
+    let _ = config::write_atomic(&path, (ids.join("\n") + "\n").as_bytes());
 }
 
 /// What a task is read against: taken when it began.
@@ -175,13 +188,18 @@ struct Baseline {
     brush: (f32, [u8; 4], Option<String>),
     smoothing: u8,
     gutters: [f32; 2],
-    presets: usize,
+    /// The presets of the banks a `Preset` task reads.
+    presets: Vec<BrushPreset>,
     /// Each effect's parameters.
     effects: Vec<(NodeId, anim_core::fx::FxParams)>,
+    /// The cel under the task: `Erased` and `Filled` read this one by its
+    /// ids, so stepping to a blank drawing or another layer erases nothing.
+    cel: Option<(DrawingId, LayerId)>,
     /// `Erased`'s inked pixels, by path.
     ink: Vec<(u16, u32)>,
-    /// `Filled`'s pixels, seed and keep.
-    pixels: Vec<([f32; 2], [u16; 4])>,
+    /// `Filled`'s pixels, seed and keep, on each layer of the drawing: a fill
+    /// lands on the armed layer, which may change before it does.
+    pixels: Vec<([f32; 2], Vec<(LayerId, [u16; 4])>)>,
 }
 
 /// A lesson standing over the open document.
@@ -191,8 +209,14 @@ pub(crate) struct LessonRun {
     /// The current task; `tasks.len()` once finished.
     pub task: usize,
     base: Baseline,
-    /// `fill_gap` and the ink, given back on leaving.
-    back: (u32, [u8; 4]),
+    /// The first reading took the first baseline: the run opens before its
+    /// step is entered and its brush armed, and the door sooner still.
+    based: bool,
+    /// `fill_gap`, the ink and `canvas.raster`, given back on leaving.
+    back: (u32, [u8; 4], bool),
+    /// A hide of Plan's sheet during this run. `plan_sheet_hidden` is the
+    /// person's own and stands untouched (spec 3.10).
+    pub sheet_off: bool,
     /// The document this run is over.
     doc: String,
     /// The boxes of the strokes landed since the task began.
@@ -279,19 +303,40 @@ fn each(done: Done, f: &mut impl FnMut(Done)) {
     }
 }
 
-/// The pixel of the armed layer at `at`, in paper units.
-fn pixel(state: &AppState, at: [f32; 2]) -> [u16; 4] {
+/// The cel `state` shows and arms.
+fn armed_cel(state: &AppState) -> Option<(DrawingId, LayerId)> {
+    Some((state.current_drawing()?, state.active_layer_id()?))
+}
+
+/// A cel's layer, by its ids: there or not, whatever the view has moved to.
+fn cel_layer(state: &AppState, (drawing, layer): (DrawingId, LayerId)) -> Option<&CelLayer> {
+    state.cut().drawing(drawing)?.layers.iter().find(|l| l.id == layer)
+}
+
+/// `layer`'s pixel at `at`, in paper units.
+fn pixel(layer: &CelLayer, at: [f32; 2]) -> [u16; 4] {
     let t = TILE as i32;
     let (x, y) = (at[0].floor() as i32, at[1].floor() as i32);
-    let tile = state.active_layer_tiles().and_then(|tiles| tiles.get(&(x.div_euclid(t), y.div_euclid(t))));
+    let tile = layer.raster.tiles.get(&(x.div_euclid(t), y.div_euclid(t)));
     let i = ((y.rem_euclid(t) * t + x.rem_euclid(t)) * 4) as usize;
     tile.map_or([0; 4], |tile| [tile.rgba[i], tile.rgba[i + 1], tile.rgba[i + 2], tile.rgba[i + 3]])
 }
 
-/// Inked pixels inside `b`, read from the armed layer's tiles.
-fn ink_in(state: &AppState, b: [f32; 4]) -> u32 {
+/// The pixel at `at` on every layer of the cel's drawing.
+fn pixels_at(state: &AppState, cel: Option<(DrawingId, LayerId)>, at: [f32; 2]) -> Vec<(LayerId, [u16; 4])> {
+    let drawing = cel.and_then(|(id, _)| state.cut().drawing(id));
+    drawing.map_or_else(Vec::new, |d| d.layers.iter().map(|l| (l.id, pixel(l, at))).collect())
+}
+
+/// Did a layer's pixel move? A layer added since began empty.
+fn pixels_moved(was: &[(LayerId, [u16; 4])], now: &[(LayerId, [u16; 4])]) -> bool {
+    now.iter().any(|(id, px)| *px != was.iter().find(|(w, _)| w == id).map_or([0; 4], |(_, p)| *p))
+}
+
+/// Inked pixels of `layer` inside `b`, read from its tiles.
+fn ink_in(layer: &CelLayer, b: [f32; 4]) -> u32 {
     let t = TILE as i32;
-    let Some(tiles) = state.active_layer_tiles() else { return 0 };
+    let tiles = &layer.raster.tiles;
     let (left, top, right, bottom) = (b[0].floor() as i32, b[1].floor() as i32, b[2].ceil() as i32, b[3].ceil() as i32);
     let mut count = 0;
     for (&(tx, ty), tile) in tiles.iter() {
@@ -358,7 +403,7 @@ impl Editor {
     /// states go (spec 5.3), and the first baseline is taken.
     pub(crate) fn begin_lesson(&mut self, lesson: Lesson, task: usize) {
         self.tools_hidden = false;
-        let back = (self.canvas.fill_gap, self.canvas.brush_color);
+        let back = (self.canvas.fill_gap, self.canvas.brush_color, self.canvas.raster);
         if let Some(gap) = lesson.fill_gap {
             self.canvas.fill_gap = gap;
         }
@@ -373,7 +418,9 @@ impl Editor {
             lesson,
             task,
             base,
+            based: false,
             back,
+            sheet_off: false,
             doc: state.untitled_group.clone(),
             marks: Vec::new(),
             peak: state.engine.undo_depth_by(None),
@@ -391,10 +438,12 @@ impl Editor {
     }
 
     /// AU27: a raster brush for the run, on a machine with the engine: with a
-    /// vector brush armed the rail has no Fill or Eraser to ring. The Rig has
-    /// no engine, so only a real window proves this one.
+    /// vector brush armed `rail::keys_of` holds only Size and Color, so the rail
+    /// has no Fill or Eraser to press or ring. A person's raster switch comes
+    /// back on leaving. The Rig has no engine, so an ignored GPU test proves it.
     pub(crate) fn lesson_arm(&mut self) {
         if self.paint.is_some() {
+            self.canvas.raster = true;
             self.canvas.arm_paint(false, &mut self.state);
         }
     }
@@ -409,17 +458,21 @@ impl Editor {
     fn lesson_base(&self, task: Option<&Task>, art: &[lessons::Path], exported: u32) -> Baseline {
         let state = &self.state;
         let cut = state.cut();
+        let cel = armed_cel(state);
         let mut ink = Vec::new();
         let mut pixels = Vec::new();
+        let mut presets = Vec::new();
         if let Some(task) = task {
             each(task.done, &mut |done| match done {
                 Done::Erased(path) => {
-                    let inside = art.get(usize::from(path)).map_or(0, |p| ink_in(state, p.bounds()));
+                    let layer = cel.and_then(|c| cel_layer(state, c));
+                    let inside = art.get(usize::from(path)).zip(layer).map_or(0, |(p, l)| ink_in(l, p.bounds()));
                     ink.push((path, inside));
                 }
                 Done::Filled { seed, keep } => {
-                    pixels.extend(std::iter::once(seed).chain(keep).map(|at| (at, pixel(state, at))));
+                    pixels.extend(std::iter::once(seed).chain(keep).map(|at| (at, pixels_at(state, cel, at))));
                 }
+                Done::Preset(bank) => presets.extend(self.presets.iter().filter(|p| p.bank == bank).cloned()),
                 _ => {}
             });
         }
@@ -438,11 +491,24 @@ impl Editor {
             brush: (self.canvas.brush_width, self.canvas.brush_color, self.canvas.armed_preset.clone()),
             smoothing: self.canvas.stabilizer,
             gutters: [state.manga.side_mm, state.manga.row_mm],
-            presets: self.presets.len(),
+            presets,
             effects: effects.collect(),
+            cel,
             ink,
             pixels,
         }
+    }
+
+    /// AU27: the task the run stands on begins now: its baseline, and what
+    /// only a watcher saw of the last one goes.
+    fn lesson_rebase(&self, run: &mut LessonRun) {
+        run.base = self.lesson_base(run.current(), &run.art, run.exported);
+        run.rest = self.lesson_rest();
+        run.marks.clear();
+        run.peak = self.state.engine.undo_depth_by(None);
+        (run.played, run.pass) = (false, None);
+        run.mirror_seen = self.canvas.view_mirrored();
+        run.composite_seen = self.canvas.composite_view;
     }
 
     /// AU27: does `done` hold now? State, never Actions or clicks: a route the
@@ -452,8 +518,8 @@ impl Editor {
         let cut = state.cut();
         let view = &state.view;
         let base = &run.base;
-        let strokes = state.strokes_done.wrapping_sub(base.strokes);
-        let fills = state.fills_done.wrapping_sub(base.fills);
+        let strokes = state.strokes_done.saturating_sub(base.strokes);
+        let fills = state.fills_done.saturating_sub(base.fills);
         let drawing = state.current_drawing().and_then(|id| cut.drawing(id));
         let layers = || drawing.map_or(&[][..], |d| &d.layers[..]);
         let column = cut.xsheet.column(view.active_column);
@@ -480,7 +546,8 @@ impl Editor {
                 met.len() >= n as usize
             }
             Done::BrushChanged => {
-                base.brush != (self.canvas.brush_width, self.canvas.brush_color, self.canvas.armed_preset.clone())
+                let (width, ink, preset) = &base.brush;
+                *width != self.canvas.brush_width || *ink != self.canvas.brush_color || *preset != self.canvas.armed_preset
             }
             Done::Armed(name) => self.canvas.armed_preset.as_deref() == Some(name),
             Done::Smoothing => self.canvas.stabilizer > base.smoothing,
@@ -489,14 +556,18 @@ impl Editor {
             Done::Undone => state.engine.undo_depth_by(None) < run.peak,
             Done::Erased(path) => {
                 let began = base.ink.iter().find(|(p, _)| *p == path).map_or(0, |(_, n)| *n);
-                let now = run.art.get(usize::from(path)).map_or(u32::MAX, |p| ink_in(state, p.bounds()));
-                began > 0 && now as f32 <= began as f32 * ERASED_LEFT
+                let layer = base.cel.and_then(|c| cel_layer(state, c));
+                let now = run.art.get(usize::from(path)).zip(layer).map(|(p, l)| ink_in(l, p.bounds()));
+                began > 0 && now.is_some_and(|now| now as f32 <= began as f32 * ERASED_LEFT)
             }
             Done::Filled { seed, keep } => {
-                let at = |p: [f32; 2]| base.pixels.iter().find(|(q, _)| *q == p).map(|(_, px)| *px);
-                fills > 0
-                    && at(seed).is_some_and(|px| px != pixel(state, seed))
-                    && keep.is_none_or(|k| at(k).is_some_and(|px| px == pixel(state, k)))
+                // A blank paper has no cel until its first mark makes one.
+                let cel = base.cel.or_else(|| armed_cel(state));
+                let moved = |p: [f32; 2]| {
+                    let was = base.pixels.iter().find(|(q, _)| *q == p).map(|(_, px)| px);
+                    was.map(|px| pixels_moved(px, &pixels_at(state, cel, p)))
+                };
+                fills > 0 && moved(seed) == Some(true) && keep.is_none_or(|k| moved(k) == Some(false))
             }
             Done::Fills(n) => fills >= u64::from(n),
             Done::FilledOn(n) => cut.drawings.iter().filter(|d| color_layer_art(d)).count() >= n as usize,
@@ -554,10 +625,8 @@ impl Editor {
             }
             Done::Chart => cut.drawings.iter().any(|d| cut.drawing_def(d.id).chart.is_some()),
             Done::Exported(n) => run.exported.saturating_sub(base.exported) >= n,
-            Done::Preset(bank) => {
-                let held = |n: usize| self.presets.iter().filter(|p| p.bank == bank).count() > n;
-                self.presets.len() > base.presets && held(0)
-            }
+            // A new name in the bank, or one saved over with new numbers.
+            Done::Preset(bank) => self.presets.iter().any(|p| p.bank == bank && !base.presets.contains(p)),
             Done::Picked(rgb) => {
                 let ink = self.canvas.brush_color;
                 (0..3).all(|c| (i32::from(ink[c]) - i32::from(rgb[c])).abs() <= PICK_NEAR)
@@ -570,9 +639,19 @@ impl Editor {
 
     /// AU27: this frame's reading, right after `say_facts`: the current task
     /// alone, against its baseline. Ticks never un-tick. A learner ahead sails
-    /// through in one frame, each next task on a baseline of its own.
+    /// through in one frame, each next task on a baseline of its own. A
+    /// document swapped in this frame is not the run's: the door ends the run
+    /// on the next, and until then nothing of it is read or written, or the
+    /// old run would tick on the new document and write its key into a file
+    /// that never held a lesson.
     pub(crate) fn lesson_read(&mut self, facts: &Facts) {
+        if self.lesson.as_ref().is_none_or(|run| run.doc != self.state.untitled_group) {
+            return;
+        }
         let Some(mut run) = self.lesson.take() else { return };
+        if !std::mem::replace(&mut run.based, true) {
+            self.lesson_rebase(&mut run);
+        }
         self.lesson_note(&mut run, facts);
         let mut ticked = false;
         while let Some(task) = run.current() {
@@ -580,15 +659,7 @@ impl Editor {
                 break;
             }
             run.task += 1;
-            let next = run.current();
-            let (base, rest) = (self.lesson_base(next, &run.art, run.exported), self.lesson_rest());
-            run.base = base;
-            run.rest = rest;
-            run.marks.clear();
-            run.peak = self.state.engine.undo_depth_by(None);
-            (run.played, run.pass) = (false, None);
-            run.mirror_seen = self.canvas.view_mirrored();
-            run.composite_seen = self.canvas.composite_view;
+            self.lesson_rebase(&mut run);
             ticked = true;
         }
         if ticked {
@@ -606,23 +677,29 @@ impl Editor {
         if facts.stroked && let Some(mark) = self.canvas.last_stroke_box.take() {
             run.marks.push(mark);
         }
-        run.exported += u32::from(facts.exported);
+        let latched = run.lesson.latch.is_none_or(|latch| match latch {
+            Latch::Transparent => facts.transparent,
+            Latch::Mono => facts.mono,
+        });
+        run.exported += if latched { facts.landed } else { 0 };
         run.peak = run.peak.max(self.state.engine.undo_depth_by(None));
         run.mirror_seen |= self.canvas.view_mirrored();
         run.composite_seen |= self.canvas.composite_view;
         let view = &self.state.view;
         let end = self.state.play_range().1;
+        // A frame that fell back under a running pass is the wrap. A stop
+        // moves the frame back too, onto its run's first frame: no pass.
+        let wrapped = view.playing && run.was_playing && view.frame < run.last_frame;
         if view.playing && !run.was_playing {
             run.pass = Some(view.frame);
         }
-        if let Some(from) = run.pass {
-            let wrapped = view.frame < run.last_frame;
-            if from != end && (view.frame == end || wrapped) {
-                run.played = true;
-            }
-            if wrapped {
-                run.pass = Some(view.frame);
-            }
+        if run.pass.is_some_and(|from| from != end && (view.frame == end || wrapped)) {
+            run.played = true;
+        }
+        // A wrap starts the next pass, on a run that was going when the task
+        // opened too: that one began after the task did.
+        if wrapped {
+            run.pass = Some(view.frame);
         }
         if !view.playing {
             run.pass = None;
@@ -633,7 +710,9 @@ impl Editor {
     /// AU27: the one door's reading of `app.lesson` (spec 5.11), before the
     /// door moves anything: `plan_sheet_off` must see the run. Open and Recover
     /// replace the state without a boot, so a boot cannot be the place. An
-    /// unknown id is ignored and kept. True: a run began here.
+    /// unknown id is ignored and kept. A finished lesson's key goes: the file
+    /// is the person's now, and its card would stand over their work for good.
+    /// True: a run began here.
     pub(crate) fn lesson_door(&mut self) -> bool {
         let doc = &self.state.untitled_group;
         if self.lesson.as_ref().is_some_and(|run| run.doc == *doc) {
@@ -646,25 +725,36 @@ impl Editor {
         let found = lessons::table().iter().find(|l| l.id == id);
         let Some(lesson) = found.filter(|_| !self.canvas.is_guest) else { return false };
         let task = task.parse().unwrap_or(0);
+        if task >= lesson.tasks.len() {
+            self.drop_lesson_key();
+            return false;
+        }
         self.begin_lesson(*lesson, task);
         true
+    }
+
+    /// `app.lesson` goes. An untouched paper with no file asks nothing.
+    fn drop_lesson_key(&mut self) {
+        self.state.engine.project.app_meta.remove(KEY);
+        self.state.meta_dirty |= self.state.file_path.is_some();
     }
 
     /// AU27: the run's end: what it borrowed goes back.
     fn end_lesson(&mut self) -> Option<LessonRun> {
         let run = self.lesson.take()?;
-        (self.canvas.fill_gap, self.canvas.brush_color) = run.back;
+        (self.canvas.fill_gap, self.canvas.brush_color, self.canvas.raster) = run.back;
         Some(run)
     }
 
     /// `Leave lesson`: the card goes, the document stays a real document. The
-    /// paper refits once for the room the card gave back.
+    /// paper refits once for the room the card gave back, and Plan's sheet is
+    /// the person's own memory's again.
     pub(crate) fn leave_lesson(&mut self) {
         if self.end_lesson().is_none() {
             return;
         }
-        self.state.engine.project.app_meta.remove(KEY);
-        self.state.meta_dirty |= self.state.file_path.is_some();
+        self.drop_lesson_key();
+        self.plan_sheet_back();
         self.canvas.fit_view();
     }
 
@@ -713,9 +803,9 @@ impl Editor {
         word(token).map(str::to_string)
     }
 
-    /// AU27: the sentence the card stands on. The wander line takes the top
-    /// when the task's own step has been left (spec 5.10), and `miss` the
-    /// sentence once the act landed and the outcome did not.
+    /// AU27: the sentence the card stands on. The wander line takes the
+    /// title's place when the task's own step has been left (spec 5.10), and
+    /// `miss` the sentence once the act landed and the outcome did not.
     pub(crate) fn lesson_lines(&self, run: &LessonRun, ctx: &egui::Context) -> Option<LessonLines> {
         let task = run.current()?;
         let words = |text: &str| resolve(text, |t| self.lesson_word(run, t, ctx));
@@ -739,7 +829,10 @@ impl Editor {
         }
         let wide = card_width(ui.ctx().content_rect().width());
         let panel = egui::Panel::right("lesson").exact_size(wide).resizable(false);
-        let panel = panel.frame(plate::desk_frame(ui.style()).fill(plate::ISLAND)).show_separator_line(false);
+        // No margin of the frame's: `CARD_PAD` is the card's one inset, or the
+        // column loses a tenth of its width to the two together.
+        let frame = plate::desk_frame(ui.style()).fill(plate::ISLAND).inner_margin(0);
+        let panel = panel.frame(frame).show_separator_line(false);
         panel.show(ui, |ui| self.lesson_card(ui));
     }
 
@@ -770,18 +863,19 @@ impl Editor {
             let scroll = egui::ScrollArea::vertical().id_salt("lesson_scroll").auto_shrink([false, false]);
             let shown = scroll.show(ui, |ui| {
                 ui.set_width(width);
-                plate::lesson_words(ui, lesson.title, Role::Step, plate::INK);
-                ui.add_space(CARD_GAP);
+                // The card's top line (spec 5.10): the way back, in the title's
+                // own slot, so a long sentence keeps its room.
+                match lines.as_ref().and_then(|l| l.wander.as_deref()) {
+                    Some(back) => plate::lesson_words(ui, back, Role::Step, plate::BLUE_DEEP),
+                    None => plate::lesson_words(ui, lesson.title, Role::Step, plate::INK),
+                };
+                ui.add_space(HEAD_GAP);
                 plate::lesson_strip(ui, width, done, total);
-                ui.add_space(CARD_GAP);
+                ui.add_space(HEAD_GAP);
                 let names: Vec<_> = path.iter().map(|s| (s.label, Some(s.stage) == now)).collect();
                 plate::lesson_path(ui, &names);
                 ui.add_space(CARD_GAP);
                 if let Some(lines) = &lines {
-                    if let Some(back) = &lines.wander {
-                        plate::lesson_words(ui, back, Role::Step, plate::BLUE_DEEP);
-                        ui.add_space(CARD_GAP);
-                    }
                     plate::lesson_words(ui, &lines.say, Role::Heading, plate::INK);
                     if let Some(why) = &lines.why {
                         ui.add_space(CARD_GAP);

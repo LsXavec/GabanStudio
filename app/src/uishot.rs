@@ -552,22 +552,97 @@ fn start_float(dir: &Path) {
     }
 }
 
-/// AU27: the lesson card beside Draw, at a wide and a narrow window, and at
-/// the finish.
+/// AU27: the card as a person meets it, from a real run of the probe in the
+/// lessons' own words: each step of its bar at the full and the worst size, the
+/// way back when they wander, a real finish and the page's tick, then Plan's
+/// sheet and the chip.
 fn lesson_card(dir: &Path) {
-    let draw = ProbeRoom::Stage(Stage::Drawing);
-    let mut h = EditorHarness::with_gpu_shipped(crate::lessons::PROBED.paper.build());
-    h.run_frames(4);
-    for (name, w, tall, finished) in
-        [("lesson-card", 1600.0, 900.0, false), ("lesson-card-1280", 1280.0, 800.0, false), ("lesson-finish", 1280.0, 800.0, true)]
-    {
-        let size = egui::vec2(w, tall);
+    use crate::aulesson_tests::{along, export_asked, open, pen};
+    let full = (1600, 900);
+    let fold = (832, 520);
+    let at = |h: &mut EditorHarness, name: &str, (w, tall): (u32, u32)| {
+        let size = egui::vec2(w as f32, tall as f32);
         h.kit_mut().set_size(size);
-        arrive(&mut h, draw);
-        h.editor_mut().begin_lesson(crate::lessons::PROBED, usize::from(finished));
-        h.run_frames(4);
+        arrive(h, ProbeRoom::Stage(Stage::Drawing));
         h.shot(size, &dir.join(format!("{name}.png")));
+    };
+    let both = |h: &mut EditorHarness, name: &str| {
+        at(h, name, full);
+        at(h, &format!("{name}-fold"), fold);
+        h.kit_mut().set_size(egui::vec2(full.0 as f32, full.1 as f32));
+        h.run_frames(4);
+    };
+
+    // A first run, from the page's card to the file, in the lessons' own words.
+    let mut h = EditorHarness::with_gpu_ready();
+    open(&mut h, "probe-spoken");
+    both(&mut h, "lesson-draw");
+    // The way back, on the card's top line, and the pill still free to press.
+    h.editor_mut().enter_room(Stage::Composite);
+    at(&mut h, "lesson-wander", fold);
+    h.editor_mut().enter_room(Stage::Drawing);
+    h.kit_mut().set_size(egui::vec2(full.0 as f32, full.1 as f32));
+    h.run_frames(4);
+    pen(&mut h, &along([210.0, 205.0], [990.0, 205.0]));
+    for (pill, name) in [
+        (crate::vocab::STEP_COLOR, "lesson-color"),
+        (crate::vocab::STEP_EFFECTS, "lesson-effects"),
+        (crate::vocab::STEP_EXPORT, "lesson-export"),
+    ] {
+        h.click(pill);
+        h.run_frames(4);
+        both(&mut h, name);
     }
+    export_asked(&mut h);
+    let out = tempfile::tempdir().expect("a folder for the file");
+    h.answer_export(&out.path().join("up-late.png"));
+    h.run_export_to_end();
+    h.run_frames(4);
+    assert!(h.editor().lesson.as_ref().is_some_and(|run| run.finished()), "the run's real finish");
+    both(&mut h, "lesson-finish");
+
+    // The page, with that finish ticked: its row takes the probe's cell.
+    let mut rows = crate::lessons::table().to_vec();
+    rows.retain(|l| l.id != "probe");
+    let mut w = crate::welcome::Welcome::new(&[]);
+    w.lessons = Box::leak(rows.into_boxed_slice());
+    h.editor_mut().open_start(w.on_lessons());
+    at(&mut h, "lesson-page", full);
+    drop(h); // the device is one at a time: the next harness waits on this one
+
+    // Plan: the sheet a lesson stands on, whatever the memory says.
+    let mut h = EditorHarness::with_gpu_ready();
+    open(&mut h, "probe-film");
+    both(&mut h, "lesson-plan");
+    drop(h);
+
+    // The chip, on the task that rings it.
+    let mut h = EditorHarness::with_gpu_ready();
+    open(&mut h, "probe-night");
+    at(&mut h, "lesson-chip", (1280, 800));
+}
+
+/// AU27: the card's pictures, by file name.
+const LESSON: [(&str, u32, u32); 15] = [
+    ("lesson-draw", 1600, 900),
+    ("lesson-draw-fold", 832, 520),
+    ("lesson-wander", 832, 520),
+    ("lesson-color", 1600, 900),
+    ("lesson-color-fold", 832, 520),
+    ("lesson-effects", 1600, 900),
+    ("lesson-effects-fold", 832, 520),
+    ("lesson-export", 1600, 900),
+    ("lesson-export-fold", 832, 520),
+    ("lesson-finish", 1600, 900),
+    ("lesson-finish-fold", 832, 520),
+    ("lesson-page", 1600, 900),
+    ("lesson-plan", 1600, 900),
+    ("lesson-plan-fold", 832, 520),
+    ("lesson-chip", 1280, 800),
+];
+
+fn lesson_owed() -> Vec<(String, u32, u32)> {
+    LESSON.iter().map(|(name, w, h)| (format!("{name}.png"), *w, *h)).collect()
 }
 
 /// AU7: the lane as it teaches: a hint with its button and dots, under the
@@ -1122,6 +1197,7 @@ fn uishot_rooms() {
     start_float(&dir);
     check_shots(&dir, &start_owed()).expect("the Start float's moments");
     lesson_card(&dir);
+    check_shots(&dir, &lesson_owed()).expect("the lesson card's moments");
     say_moments(&dir);
     check_shots(&dir, &say_owed()).expect("what the Say line teaches");
     queue_moments(&dir);

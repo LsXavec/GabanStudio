@@ -168,6 +168,10 @@ pub struct Facts {
     pub tools_back: bool,
     /// AU27: a lesson stands: its card carries the sentence.
     pub lesson: bool,
+    /// AU27: the files that landed this frame, and the latches they left under.
+    pub landed: u32,
+    pub transparent: bool,
+    pub mono: bool,
 }
 
 impl Facts {
@@ -680,9 +684,9 @@ impl Editor {
     /// AU7: what this frame came to: Quick Start's ticks, and the row that
     /// speaks next. Runs after the dock, where a stroke lands.
     pub(crate) fn say_read(&mut self, ctx: &eframe::egui::Context) {
-        let (stroked, filled, exported) = self.say_outcomes();
+        let (stroked, filled, landed) = self.say_outcomes();
         self.say.count_refusals(&self.state);
-        let facts = self.say_facts(stroked, filled, exported);
+        let facts = self.say_facts(stroked, filled, landed);
         self.lesson_read(&facts);
         let mut seen = self.say.seen;
         let hint = if self.say.off {
@@ -709,7 +713,7 @@ impl Editor {
     /// The stroke, fill, playback and export signals, read once, and what they
     /// tick. A line drawn for `Check your pen` was the check's: it ticks
     /// nothing.
-    fn say_outcomes(&mut self) -> (bool, bool, bool) {
+    fn say_outcomes(&mut self) -> (bool, bool, u32) {
         let state = &self.state;
         let check_line = std::mem::take(&mut self.say.check_line);
         let circle = std::mem::take(&mut self.say.circle);
@@ -734,8 +738,8 @@ impl Editor {
         } else if filled && self.kind() == Some(ProjectKind::Drawing) {
             self.tick_slot(1);
         }
-        let exported = self.say_landed();
-        (stroked, filled, exported)
+        let landed = self.say_landed();
+        (stroked, filled, landed)
     }
 
     /// The files that reached the disk since the last reading (spec 8.3 ticks
@@ -744,10 +748,10 @@ impl Editor {
     /// once: a plain finish has nothing to say that the report does not, so
     /// the remark gives way. With hints off the lane has no report and no
     /// button, and the remark stays.
-    fn say_landed(&mut self) -> bool {
+    fn say_landed(&mut self) -> u32 {
         let landed = std::mem::take(&mut self.state.render_queue.landed);
-        let exported = !landed.is_empty();
-        self.quick_start[welcome::EXPORT_STEP] |= exported && self.lesson.is_none();
+        let count = landed.len() as u32;
+        self.quick_start[welcome::EXPORT_STEP] |= count > 0 && self.lesson.is_none();
         let card = self.stage == Some(Stage::Export) && visible_panes(&self.dock).contains(&Pane::RenderQueue);
         for file in landed {
             if !card && self.say.off {
@@ -762,7 +766,7 @@ impl Editor {
                 self.say.exported = Some(file);
             }
         }
-        exported
+        count
     }
 
     /// What a finished stroke ticks (spec 8.3).
@@ -782,7 +786,8 @@ impl Editor {
         !self.say.off && self.say.seen & HIDE_TOOLS == 0 && menus::chord_label(ctx, Action::HideTools).is_some()
     }
 
-    fn say_facts(&mut self, stroked: bool, filled: bool, exported: bool) -> Facts {
+    fn say_facts(&mut self, stroked: bool, filled: bool, landed: u32) -> Facts {
+        let exported = landed > 0;
         let added = std::mem::take(&mut self.say.added);
         let row_clicked = std::mem::take(&mut self.state.sheet_ui.row_clicked);
         // Work goes on, and the report has been overtaken.
@@ -841,6 +846,9 @@ impl Editor {
             pen_works: std::mem::take(&mut self.say.pen_answered),
             tools_back,
             lesson: self.lesson.is_some(),
+            landed,
+            transparent: state.render_queue.panel.transparent,
+            mono: state.manga.export.mode == anim_core::deliver::PageMode::Mono,
         };
         if effect_added && self.kind() == Some(ProjectKind::Drawing) {
             self.tick_slot(2);

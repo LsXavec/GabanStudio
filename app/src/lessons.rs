@@ -176,6 +176,14 @@ pub struct Task {
     pub show: Show,
 }
 
+/// What a lesson's file must be exported with: `Exported` counts a file only
+/// with this on (spec 5.4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Latch {
+    Transparent,
+    Mono,
+}
+
 #[derive(Clone, Copy)]
 pub struct Lesson {
     /// Stored in `app.lesson`, never renumbered.
@@ -193,6 +201,8 @@ pub struct Lesson {
     pub fill_gap: Option<u32>,
     /// `canvas.brush_color` for the run, restored on leaving.
     pub ink: Option<[u8; 4]>,
+    /// The latch its exports stand on.
+    pub latch: Option<Latch>,
     /// Everything the lesson draws with.
     pub art: fn() -> Vec<Path>,
     /// The paths of `art` that make its picture.
@@ -214,6 +224,7 @@ impl Lesson {
         prep: None,
         fill_gap: None,
         ink: None,
+        latch: None,
         art: stand_in_art,
         finish: &[0],
         tasks: &[],

@@ -5374,7 +5374,10 @@ impl Editor {
     /// a stroke in progress ends first.
     fn promote(&mut self) {
         // AU27: a lesson's bar stands under it to the end: this runs on Leave.
-        if self.kind() != Some(ProjectKind::Drawing) || self.canvas.stroke_active() || self.lesson.is_some() {
+        // The key is what holds it (spec 5.11): a guest's document and a lesson
+        // this build does not know keep theirs with no run standing.
+        let lesson = self.lesson.is_some() || self.state.engine.project.app_meta.contains_key(lesson::KEY);
+        if self.kind() != Some(ProjectKind::Drawing) || self.canvas.stroke_active() || lesson {
             return;
         }
         let project = &mut self.state.engine.project;
@@ -5484,11 +5487,22 @@ impl Editor {
 
     /// AU19: Plan opens without its sheet: the memory says so, and no
     /// template started this document with it on. AU27: a lesson's Plan shows
-    /// the sheet whatever the memory says, and leaves the memory as it stood.
+    /// the sheet whatever the memory says, and leaves the memory as it stood:
+    /// only a hide during the run takes it off, for the run.
     fn plan_sheet_off(&self) -> bool {
-        self.lesson.is_none()
-            && self.plan_sheet_hidden
-            && self.template_sheet.as_ref() != Some(&self.state.untitled_group)
+        match &self.lesson {
+            Some(run) => run.sheet_off,
+            None => self.plan_sheet_hidden && self.template_sheet.as_ref() != Some(&self.state.untitled_group),
+        }
+    }
+
+    /// AU27: a run has ended in Plan: the sheet stands as the person's memory
+    /// says, unless the dock was arranged by hand.
+    fn plan_sheet_back(&mut self) {
+        let plain = same_shape(&self.dock, &Stage::Drawing.dock()) || same_shape(&self.dock, &Stage::Layout.dock());
+        if self.in_plan() && plain {
+            self.dock = self.recipe(Stage::Drawing);
+        }
     }
 
     /// AU3: a template's project opens in the template's first step, its
@@ -7675,9 +7689,9 @@ enum ProbeRoom {
     /// AU20: Draw, with the Start float on its Lessons page, on the nine rows
     /// it is built for.
     Lessons,
-    /// AU27: a step with the lesson card standing beside it.
+    /// AU27: a step of a kind's bar with the lesson card standing beside it.
     #[cfg_attr(not(test), allow(dead_code))]
-    Lesson(Stage),
+    Lesson(&'static str, ProjectKind, Stage),
 }
 
 /// Every room: the CLI probe and the ship tests walk these. AU19: `Stage::Drawing`
@@ -7696,16 +7710,23 @@ const PROBE_ROOMS: [ProbeRoom; 9] = [
     ProbeRoom::Lessons,
 ];
 
-/// AU27: the card in every step: what the clip audit walks after the rooms.
-/// The shots and the rail's audits number `PROBE_ROOMS` alone.
+/// AU27: the card in every step of every bar, Plan with its sheet among them:
+/// what the clip audit walks after the rooms (spec 1.10). The shots and the
+/// rail's audits number `PROBE_ROOMS` alone.
 #[cfg(test)]
-const LESSON_ROOMS: [ProbeRoom; 6] = [
-    ProbeRoom::Lesson(Stage::Drawing),
-    ProbeRoom::Lesson(Stage::InkPaint),
-    ProbeRoom::Lesson(Stage::Composite),
-    ProbeRoom::Lesson(Stage::Edit),
-    ProbeRoom::Lesson(Stage::Manga),
-    ProbeRoom::Lesson(Stage::Export),
+const LESSON_ROOMS: [ProbeRoom; 12] = [
+    ProbeRoom::Lesson("lesson card, Draw", ProjectKind::Drawing, Stage::Drawing),
+    ProbeRoom::Lesson("lesson card, Color", ProjectKind::Drawing, Stage::InkPaint),
+    ProbeRoom::Lesson("lesson card, Effects", ProjectKind::Drawing, Stage::Composite),
+    ProbeRoom::Lesson("lesson card, Export", ProjectKind::Drawing, Stage::Export),
+    ProbeRoom::Lesson("lesson card, Plan", ProjectKind::Animation, Stage::Drawing),
+    ProbeRoom::Lesson("lesson card, Timing", ProjectKind::Animation, Stage::Edit),
+    ProbeRoom::Lesson("lesson card, animation Color", ProjectKind::Animation, Stage::InkPaint),
+    ProbeRoom::Lesson("lesson card, animation Effects", ProjectKind::Animation, Stage::Composite),
+    ProbeRoom::Lesson("lesson card, animation Export", ProjectKind::Animation, Stage::Export),
+    ProbeRoom::Lesson("lesson card, Manga", ProjectKind::Comic, Stage::Manga),
+    ProbeRoom::Lesson("lesson card, comic Color", ProjectKind::Comic, Stage::InkPaint),
+    ProbeRoom::Lesson("lesson card, comic Export", ProjectKind::Comic, Stage::Export),
 ];
 
 impl ProbeRoom {
@@ -7715,12 +7736,7 @@ impl ProbeRoom {
             ProbeRoom::Forge => "forge",
             ProbeRoom::Layout3d => "3D layout (LO)",
             ProbeRoom::Lessons => "Lessons page",
-            ProbeRoom::Lesson(Stage::Drawing) => "lesson card, Draw",
-            ProbeRoom::Lesson(Stage::InkPaint) => "lesson card, Color",
-            ProbeRoom::Lesson(Stage::Composite) => "lesson card, Effects",
-            ProbeRoom::Lesson(Stage::Edit) => "lesson card, Timing",
-            ProbeRoom::Lesson(Stage::Manga) => "lesson card, Manga",
-            ProbeRoom::Lesson(_) => "lesson card, Export",
+            ProbeRoom::Lesson(name, ..) => name,
         }
     }
 
@@ -7752,8 +7768,9 @@ impl ProbeRoom {
                 w.lessons = lessons::STAND_IN;
                 editor.open_start(w.on_lessons());
             }
-            ProbeRoom::Lesson(st) => {
-                editor.begin_lesson(lessons::PROBED, 0);
+            ProbeRoom::Lesson(_, kind, st) => {
+                kind.stamp(&mut editor.state.engine.project);
+                editor.begin_lesson(lessons::Lesson { kind, ..lessons::PROBED }, 0);
                 editor.enter_room(st);
             }
         }
@@ -7762,11 +7779,11 @@ impl ProbeRoom {
     fn probe(self, ppp: f32) -> ProbeRun {
         match self {
             // AU9: this step has no paper: its panel is what must hold still.
-            ProbeRoom::Stage(Stage::Export) | ProbeRoom::Lesson(Stage::Export) => {
+            ProbeRoom::Stage(Stage::Export) | ProbeRoom::Lesson(_, _, Stage::Export) => {
                 probe_run_in(ppp, 100, Pane::RenderQueue, |editor| self.enter(editor))
             }
             ProbeRoom::Stage(st) => probe_run(st, ppp),
-            ProbeRoom::Forge | ProbeRoom::Lessons | ProbeRoom::Lesson(_) => {
+            ProbeRoom::Forge | ProbeRoom::Lessons | ProbeRoom::Lesson(..) => {
                 probe_run_in(ppp, 100, Pane::Canvas, |editor| self.enter(editor))
             }
             ProbeRoom::Layout3d => {
@@ -8759,9 +8776,15 @@ impl Editor {
     /// AU3: the step with the sheet or without it, remembered: Plan in
     /// `plan_sheet_hidden`, the frozen boot's Draw in `sheet_in_draw`. A dock
     /// that is neither recipe was arranged by hand, so only the sheet's tab
-    /// comes or goes and the rest of the arrangement stays.
+    /// comes or goes and the rest of the arrangement stays. AU27: during a
+    /// lesson the key works and remembers nothing (spec 3.10): the run holds
+    /// the hide, and Leave gives the person's memory back.
     fn switch_sheet(&mut self, shown: bool) {
-        let with_sheet = if self.in_plan() {
+        let plan = self.in_plan();
+        let with_sheet = if let (true, Some(run)) = (plan, self.lesson.as_mut()) {
+            run.sheet_off = shown;
+            Stage::Layout.dock()
+        } else if plan {
             self.plan_sheet_hidden = shown;
             self.template_sheet = None;
             self.plan_sheet_request = Some(shown);
@@ -10123,6 +10146,10 @@ impl Editor {
             self.invoke(action, ui.ctx());
         }
         self.start_ui(ui.ctx(), dock_rect);
+        // AU27: the shell holds the presets; a lesson's reader reads them here.
+        if self.lesson.is_some() && self.presets != *presets {
+            self.presets.clone_from(presets);
+        }
         self.say_read(ui.ctx());
         if hidden {
             self.return_dot(ui.ctx());
