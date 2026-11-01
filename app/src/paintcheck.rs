@@ -720,8 +720,8 @@ mod tests {
     #[test]
     fn inkpaint_nuri_check_sits_in_shiage_and_opens_on_ctrl_shift_k() {
         // Named as the studio says it, and found by those words.
-        assert_eq!(Action::ShowPaintCheck.label(), "Nuri check (paint check)");
-        assert_eq!(Pane::PaintCheck.title(), "Nuri check (paint check)");
+        assert_eq!(Action::ShowPaintCheck.label(), "Check paint");
+        assert_eq!(Pane::PaintCheck.title(), "Check paint");
         for word in ["nuri", "paint check"] {
             assert_eq!(crate::cmdpal::ranked(word, &[]).first(), Some(&Action::ShowPaintCheck), "{word}");
         }

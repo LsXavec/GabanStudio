@@ -1191,7 +1191,7 @@ fn austrip_scrollbar_is_no_sheet_press() {
 
 #[test]
 fn austrip_locked_track_refuses_every_edit() {
-    const LOCKED: &str = "refused — this column is locked";
+    const LOCKED: &str = "refused — this track is locked";
     let mut h = strip_up(&[3, 4]);
     h.state_mut().toggle_column_locked();
     settle(&mut h);

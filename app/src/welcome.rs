@@ -977,7 +977,7 @@ pub fn ui(
                     }
                     ui.label(
                         egui::RichText::new(t.summary())
-                            .size(11.0)
+                            .font(plate::Role::Small.font())
                             .color(plate::legend_dim()),
                     );
                 });
@@ -1060,7 +1060,7 @@ pub fn ui(
                                     "{}×{} · {} fps",
                                     m.width, m.height, m.fps
                                 ))
-                                .size(11.0)
+                                .font(plate::Role::Small.font())
                                 .color(plate::legend_dim()),
                             );
                         }
@@ -1622,7 +1622,7 @@ mod tests {
         h.perform(Action::Undo);
         h.run();
         assert_eq!(h.state().cut().graph, shaped);
-        assert!(Action::BuildComposite.help().starts_with("Replace the node graph"));
+        assert!(Action::BuildComposite.help().starts_with("Replace the Effects graph"));
     }
 
     #[test]

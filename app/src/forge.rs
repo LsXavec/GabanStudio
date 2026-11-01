@@ -297,12 +297,12 @@ fn forge_body(
         let name = forge.draft.name.trim().to_string();
         let exists = presets.iter().any(|p| p.name == name);
         if !exists {
-            if ui.button("save to library").clicked() && !name.is_empty() {
+            if ui.button("Save to Brushes").clicked() && !name.is_empty() {
                 let mut p = forge.draft.clone();
                 p.name = name.clone();
                 presets.push(p);
                 *presets_dirty = true;
-                *status = format!("forged '{}'", forge.draft.name);
+                *status = format!("Saved brush '{}'", forge.draft.name);
             }
         } else if plate::danger(ui, "OVERWRITE") {
             // Saving over a name destroys a tuned brush — held, and the
@@ -310,13 +310,13 @@ fn forge_body(
             if let Some(existing) = presets.iter_mut().find(|p| p.name == name) {
                 *existing = forge.draft.clone();
                 *presets_dirty = true;
-                *status = format!("re-forged '{name}'");
+                *status = format!("Saved over '{name}'");
             }
         }
         if exists {
             ui.label(
                 egui::RichText::new(format!("'{name}' exists"))
-                    .size(10.0)
+                    .font(plate::Role::Small.font())
                     .color(plate::legend_dim()),
             );
         }
@@ -333,14 +333,13 @@ fn rail_row(ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32) -> bo
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(label)
-                .size(10.0)
+                .font(plate::Role::Small.font())
                 .color(plate::LEGEND),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{v:.2}"))
-                    .monospace()
-                    .size(10.5)
+                    .font(plate::Role::Small.font())
                     .color(plate::STRUCK),
             );
             changed = plate::rail(ui, v, lo..=hi, 120.0).dragged();

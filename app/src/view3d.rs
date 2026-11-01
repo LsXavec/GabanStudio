@@ -601,7 +601,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             at + egui::vec2(8.0, 0.0),
             egui::Align2::LEFT_CENTER,
             "rendering…",
-            egui::FontId::proportional(12.0),
+            crate::plate::Role::Small.font(),
             crate::plate::LEGEND,
         );
     }

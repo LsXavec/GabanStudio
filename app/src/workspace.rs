@@ -111,13 +111,13 @@ impl Pane {
             Pane::NodeGraph => vocab::EFFECTS_GRAPH.into(),
             Pane::History => "History".into(),
             Pane::Curves => vocab::MOTION_CURVES.into(),
-            Pane::PaintCheck => "Nuri check (paint check)".into(),
+            Pane::PaintCheck => "Check paint".into(),
             Pane::RenderQueue => vocab::EXPORT_QUEUE.into(),
-            // GM15: the studio's words first (D7), as `More ▸ Panels ▸` says
-            // them.
-            Pane::Board => "Shinkō board (cut board)".into(),
-            Pane::Episode => "Henshū timeline (episode)".into(),
-            Pane::View3D => "View3D — 3D LO (layout)".into(),
+            // AU12: the plain word, as `More ▸ Panels ▸` says it. The studio's
+            // words stay Search aliases.
+            Pane::Board => vocab::SHOTS.into(),
+            Pane::Episode => vocab::EPISODE_TIMELINE.into(),
+            Pane::View3D => "3D view".into(),
             Pane::Manga => "Manga (pages)".into(),
             Pane::Viewer(0) => vocab::RESULT.into(),
             Pane::Viewer(n) => format!("{} {}", vocab::RESULT, n + 1),
@@ -191,9 +191,9 @@ impl Stage {
     pub fn card(self) -> (&'static str, &'static str, &'static str) {
         let arms = match self {
             Stage::Layout => "brush",
-            Stage::Drawing => "brush · onion skin",
-            Stage::InkPaint => "fill · line guard",
-            Stage::Composite => "composite view",
+            Stage::Drawing => "brush · Ghost frames",
+            Stage::InkPaint => "fill · Protect line art",
+            Stage::Composite => "Preview final",
             Stage::Edit => "select",
             Stage::Manga => "brush · panels · rulers",
             Stage::Export => "nothing",
@@ -432,9 +432,9 @@ impl Workspaces {
             }
             let said = match dropped {
                 Some(0) => None,
-                Some(1) => Some("1 saved workspace could not be read and was skipped".to_string()),
-                Some(n) => Some(format!("{n} saved workspaces could not be read and were skipped")),
-                None => Some("your saved workspaces could not be read".to_string()),
+                Some(1) => Some("1 saved arrangement could not be read and was skipped".to_string()),
+                Some(n) => Some(format!("{n} saved arrangements could not be read and were skipped")),
+                None => Some("your saved arrangements could not be read".to_string()),
             };
             if let Some(said) = said {
                 let mut bad = path.as_os_str().to_owned();

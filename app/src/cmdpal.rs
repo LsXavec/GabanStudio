@@ -42,9 +42,12 @@ impl Palette {
 /// Every word of the query must match somewhere. A word in the NAME (or the
 /// menu path) outranks one in an ALIAS, which outranks one in the HELP line;
 /// within each, a prefix beats a word start beats anywhere, and a name also
-/// matches its letters in order ("ndr" finds "New drawing"). Case and the
-/// romaji macrons fold away ("shinko" finds "Shinkō board"). Pure.
+/// matches its letters in order ("ndr" finds "New drawing"), though under any
+/// alias: an old word typed whole finds its command before a stray spelling
+/// does. The first alias is the command's old name and edges out the rest.
+/// Case and the romaji macrons fold away ("shinko" finds "Shinkō board"). Pure.
 pub fn score(query: &str, action: Action) -> Option<i32> {
+    const LETTERS: i32 = 50;
     let name = fold(action.label());
     let menu = fold(action.menu().unwrap_or(""));
     let help = fold(action.help());
@@ -52,12 +55,13 @@ pub fn score(query: &str, action: Action) -> Option<i32> {
     let mut total = 0;
     for word in query.split_whitespace() {
         let best = [
-            text_score(&name, word, true).map(|s| s + 2000),
+            text_score(&name, word, true).map(|s| if s == LETTERS { s + 900 } else { s + 2000 }),
             text_score(&menu, word, false).map(|s| s + 1500),
             action
                 .aliases()
                 .iter()
-                .filter_map(|al| text_score(&fold(al), word, false))
+                .enumerate()
+                .filter_map(|(at, al)| text_score(&fold(al), word, false).map(|s| s + LETTERS * i32::from(at == 0)))
                 .max()
                 .map(|s| s + 1000),
             help.contains(word).then_some(0),
@@ -402,7 +406,7 @@ mod tests {
         assert_eq!(h.state().view.onion, !onion, "the onion toggle ran");
         h.perform(Action::CommandPalette);
         h.type_text("onion");
-        assert!(h.has("Toggle onion skin"), "{}", h.describe());
+        assert!(h.has(Action::ToggleOnion.label()), "{}", h.describe());
     }
 
     #[test]
@@ -510,7 +514,7 @@ mod tests {
         let mut h = EditorHarness::new();
         let binds = h.rig().config.keybinds.clone();
         let digit = 1 + h.rig().config.presets.iter().position(|p| p.name == "genga").unwrap();
-        let genga = format!("genga pencil ({digit})");
+        let genga = format!("{} ({digit})", crate::vocab::CLEAN_PENCIL);
         let genga_preset = Action::preset_slot(digit).expect("a pencil-box slot");
         use crate::floats::Float;
         for (button, action, float) in [
@@ -831,12 +835,12 @@ mod tests {
     fn cmdui_items_that_cannot_run_say_why() {
         let mut h = EditorHarness::new();
         let ed = h.editor();
-        assert_eq!(ed.can_perform(Action::NextCut), Err("this is the only cut"));
-        assert_eq!(ed.can_perform(Action::RemoveColumn), Err("a cut keeps at least one column"));
+        assert_eq!(ed.can_perform(Action::NextCut), Err("this is the only shot"));
+        assert_eq!(ed.can_perform(Action::RemoveColumn), Err("a shot keeps at least one track"));
         assert_eq!(ed.can_perform(Action::ClearFrameKey), Ok(()), "frame 0 holds the drawing");
         h.perform(Action::NextFrame);
         let ed = h.editor();
-        assert_eq!(ed.can_perform(Action::ClearFrameKey), Err("no key on this frame"));
+        assert_eq!(ed.can_perform(Action::ClearFrameKey), Err("no drawing starts on this frame"));
         assert!(ed.can_perform(Action::ClearCel).is_err(), "a held frame has no cel of its own");
         // A second column makes Remove column runnable.
         h.state_mut().add_column();
@@ -844,9 +848,9 @@ mod tests {
         // The palette dims what cannot run and says why on hover...
         h.perform(Action::CommandPalette);
         h.type_text("next cut");
-        h.hover("Next cut");
+        h.hover(Action::NextCut.label());
         h.wait(1.0);
-        assert!(h.has_text_containing("not now: this is the only cut"), "{}", h.describe());
+        assert!(h.has_text_containing("not now: this is the only shot"), "{}", h.describe());
         h.key(egui::Key::Escape);
         assert!(!h.editor().palette.open);
         // ...and the menu greys it.

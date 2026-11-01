@@ -97,9 +97,8 @@ struct Entry {
 }
 
 /// GM10: the Camera node's help (add menu and title tooltip).
-const CAMERA_HELP: &str = "the shooting camera over the paper: pans, zooms (T.U./T.B.), \
-    rotates and shakes; each plane input is a multiplane level whose depth sets how far \
-    a pan moves it and how far out of focus it sits";
+const CAMERA_HELP: &str = "The camera over the paper: it pans, zooms, rotates and shakes, \
+    and each depth input moves and blurs by how far away it sits.";
 
 /// Every node the add menu offers, in category order: Source, Transform,
 /// Blend, FX, Output (later parts add Generators and 3D).
@@ -111,10 +110,10 @@ fn entries(state: &AppState) -> Vec<Entry> {
         .iter()
         .map(|c| Entry {
             category: "Source",
-            name: format!("Drawing: column {}", c.name),
+            name: format!("Drawing: track {}", c.name),
             term: None,
             aliases: &["drawingsource", "cel", "column"],
-            help: "the column's drawing at each frame",
+            help: "The track's drawing at each frame.",
             make: Make::Node(NodeKind::source(c.id)),
         })
         .collect();
@@ -689,7 +688,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
             } else {
                 node_title(&nv.kind)
             },
-            egui::FontId::proportional(12.0),
+            crate::plate::Role::Small.font(),
             crate::plate::STRUCK,
         );
 
@@ -773,7 +772,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
                 ip + vec2(PIN_R + 4.0, 0.0),
                 egui::Align2::LEFT_CENTER,
                 name,
-                egui::FontId::proportional(10.0),
+                crate::plate::Role::Small.font(),
                 crate::plate::legend_dim(),
             );
             let ip_rect = Rect::from_center_size(ip, vec2(16.0, 16.0));
@@ -825,8 +824,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
-            format!("{add} to add nodes — the cut's compositing graph lives here"),
-            egui::FontId::proportional(13.0),
+            format!("{add} to add an effect: this shot's effects graph lives here"),
+            crate::plate::Role::Panel.font(),
             crate::plate::LEGEND,
         );
     }
@@ -1054,7 +1053,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                 // and the trace-line absorb — each click one undo step.
                 let shown = match roles {
                     None => "every layer".to_string(),
-                    Some(r) => r.iter().map(|x| x.label()).collect::<Vec<_>>().join(" + "),
+                    Some(r) => r.iter().map(|x| crate::vocab::layer_role(*x)).collect::<Vec<_>>().join(" + "),
                 };
                 ui.menu_button(format!("pass: {shown} ▾"), |ui| {
                     if ui.selectable_label(roles.is_none(), "every layer").clicked() {
@@ -1063,7 +1062,7 @@ fn inspector_row(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                     for role in LayerRole::ALL {
                         let on = roles.as_ref().is_some_and(|r| r.contains(&role));
-                        if ui.selectable_label(on, role.label()).clicked() {
+                        if ui.selectable_label(on, crate::vocab::layer_role(role)).clicked() {
                             let mut r = roles.take().unwrap_or_default();
                             if on {
                                 r.retain(|x| *x != role);
@@ -1562,8 +1561,8 @@ mod tests {
         let mut h = sample_in_the_composite_room();
         let before = h.state().cut().graph.clone();
         let depth = h.state().engine.history_len();
-        assert_eq!(h.node_enabled("Build satsuei graph"), Some(true), "{}", h.describe());
-        h.click("Build satsuei graph");
+        assert_eq!(h.node_enabled(crate::vocab::FULL_FINISHING_SETUP), Some(true), "{}", h.describe());
+        h.click(crate::vocab::FULL_FINISHING_SETUP);
         let s = h.state();
         assert_eq!(s.engine.history_len(), depth + 1, "one undo step");
         let c = s.cut();
@@ -1598,7 +1597,7 @@ mod tests {
         h.editor_mut().dock = egui_dock::DockState::new(vec![Pane::NodeGraph]);
         h.run();
         h.run();
-        assert_eq!(h.node_enabled("Build satsuei graph"), Some(false), "{}", h.describe());
+        assert_eq!(h.node_enabled(crate::vocab::FULL_FINISHING_SETUP), Some(false), "{}", h.describe());
         // The registry greys the verb with the same reason (menus, palette).
         assert_eq!(h.editor().can_perform(Action::BuildSatsuei), Err(h.state().satsuei_refusal().unwrap()));
         let depth = h.state().engine.history_len();
@@ -1677,7 +1676,7 @@ mod tests {
         let ask = format!(
             "Replace this hand-built graph ({n} nodes) with the satsuei chain? Undo brings it back."
         );
-        h.click("Build satsuei graph");
+        h.click(crate::vocab::FULL_FINISHING_SETUP);
         assert!(h.has(&ask), "{}", h.describe());
         assert_eq!(h.state().engine.history_len(), depth, "asked: nothing replaced yet");
         h.click("Cancel");

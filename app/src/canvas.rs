@@ -56,7 +56,7 @@ fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
         &plate::sentence(label),
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::new(9.5, plate::semibold()),
+            font_id: plate::Role::Small.font(),
             color: plate::LEGEND,
             ..Default::default()
         },
@@ -65,7 +65,7 @@ fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
         &format!("  {value}"),
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::new(11.0, egui::FontFamily::Monospace),
+            font_id: plate::Role::Small.font(),
             color: plate::STRUCK,
             ..Default::default()
         },
@@ -2345,7 +2345,7 @@ impl CanvasView {
             &resp,
             egui::WidgetType::SelectableLabel,
             Some(armed),
-            &format!("{} pencil ({digit})", p.name),
+            &format!("{} ({digit})", crate::vocab::preset(&p.name)),
         );
         // AU21: by the preset's stored name, which no rename touches.
         match p.name.as_str() {
@@ -2399,18 +2399,21 @@ impl CanvasView {
         } else {
             plate::LEGEND
         };
+        // AU12: a third of the float has no room for "pencil": the face says
+        // the first word, the spoken name and the card say all of it.
+        let word = crate::vocab::preset(&p.name);
         painter.text(
-            pos2(rect.left() + 8.0, rect.bottom() - 9.0),
+            pos2(rect.left() + 6.0, rect.bottom() - 9.0),
             egui::Align2::LEFT_CENTER,
-            plate::sentence(&p.name),
-            egui::FontId::new(9.5, plate::semibold()),
+            word.strip_suffix(" pencil").unwrap_or(word),
+            plate::Role::Small.font(),
             name_ink,
         );
         painter.text(
-            pos2(rect.right() - 7.0, rect.bottom() - 9.0),
+            pos2(rect.right() - 5.0, rect.bottom() - 9.0),
             egui::Align2::RIGHT_CENTER,
             format!("{digit}"),
-            egui::FontId::new(11.0, egui::FontFamily::Monospace),
+            plate::Role::Small.font(),
             plate::legend_dim(),
         );
         // The lamp: solid blue ring armed; BROKEN ring = armed but the
@@ -2451,8 +2454,9 @@ impl CanvasView {
         let detail = || {
             let mut more = format!(
                 "{} — {:.0}px · flow {:.2} · opacity {:.2}",
-                p.name, p.size_px, p.flow, p.opacity
+                crate::vocab::preset(&p.name), p.size_px, p.flow, p.opacity
             );
+            more = crate::vocab::with_studio_word(crate::vocab::preset(&p.name), &more);
             if plate::exact() {
                 more.push_str(&format!(
                     "\n[PENCIL SLOT '{}' · canvas.rs pencil_slot · preset in config.presets]",
@@ -2516,8 +2520,7 @@ impl CanvasView {
                             "#{:02X}{:02X}{:02X}",
                             self.brush_color[0], self.brush_color[1], self.brush_color[2]
                         ))
-                        .monospace()
-                        .size(10.0)
+                        .font(plate::Role::Small.font())
                         .color(plate::STRUCK),
                     );
                     if let Some(n) = &armed_role {
@@ -2856,7 +2859,7 @@ impl CanvasView {
                     Some(l) => {
                         ui.label(
                             egui::RichText::new(format!("→ {l}"))
-                                .size(9.5)
+                                .font(plate::Role::Small.font())
                                 .color(plate::LEGEND),
                         );
                         // Writes the model — held DANGER (no undo there).
@@ -2999,7 +3002,7 @@ impl CanvasView {
             .card("the nearest ghost's opacity");
         // Folded by default: the fold-out keeps its old height (the view
         // block stays on screen).
-        egui::CollapsingHeader::new("onion depth").show(ui, |ui| {
+        egui::CollapsingHeader::new("Ghost frames depth").show(ui, |ui| {
             value_line(ui, "falloff", format!("{:.0}%", cfg.falloff * 100.0));
             ui.add(egui::Slider::new(&mut cfg.falloff, 0.0..=1.0).show_value(false))
                 .card("each ghost farther away keeps this much of the one before");
@@ -3096,9 +3099,9 @@ impl CanvasView {
         // chart toward the next key, and the inbetweens it makes.
         if let Some(here) = state.current_drawing() {
             let busy = self.stroke_active();
-            let fold = egui::CollapsingHeader::new("genga · douga").show(ui, |ui| {
+            let fold = egui::CollapsingHeader::new("Mark as").show(ui, |ui| {
                 let kind = state.cut().drawing_kind(here);
-                value_line(ui, "kind", kind.label().to_string());
+                value_line(ui, "kind", crate::vocab::drawing_kind(kind).to_string());
                 ui.horizontal_wrapped(|ui| {
                     for (k, verb) in [
                         (DrawingKind::Key, Action::KindKey),
@@ -3106,7 +3109,7 @@ impl CanvasView {
                         (DrawingKind::Inbetween, Action::KindInbetween),
                         (DrawingKind::Unset, Action::KindUnset),
                     ] {
-                        let label = ui.selectable_label(kind == k, k.label());
+                        let label = ui.selectable_label(kind == k, crate::vocab::drawing_kind(k));
                         if crate::menus::hover_tip(label, verb, "").clicked() && !busy {
                             state.set_drawing_kind(here, k);
                         }
@@ -3211,8 +3214,7 @@ impl CanvasView {
             .add(
                 egui::Label::new(
                     egui::RichText::new(val)
-                        .monospace()
-                        .size(11.0)
+                        .font(plate::Role::Small.font())
                         .color(plate::STRUCK),
                 )
                 .sense(Sense::click()),
@@ -3471,11 +3473,11 @@ impl CanvasView {
                                         }
                                     };
                                     format!(
-                                        "arm '{}' · {:.0}px{honest}",
-                                        p.name, p.size_px
+                                        "Use '{}' · {:.0}px{honest}",
+                                        crate::vocab::preset(&p.name), p.size_px
                                     )
                                 }
-                                None => format!("arm '{}' · {:.0}px", p.name, p.size_px),
+                                None => format!("Use '{}' · {:.0}px", crate::vocab::preset(&p.name), p.size_px),
                             };
                             if resp.card(hover).clicked() {
                                 arm = Some((*p).clone());
@@ -4114,7 +4116,7 @@ impl CanvasView {
                     on_paper((r.x, r.y)) + vec2(2.0, 1.0),
                     egui::Align2::LEFT_TOP,
                     format!("{}", n + 1),
-                    egui::FontId::monospace(9.0),
+                    plate::Role::Small.font(),
                     plate::AO,
                 );
             }
@@ -4679,7 +4681,7 @@ impl CanvasView {
         }
         if let Some(note) = composite_note {
             // Red overrules the hand; the wash holds it on any desk.
-            let words = painter.layout_no_wrap(note.to_string(), egui::FontId::proportional(13.0), plate::AKA);
+            let words = painter.layout_no_wrap(note.to_string(), plate::Role::Panel.font(), plate::AKA);
             let pill = Rect::from_center_size(
                 pos2(rect.center().x, rect.top() + 34.0),
                 words.size() + vec2(16.0, 4.0),
@@ -4984,8 +4986,8 @@ impl CanvasView {
         // GM6: shift & trace rests the pen — the paper says so (the Tally
         // dot: the latch is ARMED), and a click on the chip ends the latch.
         if tracing {
-            let text = "SHIFT & TRACE — pen resting · click to end";
-            let font = egui::FontId::proportional(12.0);
+            let text = "Shift and trace: pen resting. Click to end.";
+            let font = plate::Role::Small.font();
             let w = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), plate::LEGEND).size().x);
             // Below the FLIP line and composite view's note.
             let chip = Rect::from_center_size(pos2(rect.center().x, rect.top() + 58.0), vec2(w + 30.0, 20.0));
@@ -5067,7 +5069,7 @@ impl CanvasView {
                             pos2(sp.x + 8.0, sp.y - 8.0),
                             egui::Align2::LEFT_BOTTOM,
                             &peer.name,
-                            egui::FontId::new(10.0, crate::plate::semibold()),
+                            egui::FontId::new(plate::Role::Small.size(), crate::plate::semibold()),
                             crate::plate::AO,
                         );
                     }
@@ -5092,8 +5094,8 @@ impl CanvasView {
                             paper_rect.top() + 10.0 + away as f32 * 14.0,
                         ),
                         egui::Align2::LEFT_CENTER,
-                        format!("{} · fr {}", peer.name, peer.frame + 1),
-                        egui::FontId::new(10.0, crate::plate::semibold()),
+                        format!("{} · frame {}", peer.name, peer.frame + 1),
+                        egui::FontId::new(plate::Role::Small.size(), crate::plate::semibold()),
                         crate::plate::legend_dim(),
                     );
                     away += 1;
@@ -5110,7 +5112,7 @@ impl CanvasView {
                 at + vec2(8.0, 0.0),
                 egui::Align2::LEFT_CENTER,
                 "3D underlay rendering…",
-                egui::FontId::proportional(12.0),
+                plate::Role::Small.font(),
                 crate::plate::LEGEND,
             );
         }

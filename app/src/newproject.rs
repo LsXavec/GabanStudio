@@ -156,10 +156,10 @@ pub fn form_ui(
     // THE SLATE, at rest: the first screen an artist meets should look
     // like the instrument they are about to use — engraved legends,
     // Struck values, one clear verb. (Repaint sweep 2026-08-18.)
-    plate::legend(ui, "new cut");
+    plate::legend(ui, "new shot");
     ui.label(
         egui::RichText::new("The paper you will draw on, and how fast it plays.")
-            .size(11.5)
+            .font(plate::Role::Small.font())
             .color(plate::LEGEND),
     );
     ui.add_space(12.0);
@@ -262,7 +262,7 @@ pub fn form_ui(
                 if paged {
                     ui.label(
                         egui::RichText::new("set by the page template")
-                            .size(10.5)
+                            .font(plate::Role::Small.font())
                             .color(plate::LEGEND),
                     );
                 }
@@ -296,7 +296,7 @@ pub fn form_ui(
                             form.fps
                         )
                     })
-                    .size(10.5)
+                    .font(plate::Role::Small.font())
                     .color(plate::LEGEND),
                 );
             });
@@ -318,7 +318,7 @@ pub fn form_ui(
                     } else {
                         "recorded with the project; nothing uses it yet"
                     })
-                    .size(10.5)
+                    .font(plate::Role::Small.font())
                     .color(plate::LEGEND),
                 );
             });
@@ -330,7 +330,7 @@ pub fn form_ui(
             .add(
                 egui::Button::new(
                     egui::RichText::new("Start drawing")
-                        .size(13.0)
+                        .font(plate::Role::Panel.font())
                         .color(plate::STRUCK),
                 )
                 .min_size(egui::vec2(140.0, 30.0)),

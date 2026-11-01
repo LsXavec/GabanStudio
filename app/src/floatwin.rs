@@ -152,7 +152,7 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 &s.hint,
-                egui::FontId::proportional(14.0),
+                crate::plate::Role::Chrome.font(),
                 crate::plate::LEGEND,
             );
         }

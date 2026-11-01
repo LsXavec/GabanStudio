@@ -161,7 +161,7 @@ pub(crate) fn upgraders_dir() -> tempfile::TempDir {
 
 /// What that launch says: each chord that moved, in one sentence.
 pub(crate) const KEYS_MOVED: &str =
-    "Column kind: Book (overlay) moved from Alt+K to Alt+O · Column kind: BG (haikei) moved from Alt+B to Alt+W";
+    "Overlay track moved from Alt+K to Alt+O · Background track moved from Alt+B to Alt+W";
 
 /// The file's bytes, read the way the app reads them, once.
 pub(crate) fn loaded(config: &Value) -> (tempfile::TempDir, Config) {
@@ -209,7 +209,7 @@ fn aukeys_stock_gaban_config_migrates() {
     let same = FROZEN.iter().filter(|(name, spec)| chord_of(&config, action(name)) == Some(&chord(spec))).count();
     assert_eq!(same, 118, "118 of 120 stay");
     assert_eq!(config.ui.hints_seen, u32::MAX, "an upgrader has not come to be taught");
-    assert_eq!(config.load_notes, ["Column kind: Book (overlay) moved from Alt+K to Alt+O", "Column kind: BG (haikei) moved from Alt+B to Alt+W"]);
+    assert_eq!(config.load_notes, ["Overlay track moved from Alt+K to Alt+O", "Background track moved from Alt+B to Alt+W"]);
 }
 
 /// Industry's seven overrides stand: its frame steps stay on Comma and Period,
@@ -236,7 +236,7 @@ fn aukeys_users_alt_k_is_left_alone() {
     let (_dir, config) = loaded(&mine);
     assert_eq!(chord_of(&config, Action::ColumnKindBook), Some(&chord("Ctrl+Alt+K")));
     assert_eq!(chord_of(&config, Action::ColumnKindBg), Some(&chord("Alt+W")), "the other still moves");
-    assert_eq!(config.load_notes, ["Column kind: BG (haikei) moved from Alt+B to Alt+W"], "no word about Book");
+    assert_eq!(config.load_notes, ["Background track moved from Alt+B to Alt+W"], "no word about Book");
     // The artist took Alt+K itself for another verb, and gave Book away.
     let mine = with_chord(with_chord(golden("Gaban"), "ColumnKindBook", None), "KindKey", Some("Ctrl+Alt+J"));
     let mine = with_chord(mine, "History", Some("Alt+K"));
@@ -255,8 +255,8 @@ fn aukeys_users_alt_o_keeps_book_with_one_note() {
     assert_eq!(chord_of(&config, Action::ColumnKindBook), Some(&chord("Alt+K")), "stays");
     assert_eq!(chord_of(&config, Action::History), Some(&chord("Alt+O")), "theirs");
     assert_eq!(chord_of(&config, Action::ColumnKindBg), Some(&chord("Alt+W")));
-    let about_book: Vec<&String> = config.load_notes.iter().filter(|n| n.contains("Book")).collect();
-    assert_eq!(about_book, ["Column kind: Book (overlay) stays on Alt+K: Alt+O is taken"], "one note");
+    let about_book: Vec<&String> = config.load_notes.iter().filter(|n| n.contains("Overlay")).collect();
+    assert_eq!(about_book, ["Overlay track stays on Alt+K: Alt+O is taken"], "one note");
 }
 
 /// F5 is the artist's: that verb keeps it, Draw stays bare, and the other

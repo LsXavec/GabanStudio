@@ -62,10 +62,11 @@ pub fn tip(ctx: &egui::Context, action: Action) -> String {
 }
 
 pub fn tip_with(action: Action, chord: Option<String>) -> String {
-    match chord {
+    let line = match chord {
         Some(c) => format!("{} ({c}) — {}", action.label(), action.help()),
         None => format!("{} — {}", action.label(), action.help()),
-    }
+    };
+    crate::vocab::with_studio_word(action.label(), &line)
 }
 
 /// The registry tooltip with `more` on its own line, built only while the
@@ -105,6 +106,7 @@ pub fn sheet_rows(binds: &[Binding], query: &str) -> Vec<(Action, String)> {
             };
             let hit = q.is_empty()
                 || a.label().to_lowercase().contains(&q)
+                || a.aliases().iter().any(|old| old.to_lowercase().contains(&q))
                 || chord.to_lowercase().contains(&q)
                 || a.help().to_lowercase().contains(&q);
             if hit {

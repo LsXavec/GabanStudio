@@ -1663,7 +1663,7 @@ pub(crate) mod tests {
             assert!(clashes(&binds).is_empty(), "{km:?}: {:?}", clashes(&binds));
         }
         let lip = Action::LipFlap;
-        assert_eq!((lip.label(), lip.menu()), ("kuchipaku (lip flap)…", Some("Animation/Track/Lip flap…")));
+        assert_eq!((lip.label(), lip.menu()), ("Lip flap…", Some("Animation/Track/Lip flap…")));
         assert_eq!((lip.group(), lip.context()), (Group::Sheet, Ctx::Sheet));
         for word in ["lip sync", "kuchipaku", "mouth"] {
             assert!(lip.aliases().contains(&word), "{word}");
@@ -1680,9 +1680,9 @@ pub(crate) mod tests {
         assert_eq!(h.state().loop_range(), Some((3, 6)));
         assert_eq!(h.perform(Action::ClearLoop), Performed::Done);
         assert_eq!(h.state().loop_range(), None);
-        assert_eq!(h.editor().can_perform(Action::ClearLoop), Err("this cut has no loop range"));
+        assert_eq!(h.editor().can_perform(Action::ClearLoop), Err("this shot has no loop range"));
         assert_eq!(h.perform(Action::ClearLoop), Performed::Ignored);
-        assert_eq!(h.state().refusal, "refused — this cut has no loop range");
+        assert_eq!(h.state().refusal, "refused — this shot has no loop range");
         assert_eq!(h.perform(Action::LipFlap), Performed::Ignored, "no sound yet");
         assert!(h.editor().lip_form.is_none());
         // And the keys reach them.

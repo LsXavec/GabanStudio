@@ -267,13 +267,13 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     // Filters.
     ui.horizontal_wrapped(|ui| {
         ui.label("status");
-        let shown = state.board.status.map_or("any status", |s| s.label());
+        let shown = state.board.status.map_or("any status", crate::vocab::cut_status);
         egui::ComboBox::from_id_salt("board_status_filter")
             .selected_text(shown)
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut state.board.status, None, "any status");
                 for s in CutStatus::ALL {
-                    ui.selectable_value(&mut state.board.status, Some(s), s.label());
+                    ui.selectable_value(&mut state.board.status, Some(s), crate::vocab::cut_status(s));
                 }
             });
         ui.label("assignee");
@@ -430,7 +430,7 @@ fn card(
     }
     card_menu(&b, state, info);
     ui.label(format!("{name} · {}", length_sk(info.frames, fps)));
-    let shown = p.status.map_or("no status", |s| s.label());
+    let shown = p.status.map_or("no status", crate::vocab::cut_status);
     let mut pick = p.status;
     egui::ComboBox::from_id_salt(("board_status", at.cut.0))
         .selected_text(shown)
@@ -438,7 +438,7 @@ fn card(
         .show_ui(ui, |ui| {
             ui.selectable_value(&mut pick, None, "no status");
             for s in CutStatus::ALL {
-                ui.selectable_value(&mut pick, Some(s), s.label());
+                ui.selectable_value(&mut pick, Some(s), crate::vocab::cut_status(s));
             }
         });
     if pick != p.status {
@@ -744,7 +744,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
                     rect.left_top() + egui::vec2(4.0, 4.0),
                     egui::Align2::LEFT_TOP,
                     name,
-                    egui::FontId::proportional(11.0),
+                    crate::plate::Role::Small.font(),
                     ink,
                 );
                 if *id == current && *frames > 0 {
@@ -892,8 +892,8 @@ mod tests {
         let tabs: Vec<Pane> = Stage::Edit.dock().iter_all_tabs().map(|(_, p)| *p).collect();
         assert!(tabs.contains(&Pane::Board) && tabs.contains(&Pane::Episode), "{tabs:?}");
         assert!(Pane::ALL.contains(&Pane::Board) && Pane::ALL.contains(&Pane::Episode));
-        assert_eq!(Pane::Board.title(), "Shinkō board (cut board)");
-        assert_eq!(Pane::Episode.title(), "Henshū timeline (episode)");
+        assert_eq!(Pane::Board.title(), crate::vocab::SHOTS);
+        assert_eq!(Pane::Episode.title(), crate::vocab::EPISODE_TIMELINE);
         let mut h = EditorHarness::new();
         h.perform(crate::config::Action::RoomEdit);
         h.run_frames(2);
@@ -929,8 +929,8 @@ mod tests {
         };
         assert_eq!((cut(&h).status, cut(&h).assignee), (Some(CutStatus::Genga), "Mori".to_string()));
         // The card's combo shows it and edits it: one more undo step.
-        h.click_combo("genga (key)");
-        h.click("done");
+        h.click_combo(crate::vocab::cut_status(CutStatus::Genga));
+        h.click(crate::vocab::cut_status(CutStatus::Done));
         h.run_frames(2);
         assert_eq!(cut(&h).status, Some(CutStatus::Done));
         h.state_mut().engine.undo().unwrap();

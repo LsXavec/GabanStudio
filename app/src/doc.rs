@@ -2237,7 +2237,7 @@ impl AppState {
             },
             cut: before.cut,
         };
-        self.apply_drawing_def(id, before, after, &format!("mark {}", kind.label()));
+        self.apply_drawing_def(id, before, after, &format!("mark {}", crate::vocab::drawing_kind(kind)));
     }
 
     /// Give a key a spacing chart toward the next key in its column (no
@@ -2829,7 +2829,7 @@ impl AppState {
     fn refuse_locked_track(&mut self) -> bool {
         let locked = self.active_column_def().locked;
         if locked {
-            self.refuse("refused — this column is locked");
+            self.refuse("refused — this track is locked");
         }
         locked
     }
@@ -3418,11 +3418,11 @@ impl AppState {
         let name = self.active_column_name();
         let def = self.active_column_def();
         if def.kind == kind {
-            self.status = format!("column {name} is already {}", kind.label());
+            self.status = format!("Track {name} is already {}", crate::vocab::column_kind(kind));
             return;
         }
-        let done = format!("column {name} is now {}", kind.label());
-        self.set_active_column_def("column kind", ColumnDef { kind, ..def }, &done);
+        let done = format!("Track {name} is now {}", crate::vocab::column_kind(kind));
+        self.set_active_column_def("track kind", ColumnDef { kind, ..def }, &done);
     }
 
     /// Hide or show the active column: a hidden column is out of every
@@ -3432,9 +3432,9 @@ impl AppState {
         let def = self.active_column_def();
         let hidden = !def.hidden;
         let (label, done) = if hidden {
-            ("hide column", format!("column {name} hidden"))
+            ("hide track", format!("Track {name} hidden"))
         } else {
-            ("show column", format!("column {name} shown"))
+            ("show track", format!("Track {name} shown"))
         };
         self.set_active_column_def(label, ColumnDef { hidden, ..def }, &done);
     }
@@ -3446,9 +3446,9 @@ impl AppState {
         let def = self.active_column_def();
         let locked = !def.locked;
         let (label, done) = if locked {
-            ("lock column", format!("column {name} locked"))
+            ("lock track", format!("Track {name} locked"))
         } else {
-            ("unlock column", format!("column {name} unlocked"))
+            ("unlock track", format!("Track {name} unlocked"))
         };
         self.set_active_column_def(label, ColumnDef { locked, ..def }, &done);
     }
@@ -6800,15 +6800,15 @@ mod sheetedit_tests {
         let (mut h, _) = three_drawings();
         // Hold +1 on the bottom drawing: it already holds to the end.
         h.state_mut().goto(8);
-        let why = "the last drawing already holds to the end of the cut";
+        let why = "the last drawing already lasts to the end of the shot";
         assert_eq!(h.editor().can_perform(Action::HoldPlus), Err(why));
         assert_eq!(h.perform(Action::HoldPlus), Performed::Ignored);
         assert!(h.state().refusal.contains("lengthen the cut first"), "{}", h.state().refusal);
-        // A locked column refuses timing edits, naming the column.
+        // A locked track refuses timing edits, naming the track.
         assert_eq!(h.perform(Action::ToggleColumnLocked), Performed::Done);
         assert_eq!(h.editor().is_on(Action::ToggleColumnLocked), Some(true));
         h.state_mut().goto(4);
-        assert_eq!(h.editor().can_perform(Action::HoldMinus), Err("this column is locked"));
+        assert_eq!(h.editor().can_perform(Action::HoldMinus), Err("this track is locked"));
         let steps = h.state().engine.position();
         for verb in [
             Action::HoldMinus,
@@ -6849,7 +6849,7 @@ mod sheetedit_tests {
         let steps = h.state().engine.position();
         h.perform(Action::ColumnKindCel);
         assert_eq!(h.state().engine.position(), steps);
-        assert!(h.state().status.contains("already Cel"), "{}", h.state().status);
+        assert!(h.state().status.contains("already Drawing"), "{}", h.state().status);
         h.perform(Action::ToggleColumnHidden);
         assert!(h.state().active_column_def().hidden);
         assert_eq!(h.editor().is_on(Action::ToggleColumnHidden), Some(true));
@@ -7295,19 +7295,19 @@ mod lighttable_tests {
     fn lighttable_marking_a_key_names_the_sheet_cell_and_never_touches_pixels() {
         let mut h = EditorHarness::new();
         h.run();
-        assert!(!h.has_text_containing("at frame 1: genga (key)"));
+        assert!(!h.has_text_containing("at frame 1: Key pose"));
         let before = hashes(h.state());
         let steps = h.state().engine.position();
         h.perform(Action::KindKey);
         h.run();
-        assert!(h.has_text_containing("at frame 1: genga (key)"), "{}", h.describe());
+        assert!(h.has_text_containing("at frame 1: Key pose"), "{}", h.describe());
         let d = h.state().current_drawing().expect("a drawing");
         assert_eq!(h.state().cut().drawing_kind(d), DrawingKind::Key);
         assert_eq!(h.state().engine.position(), steps + 1, "one undo step");
         assert_eq!(hashes(h.state()), before, "a kind never changes pixels");
         h.perform(Action::KindBreakdown);
         h.run();
-        assert!(h.has_text_containing("at frame 1: breakdown"));
+        assert!(h.has_text_containing("at frame 1: Breakdown"));
         h.state_mut().undo();
         h.state_mut().undo();
         assert_eq!(h.state().cut().drawing_kind(d), DrawingKind::Unset);
@@ -7817,16 +7817,16 @@ mod lighttable_tests {
         let steps = h.state().engine.position();
         // A held cell marks the drawing held there.
         h.right_click_pos(cell(&h, 2));
-        h.click("genga (key)");
+        h.click("Key pose");
         assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Key);
         assert_eq!(h.state().engine.position(), steps + 1, "one undo step");
-        assert!(h.has_text_containing("at frame 1: genga (key)"), "{}", h.describe());
+        assert!(h.has_text_containing("at frame 1: Key pose"), "{}", h.describe());
         // The cursor's own cell (the typed entry sits on it) answers too.
         h.right_click_pos(cell(&h, 0));
-        h.click("breakdown");
+        h.click("Breakdown");
         assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Breakdown);
         h.right_click_pos(cell(&h, 6));
-        h.click("douga (inbetween)");
+        h.click("Inbetween");
         assert_eq!(h.state().cut().drawing_kind(d[1]), DrawingKind::Inbetween);
         assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Breakdown);
         assert_eq!(h.state().engine.position(), steps + 3);
@@ -7913,9 +7913,9 @@ mod lighttable_tests {
         // The Canvas options float; its genga · douga section opens on a click
         // and starts at the float's foot.
         h.open_float(crate::floats::Float::CanvasOptions);
-        h.click("genga · douga");
-        h.scroll_to("genga (key)");
-        h.click("genga (key)");
+        h.click("Mark as");
+        h.scroll_to("Key pose");
+        h.click("Key pose");
         assert_eq!(h.state().cut().drawing_kind(d[0]), DrawingKind::Key);
         // Open, the section runs past the harness's short paper: the
         // float scrolls to what is below its foot.

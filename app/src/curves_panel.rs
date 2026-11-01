@@ -693,7 +693,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     let fps = state.fps().max(1);
     let (fa, va) = view.from_screen(plot, plot.left_bottom());
     let (fb, vb) = view.from_screen(plot, plot.right_top());
-    let numbers = egui::FontId::monospace(10.0);
+    let numbers = plate::Role::Small.font();
     let tstep = time_step(view.px_per_frame, fps);
     let mut s = ((fa.max(0.0) / tstep as f64).ceil() as u32).saturating_mul(tstep);
     while (s as f64) <= fb {
@@ -800,8 +800,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     painter.text(
         plot.right_bottom() + vec2(-6.0, -4.0),
         egui::Align2::RIGHT_BOTTOM,
-        "drag keys · box select · F frames · right-click: interpolation · Alt+drag pans · scroll zooms",
-        egui::FontId::proportional(10.5),
+        "Drag points · box select · F frames · right-click: motion · Alt+drag pans · scroll zooms",
+        plate::Role::Small.font(),
         plate::legend_dim(),
     );
     state.curves.view = Some(view);

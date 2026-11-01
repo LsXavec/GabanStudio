@@ -797,7 +797,7 @@ fn autail_longer_grows_the_last_run() {
     assert_eq!(h.state().engine.position(), was + 1, "one undo");
     assert_eq!(h.state().view.frame, 2, "the cursor stays");
     // The Action and its refusal are unchanged.
-    let why = "the last drawing already holds to the end of the cut";
+    let why = "the last drawing already lasts to the end of the shot";
     assert_eq!(h.editor().can_perform(Action::HoldPlus), Err(why));
     assert_eq!(h.perform(Action::HoldPlus), Performed::Ignored);
     h.state_mut().undo();
@@ -983,7 +983,7 @@ fn autail_hold_keys_refuse_as_the_sheet_does() {
     h.click(&longer());
     settle(&mut h);
     assert_eq!(holds(h.state()), was);
-    assert_eq!(h.state().refusal, "refused — this column is locked");
+    assert_eq!(h.state().refusal, "refused — this track is locked");
     // Nothing exposed under the cursor: nothing to hold.
     let mut h = timing(AppState::new_project("t", 64, 36, 12, 72.0));
     let count = h.state().frame_count();

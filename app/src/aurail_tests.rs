@@ -121,7 +121,7 @@ fn stock_tips(h: &EditorHarness) -> Vec<LayerId> {
 fn folds(f: Float) -> &'static [&'static str] {
     match f {
         Float::Brushes => &["More settings"],
-        Float::CanvasOptions => &["onion depth", "light table", "genga · douga"],
+        Float::CanvasOptions => &["Ghost frames depth", "light table", "Mark as"],
         _ => &[],
     }
 }
@@ -152,7 +152,7 @@ fn close(h: &mut EditorHarness, f: Float) {
 fn tile(h: &EditorHarness, pencil: &str) -> String {
     let presets = &h.rig().config.presets;
     let digit = 1 + presets.iter().position(|p| p.name == pencil).expect("a pencil");
-    format!("{pencil} pencil ({digit})")
+    format!("{} ({digit})", vocab::preset(pencil))
 }
 
 fn paper_middle(h: &EditorHarness) -> Pos2 {
@@ -1541,7 +1541,9 @@ fn aurail_layers_float_gives_way_to_a_tab() {
     assert!(crate::visible_panes(&h.editor().dock).contains(&Pane::Layers), "the tab is on screen");
     assert!(!is_open(&h, Float::Layers) && float_rect(&h, Float::Layers).is_none(), "the float gave way");
     assert_eq!(h.query_count(&lock), 1, "one list\n{}", h.describe());
-    h.click("Layers");
+    // The tab now shares the key's word.
+    let key = h.rects("Layers").into_iter().max_by(|a, b| a.left().total_cmp(&b.left())).expect("the rail's key");
+    h.click_pos(key.center());
     assert!(!is_open(&h, Float::Layers), "the key stays with the tab");
 }
 

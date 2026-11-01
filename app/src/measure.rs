@@ -176,6 +176,10 @@ pub const TERMS: &[(&str, &[Hit], Tier)] = &[
     ("cut", &[Word("cut"), Word("cuts")], T),
     ("inbetween", &[Word("inbetween"), Word("inbetweens")], T),
     ("column", &[Word("column"), Word("columns")], T),
+    // AU12, past the baseline's count.
+    ("composite", &[Word("composite")], T),
+    ("layout", &[Word("layout")], T),
+    ("queue", &[Word("queue")], T),
 ];
 
 /// How many of `TERMS` the journeys counted by. The baseline stays read
@@ -2504,7 +2508,7 @@ mod tests {
             let rects = rects_of(&h.kit().output().shapes);
             rects.into_iter().filter(|r| chip.contains_rect(r.rect) && r.rect.area() > 0.0).collect()
         };
-        for name in ["hide column A", "lock column A"] {
+        for name in ["Hide track A", "Lock track A"] {
             let chip = h.rect(name);
             let faces = inside(&h, chip);
             assert!(!faces.is_empty(), "{name} paints a face");
@@ -2514,9 +2518,9 @@ mod tests {
                 assert_eq!(face.corner_radius, egui::CornerRadius::same(plate::R_SHEET));
             }
         }
-        h.click("hide column A");
+        h.click("Hide track A");
         settle(&mut h);
-        let chip = h.rect("hide column A");
+        let chip = h.rect("Hide track A");
         let lit = inside(&h, chip);
         assert!(lit.iter().any(|r| r.fill == plate::RED_WASH), "lit takes the wash: {lit:?}");
         assert!(lit.iter().all(|r| r.stroke.width == 0.0), "and still no stroke: {lit:?}");

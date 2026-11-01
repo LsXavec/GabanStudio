@@ -765,20 +765,20 @@ impl FxKind {
     /// One plain sentence for menus and tooltips.
     pub fn help(self) -> &'static str {
         match self {
-            Self::Blur => "Softens the image with a Gaussian blur (bokashi).",
-            Self::Glow => "Adds a glow around the bright parts: tōkakō / T-kō, transmitted light.",
-            Self::Diffusion => "Mixes in a soft copy of the image: difyūjon, the diffusion filter.",
-            Self::Grade => "Colour grade: lift, gamma, gain, saturation, exposure, temperature and tint.",
-            Self::Para => "Lays a two-colour gradient over the image (para): light or shade across the shot.",
+            Self::Blur => "Softens the image.",
+            Self::Glow => "Adds a glow around the bright parts.",
+            Self::Diffusion => "Mixes in a soft copy of the image.",
+            Self::Grade => "Changes brightness, contrast, saturation, exposure, temperature and tint.",
+            Self::Para => "Lays a two-color gradient over the image: light or shade across the shot.",
             Self::LightWrap => "Bleeds the background's light into the edges of the character.",
-            Self::Rim => "A rim of light along the edges that face the light, from the alpha.",
-            Self::Vignette => "Fades the corners of the frame toward a colour.",
+            Self::Rim => "A rim of light along the edges that face the light.",
+            Self::Vignette => "Fades the corners of the frame toward a color.",
             Self::Grain => "Film grain: steady for a frame and seed, different on the next frame.",
             Self::MotionBlur => "Smears the image along a direction: speed and camera shake.",
-            Self::Lut => "Grades through a .cube 3D LUT stored in the project.",
-            Self::Matte => "Cuts the image by a matte from alpha or luma, with invert and choke / spread.",
-            Self::PaletteMap => "Swaps the palette's chip colours for a variant's: day, evening, night.",
-            Self::Tone => "Screen tone: the image's grey as a halftone of dots at a line count and angle.",
+            Self::Lut => "Changes colors through a .cube color table stored in the project.",
+            Self::Matte => "Masks the image by its transparency or brightness, with invert and spread.",
+            Self::PaletteMap => "Swaps the palette's colors for a variant's: day, evening, night.",
+            Self::Tone => "Screen tone: the image's grey as a pattern of dots, by density and angle.",
         }
     }
 

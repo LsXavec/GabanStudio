@@ -236,7 +236,7 @@ fn tidy_page_template_greys_size_and_dpi() {
 fn tidy_open_sample_is_a_file_verb_with_no_chord() {
     let a = Action::OpenSample;
     assert!(Action::ALL.contains(&a));
-    assert_eq!(a.label(), "Open the sample cut");
+    assert_eq!(a.label(), "Open the example");
     assert!((1..=120).contains(&a.help().chars().count()), "{}", a.help());
     assert_eq!(a.group(), Group::File);
     assert_eq!(a.menu(), Some("Help/Example project"));

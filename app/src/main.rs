@@ -85,6 +85,8 @@ mod aulesson_tests;
 #[cfg(test)]
 mod aumenu_tests;
 #[cfg(test)]
+mod auwords_tests;
+#[cfg(test)]
 mod auguide_tests;
 #[cfg(test)]
 mod auguide_show_tests;
@@ -3515,7 +3517,7 @@ impl Editor {
                 && let Some(p) = ed.presets.get(i)
             {
                 ed.canvas.apply_preset(p);
-                ed.state.status = format!("brush: {}", p.name);
+                ed.state.status = format!("Brush: {}", vocab::preset(&p.name));
             } else {
                 *out = Performed::Ignored;
             }
@@ -3570,9 +3572,9 @@ impl Editor {
             Action::LoopOut => s.set_loop_out(),
             Action::ClearLoop => {
                 if s.clear_loop() {
-                    s.status = "loop range cleared — playback runs the whole cut".into();
+                    s.status = "loop range cleared — playback runs the whole shot".into();
                 } else {
-                    s.refuse("refused — this cut has no loop range");
+                    s.refuse("refused — this shot has no loop range");
                 }
             }
             Action::ToggleScrub => {
@@ -5254,17 +5256,17 @@ impl EditorTabs<'_> {
                         "· ".into()
                     };
                     // The words stay ink; the pencil's colour rides on a dot.
-                    let text = format!("{hotkey}{}  {:.0}px", p.name, p.size_px);
+                    let text = format!("{hotkey}{}  {:.0}px", vocab::preset(&p.name), p.size_px);
                     let row = ui.horizontal(|ui| {
                         let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), egui::Sense::hover());
                         if let Some(c) = p.color {
                             plate::identity_dot(ui.painter(), dot.center(), 3.5, plate::chip([c[0], c[1], c[2], 255]));
                         }
-                        ui.button(text).on_hover_text("apply preset").clicked()
+                        ui.button(text).on_hover_text("Use this brush.").clicked()
                     });
                     if row.inner {
                         self.canvas.apply_preset(p);
-                        self.state.status = format!("brush: {}", p.name);
+                        self.state.status = format!("Brush: {}", vocab::preset(&p.name));
                     }
                 }
                 if self.presets.is_empty() {
@@ -6415,10 +6417,10 @@ impl Editor {
             }
             Action::Save | Action::SaveAs if guest => Err("the host owns the file"),
             Action::Open | Action::OpenSample if guest => {
-                Err("leave the room first to open your own file")
+                Err("leave the shared session first to open your own file")
             }
             // GM7: the migration rewrites every texel and clears history.
-            Action::ConvertColorsToSrgb if shared => Err("leave the room first — it rewrites every cel"),
+            Action::ConvertColorsToSrgb if shared => Err("leave the shared session first: this rewrites every drawing"),
             Action::ConvertColorsToSrgb if s.engine.project.color_law == ColorLaw::Srgb => {
                 Err("this project already stores exact sRGB chips")
             }
@@ -6427,16 +6429,16 @@ impl Editor {
             }
             // GM8: the project's size and rate are the host's in a room.
             Action::ProjectSettings if guest => Err("the host owns the project settings"),
-            Action::WelcomeScreen if guest => Err("leave the room first to open your own file"),
+            Action::WelcomeScreen if guest => Err("leave the shared session first to open your own file"),
             // AU20: the page waits for its first lesson.
             Action::OpenLessons if lessons::ALL.is_empty() => Err("no lessons yet"),
-            Action::OpenLessons if guest => Err("leave the room first to open your own file"),
+            Action::OpenLessons if guest => Err("leave the shared session first to open your own file"),
             Action::BuildComposite if s.cut().render_order().is_empty() => {
-                Err("no column reaches the composite")
+                Err("no track reaches the result")
             }
             // GM13: the toolbar button's own refusal, said the same way.
             Action::BuildSatsuei if s.satsuei_refusal().is_some() => {
-                Err(s.satsuei_refusal().unwrap_or("no drawing column"))
+                Err(s.satsuei_refusal().unwrap_or("no drawing track"))
             }
             a if stroke_guarded(a) && self.canvas.stroke_active() => {
                 Err("finish the stroke first")
@@ -6456,10 +6458,10 @@ impl Editor {
             Action::PrevCut | Action::NextCut
                 if s.engine.project.scenes.iter().map(|sc| sc.cuts.len()).sum::<usize>() < 2 =>
             {
-                Err("this is the only cut")
+                Err("this is the only shot")
             }
             Action::RemoveColumn if s.cut().xsheet.columns.len() <= 1 => {
-                Err("a cut keeps at least one column")
+                Err("a shot keeps at least one track")
             }
             Action::ClearFrameKey
                 if s
@@ -6469,13 +6471,13 @@ impl Editor {
                     .and_then(|c| c.key_at(s.view.frame))
                     .is_none() =>
             {
-                Err("no key on this frame")
+                Err("no drawing starts on this frame")
             }
             Action::ClearCel | Action::ClearCelAll if s.own_key_drawing().is_none() => {
                 Err("no drawing of this frame's own to clear")
             }
             // GM5: the sheet verbs that would refuse.
-            Action::DeleteFrames if s.frame_count() <= 1 => Err("a cut keeps at least one frame"),
+            Action::DeleteFrames if s.frame_count() <= 1 => Err("a shot keeps at least one frame"),
             Action::HoldPlus
             | Action::HoldMinus
             | Action::RetimeOnes
@@ -6484,13 +6486,13 @@ impl Editor {
             | Action::Reverse
                 if s.active_column_def().locked =>
             {
-                Err("this column is locked")
+                Err("this track is locked")
             }
             Action::HoldPlus | Action::HoldMinus if s.exposure_here().is_none() => {
                 Err("nothing is exposed on this frame")
             }
             Action::HoldPlus if s.exposure_here().is_some_and(|(_, next)| next.is_none()) => {
-                Err("the last drawing already holds to the end of the cut")
+                Err("the last drawing already lasts to the end of the shot")
             }
             // GM14: nothing on the sheet clipboard yet.
             Action::PasteCells | Action::PasteCellsInsert if s.sheet_ui.clipboard.is_none() => {
@@ -6509,9 +6511,9 @@ impl Editor {
             | Action::HandlesBroken
                 if s.curves.selected.is_empty() =>
             {
-                Err("select keys in the curves pane first")
+                Err("select points in Motion curves first")
             }
-            Action::FrameCurves if s.curves.plot.is_none() => Err("open the curves pane first"),
+            Action::FrameCurves if s.curves.plot.is_none() => Err("open Motion curves first"),
             // GM6: the genga-to-douga verbs that would refuse.
             Action::CopyPixels if self.canvas.selection_poly().is_none() => {
                 Err("select pixels first")
@@ -6530,7 +6532,7 @@ impl Editor {
             Action::MakeInbetweens
                 if s.current_drawing().is_none_or(|d| s.cut().drawing_def(d).chart.is_none()) =>
             {
-                Err("give this key a spacing chart first")
+                Err("give this drawing a spacing chart first")
             }
             Action::ResetShift if s.view.light.offsets.is_empty() => Err("no pin is shifted"),
             // GM12: one sound decodes at a time; the loop range and the
@@ -6538,13 +6540,13 @@ impl Editor {
             Action::ImportSound | Action::AddSoundTrack if s.sound_import.is_some() => {
                 Err("a sound file is still decoding")
             }
-            Action::ClearLoop if s.loop_range().is_none() => Err("this cut has no loop range"),
+            Action::ClearLoop if s.loop_range().is_none() => Err("this shot has no loop range"),
             Action::LipFlap if anim_core::audio::tracks_iter(s.cut()).next().is_none() => {
                 Err("import a dialogue track first")
             }
             // GM15: the editorial's verbs need what they act on.
             Action::MakeCutsFromPanels if s.panel_column().is_none() => {
-                Err("open the animatic (a cut with a BOARD column) first")
+                Err("open the animatic (a shot with a board track) first")
             }
             Action::ExportEdl
             | Action::ExportColorSheet
@@ -7588,7 +7590,6 @@ impl eframe::App for App {
                         .show(ui, |ui| {
                             ui.label(
                                 egui::RichText::new(format!("{:.0} fps", 1.0 / dt))
-                                    .monospace()
                                     .color(plate::LEGEND),
                             );
                         });
@@ -8566,7 +8567,6 @@ impl Editor {
         }
         ui.label(
             egui::RichText::new(format!("/ {count}"))
-                .monospace()
                 .color(plate::LEGEND),
         );
     }
@@ -8653,7 +8653,7 @@ impl Editor {
             if ui
                 .button(
                     egui::RichText::new(format!("relaunch to update ({tag})"))
-                        .size(10.5)
+                        .font(plate::Role::Small.font())
                         .color(plate::STRUCK),
                 )
                 .card("Download the published build and relaunch. Your session carries over.")

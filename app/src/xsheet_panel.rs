@@ -227,7 +227,7 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         state.sheet_ui.length = frames.to_string();
         state.sheet_ui.length_at = Some(frames);
     }
-    plate::legend(ui, "shaku (length)");
+    plate::legend(ui, crate::vocab::LENGTH);
     let resp = plate::text_field(
         ui,
         egui::TextEdit::singleline(&mut state.sheet_ui.length)
@@ -235,12 +235,11 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             .desired_width(44.0),
     )
     .card(
-        "the cut's length: frames (60) or seconds+frames (2+12) — Enter sets it, one undo step",
+        "The shot's length: frames (60) or seconds+frames (2+12). Enter sets it, one undo step.",
     );
     ui.label(
         egui::RichText::new(seconds_plus_frames(frames, fps))
-            .monospace()
-            .size(11.0)
+            .font(plate::Role::Small.font())
             .color(plate::LEGEND),
     );
     if resp.lost_focus() {
@@ -250,7 +249,7 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         if enter && gesture_safe {
             match parse_length(&state.sheet_ui.length, fps) {
                 Some(n) => state.set_cut_length(n),
-                None => state.refuse("cut length: type frames (60) or seconds+frames (2+12)"),
+                None => state.refuse("Shot length: type frames (60) or seconds+frames (2+12)."),
             }
         }
         // Reseed from the cut (the new length, or back to the old one).
@@ -268,15 +267,15 @@ fn memo_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         state.sheet_ui.memo = state.cut().memos.get(&here.1).cloned().unwrap_or_default();
         state.sheet_ui.memo_at = Some(here);
     }
-    plate::legend(ui, "memo (serifu)");
+    plate::legend(ui, crate::vocab::NOTES);
     let resp = plate::text_field(
         ui,
         egui::TextEdit::singleline(&mut state.sheet_ui.memo)
             .id(id)
             .desired_width(130.0)
-            .hint_text("serifu / action"),
+            .hint_text("dialogue or action"),
     )
-    .card("this frame's memo: dialogue (serifu) and action notes — one undo step");
+    .card("This frame's notes: dialogue and action. One undo step.\nStudio word: serifu");
     if resp.lost_focus() {
         let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
         // The field's own Enter, not the sheet's Type-into-cell key.
@@ -381,7 +380,7 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
                 .frame(egui::Frame::NONE)
                 .lock_focus(true)
                 .desired_width(cell.width())
-                .font(egui::FontId::monospace(11.0))
+                .font(plate::Role::Small.font())
                 .text_color(plate::STRUCK),
         )
         .card(
@@ -464,7 +463,6 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     let cname = state.cut().name.clone();
                     ui.menu_button(
                         egui::RichText::new(cname.chars().take(10).collect::<String>())
-                            .monospace()
                             .color(plate::STRUCK),
                         |ui| {
                             let scenes: Vec<(
@@ -499,14 +497,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 }
             }
             ui.add_space(8.0);
-            // Standing LIFT KEY (charter element 12): the big target is
-            // safe BECAUSE the guard is temporal — the hold, not the size.
-            if plate::danger(ui, "LIFT KEY") && gesture_safe {
+            // Standing Remove from timeline (charter element 12): the big
+            // target is safe BECAUSE the guard is temporal — the hold, not
+            // the size.
+            if plate::danger(ui, crate::vocab::REMOVE_FROM_TIMELINE) && gesture_safe {
                 state.clear_key_at_frame();
             }
             ui.add_space(8.0);
             // HOLD readout: "am I on twos" without counting rows.
-            plate::legend(ui, "hold");
+            plate::legend(ui, "Lasts");
             let hold_txt = {
                 let count = state.frame_count();
                 let frame = state.view.frame;
@@ -529,8 +528,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             };
             ui.label(
                 egui::RichText::new(hold_txt)
-                    .monospace()
-                    .size(11.0)
+                    .font(plate::Role::Small.font())
                     .color(plate::STRUCK),
             );
         });
@@ -538,7 +536,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
 
     // Column tabs (active column = the one the pen draws into).
     ui.horizontal(|ui| {
-        plate::legend(ui, "columns");
+        plate::legend(ui, crate::vocab::TRACKS);
         let columns: Vec<(anim_core::ids::ColumnId, String)> = state
             .cut()
             .xsheet
@@ -553,7 +551,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 state.view.active_column = id;
             }
         }
-        if plate::icon_button(ui, Icon::Plus, "", "add column (layer)").clicked() {
+        if plate::icon_button(ui, Icon::Plus, "", "Add track").clicked() {
             state.add_column();
         }
     });
@@ -569,18 +567,18 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     head.button_padding.y = (ROW_H - row_text) * 0.5;
 
     ui.horizontal(|ui| {
-        ui.menu_button("key", |ui| {
+        ui.menu_button("Drawing", |ui| {
             if ui
-                .button("new drawing")
-                .card("create + expose at the current frame")
+                .button("New drawing")
+                .card("Make a new drawing on this frame.")
                 .clicked()
             {
                 state.new_drawing_at_frame();
                 ui.close();
             }
             if ui
-                .button("expose selected")
-                .card("expose the selected library drawing here")
+                .button("Use selected")
+                .card("Show the drawing selected in Drawings on this frame.")
                 .clicked()
             {
                 state.expose_selected();
@@ -602,7 +600,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
 
     // Drawing library — a DRAWER (spec §4.2): collapsed until reached for.
     ui.separator();
-    egui::CollapsingHeader::new("library")
+    egui::CollapsingHeader::new(crate::vocab::DRAWINGS)
         .default_open(false)
         .show(ui, |ui| {
     *ui.spacing_mut() = controls.clone();
@@ -715,7 +713,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 rect.left_center(),
                 egui::Align2::LEFT_CENTER,
                 &col.name,
-                egui::FontId::proportional(12.0),
+                plate::Role::Small.font(),
                 if is_active {
                     plate::STRUCK
                 } else {
@@ -733,7 +731,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 rect.left_center(),
                 egui::Align2::LEFT_CENTER,
                 &pcol.name,
-                egui::FontId::proportional(12.0),
+                plate::Role::Small.font(),
                 if is_sel { plate::STRUCK } else { plate::LEGEND },
             );
         }
@@ -746,11 +744,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
         ui.painter().text(
             rect.left_center(),
             egui::Align2::LEFT_CENTER,
-            "memo",
-            egui::FontId::proportional(12.0),
+            crate::vocab::NOTES,
+            plate::Role::Small.font(),
             plate::LEGEND,
         );
-        resp.card("serifu (dialogue) and action notes — edit in the memo field above");
+        resp.card("Dialogue and action notes: edit them in the Notes field above.\nStudio word: serifu");
     });
     // GM14: each column's kind badge (a click steps Cel → BG → Book →
     // Ref) and its hide and lock toggles — the GM5 verbs, per column.
@@ -769,12 +767,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 let resp = ui.interact(r, ui.id().with(("column_head", col.id, what)), Sense::click());
                 let (text, on, name) = match what {
                     0 => (
-                        def.kind.label().to_string(),
+                        crate::vocab::column_kind_chip(def.kind).to_string(),
                         false,
-                        format!("kind of column {}: {}", col.name, def.kind.label()),
+                        format!("Kind of track {}: {}", col.name, crate::vocab::column_kind(def.kind)),
                     ),
-                    1 => ("H".to_string(), def.hidden, format!("hide column {}", col.name)),
-                    _ => ("L".to_string(), def.locked, format!("lock column {}", col.name)),
+                    1 => (String::new(), def.hidden, format!("{} {}", crate::vocab::HIDE_TRACK, col.name)),
+                    _ => (String::new(), def.locked, format!("{} {}", crate::vocab::LOCK_TRACK, col.name)),
                 };
                 let lit = on.then_some(if what == 1 {
                     (plate::RED_WASH, plate::AKA)
@@ -782,6 +780,11 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     (plate::BLUE_WASH, plate::BLUE_DEEP)
                 });
                 plate::chip_face(ui, r, &resp, &text, lit);
+                match what {
+                    1 => plate::eye_mark(ui, r.center(), on),
+                    2 => plate::lock_mark(ui, r.center(), on),
+                    _ => {}
+                }
                 let typ = if what == 0 {
                     egui::WidgetType::Button
                 } else {
@@ -789,9 +792,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 };
                 plate::speak(&resp, typ, (what > 0).then_some(on), &name);
                 let hover = match what {
-                    0 => "the column's kind: Cel, BG (haikei), Book (over the cels) or Ref (never rendered) — click for the next",
-                    1 => "hide or show the column: a hidden column is left out of every composite",
-                    _ => "lock or unlock the column: a locked column refuses paint and sheet edits",
+                    0 => "The track's kind: Drawing, Background, Overlay or Reference. Click for the next.",
+                    1 => "Hide or show the track: a hidden track is left out of the picture.",
+                    _ => "Protect this track: it refuses paint and sheet edits until you turn this off.",
                 };
                 if resp.card(hover).clicked() && gesture_safe {
                     header_edit = Some((col.id, what));
@@ -871,9 +874,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     if is_current {
                         // Weight only — never size; the row must not reflow
                         // as the playhead passes (spec §5.3).
-                        egui::FontId::new(11.0, plate::mono_semibold())
+                        egui::FontId::new(plate::Role::Panel.size(), plate::semibold())
                     } else {
-                        egui::FontId::monospace(11.0)
+                        plate::Role::Panel.font()
                     },
                     if is_current {
                         plate::STRUCK
@@ -958,7 +961,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                             pos2(cell.left() + 10.0, cell.center().y),
                             egui::Align2::LEFT_CENTER,
                             text,
-                            egui::FontId::monospace(11.0),
+                            plate::Role::Panel.font(),
                             color,
                         );
                     }
@@ -976,7 +979,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                         pos2(cell.left() + 4.0, cell.center().y),
                         egui::Align2::LEFT_CENTER,
                         memo,
-                        egui::FontId::proportional(11.0),
+                        plate::Role::Small.font(),
                         plate::STRUCK,
                     );
                 }
@@ -1142,7 +1145,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                                 pos2(cleft + 2.0, y + ROW_H * 0.5),
                                 egui::Align2::LEFT_CENTER,
                                 format!("{}s", f / fps.max(1)),
-                                egui::FontId::monospace(11.0),
+                                plate::Role::Small.font(),
                                 plate::LEGEND,
                             );
                         }
@@ -1223,7 +1226,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                             pos2(cx + 10.0, ctop + r.start as f32 * ROW_H + ROW_H * 0.5),
                             egui::Align2::LEFT_CENTER,
                             &name,
-                            egui::FontId::monospace(11.0),
+                            plate::Role::Panel.font(),
                             plate::STRUCK,
                         );
                         // GM6: a key's number circled, a breakdown's
@@ -1276,7 +1279,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                                 &format!(
                                     "drawing {name} at frame {}: {}",
                                     r.start + 1,
-                                    def.kind.label()
+                                    crate::vocab::drawing_kind(def.kind)
                                 ),
                             );
                         }
@@ -1304,7 +1307,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                                 pos2(right, ctop + p.start as f32 * ROW_H + ROW_H * 0.5),
                                 egui::Align2::RIGHT_CENTER,
                                 format!("C{}", p.cut),
-                                egui::FontId::monospace(10.0),
+                                plate::Role::Small.font(),
                                 ink,
                             );
                             let name = cut.drawing(p.drawing).map_or(String::new(), |d| d.name.clone());
@@ -2018,7 +2021,7 @@ pub(crate) fn kind_menu(
         DrawingKind::Inbetween,
         DrawingKind::Unset,
     ] {
-        if ui.selectable_label(now == k, k.label()).clicked() {
+        if ui.selectable_label(now == k, crate::vocab::drawing_kind(k)).clicked() {
             state.set_drawing_kind(drawing, k);
             ui.close();
         }
@@ -2067,11 +2070,11 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
     ui.horizontal(|ui| {
         let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
         plate::identity_dot(ui.painter(), dot.center(), 3.5, props_chip_color(props));
-        ui.label(egui::RichText::new(&props.name).size(12.5).strong().color(plate::STRUCK));
+        ui.label(egui::RichText::new(&props.name).font(plate::Role::Panel.font()).strong().color(plate::STRUCK));
     });
     ui.label(
-        egui::RichText::new("double-click the name in the strip to rename")
-            .size(10.0)
+        egui::RichText::new("Double-click the name in the strip to rename.")
+            .font(plate::Role::Small.font())
             .color(plate::legend_dim()),
     );
     ui.add_space(4.0);
@@ -2079,13 +2082,13 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
     // ROLE — what drives behaviour. Changing it re-labels only a layer
     // still wearing its old role's default name (a custom name is the
     // artist's; never overwritten).
-    plate::legend(ui, "role");
+    plate::legend(ui, "kind");
     for role in LayerRole::ALL.iter().rev() {
         let on = props.role == *role;
         ui.horizontal(|ui| {
             let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
             plate::identity_dot(ui.painter(), dot.center(), 3.5, role_chip_color(*role));
-            let row = plate::detent(ui, on, role.label());
+            let row = plate::detent(ui, on, crate::vocab::layer_role(*role));
             if *role == LayerRole::Rough {
                 plate::mark_row(&row, LAYERS_ROLE);
             }
@@ -2197,13 +2200,11 @@ fn opacity_cells(
     };
     // AUDIT [3]: this was an egui Slider whose track is invisible
     // under our Visuals — a bare handle on the plate with no 0 or
-    // full. The rail shows its range; the readout is Mono 11 Struck
-    // (the old .monospace().small() pair resolved to 9.5 PROP).
+    // full. The rail shows its range; the readout is Small, Struck.
     let resp = plate::rail(ui, &mut live, 0.0..=1.0, track);
     ui.label(
         egui::RichText::new(format!("{:3.0}%", live * 100.0))
-            .monospace()
-            .size(11.0)
+            .font(plate::Role::Small.font())
             .color(plate::STRUCK),
     );
     if resp.drag_stopped() {
@@ -2261,19 +2262,23 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     ui.set_min_width(ui.available_width());
     ui.add_space(2.0);
     ui.horizontal(|ui| {
-        plate::legend(ui, "cel layers");
+        plate::legend(ui, crate::vocab::LAYERS);
         let have_cel = state.own_key_drawing().is_some();
         let at_cap = state.strip_layers().len() >= 8;
         let add = ui.menu_button("+", |ui| {
             if at_cap {
-                ui.label(egui::RichText::new("layer cap (8) reached").color(plate::legend_dim()).small());
+                ui.label(
+                    egui::RichText::new("Eight layers is the most a drawing can hold.")
+                        .color(plate::legend_dim())
+                        .font(plate::Role::Small.font()),
+                );
                 return;
             }
             if !have_cel {
                 ui.label(
-                    egui::RichText::new("no cel on this frame (draw or press E)")
+                    egui::RichText::new("No drawing on this frame: draw, or press E.")
                         .color(plate::legend_dim())
-                        .small(),
+                        .font(plate::Role::Small.font()),
                 );
                 return;
             }
@@ -2283,7 +2288,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 let picked = ui.horizontal(|ui| {
                     let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
                     plate::identity_dot(ui.painter(), dot.center(), 3.5, role_chip_color(*role));
-                    ui.button(role.label()).clicked()
+                    ui.button(crate::vocab::layer_role(*role)).clicked()
                 });
                 if picked.inner {
                     state.layer_add_role(*role);
@@ -2291,7 +2296,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 }
             }
             ui.separator();
-            let custom = ui.button(egui::RichText::new("custom layer").color(plate::LEGEND));
+            let custom = ui.button(egui::RichText::new("Custom layer").color(plate::LEGEND));
             plate::mark(ui, custom.interact_rect, Target::Named("layers.custom"));
             if custom.clicked() {
                 state.layer_add_role(anim_core::model::LayerRole::Custom);
@@ -2299,54 +2304,55 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             }
         });
         plate::mark(ui, add.response.interact_rect, Target::Named("layers.add"));
-        add.response.card("add a layer — it lands at its role's pipeline position");
+        add.response.card("Add a layer: it lands in its usual place in the order.");
 
         // PSD-cel-layers Stage 4: the stack presets. Picking binds the
         // CURRENT room's new cels; apply/conform only ever ADD layers.
-        ui.menu_button("stack", |ui| {
+        ui.menu_button(crate::vocab::LAYER_SET, |ui| {
             ui.set_min_width(240.0);
-            plate::legend(ui, "new cels in this room get");
+            plate::legend(ui, "New drawings in this step get");
             let stacks = state.stacks.clone();
             for s in &stacks {
                 let on = s.name == state.stack_current;
                 ui.horizontal(|ui| {
-                    if plate::detent(ui, on, &s.name).clicked() && !on {
+                    if plate::detent(ui, on, crate::vocab::stack(&s.name)).clicked() && !on {
                         state.stack_request = Some(crate::doc::StackRequest::Pick(s.name.clone()));
                     }
                 });
                 ui.label(
                     egui::RichText::new(s.summary())
-                        .size(10.0)
+                        .font(plate::Role::Small.font())
                         .color(plate::legend_dim()),
                 );
             }
             ui.separator();
             let cur = state.stack_current.clone();
+            let shown = crate::vocab::stack(&cur);
             let can = have_cel;
             if ui
-                .add_enabled(can, egui::Button::new(format!("add missing '{cur}' layers to this cel")))
-                .card("adds only the layers this cel lacks — never deletes, renames, or moves painted layers")
+                .add_enabled(can, egui::Button::new(format!("Add missing '{shown}' layers to this drawing")))
+                .card("Adds only the layers this drawing lacks. It never deletes, renames or moves painted layers.")
                 .clicked()
             {
                 state.apply_stack_to_cel(&cur);
                 ui.close();
             }
             if ui
-                .button(format!("conform the whole cut to '{cur}'"))
-                .card("the same additive apply for every layered cel in this cut — one undo step")
+                .button(format!("Use '{shown}' on the whole shot"))
+                .card("The same for every layered drawing in this shot, in one undo step.")
                 .clicked()
             {
                 state.conform_cut(&cur);
                 ui.close();
             }
             ui.separator();
-            plate::legend(ui, "save this cel's stack");
+            plate::legend(ui, "Save this drawing's layer set");
             ui.horizontal(|ui| {
                 plate::text_field(ui, egui::TextEdit::singleline(&mut state.stack_name_buf).desired_width(130.0));
                 let name = state.stack_name_buf.trim().to_string();
                 if ui
-                    .add_enabled(can && !name.is_empty(), egui::Button::new("save"))
-                    .card("structure only — names, roles, inks, locks, opacity; never pixels")
+                    .add_enabled(can && !name.is_empty(), egui::Button::new("Save"))
+                    .card("Saves the structure only: names, inks, locks and opacity, never pixels.")
                     .clicked()
                 {
                     state.stack_request = Some(crate::doc::StackRequest::Save(name));
@@ -2356,7 +2362,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             });
         })
         .response
-        .card("layer-stack presets for the modern pipeline — LO, genga, douga, shiage");
+        .card("Ready-made layer sets for rough, clean line and paint.");
     });
 
     // Owned snapshot so row actions can mutate state freely. The FULL props
@@ -2391,9 +2397,9 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             .map(|p| p.name.clone())
             .collect();
         ui.label(
-            egui::RichText::new(format!("held/empty frame — a new cel gets {}", names.join(" · ")))
+            egui::RichText::new(format!("No drawing here. A new one gets {}.", names.join(", ")))
                 .color(plate::legend_dim())
-                .small(),
+                .font(plate::Role::Small.font()),
         );
         ui.add_space(2.0);
         return;
@@ -2469,8 +2475,8 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             );
             plate::identity_dot(ui.painter(), dot_rect.center(), 4.0, props_chip_color(&props));
             let dot_resp = dot_resp.card(format!(
-                "{} — click: define this layer",
-                props.role.label()
+                "{}: click to define this layer.",
+                crate::vocab::layer_role(props.role)
             ));
             egui::Popup::menu(&dot_resp).show(|ui| {
                 layer_card(ui, state, *lid, &props, is_active);
@@ -2599,20 +2605,20 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         // LINE GUARD: arming-only protection for the line layer (shiage;
         // defaults ON in the Finishing room). A guard, not a lock.
         let mut lg = state.view.line_guard;
-        plate::latch(ui, &mut lg, "line guard").card(
-        "while on, the line layer cannot be ARMED as the ink target — cycling skips it, tapping refuses",
+        plate::latch(ui, &mut lg, crate::vocab::PROTECT_LINE_ART).card(
+        "While on, the line art layer can't be picked to draw on: stepping skips it, a tap refuses.",
         );
         state.view.line_guard = lg;
         let active_lid = state.active_layer_id();
-            if plate::danger(ui, "ERASE CEL") && gesture_safe {
+            if plate::danger(ui, "Erase drawing") && gesture_safe {
             // Pixels, not exposure: clears this cel's raster (undoable).
             state.clear_current_raster();
         }
-        if plate::danger(ui, "DELETE LAYER") && gesture_safe {
+        if plate::danger(ui, "Delete layer") && gesture_safe {
         match active_lid {
         Some(lid) => state.layer_remove(lid),
         None => state.refuse(format!(
-        "refused — no '{}' layer on this cel to delete",
+        "refused — no '{}' layer on this drawing to delete",
         state.view.active_layer
                 )),
             }
@@ -2903,15 +2909,15 @@ mod sheetui_tests {
         let mut h = sheet();
         let a = column(&h, 0);
         assert!(h.state().cut().render_order().contains(&a));
-        assert_eq!(h.node_toggled("hide column A"), Some(false));
+        assert_eq!(h.node_toggled("Hide track A"), Some(false));
         let steps = h.state().engine.position();
-        h.click("hide column A");
+        h.click("Hide track A");
         assert!(!h.state().cut().render_order().contains(&a));
-        assert_eq!(h.node_toggled("hide column A"), Some(true));
+        assert_eq!(h.node_toggled("Hide track A"), Some(true));
         assert_eq!(h.state().engine.position(), steps + 1);
-        h.click("lock column A");
+        h.click("Lock track A");
         assert!(h.state().cut().column_def(a).locked);
-        h.click("kind of column A: Cel");
+        h.click("Kind of track A: Drawing");
         assert_ne!(h.state().cut().column_def(a).kind, anim_core::xsheet::ColumnKind::Cel);
     }
 

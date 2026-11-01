@@ -12,7 +12,7 @@ use anim_core::ids::{CutId, DrawingId};
 use anim_core::xsheet::Exposure;
 use eframe::egui;
 use egui::accesskit;
-use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::doc::{AppState, FINISH_STROKE, drawing_has_art};
 use crate::lesson::color_layer_art;
@@ -582,7 +582,7 @@ fn paint(
         painter.line_segment([pos2(x, bar.top()), pos2(x, bar.bottom())], Stroke::new(1.0, plate::ON_FILL));
         if x >= free {
             let words = format!("{} s", frame / fps.max(1));
-            let font = FontId::proportional(12.0);
+            let font = plate::Role::Small.font();
             let label = painter.text(pos2(x + 3.0, bar.center().y), Align2::LEFT_CENTER, words, font, plate::STEEL_INK);
             free = label.right() + 6.0;
         }
@@ -624,7 +624,7 @@ fn paint(
 /// chip's right end.
 fn track_chip(ui: &Ui, at: Pos2, name: &str) {
     let painter = ui.painter();
-    let font = FontId::proportional(12.0);
+    let font = plate::Role::Small.font();
     let galley = painter.layout_no_wrap(name.to_string(), font, plate::INK);
     let size = vec2(galley.size().x + 10.0, 14.0);
     let chip = Rect::from_min_size(at - vec2(size.x, 7.0), size);
@@ -667,7 +667,7 @@ fn paint_sheet(painter: &egui::Painter, at: Rect, sheet: &Sheet, drawings: &Hash
     if at.width() >= NUMBERED {
         // Beside the badge's words when they show, in the middle when not.
         let (x, align) = if worded { (at.left() + 8.0, Align2::LEFT_CENTER) } else { (at.center().x, Align2::CENTER_CENTER) };
-        let font = FontId::proportional(14.0);
+        let font = plate::Role::Chrome.font();
         painter.text(pos2(x, at.top() + SHEET_ROW), align, number_of(drawings, id).to_string(), font, plate::INK2);
     }
     if twice {
@@ -678,7 +678,7 @@ fn paint_sheet(painter: &egui::Painter, at: Rect, sheet: &Sheet, drawings: &Hash
 /// `Used twice`, on the number's row, or its mark where the words do not fit.
 fn twice_badge(painter: &egui::Painter, at: Rect, worded: bool) {
     if worded {
-        let (font, end) = (FontId::proportional(12.0), pos2(at.right() - 12.0, at.top() + SHEET_ROW));
+        let (font, end) = (plate::Role::Small.font(), pos2(at.right() - 12.0, at.top() + SHEET_ROW));
         painter.text(end, Align2::RIGHT_CENTER, "Used twice", font, plate::BLUE_DEEP);
     } else {
         painter.circle_filled(at.right_bottom() - vec2(6.0, 5.0), 2.5, plate::BLUE_DEEP);

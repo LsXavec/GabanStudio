@@ -278,11 +278,11 @@ impl Group {
             Group::File => "file",
             Group::Edit => "edit",
             Group::View => "view",
-            Group::Sheet => "sheet",
-            Group::Cut => "cut",
-            Group::Composite => "composite",
+            Group::Sheet => "timing",
+            Group::Cut => "shot",
+            Group::Composite => "effects",
             Group::Room => crate::vocab::STEP,
-            Group::Window => "window",
+            Group::Window => "panels",
             Group::Help => "help",
             Group::Tool => "tools",
             Group::Playback => "playback",
@@ -540,36 +540,36 @@ impl Action {
             Action::PrevFrame => "Previous frame",
             Action::FirstFrame => "First frame",
             Action::LastFrame => "Last frame",
-            Action::NewDrawing => "New drawing (blank cel)",
+            Action::NewDrawing => "New drawing here",
             Action::ClearCel => "Clear active layer",
-            Action::ClearCelAll => "Clear whole cel (all layers)",
-            Action::PrevKey => "Jump to previous key (active column)",
-            Action::NextKey => "Jump to next key (active column)",
-            Action::MissCheck => "Miss check: dark-ground hole-hunt (shiage)",
-            Action::PrevCut => "Previous cut",
-            Action::NextCut => "Next cut",
-            Action::ToggleLoop => "Loop playback latch",
-            Action::ToggleEraser => "Brush / eraser toggle",
-            Action::ToggleAlphaLock => "Alpha lock toggle (recolor within existing ink)",
-            Action::Preset1 => "Brush preset 1",
-            Action::Preset2 => "Brush preset 2",
-            Action::Preset3 => "Brush preset 3",
-            Action::Preset4 => "Brush preset 4",
-            Action::Preset5 => "Brush preset 5",
-            Action::Preset6 => "Brush preset 6",
-            Action::Preset7 => "Brush preset 7",
-            Action::Preset8 => "Brush preset 8",
-            Action::CycleCelLayer => "Next cel layer",
-            Action::CycleCelLayerBack => "Previous cel layer",
-            Action::ClearFrameKey => "Lift key (hold extends)",
-            Action::RemoveColumn => "Remove selected column",
-            Action::ToggleOnion => "Toggle onion skin",
-            Action::ToggleCompositeView => "Composite view (node-graph output)",
+            Action::ClearCelAll => "Clear whole drawing (all layers)",
+            Action::PrevKey => crate::vocab::PREVIOUS_DRAWING,
+            Action::NextKey => crate::vocab::NEXT_DRAWING,
+            Action::MissCheck => "Miss check: find holes on a dark ground",
+            Action::PrevCut => "Previous shot",
+            Action::NextCut => "Next shot",
+            Action::ToggleLoop => "Loop playback",
+            Action::ToggleEraser => "Brush or eraser",
+            Action::ToggleAlphaLock => crate::vocab::KEEP_INSIDE_STROKES,
+            Action::Preset1 => "Brush 1",
+            Action::Preset2 => "Brush 2",
+            Action::Preset3 => "Brush 3",
+            Action::Preset4 => "Brush 4",
+            Action::Preset5 => "Brush 5",
+            Action::Preset6 => "Brush 6",
+            Action::Preset7 => "Brush 7",
+            Action::Preset8 => "Brush 8",
+            Action::CycleCelLayer => "Next layer",
+            Action::CycleCelLayerBack => "Previous layer",
+            Action::ClearFrameKey => crate::vocab::REMOVE_FROM_TIMELINE,
+            Action::RemoveColumn => "Remove track",
+            Action::ToggleOnion => crate::vocab::GHOST_FRAMES,
+            Action::ToggleCompositeView => crate::vocab::PREVIEW_FINAL,
             Action::CanvasOptions => "Canvas options…",
-            Action::SelectTool => "Select / transform tool",
-            Action::BrushTool => "Paint tool (brush)",
-            Action::FillTool => "Flood fill tool",
-            Action::LassoFillTool => "Lasso fill tool",
+            Action::SelectTool => "Select tool",
+            Action::BrushTool => "Brush tool",
+            Action::FillTool => "Fill tool",
+            Action::LassoFillTool => "Draw to fill tool",
             Action::SelectAll => "Select all",
             Action::Undo => "Undo",
             Action::Redo => "Redo",
@@ -604,18 +604,18 @@ impl Action {
             Action::BrushBigger => "Brush bigger",
             Action::InsertFrames => "Insert frame",
             Action::DeleteFrames => "Delete frame",
-            Action::HoldPlus => "Hold +1",
-            Action::HoldMinus => "Hold -1",
+            Action::HoldPlus => crate::vocab::LONGER,
+            Action::HoldMinus => crate::vocab::SHORTER,
             Action::RetimeOnes => "Retime to 1s (on ones)",
             Action::RetimeTwos => "Retime to 2s (on twos)",
             Action::RetimeThrees => "Retime to 3s (on threes)",
             Action::Reverse => "Reverse timing",
-            Action::ColumnKindCel => "Column kind: Cel",
-            Action::ColumnKindBg => "Column kind: BG (haikei)",
-            Action::ColumnKindBook => "Column kind: Book (overlay)",
-            Action::ColumnKindRef => "Column kind: Ref (guide)",
-            Action::ToggleColumnHidden => "Hide column",
-            Action::ToggleColumnLocked => "Lock column",
+            Action::ColumnKindCel => "Drawing track",
+            Action::ColumnKindBg => "Background track",
+            Action::ColumnKindBook => "Overlay track",
+            Action::ColumnKindRef => "Reference track",
+            Action::ToggleColumnHidden => crate::vocab::HIDE_TRACK,
+            Action::ToggleColumnLocked => crate::vocab::LOCK_TRACK,
             Action::CopyCells => "Copy cells",
             Action::CutCells => "Cut cells",
             Action::PasteCells => "Paste cells",
@@ -623,65 +623,65 @@ impl Action {
             Action::TypeIntoCell => "Type into cell",
             Action::AddDrawingAfter => "Add drawing",
             Action::GoToFrame => "Go to frame…",
-            Action::ShowCurves => "Curves (graph editor)",
+            Action::ShowCurves => crate::vocab::MOTION_CURVES,
             Action::FrameCurves => "Frame curves",
-            Action::InterpHold => "Key interpolation: hold",
-            Action::InterpLinear => "Key interpolation: linear",
-            Action::InterpEase => "Key interpolation: ease",
-            Action::InterpEaseIn => "Key interpolation: ease in (slow start)",
-            Action::InterpEaseOut => "Key interpolation: ease out (slow stop)",
-            Action::InterpBezier => "Key interpolation: bezier",
-            Action::HandlesAuto => "Key handles: auto",
-            Action::HandlesSmooth => "Key handles: smooth",
-            Action::HandlesFlat => "Key handles: flat",
-            Action::HandlesBroken => "Key handles: broken",
+            Action::InterpHold => "Curve: stay at value",
+            Action::InterpLinear => "Curve: linear",
+            Action::InterpEase => "Curve: ease",
+            Action::InterpEaseIn => "Curve: ease in (slow start)",
+            Action::InterpEaseOut => "Curve: ease out (slow stop)",
+            Action::InterpBezier => "Curve: bezier",
+            Action::HandlesAuto => "Curve handles: auto",
+            Action::HandlesSmooth => "Curve handles: smooth",
+            Action::HandlesFlat => "Curve handles: flat",
+            Action::HandlesBroken => "Curve handles: broken",
             Action::CopyPixels => "Copy pixels",
             Action::PastePixels => "Paste pixels",
-            Action::DuplicateCel => "Duplicate cel",
-            Action::MakeInbetweens => "Make douga (inbetweens)",
-            Action::KindKey => "Mark drawing: genga (key)",
-            Action::KindBreakdown => "Mark drawing: breakdown",
-            Action::KindInbetween => "Mark drawing: douga (inbetween)",
-            Action::KindUnset => "Mark drawing: unmarked",
-            Action::PinToLightTable => "Pin to light table",
+            Action::DuplicateCel => "Duplicate drawing",
+            Action::MakeInbetweens => "Make inbetweens",
+            Action::KindKey => "Mark as key pose",
+            Action::KindBreakdown => "Mark as breakdown",
+            Action::KindInbetween => "Mark as inbetween",
+            Action::KindUnset => "Mark as unmarked",
+            Action::PinToLightTable => "Pin this drawing",
             Action::ShiftTrace => "Shift & trace",
-            Action::ResetShift => "Reset shift & trace",
-            Action::ConvertColorsToSrgb => "Convert colours to sRGB…",
-            Action::ShowPaintCheck => "Nuri check (paint check)",
-            Action::BuildComposite => "Build composite from sheet",
+            Action::ResetShift => "Reset shift",
+            Action::ConvertColorsToSrgb => "Convert colors to sRGB…",
+            Action::ShowPaintCheck => "Check paint",
+            Action::BuildComposite => crate::vocab::REBUILD_FROM_LAYERS,
             Action::AddNode => "Add node…",
             Action::ProjectSettings => "Project settings…",
-            Action::WelcomeScreen => "Welcome screen…",
-            Action::OpenSample => "Open the sample cut",
+            Action::WelcomeScreen => "Start screen…",
+            Action::OpenSample => "Open the example",
             Action::WhatsNew => "What's New",
             Action::OpenLessons => "Lessons",
             Action::HideTools => "Hide tools",
             Action::ToggleLockPositions => "Lock UI positions",
             Action::ToggleHints => "Hints",
             Action::PaperSize => "Paper size…",
-            Action::ShowRenderQueue => "Render Queue (delivery)",
-            Action::ToggleFinalLook => "Final look (delivery)",
+            Action::ShowRenderQueue => crate::vocab::EXPORT_QUEUE,
+            Action::ToggleFinalLook => "Full quality",
             Action::ImportSound => "Import sound…",
             Action::AddSoundTrack => "Add sound track…",
-            Action::LoopIn => "Loop in (range start)",
-            Action::LoopOut => "Loop out (range end)",
+            Action::LoopIn => crate::vocab::LOOP_START,
+            Action::LoopOut => crate::vocab::LOOP_END,
             Action::ClearLoop => "Clear loop range",
-            Action::ToggleScrub => "Audio scrub latch",
-            Action::RamPreview => "Render RAM preview",
-            Action::LipFlap => "kuchipaku (lip flap)…",
-            Action::BuildSatsuei => "Build satsuei graph",
-            Action::ShowCutBoard => "Shinkō board (cut board)",
-            Action::ShowEpisode => "Henshū timeline (episode)",
+            Action::ToggleScrub => crate::vocab::SOUND_WHILE_DRAGGING,
+            Action::RamPreview => "Render preview to memory",
+            Action::LipFlap => "Lip flap…",
+            Action::BuildSatsuei => crate::vocab::FULL_FINISHING_SETUP,
+            Action::ShowCutBoard => crate::vocab::SHOTS,
+            Action::ShowEpisode => crate::vocab::EPISODE_TIMELINE,
             Action::PlayEpisode => "Play episode",
             Action::ExportEdl => "Export EDL (CMX3600)",
-            Action::ExportColorSheet => "Export colour sheet (iro shitei)",
-            Action::ExportCutAsProject => "Export cut as project",
-            Action::MakeCutsFromPanels => "Make cuts from panels",
-            Action::RenderEpisode => "Render episode",
+            Action::ExportColorSheet => "Export color sheet",
+            Action::ExportCutAsProject => "Export shot as project",
+            Action::MakeCutsFromPanels => "Make shots from panels",
+            Action::RenderEpisode => "Export episode",
             Action::AddRetakeNote => "Add retake note…",
             Action::Import3DModel => "Import 3D model…",
-            Action::SetCutCameraFromView => "Set cut camera from view",
-            Action::Layout3dRoom => "3D layout (LO) room",
+            Action::SetCutCameraFromView => "Set shot camera from view",
+            Action::Layout3dRoom => crate::vocab::LAYOUT_3D,
             Action::View3dFront => "Front view",
             Action::View3dBack => "Back view",
             Action::View3dRight => "Right view",
@@ -701,7 +701,7 @@ impl Action {
             Action::ExportPngSequence => "Picture sequence (PNG)",
             Action::ExportStill => "This frame (PNG)",
             Action::ToggleRulerSnap => "Snap to rulers",
-            Action::PanelTool => "Panel (koma) tool",
+            Action::PanelTool => "Panel tool",
             Action::ReloadSequences => "Reload image sequences",
             Action::Underlay3d => "3D underlay",
             Action::BrushMakerRoom => "Brush maker",
@@ -716,36 +716,36 @@ impl Action {
     pub fn help(self) -> &'static str {
         use Action::*;
         match self {
-            PlayPause => "Start or stop playback of the cut. Held on the canvas, Space drags the view (Shift+drag turns it).",
+            PlayPause => "Start or stop playback; on the canvas, Space and drag moves the view, and Shift turns it.",
             NextFrame => "Step one frame forward.",
             PrevFrame => "Step one frame back.",
-            FirstFrame => "Jump to the cut's first frame.",
-            LastFrame => "Jump to the cut's last frame.",
-            PrevKey => "Jump to the previous key on the active column.",
-            NextKey => "Jump to the next key on the active column.",
-            MissCheck => "Flip to a dark ground to hunt unpainted holes.",
-            PrevCut => "Open the previous cut in the scene list.",
-            NextCut => "Open the next cut in the scene list.",
-            ToggleLoop => "Latch looping playback on or off.",
+            FirstFrame => "Jump to the shot's first frame.",
+            LastFrame => "Jump to the shot's last frame.",
+            PrevKey => "Jump to the previous drawing on the active track.",
+            NextKey => "Jump to the next drawing on the active track.",
+            MissCheck => "Flip to a dark ground to find unpainted holes.",
+            PrevCut => "Open the previous shot in the scene list.",
+            NextCut => "Open the next shot in the scene list.",
+            ToggleLoop => "Turn looping playback on or off.",
             NewDrawing => "Put a new blank drawing on this frame.",
             ClearCel => "Erase the active layer of this drawing, or only the selection (undoable).",
             ClearCelAll => "Erase every layer of this drawing (undoable).",
             ToggleEraser => "Switch the pen between brush and eraser.",
-            ToggleAlphaLock => "Paint only where ink already is (recolour).",
+            ToggleAlphaLock => "Paint only where ink already is, to recolor it.",
             Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8 => {
-                "Arm this brush preset slot (with fill: a palette pot)."
+                "Pick up the brush in this slot (with fill: a palette color)."
             }
-            CycleCelLayer => "Make the next cel layer active.",
-            CycleCelLayerBack => "Make the previous cel layer active.",
-            ClearFrameKey => "Lift the key on this frame; the hold before it extends.",
-            RemoveColumn => "Remove the selected x-sheet column.",
+            CycleCelLayer => "Make the next layer active.",
+            CycleCelLayerBack => "Make the previous layer active.",
+            ClearFrameKey => "Take this frame's drawing off the timeline; the drawing before it runs on.",
+            RemoveColumn => "Remove the selected track from the Timing sheet.",
             ToggleOnion => "Show neighbouring drawings faintly under this one.",
-            ToggleCompositeView => "Show the node graph's composite instead of the edit view.",
+            ToggleCompositeView => "Show the finished picture instead of the drawing view.",
             CanvasOptions => "Open the float of paper, guide and view settings beside the canvas.",
             SelectTool => "Select, move, scale and rotate ink.",
             BrushTool => "Back to the brush.",
-            FillTool => "Flood-fill closed areas with the brush colour. Shift+click: refill a flat; Ctrl+Shift+click: layer-wide.",
-            LassoFillTool => "Draw a loop and it fills with the brush colour.",
+            FillTool => "Fill closed areas with the brush color; Shift+click refills, Ctrl+Shift+click fills across the layer.",
+            LassoFillTool => "Draw a loop and it fills with the brush color.",
             SelectAll => "Select everything on the active layer.",
             Undo => "Take back the last step.",
             Redo => "Re-apply the step you took back last.",
@@ -761,12 +761,12 @@ impl Action {
             Settings => "Shortcuts, pen, performance and the rest.",
             Quit => "Close the app (asks first about unsaved work).",
             ResetLayout => "Put this step's panes back where they started.",
-            ZoomFit => "Fit the whole paper back in its pane, centred; a turned view keeps its turn.",
-            RoomLayout => "Open the project's first step. On an animation that is Plan: the sheet and the paper.",
+            ZoomFit => "Fit the whole paper back in its pane, centered; a turned view keeps its turn.",
+            RoomLayout => "Open the project's first step: on an animation that is Plan, the sheet and the paper.",
             RoomDrawing => "Open the Draw step: the paper, one drawing at a time.",
             RoomFinishing => "Open the Color step: palettes and fill.",
-            RoomComposite => "Open the Effects step: the node graph, curves and the result.",
-            RoomEdit => "Open the Timing step: cuts and the sheet head.",
+            RoomComposite => "Open the Effects step: the Effects graph, curves and the result.",
+            RoomEdit => "Open the Timing step: shots and the sheet head.",
             ZoomIn => "Zoom the canvas in one step on the zoom ladder.",
             ZoomOut => "Zoom the canvas out one step on the zoom ladder.",
             Zoom100 => "One paper pixel to one screen point.",
@@ -776,22 +776,22 @@ impl Action {
             MirrorView => "Flip the view left to right; the drawing itself is untouched.",
             BrushSmaller => "Step the brush size down the size ladder.",
             BrushBigger => "Step the brush size up the size ladder.",
-            InsertFrames => "Insert a frame at the cursor in every column; the cut grows by one frame.",
-            DeleteFrames => "Delete the cursor's frame from every column; the cut is one frame shorter.",
-            HoldPlus => "Hold +1: the exposure under the cursor holds one frame longer; the column ripples.",
-            HoldMinus => "Hold -1: the exposure under the cursor holds one frame less; a 1-frame one goes.",
-            RetimeOnes => "Retime to 1s (on ones): each drawing in the column from the cursor down holds 1 frame.",
-            RetimeTwos => "Retime to 2s (on twos): each drawing in the column from the cursor down holds 2 frames.",
+            InsertFrames => "Insert a frame at the cursor on every track; the shot grows by one frame.",
+            DeleteFrames => "Delete the cursor's frame from every track; the shot is one frame shorter.",
+            HoldPlus => "This drawing stays on screen one frame longer, and the rest of the track moves down.",
+            HoldMinus => "This drawing stays on screen one frame less; a one-frame drawing goes.",
+            RetimeOnes => "Retime to 1s (on ones): each drawing on the track from the cursor down lasts 1 frame.",
+            RetimeTwos => "Retime to 2s (on twos): each drawing on the track from the cursor down lasts 2 frames.",
             RetimeThrees => {
-                "Retime to 3s (on threes): each drawing in the column from the cursor down holds 3 frames."
+                "Retime to 3s (on threes): each drawing on the track from the cursor down lasts 3 frames."
             }
-            Reverse => "Reverse the drawing order from the cursor down; each exposure keeps its length.",
-            ColumnKindCel => "Make the column a cel: a drawing column, composited in sheet order.",
-            ColumnKindBg => "Make the column haikei (background): drawn under every cel.",
-            ColumnKindBook => "Make the column a book: an overlay held above the cels.",
-            ColumnKindRef => "Make the column a ref (guide): shown for reference, never rendered.",
-            ToggleColumnHidden => "Hide or show the column: a hidden column is left out of every composite.",
-            ToggleColumnLocked => "Lock or unlock the column: a locked column refuses paint and sheet edits.",
+            Reverse => "Reverse the drawing order from the cursor down; each drawing keeps its length.",
+            ColumnKindCel => "Make this a drawing track, stacked in sheet order.",
+            ColumnKindBg => "Make this a background track, drawn under every drawing track.",
+            ColumnKindBook => "Make this an overlay track, drawn over the drawing tracks.",
+            ColumnKindRef => "Make this a reference track: shown as a guide, never exported.",
+            ToggleColumnHidden => "Hide or show the track: a hidden track is left out of the picture.",
+            ToggleColumnLocked => "Protect this track: it refuses paint and sheet edits until you turn this off.",
             CopyCells => "Copy the selected sheet cells (or the cursor's cell) to the sheet clipboard.",
             CutCells => "Copy the selected sheet cells, then empty them.",
             PasteCells => "Paste the copied cells at the cursor, over the cells there.",
@@ -799,95 +799,95 @@ impl Action {
             TypeIntoCell => {
                 "Type a drawing name into the sheet cursor's cell (a digit over the sheet starts it too)."
             }
-            AddDrawingAfter => "Add a blank drawing after this one, held as long as this one.",
+            AddDrawingAfter => "Add a blank drawing after this one, lasting as long as this one.",
             GoToFrame => "Type a frame number and jump to it.",
-            ShowCurves => "Open the Curves pane: param columns (camera moves) as curves over frames, keys to drag.",
-            FrameCurves => "Fit the curves view to the selected keys, or every curve when none is selected.",
-            InterpHold => "The selected keys hold their value until the next key: a jump, no motion between.",
-            InterpLinear => "The selected keys move at an even speed to the next key.",
-            InterpEase => "The selected keys start slowly, speed up, and slow again into the next key.",
+            ShowCurves => "Open Motion curves: camera moves and other values as curves over the frames, points to drag.",
+            FrameCurves => "Fit the curves view to the selected points, or every curve when none is selected.",
+            InterpHold => "The selected points stay at their value until the next point: a jump, no motion between.",
+            InterpLinear => "The selected points move at an even speed to the next point.",
+            InterpEase => "The selected points start slowly, speed up, and slow again into the next point.",
             InterpEaseIn => {
-                "Slow start: leaves the key slowly and speeds up toward the next (like After Effects' Easy Ease Out on this key)."
+                "Slow start: leaves this point slowly and speeds up toward the next."
             }
             InterpEaseOut => {
-                "Slow stop: leaves the key at speed and slows into the next key (like After Effects' Easy Ease In on that key)."
+                "Slow stop: leaves this point at speed and slows into the next."
             }
-            InterpBezier => "The selected keys curve to the next key along their handles (drag them in the Curves pane).",
-            HandlesAuto => "Bezier keys with automatic handles: the curve passes smoothly through each key.",
-            HandlesSmooth => "Bezier handles that stay in line: dragging one turns the other, so the curve stays smooth.",
-            HandlesFlat => "Bezier handles laid flat: the motion comes to rest on the key (no overshoot).",
-            HandlesBroken => "Bezier handles that move apart: each side of the key bends on its own (a sharp turn).",
+            InterpBezier => "The selected points curve to the next along their handles, which you drag in Motion curves.",
+            HandlesAuto => "Automatic handles: the curve passes smoothly through each point.",
+            HandlesSmooth => "Handles that stay together: dragging one turns the other, so the curve stays smooth.",
+            HandlesFlat => "Handles laid flat: the motion comes to rest on the point, with no overshoot.",
+            HandlesBroken => "Handles that move apart: each side of the point bends on its own, for a sharp turn.",
             CopyPixels => "Copy the selected pixels of the active layer (over the canvas, with a selection).",
-            PastePixels => "Paste the copied pixels in place on this frame's cel — one undo step.",
-            DuplicateCel => "Copy this frame's drawing and its layer stack under the next free number, exposed here.",
-            MakeInbetweens => "Turn this key's spacing chart into blank inbetween drawings, exposed between the keys.",
-            KindKey => "Mark this frame's drawing as a genga (key): its number is circled on the sheet.",
+            PastePixels => "Paste the copied pixels in place on this frame's drawing, as one undo step.",
+            DuplicateCel => "Copy this frame's drawing and its layers under the next free number, on this frame.",
+            MakeInbetweens => "Turn this drawing's spacing chart into blank drawings between the two poses.",
+            KindKey => "Mark this frame's drawing as a main pose: its number is circled on the sheet.",
             KindBreakdown => "Mark this frame's drawing as a breakdown: its number is underlined on the sheet.",
-            KindInbetween => "Mark this frame's drawing as a douga (inbetween).",
-            KindUnset => "Clear this frame's drawing kind (and its spacing chart).",
+            KindInbetween => "Mark this frame's drawing as one that goes between the poses.",
+            KindUnset => "Clear this frame's drawing mark (and its spacing chart).",
             PinToLightTable => "Pin or unpin this frame's drawing on the light table: it shows on every frame.",
-            ShiftTrace => "Shift & trace: drag moves the selected light-table ghost, Shift+drag turns it (view only).",
-            ResetShift => "Put every shifted light-table ghost back where it belongs.",
-            ConvertColorsToSrgb => "Store this saved project's colours as exact sRGB chips (a backup is written first).",
-            ShowPaintCheck => "Open the nuri check pane: unpainted holes and off-palette colours, click to jump.",
-            BuildComposite => "Replace the node graph with every rendered column in sheet order (one undo step).",
-            AddNode => "Open the add-node menu at the pointer: sources, blends, FX, generators (particles, speed lines, text, balloons), output.",
-            ProjectSettings => "Name, size, fps, default cut length and dpi of this project (undoable).",
-            WelcomeScreen => "Open the Start panel: templates, recent files and the sample cut (a card asks about unsaved work).",
-            OpenSample => "Open the sample cut to learn on (unsaved work is asked about first).",
+            ShiftTrace => "Shift & trace: drag moves the selected ghost, Shift+drag turns it (view only).",
+            ResetShift => "Put every shifted ghost back where it belongs.",
+            ConvertColorsToSrgb => "Store this saved project's colors as exact sRGB chips (a backup is written first).",
+            ShowPaintCheck => "Open Check paint: unpainted holes and off-palette colors, click to jump.",
+            BuildComposite => "Replace the Effects graph with every track that shows, in sheet order (one undo step).",
+            AddNode => "Open the add menu at the pointer: effects, blends and generators (particles, speed lines, text, balloons).",
+            ProjectSettings => "Name, size, fps, default shot length and dpi of this project (undoable).",
+            WelcomeScreen => "Open the Start panel: templates, recent files and the example (a card asks about unsaved work).",
+            OpenSample => "Open the example to learn on (unsaved work is asked about first).",
             WhatsNew => "Show what this release brings, in the Start panel.",
             OpenLessons => "Pick a lesson that makes a real file, in the Start panel.",
             HideTools => "Clear the screen down to your drawing; a dot in the corner brings the tools back.",
             ToggleLockPositions => "Keep the panels where they are: tabs stop dragging and the step's panels stay open.",
             ToggleHints => "Show or hide the teaching sentences and the Quick Start dots; turning them on starts them again.",
-            PaperSize => "Set the cut's paper: the sheet the camera pans over, larger than the frame for BG pans and hiki slides.",
-            ShowRenderQueue => "Open the render queue: delivery jobs (PNG16, TIFF16, EXR, ProRes, line test) rendered on a worker.",
-            ToggleFinalLook => "Show the composite as the master delivers it: no rough, reference or correction layers, rendered on a worker.",
-            ImportSound => "Import a WAV, MP3, OGG or FLAC file as the cut's first (dialogue) track, else a further one.",
-            AddSoundTrack => "Add a sound file as a further track (SE, BGM…), its kind guessed from the file name.",
-            LoopIn => "Start the loop range (work area) at this frame: playback runs from here.",
-            LoopOut => "End the loop range (work area) at this frame: playback wraps or stops here.",
-            ClearLoop => "Clear this cut's loop range: playback runs the whole cut again.",
-            ToggleScrub => "Latch audio scrub: stepping or dragging the stopped playhead sounds that frame.",
-            RamPreview => "Render the play range's composites into RAM on a worker; playback shows them (Ao on the sheet).",
-            LipFlap => "Write 3-mouth kuchipaku on a column from a dialogue track's level, as one undo step.",
-            BuildSatsuei => "Build the satsuei (composite) look graph: passes, diffusion, para, light wrap, grade, grain, vignette.",
-            ShowCutBoard => "Open the shinkō board: a card per cut with its picture, length, status, assignee and open notes.",
-            ShowEpisode => "Open the henshū timeline: the scene's cuts as blocks in order (drag one to move it), the TRT and its target.",
-            PlayEpisode => "Play every cut of the scene back to back with its sound; again, it stops.",
-            ExportEdl => "Write the scene as a CMX3600 EDL into the render folder, one event per cut naming its render.",
-            ExportColorSheet => "Write the iro shitei (colour designation sheet): a PNG per character palette, into the render folder.",
-            ExportCutAsProject => "Write the open cut, its palettes and the project settings as a new .animproj for a freelancer.",
-            MakeCutsFromPanels => "Turn the open animatic's BOARD panels into cuts, one per panel cut number, as one undo step.",
-            RenderEpisode => "Queue the scene's cuts as one Episode job in the render queue, frame for frame, sound end to end.",
-            AddRetakeNote => "Note what to fix on this frame of the open cut (it can set the cut to Retake); the sheet shows it.",
-            Import3DModel => "Embed a glTF (.glb, .gltf) or OBJ model in the cut and add its Model3D node, as one undo step; View3D shows it.",
-            SetCutCameraFromView => "Key the cut camera to what View3D sees at this frame, as one undo step.",
-            Layout3dRoom => "3D layout (LO) room: View3D, a composite viewer and the node graph; View ▸ 3D view ▸ 3D underlay draws on the model.",
-            View3dFront => "View3D: look from the front (numpad 1 in Blender).",
-            View3dBack => "View3D: look from the back (Ctrl+numpad 1 in Blender).",
-            View3dRight => "View3D: look from the right (numpad 3 in Blender).",
-            View3dLeft => "View3D: look from the left (Ctrl+numpad 3 in Blender).",
-            View3dTop => "View3D: look from the top (numpad 7 in Blender).",
-            View3dBottom => "View3D: look from the bottom (Ctrl+numpad 7 in Blender).",
-            View3dCamera => "View3D: look through the cut camera (numpad 0 in Blender).",
-            View3dOrtho => "View3D: orthographic, or perspective again (numpad 5 in Blender).",
-            View3dFrameAll => "View3D: frame the whole model, keeping the view's direction (Home in Blender).",
-            MangaRoom => "Manga pages: the page large, the Manga pane (pages, panels, tones, rulers) and the layers.",
-            NewPage => "Add a one-frame page after the book's last, with INK and TONE columns and one panel, as one undo step.",
-            ClipToPanels => "Rebuild the page's graph: each column's art cut to the panels over white paper, the borders on top; one undo step.",
-            ExportPages => "Write the book's pages to a folder as PNG or TIFF at the page's dpi, in colour, grey or 1-bit mono, with trim marks.",
+            PaperSize => "Set the shot's paper: the sheet the camera pans over, larger than the frame for long pans.",
+            ShowRenderQueue => "Open your exports: PNG, TIFF, EXR, ProRes and line test jobs rendered in the background.",
+            ToggleFinalLook => "Show the picture as it will export: no rough, reference or correction layers.",
+            ImportSound => "Import a WAV, MP3, OGG or FLAC file as the shot's first (dialogue) track, else a further one.",
+            AddSoundTrack => "Add a sound file as a further track (effects, music), its kind guessed from the file name.",
+            LoopIn => "Start the loop range at this frame: playback runs from here.",
+            LoopOut => "End the loop range at this frame: playback wraps or stops here.",
+            ClearLoop => "Clear this shot's loop range: playback runs the whole shot again.",
+            ToggleScrub => "Hear the frame when you step or drag the stopped playhead.",
+            RamPreview => "Render the play range into memory in the background; playback then shows it.",
+            LipFlap => "Write three mouth shapes on a track from a dialogue track's level, as one undo step.",
+            BuildSatsuei => "Build the whole finishing look: passes, soft focus, color wash, light wrap, grain and vignette.",
+            ShowCutBoard => "Open Shots: a card per shot with its picture, length, status, assignee and open notes.",
+            ShowEpisode => "Open the Episode timeline: the scene's shots as blocks in order, the running time and its target.",
+            PlayEpisode => "Play every shot of the scene back to back with its sound; again, it stops.",
+            ExportEdl => "Write the scene as a CMX3600 EDL into the render folder, one event per shot naming its render.",
+            ExportColorSheet => "Write a color sheet: a PNG per character palette, into the render folder.",
+            ExportCutAsProject => "Write the open shot, its palettes and the project settings as a new .animproj for a freelancer.",
+            MakeCutsFromPanels => "Turn the open animatic's board panels into shots, one per panel number, as one undo step.",
+            RenderEpisode => "Add the scene's shots to your exports as one Episode job, sound end to end.",
+            AddRetakeNote => "Note what to fix on this frame of the open shot (it can set the shot to Retake); the sheet shows it.",
+            Import3DModel => "Embed a glTF (.glb, .gltf) or OBJ model in the shot, as one undo step; the 3D view shows it.",
+            SetCutCameraFromView => "Set the shot camera to what the 3D view sees at this frame, as one undo step.",
+            Layout3dRoom => "3D view, a result view and the Effects graph; View ▸ 3D view ▸ 3D underlay draws on the model.",
+            View3dFront => "3D view: look from the front (numpad 1 in Blender).",
+            View3dBack => "3D view: look from the back (Ctrl+numpad 1 in Blender).",
+            View3dRight => "3D view: look from the right (numpad 3 in Blender).",
+            View3dLeft => "3D view: look from the left (Ctrl+numpad 3 in Blender).",
+            View3dTop => "3D view: look from the top (numpad 7 in Blender).",
+            View3dBottom => "3D view: look from the bottom (Ctrl+numpad 7 in Blender).",
+            View3dCamera => "3D view: look through the shot camera (numpad 0 in Blender).",
+            View3dOrtho => "3D view: orthographic, or perspective again (numpad 5 in Blender).",
+            View3dFrameAll => "3D view: frame the whole model, keeping the view's direction (Home in Blender).",
+            MangaRoom => "Manga pages: the page large, the Manga panel (pages, panels, tones, rulers) and the layers.",
+            NewPage => "Add a one-frame page after the book's last, with ink and tone tracks and one panel, as one undo step.",
+            ClipToPanels => "Rebuild the page: each track's art trimmed to the panels over white paper; one undo step.",
+            ExportPages => "Write the book's pages to a folder as PNG or TIFF at the page's dpi, with trim marks.",
             RoomExport => "Open the Export step: the result, and the choices for saving a file to share.",
             ExportGif => "Save the animation as a GIF on white that plays anywhere; File ▸ Export's frame range holds if set.",
             ExportMp4 => "Save the animation as an MP4 video, with the free ffmpeg add-on; File ▸ Export's frame range holds if set.",
             ExportPngSequence => "Save the frames as numbered PNG pictures in a folder; File ▸ Export's frame range holds if set.",
             ExportStill => "Save the frame on screen as one PNG picture on white.",
-            ToggleRulerSnap => "Hold the pen to the page's perspective rulers (a line toward a vanishing point, or level), or draw free again.",
-            PanelTool => "Drag on paper: a panel; across a panel: a split at the gutter; a VP or the horizon: moved. One undo step each.",
+            ToggleRulerSnap => "Keep the pen on the page's perspective rulers, toward a vanishing point or level, or draw free again.",
+            PanelTool => "Drag on paper for a panel, across a panel to split it, or on a vanishing point or the horizon to move it.",
             ReloadSequences => "Read every image sequence's files again (a re-render on disk shows); also on returning to the window.",
-            Underlay3d => "Draw the cut's 3D model faded under the canvas's drawing, at the current frame; a view, not in the export.",
-            BrushMakerRoom => "Brush maker: the forge tall on the left, quick list and palette under it, the canvas as test paper.",
-            EditCut => "Cut the selected sheet cells. Pixels have no Cut: use Copy, then Clear.",
+            Underlay3d => "Draw the shot's 3D model faded under the drawing, at the current frame; a view, not in the export.",
+            BrushMakerRoom => "Brush maker: its panel tall on the left, quick list and palette under it, the canvas as test paper.",
+            EditCut => "Move the selected sheet cells to the clipboard; pixels have no such move, so use Copy, then Clear.",
             EditCopy => "Copy the selected cells, or the selected pixels over the canvas.",
             EditPaste => "Paste the copied cells, or the copied pixels over the canvas.",
         }
@@ -1123,22 +1123,31 @@ impl Action {
         use Action::*;
         match self {
             PlayPause => &["preview", "run"],
-            MissCheck => &["holes", "gaps"],
+            MissCheck => &["holes", "gaps", "shiage"],
+            PrevKey => &["previous key", "key"],
+            NextKey => &["next key", "key"],
+            PrevCut => &["previous cut", "cut"],
+            NextCut => &["next cut", "cut"],
+            ToggleLoop => &["loop latch", "repeat"],
             // "light table" stays free for the light table's own verb (GM6).
-            ToggleOnion => &["onion", "ghost", "sukashi"],
-            ToggleCompositeView => &["render", "output", "comp"],
+            ToggleOnion => &["onion", "onion skin", "ghost", "sukashi"],
+            ToggleCompositeView => &["render", "output", "comp", "composite view"],
             CanvasOptions => &["lightbox settings", "paper settings", "peg bar"],
             ToggleEraser => &["rubber", "erase"],
-            ToggleAlphaLock => &["preserve alpha", "lock transparency"],
+            ToggleAlphaLock => &["alpha lock", "lock", "preserve alpha", "lock transparency", "recolour"],
+            Preset1 | Preset2 | Preset3 | Preset4 | Preset5 | Preset6 | Preset7 | Preset8 => {
+                &["brush preset", "preset", "pencil"]
+            }
             SelectTool => &["move", "transform", "lasso select"],
-            FillTool => &["bucket", "paint", "refill", "nuri-naoshi", "replace colour"],
+            BrushTool => &["paint tool"],
+            FillTool => &["bucket", "flood fill", "paint", "refill", "nuri-naoshi", "replace colour"],
             LassoFillTool => &["lasso fill", "fill loop"],
             NewDrawing => &["new cel", "blank"],
-            ClearFrameKey => &["hold", "extend"],
-            RemoveColumn => &["delete column"],
+            ClearFrameKey => &["lift key", "hold", "extend"],
+            RemoveColumn => &["delete column", "remove column", "column"],
             ClearCel => &["wipe", "erase layer"],
-            ClearCelAll => &["wipe all", "erase cel"],
-            CycleCelLayer | CycleCelLayerBack => &["line", "colour", "shadow"],
+            ClearCelAll => &["wipe all", "erase cel", "clear cel"],
+            CycleCelLayer | CycleCelLayerBack => &["cel layer", "line", "colour", "shadow"],
             Undo => &["back", "revert"],
             Redo => &["again"],
             History => &["undo list", "steps"],
@@ -1163,7 +1172,7 @@ impl Action {
             RoomComposite => &["composite", "compositing", "photography", "satsuei", "room"],
             RoomEdit => &["edit", "henshu", "henshū", "editing", "room"],
             // GM8: the auto-comp and the project's settings.
-            BuildComposite => &["auto comp", "autocomp", "wire graph", "build graph"],
+            BuildComposite => &["build composite", "composite", "auto comp", "autocomp", "wire graph", "build graph"],
             // GM9: the FX it adds, by their trade words too.
             AddNode => &[
                 "node",
@@ -1202,20 +1211,20 @@ impl Action {
             ToggleHints => &["tips", "teaching", "tutorial hints"],
             PaperSize => &["paper", "hiki", "BG pan", "pan paper", "kami", "BG sheet"],
             // GM5: the sheet verbs by the words a timing sheet uses.
-            InsertFrames => &["insert frames", "add frame", "open a frame"],
-            DeleteFrames => &["delete frames", "remove frame", "close a frame"],
-            HoldPlus => &["hold", "extend", "longer"],
-            HoldMinus => &["hold", "shorten", "shorter"],
+            InsertFrames => &["insert frames", "add frame", "open a frame", "shaku", "length"],
+            DeleteFrames => &["delete frames", "remove frame", "close a frame", "shaku", "length"],
+            HoldPlus => &["hold +", "hold +1", "hold", "extend", "longer", "exposure"],
+            HoldMinus => &["hold −", "hold -1", "hold", "shorten", "shorter", "exposure"],
             RetimeOnes => &["ones", "1s", "retime"],
             RetimeTwos => &["twos", "2s", "retime"],
             RetimeThrees => &["threes", "3s", "retime"],
             Reverse => &["reverse", "backwards", "play backwards"],
-            ColumnKindCel => &["column kind", "cel column"],
-            ColumnKindBg => &["column kind", "background", "haikei"],
-            ColumnKindBook => &["column kind", "overlay", "held cel"],
-            ColumnKindRef => &["column kind", "guide", "reference"],
-            ToggleColumnHidden => &["hide", "show column", "visibility"],
-            ToggleColumnLocked => &["lock", "unlock", "protect"],
+            ColumnKindCel => &["column kind", "cel column", "cel"],
+            ColumnKindBg => &["column kind", "background", "bg", "haikei"],
+            ColumnKindBook => &["column kind", "overlay", "book", "held cel"],
+            ColumnKindRef => &["column kind", "guide", "reference", "ref"],
+            ToggleColumnHidden => &["hide", "hide column", "show column", "visibility"],
+            ToggleColumnLocked => &["lock", "lock column", "unlock", "protect"],
             CopyCells => &["copy", "cells", "clipboard"],
             CutCells => &["cut", "cells", "clipboard"],
             PasteCells => &["paste", "cells", "clipboard"],
@@ -1227,14 +1236,14 @@ impl Action {
             ShowCurves => &["graph editor", "f-curve", "curves", "camera move"],
             FrameCurves => &["fit curves", "graph editor", "frame all"],
             InterpHold | InterpLinear | InterpEase | InterpEaseIn | InterpEaseOut
-            | InterpBezier => &["interpolation", "curves", "easing"],
+            | InterpBezier => &["key interpolation", "interpolation", "curves", "easing"],
             HandlesAuto | HandlesSmooth | HandlesFlat | HandlesBroken => {
-                &["handles", "bezier", "tangents"]
+                &["key handles", "handles", "bezier", "tangents"]
             }
             // GM6: the genga-to-douga words.
             CopyPixels => &["copy", "pixels", "clipboard", "copy selection"],
             PastePixels => &["paste", "pixels", "clipboard", "paste in place"],
-            DuplicateCel => &["duplicate", "copy drawing", "clone cel"],
+            DuplicateCel => &["duplicate", "duplicate cel", "copy drawing", "clone cel"],
             MakeInbetweens => &["inbetween", "douga", "spacing chart", "tween"],
             KindKey => &["key", "genga", "drawing kind"],
             KindBreakdown => &["breakdown", "drawing kind"],
@@ -1246,8 +1255,9 @@ impl Action {
             // GM7: the ink-and-paint words.
             ConvertColorsToSrgb => &["colour law", "color space", "srgb", "convert colours"],
             ShowPaintCheck => &[
-                "paint check",
+                "nuri check",
                 "nuri",
+                "paint check",
                 "shiage kensa",
                 "kensa",
                 "holes",
@@ -1256,6 +1266,8 @@ impl Action {
             ],
             // GM11: the delivery by the words a satsuei desk uses for it.
             ShowRenderQueue => &[
+                "render queue",
+                "queue",
                 "render",
                 "export",
                 "deliver",
@@ -1281,9 +1293,9 @@ impl Action {
             ToggleScrub => &["sound while dragging", "scrub", "audio scrub"],
             RamPreview => &["ram preview", "cache frames", "preview render"],
             LipFlap => &["lip sync", "kuchipaku", "mouth"],
-            BuildSatsuei => &["satsuei", "look", "satsuei template", "satsuei graph"],
-            ShowCutBoard => &["shinko", "cut board", "production status", "progress", "assignee"],
-            ShowEpisode => &["henshu", "episode", "timeline", "trt", "running time", "cut order"],
+            BuildSatsuei => &["satsuei", "look", "satsuei template", "satsuei graph", "build satsuei graph"],
+            ShowCutBoard => &["shinko", "shinkō", "shinkō board", "cut board", "production status", "progress", "assignee"],
+            ShowEpisode => &["henshu", "henshū", "henshū timeline", "episode", "timeline", "trt", "running time", "cut order"],
             PlayEpisode => &["animatic", "play all cuts", "play scene", "conte"],
             ExportEdl => &["edl", "cmx3600", "online edit", "conform", "edit decision list"],
             ExportColorSheet => &["iro shitei", "colour sheet", "color sheet", "designation"],
@@ -1292,8 +1304,8 @@ impl Action {
             RenderEpisode => &["episode render", "render all cuts", "export episode"],
             AddRetakeNote => &["retake", "note", "fix note", "kantoku", "correction"],
             Import3DModel => &["3d", "gltf", "glb", "obj", "model", "layout", "blender"],
-            SetCutCameraFromView => &["align camera to view", "kamera", "LO camera"],
-            Layout3dRoom => &["3d", "layout", "LO"],
+            SetCutCameraFromView => &["set cut camera", "align camera to view", "kamera", "LO camera"],
+            Layout3dRoom => &["3d", "layout", "3d layout (lo)", "LO"],
             BrushMakerRoom => &["brush forge", "forge", "brush design", "kpp", "room"],
             EditCut => &["cut", "clipboard"],
             EditCopy => &["copy", "clipboard"],
@@ -3682,7 +3694,7 @@ fn layout_page(
              name, and load any preset — the same rooms as the ws menu, \
              kept here so they persist across hosted sessions.",
         )
-        .size(11.0)
+        .font(crate::plate::Role::Small.font())
         .color(crate::plate::legend_dim()),
     );
     ui.add_space(6.0);
@@ -3699,12 +3711,12 @@ fn layout_page(
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new("host's layout")
-                    .size(11.5)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::STRUCK),
             );
             ui.label(
                 egui::RichText::new("from this session")
-                    .size(10.0)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::LEGEND),
             );
             if ui.button("LOAD").clicked() {
@@ -3716,7 +3728,7 @@ fn layout_page(
     if names.is_empty() {
         ui.label(
             egui::RichText::new("no presets saved yet")
-                .size(11.0)
+                .font(crate::plate::Role::Small.font())
                 .color(crate::plate::legend_dim()),
         );
     } else {
@@ -3724,7 +3736,7 @@ fn layout_page(
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(n)
-                        .size(11.5)
+                        .font(crate::plate::Role::Small.font())
                         .color(crate::plate::STRUCK),
                 );
                 if ui.button("LOAD").clicked() {
@@ -3804,13 +3816,11 @@ fn session_page(
                 ui.label("Code now");
                 ui.label(
                     egui::RichText::new(code)
-                        .monospace()
-                        .size(20.0)
+                        .font(crate::plate::Role::Card.font())
                         .color(crate::plate::STRUCK),
                 );
                 ui.label(
                     egui::RichText::new(format!("{secs}s left"))
-                        .monospace()
                         .color(crate::plate::LEGEND),
                 );
             });
@@ -3866,7 +3876,7 @@ fn session_page(
         if lan_rooms.is_empty() {
             ui.label(
                 egui::RichText::new("no rooms on this network yet")
-                    .size(11.0)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::legend_dim()),
             );
         } else {
@@ -3875,21 +3885,20 @@ fn session_page(
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(&b.name)
-                            .size(11.5)
+                            .font(crate::plate::Role::Small.font())
                             .color(crate::plate::STRUCK),
                     );
                     if !b.open {
                         ui.label(
                             egui::RichText::new("key")
-                                .size(9.5)
+                                .font(crate::plate::Role::Small.font())
                                 .color(crate::plate::LEGEND),
                         )
                         .on_hover_text("this room requires its key");
                     }
                     ui.label(
                         egui::RichText::new(format!("v{} · {}", b.version, b.addr))
-                            .monospace()
-                            .size(10.0)
+                            .font(crate::plate::Role::Small.font())
                             .color(crate::plate::LEGEND),
                     );
                     if ui.button("JOIN").clicked() {
@@ -4011,7 +4020,7 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
                 format!(" · {update_note}")
             }
         ))
-        .size(11.0)
+        .font(crate::plate::Role::Small.font())
         .color(crate::plate::legend_dim()),
     );
     ui.add_space(8.0);
@@ -4025,7 +4034,7 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
              engine parameters stay with their apps — they paint with OUR \
              brush, honestly.",
         )
-        .size(11.5)
+        .font(crate::plate::Role::Small.font())
         .color(crate::plate::LEGEND),
     );
     ui.add_space(6.0);
@@ -4065,13 +4074,12 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
             let shown = if bank.is_empty() { "unsorted" } else { bank };
             ui.label(
                 egui::RichText::new(shown)
-                    .size(11.5)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::STRUCK),
             );
             ui.label(
                 egui::RichText::new(format!("{count} brush(es)"))
-                    .monospace()
-                    .size(11.0)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::LEGEND),
             );
             if !bank.is_empty() && crate::plate::danger(ui, "REMOVE BANK") {
@@ -4092,7 +4100,7 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
             egui::RichText::new(
                 "every brush is self-contained — all tips and grains cached",
             )
-            .size(11.0)
+            .font(crate::plate::Role::Small.font())
             .color(crate::plate::legend_dim()),
         );
     } else {
@@ -4108,7 +4116,7 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
         for n in no_tip.iter().take(8) {
             ui.label(
                 egui::RichText::new(format!("  · {n}"))
-                    .size(10.5)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::legend_dim()),
             );
         }
@@ -4151,8 +4159,7 @@ pub(crate) fn general_page(
         ui.add(
             egui::Label::new(
                 egui::RichText::new(dir.display().to_string())
-                    .monospace()
-                    .size(10.0)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::LEGEND),
             )
             .selectable(true),
@@ -4192,7 +4199,7 @@ pub(crate) fn general_page(
             Some(Some(path)) => {
                 ui.label(
                     egui::RichText::new(format!("found: {}", path.display()))
-                        .size(10.0)
+                        .font(crate::plate::Role::Small.font())
                         .color(crate::plate::legend_dim()),
                 );
             }
@@ -4507,7 +4514,7 @@ fn pen_page(ui: &mut egui::Ui, config: &mut Config) {
     window toolkit.",
         )
         .color(crate::plate::legend_dim())
-        .size(11.0),
+        .font(crate::plate::Role::Small.font()),
     );
     if changed {
         config.save();
@@ -4527,7 +4534,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
              cloned first). Built-ins follow the modern pipeline; build your own \
              in the Cel Layers strip and save it from its stack menu.",
         )
-        .size(11.0)
+        .font(crate::plate::Role::Small.font())
         .color(crate::plate::legend_dim()),
     );
     ui.add_space(4.0);
@@ -4543,7 +4550,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(label)
-                    .size(11.5)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::STRUCK),
             );
             let current = config.layers.stack_for_room(room).name;
@@ -4568,13 +4575,13 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(&s.name)
-                    .size(11.5)
+                    .font(crate::plate::Role::Small.font())
                     .color(crate::plate::STRUCK),
             );
             if is_builtin {
                 ui.label(
                     egui::RichText::new("built-in")
-                        .size(10.0)
+                        .font(crate::plate::Role::Small.font())
                         .color(crate::plate::LEGEND),
                 );
                 if ui
@@ -4590,8 +4597,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
         });
         ui.label(
             egui::RichText::new(s.summary())
-                .monospace()
-                .size(10.0)
+                .font(crate::plate::Role::Small.font())
                 .color(crate::plate::legend_dim()),
         );
     }
@@ -4622,7 +4628,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
             "Reference colours per layer name (the automatic brush swap on layer \
              change is retired — pick ink with the paint dish or pencil box).",
         )
-        .size(11.0)
+        .font(crate::plate::Role::Small.font())
         .color(crate::plate::legend_dim()),
     );
     ui.add_space(8.0);
@@ -4686,7 +4692,6 @@ fn brushes_page(ui: &mut egui::Ui, config: &mut Config) {
                             } else {
                                 "[·]".into()
                             })
-                            .monospace()
                             .color(crate::plate::legend_dim()),
                         );
                         changed |= crate::plate::text_field(

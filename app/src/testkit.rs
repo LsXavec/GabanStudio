@@ -1492,7 +1492,7 @@ mod tests {
             .position(|p| p.name == "genga")
             .expect("the pencil box has a genga pencil");
         h.open_float(crate::floats::Float::Brushes);
-        h.click(&format!("genga pencil ({digit})"));
+        h.click(&format!("{} ({digit})", crate::vocab::CLEAN_PENCIL));
         assert_eq!(h.editor().canvas.arming_pencil(), "genga");
         assert!(!h.editor().canvas.erasing);
         h.click("Eraser");
@@ -1735,7 +1735,7 @@ mod tests {
         let names: Vec<&str> = got.list.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, ["a", "b"]);
         assert_eq!(notes.len(), 1, "{notes:?}");
-        assert!(notes[0].starts_with("1 saved workspace could not be read"), "{notes:?}");
+        assert!(notes[0].starts_with("1 saved arrangement could not be read"), "{notes:?}");
         assert_eq!(std::fs::read(dir.path().join("workspaces.json.bad")).unwrap(), bytes);
         got.save_to(dir.path()).unwrap();
         assert!(!dir.path().join("workspaces.json.tmp").exists());
@@ -1761,7 +1761,7 @@ mod tests {
         let mut h = EditorHarness::with_dir(state, dir);
         let said = h.state().refusal.clone();
         assert!(
-            said.contains("interface reset to defaults") && said.contains("saved workspace"),
+            said.contains("interface reset to defaults") && said.contains("saved arrangement"),
             "{said:?}"
         );
         assert!(h.has(&said), "the notice is not on screen\n{}", h.describe());
@@ -3090,7 +3090,8 @@ mod tests {
         ("doc.rs", "    pub fn undo(", 0xe15edd6f411d2b83),
         ("doc.rs", "    pub fn redo(", 0xcaa16d99af9d7dbd),
         ("doc.rs", "    pub fn undo_to(", 0x387309403f18550e),
-        ("workspace.rs", "    pub fn load_from", 0xeedf52910f122df8),
+        // AU12: the note `load_from` writes says "saved arrangement".
+        ("workspace.rs", "    pub fn load_from", 0x329c11389bcffa7f),
         ("workspace.rs", "    pub fn save_to", 0x18ceee7d714dc4d4),
         // AU4: `seen_pen` latches past the layer gate, and only there.
         ("canvas.rs", "    fn handle_pen(", 0x999c4cb09447e79e),
@@ -3135,18 +3136,19 @@ mod tests {
     }
 
     /// AU2's leave-out list: no renames, no menu moves, no new Actions. The
-    /// parts that make them (AU3, AU4, AU5, AU6, AU7, AU9, AU10, AU11) re-pin
-    /// this and say so in their commit bodies. AU4 brought the rail and
+    /// parts that make them (AU3, AU4, AU5, AU6, AU7, AU9, AU10, AU11, AU12)
+    /// re-pin this and say so in their commit bodies. AU4 brought the rail and
     /// `CanvasOptions`, AU5 `AddDrawingAfter` and `GoToFrame`, AU6 `WhatsNew`
     /// and `ToggleLockPositions`, AU7 `ToggleHints`, AU9 `RoomExport` and the
     /// four plain exports, AU10 `HideTools`, AU20 `OpenLessons`, AU11
-    /// `BrushMakerRoom`, the three Edit rows and the six menus' words.
+    /// `BrushMakerRoom`, the three Edit rows and the six menus' words, AU12 the
+    /// plain words.
     #[test]
     fn aulook_what_was_left_out_stays_out() {
         let actions: String =
             Action::ALL.iter().map(|a| format!("{a:?}|{}|{:?}\n", a.label(), a.menu())).collect();
         let panes: String = Pane::ALL.iter().map(|p| format!("{p:?}|{}\n", p.title())).collect();
-        assert_eq!((Action::ALL.len(), digest(&actions)), (171, 0x9ef370ef01baff35), "the Actions, their words, their menus");
-        assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x20742d9b6c3fefed), "the panes and their titles");
+        assert_eq!((Action::ALL.len(), digest(&actions)), (171, 0x034578ff688e0034), "the Actions, their words, their menus");
+        assert_eq!((Pane::ALL.len(), digest(&panes)), (16, 0x7cfaa85046cd2ab3), "the panes and their titles");
     }
 }

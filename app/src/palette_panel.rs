@@ -150,7 +150,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
                                 // colour designer authored it), nothing else.
                                 ui.label(
                                     egui::RichText::new(role.name.clone())
-                                        .size(11.5)
+                                        .font(plate::Role::Small.font())
                                         .color(plate::STRUCK),
                                 );
                             }

@@ -230,7 +230,7 @@ fn empty_state(ui: &mut egui::Ui, rect: Rect, words: &str, button: &str, verb: A
         rect.center() - vec2(0.0, gap),
         egui::Align2::CENTER_BOTTOM,
         words,
-        egui::FontId::proportional(14.0),
+        crate::plate::Role::Chrome.font(),
         crate::plate::LEGEND,
     );
     // Measured in the Ui's own font: the plain panel tests dress none.
@@ -286,7 +286,7 @@ pub fn ui(ui: &mut egui::Ui, state: &AppState, graph: GraphView, vs: &mut Viewer
             rect.center(),
             egui::Align2::CENTER_CENTER,
             msg,
-            egui::FontId::proportional(14.0),
+            crate::plate::Role::Chrome.font(),
             crate::plate::LEGEND,
         );
     };

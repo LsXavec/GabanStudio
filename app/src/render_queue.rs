@@ -1311,7 +1311,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                 Some(path) => {
                     ui.label(
                         egui::RichText::new(format!("ffmpeg: {}", path.display()))
-                            .size(10.0)
+                            .font(plate::Role::Small.font())
                             .color(plate::legend_dim()),
                     );
                 }
@@ -1564,8 +1564,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                     plate::meter(ui, Some(job.done as f32 / job.total() as f32), 90.0);
                     ui.label(
                         egui::RichText::new(format!("{}/{}", job.done, job.total()))
-                            .monospace()
-                            .size(11.0)
+                            .font(plate::Role::Small.font())
                             .color(plate::STRUCK),
                     );
                     ui.label(egui::RichText::new(word).color(color));
@@ -1895,7 +1894,7 @@ mod tests {
                 "{st:?}"
             );
         }
-        assert_eq!(Pane::RenderQueue.title(), "Render Queue");
+        assert_eq!(Pane::RenderQueue.title(), crate::vocab::EXPORT_QUEUE);
         assert!(Pane::ALL.contains(&Pane::RenderQueue));
         let mut h = EditorHarness::new();
         // No ffmpeg anywhere (the search's answer, faked: tests scan nothing).
@@ -2117,7 +2116,7 @@ mod tests {
         let a = Action::ShowRenderQueue;
         assert_eq!(a.menu(), Some("More/Panels/Export queue"));
         assert_eq!((a.group(), a.context()), (Group::Window, Ctx::Global));
-        assert!(a.help().contains("render queue") && a.help().len() <= 120);
+        assert!(a.help().contains("exports") && a.help().len() <= 120);
         for word in [
             "render",
             "export",

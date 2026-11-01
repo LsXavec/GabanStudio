@@ -21,6 +21,7 @@ use egui::{
     text::{LayoutJob, TextFormat},
 };
 
+use crate::icons::Icon;
 use crate::lessons::Target;
 
 // ---------------------------------------------------------------------------
@@ -1175,8 +1176,25 @@ pub fn chip_face(
     };
     let p = ui.painter();
     p.rect_filled(r.shrink(1.0), R_SHEET, ground_of(ui, fill));
-    let font = FontId::new(10.0, FontFamily::Proportional);
-    p.text(r.center(), egui::Align2::CENTER_CENTER, words, font, at_rest(ui, ink));
+    p.text(r.center(), egui::Align2::CENTER_CENTER, words, Role::Small.font(), at_rest(ui, ink));
+}
+
+/// The sheet head's hide mark on its chip: an open eye, shut while the track
+/// is hidden.
+pub fn eye_mark(ui: &Ui, center: Pos2, hidden: bool) {
+    let icon = if hidden { Icon::EyeOff } else { Icon::Eye };
+    mark_icon(ui, center, icon, hidden);
+}
+
+/// The sheet head's lock mark on its chip.
+pub fn lock_mark(ui: &Ui, center: Pos2, locked: bool) {
+    mark_icon(ui, center, Icon::Lock, locked);
+}
+
+fn mark_icon(ui: &Ui, center: Pos2, icon: Icon, on: bool) {
+    let ink = at_rest(ui, if on { INK } else { INK2 });
+    let rect = egui::Rect::from_center_size(center, Vec2::splat(Role::Chrome.size()));
+    crate::icons::paint(ui.painter(), rect, ink, icon);
 }
 
 /// DETENT — a radio position. An `INK3` ring; a filled blue disc when this
