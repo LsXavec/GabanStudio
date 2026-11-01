@@ -82,6 +82,8 @@ mod austart_tests;
 mod austrip_tests;
 #[cfg(test)]
 mod aulesson_tests;
+#[cfg(test)]
+mod auguide_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;
@@ -106,6 +108,7 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use egui_dock::{DockArea, DockState};
 use icons::Icon;
+use lessons::Target;
 use newproject::{FormAction, NewProjectForm};
 use paint::PaintLayer;
 use plate::Card;
@@ -4947,6 +4950,7 @@ fn transport_key(ui: &mut egui::Ui, icon: Icon, word: &str, action: Action) -> e
 /// own word for the name and the chord it has now.
 fn chord_card(resp: egui::Response, word: &str, action: Action, what: String) -> egui::Response {
     let ctx = resp.ctx.clone();
+    plate::mark_row(&resp, Target::Action(action));
     plate::hover_card(resp, || match menus::chord_label(&ctx, action) {
         Some(chord) => format!("{word} ({chord}) — {what}"),
         None => format!("{word} — {what}"),
@@ -5004,6 +5008,10 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
         // down first, so all content paints over the material.
         plate::surface(ui);
         self.pane_rects.push((*tab, ui.max_rect(), ui.layer_id()));
+        plate::mark(ui.ctx(), ui.max_rect(), Target::Pane(*tab));
+        if *tab == Pane::Canvas {
+            plate::mark(ui.ctx(), ui.max_rect(), Target::Paper);
+        }
         plate::note_pane_body(ui);
         match tab {
             Pane::History => {
@@ -7711,8 +7719,8 @@ const PROBE_ROOMS: [ProbeRoom; 9] = [
 ];
 
 /// AU27: the card in every step of every bar, Plan with its sheet among them:
-/// what the clip audit walks after the rooms (spec 1.10). The shots and the
-/// rail's audits number `PROBE_ROOMS` alone.
+/// what the clip audit and AU21 the rail's audits walk after the rooms (spec
+/// 1.10). The shots number `PROBE_ROOMS` alone.
 #[cfg(test)]
 const LESSON_ROOMS: [ProbeRoom; 12] = [
     ProbeRoom::Lesson("lesson card, Draw", ProjectKind::Drawing, Stage::Drawing),
@@ -8341,6 +8349,9 @@ impl Editor {
         ];
         for (icon, word, action, by, says) in keys {
             let key = plate::band_action(ui, icon, word, &format!("{word} (band)"));
+            if by > 0 {
+                plate::mark(ui.ctx(), key.interact_rect, Target::Named("band.longer"));
+            }
             if chord_card(key, word, action, says.to_string()).clicked() {
                 self.hold_by(by);
             }
@@ -8440,6 +8451,7 @@ impl Editor {
                 self.speed_rows(ui);
             }
         });
+        plate::mark(ui.ctx(), more.response.interact_rect, Target::Named("band.fold"));
         if more.inner.is_none() {
             more.response.card(card);
         }
@@ -8533,6 +8545,7 @@ impl Editor {
     /// Speed: its popover sets every drawing's hold at once, and the loop.
     fn speed_key(&mut self, ui: &mut egui::Ui) {
         let key = plate::band_action(ui, Icon::Speed, "Speed", "Speed");
+        plate::mark(ui.ctx(), key.interact_rect, Target::Named("band.speed"));
         let popup = egui::Popup::menu(&key);
         if popup.show(|ui| self.speed_rows(ui)).is_none() {
             key.card(format!("How long each drawing holds, and whether the {} loops.", vocab::SHOT));
@@ -8545,7 +8558,11 @@ impl Editor {
         let now = strip::speed_of(&self.state);
         for (word, step) in [("Fast", 1), ("Medium", 2), ("Slow", 3)] {
             let fact = if step == 1 { "1 frame each".to_string() } else { format!("{step} frames each") };
-            if plate::detent_fact(ui, now == Some(step), word, &fact, "Medium").clicked() {
+            let row = plate::detent_fact(ui, now == Some(step), word, &fact, "Medium");
+            if step == 2 {
+                plate::mark(ui.ctx(), row.interact_rect, Target::Named("speed.medium"));
+            }
+            if row.clicked() {
                 if self.canvas.stroke_active() {
                     self.state.refuse(doc::FINISH_STROKE);
                 } else {
@@ -8757,6 +8774,7 @@ impl Editor {
         } else {
             plate::band_action(ui, Icon::Sheet, word, vocab::SHOW_TIMING_SHEET)
         };
+        plate::mark(ui.ctx(), key.interact_rect, Target::Named("band.sheet"));
         let key = key.card(if draw && shown {
             format!("Hides the {word}.")
         } else {
@@ -8825,7 +8843,9 @@ impl Editor {
     /// Loop, on the full transport's row at any width.
     fn loop_latch(&mut self, ui: &mut egui::Ui) {
         let mut lp = self.state.view.loop_playback;
-        plate::latch(ui, &mut lp, vocab::LOOP).card(loop_card());
+        let latch = plate::latch(ui, &mut lp, vocab::LOOP);
+        plate::mark(ui.ctx(), latch.interact_rect, Target::Named("band.loop"));
+        latch.card(loop_card());
         self.state.view.loop_playback = lp;
     }
 
@@ -9045,6 +9065,8 @@ impl Editor {
             }
         }
         self.promote();
+        // AU21: before anything that can mark, the lip flap's window first.
+        plate::wish(ui.ctx(), self.lesson_chain());
         // The band's keys and the rail's Flip arrive on one frame. AU18: on an
         // animation: two tracks on one frame are a picture, and it flips nothing.
         self.full_band |= self.animated() && self.state.cut().drawings.len() > 1;
@@ -9648,7 +9670,7 @@ impl Editor {
                 });
                 // Open or bring forward each pane (a pane lives only while
                 // it's in the dock tree). GM3: was "panes".
-                plate::menu_word(ui, "window", |ui| {
+                let word = plate::menu_word(ui, "window", |ui| {
                     for pane in Pane::ALL {
                         // The Brush window is RETIRED (owner 2026-08-17):
                         // its settings live on the canvas deck + right rail.
@@ -9744,6 +9766,7 @@ impl Editor {
                     ui.separator();
                     self.menu_items(ui, "Window");
                 });
+                menus::mark_word(ui.ctx(), &word, "window");
                 self.help_menu(ui);
             };
             let mut strip = ui.new_child(
@@ -9752,7 +9775,8 @@ impl Editor {
                     .layout(egui::Layout::left_to_right(egui::Align::Center)),
             );
             if narrow {
-                plate::menu_word(&mut strip, "Menu", |ui| menus(ui));
+                let word = plate::menu_word(&mut strip, "Menu", |ui| menus(ui));
+                menus::mark_narrow(strip.ctx(), &word);
             } else {
                 menus(&mut strip);
             }
@@ -9795,7 +9819,9 @@ impl Editor {
             for step in bar {
                 let current = Some(step.stage) == self.stage;
                 let primary = step.stage == Stage::Export;
-                if plate::step_pill(&mut pills, step.label, current, primary)
+                let pill = plate::step_pill(&mut pills, step.label, current, primary);
+                plate::mark(ui.ctx(), pill.interact_rect, Target::Step(step.stage));
+                if pill
                     .on_hover_ui(|ui| {
                         ui.label(step.card());
                     })
@@ -10225,5 +10251,7 @@ impl Editor {
         if !std::mem::take(&mut self.state.strip_opacity_drawn) {
             self.state.strip_opacity = None;
         }
+        // AU21: last, over all of it.
+        plate::stroke_ring(ui.ctx());
     }
 }

@@ -21,6 +21,8 @@ use egui::{
     text::{LayoutJob, TextFormat},
 };
 
+use crate::lessons::Target;
+
 // ---------------------------------------------------------------------------
 // Tokens (spec 2.2). Named by role. `aulook_tokens_are_the_table` pins them.
 // ---------------------------------------------------------------------------
@@ -879,16 +881,19 @@ pub fn fixed_row<R>(ui: &mut Ui, size: Vec2, add: impl FnOnce(&mut Ui) -> R) -> 
     add(&mut row)
 }
 
-/// Menus do not scroll, so a row off the window is a row out of reach. A menu
-/// of `rows` too long for the window at a panel's height stands at a sheet
-/// row's, a point of gap under what every menu stood at before the new look.
-pub fn fit_menu(ui: &mut Ui, rows: usize) {
+/// A row off the window is a row out of reach. A menu of `rows` too long for
+/// the window at a panel's height stands at a sheet row's, a point of gap
+/// under what every menu stood at before the new look. Answers how tall the
+/// menu stands, so one still too tall can scroll.
+pub fn fit_menu(ui: &mut Ui, rows: usize) -> f32 {
     let spacing = ui.spacing();
     let tall = rows as f32 * (CTRL_H + spacing.item_spacing.y) + spacing.menu_margin.sum().y;
-    if tall > ui.ctx().content_rect().height() {
-        ui.spacing_mut().interact_size.y = ROW_H;
-        ui.spacing_mut().item_spacing.y = SHEET_GAP;
+    if tall <= ui.ctx().content_rect().height() {
+        return tall;
     }
+    ui.spacing_mut().interact_size.y = ROW_H;
+    ui.spacing_mut().item_spacing.y = SHEET_GAP;
+    rows as f32 * (ROW_H + SHEET_GAP) + ui.spacing().menu_margin.sum().y
 }
 
 /// The dock in the look: tab bars on the desk, the current tab on its island.
@@ -1621,9 +1626,104 @@ pub fn primary_card(ui: &mut Ui, label: &str, tall: f32, role: Role) -> Response
 
 /// AU9: Show me's mark: a ring round a control, clear of its edge.
 pub fn ring(ui: &Ui, around: egui::Rect) -> egui::Rect {
+    ring_on(ui.painter(), around)
+}
+
+fn ring_on(painter: &egui::Painter, around: egui::Rect) -> egui::Rect {
     let ring = around.expand(RING_GAP);
-    ui.painter().rect_stroke(ring, R_CONTROL + RING_GAP as u8, Stroke::new(2.0, BLUE_DEEP), StrokeKind::Outside);
+    painter.rect_stroke(ring, R_CONTROL + RING_GAP as u8, Stroke::new(2.0, BLUE_DEEP), StrokeKind::Outside);
     ring.expand(2.0)
+}
+
+/// AU21: a task's chain this frame (spec 5.5): the wish, ancestor first, the
+/// first rect each target found, and where the ring stood last.
+#[derive(Clone, Default)]
+struct Marks {
+    wish: Vec<Target>,
+    found: Vec<Option<egui::Rect>>,
+    stands: Option<(Target, egui::Rect)>,
+    /// Rows drawn this frame, and those a scroll has come to already.
+    laid: Vec<Target>,
+    scrolled: Vec<Target>,
+}
+
+fn marks_id() -> egui::Id {
+    egui::Id::new("lesson_marks")
+}
+
+/// AU21: the chain this frame's marks look for. Called once, before anything
+/// that can mark is drawn.
+pub fn wish(ctx: &egui::Context, chain: Vec<Target>) {
+    ctx.data_mut(|d| {
+        let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
+        let laid = std::mem::take(&mut marks.laid);
+        marks.scrolled.retain(|t| laid.contains(t) && chain.contains(t));
+        marks.found = vec![None; chain.len()];
+        marks.wish = chain;
+    });
+}
+
+/// AU21: `target` stands at `rect`, if the wish asks for it. Nothing here reads
+/// a word. The first rect of a frame holds, so a row of an open menu stands
+/// before the word that opened it, however late that word is drawn. A control
+/// scrolled away has no size, and the canvas in its own OS window is not on
+/// this screen.
+pub fn mark(ctx: &egui::Context, rect: egui::Rect, target: Target) {
+    if !rect.is_positive() || ctx.viewport_id() != egui::ViewportId::ROOT {
+        return;
+    }
+    ctx.data_mut(|d| {
+        let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
+        if let Some(i) = marks.wish.iter().position(|t| *t == target) {
+            marks.found[i].get_or_insert(rect);
+        }
+    });
+}
+
+/// AU21: [`mark`] for a control in a body that scrolls. Scrolled away it has no
+/// rect, so a wished one is brought into view: once, each time it comes to be
+/// drawn, and the person's own scroll stands after that.
+pub fn mark_row(resp: &Response, target: Target) {
+    let ctx = &resp.ctx;
+    let hidden = !resp.interact_rect.contains_rect(resp.rect) && ctx.viewport_id() == egui::ViewportId::ROOT;
+    let reveal = ctx.data_mut(|d| {
+        let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
+        if !marks.wish.contains(&target) {
+            return false;
+        }
+        marks.laid.push(target);
+        let reveal = hidden && !marks.scrolled.contains(&target);
+        if reveal {
+            marks.scrolled.push(target);
+        }
+        reveal
+    });
+    if reveal {
+        resp.scroll_to_me_animation(None, egui::style::ScrollAnimation::none());
+    }
+    mark(ctx, resp.interact_rect, target);
+}
+
+/// AU21: the ring on the chain's last target with a rect (spec 5.8), on a bare
+/// painter: no `Area`, so `layer_id_at` skips it and the pen passes (R15).
+/// `Target::Paper` is found and rings nothing.
+pub fn stroke_ring(ctx: &egui::Context) {
+    let stands = ctx.data_mut(|d| {
+        let marks = d.get_temp_mut_or_default::<Marks>(marks_id());
+        let last = marks.found.iter().rposition(Option::is_some);
+        marks.stands = last.and_then(|i| Some((marks.wish[i], marks.found[i]?)));
+        marks.stands
+    });
+    if let Some((_, rect)) = stands.filter(|(target, _)| *target != Target::Paper) {
+        let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("lesson_ring"));
+        ring_on(&ctx.layer_painter(layer), rect);
+    }
+}
+
+/// AU21: where the ring stood at the end of the last frame.
+#[cfg(test)]
+pub fn ring_stands(ctx: &egui::Context) -> Option<(Target, egui::Rect)> {
+    ctx.data_mut(|d| d.get_temp_mut_or_default::<Marks>(marks_id()).stands)
 }
 
 /// AU20: a lesson on the Lessons page: a `WELL` card at `rect`, its `picture`

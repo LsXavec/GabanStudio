@@ -23,6 +23,7 @@ use anim_core::xsheet::Exposure;
 use eframe::egui;
 
 use crate::doc::AppState;
+use crate::lessons::Target;
 use crate::plate;
 
 // ---- The audio clock -----------------------------------------------------------
@@ -1126,8 +1127,9 @@ impl crate::Editor {
                 );
                 ui.separator();
                 let ready = form.mouths_set().is_some();
-                if ui
-                    .add_enabled(ready && safe, egui::Button::new("generate"))
+                let button = ui.add_enabled(ready && safe, egui::Button::new("generate"));
+                plate::mark(ui.ctx(), button.interact_rect, Target::Named("lip.generate"));
+                if button
                     .on_hover_text("write the mouths into the column over the frames (one undo step)")
                     .on_disabled_hover_text(if ready {
                         "not mid-stroke"

@@ -543,17 +543,42 @@ impl EditorHarness {
     /// a panic that prints the whole tree.
     #[track_caller]
     pub fn click(&mut self, label: &str) {
-        self.click_at(label, 0, true);
+        self.click_named(label, 0, true);
     }
 
     /// Click the n-th of several widgets sharing a name.
     #[track_caller]
     pub fn click_nth(&mut self, label: &str, n: usize) {
-        self.click_at(label, n, false);
+        self.click_named(label, n, false);
+    }
+
+    /// AU21: where the lesson's ring stands, and on what. `Target::Paper` is
+    /// found and rings nothing, so `ring_rect` has no rect for it.
+    pub fn ring_stands(&self) -> Option<(crate::lessons::Target, egui::Rect)> {
+        crate::plate::ring_stands(&self.h.ctx)
+    }
+
+    pub fn ring_rect(&self) -> Option<egui::Rect> {
+        let on_paper = |(target, _): &(_, _)| *target == crate::lessons::Target::Paper;
+        self.ring_stands().filter(|stands| !on_paper(stands)).map(|(_, rect)| rect)
+    }
+
+    /// AU21: in points, the rect of each widget with this name.
+    pub fn rects(&self, label: &str) -> Vec<egui::Rect> {
+        let ppp = self.h.ctx.pixels_per_point();
+        let points = |r: egui::Rect| egui::Rect::from_min_max((r.min.to_vec2() / ppp).to_pos2(), (r.max.to_vec2() / ppp).to_pos2());
+        self.h.query_all_by_label(label).map(|node| points(node.rect())).collect()
+    }
+
+    /// AU21: the lesson driver's one click, and only where the ring stands.
+    #[track_caller]
+    pub fn click_at(&mut self, rect: egui::Rect) {
+        assert_eq!(self.ring_rect(), Some(rect), "a lesson's click lands where the ring stands");
+        self.click_pos(rect.center());
     }
 
     #[track_caller]
-    fn click_at(&mut self, label: &str, n: usize, only: bool) {
+    fn click_named(&mut self, label: &str, n: usize, only: bool) {
         let count = self.h.query_all_by_label(label).count();
         if count == 0 || (only && count > 1) || n >= count {
             panic!(
@@ -2562,8 +2587,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 1027;
-    const ASSERT_FLOOR: usize = 6400;
+    const TEST_FLOOR: usize = 1036;
+    const ASSERT_FLOOR: usize = 6448;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

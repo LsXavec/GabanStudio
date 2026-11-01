@@ -13,6 +13,7 @@ use eframe::egui;
 
 use crate::config::Action;
 use crate::doc::AppState;
+use crate::lessons::Target;
 use crate::plate::{self, Card as _};
 use crate::AppRequest;
 use crate::render_queue::{self, JobState, Landed};
@@ -244,13 +245,16 @@ fn lead_choice(ui: &mut egui::Ui, state: &mut AppState, label: &str, action: Act
     if panel.ring {
         panel.ring_at = Some(plate::ring(ui, resp.rect));
     }
+    plate::mark_row(&resp, Target::Action(action));
     if resp.card(action.help()).clicked() {
         panel.ask(Ask::Do(action));
     }
 }
 
 fn choice(ui: &mut egui::Ui, state: &mut AppState, action: Action) {
-    if plate::choice_card(ui, action.label(), CHOICE_H).card(action.help()).clicked() {
+    let resp = plate::choice_card(ui, action.label(), CHOICE_H);
+    plate::mark_row(&resp, Target::Action(action));
+    if resp.card(action.help()).clicked() {
         state.render_queue.panel.ask(Ask::Do(action));
     }
 }
@@ -297,7 +301,9 @@ fn transparent(ui: &mut egui::Ui, state: &mut AppState) {
         ui.scroll_to_cursor(Some(egui::Align::TOP));
     }
     let card = "A still keeps its see-through background: a PNG with no white behind it.";
-    if plate::latch(ui, &mut panel.transparent, TRANSPARENT).card(card).changed() {
+    let latch = plate::latch(ui, &mut panel.transparent, TRANSPARENT);
+    plate::mark_row(&latch, Target::Named("export.transparent"));
+    if latch.card(card).changed() {
         panel.ring = false;
     }
 }
@@ -434,7 +440,9 @@ fn job_list(ui: &mut egui::Ui, state: &mut AppState, wide: f32, room: f32) {
 fn fold(ui: &mut egui::Ui, state: &mut AppState, more_default: bool, wide: f32) -> bool {
     let panel = &mut state.render_queue.panel;
     let open = panel.more.unwrap_or(more_default);
-    if !plate::ghost_row(ui, MORE_OPTIONS, wide, Some(open)).clicked() {
+    let row = plate::ghost_row(ui, MORE_OPTIONS, wide, Some(open));
+    plate::mark_row(&row, Target::Named("export.more"));
+    if !row.clicked() {
         return open;
     }
     panel.ring = false;

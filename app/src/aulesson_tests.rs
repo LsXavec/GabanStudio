@@ -180,7 +180,7 @@ fn stroke() -> Stroke {
 }
 
 /// Texels on the armed layer, `rgba` in half-float bits.
-fn texels(h: &mut EditorHarness, cells: &[(i32, i32)], alpha: u16) {
+pub(crate) fn texels(h: &mut EditorHarness, cells: &[(i32, i32)], alpha: u16) {
     let state = h.state_mut();
     let t = TILE as i32;
     let mut map: std::collections::BTreeMap<(i32, i32), Vec<u16>> = Default::default();

@@ -20,6 +20,7 @@ use egui::{Color32, Pos2, Rect, Sense, pos2, vec2};
 use crate::config::{Action, BrushPreset, LayersConfig, PenConfig, PressureCurve};
 use crate::doc::AppState;
 use crate::icons::Icon;
+use crate::lessons::Target;
 use crate::paint::{self, Dab, PaintLayer, PaintMode};
 use crate::plate::{self, Card};
 
@@ -2293,6 +2294,12 @@ impl CanvasView {
             Some(armed),
             &format!("{} pencil ({digit})", p.name),
         );
+        // AU21: by the preset's stored name, which no rename touches.
+        match p.name.as_str() {
+            "atari" => plate::mark_row(&resp, Target::Named("brush.sketch")),
+            "genga" => plate::mark_row(&resp, Target::Named("brush.clean")),
+            _ => {}
+        }
         if resp.clicked() && !self.stroke_active() {
             if self.tool != CanvasTool::Paint {
                 self.set_tool(CanvasTool::Paint, state);
@@ -3036,7 +3043,7 @@ impl CanvasView {
         // chart toward the next key, and the inbetweens it makes.
         if let Some(here) = state.current_drawing() {
             let busy = self.stroke_active();
-            egui::CollapsingHeader::new("genga · douga").show(ui, |ui| {
+            let fold = egui::CollapsingHeader::new("genga · douga").show(ui, |ui| {
                 let kind = state.cut().drawing_kind(here);
                 value_line(ui, "kind", kind.label().to_string());
                 ui.horizontal_wrapped(|ui| {
@@ -3059,7 +3066,7 @@ impl CanvasView {
                         "chart",
                         chart.as_ref().map_or("none".to_string(), |c| format!("{} marks", c.marks.len())),
                     );
-                    ui.horizontal_wrapped(|ui| {
+                    let presets = ui.horizontal_wrapped(|ui| {
                         for (name, marks, tip) in crate::doc::CHART_PRESETS {
                             if ui.small_button(*name).card(*tip).clicked() && !busy {
                                 state.set_chart(here, marks);
@@ -3072,6 +3079,7 @@ impl CanvasView {
                             state.set_chart(here, &[]);
                         }
                     });
+                    plate::mark_row(&presets.response, Target::Named("options.chart"));
                     // The chart editor: any count of marks, even or closing
                     // up toward one key; then drag a mark on the chart.
                     value_line(ui, "marks", self.chart_count.to_string());
@@ -3101,6 +3109,8 @@ impl CanvasView {
                     state.duplicate_cel();
                 }
             });
+            // AU21: after the body, whose chart row stands first once it is open.
+            plate::mark_row(&fold.header_response, Target::Named("options.chart"));
         }
         ui.add_space(10.0);
         plate::legend(ui, "paper");
@@ -3496,14 +3506,16 @@ impl CanvasView {
     /// Combines with brush or eraser, so Brushes and Tool options share it.
     pub(crate) fn keep_inside_row(&mut self, ui: &mut egui::Ui) {
         let mut lock = self.alpha_lock;
+        let latch = plate::tool_latch(
+            ui,
+            &mut lock,
+            Icon::Lock,
+            crate::vocab::KEEP_INSIDE_STROKES_SHORT,
+            crate::vocab::KEEP_INSIDE_STROKES,
+        );
+        plate::mark_row(&latch, Target::Named("keep.row"));
         crate::menus::hover_tip(
-            plate::tool_latch(
-                ui,
-                &mut lock,
-                Icon::Lock,
-                crate::vocab::KEEP_INSIDE_STROKES_SHORT,
-                crate::vocab::KEEP_INSIDE_STROKES,
-            ),
+            latch,
             Action::ToggleAlphaLock,
             "ink only recolors pixels this layer already has \
             coverage on; the silhouette can't grow",
@@ -3673,6 +3685,7 @@ impl CanvasView {
                 egui::DragValue::new(&mut stab).range(0..=crate::stabilizer::MAX_LEVEL),
             );
             plate::speak(&field, egui::WidgetType::DragValue, None, crate::vocab::STEADY_STROKE);
+            plate::mark_row(&field, Target::Named("steady.row"));
             field.card(
                 "tebure hosei (stabilization): 0 = raw pen; \
                  higher pulls the ink on a longer string",

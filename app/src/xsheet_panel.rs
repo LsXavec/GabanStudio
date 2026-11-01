@@ -11,6 +11,7 @@ use egui::{Color32, Rect, Sense, pos2, vec2};
 use crate::canvas::{props_chip_color, role_chip_color};
 use crate::doc::AppState;
 use crate::icons::Icon;
+use crate::lessons::Target;
 use crate::plate::{self, Card};
 
 const ROW_H: f32 = 18.0;
@@ -1006,6 +1007,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                         }
                     }
                     _ => {}
+                }
+                // AU21: a task's cell, as much of it as the scroll shows. A
+                // row scrolled off marks nothing: the ring waits on its ancestor.
+                for (track, _) in col_ids.iter().enumerate() {
+                    let target = Target::Cell { track: track as u8, frame };
+                    plate::mark(ui.ctx(), cell_of(track).intersect(ui.clip_rect()), target);
                 }
             }
 
@@ -2063,7 +2070,11 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
         ui.horizontal(|ui| {
             let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
             plate::identity_dot(ui.painter(), dot.center(), 3.5, role_chip_color(*role));
-            if plate::detent(ui, on, role.label()).clicked() && !on {
+            let row = plate::detent(ui, on, role.label());
+            if *role == LayerRole::Rough {
+                plate::mark_row(&row, Target::Named("layers.role"));
+            }
+            if row.clicked() && !on {
                 let name = if props.name == props.role.default_name() {
                     role.default_name().to_string()
                 } else {
@@ -2206,6 +2217,15 @@ fn opacity_cells(
     }
 }
 
+/// AU21: the row `layers.eye` and `layers.role` stand on: a task over the layer
+/// under the pen means the art beside it, the sketch below the armed layer, and
+/// with no art there the armed layer itself.
+fn ringed_layer(state: &AppState, armed: Option<LayerId>) -> Option<LayerId> {
+    let layers = state.strip_layers();
+    let art = layers.iter().find(|(_, l)| Some(l.id) != armed && !l.raster.tiles.is_empty());
+    art.map(|(_, l)| l.id).or(armed)
+}
+
 pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     /// Under this width a row's opacity moves to a line of its own: the
     /// furniture, the 48 name cell and the percentage come to this.
@@ -2220,7 +2240,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         plate::legend(ui, "cel layers");
         let have_cel = state.own_key_drawing().is_some();
         let at_cap = state.strip_layers().len() >= 8;
-        ui.menu_button("+", |ui| {
+        let add = ui.menu_button("+", |ui| {
             if at_cap {
                 ui.label(egui::RichText::new("layer cap (8) reached").color(plate::legend_dim()).small());
                 return;
@@ -2247,16 +2267,15 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 }
             }
             ui.separator();
-            if ui
-                .button(egui::RichText::new("custom layer").color(plate::LEGEND))
-                .clicked()
-            {
+            let custom = ui.button(egui::RichText::new("custom layer").color(plate::LEGEND));
+            plate::mark(ui.ctx(), custom.interact_rect, Target::Named("layers.custom"));
+            if custom.clicked() {
                 state.layer_add_role(anim_core::model::LayerRole::Custom);
                 ui.close();
             }
-        })
-        .response
-        .card("add a layer — it lands at its role's pipeline position");
+        });
+        plate::mark(ui.ctx(), add.response.interact_rect, Target::Named("layers.add"));
+        add.response.card("add a layer — it lands at its role's pipeline position");
 
         // PSD-cel-layers Stage 4: the stack presets. Picking binds the
         // CURRENT room's new cels; apply/conform only ever ADD layers.
@@ -2356,6 +2375,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         return;
     }
     let armed_id = state.active_layer_id();
+    let ringed = ringed_layer(state, armed_id);
     let narrow = ui.available_width() < NARROW_STRIP;
     for (row_i, (lid, name, visible, opacity)) in rows.iter().enumerate() {
         let is_active = armed_id == Some(*lid);
@@ -2364,7 +2384,11 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // Eye: visibility toggle (one click = one undo step). Hidden is a
             // configuration, so the struck eye dims — it does not go red.
             let eye_icon = if *visible { Icon::Eye } else { Icon::EyeOff };
-            if plate::icon_button(ui, eye_icon, "", "show / hide").clicked() {
+            let eye = plate::icon_button(ui, eye_icon, "", "show / hide");
+            if ringed == Some(*lid) {
+                plate::mark_row(&eye, Target::Named("layers.eye"));
+            }
+            if eye.clicked() {
                 state.layer_set_props(
                     *lid,
                     LayerProps {
@@ -2426,6 +2450,10 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             egui::Popup::menu(&dot_resp).show(|ui| {
                 layer_card(ui, state, *lid, &props, is_active);
             });
+            // AU21: after the card, whose Rough row stands first while it is open.
+            if ringed == Some(*lid) {
+                plate::mark_row(&dot_resp, Target::Named("layers.role"));
+            }
 
             // Name: click = activate, double-click = rename — in a FIXED
             // cell (spec defect 10): the columns after it never drift with

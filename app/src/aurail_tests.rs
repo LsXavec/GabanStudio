@@ -12,7 +12,7 @@ use crate::menus;
 use crate::rail::{self, OverlayArgs, Tier};
 use crate::testkit::{EditorHarness, PanelHarness};
 use crate::workspace::Stage;
-use crate::{PROBE_ROOMS, PROBE_SCALES, Pane, ProbeRoom, plate, sample, vocab};
+use crate::{LESSON_ROOMS, PROBE_ROOMS, PROBE_SCALES, Pane, ProbeRoom, plate, sample, vocab};
 
 const SIZES: [(f32, f32); 4] = [(1600.0, 900.0), (1280.0, 800.0), (1280.0, 720.0), (1024.0, 640.0)];
 /// The floors of spec 4.1, by `SIZES`. They are never lowered.
@@ -51,7 +51,7 @@ fn centre(h: &EditorHarness, name: &str) -> Pos2 {
 
 /// A window of exactly these points: `window` zooms out a short one, so its
 /// layout never comes to a small tier.
-fn sized(harness: &mut EditorHarness, w: f32, h: f32) {
+pub(crate) fn sized(harness: &mut EditorHarness, w: f32, h: f32) {
     harness.kit_mut().set_size(vec2(w, h));
     harness.kit_mut().set_pixels_per_point(1.0);
     settle(harness);
@@ -548,59 +548,76 @@ fn aurail_rail_fits_every_room() {
             for stored in PROBE_SCALES {
                 window(&mut h, w, tall, stored);
                 for room in PROBE_ROOMS {
-                    room.enter(h.editor_mut());
-                    settle(&mut h);
-                    let at = format!("{w}×{tall} at {stored} in {}", room.name());
-                    // The Brush maker and 3D switch the rail off.
-                    let off = matches!(room, ProbeRoom::Forge | ProbeRoom::Layout3d);
-                    let hosted = !off && crate::visible_panes(&h.editor().dock).contains(&Pane::Canvas);
-                    let host = h.editor().canvas.dbg_rect;
-                    let reference = rail::reference(host.height(), h.editor().strip_closed());
-                    let tier = Tier::of(reference, host.width());
-                    let Some(rail) = island(&h) else {
-                        if hosted && tier != Tier::Hidden {
-                            found.push(format!("{at}: no rail in {host:?}"));
-                        }
-                        continue;
-                    };
-                    if !hosted {
-                        found.push(format!("{at}: a rail where none stands"));
-                        continue;
-                    }
-                    if !host.contains_rect(rail) {
-                        found.push(format!("{at}: {rail:?} out of {host:?}"));
-                    }
-                    let keys = rail_controls(&h);
-                    let total = rail_total(tier, keys.len());
-                    if (rail.height() - total).abs() > 0.5 {
-                        found.push(format!("{at}: {tier:?} is {}, not {total}", rail.height()));
-                    }
-                    if keys.iter().any(|c| c.height() < 24.0) {
-                        found.push(format!("{at}: a key under 24"));
-                    }
-                    // Every verb in at most two taps: the dots, and the key.
-                    if tier == Tier::Pocket {
-                        let dots = centre(&h, "More tools");
-                        h.pen_tap(dots);
-                        settle(&mut h);
-                        let manga = matches!(room, ProbeRoom::Stage(Stage::Manga));
-                        let nine = if manga { Some("Panel tool") } else { h.editor().full_band.then_some("Flip") };
-                        for held in ["Hand", "Size", "Layers"].into_iter().chain(nine) {
-                            if !h.has(held) {
-                                found.push(format!("{at}: {held} is not behind the dots"));
-                            }
-                        }
-                        h.pen_tap(dots);
-                        settle(&mut h);
-                        if h.has("Size") {
-                            found.push(format!("{at}: the dots do not close what they opened"));
-                        }
-                    }
+                    rail_fits_in(&mut h, room, format!("{w}×{tall} at {stored}"), &mut found);
+                }
+            }
+        }
+        // AU21: and each step with the lesson card beside it. A walk of its
+        // own: these rooms stamp the document's kind, which the rooms above
+        // must not stand on.
+        for (w, tall) in SIZES {
+            for stored in PROBE_SCALES {
+                window(&mut h, w, tall, stored);
+                for room in LESSON_ROOMS {
+                    rail_fits_in(&mut h, room, format!("{w}×{tall} at {stored}"), &mut found);
                 }
             }
         }
     }
     assert!(found.is_empty(), "{} findings:\n{}", found.len(), found.join("\n"));
+}
+
+/// The rail in `room`, against what it is meant to come to.
+fn rail_fits_in(h: &mut EditorHarness, room: ProbeRoom, size: String, found: &mut Vec<String>) {
+    room.enter(h.editor_mut());
+    settle(h);
+    let at = format!("{size} in {}", room.name());
+    // The Brush maker and 3D switch the rail off.
+    let off = matches!(room, ProbeRoom::Forge | ProbeRoom::Layout3d);
+    let hosted = !off && crate::visible_panes(&h.editor().dock).contains(&Pane::Canvas);
+    let host = h.editor().canvas.dbg_rect;
+    let reference = rail::reference(host.height(), h.editor().strip_closed());
+    let tier = Tier::of(reference, host.width());
+    let Some(rail) = island(h) else {
+        if hosted && tier != Tier::Hidden {
+            found.push(format!("{at}: no rail in {host:?}"));
+        }
+        return;
+    };
+    if !hosted {
+        found.push(format!("{at}: a rail where none stands"));
+        return;
+    }
+    if !host.contains_rect(rail) {
+        found.push(format!("{at}: {rail:?} out of {host:?}"));
+    }
+    let keys = rail_controls(h);
+    let total = rail_total(tier, keys.len());
+    if (rail.height() - total).abs() > 0.5 {
+        found.push(format!("{at}: {tier:?} is {}, not {total}", rail.height()));
+    }
+    if keys.iter().any(|c| c.height() < 24.0) {
+        found.push(format!("{at}: a key under 24"));
+    }
+    // Every verb in at most two taps: the dots, and the key.
+    if tier == Tier::Pocket {
+        let dots = centre(h, "More tools");
+        h.pen_tap(dots);
+        settle(h);
+        // AU21: the card in the Manga step keeps that step's key.
+        let manga = matches!(room, ProbeRoom::Stage(Stage::Manga) | ProbeRoom::Lesson(_, _, Stage::Manga));
+        let nine = if manga { Some("Panel tool") } else { h.editor().full_band.then_some("Flip") };
+        for held in ["Hand", "Size", "Layers"].into_iter().chain(nine) {
+            if !h.has(held) {
+                found.push(format!("{at}: {held} is not behind the dots"));
+            }
+        }
+        h.pen_tap(dots);
+        settle(h);
+        if h.has("Size") {
+            found.push(format!("{at}: the dots do not close what they opened"));
+        }
+    }
 }
 
 /// The Pocket tier by pen: the dots hold Hand, Size, Layers and Flip, each a
@@ -1492,7 +1509,7 @@ fn aurail_mirror_stands_with_the_sheet() {
     window(&mut animation, 1600.0, 900.0, 1.0);
     assert!(animation.editor().in_plan() && mirror(&animation).is_none(), "one timeline");
     for h in [&mut h, &mut animation] {
-        for room in PROBE_ROOMS {
+        for room in PROBE_ROOMS.into_iter().chain(LESSON_ROOMS) {
             room.enter(h.editor_mut());
             settle(h);
             let panes = crate::visible_panes(&h.editor().dock);

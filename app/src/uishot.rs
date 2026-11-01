@@ -645,6 +645,34 @@ fn lesson_owed() -> Vec<(String, u32, u32)> {
     LESSON.iter().map(|(name, w, h)| (format!("{name}.png"), *w, *h)).collect()
 }
 
+/// AU21: the ring on a rail key, on a menu's word, on the row that opens.
+const GUIDE: [&str; 3] = ["guide-rail", "guide-menu", "guide-row"];
+
+fn guide_owed() -> Vec<(String, u32, u32)> {
+    let sized = |&(w, h, suffix): &(u32, u32, &str)| GUIDE.map(|state| (format!("{state}{suffix}.png"), w, h));
+    SIZES.iter().flat_map(sized).collect()
+}
+
+fn guide_moments(dir: &Path) {
+    use crate::auguide_tests::stand;
+    use crate::lessons::Target;
+    const RAIL: &[Target] = &[Target::Rail(crate::rail::Key::Size)];
+    const MENU: &[Target] = &[Target::Named("menu.view"), Target::Action(Action::MirrorView)];
+    for (w, tall, suffix) in SIZES {
+        let size = egui::vec2(w as f32, tall as f32);
+        let mut h = EditorHarness::with_gpu_ready();
+        h.kit_mut().set_size(size);
+        stand(&mut h, RAIL, Stage::Drawing);
+        h.shot(size, &dir.join(format!("guide-rail{suffix}.png")));
+        stand(&mut h, MENU, Stage::Drawing);
+        h.shot(size, &dir.join(format!("guide-menu{suffix}.png")));
+        let rect = h.ring_rect().expect("the ring stands on the word");
+        h.click_at(rect);
+        h.run_frames(4);
+        h.shot(size, &dir.join(format!("guide-row{suffix}.png")));
+    }
+}
+
 /// AU7: the lane as it teaches: a hint with its button and dots, under the
 /// fold, beside the sheet, and the longest sentence with `Fix it`; each empty
 /// step; the empty cell's line; and Show me's ring in the Export step.
@@ -1198,6 +1226,8 @@ fn uishot_rooms() {
     check_shots(&dir, &start_owed()).expect("the Start float's moments");
     lesson_card(&dir);
     check_shots(&dir, &lesson_owed()).expect("the lesson card's moments");
+    guide_moments(&dir);
+    check_shots(&dir, &guide_owed()).expect("the ring");
     say_moments(&dir);
     check_shots(&dir, &say_owed()).expect("what the Say line teaches");
     queue_moments(&dir);

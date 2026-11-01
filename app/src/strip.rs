@@ -14,7 +14,9 @@ use eframe::egui;
 use egui::accesskit;
 use egui::{Align2, Color32, CornerRadius, FontId, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
-use crate::doc::{AppState, FINISH_STROKE};
+use crate::doc::{AppState, FINISH_STROKE, drawing_has_art};
+use crate::lesson::color_layer_art;
+use crate::lessons::Target;
 use crate::plate::{self, Card};
 use crate::rail::STRIP_H;
 
@@ -498,6 +500,15 @@ fn sheet_rect(ruler: Ruler, top: f32, sheet: &Sheet) -> Rect {
     Rect::from_min_size(pos2(ruler.x(sheet.from), top), vec2(width, SHEET_H))
 }
 
+/// AU21: `strip.next`: where the first sheet stands whose drawing has ink and
+/// no color (spec 5.5). `tap` lands on a run's first frame, so Fill never meets
+/// a held one.
+fn next_to_color(state: &AppState, sheets: &[Sheet]) -> Option<u32> {
+    let wants = |id| state.cut().drawing(id).is_some_and(|d| drawing_has_art(d) && !color_layer_art(d));
+    let bare = |s: &&Sheet| matches!(s.shows, Exposure::Drawing(id) if wants(id));
+    sheets.iter().find(bare).map(|s| s.from)
+}
+
 /// Each sheet on screen is one accessible control (spec 7.2): the surface
 /// alone would be one large widget.
 fn speak_sheets(
@@ -511,6 +522,7 @@ fn speak_sheets(
 ) {
     let ppp = ui.ctx().pixels_per_point();
     let clip = ui.clip_rect();
+    let next = next_to_color(state, sheets);
     for sheet in sheets {
         let rect = sheet_rect(ruler, top, sheet);
         if !rect.intersects(clip) {
@@ -519,6 +531,9 @@ fn speak_sheets(
         plate::note_strip_sheet(ui, rect);
         let id = resp.id.with(("sheet", sheet.from));
         let at = rect.intersect(clip);
+        if next == Some(sheet.from) {
+            plate::mark(ui.ctx(), at, Target::Named("strip.next"));
+        }
         let name = sheet_name(drawings, sheet);
         ui.ctx().accesskit_node_builder(id, |node| {
             node.set_role(accesskit::Role::Button);

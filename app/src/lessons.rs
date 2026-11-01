@@ -86,11 +86,14 @@ pub enum Show {
     Where,
 }
 
-/// A control the ring can stand on. The ring and its handles come after the
-/// frame, with the rail's keys (spec 5.5, 5.8); `lesson.chip` is read today.
+/// A control the ring can stand on (spec 5.5, 5.8). Each is found by the
+/// `plate::mark` at its own site; `Paper` is found and rings nothing, because
+/// the guide is the pointer there.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Target {
     Action(Action),
+    Rail(crate::rail::Key),
+    Float(crate::floats::Float),
     Pane(crate::workspace::Pane),
     Step(Stage),
     Cell { track: u8, frame: u32 },

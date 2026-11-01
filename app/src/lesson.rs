@@ -232,6 +232,8 @@ pub(crate) struct LessonRun {
     last_frame: u32,
     mirror_seen: bool,
     composite_seen: bool,
+    /// The person pressed the card's button on this task.
+    asked: bool,
     /// `{rest drawing}`, read when the task opened.
     rest: String,
     picture: welcome::Picture,
@@ -394,7 +396,7 @@ fn own_key(cut: &Cut, column: &Column, frame: u32) -> Option<bool> {
     }
 }
 
-fn color_layer_art(d: &Drawing) -> bool {
+pub(crate) fn color_layer_art(d: &Drawing) -> bool {
     d.layers.iter().any(|l| l.props.role == LayerRole::Color && !l.raster.tiles.is_empty())
 }
 
@@ -431,6 +433,7 @@ impl Editor {
             last_frame: state.view.frame,
             mirror_seen: self.canvas.view_mirrored(),
             composite_seen: self.canvas.composite_view,
+            asked: false,
             rest: self.lesson_rest(),
             picture: welcome::Picture::of(&lesson),
             art,
@@ -509,6 +512,7 @@ impl Editor {
         (run.played, run.pass) = (false, None);
         run.mirror_seen = self.canvas.view_mirrored();
         run.composite_seen = self.canvas.composite_view;
+        run.asked = false;
     }
 
     /// AU27: does `done` hold now? State, never Actions or clicks: a route the
@@ -759,8 +763,15 @@ impl Editor {
     }
 
     /// `Show me`: the demonstration lands on the real document, so the task
-    /// ticks as any other. The paper's own traces come with the guide.
+    /// ticks as any other. The paper's own traces come with the guide. AU21:
+    /// `Show me where` rings the control, and that is all an Experienced
+    /// lesson's button does (spec 5.2).
     fn lesson_show(&mut self, ctx: &egui::Context) {
+        let Some(run) = self.lesson.as_mut() else { return };
+        run.asked = true;
+        if run.lesson.class == Class::Experienced {
+            return;
+        }
         match self.lesson.as_ref().and_then(LessonRun::current).map(|t| t.show) {
             Some(Show::Perform(action)) => {
                 self.invoke(action, ctx);
@@ -803,14 +814,33 @@ impl Editor {
         word(token).map(str::to_string)
     }
 
+    /// The task's own step has been left. A task that is the pill stays itself.
+    fn lesson_wandered(&self, task: &Task) -> bool {
+        !matches!(task.done, Done::OnStep(_)) && self.stage != Some(task.step)
+    }
+
+    /// AU21: what the ring looks for this frame, ancestor first: the way back
+    /// when the step was left (spec 5.10), else the task's own chain, from its
+    /// start, and in an Experienced lesson only once asked (spec 5.2).
+    pub(crate) fn lesson_chain(&self) -> Vec<Target> {
+        let Some(run) = self.lesson.as_ref() else { return Vec::new() };
+        let Some(task) = run.current() else { return Vec::new() };
+        if self.lesson_wandered(task) {
+            return vec![Target::Step(task.step)];
+        }
+        if run.lesson.class == Class::Experienced && !run.asked {
+            return Vec::new();
+        }
+        task.ring.to_vec()
+    }
+
     /// AU27: the sentence the card stands on. The wander line takes the
     /// title's place when the task's own step has been left (spec 5.10), and
     /// `miss` the sentence once the act landed and the outcome did not.
     pub(crate) fn lesson_lines(&self, run: &LessonRun, ctx: &egui::Context) -> Option<LessonLines> {
         let task = run.current()?;
         let words = |text: &str| resolve(text, |t| self.lesson_word(run, t, ctx));
-        let on_step = matches!(task.done, Done::OnStep(_));
-        let wander = (!on_step && self.stage != Some(task.step)).then(|| {
+        let wander = self.lesson_wandered(task).then(|| {
             format!("Go back to {}", self.step_name(task.step))
         });
         let acted = self.state.strokes_done != run.base.strokes || self.state.fills_done != run.base.fills;
@@ -888,7 +918,9 @@ impl Editor {
                 }
                 if chip && !finished {
                     ui.add_space(CARD_GAP);
-                    if plate::swatch(ui, plate::LESSON_NIGHT, armed, NIGHT).clicked() {
+                    let swatch = plate::swatch(ui, plate::LESSON_NIGHT, armed, NIGHT);
+                    plate::mark_row(&swatch, Target::Named(CHIP));
+                    if swatch.clicked() {
                         self.canvas.brush_color = night;
                     }
                 }
