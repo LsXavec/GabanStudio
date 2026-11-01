@@ -271,6 +271,16 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     let shown: Vec<CutId> = cards.iter().map(|c| c.at.cut).collect();
     refresh_thumbs(ui.ctx(), state, scene_id, &shown, gesture_safe);
     plate::legend(ui, vocab::SHOTS).on_hover_text(vocab::with_studio_word(vocab::SHOTS, "Every shot of the scene, by its status."));
+    // AU15: a scene of one shot says so, and offers the next (spec 8.4),
+    // ahead of the fold.
+    if total == 1 {
+        ui.label(egui::RichText::new(ONE_SHOT).color(plate::legend_dim()));
+        let add = ui.button("Add shot").on_hover_text("Add a shot to this scene.");
+        plate::speak(&add, egui::WidgetType::Button, None, "Add shot to this scene");
+        if add.clicked() && gesture_safe {
+            state.new_cut(scene_id);
+        }
+    }
     // AU15: the cards and their status stand; the filters and exports fold.
     let more = plate::more_row(ui, &mut state.panel_more, plate::MORE_SHOTS, vocab::MENU_MORE);
     // Filters.
@@ -309,7 +319,10 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     // Export does (D6); above the cards, so they never scroll away.
     let name = state.cut().name.clone();
     ui.horizontal_wrapped(|ui| {
-        ui.label(format!("{} of {} shot(s)", cards.len(), total));
+        // AU15: a lone shot has its sentence above.
+        if total > 1 {
+            ui.label(format!("{} of {} shot(s)", cards.len(), total));
+        }
         if !more {
             return;
         }
@@ -331,15 +344,6 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             state.board.asked.push(Action::ExportCutAsProject);
         }
     });
-    // AU15: a scene of one shot says so, and offers the next (spec 8.4).
-    if total == 1 {
-        ui.label(egui::RichText::new(ONE_SHOT).color(plate::legend_dim()));
-        let add = ui.button("Add shot").on_hover_text("Add a shot to this scene.");
-        plate::speak(&add, egui::WidgetType::Button, None, "Add shot to this scene");
-        if add.clicked() && gesture_safe {
-            state.new_cut(scene_id);
-        }
-    }
     ui.separator();
     let fps = state.engine.project.fps;
     let mut open: Option<CutId> = None;
@@ -674,7 +678,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
         let r = plate::text_field(
             ui,
             egui::TextEdit::singleline(&mut state.board.target)
-                .hint_text("target MM:SS+FF")
+                .hint_text("MM:SS+FF")
                 .desired_width(110.0),
         );
         if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {

@@ -336,7 +336,7 @@ const LATCH_BOX: f32 = 16.0;
 const LATCH_TEXT_X: f32 = LATCH_BOX + 6.0;
 /// A docked pane's inner margin. `window_margin` is a float's; a pane keeps
 /// the room it always had, because the sheet's rows live in it.
-const PANE_MARGIN: i8 = 6;
+pub const PANE_MARGIN: i8 = 6;
 
 // The radii (spec 2.6). Paper is square; a stadium takes half its height.
 pub const R_DIALOG: u8 = 14;
@@ -347,6 +347,14 @@ pub const R_INPUT: u8 = 6;
 pub const R_SHEET: u8 = 4;
 /// A stadium: egui clamps a radius to half the shape's height.
 pub const R_PILL: u8 = 64;
+/// AU15: a dock's tab bar, and how far its tabs stand in from the bar's edges,
+/// so they read as the pills of the step bar over them.
+pub const TAB_BAR_H: f32 = 34.0;
+pub const TAB_INSET: i8 = 3;
+/// Half a tab's height, the full stadium of 2.6.
+pub const TAB_RADIUS: u8 = 14;
+/// AU15: how much of a scroll handle stands at rest.
+pub const SCROLL_CUE: f32 = 0.5;
 
 /// The pixel-snapping law. Every rule, notch, dot and 1px edge is snapped;
 /// unsnapped hairlines shimmer under scroll at ppp 1.25 and this direction
@@ -528,6 +536,9 @@ pub fn style() -> egui::Style {
     s.interact_size.y = CTRL_H;
     // Eleven rows at a control's height: a combo opens whole, not to a fold.
     s.combo_height = 352.0;
+    // AU15: a list that runs past its edge shows it at rest, not only under a
+    // hover: the handle is what says the word cut there can be reached.
+    s.scroll.dormant_handle_opacity = SCROLL_CUE;
 
     style.interaction.selectable_labels = false;
     style.interaction.tooltip_delay = 0.35;
@@ -929,16 +940,19 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     dock.tab.tab_body.inner_margin = egui::Margin::same(PANE_MARGIN);
     dock.tab_bar.bg_fill = DESK;
     dock.tab_bar.hline_color = RULE;
-    dock.tab_bar.corner_radius = CornerRadius::same(R_CONTROL);
+    // Desk on the desk: rounding it paints nothing, at a price.
+    dock.tab_bar.corner_radius = CornerRadius::ZERO;
+    // A ghost at rest has no fill and an outline none would see: an outline in
+    // a tab's own fill costs a room hundreds of vertices for nothing.
     let quiet = [&mut dock.tab.inactive, &mut dock.tab.inactive_with_kb_focus];
     for tab in quiet {
-        tab.bg_fill = DESK;
+        tab.bg_fill = Color32::TRANSPARENT;
         tab.text_color = INK2;
-        tab.outline_color = DESK;
+        tab.outline_color = Color32::TRANSPARENT;
     }
     dock.tab.hovered.bg_fill = WELL;
     dock.tab.hovered.text_color = INK;
-    dock.tab.hovered.outline_color = WELL;
+    dock.tab.hovered.outline_color = Color32::TRANSPARENT;
     let lit = [
         &mut dock.tab.active,
         &mut dock.tab.focused,
@@ -948,8 +962,11 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
     for tab in lit {
         tab.bg_fill = BLUE_WASH;
         tab.text_color = BLUE_DEEP;
-        tab.outline_color = BLUE_WASH;
+        tab.outline_color = Color32::TRANSPARENT;
     }
+    // A stadium the bar's height less its inset, exactly: egui_dock joins a tab
+    // to its body along the bottom between the corners it is told of.
+    let stadium = CornerRadius::same(TAB_RADIUS);
     for tab in [
         &mut dock.tab.active,
         &mut dock.tab.focused,
@@ -959,9 +976,12 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
         &mut dock.tab.inactive_with_kb_focus,
         &mut dock.tab.hovered,
     ] {
-        tab.corner_radius = CornerRadius::same(R_CONTROL);
+        tab.corner_radius = stadium;
     }
     dock.tab.tab_body.stroke = Stroke::NONE;
+    // Its top corners stand square under the bar, which rounds them: a corner
+    // nobody sees costs a room's panes their vertices all the same.
+    dock.tab.tab_body.corner_radius = CornerRadius { nw: 0, ne: 0, sw: R_CONTROL, se: R_CONTROL };
     dock
 }
 
@@ -2164,17 +2184,17 @@ pub fn more_name(key: &str) -> &'static str {
         MORE_EPISODE => "More in Episode",
         MORE_3D => "More in 3D",
         MORE_MANGA => "More in Manga",
-        MORE_BRUSHES => "More in Brushes",
+        MORE_BRUSHES => "More settings",
         _ => "More options",
     }
 }
 
 /// AU15: egui_dock scrolls a tab bar too full for its leaf, over the body it
-/// tops, so the bar's words are a viewport's to cut.
+/// tops, so the bar's words are a viewport's to cut: that bar and no wider.
 pub fn note_tab_bar(ui: &Ui) {
     let body = ui.clip_rect();
-    let bar = egui::Rect::from_min_max(body.left_top() - egui::vec2(0.0, 40.0), body.right_top());
-    note_viewport(ui, bar, [true, false]);
+    let bar = egui::Rect::from_min_max(body.left_top() - egui::vec2(0.0, TAB_BAR_H), body.right_top());
+    note_viewport(ui, bar.shrink2(egui::vec2(f32::from(TAB_INSET) + 1.0, 0.0)), [true, false]);
 }
 
 impl Default for PanelMore {
@@ -2200,12 +2220,23 @@ pub fn fold_row_width(ui: &Ui, label: &str) -> f32 {
     words.size().x + 2.0 * ROW_PAD + ICON + 4.0
 }
 
-/// AU15: a panel in a slot smaller than its minimum keeps the minimum and
-/// scrolls as a whole, on the axes it does not fit. A slot it fits costs nothing.
-pub fn keep_minimum<R>(ui: &mut Ui, min: Vec2, add: impl FnOnce(&mut Ui) -> R) -> R {
+/// AU15: a panel in its slot, by its policy. Below its minimum it keeps the
+/// minimum and scrolls as a whole, and a panel of words also scrolls whatever
+/// outgrows a slot above it. Its own scrolls inside stand at the slot's size,
+/// so only true overflow ever reaches this one. A view that pans costs nothing
+/// in a slot it fits.
+pub fn keep_minimum<R>(
+    ui: &mut Ui,
+    min: Vec2,
+    policy: crate::workspace::PaneScroll,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
     use egui::scroll_area::ScrollSource;
     let slot = ui.available_size();
-    let axes = [slot.x < min.x, slot.y < min.y];
+    let axes = match policy {
+        crate::workspace::PaneScroll::Pans => [slot.x < min.x, slot.y < min.y],
+        _ => [true, true],
+    };
     if axes == [false, false] {
         return add(ui);
     }
@@ -2222,7 +2253,12 @@ pub fn keep_minimum<R>(ui: &mut Ui, min: Vec2, add: impl FnOnce(&mut Ui) -> R) -
             })
             .inner
         });
-    note_viewport(ui, scroll.inner_rect, axes);
+    // Only the axes that really run over: the audit excuses a viewport's edge
+    // on those alone.
+    let over = [0, 1].map(|d| axes[d] && scroll.content_size[d] > scroll.inner_rect.size()[d] + 0.5);
+    if over != [false, false] {
+        note_viewport(ui, scroll.inner_rect, over);
+    }
     scroll.inner
 }
 
@@ -2512,8 +2548,10 @@ pub fn swatch_cell(ui: &mut Ui, size: Vec2, color: Color32, armed: bool, name: &
     if ui.is_rect_visible(rect) {
         let p = ui.painter();
         let well = rect.shrink(3.0);
-        p.rect_filled(well, R_SHEET, color);
-        p.rect_stroke(well, R_SHEET, Stroke::new(1.0, at_rest(ui, INK3)), StrokeKind::Outside);
+        // One shape, its edge drawn inside the rect a point larger, as it stood
+        // outside the well: a row of ten as two shapes each costs 1,000 vertices.
+        let edge = Stroke::new(1.0, at_rest(ui, INK3));
+        p.add(egui::epaint::RectShape::new(well.expand(1.0), R_SHEET + 1, color, edge, StrokeKind::Inside));
         if armed {
             p.rect_stroke(well.expand(2.0), R_INPUT, Stroke::new(2.0, at_rest(ui, BLUE)), StrokeKind::Outside);
         } else if resp.hovered() {
@@ -2845,11 +2883,15 @@ pub fn surface_alpha(ui: &mut Ui, opacity: u8) {
 /// other way to find one. `axes` are the ones that scroll, `[horizontal,
 /// vertical]` as `ScrollArea::new` takes them. The clip audit reads the list
 /// (`note_viewport` sits after every scroll area, a rule test holds that);
-/// it exists only under test.
+/// it exists only under test. AU15: `cue` reads whether a handle stands at
+/// rest here, and a scroll that shows nothing excuses no cut word.
 #[cfg_attr(not(test), allow(unused_variables))]
 pub fn note_viewport(ui: &Ui, inner: egui::Rect, axes: [bool; 2]) {
     #[cfg(test)]
-    note_view(ui, Viewport { rect: inner, reach: inner.expand(ui.visuals().clip_rect_margin), axes });
+    {
+        let reach = inner.expand(ui.visuals().clip_rect_margin);
+        note_view(ui, Viewport { rect: inner, reach, axes, cue: ui.spacing().scroll.dormant_handle_opacity > 0.0 });
+    }
 }
 
 /// AU1: a view panned by hand is a scroll viewport on both axes, with no
@@ -2858,7 +2900,7 @@ pub fn note_viewport(ui: &Ui, inner: egui::Rect, axes: [bool; 2]) {
 #[cfg_attr(not(test), allow(unused_variables))]
 pub fn note_pan_view(ui: &Ui, rect: egui::Rect, reach: egui::Rect) {
     #[cfg(test)]
-    note_view(ui, Viewport { rect, reach, axes: [true, true] });
+    note_view(ui, Viewport { rect, reach, axes: [true, true], cue: true });
 }
 
 /// AU1: a dock pane reports the clip its body draws under, so the clip audit
@@ -2880,6 +2922,21 @@ pub fn note_dock(ui: &Ui, rect: egui::Rect) {
     this_pass(ui.ctx(), |seen| seen.dock = Some(rect));
 }
 
+/// AU15: a dock seam across `rect` at `fraction`, its painted 6 pt: what the
+/// census calls a seam, though its grab runs wider. Only under test.
+#[cfg(test)]
+pub fn note_dock_seam(ui: &Ui, rect: egui::Rect, fraction: f32, across: bool) {
+    let mut seam = rect;
+    if across {
+        let x = rect.left() + rect.width() * fraction;
+        (seam.min.x, seam.max.x) = (x - 3.0, x + 3.0);
+    } else {
+        let y = rect.top() + rect.height() * fraction;
+        (seam.min.y, seam.max.y) = (y - 3.0, y + 3.0);
+    }
+    this_pass(ui.ctx(), |seen| seen.seams.push(seam));
+}
+
 /// AU5: the strip is one surface, and each sheet on it counts as a control
 /// (spec 7.2), so it reports them to the census. Only under test.
 #[cfg_attr(not(test), allow(unused_variables))]
@@ -2897,6 +2954,8 @@ pub struct Viewport {
     pub rect: egui::Rect,
     pub reach: egui::Rect,
     pub axes: [bool; 2],
+    /// Something at rest says this view scrolls: a handle, or the view's own pan.
+    pub cue: bool,
 }
 
 /// One pass's registered viewports, pane bodies and dock.
@@ -2908,6 +2967,7 @@ struct Viewports {
     bodies: Vec<egui::Rect>,
     dock: Option<egui::Rect>,
     sheets: Vec<egui::Rect>,
+    seams: Vec<egui::Rect>,
 }
 
 #[cfg(test)]
@@ -2959,6 +3019,12 @@ pub fn dock_rect(ctx: &egui::Context) -> Option<egui::Rect> {
 #[cfg(test)]
 pub fn strip_sheets(ctx: &egui::Context) -> Vec<egui::Rect> {
     last_pass(ctx).sheets
+}
+
+/// The dock's seams, as painted, in the last finished pass.
+#[cfg(test)]
+pub fn dock_seams(ctx: &egui::Context) -> Vec<egui::Rect> {
+    last_pass(ctx).seams
 }
 
 // ---------------------------------------------------------------------------

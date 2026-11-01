@@ -3298,8 +3298,11 @@ impl CanvasView {
         self.keep_inside_row(ui);
         ui.add_space(4.0);
         // "More settings": the top row holds a word `More`, and a name is one
-        // control's (spec 1.5 rule 9).
-        egui::CollapsingHeader::new("More settings").id_salt("brushes_more").show(ui, |ui| {
+        // control's (spec 1.5 rule 9). AU15: remembered with every other fold.
+        if !plate::more_row(ui, &mut state.panel_more, plate::MORE_BRUSHES, plate::more_name(plate::MORE_BRUSHES)) {
+            return;
+        }
+        ui.indent("brushes_more", |ui| {
             // The fold stands indented, and `set_width` above it is only a
             // floor: a slider of the body's width would widen the float.
             ui.spacing_mut().slider_width = ui.available_width();

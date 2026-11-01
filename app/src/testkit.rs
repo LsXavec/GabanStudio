@@ -2750,8 +2750,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 1230;
-    const ASSERT_FLOOR: usize = 7400;
+    const TEST_FLOOR: usize = 1295;
+    const ASSERT_FLOOR: usize = 7700;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");
@@ -3170,8 +3170,9 @@ mod tests {
         ("doc.rs", "    pub fn undo(", 0xe15edd6f411d2b83),
         ("doc.rs", "    pub fn redo(", 0xcaa16d99af9d7dbd),
         ("doc.rs", "    pub fn undo_to(", 0x387309403f18550e),
-        // AU12: the note `load_from` writes says "saved arrangement".
-        ("workspace.rs", "    pub fn load_from", 0x329c11389bcffa7f),
+        // AU12: the note `load_from` writes says "saved arrangement". AU15: a
+        // leaf saved collapsed opens on load, its corner buttons being gone.
+        ("workspace.rs", "    pub fn load_from", 0xa40e350f8acafe85),
         ("workspace.rs", "    pub fn save_to", 0x18ceee7d714dc4d4),
         // AU4: `seen_pen` latches past the layer gate, and only there.
         // AU22: a pen on `See the page` is refused in that step's words.

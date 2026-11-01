@@ -4820,9 +4820,11 @@ impl AppState {
     }
 
     /// AU15: the drawing the menu's Remove drawing acts on: the one selected
-    /// in the sheet's list, else this frame's.
+    /// in the sheet's list while that list shows, else this frame's. A person
+    /// cannot see what a folded list holds selected.
     pub fn drawing_in_hand(&self) -> Option<DrawingId> {
-        let listed = self.view.selected_drawing.filter(|d| self.cut().drawing(*d).is_some());
+        let shown = self.panel_more.is_open(crate::plate::MORE_SHEET);
+        let listed = self.view.selected_drawing.filter(|d| shown && self.cut().drawing(*d).is_some());
         listed.or_else(|| self.current_drawing())
     }
 

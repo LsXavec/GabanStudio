@@ -523,12 +523,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
         if set.clicked() {
             state.view3d.asked.push(Action::SetCutCameraFromView);
         }
-        crate::plate::more_tag(ui, &mut state.panel_more, crate::plate::MORE_3D, crate::vocab::MENU_MORE);
+        // AU15: the key legend is all it folds, and no model has no view to
+        // take keys.
+        if node.is_some() {
+            crate::plate::more_tag(ui, &mut state.panel_more, crate::plate::MORE_3D, crate::vocab::MENU_MORE);
+        }
     });
     let Some(node) = node else {
         ui.centered_and_justified(|ui| {
             ui.label(
-                egui::RichText::new("no 3D model in this shot — File ▸ Import ▸ Import 3D model…")
+                egui::RichText::new("No 3D model in this shot — File ▸ Import ▸ Import 3D model…")
                     .color(crate::plate::legend_dim()),
             );
         });

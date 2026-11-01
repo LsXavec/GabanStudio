@@ -151,21 +151,8 @@ impl Pane {
         egui::vec2(w, h)
     }
 
-    /// AU15: what `keep_minimum` holds this panel to. Colors rewraps its wells
-    /// to any width. The Export panel's foot is an `egui::Panel`, whose clip is
-    /// its own, so inside a scroll it would paint past the pane: its rows
-    /// scroll by themselves above that foot.
-    pub fn held_size(&self) -> egui::Vec2 {
-        let min = self.min_size();
-        match self {
-            Pane::Palette => egui::vec2(0.0, min.y),
-            Pane::RenderQueue => egui::Vec2::ZERO,
-            _ => min,
-        }
-    }
-
     /// AU15: how this panel takes what does not fit (spec 7.1), said once per
-    /// panel so none is left to chance.
+    /// panel so none is left to chance. `plate::keep_minimum` follows it.
     pub fn scroll_policy(&self) -> PaneScroll {
         match self {
             Pane::Canvas | Pane::NodeGraph | Pane::Viewer(_) | Pane::Curves | Pane::View3D => PaneScroll::Pans,
@@ -186,10 +173,10 @@ impl Pane {
 }
 
 /// AU15: a panel's scroll policy. Below its minimum every panel also scrolls as
-/// a whole; this is what it does inside its minimum.
+/// a whole; this is what it does above it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneScroll {
-    /// The view fits its slot and pans by hand. Nothing in it scrolls.
+    /// The view fits any slot and pans by hand. Nothing in it scrolls.
     Pans,
     /// A list runs down the panel under its fixed rows.
     Rows,
@@ -303,6 +290,17 @@ impl Stage {
         ds
     }
 
+    /// AU15: the Effects step as a person gets it: the graph large and in
+    /// front, and the Result the whole height beside it, with the colors and
+    /// the Export queue a tab behind. `Stage::Composite`'s lower leaf is the
+    /// room's whole overrun of its vertex ceiling (spec section 10).
+    pub fn dock_effects() -> DockState<Pane> {
+        let mut ds = DockState::new(vec![Pane::NodeGraph, Pane::Curves]);
+        let side = vec![Pane::Viewer(0), Pane::Canvas, Pane::Palette, Pane::RenderQueue];
+        ds.main_surface_mut().split_right(NodeIndex::root(), 0.58, side);
+        ds
+    }
+
     /// AU13: `Result beside` on a drawing or a comic, which have no frames to
     /// time, so no sheet (feedback spec 1.4): Layers at the left, the canvas,
     /// and the result over the colors and the paint check.
@@ -339,16 +337,12 @@ impl Stage {
             Stage::Composite => {
                 // The graph large with curves tabbed beside it; the result
                 // viewer (canvas tabbed behind it) and the palette at right,
-                // the render queue (GM11) tabbed beside it and in front
-                // (AU15: the room's budget; the swatches are the Color step's).
+                // the render queue (GM11) tabbed behind it.
                 let mut ds = DockState::new(vec![Pane::NodeGraph, Pane::Curves]);
                 let tree = ds.main_surface_mut();
                 let [_, side] =
                     tree.split_right(NodeIndex::root(), 0.58, vec![Pane::Viewer(0), Pane::Canvas]);
-                let [_, low] = tree.split_below(side, 0.62, vec![Pane::Palette, Pane::RenderQueue]);
-                if let Some(leaf) = tree[low].get_leaf_mut() {
-                    let _ = leaf.set_active_tab(1);
-                }
+                tree.split_below(side, 0.62, vec![Pane::Palette, Pane::RenderQueue]);
                 ds
             }
             Stage::Edit => {
@@ -476,6 +470,25 @@ fn finite_rects(v: &mut serde_json::Value) {
     }
 }
 
+/// AU15: a leaf saved collapsed comes back open: its corner buttons are gone,
+/// so nothing else could open it. The flags are egui_dock's: a leaf's, a
+/// split's and the tree's own.
+fn open_leaves(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map.iter_mut() {
+                match key.as_str() {
+                    "collapsed" | "fully_collapsed" if value.is_boolean() => *value = false.into(),
+                    "collapsed_leaf_count" if value.is_number() => *value = 0.into(),
+                    _ => open_leaves(value),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(open_leaves),
+        _ => {}
+    }
+}
+
 impl Workspace {
     /// AU3: this workspace as every save path writes it. A dock never drawn
     /// holds infinite rects (see [`finite_rects`]); egui_dock has no public
@@ -483,6 +496,7 @@ impl Workspace {
     pub fn normalised(&self) -> serde_json::Result<Workspace> {
         let mut v = serde_json::to_value(self)?;
         finite_rects(&mut v);
+        open_leaves(&mut v);
         serde_json::from_value(v)
     }
 }
@@ -521,6 +535,7 @@ impl Workspaces {
                         for it in items {
                             let mut it = it.clone();
                             finite_rects(&mut it);
+                            open_leaves(&mut it);
                             match serde_json::from_value::<Workspace>(it) {
                                 Ok(w) => list.push(w),
                                 Err(_) => dropped = dropped.map(|n| n + 1),

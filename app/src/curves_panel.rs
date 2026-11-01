@@ -702,13 +702,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
             [pos2(x, plot.top()), pos2(x, plot.bottom())],
             egui::Stroke::new(1.0, plate::rule_beat()),
         );
-        painter.text(
-            pos2(x + 3.0, plot.top() + 2.0),
-            egui::Align2::LEFT_TOP,
-            time_label(s, tstep, fps),
-            numbers.clone(),
-            plate::LEGEND,
-        );
+        // AU15: a time that would run past the plot's edge waits for the
+        // pan that brings it in whole.
+        let time = painter.layout_no_wrap(time_label(s, tstep, fps), numbers.clone(), plate::LEGEND);
+        if x + 3.0 + time.size().x <= plot.right() {
+            painter.galley(pos2(x + 3.0, plot.top() + 2.0), time, plate::LEGEND);
+        }
         let Some(next) = s.checked_add(tstep) else { break };
         s = next;
     }
@@ -797,13 +796,14 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         painter.rect_filled(r, 0.0, plate::LEGEND.gamma_multiply(0.12));
         painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, plate::LEGEND), egui::StrokeKind::Inside);
     }
-    painter.text(
-        plot.right_bottom() + vec2(-6.0, -4.0),
-        egui::Align2::RIGHT_BOTTOM,
-        "Drag points · box select · F frames · right-click: motion · Alt+drag pans · scroll zooms",
+    // AU15: the line wraps in a plot narrower than it, whole at the minimum.
+    let hint = painter.layout(
+        "Drag points · box select · F frames · right-click: motion · Alt+drag pans · scroll zooms".to_string(),
         plate::Role::Small.font(),
         plate::legend_dim(),
+        plot.width() - 12.0,
     );
+    painter.galley(plot.right_bottom() - hint.size() - vec2(6.0, 4.0), hint, plate::legend_dim());
     state.curves.view = Some(view);
 
     // Interpolation and handle modes for the selected keys: the registry's

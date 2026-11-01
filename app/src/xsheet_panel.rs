@@ -27,6 +27,10 @@ const AUDIO_COL_W: f32 = 46.0;
 const MEMO_COL_W: f32 = 96.0;
 /// GM15: a retake note's tick at the memo cell's right edge.
 const NOTE_TICK_W: f32 = 4.0;
+/// AU15: the `+` at the end of the track row.
+const TRACK_PLUS_W: f32 = plate::CTRL_H;
+/// AU15: the sheet's rows keep at least this, the head of the grid and four rows.
+const LEAST_GRID: f32 = 100.0;
 
 /// GM14: the typed entry on the cursor's cell, and the toolbar fields.
 const ENTRY_ID: &str = "gaban_sheet_cell_entry";
@@ -544,14 +548,16 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
 
     // Column tabs (active column = the one the pen draws into).
     ui.horizontal(|ui| {
-        // AU15: the tracks run across under their own scroll, so a sheet of
-        // many never pushes `Details` out of the pane.
+        // AU15: the tracks run across under their own scroll, its handle in
+        // sight, and `+` and `Details` stand at the row's end: a sheet of many
+        // never pushes either out of the pane.
         let fold = plate::fold_row_width(ui, crate::vocab::DETAILS);
-        let room = (ui.available_width() - fold - ui.spacing().item_spacing.x).max(0.0);
+        let gap = ui.spacing().item_spacing.x;
+        let room = (ui.available_width() - fold - TRACK_PLUS_W - 2.0 * gap).max(0.0);
         let tracks = egui::ScrollArea::horizontal()
             .id_salt("sheet_tracks")
             .max_width(room)
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     plate::legend(ui, crate::vocab::TRACKS);
@@ -569,12 +575,12 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                             state.view.active_column = id;
                         }
                     }
-                    if plate::icon_button(ui, Icon::Plus, "", "Add track").clicked() {
-                        state.add_column();
-                    }
                 });
             });
         plate::note_viewport(ui, tracks.inner_rect, [true, false]);
+        if plate::icon_button(ui, Icon::Plus, "", "Add track").clicked() {
+            state.add_column();
+        }
         plate::more_tag(ui, &mut state.panel_more, plate::MORE_SHEET, crate::vocab::DETAILS);
     });
 
@@ -715,17 +721,23 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     // waveform column.
     track_header(ui, state, gesture_safe);
     }
+    keep_shown_track(state);
     let wave = sheet_wave(state);
 
     // AU15: the sheet's tracks run across under one scroll, head and rows
     // together; a wide cut never cuts a column at the pane's edge.
     let view_w = ui.available_width();
-    let across = egui::ScrollArea::horizontal()
-        .id_salt("sheet_across")
-        .auto_shrink([false, false])
-        .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
-        .show(ui, |ui| grid(ui, state, gesture_safe, details, controls, wave, view_w));
-    plate::note_viewport(ui, across.inner_rect, [true, false]);
+    // AU15: `Details` open in a short slot leaves the rows their least, and the
+    // pane's own scroll takes up the rest: they never fold to nothing.
+    let tall = ui.available_height().max(LEAST_GRID);
+    let across = ui.allocate_ui(vec2(view_w, tall), |ui| {
+        egui::ScrollArea::horizontal()
+            .id_salt("sheet_across")
+            .auto_shrink([false, false])
+            .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
+            .show(ui, |ui| grid(ui, state, gesture_safe, details, controls, wave, view_w))
+    });
+    plate::note_viewport(ui, across.inner.inner_rect, [true, false]);
 }
 
 /// The sheet itself: its column heads and its rows.
@@ -1494,12 +1506,8 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     use crate::playback::track_name;
     use anim_core::audio::{self, MAX_GAIN_DB, MIN_GAIN_DB, TrackKind};
     let tracks: Vec<usize> = audio::tracks_iter(state.cut()).map(|(i, _, _)| i).collect();
-    let Some(&first) = tracks.first() else {
-        state.sheet_ui.track_edit = None;
+    if tracks.is_empty() {
         return;
-    };
-    if !tracks.contains(&state.sheet_ui.track) {
-        state.sheet_ui.track = first;
     }
     let t = state.sheet_ui.track;
     let Some(now) = audio::track_props(state.cut(), t).cloned() else {
@@ -1635,6 +1643,18 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     if let Some(next) = commit {
         state.sheet_ui.track_edit = None;
         state.set_track_props(t, next);
+    }
+}
+
+/// AU15: the shown sound track stays a track of this shot, each frame: the
+/// waveform column reads it whether `Details` is open or not.
+fn keep_shown_track(state: &mut AppState) {
+    use anim_core::audio;
+    let tracks: Vec<usize> = audio::tracks_iter(state.cut()).map(|(i, _, _)| i).collect();
+    match tracks.first() {
+        None => state.sheet_ui.track_edit = None,
+        Some(first) if !tracks.contains(&state.sheet_ui.track) => state.sheet_ui.track = *first,
+        Some(_) => {}
     }
 }
 
@@ -2294,6 +2314,10 @@ fn opacity_cells(
 
 const LAYERS_EYE: Target = Target::Named("layers.eye");
 const LAYERS_ROLE: Target = Target::Named("layers.role");
+/// AU15: the latch stands under `More`, so the refusal says where.
+pub const LINE_GUARD_REFUSAL: &str = "Protect line art is on. Turn it off under More in Layers.";
+/// AU15: a layer row: the height its name's two lines take.
+const LAYER_ROW_H: f32 = 38.0;
 
 /// AU21: the row `layers.eye` and `layers.role` stand on: a task over the layer
 /// under the pen means the art beside it, the sketch below the armed layer
@@ -2310,7 +2334,9 @@ pub(crate) fn ringed_layer(state: &AppState, armed: Option<LayerId>) -> Option<L
     below.or_else(|| layers.iter().find(art)).map(|(_, l)| l.id).or(armed)
 }
 
-pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
+pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, docked: bool) {
+    /// AU15: the rows' least height in the dock, whatever stands around them.
+    const LEAST_ROWS: f32 = 44.0;
     /// Under this width a row's opacity moves to a line of its own: the
     /// furniture, the 48 name cell and the percentage come to this.
     const NARROW_STRIP: f32 = 296.0;
@@ -2325,7 +2351,10 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     // AU15: a lesson's task on the layer's kind opens the fold it stands in.
     let more = state.panel_more.is_open(plate::MORE_LAYERS) || plate::wishes(ui.ctx(), LAYERS_ROLE);
     ui.horizontal(|ui| {
-        plate::legend(ui, crate::vocab::LAYERS);
+        // AU15: a float's title already names the panel.
+        if docked {
+            plate::legend(ui, crate::vocab::LAYERS);
+        }
         let have_cel = state.own_key_drawing().is_some();
         let at_cap = state.strip_layers().len() >= 8;
         let add = ui.menu_button("+", |ui| {
@@ -2499,10 +2528,14 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     let asked = [LAYERS_EYE, LAYERS_ROLE].iter().any(|t| plate::wishes(ui.ctx(), *t));
     let ringed = if asked { ringed_layer(state, armed_id) } else { None };
     let narrow = ui.available_width() < if more { NARROW_STRIP } else { NARROW_FOLDED };
+    let mut layer_rows = |ui: &mut egui::Ui| {
     for (row_i, (lid, name, visible, opacity)) in rows.iter().enumerate() {
         let is_active = armed_id == Some(*lid);
         let props = full[row_i].clone();
-        ui.horizontal(|ui| {
+        // AU15: at the row's own height from its first control: `horizontal`
+        // would centre the eye on a shorter line than the name beside it.
+        let layout = egui::Layout::left_to_right(egui::Align::Center);
+        ui.allocate_ui_with_layout(vec2(ui.available_width(), LAYER_ROW_H), layout, |ui| {
             // Eye: visibility toggle (one click = one undo step). Hidden is a
             // configuration, so the struck eye dims — it does not go red.
             let eye_icon = if *visible { Icon::Eye } else { Icon::EyeOff };
@@ -2577,6 +2610,16 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             if ringed == Some(*lid) {
                 plate::mark_row(&dot_resp, LAYERS_ROLE);
             }
+            } else if props.locked {
+                // AU15: the lock folds, the fact does not: a painting tool
+                // refuses this row, so its row says why. A mark, not a control.
+                let (mark, _) = ui.allocate_exact_size(vec2(14.0, 18.0), Sense::hover());
+                crate::icons::paint(
+                    ui.painter(),
+                    Rect::from_center_size(mark.center(), vec2(11.0, 11.0)),
+                    plate::legend_dim(),
+                    Icon::Lock,
+                );
             }
 
             // Name: click = activate, double-click = rename — in a FIXED
@@ -2593,7 +2636,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             };
             let name_w = (ui.available_width() - reserve).max(48.0);
             ui.allocate_ui_with_layout(
-                vec2(name_w, 20.0),
+                vec2(name_w, LAYER_ROW_H),
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     ui.set_min_width(name_w);
@@ -2658,9 +2701,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                             state.strip_rename = Some((*lid, name.clone()));
                         } else if resp.clicked() {
                             if state.view.line_guard && props.role.is_line() {
-                                state.refuse(
-                                    "refused — Protect line art is on (unlatch it to draw on a line layer)",
-                                );
+                                state.refuse(LINE_GUARD_REFUSAL);
                             } else {
                                 state.arm_layer(&props);
                             }
@@ -2695,6 +2736,23 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             });
         }
     }
+    };
+    // AU15: a float scrolls by itself. In the dock the rows scroll here, and
+    // the head's `+` and the foot's Delete stand whatever the layer count.
+    let foot_id = ui.id().with("layers foot");
+    if docked {
+        let foot = ui.ctx().data(|d| d.get_temp::<f32>(foot_id)).unwrap_or(0.0);
+        let scroll = egui::ScrollArea::vertical()
+            .id_salt("layers rows")
+            .max_height((ui.available_height() - foot).max(LEAST_ROWS))
+            .auto_shrink([false, true])
+            .scroll_source(egui::scroll_area::ScrollSource::SCROLL_BAR | egui::scroll_area::ScrollSource::MOUSE_WHEEL)
+            .show(ui, |ui| layer_rows(ui));
+        plate::note_viewport(ui, scroll.inner_rect, [false, true]);
+    } else {
+        layer_rows(ui);
+    }
+    let foot_top = ui.cursor().top();
 
     // ---- The destructive commands: apart from the rows, Aka-edged, and
     // fired only by a held press (spec §6 defects 6/7/11). Both act on the
@@ -2727,6 +2785,8 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
         }
     });
     ui.add_space(2.0);
+    let foot = ui.cursor().top() - foot_top;
+    ui.ctx().data_mut(|d| d.insert_temp(foot_id, foot));
 }
 
 /// GM14: the sheet panel driven through the harness — range select, the

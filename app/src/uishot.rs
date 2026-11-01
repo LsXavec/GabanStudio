@@ -1238,6 +1238,40 @@ fn color_moments(dir: &Path) {
     }
 }
 
+/// AU15: the panels no walk stops on, docked beside the paper, folds shut.
+const PANELS: [(&str, crate::workspace::Pane); 7] = [
+    ("panel-shots", crate::workspace::Pane::Board),
+    ("panel-check-paint", crate::workspace::Pane::PaintCheck),
+    ("panel-episode", crate::workspace::Pane::Episode),
+    ("panel-history", crate::workspace::Pane::History),
+    ("panel-curves", crate::workspace::Pane::Curves),
+    ("panel-forge", crate::workspace::Pane::Forge),
+    ("panel-manga", crate::workspace::Pane::Manga),
+];
+
+pub(crate) fn panels_owed() -> Vec<(String, u32, u32)> {
+    let sized = |(name, _): &(&str, crate::workspace::Pane)| {
+        COLOR_SIZES.map(|(suffix, w, h)| (format!("{name}{suffix}.png"), w, h))
+    };
+    PANELS.iter().flat_map(sized).collect()
+}
+
+fn panel_moments(dir: &Path) {
+    for (suffix, w, tall) in COLOR_SIZES {
+        let size = egui::vec2(w as f32, tall as f32);
+        for (name, pane) in PANELS {
+            let mut h = EditorHarness::with_gpu_shipped(crate::sample::build_sample());
+            h.kit_mut().set_size(size);
+            h.run_frames(4);
+            let mut dock = egui_dock::DockState::new(vec![crate::workspace::Pane::Canvas]);
+            dock.main_surface_mut().split_right(egui_dock::NodeIndex::root(), 0.66, vec![pane]);
+            h.editor_mut().dock = dock;
+            h.run_frames(4);
+            h.shot(size, &dir.join(format!("{name}{suffix}.png")));
+        }
+    }
+}
+
 /// AU14: the Effects step: a graph with nothing in it, a shelf disabled on a
 /// hand-built graph, the sheet's graph before any effect, the shelf with an
 /// effect on the picture, the Add effect menu, its More open, the frame box
@@ -1557,6 +1591,48 @@ fn uishot_rooms() {
     check_shots(&dir, &color_owed()).expect("the Color step");
     fx_moments(&dir);
     check_shots(&dir, &fx_owed()).expect("the Effects step");
+    panel_moments(&dir);
+    check_shots(&dir, &panels_owed()).expect("the panels no walk stops on");
+}
+
+/// Only the ignored pass writes them, so this holds it to the whole count:
+/// each list checked there, no name twice, and the part's new panels taken
+/// before they are checked.
+#[test]
+fn audress_the_ignored_pass_owes_every_shot() {
+    let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
+    let taken = pass.find("panel_moments(&dir);").expect("it takes them");
+    let checked = pass.find("check_shots(&dir, &panels_owed())").expect("it checks them");
+    assert!(taken < checked, "taken, then checked");
+    let lists = [
+        ("shots_owed", shots_owed()),
+        ("states_owed", states_owed()),
+        ("shipped_owed", shipped_owed()),
+        ("plan_owed", plan_owed()),
+        ("rail_owed", rail_owed()),
+        ("strip_owed", strip_owed()),
+        ("start_owed", start_owed()),
+        ("lesson_owed", lesson_owed()),
+        ("guide_owed", guide_owed()),
+        ("say_owed", say_owed()),
+        ("queue_owed", queue_owed()),
+        ("export_owed", export_owed()),
+        ("hide_owed", hide_owed()),
+        ("keys_owed", keys_owed()),
+        ("kinds_owed", kinds_owed()),
+        ("page_owed", page_owed()),
+        ("tail_owed", tail_owed()),
+        ("color_owed", color_owed()),
+        ("fx_owed", fx_owed()),
+        ("panels_owed", panels_owed()),
+    ];
+    for (name, _) in &lists {
+        assert!(pass.contains(&format!("check_shots(&dir, &{name}())")), "{name} is checked");
+    }
+    let names: BTreeSet<&str> = lists.iter().flat_map(|(_, l)| l.iter().map(|o| o.0.as_str())).collect();
+    let owed: usize = lists.iter().map(|(_, l)| l.len()).sum();
+    assert_eq!(names.len(), owed, "no two shots share a name");
+    assert_eq!(owed, 273 + 2 * PANELS.len(), "the 273 owed before this part, and its panels at both sizes");
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of

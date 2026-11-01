@@ -4780,17 +4780,51 @@ fn dock_style(base: &egui::Style, dock: &DockState<Pane>) -> egui_dock::Style {
     // slim rails.
     s.separator.extra = 26.0;
     s.separator.width = 6.0;
-    // AU15: a seam is its 6 pt: a grab wider than that would read as one more
-    // control in a crowded room (the census's rule, spec section 10).
-    s.separator.extra_interact_width = 0.0;
     let flush = dock.iter_all_tabs().count() == 1;
-    s.tab_bar.height = if flush { 0.0 } else { 34.0 };
+    s.tab_bar.height = if flush { 0.0 } else { plate::TAB_BAR_H };
+    if !flush {
+        s.tab_bar.inner_margin = egui::Margin::symmetric(plate::TAB_INSET + 1, plate::TAB_INSET);
+    }
     if flush {
         s.tab.tab_body.inner_margin = egui::Margin::ZERO;
         s.tab.tab_body.stroke = egui::Stroke::NONE;
         s.tab_bar.hline_color = egui::Color32::TRANSPARENT;
     }
     s
+}
+
+/// AU15: where the dock's seams are painted, for the census: egui_dock grabs a
+/// seam 2 pt wider than it paints it, and a seam is what it paints (spec
+/// section 10). Only under test.
+#[cfg_attr(not(test), allow(unused_variables))]
+fn note_dock_seams(ui: &egui::Ui, dock: &DockState<Pane>) {
+    #[cfg(test)]
+    for (_, node) in dock.iter_all_nodes() {
+        use egui_dock::Node;
+        let (rect, across) = match node {
+            Node::Horizontal(split) => (split, true),
+            Node::Vertical(split) => (split, false),
+            _ => continue,
+        };
+        plate::note_dock_seam(ui, rect.rect, rect.fraction, across);
+    }
+}
+
+/// AU15: Plan's sheet column stands at the sheet's minimum however narrow the
+/// dock: its slot is the room's reason for being, and a lesson card takes its
+/// share from the same width. Spec 7.1.
+fn keep_plan_column(dock: &mut DockState<Pane>, wide: f32) {
+    /// The seam's share of the column.
+    const SEAM: f32 = 4.0;
+    let tree = dock.main_surface_mut();
+    let sheet = egui_dock::NodeIndex::root().left();
+    if sheet.0 >= tree.len() || !tree[sheet].tabs().is_some_and(|tabs| tabs.contains(&Pane::XSheet)) {
+        return;
+    }
+    if let Some(egui_dock::Node::Horizontal(split)) = tree.root_node_mut() {
+        let least = Pane::XSheet.min_size().x + 2.0 * f32::from(plate::PANE_MARGIN) + SEAM;
+        split.fraction = split.fraction.max((least / wide).min(0.5));
+    }
 }
 
 /// AU10: the dock's share of the return dot's corner. A lone canvas has desk
@@ -5143,7 +5177,9 @@ struct EditorTabs<'a> {
     export_view: export_step::View,
     /// AU19: this is Plan: an animation's `Stage::Drawing`.
     plan: bool,
-    /// AU13: what the Colors panel reads from the Editor.
+    /// AU15: one pane fills the dock, flush, with no tab bar.
+    lone: bool,
+    ///AU13: what the Colors panel reads from the Editor.
     colors_view: palette_panel::View,
     /// AU13: `Result beside`, pressed this frame, for after the dock.
     result_asked: Option<bool>,
@@ -5154,11 +5190,8 @@ struct EditorTabs<'a> {
 impl egui_dock::TabViewer for EditorTabs<'_> {
     type Tab = Pane;
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
-        // Plan's canvas shows the shot; the pane stays `Pane::Canvas`.
-        if self.plan && *tab == Pane::Canvas {
-            return vocab::PREVIEW.into();
-        }
-        tab.title().into()
+        // AU15: a lone pane's tab bar stands at no height, and paints no word.
+        if self.lone { "".into() } else { tab.title().into() }
     }
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
         // Every pane sits on the plate's grain (owner's amendment): laid
@@ -5171,7 +5204,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
         }
         plate::note_pane_body(ui);
         plate::note_tab_bar(ui);
-        plate::keep_minimum(ui, tab.held_size(), |ui| match tab {
+        plate::keep_minimum(ui, tab.min_size(), tab.scroll_policy(), |ui| match tab {
             Pane::History => {
                 let gesture_safe = !self.canvas.stroke_active();
                 let shared = self.canvas.is_guest || self.canvas.session_live;
@@ -5187,7 +5220,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
             }
             Pane::Layers => {
                 let gesture_safe = !self.canvas.stroke_active();
-                xsheet_panel::cel_layers_strip(ui, self.state, gesture_safe)
+                xsheet_panel::cel_layers_strip(ui, self.state, gesture_safe, true)
             }
             Pane::Brush => {
                 // The deck moved onto the canvas itself (owner's directive
@@ -5280,7 +5313,7 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
     }
 
     /// AU15: no pane leans on the dock's blanket scroll: each has its policy
-    /// (`Pane::scroll_policy`), and below its minimum `keep_minimum` scrolls it.
+    /// (`Pane::scroll_policy`), which `keep_minimum` follows.
     fn scroll_bars(&self, _tab: &Pane) -> [bool; 2] {
         [false, false]
     }
@@ -5320,15 +5353,17 @@ impl EditorTabs<'_> {
     fn presets_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
+            // AU15: the field gives way, the button beside it stands whole.
+            let wide = (ui.available_width() - 90.0).clamp(60.0, 110.0);
             plate::text_field(
                 ui,
                 egui::TextEdit::singleline(self.preset_name)
                     .hint_text("name…")
-                    .desired_width(110.0),
+                    .desired_width(wide),
             );
             let name = self.preset_name.trim().to_string();
             if ui
-                .button("save current")
+                .button("Save current")
                 .on_hover_text("keep the current brush in this list")
                 .clicked()
                 && !name.is_empty()
@@ -5360,7 +5395,8 @@ impl EditorTabs<'_> {
                         if let Some(c) = p.color {
                             plate::identity_dot(ui.painter(), dot.center(), 3.5, plate::chip([c[0], c[1], c[2], 255]));
                         }
-                        ui.button(text).on_hover_text("Use this brush.").clicked()
+                        // AU15: a long name wraps in the pane's narrow width.
+                        ui.add(egui::Button::new(text).wrap()).on_hover_text("Use this brush.").clicked()
                     });
                     if row.inner {
                         self.canvas.apply_preset(p);
@@ -5705,6 +5741,7 @@ impl Editor {
             Stage::Drawing if self.kind_unset && self.sheet_in_draw => Stage::dock_with_sheet(),
             Stage::InkPaint if self.result_on() && self.result_has_sheet() => Stage::dock_with_result(),
             Stage::InkPaint if self.result_on() => Stage::dock_with_result_no_sheet(),
+            Stage::Composite if !self.kind_unset => Stage::dock_effects(),
             _ => st.dock(),
         }
     }
@@ -9863,6 +9900,7 @@ impl Editor {
             locked: if ui_lock { &self.held } else { &[] },
             export_view,
             plan,
+            lone: self.dock.iter_all_tabs().count() == 1,
             colors_view,
             result_asked: None,
             effects_shelf,
@@ -9873,6 +9911,9 @@ impl Editor {
         }
         let dock_rect = ui.available_rect_before_wrap();
         plate::note_dock(ui, dock_rect);
+        if plan {
+            keep_plan_column(&mut self.dock, dock_rect.width());
+        }
         if dock_style.dock_area_padding.is_some() {
             ui.painter().rect_filled(dock_rect, 0.0, plate::DESK);
         }
@@ -9893,6 +9934,7 @@ impl Editor {
                 egui_dock::AllowedSplits::All
             })
             .show_inside(ui, &mut tabs);
+        note_dock_seams(ui, &self.dock);
         if let Some(on) = tabs.result_asked {
             self.switch_result(on);
         }

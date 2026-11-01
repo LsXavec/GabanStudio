@@ -1077,8 +1077,11 @@ fn auexport_the_job_list_holds_at_the_foot() {
     let file = dir.path().join("ball.gif");
     let mut h = EditorHarness::with_state_shipped(ball(3));
     h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
-    sized(&mut h, 1280.0, 800.0);
+    sized(&mut h, 1280.0, 880.0);
     h.editor_mut().enter_room(Stage::Composite);
+    // AU15: the lower leaf a person's Effects step no longer has, any drag
+    // can still make one, at its 220 of height: under that the pane pans.
+    h.editor_mut().dock = Stage::Composite.dock();
     settle(&mut h);
     assert_eq!(h.perform(Action::ShowRenderQueue), Performed::Done);
     settle(&mut h);

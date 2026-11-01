@@ -199,7 +199,23 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     state.paintcheck.poll();
     let frames = state.frame_count().max(1);
     let now = state.view.frame;
-    // AU15: the list and its Run stand; what it looks for folds (spec 7.1).
+    // AU15: its Run leads and the list stands; what it looks for folds
+    // between them (spec 7.1).
+    if state.paintcheck.busy() {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("checking…");
+        });
+    } else if ui
+        .button("Check paint")
+        .on_hover_text(
+            "find unpainted holes, colours that are no chip of the palette and soft \
+             (part-covered) paint",
+        )
+        .clicked()
+    {
+        start(state, ui.ctx());
+    }
     if plate::more_row(ui, &mut state.panel_more, plate::MORE_CHECK, crate::vocab::MENU_MORE) {
     ui.horizontal_wrapped(|ui| {
         let pc = &mut state.paintcheck;
@@ -252,21 +268,6 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
     });
     }
     ui.add_space(4.0);
-    if state.paintcheck.busy() {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label("checking…");
-        });
-    } else if ui
-        .button("Check paint")
-        .on_hover_text(
-            "find unpainted holes, colours that are no chip of the palette and soft \
-             (part-covered) paint",
-        )
-        .clicked()
-    {
-        start(state, ui.ctx());
-    }
     let pc = &state.paintcheck;
     let Some(found) = pc.findings.as_ref() else {
         if !pc.busy() {

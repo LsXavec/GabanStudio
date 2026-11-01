@@ -71,7 +71,10 @@ fn swatch_handle(name: &str) -> Option<Target> {
 /// three where it does not: a click arms the color and nothing else, so the
 /// document does not change.
 fn starters(ui: &mut egui::Ui, state: &mut AppState, canvas: &mut CanvasView) {
-    let (gap, room) = (ui.spacing().item_spacing.x, ui.available_width());
+    // AU15: a pane under its minimum pans across; the starters keep to what
+    // it shows, so all ten stand whole at once.
+    let shown = ui.clip_rect().width() - 2.0 * ui.visuals().clip_rect_margin;
+    let (gap, room) = (ui.spacing().item_spacing.x, ui.available_width().min(shown));
     let needs = |n: usize| n as f32 * NARROWEST_SWATCH + (n - 1) as f32 * gap;
     let columns = [5, 4].into_iter().find(|n| needs(*n) <= room).unwrap_or(3);
     let cell = ((room - (columns - 1) as f32 * gap) / columns as f32).clamp(NARROWEST_SWATCH, WIDEST_SWATCH);
@@ -482,7 +485,7 @@ fn variants_ui(ui: &mut egui::Ui, state: &mut AppState, ci: usize) {
         plate::text_field(
             ui,
             egui::TextEdit::singleline(&mut name)
-                .hint_text("set name… (evening)")
+                .hint_text("Set name")
                 .desired_width(110.0),
         );
         let trimmed = name.trim().to_string();

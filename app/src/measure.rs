@@ -40,7 +40,7 @@ fn walk_texts<'s>(shape: &'s Shape, clip: Rect, out: &mut Vec<(&'s TextShape, Re
     }
 }
 
-fn texts_of(shapes: &[ClippedShape]) -> Vec<(&TextShape, Rect)> {
+pub fn texts_of(shapes: &[ClippedShape]) -> Vec<(&TextShape, Rect)> {
     let mut out = Vec::new();
     for c in shapes {
         walk_texts(&c.shape, c.clip_rect, &mut out);
@@ -331,6 +331,8 @@ impl Reading {
 
     fn read(ctx: &Context, shapes: &[ClippedShape], only: Option<(LayerId, Rect)>) -> Self {
         let window = ctx.content_rect();
+        // A dock seam is read as painted: its grab runs a point past each side.
+        let seams = crate::plate::dock_seams(ctx);
         let rows = ctx.viewport(|v| {
             let w = &v.prev_pass.widgets;
             let mut rows = Vec::new();
@@ -339,7 +341,9 @@ impl Reading {
                     continue;
                 }
                 for r in rects.iter().filter(|r| interactive(r.sense)) {
-                    let at = r.interact_rect.intersect(window);
+                    let grab = r.interact_rect.intersect(window);
+                    let seam = seams.iter().find(|s| s.expand(1.5).contains_rect(grab));
+                    let at = seam.map_or(grab, |s| s.intersect(window));
                     if at.width() > 0.0 && at.height() > 0.0 {
                         rows.push(Row {
                             w: at.width().round_ties_even(),
@@ -652,10 +656,24 @@ impl Side {
 
 /// A registered scroll viewport owns the clip edge `edge` on this side. Only
 /// on an axis it scrolls: across one, the clip it sits under is a parent's.
+/// AU15: and only one that shows at rest it scrolls.
 fn owned(views: &[Viewport], side: Side, edge: f32, along: Rect) -> bool {
     views.iter().any(|v| {
         let (lo, hi) = side.band(v);
-        v.axes[side.axis()] && side.alongside(v.rect, along) && (lo - SLACK..=hi + SLACK).contains(&edge)
+        v.cue && v.axes[side.axis()] && side.alongside(v.rect, along) && (lo - SLACK..=hi + SLACK).contains(&edge)
+    })
+}
+
+/// Panned off past a corner, no side of a view runs along what its clip left:
+/// `cut` is in reach when each axis has a view, showing at rest, that takes
+/// it in along that axis. One view pans both ways, or (AU15) a pane held at
+/// its minimum pans across while its list goes down.
+fn panned(views: &[Viewport], cut: Rect) -> bool {
+    [0, 1].into_iter().all(|axis| {
+        views.iter().any(|v| {
+            let reach = v.reach.expand(SLACK);
+            v.cue && v.axes[axis] && cut.min[axis] >= reach.min[axis] && cut.max[axis] <= reach.max[axis]
+        })
     })
 }
 
@@ -702,13 +720,12 @@ pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope) -> Clip 
             out.found.push(format!("elided {text:?}"));
         }
         let clip = clip.intersect(window);
-        // AU15: an empty clip paints nothing at all: a tab bar folded to no
-        // height, a row scrolled clean away. No word stands cut on the screen.
-        if !clip.is_positive() {
-            continue;
-        }
-        let cut = |&side: &Side| side.past(bound, clip) && !owned(&views, side, side.of(clip), clip);
-        if SIDES.iter().any(cut) {
+        // A clip scrolled empty runs along nothing: what it cut stands where
+        // the text does. An empty clip no viewport owns is still a finding.
+        let along = if clip.is_positive() { clip } else { bound };
+        let cut = |&side: &Side| side.past(bound, clip) && !owned(&views, side, side.of(clip), along);
+        let gone = !clip.is_positive() && panned(&views, clip);
+        if !gone && SIDES.iter().any(cut) {
             out.clipped += 1;
             out.found.push(format!("clipped {text:?} at {bound:?} by {clip:?}"));
         }
@@ -735,9 +752,7 @@ pub fn clip_frame(ctx: &Context, shapes: &[ClippedShape], scope: Scope) -> Clip 
                     side.past(r.rect, window) && !owned(&views, side, side.of(at), r.rect)
                 };
                 let pane = r.layer_id == LayerId::background() && in_body(at);
-                // Panned off past a corner, no side of the view runs along it.
-                let panned = views.iter().any(|v| v.axes == [true, true] && inside(at, v.reach));
-                if !pane && !panned && SIDES.iter().any(past) {
+                if !pane && !panned(&views, at) && SIDES.iter().any(past) {
                     let name = w.info(r.id).and_then(|i| i.label.clone()).unwrap_or_default();
                     off.push((r.rect, name));
                 }
@@ -1065,7 +1080,11 @@ mod tests {
         let mut h = Harness::builder()
             .with_size(vec2(400.0, 300.0))
             .with_pixels_per_point(1.0)
-            .build_ui(move |ui| paint(ui));
+            .build_ui(move |ui| {
+                // The app's own scroll style: a handle shows at rest.
+                ui.spacing_mut().scroll.dormant_handle_opacity = 0.5;
+                paint(ui)
+            });
         h.run_steps(3);
         h
     }
@@ -1481,6 +1500,14 @@ mod tests {
         let got = clip_of(&unregistered);
         assert_eq!(got.clipped, 1, "{:?}", got.found);
         assert!(got.found[0].contains("row 7"), "{:?}", got.found);
+        // AU15: a registered list that shows nothing at rest cuts a word with
+        // nothing to say more lies past it: still a finding.
+        let unseen = fixture(move |ui| {
+            ui.spacing_mut().scroll.dormant_handle_opacity = 0.0;
+            let out = egui::ScrollArea::vertical().max_height(132.0).show(ui, rows);
+            plate::note_viewport(ui, out.inner_rect, [false, true]);
+        });
+        assert_eq!(clip_of(&unseen).clipped, 1, "{:?}", clip_of(&unseen).found);
         // A label cut across the scroll, not along it, is still a finding.
         let across = fixture(|ui| {
             let out = egui::ScrollArea::vertical().max_width(60.0).max_height(120.0).show(ui, |ui| {

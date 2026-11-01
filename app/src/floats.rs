@@ -194,7 +194,7 @@ fn body(ui: &mut egui::Ui, f: Float, args: &mut OverlayArgs) {
     match f {
         Float::Layers => {
             let gesture_safe = !args.canvas.stroke_active();
-            xsheet_panel::cel_layers_strip(ui, args.state, gesture_safe);
+            xsheet_panel::cel_layers_strip(ui, args.state, gesture_safe, false);
         }
         Float::Brushes => args.canvas.brush_rail_ui(ui, args.presets, args.state),
         Float::Color => args.canvas.color_ui(ui, args.state),

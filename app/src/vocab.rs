@@ -93,8 +93,6 @@ pub const SPEED_LINES: &str = "Speed lines";
 pub const MONO: &str = "Mono";
 pub const DETAILS: &str = "Details";
 pub const RESULT: &str = "Result";
-/// The Layout room's canvas pane: the shot's preview, under the Canvas tab.
-pub const PREVIEW: &str = "Preview";
 pub const MOTION_CURVES: &str = "Motion curves";
 pub const EDIT_COLORS: &str = "Edit colors";
 pub const COLOR_NAME: &str = "Color name";
@@ -375,7 +373,6 @@ pub const TABLE: &[(&str, &str, &str)] = &[
     ("DETAILS", DETAILS, "Details"),
     ("REBUILD_FROM_LAYERS", REBUILD_FROM_LAYERS, "Rebuild from layers"),
     ("RESULT", RESULT, "Result"),
-    ("PREVIEW", PREVIEW, "Preview"),
     ("MOTION_CURVES", MOTION_CURVES, "Motion curves"),
     ("EDIT_COLORS", EDIT_COLORS, "Edit colors"),
     ("COLOR_NAME", COLOR_NAME, "Color name"),

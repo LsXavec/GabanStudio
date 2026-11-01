@@ -55,7 +55,6 @@ const SECTION_3: &[(&str, &str)] = &[
     ("Build satsuei graph", "Full finishing setup"),
     ("Build composite from sheet", "Rebuild from layers"),
     ("Viewer", "Result"),
-    ("Layout canvas", "Preview"),
     ("Curves", "Motion curves"),
     ("EDIT MODEL", "Edit colors"),
     ("role", "Color name"),

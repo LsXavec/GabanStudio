@@ -685,12 +685,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
     // Wires (under nodes).
     let cable = |painter: &egui::Painter, a: Pos2, b: Pos2, color: Color32| {
         let d = ((b.x - a.x).abs() * 0.5).max(24.0);
-        painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
+        // AU15: flattened a third of a point off true: the default tenth spends
+        // twice the vertices on a difference nobody can see in a 2 pt wire.
+        let wire = egui::epaint::CubicBezierShape::from_points_stroke(
             [a, pos2(a.x + d, a.y), pos2(b.x - d, b.y), b],
             false,
             Color32::TRANSPARENT,
             Stroke::new(2.0, color),
-        ));
+        );
+        painter.add(egui::Shape::line(wire.flatten(Some(0.33)), Stroke::new(2.0, color)));
     };
     for nv in &nodes {
         for (pin, input) in nv.inputs.iter().enumerate() {
@@ -726,19 +729,17 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
         let selected = state.selected_node == Some(nv.id);
         let is_output = output_node == Some(nv.id);
         let body = crate::plate::GRAPHITE;
-        painter.rect_filled(nv.rect, crate::plate::R_CONTROL, body);
-        // The kind's ground: its ink at the wash's strength, so the title
-        // holds on every kind.
-        painter.rect_filled(
-            Rect::from_min_size(nv.rect.left_top(), vec2(NODE_W, TITLE_H)),
-            egui::CornerRadius { nw: crate::plate::R_CONTROL, ne: crate::plate::R_CONTROL, sw: 0, se: 0 },
-            kind_color(&nv.kind).gamma_multiply(0.2),
-        );
-        painter.rect_stroke(
-            nv.rect,
-            crate::plate::R_CONTROL,
+        // AU15: one shape for the card and its edge, at the sheet's radius: a
+        // graph is the costliest thing in a room (spec section 10), and a
+        // corner past 5 spends twice the vertices. The edge stands inside a
+        // rect grown by it, as an outside edge would lift the radius past 5.
+        let edge = if selected { 2.0 } else { 1.0 };
+        painter.add(egui::epaint::RectShape::new(
+            nv.rect.expand(edge),
+            crate::plate::R_SHEET,
+            body,
             Stroke::new(
-                if selected { 2.0 } else { 1.0 },
+                edge,
                 // Selection is TALLY — the one colour meaning current/armed
                 // (Ao is never a selection; the colour law). The output
                 // node's identity edge is Struck, not Aka — the result is
@@ -751,7 +752,14 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
                     crate::plate::legend_muted()
                 },
             ),
-            egui::StrokeKind::Outside,
+            egui::StrokeKind::Inside,
+        ));
+        // The kind's ground: its ink at the wash's strength, so the title
+        // holds on every kind.
+        painter.rect_filled(
+            Rect::from_min_size(nv.rect.left_top(), vec2(NODE_W, TITLE_H)),
+            egui::CornerRadius { nw: crate::plate::R_SHEET, ne: crate::plate::R_SHEET, sw: 0, se: 0 },
+            kind_color(&nv.kind).gamma_multiply(0.2),
         );
         painter.text(
             nv.rect.left_top() + vec2(8.0, TITLE_H * 0.5),
@@ -821,7 +829,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
         let op_resp = ui.interact(
             op_rect,
             ui.id().with(("outpin", nv.id.0)),
-            // AU15: a pin is a pointer's target: Tab never stops on one.
+            // AU15: a pin is a pointer's target. It has no key of its own, so a
+            // Tab stop here would stop on nothing it could do.
             Sense::CLICK | Sense::DRAG,
         );
         if op_resp.drag_started() {
@@ -1111,9 +1120,15 @@ fn strength_slot(ui: &mut egui::Ui, state: &mut AppState) {
 /// its label, its help) replaces the graph with the satsuei chain in one
 /// undo step; over a graph shaped by hand it has the DANGER edge and asks
 /// first; without a drawing column it is disabled and its tooltip says why.
+/// AU15: away from the Effects step's shelf it folds under the panel's `More`
+/// (spec 7.1), the fold every panel remembers.
 fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
     use crate::config::Action;
     ui.horizontal(|ui| {
+        let more = &mut state.panel_more;
+        if !crate::plate::more_tag(ui, more, crate::plate::MORE_GRAPH, crate::vocab::MENU_MORE) {
+            return;
+        }
         let why = state.satsuei_refusal();
         let hand = state.satsuei_hand_built();
         let button = ui.add_enabled(why.is_none(), egui::Button::new(Action::BuildSatsuei.label()));
@@ -1177,21 +1192,10 @@ fn inspector_controls(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<She
             let button = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
             ui.set_min_height(button);
         }
+        // AU15: one sentence in every step: the chords stay on the node
+        // menu's rows and in the palette.
         let Some(id) = state.selected_node else {
-            if shelf.is_some() {
-                ui.label(egui::RichText::new(PICK_A_BOX).color(crate::plate::legend_dim()));
-                return;
-            }
-            // GM9: the add verb said by its chord in this keymap.
-            let add = crate::menus::chord_label(ui.ctx(), crate::config::Action::AddNode)
-                .map(|c| format!("{c} or right-click"))
-                .unwrap_or_else(|| "right-click".into());
-            ui.label(
-                egui::RichText::new(format!(
-                    "no node selected — click one; {add} adds, right-click a node removes it"
-                ))
-                .color(crate::plate::legend_dim()),
-            );
+            ui.label(egui::RichText::new(PICK_A_BOX).color(crate::plate::legend_dim()));
             return;
         };
         let Ok(node) = state.cut().graph.node(id) else {

@@ -1271,18 +1271,19 @@ pub fn held_job(state: &mut AppState, file: &Path, done: usize) -> std::sync::mp
     tx
 }
 
+/// AU15: the empty Export queue (spec 8.4), in the words the panel's foot says it.
+pub use crate::export_step::NOTHING_WAITING;
+
 /// The pane. AU9: the Export panel's foot comes first and stands at the pane's
 /// foot whatever the pane's height, its choices lead the scrolling above it,
 /// and the new-job form over the job list follows them while `More options`
 /// is open.
-/// AU15: the empty Export queue (spec 8.4).
-pub const NOTHING_WAITING: &str = "Nothing waiting.";
-
 pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
     poll(state, ui.ctx());
     let ffmpeg = state.render_queue.ffmpeg_path();
     let open = crate::export_step::foot(ui, state, view);
     let scroll = egui::ScrollArea::vertical()
+        .max_height(ui.available_height() - state.render_queue.panel.foot_high)
         .auto_shrink([false, false])
         .content_margin(crate::export_step::RING_ROOM)
         .show(ui, |ui| {
@@ -1378,23 +1379,25 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
             });
             ui.horizontal(|ui| {
                 ui.label("output folder");
-                plate::text_field(
-                    ui,
-                    egui::TextEdit::singleline(&mut d.out)
-                        .hint_text(out_hint)
-                        .desired_width(220.0),
+                let wide = ui.available_width().min(220.0);
+                plate::text_field(ui, egui::TextEdit::singleline(&mut d.out).desired_width(wide));
+            });
+            // AU15: where it lands in words that wrap: a hint in the field
+            // would elide in the narrowest pane.
+            if d.out.is_empty() {
+                ui.label(egui::RichText::new(out_hint).color(plate::legend_dim()).font(plate::Role::Small.font()));
+            }
+            // AU15: the pattern's name stands over it, and its whole text in
+            // the narrowest pane.
+            ui.label("file names");
+            let wide = ui.available_width();
+            plate::pattern_field(ui, egui::TextEdit::singleline(&mut d.pattern).desired_width(wide))
+                .on_hover_text(
+                    "{project} {scene} {cut} {frame} {frame:04}; an image sequence \
+                     whose pattern has no frame gets _{frame:04}; a GIF or a still \
+                     has no frame number, so a second one of the same shot replaces \
+                     the first",
                 );
-            });
-            ui.horizontal(|ui| {
-                ui.label("file names");
-                plate::pattern_field(ui, egui::TextEdit::singleline(&mut d.pattern).desired_width(220.0))
-                    .on_hover_text(
-                        "{project} {scene} {cut} {frame} {frame:04}; an image sequence \
-                         whose pattern has no frame gets _{frame:04}; a GIF or a still \
-                         has no frame number, so a second one of the same shot replaces \
-                         the first",
-                    );
-            });
             let at = state.at();
             let n = state.cut().frame_count.max(1);
             ui.horizontal_wrapped(|ui| {
@@ -1516,7 +1519,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                 }
             });
             ui.separator();
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let rq = &state.render_queue;
                 let waiting = rq.queue.jobs.iter().any(|j| j.state == JobState::Queued);
                 let start_key = ui
@@ -1547,12 +1550,13 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                     state.render_queue.panel.failed = None;
                 }
             });
-            if state.render_queue.queue.jobs.is_empty() {
+            // The foot says it once there is art to export.
+            if state.render_queue.queue.jobs.is_empty() && crate::export_step::Offer::of(state) == crate::export_step::Offer::NoArt {
                 ui.label(egui::RichText::new(NOTHING_WAITING).color(plate::legend_dim()));
             }
             let mut show = None;
             for job in &state.render_queue.queue.jobs {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     let (word, color) = match &job.state {
                         JobState::Queued => ("queued".to_string(), plate::legend_dim()),
                         JobState::Running => ("rendering".to_string(), plate::TALLY),
@@ -2965,7 +2969,7 @@ mod tests {
         }
         // The pattern's field has no name of its own: the pointer, by hand.
         h.scroll_to("file names");
-        let field = h.rect("file names").right_center() + egui::vec2(40.0, 0.0);
+        let field = h.rect("file names").left_bottom() + egui::vec2(40.0, 14.0);
         h.kit_mut().input_mut().events.push(egui::Event::PointerMoved(field));
         h.run();
         h.wait(1.0);

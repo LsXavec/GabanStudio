@@ -146,7 +146,7 @@ pub struct Panel {
     /// The fold just opened: the scrolling brings it into view.
     reveal: bool,
     /// The foot's height, last frame.
-    foot_high: f32,
+    pub foot_high: f32,
 }
 
 impl Panel {
@@ -232,19 +232,23 @@ fn xdts_row(ui: &mut egui::Ui, state: &mut AppState, wide: f32) {
 /// The panel's foot: the jobs, `Stop export` and `More options`, outside the
 /// pane's scrolling and first into the pane, so they hold down to the smallest
 /// pane. True while `More options` is open.
+///
+/// AU15: laid in a child of the pane's Ui, not an `egui::Panel`: a panel keeps
+/// a clip of its own, and under its minimum this pane scrolls as a whole.
 pub fn foot(ui: &mut egui::Ui, state: &mut AppState, view: &View) -> bool {
     let room = ui.available_height();
-    let shown = egui::Panel::bottom(ui.id().with("export foot"))
-        .resizable(false)
-        .frame(egui::Frame::new().inner_margin(RING_ROOM))
-        .show(ui, |ui| {
-            let wide = ui.available_width();
-            ui.spacing_mut().item_spacing.y = CHOICE_GAP;
-            job_list(ui, state, wide, room);
-            fold(ui, state, view.more_default, wide)
-        });
-    // The panel stands at last frame's height, so a list that changed length
-    // needs one more frame to stand right.
+    let slot = ui.available_rect_before_wrap();
+    let top = slot.bottom() - state.render_queue.panel.foot_high;
+    let at = egui::Rect::from_min_max(egui::pos2(slot.left(), top), slot.right_bottom());
+    let mut stand = ui.new_child(egui::UiBuilder::new().max_rect(at).layout(egui::Layout::top_down(egui::Align::Min)));
+    let shown = egui::Frame::new().inner_margin(RING_ROOM).show(&mut stand, |ui| {
+        let wide = ui.available_width();
+        ui.spacing_mut().item_spacing.y = CHOICE_GAP;
+        job_list(ui, state, wide, room);
+        fold(ui, state, view.more_default, wide)
+    });
+    // It stands at last frame's height, so a list that changed length needs
+    // one more frame to stand right.
     let high = shown.response.rect.height();
     if std::mem::replace(&mut state.render_queue.panel.foot_high, high) != high {
         ui.ctx().request_repaint();
@@ -497,8 +501,11 @@ fn job_list(ui: &mut egui::Ui, state: &mut AppState, wide: f32, room: f32) {
 /// `More options`: the Transparent latch and the queue's panel, in the
 /// scrolling above it.
 fn fold(ui: &mut egui::Ui, state: &mut AppState, more_default: bool, wide: f32) -> bool {
+    // AU15: the panel's own memory of a fold pressed this boot, then the map
+    // every panel shares, which a swapped document does not take away.
+    let stored = state.panel_more.open.get(plate::MORE_EXPORT).copied();
     let panel = &mut state.render_queue.panel;
-    let open = panel.more.unwrap_or(more_default);
+    let open = panel.more.or(stored).unwrap_or(more_default);
     let row = plate::ghost_row(ui, MORE_OPTIONS, wide, Some(open));
     plate::mark_row(&row, Target::Named("export.more"));
     if !row.clicked() {
