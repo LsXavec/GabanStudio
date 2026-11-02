@@ -741,6 +741,18 @@ fn lesson_card(dir: &Path) {
         h.run_frames(8);
         h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("experienced-plate_one-asked{name}.png")));
         drop(h);
+        // And the card the class ends on.
+        let mut h = EditorHarness::with_gpu_ready();
+        open(&mut h, plate.id);
+        crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
+        let step = h.editor().stage.expect("the lesson's step");
+        let last = crate::lessons::Task { step, done: crate::lessons::Done::OnStep(step), ..crate::lessons::PROBED.tasks[0] };
+        let tasks: &'static [crate::lessons::Task] = Box::leak(Box::new([last]));
+        h.editor_mut().lesson = None;
+        h.editor_mut().begin_lesson(crate::lessons::Lesson { tasks, ..*plate }, 0);
+        h.run_frames(8);
+        h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("experienced-plate_one-finish{name}.png")));
+        drop(h);
     }
     for (lesson, task) in [(0, 8), (1, 6), (2, 7), (3, 4), (4, 7), (5, 7), (6, 8), (7, 11), (8, 7)] {
         let lesson = crate::lessons::ALL[lesson];
@@ -792,7 +804,7 @@ fn lesson_card(dir: &Path) {
 }
 
 /// AU27: the card's pictures, by file name.
-const LESSON: [(&str, u32, u32); 66] = [
+const LESSON: [(&str, u32, u32); 68] = [
     ("lesson-draw", 1600, 900),
     ("lesson-draw-fold", 832, 520),
     ("lesson-wander", 832, 520),
@@ -846,6 +858,8 @@ const LESSON: [(&str, u32, u32); 66] = [
     ("amateur-too_much_coat-lettering-1280", 1280, 800),
     ("experienced-plate_one-asked", 1600, 900),
     ("experienced-plate_one-asked-1280", 1280, 800),
+    ("experienced-plate_one-finish", 1600, 900),
+    ("experienced-plate_one-finish-1280", 1280, 800),
     ("experienced-plate_one", 1600, 900),
     ("experienced-plate_one-1280", 1280, 800),
     ("experienced-desk_to_lamp", 1600, 900),
@@ -1771,7 +1785,7 @@ fn audress_the_ignored_pass_owes_every_shot() {
     let names: BTreeSet<&str> = lists.iter().flat_map(|(_, l)| l.iter().map(|o| o.0.as_str())).collect();
     let owed: usize = lists.iter().map(|(_, l)| l.len()).sum();
     assert_eq!(names.len(), owed, "no two shots share a name");
-    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 16 + 15, "the 273 owed before AU15, its panels at both sizes, AU23's and AU24's lessons: three at both and eight steps each, AU24's Plan at both, and AU25's three at both, seven steps and its ring at both");
+    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 16 + 17, "the 273 owed before AU15, its panels at both sizes, AU23's and AU24's lessons: three at both and eight steps each, AU24's Plan at both, and AU25's three at both, seven steps, its ring at both and its finish at both");
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of

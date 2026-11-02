@@ -293,6 +293,13 @@ fn by_hand(go: &mut Recorder, step: &str, task: &Task, rect: egui::Rect) {
             let from = rect.center();
             go.act(step, Act::Drag(&[from, pos2(rect.left() + rect.width() * STRENGTH_LEFT, from.y)]));
         }
+        // AU25: the row the ring stands on, typed, and the window's own button.
+        Done::Lipped(_) => go.act(step, Act::Answer(Box::new(|h| {
+            h.editor_mut().lip_form.as_mut().expect("the window").from = lessons::LAMP_KEYS[2];
+            settle(h);
+            h.click("generate");
+            settle(h);
+        }))),
         // AU25: on, a look, and off.
         Done::PageSeen => {
             for _ in 0..2 {
@@ -414,7 +421,7 @@ fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &T
             again(go, step, task);
         }
         // AU25: the Lip flap window stands over the menu bar until it is shut.
-        if task.done == Done::Lipped {
+        if matches!(task.done, Done::Lipped(_)) {
             go.act(step, Act::Answer(Box::new(|h| h.editor_mut().lip_form = None)));
         }
     } else if let Show::Perform(action) = task.show {
@@ -439,16 +446,6 @@ fn own_work(go: &mut Recorder, step: &str, art: &[Path], task: &Task, hand: Hand
     if let Some(run) = task.hand {
         go.act(step, Act::Answer(Box::new(move |h| run(h.editor_mut()))));
         settle(go.harness());
-        // AU25: what the hand did was off the spine: its save is the ring's, and
-        // then the ring is the way back.
-        for _ in 0..2 {
-            if let Some((Target::Named("forge.save") | Target::Step(_), rect)) = go.harness().ring_stands().filter(|_| !own_lines(task).is_empty()) {
-                go.act(step, Act::Answer(Box::new(move |h| {
-                    h.click_at(rect);
-                    settle(h);
-                })));
-            }
-        }
     }
     if task.done == Done::Moved {
         lasso_and_drag(go, step, art, task.stand_in);

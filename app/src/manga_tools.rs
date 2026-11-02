@@ -802,6 +802,13 @@ pub fn land_words(state: &mut AppState) {
 }
 
 /// `key`, a number generator `id` holds, becomes `v`: one `SetNodeKind`.
+/// AU25: `speed_rows`' two fields landed: which way the lines run, and how many.
+pub(crate) fn set_lines(state: &mut AppState, id: NodeId, angle: f32, count: f32) {
+    for (key, v) in [("angle", angle), ("count", count)] {
+        state.manga_edit("speed lines", |cut, at| set_float(cut, at, id, key, v));
+    }
+}
+
 fn set_float(cut: &Cut, at: CutRef, id: NodeId, key: &str, v: f32) -> Vec<Command> {
     let Ok(node) = cut.graph.node(id) else {
         return Vec::new();
@@ -1147,11 +1154,17 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
     if page.is_some() {
         ui.add_space(6.0);
         plate::legend(ui, "lettering");
+        // AU25: a chain through a panel comes here once that panel is picked: a
+        // new letter stands in the picked one.
+        let panel = PANEL_HANDLES.iter().position(|h| plate::wishes(ui.ctx(), Target::Named(h)));
+        let panel_next = panel.is_none_or(|i| i == state.manga.selected);
         ui.horizontal_wrapped(|ui| {
             ui.set_max_width(shown);
             for (kind, word, label, handle, help) in LETTER_VERBS {
                 let r = ui.button(word);
-                plate::mark_row(&r, Target::Named(handle));
+                if panel_next {
+                    plate::mark_row(&r, Target::Named(handle));
+                }
                 if r.on_hover_text(help).clicked() {
                     *edit = Some(Edit::Add(kind, label));
                 }

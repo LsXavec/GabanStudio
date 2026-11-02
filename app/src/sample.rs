@@ -35,7 +35,7 @@ pub const FRAMES: u32 = 24;
 /// the camera pans this far, from the paper's left end onto the frame.
 pub const PAN: u32 = 320;
 const GROUND: u32 = 290;
-const RADIUS: f32 = 26.0;
+pub(crate) const RADIUS: f32 = 26.0;
 const LINE: [u8; 4] = [26, 26, 26, 255];
 const BALL: [u8; 4] = [214, 72, 60, 255];
 /// The drawings (of 12) that are keys: the start, the contact, the end.

@@ -1065,7 +1065,8 @@ impl crate::Editor {
                     ui.horizontal(|ui| {
                         let mut a = form.from + 1;
                         let mut b = form.to + 1;
-                        plate::field(ui, egui::DragValue::new(&mut a).range(1..=last + 1).prefix("in "));
+                        let from = plate::field(ui, egui::DragValue::new(&mut a).range(1..=last + 1).prefix("in "));
+                        plate::mark(ui, from.interact_rect, Target::Named("lip.in"));
                         plate::field(ui, egui::DragValue::new(&mut b).range(1..=last + 1).prefix("out "));
                         form.from = a - 1;
                         form.to = (b - 1).max(form.from);

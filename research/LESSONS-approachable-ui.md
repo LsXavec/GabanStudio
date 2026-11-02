@@ -151,7 +151,7 @@ Each table is grouped by step, in bar order. The first task of every later step 
 | Paper | Const `PLATE`: 1500×2000, 1 frame, track `A`, stack `Solo merged` |
 | Prep, `fill_gap`, `ink` | None |
 | On the paper | Nothing |
-| Card picture | None until the end. A learner's plate is not compared with ours |
+| Card picture | None until the end. A learner's plate is not compared with ours: the end card and the Lessons page's tile show three neutral stage marks, never the stand-in's boxes |
 | Closing | `You made that. It is a real file. You can rough, ink, keep your roughs out of the file and deliver on a clear background.` |
 | Next | The Lessons page |
 
@@ -163,24 +163,27 @@ Each table is grouped by step, in bar order. The first task of every later step 
 | 3 | Pick {Clean pencil} and raise {Steady stroke} until your hand stops showing in the long lines. | `Rail(Brush)`, `Float(Brushes)`, `brush.clean`, `steady.row` | `All([Armed(clean), Smoothing])` | `Where` |
 | 4 | Ink all three stages. | `Paper` | `All([InkOnLayer, Strokes(6)])` | `Where` |
 | 5 | Set the rough layer's role to Rough, so it never reaches a file. | `Rail(Layers)`, `layers.role` | `LayerRole(Rough)` | `Where` |
-| 6 | Make a brush with a paper grain in {Brush maker}, press {Draw} to come back, and shade one stage with it. | `menu.more`, `Action(BrushMakerRoom)`, `Pane(Forge)` | `All([Preset(my_brushes), Strokes(1)])` | `Where` |
+| 6 | Make a brush in {Brush maker}: under {More}, raise its scatter, then save it. | `menu.more`, `Action(BrushMakerRoom)`, `Pane(Forge)`, `forge_more`, `forge.scatter`, `forge.save` | `Scattered(my_brushes)` | `Where` |
+| 7 | Press {Draw} to come back, pick your ink layer in {Layers}, and shade one stage with your new brush. | `Rail(Layers)`, `layers.pick` | `Strokes(1)` | `Where` |
 | | **Color** | | | |
-| 7 | Press {Color}. *Why: Flat colors only. The paper stays bare, so this plate sits on any page.* | `Step(InkPaint)` | `OnStep(InkPaint)` | `Where` |
-| 8 | Flat-color all three stages, and leave the paper bare. | `Rail(Fill)`, `Pane(Palette)` | `Fills(3)` | `Where` |
+| 8 | Press {Color}. *Why: Flat colors only. The paper stays bare, so this plate sits on any page.* | `Step(InkPaint)` | `OnStep(InkPaint)` | `Where` |
+| 9 | Flat-color all three stages, and leave the paper bare. | `Rail(Fill)`, `Pane(Palette)` | `Fills(3)` | `Where` |
 | | **Effects** | | | |
-| 9 | Press {Effects}. *Why: One effect, quietly. If someone can name it, it is too much.* | `Step(Composite)` | `OnStep(Composite)` | `Where` |
-| 10 | Add one effect from the shelf and keep it subtle. | `shelf.strength` | `All([AnyEffect, Strength])` | `Where` |
+| 10 | Press {Effects}. *Why: One effect, quietly. If someone can name it, it is too much.* | `Step(Composite)` | `OnStep(Composite)` | `Where` |
+| 11 | Add one effect from the shelf and keep it subtle. | `shelf.strength` | `All([AnyEffect, Strength])` | `Where` |
 | | **Export** | | | |
-| 11 | Press {Export}. *Why: A plate is only finished when it can leave the app.* | `Step(Export)` | `OnStep(Export)` | `Where` |
-| 12 | Export a PNG with a transparent background. | `export.more`, `export.transparent`, `Action(ExportStill)` | `Exported(1)`, latch on | `Where` |
+| 12 | Press {Export}. *Why: A plate is only finished when it can leave the app.* | `Step(Export)` | `OnStep(Export)` | `Where` |
+| 13 | Export a PNG with a transparent background. If the file lands with the latch off: `That file kept its white paper. Open {More options} and turn on {Transparent background}.` | `export.more`, `export.transparent`, `Action(ExportStill)` | `Exported(1)`, latch on | `Where` |
 
 **Fallback, task 5.** If a plain still does not leave out a Rough layer: `Hide the rough layer, so it never reaches a file.`, ring `Rail(Layers)`, `layers.eye`, tick `LayerHidden`. The purpose of a layer role was not read.
 
-**Fallback, task 6.** If `BrushMakerRoom` has no Rig route: `Pick a brush with a paper grain from {Brushes}, and shade one stage with it.`, ring `Rail(Brush)`, `Float(Brushes)`, tick `Strokes(1)`, and the report says so.
+**Why scatter, not a paper grain (task 6, AU25 review).** A grain needs a texture brought in through an OS file dialog, and a new install has none, so a paper grain cannot be made on a first run and the gate could only fake one. Scatter is on the Brush maker's own fold, and the tick reads the value in the saved brush.
 
-**The wander line** holds off in task 6 until the new preset lands, because Brush maker is off the spine and the ring leads there. After that it points back to Draw, which is the way back from an off-spine place. Brush maker hides the rail, so the shading stroke cannot land there.
+**Why a task of its own (task 7).** Brush maker hides the rail, so the shading stroke cannot land there. The door back arms the stack's working layer, which is the one task 5 hid, and a hidden layer refuses the pen, so the person picks their ink layer first. The door itself does not change: `arm_room` is free work's too.
 
-**Stand-ins.** `rough_1` to `rough_6` (1), `ink_1` to `ink_6` (4), a grain stroke (6), seeds `body_1` to `body_3` (8). The gate's stand-in moth is a plain shape nobody sees, so it sets no example.
+**The wander line** holds off in task 6, because Brush maker is off the spine and the ring leads there. In task 7 it points back to Draw, which is the way back from an off-spine place.
+
+**Stand-ins.** `rough_1` to `rough_6` (1), `ink_1` to `ink_6` (4), a grain stroke (7), seeds `body_1` to `body_3` (9). The gate's stand-in moth is a plain shape nobody sees, so it sets no example.
 
 **Guide art.** None. Nothing stands on the paper in this lesson.
 
@@ -323,21 +326,21 @@ Each move plants one foot, so nothing skates. Peg bar x 20 to 160, on the desk. 
 | # | On screen | Ring | Tick | Show me where |
 |---|---|---|---|---|
 | | **Plan** | | | |
-| 1 | The moth wakes. Its first flight is from the desk to the lamp, and the hum is already on the sheet. Design it. On track W, rows 1 to 3, draw the wings closed, half and open. {Lip flap} reads those three, in that order. *Why: Plan is where a design becomes keys.* | `band.sheet`, `Cell { W, 0 }` | `All([KeyArt { W, 0 }, KeyArt { W, 1 }, KeyArt { W, 2 }])` | `Where` |
-| 2 | On track A, draw the body on the three marked keys: take-off, the turn, the landing. | `band.sheet`, `Cell { A, 0 }` | `All([KeyArt { A, 0 }, KeyArt { A, 20 }, KeyArt { A, 40 }])` | `Where` |
+| 1 | The moth wakes. Its first flight is from the desk to the lamp, and the hum is already on the sheet. Design it. On track W, rows 41 to 43, draw the wings closed, half and open, at the lamp where it lands. {Lip flap} reads those three, in that order. *Why: Plan is where a design becomes keys.* | `band.sheet`, `Cell { W, 40 }` | `All([KeyArt { W, 40 }, KeyArt { W, 41 }, KeyArt { W, 42 }])` | `Where` |
+| 2 | On track A, draw the body on the three marked keys: take-off, the turn, the landing. In flight, its wings are part of the body. | `band.sheet`, `Cell { A, 0 }` | `All([KeyArt { A, 0 }, KeyArt { A, 20 }, KeyArt { A, 40 }])` | `Where` |
 | 3 | Open {Canvas options}, chart the spacing between two keys, make the in-betweens and draw them. | `menu.view`, `Action(CanvasOptions)`, `options.chart`, `Action(MakeInbetweens)` | `All([Chart, Inbetweens])` | `Where` |
 | | **Timing** | | | |
 | 4 | Press {Timing}. *Why: Timing is where a moth gets its weight.* | `Step(Edit)` | `OnStep(Edit)` | `Where` |
-| 5 | Run {Lip flap} on track W, so the wings beat with the hum. | `menu.animation`, `menu.animation.track`, `Action(LipFlap)`, `lip.generate` | `Lipped` | `Where` |
-| 6 | Let the moth hang at the lamp for at least a second. | `Cell { A, 40 }`, `band.longer` | `Hold { frame: 40, len: 12 }` | `Where` |
+| 5 | Let the moth hang at the lamp for at least a second. | `Cell { A, 40 }`, `band.longer` | `Hold { frame: 40, len: 12 }` | `Where` |
+| 6 | Run {Lip flap} on track W from row 41, so the wings beat with the hum while it hangs. | `menu.animation`, `menu.animation.track`, `Action(LipFlap)`, `lip.in` | `Lipped(W)` | `Where` |
 | | **Color** | | | |
 | 7 | Press {Color}. *Why: Two colors. A small thing needs a small palette.* | `Step(InkPaint)` | `OnStep(InkPaint)` | `Where` |
-| 8 | Fill every drawing, in two colors. | `Rail(Fill)`, `Pane(Palette)` | `FilledOn(6)` | `Where` |
+| 8 | Fill every drawing, in two colors. | `Rail(Fill)`, `Pane(Palette)` | `FilledOn(9)` | `Where` |
 | | **Effects** | | | |
 | 9 | Press {Effects}. *Why: Effects is where the camera gets its nerve.* | `Step(Composite)` | `OnStep(Composite)` | `Where` |
 | 10 | Add a {Camera move} from the desk to the lamp. | `shelf.camera` | `CameraKeys(2)` | `Where` |
-| 11 | Ease it in {Motion curves}, so the camera arrives late. | `menu.more`, `menu.more.panels`, `Action(ShowCurves)` | `Eased` | `Where` |
-| 12 | Add wing dust: {Add effect}, Particles, Dust. | `shelf.add` | `Particles` | `Where` |
+| 11 | Add dust to the air: {Add effect}, Particles, Dust. | `shelf.add` | `Particles` | `Where` |
+| 12 | Ease the camera in {Motion curves}, so it arrives late. | `menu.more`, `menu.more.panels`, `Action(ShowCurves)`, `Pane(Curves)` | `Eased` | `Where` |
 | | **Export** | | | |
 | 13 | Press {Export}. *Why: Two files: frames for an editor, a GIF for everyone else.* | `Step(Export)` | `OnStep(Export)` | `Where` |
 | 14 | Export a PNG sequence. | `Action(ExportPngSequence)` | `Exported(1)` | `Where` |
@@ -347,13 +350,17 @@ Each move plants one foot, so nothing skates. Peg bar x 20 to 160, on the desk. 
 
 **No MP4.** It needs ffmpeg, and a lesson must not.
 
-**Lip flap on wings.** It reads the first three drawings as closed, half and open, which is why task 1 orders them. It has not been run on drawn wings over a code-made hum. **Fallback:** if it fails, task 5 reads `Set the wings by hand, closed, half, open, for a beat of 3 rows.`, tick `Lipped` unchanged (cells on W past row 3).
+**Lip flap on wings.** It reads the first three drawings as closed, half and open, which is why task 1 orders them. The gate runs it on drawn wings over the code-made hum. **Fallback:** if it fails, task 6 reads `Set the wings by hand, closed, half, open, for a beat of 3 rows.`, tick `Lipped(W)` unchanged (cells on W past row 3).
+
+**Where the wings are (AU25 review, the Lead's to confirm).** Track W is a plain cel with no road of its own, so wings beating across the whole cut stand still at the desk while the body flies off, and the moth comes apart. The file left that open, and the part took the smaller of the reviewer's two roads, recorded here and on the spec's list for the Lead. The flying keys and their in-betweens carry the wings in the body's own drawing, W stays blank until row 41, and Lip flap beats W's three drawings only while the moth hangs at the lamp. The other road, a keyed Transform on W's plane, needs a person's route to a node's parameters that no step offers yet. So the hang comes before Lip flap, whose window takes the cut as it stands, and the fold's `in` field is the ring's last stop.
+
+**The hum** is made to suit this: a beat of 8 rows, each of Lip flap's three bands held 2 rows, closed, half, open, half, so all three wings land and the 12 rows of the hang hold 6 beats. It runs 60 rows, past the cut, so the hang never meets silence.
 
 **Stand-ins.** `wing_0` to `wing_2`, `body_1` to `body_3`, in-between drawings, seeds, two camera keys.
 
 **Guide art.** None on the paper. BG and the hum are made by code. The lamp's cone is one soft shape, so the dust has something to catch.
 
-**File facts.** A folder of frames and one GIF, the same count, at least 52. W cells past row 3. First and last pictures differ by the camera. Dust present: pixels changed against the same frame with Particles off. No `.mp4`.
+**File facts.** A folder of frames and one GIF, the same count, at least 52. W cells past row 3, none before row 41, all three wings among them. At the first frame W is blank; at the last, W's ink stands within reach of the landed body. First and last pictures differ by the camera. Dust present: pixels changed against the same frame with Particles off. No `.mp4`.
 
 ---
 
@@ -455,25 +462,30 @@ Each move plants one foot, so nothing skates. Peg bar x 20 to 160, on the desk. 
 | | **Manga** | | | |
 | 1 | The moth has seen the bulb. Draw the most serious page ever made about something very small. Split it into at least five panels, one tall for the dive. *Why: Save the only word in this course for the end.* | `Action(PanelTool)` | `Panels(5)` | `Where` |
 | 2 | Set a 3-point ruler, snap on. Build a canyon of book spines. | `manga.rulers`, `Action(ToggleRulerSnap)` | `All([Rulers(3), Strokes(6)])` | `Where` |
-| 3 | Ink the dive. Small moth, huge canyon. | `Rail(Brush)` | `InkInPanels(3)` | `Where` |
+| 3 | Turn {Snap to rulers} off, then ink the dive. Small moth, huge canyon. | `manga.rulers`, `Action(ToggleRulerSnap)` | `All([InkInPanels(3), Snap(false)])` | `Where` |
 | 4 | Lay tone on the sky only. | `manga.ink_tone`, `manga.tone_preset` | `Tone` | `Where` |
-| 5 | Add {Speed lines} to the dive. | `manga.speed_lines` | `Generator(SpeedLines)` | `Where` |
-| 6 | Last panel: one balloon, one word. `tink` | `manga.balloon`, `manga.words` | `All([Generator(Balloon), Words])` | `Where` |
-| 7 | Press {See the page}, check it as it will print, then come back. | `manga.see_page` | `PageSeen` | `Where` |
+| 5 | Set Draw on back to Ink. | `manga.ink_tone` | `OnTrack(INK)` | `Where` |
+| 6 | Add {Speed lines}. They cross the whole page, so set their direction to 90, down the dive, and thin them out. | `manga.speed_lines`, `manga.speed.direction` | `All([Generator(SpeedLines), LinesDown])` | `Where` |
+| 7 | Last panel: one balloon, one word: tink | `manga.panel.5`, `manga.balloon`, `manga.words` | `All([Generator(Balloon), Words])` | `Where` |
+| 8 | Press {See the page}, check it as it will print, then come back. | `manga.see_page` | `PageSeen` | `Where` |
 | | **Color** | | | |
-| 8 | Press {Color}. *Why: A black wall makes a small bulb glare.* | `Step(InkPaint)` | `OnStep(InkPaint)` | `Where` |
-| 9 | Flood the wall behind the bulb to solid black. | `swatch.black`, `Rail(Fill)` | `Fills(1)` | `Where` |
+| 9 | Press {Color}. *Why: A black wall makes a small bulb glare.* | `Step(InkPaint)` | `OnStep(InkPaint)` | `Where` |
+| 10 | Flood the wall behind the bulb to solid black. | `swatch.black`, `Rail(Fill)` | `Fills(1)` | `Where` |
 | | **Export** | | | |
-| 10 | Press {Export}. *Why: Mono is how a page goes to print.* | `Step(Export)` | `OnStep(Export)` | `Where` |
-| 11 | Export in mono, with a threshold that keeps the tone clean. | `export.page.mono`, `Action(ExportPages)` | `Exported(1)`, mono on | `Where` |
+| 11 | Press {Export}. *Why: Mono is how a page goes to print.* | `Step(Export)` | `OnStep(Export)` | `Where` |
+| 12 | Export in mono, with a threshold that keeps the tone clean. If the pages land with the latch off: `That page kept its greys. Set {Mono}, then export again.` | `export.page.mono`, `Action(ExportPages)` | `Exported(1)`, mono on | `Where` |
 
-**This lesson needs the Comic step.** Tasks 4 to 7 use its verbs, so no one meets the Tab menu, typed fractions or a DANGER edge. `PageSeen` passes with no GPU, as the Comic step specifies. Task 11's Mono latch stands on the Export step only because that part puts it there: today it is a row in the Manga pane.
+**This lesson needs the Comic step.** Tasks 4 to 8 use its verbs, so no one meets the Tab menu, typed fractions or a DANGER edge. `PageSeen` passes with no GPU, as the Comic step specifies. Task 12's Mono latch stands on the Export step only because that part puts it there: today it is a row in the Manga pane.
+
+**Why the pen goes back to Ink (task 5).** Task 4 leaves `Draw on` on Tone, and a flood lands on the track in hand. On TONE the wall would print as dots.
+
+**Speed lines cross the whole page (task 6).** The generator has no panel to stay in and the Comic step's pane offers only direction and count, so the lines cannot be confined to the dive without an engine change, which AU25 may not make. The sentence says what the control does, and the tick reads the direction. Confining them is on the spec's list for the Lead.
 
 **Stand-ins.** Cuts, `spine_1` to `spine_6`, `dive_1` to `dive_3`, a tone patch, the word `tink`, seed `wall`.
 
 **Guide art.** None on the paper.
 
-**File facts.** One PNG, 2591×3624, every pixel black or white. Panels ≥5. Tone on the `TONE` track. A balloon and the text `tink` in the page graph. No DANGER edge: `page_hand_built` is None.
+**File facts.** One PNG, 2591×3624, every pixel black or white. Panels ≥5. Tone on the `TONE` track. The wall solid black, on the `INK` track. A balloon whose centre stands in the last panel, and the text `tink` in the page graph. Speed lines running down the page, at a thinned count. No DANGER edge: `page_hand_built` is None.
 
 ---
 
@@ -500,7 +512,7 @@ Resolved at run time, so a word changed by Plain words changes here too. A token
 | `{Longer}`, `{Shorter}` | `vocab::LONGER`, `vocab::SHORTER` |
 | `{Layers}`, `{Brushes}`, `{Canvas options}`, `{Steady stroke}`, `{Keep inside strokes}`, `{Sketch pencil}`, `{Clean pencil}`, `{Brush maker}`, `{Loop}`, `{Loop start}`, `{Loop end}` | `vocab::` constants of those names |
 | `{Brush}`, `{Eraser}`, `{Select}`, `{Fill}`, `{Size}` | The rail's faces |
-| `{Add drawing}`, `{Speed}`, `{Medium}`, `{Play}`, `{Undo}`, `{View}`, `{Mirror view}`, `{Motion curves}`, `{Lip flap}`, `{Custom layer}`, `{New page}`, `{Panel tool}`, `{Export pages}` | The control's own label, one const each, shared with it |
+| `{Add drawing}`, `{Speed}`, `{Medium}`, `{Play}`, `{Undo}`, `{View}`, `{Mirror view}`, `{Motion curves}`, `{Lip flap}`, `{Custom layer}`, `{New page}`, `{Panel tool}`, `{Export pages}`, `{More}`, `{More options}`, `{Transparent background}`, `{Mono}` | The control's own label, one const each, shared with it |
 | `{Glow}`, `{Strength}`, `{Add effect}`, `{Camera move}` | `Effects` step constants |
 | `{Split across}`, `{Split down}`, `{panel 3}`, `{See the page}`, `{Speed lines}`, `{Snap to rulers}` | `manga_tools` constants, `op.label()` |
 | `{Night}`, `{Show me}` | `lesson.rs` |

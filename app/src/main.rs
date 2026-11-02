@@ -6030,14 +6030,8 @@ impl Editor {
         if *seen != room_key && !self.canvas.stroke_active() {
             *seen = room_key;
             let (n, r) = stack.armed();
-            // AU25: a layer the person hid is no door's to arm: the pen would be
-            // refused there, and Plate One comes back from the Brush maker to it.
-            let drawing = self.state.current_drawing().and_then(|id| self.state.cut().drawing(id));
-            let hidden = drawing.and_then(|d| d.layers.iter().find(|l| l.props.name == n)).is_some_and(|l| !l.props.visible);
-            if !hidden {
-                self.state.view.active_layer = n;
-                self.state.view.active_role = r;
-            }
+            self.state.view.active_layer = n;
+            self.state.view.active_role = r;
         }
         self.state.new_cel_active = stack.armed();
         self.state.new_cel_template = stack.layers.clone();

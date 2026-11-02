@@ -910,6 +910,7 @@ fn grid(
     let range = state.sheet_range();
     let frame_count = state.frame_count();
     ui.spacing_mut().item_spacing.y = 0.0;
+    let mut across = None;
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         // GM14: following the cursor jumps at once — the next frame lays
@@ -1497,18 +1498,25 @@ fn grid(
             // AU21: a task's cell the same way, once, as a marked row is: only
             // the rows in view are laid out, so one below the fold never
             // reaches its mark, and the person's own scroll stands after this.
+            // AU25: a row of room under it, or it lands beneath the across bar
+            // and its click scrolls the sheet.
             for &(track, frame) in cells.iter().filter(|c| c.1 < frame_count) {
                 if let Some((ctop, cleft)) = geom
                     && plate::first_sight(ui.ctx(), Target::Cell { track, frame })
                 {
-                    ui.scroll_to_rect(
-                        Rect::from_min_size(pos2(cleft, ctop + frame as f32 * ROW_H), vec2(1.0, ROW_H)),
-                        None,
-                    );
+                    let cell = pos2(cleft + GUTTER_W + f32::from(track) * COL_W, ctop + frame as f32 * ROW_H);
+                    let rect = Rect::from_min_size(cell, vec2(COL_W, 2.0 * ROW_H));
+                    ui.scroll_to_rect(rect, None);
+                    across = Some(rect);
                     ui.ctx().request_repaint();
                 }
             }
         });
+    // AU25: the rows' scroll eats both axes of a target, so the track a slim
+    // pane has off to the side comes back from out here, in the sheet's across.
+    if let Some(rect) = across {
+        ui.scroll_to_rect(rect, None);
+    }
     plate::note_viewport(ui, scroll.inner_rect, [false, true]);
 }
 
@@ -2330,6 +2338,7 @@ fn opacity_cells(
 
 const LAYERS_EYE: Target = Target::Named("layers.eye");
 const LAYERS_ROLE: Target = Target::Named("layers.role");
+const LAYERS_PICK: Target = Target::Named("layers.pick");
 /// AU15: the latch stands under `More`, so the refusal says where.
 pub const LINE_GUARD_REFUSAL: &str = "Protect line art is on. Turn it off under More in Layers.";
 /// AU15: a layer row: the height its name's two lines take.
@@ -2348,6 +2357,15 @@ pub(crate) fn ringed_layer(state: &AppState, armed: Option<LayerId>) -> Option<L
     let under = layers.iter().position(|(_, l)| Some(l.id) == armed).map_or(0, |i| i + 1);
     let below = layers[under..].iter().find(art);
     below.or_else(|| layers.iter().find(art)).map(|(_, l)| l.id).or(armed)
+}
+
+/// AU25: the row `layers.pick` stands on: the top layer that shows and holds art,
+/// and with none the top one that shows.
+fn ink_layer(state: &AppState) -> Option<LayerId> {
+    let layers = state.strip_layers();
+    let shows = |(_, l): &&(usize, &CelLayer)| l.props.visible;
+    let inked = layers.iter().filter(shows).find(|(_, l)| !l.raster.tiles.is_empty());
+    inked.or_else(|| layers.iter().find(shows)).map(|(_, l)| l.id)
 }
 
 pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool, docked: bool) {
@@ -2543,6 +2561,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
     let armed_id = state.active_layer_id();
     let asked = [LAYERS_EYE, LAYERS_ROLE].iter().any(|t| plate::wishes(ui.ctx(), *t));
     let ringed = if asked { ringed_layer(state, armed_id) } else { None };
+    let picked = if plate::wishes(ui.ctx(), LAYERS_PICK) { ink_layer(state) } else { None };
     let narrow = ui.available_width() < if more { NARROW_STRIP } else { NARROW_FOLDED };
     let mut layer_rows = |ui: &mut egui::Ui| {
     for (row_i, (lid, name, visible, opacity)) in rows.iter().enumerate() {
@@ -2710,6 +2729,9 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                         let resp = ui.selectable_label(is_active, text).card(
                             "click: edit this layer — double-click: rename — right-click: define",
                         );
+                        if picked == Some(*lid) {
+                            plate::mark_row(&resp, LAYERS_PICK);
+                        }
                         resp.context_menu(|ui| {
                             layer_card(ui, state, *lid, &props, is_active);
                         });

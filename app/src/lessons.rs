@@ -632,16 +632,23 @@ pub enum Done {
     Generator(GenKind),
     Words,
     PageSeen,
-    Lipped,
+    /// AU25: the named track holds more keys than it did.
+    Lipped(u8),
     Inbetweens,
     Chart,
     Exported(u32),
     Preset(&'static str),
+    /// AU25: a brush of the bank, new or saved over, with its scatter raised.
+    Scattered(&'static str),
     Picked([u8; 3]),
     Locked(bool),
     /// AU24: `Snap to rulers`, on or off.
     Snap(bool),
     PanelPicked(u32),
+    /// AU25: the named track is the one in hand.
+    OnTrack(u8),
+    /// AU25: `Speed lines` run down the page, and fewer than they came.
+    LinesDown,
     All(&'static [Done]),
 }
 
@@ -2558,6 +2565,10 @@ const PLATE_INK: u16 = 0;
 const PLATE_ROUGH: u16 = 6;
 const PLATE_GRAIN: u16 = 12;
 const PLATE_SEED: u16 = 13;
+/// The tile and the card: a person's plate is their own, so these show none.
+const PLATE_MARKS: u16 = 16;
+const PLATE_MARK_PATHS: usize = 4;
+const PLATE_MARK_LINE: f32 = 40.0;
 /// `(middle, half wide, half tall)` of the strip, the coat, and what comes out.
 pub(crate) const PLATE_STAGES: [(Pt, f32, f32); 3] = [([750.0, 390.0], 480.0, 130.0), ([750.0, 1000.0], 300.0, 280.0), ([750.0, 1610.0], 420.0, 190.0)];
 const PLATE_LINE: f32 = 10.0;
@@ -2565,8 +2576,6 @@ const PLATE_LINE: f32 = 10.0;
 const ROUGH_OFF: f32 = 90.0;
 /// `Steady stroke`, raised: a hand stops showing in a long curve about here.
 const STEADY_UP: u8 = 4;
-/// `Strength`'s grain, as the Brush maker's first press sets it.
-const GRAIN_STRENGTH: f32 = 0.5;
 
 fn plate_art() -> Vec<Path> {
     let mut art = Vec::new();
@@ -2581,6 +2590,9 @@ fn plate_art() -> Vec<Path> {
     let [_, ([x, y], wide, tall), _] = PLATE_STAGES;
     art.push(line_of([x - wide * 0.4, y + tall * 0.25], [x + wide * 0.4, y + tall * 0.25], 16.0));
     art.extend(PLATE_STAGES.map(|([x, y], _, tall)| seed_at([x, y + tall * 0.55])));
+    let [_, ([x, y], wide, _), _] = PLATE_STAGES;
+    art.push(line_of([x - wide, y], [x + wide, y], PLATE_MARK_LINE));
+    art.extend([-wide, 0.0, wide].map(|off| line_of([x + off, y - 120.0], [x + off, y + 120.0], PLATE_MARK_LINE)));
     art
 }
 
@@ -2596,18 +2608,6 @@ fn clean_and_steady(e: &mut Editor) {
     // The pen's config keeps the level: the row's own road, or a frame resets it.
     e.canvas.stabilizer = e.canvas.stabilizer.max(steady) + STEADY_UP;
     e.canvas.stabilizer_request = Some(e.canvas.stabilizer);
-}
-
-/// The Brush maker's draft with a paper grain, named: its `Save to Brushes` is
-/// the ring's, and the shell holds the presets.
-fn draft_grain_brush(e: &mut Editor) {
-    let mut brush = crate::forge::blank_draft();
-    brush.name = "Paper grain".to_string();
-    if let Some(engine) = brush.engine.as_mut() {
-        engine.grain_key = Some("paper".to_string());
-        engine.grain_strength = GRAIN_STRENGTH;
-    }
-    e.forge.draft = brush;
 }
 
 const PLATE_TASKS: &[Task] = &[
@@ -2652,14 +2652,30 @@ const PLATE_TASKS: &[Task] = &[
         &[MORE_KEY, LAYERS_KEY, Target::Named("layers.eye")],
         Show::Where,
     ),
+    // A paper grain needs a texture the person imports through a file dialog, and
+    // a new install has none: the Brush maker's scatter is what any first run has.
+    act(
+        "Make a brush in {Brush maker}: under {More}, raise its scatter, then save it.",
+        Stage::Drawing,
+        Done::Scattered("my brushes"),
+        &[
+            Target::Named("menu.more"),
+            Target::Action(Action::BrushMakerRoom),
+            Target::Pane(Pane::Forge),
+            Target::Named(plate::MORE_FORGE),
+            Target::Named("forge.scatter"),
+            Target::Named("forge.save"),
+        ],
+        Show::Where,
+    ),
+    // The door to Draw arms the stack's layer, the one just hidden.
     Task {
-        hand: Some(draft_grain_brush),
         stand_in: &[PLATE_GRAIN],
         ..act(
-            "Make a brush with a paper grain in {Brush maker}, press {Draw} to come back, and shade one stage with it.",
+            "Press {Draw} to come back, pick your ink layer in {Layers}, and shade one stage with your new brush.",
             Stage::Drawing,
-            Done::All(&[Done::Preset("my brushes"), Done::Strokes(1)]),
-            &[Target::Named("menu.more"), Target::Action(Action::BrushMakerRoom), Target::Pane(Pane::Forge), Target::Named("forge.save")],
+            Done::Strokes(1),
+            &[MORE_KEY, LAYERS_KEY, Target::Named("layers.pick")],
             Show::Where,
         )
     },
@@ -2685,13 +2701,16 @@ const PLATE_TASKS: &[Task] = &[
         Show::Where,
     ),
     where_pill("Press {Export}.", "A plate is only finished when it can leave the app.", Stage::Export, Action::RoomExport),
-    act(
-        "Export a PNG with a transparent background.",
-        Stage::Export,
-        Done::Exported(1),
-        &[Target::Named("export.more"), Target::Named("export.transparent"), Target::Action(Action::ExportStill)],
-        Show::Where,
-    ),
+    Task {
+        miss: Some("That file kept its white paper. Open {More options} and turn on {Transparent background}."),
+        ..act(
+            "Export a PNG with a transparent background.",
+            Stage::Export,
+            Done::Exported(1),
+            &[Target::Named("export.more"), Target::Named("export.transparent"), Target::Action(Action::ExportStill)],
+            Show::Where,
+        )
+    },
 ];
 
 // ---- Desk to Lamp ----
@@ -2723,11 +2742,20 @@ const LAMP_BODY_SEED: u16 = 10;
 const LAMP_BETWEEN_SEED: u16 = 13;
 const LAMP_THUMB: u16 = 16;
 const LAMP_THUMB_PATHS: usize = 5;
-/// The three wings' root: inside all three, so a fill finds whichever a beat
-/// left on the row.
-const WINGS_AT: Pt = [512.0, 620.0];
+/// The three wings' root, on the landed body: track W has no road of its own, so
+/// its wings beat where the moth hangs and the flying keys carry theirs.
+pub(crate) const WINGS_AT: Pt = LAMP_ROAD[2];
 /// The moth's road, key to key.
 const LAMP_ROAD: [Pt; 3] = [[230.0, 540.0], [520.0, 330.0], [790.0, 230.0]];
+/// How wide a flying body is drawn, its wings folded into the key, and how wide
+/// the landed one, whose wings are W's.
+const FLYING: f32 = 96.0;
+const LANDED: f32 = 40.0;
+/// The hum: long enough to run past the hang, and its beat in rows, a level for
+/// each of Lip flap's three bands, closed, half, open, half, two rows each.
+const HUM_ROWS: u32 = 60;
+const HUM_BEAT: [f32; 4] = [0.02, 0.35, 1.0, 0.35];
+const HUM_HOLD: u32 = 2;
 const LAMP_LINE: f32 = 6.0;
 const LAMP_AT: f32 = 800.0;
 const LAMP_SHADE: [f32; 2] = [140.0, 200.0];
@@ -2750,8 +2778,8 @@ fn lamp_art() -> Vec<Path> {
         ring_at(WINGS_AT, 90.0, 54.0, LAMP_LINE),
         ring_at(WINGS_AT, 140.0, 84.0, LAMP_LINE),
     ];
-    art.extend(LAMP_ROAD.map(|at| ring_at(at, 40.0, 24.0, LAMP_LINE)));
-    art.extend([0.25, 0.5, 0.75].map(|t| ring_at(road(t), 40.0, 24.0, LAMP_LINE)));
+    art.extend(LAMP_ROAD.map(|at| ring_at(at, if at == WINGS_AT { LANDED } else { FLYING }, 24.0, LAMP_LINE)));
+    art.extend([0.25, 0.5, 0.75].map(|t| ring_at(road(t), FLYING, 24.0, LAMP_LINE)));
     art.push(seed_at(WINGS_AT));
     art.extend(LAMP_ROAD.map(seed_at));
     art.extend([0.25, 0.5, 0.75].map(|t| seed_at(road(t))));
@@ -2786,19 +2814,18 @@ pub(crate) fn lamp_texel(x: i32, y: i32) -> [u8; 4] {
 }
 
 /// The hum on the sheet, made in code as the sample's dialogue is: a 120 Hz
-/// buzz under one swell every `SWELL` rows of the cut. Deterministic.
+/// buzz under `HUM_BEAT`. Deterministic.
 fn hum_wav() -> Vec<u8> {
     use crate::sample::VOICE_RATE;
-    use std::f32::consts::{PI, TAU};
-    const SWELL: f32 = 6.0;
+    use std::f32::consts::TAU;
     let spec = hound::WavSpec { channels: 1, sample_rate: VOICE_RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
     let per_row = VOICE_RATE as f32 / LAMP.fps as f32;
     let mut out = std::io::Cursor::new(Vec::new());
     {
         let mut w = hound::WavWriter::new(&mut out, spec).expect("a WAV header into memory");
-        for i in 0..(LAMP.cut_frames as f32 * per_row) as u32 {
-            let row = i as f32 / per_row;
-            let swell = (PI * row / SWELL).sin().powi(2);
+        for i in 0..(HUM_ROWS as f32 * per_row) as u32 {
+            let row = (i as f32 / per_row) as u32;
+            let swell = HUM_BEAT[(row / HUM_HOLD) as usize % HUM_BEAT.len()];
             let buzz = (TAU * 120.0 * i as f32 / VOICE_RATE as f32).sin();
             w.write_sample((buzz * swell * 0.6 * f32::from(i16::MAX)) as i16).expect("a sample into memory");
         }
@@ -2884,12 +2911,16 @@ const LAMP_TASKS: &[Task] = &[
     Task {
         why: Some("Plan is where a design becomes keys."),
         stand_in: &run_of::<3>(WING_0),
-        cells: &[(TRACK_W, 0), (TRACK_W, 1), (TRACK_W, 2)],
+        cells: &[(TRACK_W, LAMP_KEYS[2]), (TRACK_W, LAMP_KEYS[2] + 1), (TRACK_W, LAMP_KEYS[2] + 2)],
         ..act(
-            "The moth wakes. Its first flight is from the desk to the lamp, and the hum is already on the sheet. Design it. On track W, rows 1 to 3, draw the wings closed, half and open. {Lip flap} reads those three, in that order.",
+            "The moth wakes. Its first flight is from the desk to the lamp, and the hum is already on the sheet. Design it. On track W, rows 41 to 43, draw the wings closed, half and open, at the lamp where it lands. {Lip flap} reads those three, in that order.",
             Stage::Drawing,
-            Done::All(&[Done::KeyArt { track: TRACK_W, frame: 0 }, Done::KeyArt { track: TRACK_W, frame: 1 }, Done::KeyArt { track: TRACK_W, frame: 2 }]),
-            &[Target::Named("band.sheet"), Target::Cell { track: TRACK_W, frame: 0 }],
+            Done::All(&[
+                Done::KeyArt { track: TRACK_W, frame: LAMP_KEYS[2] },
+                Done::KeyArt { track: TRACK_W, frame: LAMP_KEYS[2] + 1 },
+                Done::KeyArt { track: TRACK_W, frame: LAMP_KEYS[2] + 2 },
+            ]),
+            &[Target::Named("band.sheet"), Target::Cell { track: TRACK_W, frame: LAMP_KEYS[2] }],
             Show::Where,
         )
     },
@@ -2898,14 +2929,14 @@ const LAMP_TASKS: &[Task] = &[
         stand_in: &[BODY_1 + 1, BODY_1 + 2, BODY_1],
         cells: &[(TRACK_A, LAMP_KEYS[1]), (TRACK_A, LAMP_KEYS[2]), (TRACK_A, LAMP_KEYS[0])],
         ..act(
-            "On track A, draw the body on the three marked keys: take-off, the turn, the landing.",
+            "On track A, draw the body on the three marked keys: take-off, the turn, the landing. In flight, its wings are part of the body.",
             Stage::Drawing,
             Done::All(&[
                 Done::KeyArt { track: TRACK_A, frame: LAMP_KEYS[0] },
                 Done::KeyArt { track: TRACK_A, frame: LAMP_KEYS[1] },
                 Done::KeyArt { track: TRACK_A, frame: LAMP_KEYS[2] },
             ]),
-            &[Target::Named("band.sheet"), Target::Cell { track: TRACK_A, frame: 0 }],
+            &[Target::Named("band.sheet"), Target::Cell { track: TRACK_A, frame: LAMP_KEYS[0] }],
             Show::Where,
         )
     },
@@ -2928,22 +2959,23 @@ const LAMP_TASKS: &[Task] = &[
     },
     where_pill("Press {Timing}.", "Timing is where a moth gets its weight.", Stage::Edit, Action::RoomEdit),
     Task {
-        cells: &[(TRACK_W, 0)],
-        ..act(
-            "Run {Lip flap} on track W, so the wings beat with the hum.",
-            Stage::Edit,
-            Done::Lipped,
-            &[Target::Named("menu.animation"), Target::Named("menu.animation.track"), Target::Action(Action::LipFlap), Target::Named("lip.generate")],
-            Show::Where,
-        )
-    },
-    Task {
         cells: &[(TRACK_A, LAMP_KEYS[2])],
         ..act(
             "Let the moth hang at the lamp for at least a second.",
             Stage::Edit,
             Done::Hold { frame: LAMP_KEYS[2], len: 12 },
             &[Target::Cell { track: TRACK_A, frame: LAMP_KEYS[2] }, Target::Named("band.longer")],
+            Show::Where,
+        )
+    },
+    // After the hang: its window takes the cut's whole length as it stands.
+    Task {
+        cells: &[(TRACK_W, LAMP_KEYS[2])],
+        ..act(
+            "Run {Lip flap} on track W from row 41, so the wings beat with the hum while it hangs.",
+            Stage::Edit,
+            Done::Lipped(TRACK_W),
+            &[Target::Named("menu.animation"), Target::Named("menu.animation.track"), Target::Action(Action::LipFlap), Target::Named("lip.in")],
             Show::Where,
         )
     },
@@ -2957,7 +2989,11 @@ const LAMP_TASKS: &[Task] = &[
             LAMP_BETWEEN_SEED,
             LAMP_BETWEEN_SEED + 1,
             LAMP_BETWEEN_SEED + 2,
+            WING_SEED,
+            WING_SEED,
+            WING_SEED,
         ],
+        // W's rows where the beat puts each wing.
         cells: &[
             (TRACK_A, LAMP_KEYS[0]),
             (TRACK_A, LAMP_KEYS[1]),
@@ -2965,27 +3001,32 @@ const LAMP_TASKS: &[Task] = &[
             (TRACK_A, LAMP_BETWEEN[0]),
             (TRACK_A, LAMP_BETWEEN[1]),
             (TRACK_A, LAMP_BETWEEN[2]),
+            (TRACK_W, LAMP_KEYS[2]),
+            (TRACK_W, LAMP_KEYS[2] + HUM_HOLD),
+            (TRACK_W, LAMP_KEYS[2] + 2 * HUM_HOLD),
         ],
-        ..act("Fill every drawing, in two colors.", Stage::InkPaint, Done::FilledOn(6), &[Target::Rail(Key::Fill), Target::Pane(Pane::Palette)], Show::Where)
+        ..act("Fill every drawing, in two colors.", Stage::InkPaint, Done::FilledOn(9), &[Target::Rail(Key::Fill), Target::Pane(Pane::Palette)], Show::Where)
     },
     where_pill("Press {Effects}.", "Effects is where the camera gets its nerve.", Stage::Composite, Action::RoomComposite),
     Task {
         hand: Some(camera_to_lamp),
         ..act("Add a {Camera move} from the desk to the lamp.", Stage::Composite, Done::CameraKeys(2), &[Target::Named("shelf.camera")], Show::Where)
     },
+    // Before the ease: `Motion curves` comes forward over the shelf's tab.
+    Task {
+        hand: Some(add_dust),
+        ..act("Add dust to the air: {Add effect}, Particles, Dust.", Stage::Composite, Done::Particles, &[Target::Named("shelf.add")], Show::Where)
+    },
     Task {
         hand: Some(ease_the_camera),
         ..act(
-            "Ease it in {Motion curves}, so the camera arrives late.",
+            "Ease the camera in {Motion curves}, so it arrives late.",
             Stage::Composite,
             Done::Eased,
-            &[Target::Named("menu.more"), Target::Named("menu.more.panels"), Target::Action(Action::ShowCurves)],
+            // The pane where it stands open already, the menu's way where not.
+            &[Target::Named("menu.more"), Target::Named("menu.more.panels"), Target::Action(Action::ShowCurves), Target::Pane(Pane::Curves)],
             Show::Where,
         )
-    },
-    Task {
-        hand: Some(add_dust),
-        ..act("Add wing dust: {Add effect}, Particles, Dust.", Stage::Composite, Done::Particles, &[Target::Named("shelf.add")], Show::Where)
     },
     where_pill("Press {Export}.", "Two files: frames for an editor, a GIF for everyone else.", Stage::Export, Action::RoomExport),
     act("Export a PNG sequence.", Stage::Export, Done::Exported(1), &[Target::Action(Action::ExportPngSequence)], Show::Where),
@@ -3000,11 +3041,15 @@ const LAMP_TASKS: &[Task] = &[
 pub(crate) const MANGA_B5: usize = 4;
 const ONLY_WORD_PAPER: &Template = &Template { name: "The Only Word", ..templates::ALL[MANGA_B5] };
 pub(crate) const THE_WORD: &str = "tink";
-const TRACK_INK: u8 = 0;
+pub(crate) const TRACK_INK: u8 = 0;
 pub(crate) const TRACK_TONE: u8 = 1;
 
 /// One tall panel for the dive, then the four the page reads down.
 pub(crate) const WORD_PANELS: u32 = 5;
+const LAST_PANEL: &str = "manga.panel.5";
+/// `Speed lines` down the dive, and fewer than they came.
+const LINES_WAY: f32 = 90.0;
+const LINES_THIN: f32 = 30.0;
 const WORD_CUTS: [(usize, PanelOp); 4] = [(0, PanelOp::SplitDown), (1, PanelOp::SplitAcross), (2, PanelOp::SplitAcross), (1, PanelOp::SplitAcross)];
 
 // Its art, in the order `word_art` lays it down.
@@ -3014,6 +3059,10 @@ const TONE_PATCH: u16 = 9;
 const WALL_SEED: u16 = 10;
 /// Its wall, in the last panel: what the flood stops at.
 const WALL_AT: Pt = [1820.0, 2975.0];
+/// Where the flood starts, inside the wall.
+const WALL_FLOODED: Pt = [WALL_AT[0], WALL_AT[1] + 130.0];
+/// Two of its corners: the balloon stands on the wall's middle.
+pub(crate) const WALL_CORNERS: [Pt; 2] = [[WALL_AT[0] - 280.0, WALL_AT[1] - 170.0], [WALL_AT[0] + 280.0, WALL_AT[1] + 170.0]];
 
 fn word_art() -> Vec<Path> {
     let mut art = Vec::new();
@@ -3025,7 +3074,7 @@ fn word_art() -> Vec<Path> {
     art.push(line_of([1450.0, 1200.0], [2200.0, 1650.0], 12.0));
     art.push(ring_at(WALL_AT, 420.0, 270.0, 14.0));
     art.push(line_of([400.0, 520.0], [1150.0, 520.0], 120.0));
-    art.push(seed_at([WALL_AT[0], WALL_AT[1] + 130.0]));
+    art.push(seed_at(WALL_FLOODED));
     art
 }
 
@@ -3051,6 +3100,15 @@ fn open_three_rulers(e: &mut Editor) {
     e.state.manga_edit("perspective rulers", |cut, at| rulers.set(cut, at).into_iter().collect());
     e.state.manga.snap = true;
     arm_brush(e);
+}
+
+/// `Speed lines`' two fields, each one edit, as the pane's rows land them.
+fn thin_the_lines(e: &mut Editor) {
+    let lines = |n: &Node| matches!(n.kind, NodeKind::Generator { generator: GenKind::SpeedLines, .. }).then_some(n.id);
+    let lines = e.state.cut().graph.nodes().find_map(lines);
+    if let Some(id) = lines {
+        manga_tools::set_lines(&mut e.state, id, LINES_WAY, LINES_THIN);
+    }
 }
 
 /// The word typed into the balloon's own row.
@@ -3094,7 +3152,13 @@ const WORD_TASKS: &[Task] = &[
     },
     Task {
         stand_in: &run_of::<3>(DIVE_1),
-        ..act("Ink the dive. Small moth, huge canyon.", Stage::Manga, Done::InkInPanels(3), BRUSH_KEY, Show::Where)
+        ..act(
+            "Turn {Snap to rulers} off, then ink the dive. Small moth, huge canyon.",
+            Stage::Manga,
+            Done::All(&[Done::InkInPanels(3), Done::Snap(false)]),
+            RULERS,
+            Show::Where,
+        )
     },
     Task {
         stand_in: &[TONE_PATCH],
@@ -3108,14 +3172,26 @@ const WORD_TASKS: &[Task] = &[
             Show::Where,
         )
     },
-    act("Add {Speed lines} to the dive.", Stage::Manga, Done::Generator(GenKind::SpeedLines), &[Target::Named("manga.speed_lines")], Show::Where),
+    // A flood lands on the track in hand, and on TONE it would print as dots.
+    act("Set Draw on back to Ink.", Stage::Manga, Done::OnTrack(TRACK_INK), &[Target::Pane(Pane::Manga), Target::Named("manga.ink_tone")], Show::Where),
+    // The generator has no panel to stay in: the sentence says what it does.
+    Task {
+        hand: Some(thin_the_lines),
+        ..act(
+            "Add {Speed lines}. They cross the whole page, so set their direction to 90, down the dive, and thin them out.",
+            Stage::Manga,
+            Done::All(&[Done::Generator(GenKind::SpeedLines), Done::LinesDown]),
+            &[Target::Named("manga.speed_lines"), Target::Named("manga.speed.direction")],
+            Show::Where,
+        )
+    },
     Task {
         hand: Some(type_the_word),
         ..act(
-            "Last panel: one balloon, one word. `tink`",
+            "Last panel: one balloon, one word: tink",
             Stage::Manga,
             Done::All(&[Done::Generator(GenKind::Balloon), Done::Words]),
-            &[Target::Named("manga.balloon"), Target::Named("manga.words")],
+            &[Target::Named(LAST_PANEL), Target::Named("manga.balloon"), Target::Named("manga.words")],
             Show::Where,
         )
     },
@@ -3124,7 +3200,6 @@ const WORD_TASKS: &[Task] = &[
     Task {
         hand: Some(pick_black_fill),
         stand_in: &[WALL_SEED],
-        cells: &[(TRACK_INK, 0)],
         ..act(
             "Flood the wall behind the bulb to solid black.",
             Stage::InkPaint,
@@ -3134,13 +3209,16 @@ const WORD_TASKS: &[Task] = &[
         )
     },
     where_pill("Press {Export}.", "Mono is how a page goes to print.", Stage::Export, Action::RoomExport),
-    act(
-        "Export in mono, with a threshold that keeps the tone clean.",
-        Stage::Export,
-        Done::Exported(1),
-        &[Target::Named("export.page.mono"), Target::Action(Action::ExportPages)],
-        Show::Where,
-    ),
+    Task {
+        miss: Some("That page kept its greys. Set {Mono}, then export again."),
+        ..act(
+            "Export in mono, with a threshold that keeps the tone clean.",
+            Stage::Export,
+            Done::Exported(1),
+            &[Target::Named("export.page.mono"), Target::Action(Action::ExportPages)],
+            Show::Where,
+        )
+    },
 ];
 
 /// Every lesson that ships.
@@ -3280,8 +3358,8 @@ pub const ALL: &[Lesson] = &[
         latch: Some(Latch::Transparent),
         art: plate_art,
         finish: &run_of::<6>(PLATE_INK),
-        thumb: &[],
-        card: &[],
+        thumb: &run_of::<PLATE_MARK_PATHS>(PLATE_MARKS),
+        card: &run_of::<PLATE_MARK_PATHS>(PLATE_MARKS),
         pages: &[],
         tasks: PLATE_TASKS,
         closing: "You made that. It is a real file. You can rough, ink, keep your roughs out of the file and deliver on a clear background.",

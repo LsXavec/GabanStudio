@@ -500,7 +500,7 @@ const fn reading(done: Done, room: &'static str, miss: fn(&mut EditorHarness), h
 /// `Done`'s variants, each with its place in the list. No arm is a wildcard: a
 /// new goal does not compile here until it has one, and with one it fails
 /// `aulesson_done_reads_the_state` until it has a row.
-const READERS: usize = 52;
+const READERS: usize = 55;
 
 fn reader(done: Done) -> usize {
     match done {
@@ -546,7 +546,7 @@ fn reader(done: Done) -> usize {
         Done::Generator(_) => 39,
         Done::Words => 40,
         Done::PageSeen => 41,
-        Done::Lipped => 42,
+        Done::Lipped(_) => 42,
         Done::Inbetweens => 43,
         Done::Chart => 44,
         Done::Exported(_) => 45,
@@ -556,6 +556,9 @@ fn reader(done: Done) -> usize {
         Done::PanelPicked(_) => 49,
         Done::All(_) => 50,
         Done::Snap(_) => 51,
+        Done::Scattered(_) => 52,
+        Done::OnTrack(_) => 53,
+        Done::LinesDown => 54,
     }
 }
 
@@ -638,6 +641,24 @@ fn the_text(h: &EditorHarness) -> NodeId {
     let mut nodes = h.state().cut().graph.nodes();
     let text = |n: &&anim_core::graph::Node| matches!(n.kind, NodeKind::Generator { generator: GenKind::Text, .. });
     nodes.find(text).expect("a text").id
+}
+
+/// The speed lines `wire_lines` left.
+fn the_lines(h: &EditorHarness) -> NodeId {
+    let mut nodes = h.state().cut().graph.nodes();
+    let lines = |n: &&anim_core::graph::Node| matches!(n.kind, NodeKind::Generator { generator: GenKind::SpeedLines, .. });
+    nodes.find(lines).expect("the lines").id
+}
+
+/// Speed lines into the output.
+fn wire_lines(h: &mut EditorHarness) {
+    node_added(h, NodeKind::generator(GenKind::SpeedLines));
+    wire_selected(h);
+}
+
+fn on_track(h: &mut EditorHarness, track: usize) {
+    let s = h.state_mut();
+    s.view.active_column = s.cut().xsheet.columns[track].id;
 }
 
 fn typed(words: &'static str) -> impl FnOnce(&mut anim_core::fx::FxParams) {
@@ -959,7 +980,7 @@ fn readings() -> Vec<Reading> {
         // The sheet a generate leaves: a further key; a key replaced is none.
         Reading {
             set: |h| keyed(h, &[0, 1]),
-            ..reading(Done::Lipped, "probe-film", |h| {
+            ..reading(Done::Lipped(0), "probe-film", |h| {
                 let first = key(h, 0);
                 cell(h, 1, first);
             }, |h| {
@@ -1005,6 +1026,34 @@ fn readings() -> Vec<Reading> {
             ..reading(Done::All(&[Done::Smoothing, Done::Strokes(1)]), "probe", |h| h.rig_mut().config.pen.stabilizer = 8, stroked)
         },
         reading(Done::Snap(false), "probe", |h| h.editor_mut().canvas.brush_width += 3.0, |h| h.state_mut().manga.snap = false),
+        // A new brush with nothing raised is no scatter.
+        reading(Done::Scattered("Comic"), "probe", |h| preset(h, "Comic", 9.0), |h| {
+            let mut scattered = BrushPreset { name: "Scattered".into(), bank: "Comic".into(), ..Default::default() };
+            scattered.engine = Some(crate::config::EngineDef { scatter: 1.0, ..Default::default() });
+            h.rig_mut().config.presets.push(scattered);
+        }),
+        Reading {
+            set: |h| {
+                h.state_mut().add_column();
+                h.state_mut().add_column();
+                on_track(h, 0);
+            },
+            ..reading(Done::OnTrack(2), "probe-film", |h| on_track(h, 1), |h| on_track(h, 2))
+        },
+        // A direction alone leaves the page as black as it came.
+        Reading {
+            set: |h| wire_lines(h),
+            ..reading(Done::LinesDown, "probe-film", |h| {
+                let id = the_lines(h);
+                node_edit(h, id, |p| p.set("angle", FxValue::Float(90.0)));
+            }, |h| {
+                let id = the_lines(h);
+                node_edit(h, id, |p| {
+                    p.set("angle", FxValue::Float(90.0));
+                    p.set("count", FxValue::Float(30.0));
+                });
+            })
+        },
     ]
 }
 
@@ -1641,6 +1690,7 @@ fn aulesson_words_are_real_labels() {
         include_str!("manga_tools.rs"),
         include_str!("menus.rs"),
         include_str!("nodegraph_panel.rs"),
+        include_str!("export_step.rs"),
         include_str!("../../crates/anim-core/src/generator.rs"),
     ]
     .concat();

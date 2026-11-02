@@ -16,7 +16,11 @@ use eframe::egui;
 use egui::{Pos2, Sense, pos2, vec2};
 
 use crate::config::{AutoTip, BrushPreset, CurveDef, EngineDef};
+use crate::lessons::Target;
 use crate::plate;
+
+/// AU25: the rail a lesson asks raised before its save.
+const FORGE_SCATTER: Target = Target::Named("forge.scatter");
 
 /// The draft under the hammer, plus pane transients.
 pub struct ForgeState {
@@ -40,7 +44,7 @@ impl Default for ForgeState {
     }
 }
 
-pub(crate) fn blank_draft() -> BrushPreset {
+fn blank_draft() -> BrushPreset {
     BrushPreset {
         name: "new brush".into(),
         bank: "my brushes".into(),
@@ -251,7 +255,9 @@ fn forge_body(
         }
     }
     changed |= rail_row(ui, "rotation jitter", &mut engine.randomness, 0.0, 1.0);
-    changed |= rail_row(ui, "scatter", &mut engine.scatter, 0.0, 3.0);
+    let scatter = rail_at(ui, "scatter", &mut engine.scatter, 0.0, 3.0);
+    plate::mark_row(&scatter, FORGE_SCATTER);
+    changed |= scatter.dragged();
 
     // ---- DYNAMICS: pressure curves for size and opacity.
     plate::legend(ui, "pressure");
@@ -306,9 +312,13 @@ fn forge_body(
         }
         let name = forge.draft.name.trim().to_string();
         let exists = presets.iter().any(|p| p.name == name);
+        let scattered = forge.draft.engine.as_ref().is_some_and(|e| e.scatter > 0.0);
         if !exists {
             let save = ui.button("Save to Brushes");
-            plate::mark_row(&save, crate::lessons::Target::Named("forge.save"));
+            // AU25: a chain through the scatter rail comes here once that is raised.
+            if scattered || !plate::wishes(ui.ctx(), FORGE_SCATTER) {
+                plate::mark_row(&save, Target::Named("forge.save"));
+            }
             if save.clicked() && !name.is_empty() {
                 let mut p = forge.draft.clone();
                 p.name = name.clone();
@@ -345,7 +355,11 @@ fn forge_body(
 
 /// A labelled plate rail on one row. Returns true while dragging.
 fn rail_row(ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32) -> bool {
-    let mut changed = false;
+    rail_at(ui, label, v, lo, hi).dragged()
+}
+
+/// The row of [`rail_row`], and its rail's response for a ring to stand on.
+fn rail_at(ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32) -> egui::Response {
     ui.horizontal(|ui| {
         ui.label(
             egui::RichText::new(label)
@@ -358,10 +372,11 @@ fn rail_row(ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32) -> bo
                     .font(plate::Role::Small.font())
                     .color(plate::STRUCK),
             );
-            changed = plate::rail(ui, v, lo..=hi, 120.0).dragged();
-        });
-    });
-    changed
+            plate::rail(ui, v, lo..=hi, 120.0)
+        })
+        .inner
+    })
+    .inner
 }
 
 /// A pressure-curve editor row: a Well the artist drags a control point

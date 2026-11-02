@@ -54,7 +54,7 @@ const CARD_GAP: f32 = 8.0;
 /// longest sentence at the worst size needs what this and the pad give back.
 const HEAD_GAP: f32 = 4.0;
 /// A lesson's picture on the card: tall enough for six small ones to read.
-const PICTURE_H: f32 = 104.0;
+pub(crate) const PICTURE_H: f32 = 104.0;
 /// The share of the paper a path's box grows by when a stroke is met.
 const MEET_GROW: f32 = 0.08;
 /// A stroke spans at least this share of the path's longest side.
@@ -105,6 +105,10 @@ pub(crate) const WORDS: &[(&str, &str)] = &[
     ("View", "View"),
     ("Mirror view", "Mirror view"),
     ("Lip flap", "Lip flap"),
+    ("More", vocab::MENU_MORE),
+    ("More options", crate::export_step::MORE_OPTIONS),
+    ("Transparent background", crate::export_step::TRANSPARENT),
+    ("Mono", vocab::MONO),
     ("Custom layer", "Custom layer"),
     ("New page", "New page"),
     ("Panel tool", "Panel tool"),
@@ -189,11 +193,18 @@ fn write_finished(dir: Option<&Path>, id: &str) {
     let _ = config::write_atomic(&path, (ids.join("\n") + "\n").as_bytes());
 }
 
+/// `LinesDown`: straight down, near enough to read as a dive, and a count under
+/// the generator's own start.
+const LINES_DOWN: f32 = 90.0;
+const LINES_NEAR: f32 = 5.0;
+const LINES_AT_START: f32 = 80.0;
+
 /// What a task is read against: taken when it began.
 struct Baseline {
     strokes: u64,
     fills: u64,
     drawings: usize,
+    /// The keys on the track a `Lipped` task names.
     keys: usize,
     moves: u64,
     exported: u32,
@@ -463,7 +474,7 @@ fn pixels_moved(was: &[(LayerId, [u16; 4])], now: &[(LayerId, [u16; 4])]) -> boo
 }
 
 /// Inked pixels of `layer` inside `b`, read from its tiles.
-fn ink_in(layer: &CelLayer, b: [f32; 4]) -> u32 {
+pub(crate) fn ink_in(layer: &CelLayer, b: [f32; 4]) -> u32 {
     let t = TILE as i32;
     let tiles = &layer.raster.tiles;
     let (left, top, right, bottom) = (b[0].floor() as i32, b[1].floor() as i32, b[2].ceil() as i32, b[3].ceil() as i32);
@@ -511,6 +522,14 @@ fn words_on_page(cut: &Cut) -> bool {
     reached(&cut.graph).iter().any(|n| {
         matches!(n, NodeKind::Generator { generator: GenKind::Text | GenKind::Balloon, params, .. } if typed(params))
     })
+}
+
+/// A parameter a person has set: one left at its default is not stored.
+pub(crate) fn number(params: &anim_core::fx::FxParams, key: &str) -> Option<f32> {
+    match params.get(key) {
+        Some(anim_core::fx::FxValue::Float(v)) => Some(*v),
+        _ => None,
+    }
 }
 
 fn track(cut: &Cut, track: u8) -> Option<&Column> {
@@ -605,6 +624,7 @@ impl Editor {
         let mut ink = Vec::new();
         let mut pixels = Vec::new();
         let mut presets = Vec::new();
+        let mut keys = 0;
         if let Some(task) = task {
             each(task.done, &mut |done| match done {
                 Done::Erased(path) => {
@@ -615,11 +635,11 @@ impl Editor {
                 Done::Filled { seed, keep } => {
                     pixels.extend(std::iter::once(seed).chain(keep).map(|at| (at, pixels_at(state, cel, at))));
                 }
-                Done::Preset(bank) => presets.extend(self.presets.iter().filter(|p| p.bank == bank).cloned()),
+                Done::Preset(bank) | Done::Scattered(bank) => presets.extend(self.presets.iter().filter(|p| p.bank == bank).cloned()),
+                Done::Lipped(t) => keys = track(cut, t).map_or(0, |c| c.keys().count()),
                 _ => {}
             });
         }
-        let column = cut.xsheet.column(state.view.active_column);
         let effects = cut.graph.nodes().filter_map(|n| match &n.kind {
             NodeKind::Effect { params, .. } => Some((n.id, params.clone())),
             _ => None,
@@ -628,7 +648,7 @@ impl Editor {
             strokes: state.strokes_done,
             fills: state.fills_done,
             drawings: cut.drawings.len(),
-            keys: column.map_or(0, |c| c.keys().count()),
+            keys,
             moves: self.canvas.moves_done,
             exported,
             brush: (self.canvas.brush_width, self.canvas.brush_color, self.canvas.armed_preset.clone()),
@@ -778,7 +798,8 @@ impl Editor {
             Done::Generator(kind) => generator_reached(cut, kind),
             Done::Words => words_on_page(cut),
             Done::PageSeen => run.composite_seen && !self.canvas.composite_view,
-            Done::Lipped => column.is_some_and(|c| c.keys().count() > base.keys),
+            // The named track: a click on another column is no lip flap.
+            Done::Lipped(t) => track(cut, t).is_some_and(|c| c.keys().count() > base.keys),
             Done::Inbetweens => {
                 cut.drawings.len() > base.drawings && cut.drawings[base.drawings..].iter().all(drawing_has_art)
             }
@@ -786,6 +807,9 @@ impl Editor {
             Done::Exported(n) => run.exported.saturating_sub(base.exported) >= n,
             // A new name in the bank, or one saved over with new numbers.
             Done::Preset(bank) => self.presets.iter().any(|p| p.bank == bank && !base.presets.contains(p)),
+            Done::Scattered(bank) => self.presets.iter().any(|p| {
+                p.bank == bank && !base.presets.contains(p) && p.engine.as_ref().is_some_and(|e| e.scatter > 0.0)
+            }),
             Done::Picked(rgb) => {
                 let ink = self.canvas.brush_color;
                 (0..3).all(|c| (i32::from(ink[c]) - i32::from(rgb[c])).abs() <= PICK_NEAR)
@@ -793,6 +817,14 @@ impl Editor {
             Done::Locked(on) => self.canvas.alpha_lock == on,
             Done::Snap(on) => state.manga.snap == on,
             Done::PanelPicked(n) => state.manga.selected == n as usize,
+            Done::OnTrack(t) => track(cut, t).is_some_and(|c| c.id == view.active_column),
+            Done::LinesDown => reached(&cut.graph).iter().any(|n| match n {
+                NodeKind::Generator { generator: GenKind::SpeedLines, params, .. } => {
+                    number(params, "angle").is_some_and(|a| (a - LINES_DOWN).abs() <= LINES_NEAR)
+                        && number(params, "count").is_some_and(|n| n < LINES_AT_START)
+                }
+                _ => false,
+            }),
             Done::All(list) => list.iter().all(|d| self.lesson_holds(run, *d)),
         }
     }
@@ -865,6 +897,10 @@ impl Editor {
         run.mirror_seen |= self.canvas.view_mirrored();
         run.composite_seen |= self.canvas.composite_view;
         run.spilt |= run.current().filter(|t| t.miss.is_some()).is_some_and(|t| self.lesson_spilt(run, t.done));
+        // AU25: a file that landed with the latch off missed, until the latch is on.
+        if run.current().is_some_and(|t| matches!(t.done, Done::Exported(_))) {
+            run.spilt = !latched && (run.spilt || facts.landed > 0);
+        }
         // `commit_path`'s `painted` is doc.rs's word to a log. The card does the
         // talking here, and the lane must not read like a bug beside it.
         if self.state.status.starts_with("painted") {
@@ -1154,21 +1190,12 @@ impl Editor {
 
     /// The task's own step has been left. A task that is the pill stays itself,
     /// and a place off the spine stands when the chain itself goes there: Plate
-    /// One sends the person into the Brush maker, a pane no step holds. AU25: until
-    /// the new preset lands: the rest of the task is back on the paper.
+    /// One sends the person into the Brush maker, a pane no step holds.
     fn lesson_wandered(&self, task: &Task) -> bool {
         if matches!(task.done, Done::OnStep(_)) || self.stage == Some(task.step) {
             return false;
         }
-        !(self.stage.is_none() && self.lesson_place(task) && !self.lesson_preset_landed(task))
-    }
-
-    /// A preset this task asks for has been saved.
-    fn lesson_preset_landed(&self, task: &Task) -> bool {
-        let Some(run) = self.lesson.as_ref() else { return false };
-        let mut landed = false;
-        each(task.done, &mut |done| landed |= matches!(done, Done::Preset(_)) && self.lesson_holds(run, done));
-        landed
+        !(self.stage.is_none() && self.lesson_place(task))
     }
 
     /// The latch the lesson's file stands on is on, or it has none.
