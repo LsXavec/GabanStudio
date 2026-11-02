@@ -114,11 +114,11 @@ Each table is grouped by step, in bar order. The first task of every later step 
 | 3 | Ink the shaving on the new layer. One clean line, thicker on the turns. | `Paper` | `All([InkOnLayer, Ink(tick_1)])` | `Where` |
 | 4 | Hide your sketch with its eye. | `Rail(Layers)`, `layers.eye` | `LayerHidden` | `Run(hide_sketch)` |
 | 5 | Draw two more shavings at the other ticks. No two alike. | `Paper` | `Ink(tick_2, tick_3)` | `Where` |
-| 6 | Pick {Select}, circle one shaving and drag it over another. A coat overlaps. | `Rail(Select)` | `Moved` | `Run(arm_select)`. `SelectTool` is a toggle, so `Perform` would disarm a learner who had already picked it |
+| 6 | Pick {Select}, circle one shaving and drag it over another. A coat overlaps. | `Rail(Select)` | `Moved`: the frame sets a moved piece down when the drag ends, because a person has no other gesture that commits it | `Run(arm_select)`. `SelectTool` is a toggle, so `Perform` would disarm a learner who had already picked it |
 | 7 | Open {View} and press {Mirror view}. A wrong curve shows up at once. Press it again when you have looked. | `menu.view`, `Action(MirrorView)` | `Mirrored` | `Perform(MirrorView)` |
 | | **Color** | | | |
 | 8 | Press {Color}. *Why: Color is where the wood gets warm, and your lines stay safe.* | `Step(InkPaint)` | `OnStep(InkPaint)` | Press |
-| 9 | Pick brown and fill each shaving. | `swatch.brown`, `Rail(Fill)` | `Fills(3)` | `Run(pick_brown)` |
+| 9 | Pick brown and fill each shaving, and the overlap too. | `swatch.brown`, `Rail(Fill)` | `Fills(3)`, not 4: a tap on a line raises no fill, so 4 could strand a person who has three regions brown | `Run(pick_brown)` |
 | 10 | Press {Brush}, open {Brushes} and turn on {Keep inside strokes}. | `Rail(Brush)`, `Float(Brushes)`, `keep.row` | `Locked(true)` | `Perform(ToggleAlphaLock)` |
 | 11 | Pick yellow and paint a rim along each shaving. Paint it rough: it stays inside. | `swatch.yellow`, `Rail(Brush)` | `Strokes(3)` | `Run(pick_yellow_and_brush)` |
 | 12 | Turn {Keep inside strokes} off. | `Rail(Brush)`, `Float(Brushes)`, `keep.row` | `Locked(false)` | `Perform(ToggleAlphaLock)` |
@@ -279,12 +279,12 @@ Each move plants one foot, so nothing skates. Peg bar x 20 to 160, on the desk. 
 | 5 | Press {Timing}. *Why: This is where nothing gets to happen.* | `Step(Edit)` | `OnStep(Edit)` | Press |
 | 6 | Right-click each drawing on the sheet and mark all three as keys. | `Cell { A, 0 }` | `Kinds(3)` | `Run(mark_keys)` |
 | 7 | Click row 1 and press {Longer} until the rest lasts 12 rows. Wait longer than feels right. | `Cell { A, 0 }`, `band.longer` | `Hold { frame: 0, len: 12 }` | `Run(goto_first)` |
-| 8 | Click row 17 twice, type {rest drawing} and press Enter. The rest drawing comes back after the shiver. | `Cell { A, 16 }` | `Shows { frame: 16, drawing: 0 }` | `Run(goto_row_17)` |
+| 8 | Click row 16 twice, type {rest drawing} and press Enter. The rest drawing comes back after the shiver. | `Cell { A, 15 }` | `All([Shows { frame: 14, drawing: 2 }, Shows { frame: 15, drawing: 0 }])` | `Run(goto_rest_row)` |
 | 9 | Turn on {Loop}, and set {Loop start} and {Loop end} around the shot. | `band.loop`, `band.fold`, `Action(LoopIn)`, `Action(LoopOut)` | `Loop` | `Run(turn_on_loop)` |
 | 10 | Press {Play}. If the wait is not funny yet, change it with {Longer} or {Shorter}. | `Action(PlayPause)` | `Played` | `Perform(PlayPause)` |
 | | **Color** | | | |
 | 11 | Press {Color}. *Why: Your lines stay safe here.* | `Step(InkPaint)` | `OnStep(InkPaint)` | Press |
-| 12 | Fill all three drawings: brown for the wood, yellow for the rims. | `Rail(Fill)`, `swatch.brown`, `swatch.yellow` | `FilledOn(3)` | `Run(pick_brown)` |
+| 12 | Fill all three drawings: brown for the wood, yellow for the rims. | `Rail(Fill)`, `swatch.brown`. The sentence takes them to yellow | `FilledOn(3)` | `Run(pick_brown)` |
 | | **Effects** | | | |
 | 13 | Press {Effects}. *Why: Effects is where the rims catch the light.* | `Step(Composite)` | `OnStep(Composite)` | Press |
 | 14 | Tap {Glow}. | `shelf.glow` | `Effect(Glow)` | `Run(add_glow)` |
@@ -297,7 +297,7 @@ Each move plants one foot, so nothing skates. Peg bar x 20 to 160, on the desk. 
 
 **Task 8.** The cell takes a drawing's name, and strokes name drawings `D1A`, `D2A`, so `{rest drawing}` is read at run time from row 1. Typing a bare number would make a new blank drawing and lose the pose. `Shows`' 0 is the first key on the track.
 
-**Why the numbers work.** Three keys on 24 rows give `[4, 2, 18]`. Eight presses of `Longer` on the first ripple later keys and take the cut along: `[12, 2, 18]`, 32 frames. A key at row 17 gives `[12, 2, 2, 16]`: rest, left, right, rest. 32 frames at 12 fps is about 2.67 s.
+**Why the numbers work.** Three keys on 24 rows give `[4, 2, 18]`. Eight presses of `Longer` on the first ripple later keys and take the cut along: `[12, 2, 18]`, 32 frames. A drawing on a blank tail keeps to its row, so the right pose stops at row 15, and a key at row 17 would flash the blank row 16 between right and rest. A key at row 16 gives `[12, 2, 1, 17]`: rest, left, right, rest. 32 frames at 12 fps is about 2.67 s.
 
 **Stand-ins.** `coat_rest`, `coat_left`, `coat_right`, each a closed outline with a rim band. Seeds for each, two colours.
 
@@ -413,21 +413,24 @@ Each move plants one foot, so nothing skates. Peg bar x 20 to 160, on the desk. 
 | # | On screen | Ring | Tick | Show me |
 |---|---|---|---|---|
 | | **Manga** | | | |
-| 1 | Deckle wants more coat. Page one: pick the {Panel tool} and cut six panels. *Why: A comic's pace is its panels. Six small ones read fast.* | `Action(PanelTool)` | `Panels(6)` | `Perform(PanelTool)` |
+| 1 | Deckle wants more coat. Page one: pick the {Panel tool} and split it into six panels. *Why: A comic's pace is its panels. Six small ones read fast.* | `Action(PanelTool)` | `Panels(6)` | `Perform(PanelTool)` |
 | 2 | Open the gutters a little. They are the silence between panels. | `manga.gutter.side`, `manga.gutter.row` | `Gutters` | `Run(open_gutters)` |
 | 3 | In each panel, draw Deckle dragging one shaving home. The thumbnails are on this card. | `Rail(Brush)` | `InkInPanels(6)` | `Where` |
 | 4 | Press {New page}. | `Action(NewPage)` | `Pages(2)` | `Perform(NewPage)` |
-| 5 | Set a 1-point ruler along the desk, and turn snap on. | `manga.rulers`, `Action(ToggleRulerSnap)` | `Rulers(1)` | `Run(open_rulers)` |
+| 5 | Set a 1-point ruler along the desk, and turn snap on. | `manga.rulers`, `Action(ToggleRulerSnap)` | `All([Rulers(1), Snap(true)])` | `Run(open_rulers)` |
 | 6 | Page two is one big picture: pencils going away like trees. | `Paper` | `Strokes(5)` | `Where` |
-| 7 | Put the surprise here, after the page turn: one giant coat, one small eye. | `Paper` | `Strokes(3)` | `Where` |
+| 7 | Turn {Snap to rulers} off. | `manga.rulers`, `Action(ToggleRulerSnap)` | `Snap(false)` | `Perform(ToggleRulerSnap)` |
+| 8 | Put the surprise here, after the page turn: one giant coat, one small eye. | `Paper` | `Strokes(3)` | `Where` |
 | | **Color** | | | |
-| 8 | Press {Color}. *Why: One flat color is this page's whole budget. Spend it on the coat.* | `Step(InkPaint)` | `OnStep(InkPaint)` | Press |
-| 9 | Fill the coat with one color. | `swatch.brown`, `Rail(Fill)` | `Fills(1)` | `Run(pick_brown)` |
+| 9 | Press {Color}. *Why: One flat color is this page's whole budget. Spend it on the coat.* | `Step(InkPaint)` | `OnStep(InkPaint)` | Press |
+| 10 | Fill the coat with one color. | `swatch.brown`, `Rail(Fill)` | `Fills(1)` | `Run(pick_brown)` |
 | | **Export** | | | |
-| 10 | Press {Export}. *Why: Two pages, two files.* | `Step(Export)` | `OnStep(Export)` | Press |
-| 11 | Press {Export pages}. | `Action(ExportPages)` | `Exported(1)` | `Perform(ExportPages)` |
+| 11 | Press {Export}. *Why: Two pages, two files.* | `Step(Export)` | `OnStep(Export)` | Press |
+| 12 | Press {Export pages}. | `Action(ExportPages)` | `Exported(1)` | `Perform(ExportPages)` |
 
-**Stand-ins.** Cuts from the table `split_into_six` (1), `t1` to `t6` (3), `tree_1` to `tree_5` (6), `coat_big` and an eye (7), seed `coat` (9).
+**Task 7.** The snap holds every stroke to a ruler's line. Left on, task 8's coat would come out straight. Neither the lock nor the snap is in the file, so a resumed run takes both from the tasks before it, and `Leave lesson` gives back what was there.
+
+**Stand-ins.** Cuts from the table `split_into_six` (1), `t1` to `t6` and each one's shaving (3), `tree_1` to `tree_5` (6), `coat_big` and an eye (8), seed `coat` (10).
 
 **Guide art.** Landmarks and thumbnails only. Thumbnails are quarter-scale paths by `deckle` and `shaving`, a small one each. Page 2's thumbnail shows the desk going away to one point, and the giant coat filling the lower half.
 
@@ -499,7 +502,7 @@ Resolved at run time, so a word changed by Plain words changes here too. A token
 | `{Brush}`, `{Eraser}`, `{Select}`, `{Fill}`, `{Size}` | The rail's faces |
 | `{Add drawing}`, `{Speed}`, `{Medium}`, `{Play}`, `{Undo}`, `{View}`, `{Mirror view}`, `{Motion curves}`, `{Lip flap}`, `{Custom layer}`, `{New page}`, `{Panel tool}`, `{Export pages}` | The control's own label, one const each, shared with it |
 | `{Glow}`, `{Strength}`, `{Add effect}`, `{Camera move}` | `Effects` step constants |
-| `{Split across}`, `{Split down}`, `{panel 3}`, `{See the page}`, `{Speed lines}` | `manga_tools` constants, `op.label()` |
+| `{Split across}`, `{Split down}`, `{panel 3}`, `{See the page}`, `{Speed lines}`, `{Snap to rulers}` | `manga_tools` constants, `op.label()` |
 | `{Night}`, `{Show me}` | `lesson.rs` |
 | `{rest drawing}` | `lesson.rs`: the name of the drawing on row 1 of track A, read from the sheet when the task opens, for example `D1A` |
 | `{chord:Action}` | `chord_label`, for Experienced text if the build adds a chord to a goal |

@@ -9,12 +9,12 @@ use anim_core::graph::{Node, NodeKind};
 use anim_core::manga::{self, Rulers};
 use eframe::egui::{self, Pos2};
 
-use crate::auguide_show_tests::{File, Hand, Picture, Ridden, ride, settle};
+use crate::auguide_show_tests::{File, Hand, Picture, Ridden, at, carry, lift, ride, ride_tasks, settle};
 use crate::auguide_tests::stand_on_the_tasks_before;
 use crate::aulesson_tests::open;
 use crate::aurail_tests::sized;
 use crate::doc::path_cover;
-use crate::lesson::HOLD;
+use crate::lesson::{HOLD, KEY, LEAVE, SHOW_ME};
 use crate::lessons::art;
 use crate::lessons::{self, CORNER, Class, Done, Lesson, PathKind, Show, coat, coat_seeds};
 use crate::plate;
@@ -26,6 +26,11 @@ use crate::workspace::Stage;
 const NEAR: i32 = 8;
 /// The night's levels a shaving's width from a rim, past pure night (the lessons file).
 const NIGHT_NEAR: i32 = 20;
+/// The three rims' yellow, and the rim brush's pixels the lock keeps on the night:
+/// with the lock off that is 6,400.
+const RIM_PIXELS: i32 = 40_000;
+const RIM_ON_NIGHT: i32 = 250_000;
+const LINE_REACH: i32 = 6;
 
 fn amateur(id: &str) -> Lesson {
     *lessons::ALL.iter().find(|l| l.id == id).expect("an Amateur lesson")
@@ -98,7 +103,13 @@ fn auamateur_six_stand() {
     let sizes: Vec<(u32, u32)> = amateurs().iter().map(|l| (l.paper.width, l.paper.height)).collect();
     assert_eq!(sizes, [(1400, 1050), (1024, 768), (888, 1243)]);
     let counts: Vec<usize> = amateurs().iter().map(|l| l.tasks.len()).collect();
-    assert_eq!(counts, [18, 17, 11]);
+    assert_eq!(counts, [18, 17, 12]);
+    // Minutes a person can plan on, and what each ends in.
+    let hovers: Vec<&str> = amateurs().iter().map(|l| l.hover).collect();
+    let ends = ["About 20 minutes. Ends in a PNG.", "About 20 minutes. Ends in a looping GIF.", "About 25 minutes."];
+    for (hover, ends) in hovers.iter().zip(ends) {
+        assert!(hover.contains(ends), "{hover:?} for {ends:?}");
+    }
 
     let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../research/LESSONS-approachable-ui.md");
     let file = std::fs::read_to_string(file).expect("the lessons file").replace("\\|", "|");
@@ -110,10 +121,7 @@ fn auamateur_six_stand() {
             let trace = matches!(task.show, Show::Trace(_) | Show::Fill(_));
             assert!(!trace, "{}: {}: `Show me` never draws their art", lesson.id, task.say);
             for sentence in std::iter::once(task.say).chain(task.why) {
-                // Two differ from the file's, by AU24's notes: `cut` is a retired
-                // word, and row 17 would leave the blank row 16 in the shot.
-                let said = sentence.replace("split it into six panels", "cut six panels").replace("row 16", "row 17");
-                assert!(file.contains(&said), "{}: {sentence:?} is not the lessons file's", lesson.id);
+                assert!(file.contains(sentence), "{}: {sentence:?} is not the lessons file's", lesson.id);
             }
         }
         assert!(file.contains(lesson.closing), "{}: its closing", lesson.id);
@@ -155,11 +163,22 @@ fn auamateur_coat_file() {
     assert!(on_it * 10 >= sketch.points.len() * 6, "{on_it} of {} under the night", sketch.points.len());
     assert!(dark * 10 <= sketch.points.len() as i32, "{dark} black samples: the sketch reached the file");
     // Deckle: a black line, a white body, off the color layer.
-    let black = lesson.finish.iter().map(|i| &art[usize::from(*i)]).find(|p| p.kind == PathKind::Finish && p.width < 8.0 && p.points.len() > 200).expect("a line");
+    let black = &art[usize::from(lessons::COAT_DECKLE)];
     let inked = black.points.iter().filter(|p| bright(picture.pixel(p[0] as i32, p[1] as i32)) < 3 * 90).count();
     assert!(inked * 10 >= black.points.len() * 5, "{inked} of {}", black.points.len());
     let white = picture.count([255, 255, 255]);
     assert!(white > 1000, "{white} white px");
+    // The white stops at the line: under the feet there is night and no body.
+    let reach = |pick: fn(&[f32; 3]) -> f32| black.points.iter().map(pick).fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+    let (left, right) = reach(|p| p[0]);
+    let (_, feet) = reach(|p| p[1]);
+    let mut below = 0;
+    for y in feet as i32 + 6..feet as i32 + 60 {
+        for x in left as i32 - 40..right as i32 + 40 {
+            below += i32::from(picture.pixel(x, y)[..3].iter().all(|c| *c > 200));
+        }
+    }
+    assert_eq!(below, 0, "{below} white px past Deckle's feet");
 
     // The light: a rim brighter than with Glow off, the night beside it not.
     let dir = tempfile::tempdir().expect("dir");
@@ -213,30 +232,35 @@ fn auamateur_rims_stay_inside() {
     }
     assert_eq!(overrun, 3);
 
-    let (_h, ride) = ridden("coat_of_shavings", Hand::ShowMe);
+    let (mut h, ride) = ridden("coat_of_shavings", Hand::ShowMe);
     let picture = still_of(&ride);
+    // The light spreads past the wood: the wood's edge is read with it off.
+    let dir = tempfile::tempdir().expect("dir");
+    let plain = without_glow(&mut h, dir.path());
+    let wood = wood_of(&plain, &art);
     let yellow = rgb(YELLOW);
-    let mut outside = 0;
-    let mut inside = 0;
-    for r in rims {
-        let path = &art[usize::from(*r)];
-        path_cover(&path.points, path.width, |x, y, cover| {
-            if cover >= 1.0 && near(picture.pixel(x, y), yellow, 40) {
-                // A yellow pixel out on the night: the wood stands on one side of
-                // the edge, and the lock kept every other pixel out of it.
-                let around = [(-4, 0), (4, 0), (0, -4), (0, 4), (-9, 0), (9, 0), (0, -9), (0, 9)];
-                let wood = around.iter().any(|(dx, dy)| near(picture.pixel(x + dx, y + dy), rgb(BROWN), 40) || bright(picture.pixel(x + dx, y + dy)) > 3 * 150);
-                if wood {
+    let (w, tall) = (plain.size.0 as i32, plain.size.1 as i32);
+    // The fill runs in under the line, and a speck of it can show past: that is
+    // wood too. A rim's overrun stands 15 px out, and this reaches a line's 6.
+    let by_the_line = |x: i32, y: i32| {
+        let around = (-LINE_REACH..=LINE_REACH).flat_map(|dy| (-LINE_REACH..=LINE_REACH).map(move |dx| (x + dx, y + dy)));
+        around.into_iter().any(|(x, y)| x >= 0 && y >= 0 && x < w && y < tall && wood[(y * w + x) as usize])
+    };
+    let (mut inside, mut outside) = (0, 0);
+    for y in 0..tall {
+        for x in 0..w {
+            if near(plain.pixel(x, y), yellow, 40) {
+                if wood[(y * w + x) as usize] {
                     inside += 1;
-                } else {
+                } else if !by_the_line(x, y) {
                     outside += 1;
                 }
             }
-        });
+        }
     }
-    assert!(inside > 2000, "{inside} px of rim");
-    assert_eq!(outside, 0, "{outside} yellow px stand clear of any wood");
-    // The rims' whole width would reach the night: it holds none of it.
+    assert!(inside > RIM_PIXELS, "{inside} px of rim");
+    assert_eq!(outside, 0, "{outside} yellow px stand past the wood");
+    // The rims' whole width would reach the night: the lock holds all of it back.
     let mut night_under = 0;
     for r in rims {
         let path = &art[usize::from(*r)];
@@ -244,11 +268,29 @@ fn auamateur_rims_stay_inside() {
             night_under += i32::from(cover >= 1.0 && near(picture.pixel(x, y), night(), 30));
         });
     }
-    assert!(night_under > 1000, "{night_under} rim-brush px stand on the night: the rims overran");
+    assert!(night_under > RIM_ON_NIGHT, "{night_under} rim-brush px stand on the night: the rims overran");
+}
+
+/// The file's wood, as a mask: out from each fill's seed through the brown and the
+/// yellow on it, as far as the black line and the night.
+fn wood_of(picture: &Picture, art: &[lessons::Path]) -> Vec<bool> {
+    const WOOD_RED: u8 = 100;
+    let (w, tall) = (picture.size.0 as i32, picture.size.1 as i32);
+    let mut wood = vec![false; (w * tall) as usize];
+    let seeds = art.iter().filter(|p| p.kind == PathKind::Seed);
+    let mut stack: Vec<(i32, i32)> = seeds.map(|s| (s.points[0][0] as i32, s.points[0][1] as i32)).collect();
+    while let Some((x, y)) = stack.pop() {
+        if x < 0 || y < 0 || x >= w || y >= tall || wood[(y * w + x) as usize] || picture.pixel(x, y)[0] <= WOOD_RED {
+            continue;
+        }
+        wood[(y * w + x) as usize] = true;
+        stack.extend([(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]);
+    }
+    wood
 }
 
 /// Spec AU24 acceptance 4: the GIF: its pictures, its running time, the rest
-/// drawing back at row 17, and a desk in every frame.
+/// drawing back at row 16, where the shiver's run ends, and a desk in every frame.
 #[test]
 fn auamateur_still_in_the_coat_file() {
     let (h, ride) = ridden("still_in_the_coat", Hand::ShowMe);
@@ -276,8 +318,33 @@ fn auamateur_still_in_the_coat_file() {
     assert!(bytes.windows(19).any(|w| w == b"\x21\xFF\x0BNETSCAPE2.0\x03\x01\x00\x00\x00"), "it loops for ever");
 }
 
+/// Loop is the person's to set: a range in the middle of the shot changes what
+/// they play, and the file is the same 32 frames with or without it.
+#[test]
+fn auamateur_the_loop_range_leaves_the_file_alone() {
+    let (mut h, ride) = ridden("still_in_the_coat", Hand::ShowMe);
+    let File::One(ExportKind::Gif, whole) = ride.files.last().expect("a file") else { panic!("a GIF") };
+    let (pictures, length) = Picture::gif(whole);
+    let state = h.state_mut();
+    state.goto(8);
+    state.set_loop_in();
+    state.goto(20);
+    state.set_loop_out();
+    assert_eq!(state.loop_range(), Some((8, 20)), "a range from the middle of the shot");
+    let dir = tempfile::tempdir().expect("dir");
+    let path = dir.path().join("mid-range.gif");
+    let ctx = h.ctx();
+    h.editor_mut().export_to(&ctx, ExportKind::Gif, &path);
+    h.run_export_to_end();
+    let (again, again_length) = Picture::gif(&path);
+    assert_eq!(again_length, length, "the same running time");
+    assert_eq!(again.len(), pictures.len(), "the same pictures");
+    assert!(again.iter().zip(&pictures).all(|(a, b)| a.rgba == b.rgba), "picture for picture");
+}
+
 /// The lessons file's numbers on the sheet, and a loop that closes: `Show me` sets
-/// the range round the whole shot, and a range from mid-shot does not tick.
+/// the range round the whole shot. Any range ticks the task, and none reaches the
+/// file (`auamateur_the_loop_range_leaves_the_file_alone`).
 #[test]
 fn auamateur_loop_closes() {
     let (mut h, _ride) = ridden("still_in_the_coat", Hand::ShowMe);
@@ -395,9 +462,202 @@ fn auamateur_hold_to_see_it_is_held() {
         assert!(idle <= lesson.tasks[i].guide.len(), "{}: {idle} lines idle", lesson.id);
         let rects = h.rects(HOLD);
         assert_eq!(rects.len(), 1, "{}: the card's third foot row", lesson.id);
+        // A comic's guided task stands on its last page.
+        let page = h.state().at().cut;
+        let scene = h.state().engine.project.scene(h.state().at().scene).expect("the scene");
+        let page = scene.cuts.iter().position(|c| c.id == page).expect("the open page");
         press(&mut h, rects[0].center(), true);
-        assert_eq!(h.editor().canvas.guide.lines.len(), lesson.finish.len(), "{}: the finish while held", lesson.id);
+        assert_eq!(h.editor().canvas.guide.lines.len(), lesson.held(page).len(), "{}: the finish while held", lesson.id);
         press(&mut h, rects[0].center(), false);
         assert_eq!(h.editor().canvas.guide.lines.len(), idle, "{}: gone at the release", lesson.id);
     }
+}
+
+/// Spec AU24 acceptance 2: a comic's finish is two pages, and the hold shows the
+/// one that is open: page one's six on page one, and the coat on page two.
+#[test]
+fn auamateur_hold_follows_the_open_page() {
+    let lesson = amateur("too_much_coat");
+    let art = (lesson.art)();
+    let pencils = lesson.tasks.iter().position(|t| t.done == Done::Strokes(5)).expect("page two's task");
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    ride_tasks(&mut h, &lesson, 0..pencils, Hand::ShowMe);
+    let spot = h.rects(HOLD)[0].center();
+    let held = |h: &mut EditorHarness| {
+        let button = |pressed| egui::Event::PointerButton { pos: spot, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        h.kit_mut().input_mut().events.extend([egui::Event::PointerMoved(spot), button(true)]);
+        h.run_frames(3);
+        let lines = h.editor().canvas.guide.lines.clone();
+        h.kit_mut().input_mut().events.push(button(false));
+        h.run_frames(3);
+        lines
+    };
+    let shown = |lines: &[crate::canvas::GuideLine], want: &[u16]| {
+        let first = |i: &u16| art[usize::from(*i)].points[0];
+        let starts: Vec<[f32; 2]> = lines.iter().map(|l| [l.points[0].x, l.points[0].y]).collect();
+        lines.len() == want.len() && want.iter().all(|i| starts.contains(&[first(i)[0], first(i)[1]]))
+    };
+    let [one, two] = lesson.pages else { panic!("two pages") };
+    assert!(one.iter().chain(*two).all(|i| lesson.finish.contains(i)), "the two pages are the finish");
+    assert_eq!(one.len() + two.len(), lesson.finish.len());
+    let on_two = held(&mut h);
+    assert!(shown(&on_two, two), "page two: {} lines", on_two.len());
+    let at = h.state().at();
+    let scene = h.state().engine.project.scene(at.scene).expect("the book");
+    let first = scene.cuts[0].id;
+    h.state_mut().goto_cut(at.scene, first);
+    h.run_frames(3);
+    let on_one = held(&mut h);
+    assert!(shown(&on_one, one), "page one: {} lines", on_one.len());
+    let second = h.state().engine.project.scene(at.scene).expect("the book").cuts[1].id;
+    h.state_mut().goto_cut(at.scene, second);
+    h.run_frames(3);
+    let back = held(&mut h);
+    assert!(shown(&back, two), "page two again: {} lines", back.len());
+}
+
+/// M1: `Select`'s move ticks on the person's own drag: a lifted piece that has
+/// gone nowhere does not, the drag does, and the piece is set down.
+#[test]
+fn auamateur_the_drag_moves_the_piece() {
+    let lesson = amateur("coat_of_shavings");
+    let art = (lesson.art)();
+    let i = lesson.tasks.iter().position(|t| t.done == Done::Moved).expect("the move");
+    let &[lasso, drag] = lesson.tasks[i].stand_in else { panic!("a lasso and a drag") };
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    ride_tasks(&mut h, &lesson, 0..i, Hand::ShowMe);
+    h.click(SHOW_ME);
+    settle(&mut h);
+    lift(&mut h, &art[usize::from(lasso)].points);
+    assert_eq!(at(&h), i, "lifted, and gone nowhere");
+    assert!(!h.editor().canvas.float_moved());
+    carry(&mut h, &art[usize::from(drag)].points);
+    settle(&mut h);
+    assert_eq!(at(&h), i + 1, "the drag's end ticks the task");
+    assert!(!h.editor().canvas.float_moved(), "and sets the piece down");
+}
+
+/// M2: `Press Play` on a looping sheet: it plays on while they watch, and the next
+/// task stops it, or the canvas would take no pen in any room after. A stroke
+/// lands at Color.
+#[test]
+fn auamateur_a_loop_stops_when_they_move_on() {
+    let lesson = amateur("still_in_the_coat");
+    let colour = lesson.tasks.iter().rposition(|t| t.step == Stage::InkPaint).expect("the fills");
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    ride_tasks(&mut h, &lesson, 0..colour, Hand::ShowMe);
+    assert!(h.state().view.loop_playback, "the loop stays on");
+    assert!(!h.state().view.playing, "the Color pill's task stopped it");
+    let xf = h.editor().canvas.view_xform();
+    let line = [(200.0, 200.0), (260.0, 240.0), (320.0, 210.0), (380.0, 250.0)];
+    let path: Vec<Pos2> = line.iter().map(|&(x, y)| xf.paper_to_screen(egui::pos2(x, y))).collect();
+    h.editor_mut().canvas.tool = crate::canvas::CanvasTool::Paint;
+    h.run_frames(2);
+    let strokes = h.state().strokes_done;
+    h.drag_path(&path);
+    assert_eq!(h.state().strokes_done, strokes + 1, "the pointer reaches the paper");
+}
+
+/// M3: no file holds `Keep inside strokes`: a resumed run has it on from the task
+/// that turned it, and `Leave lesson` hands back what was there. So for the snap.
+#[test]
+fn auamateur_lock_and_snap_are_borrowed() {
+    // The snap the run found: a new document's has it on.
+    let resumed = |id: &str, task: usize, snap: bool| {
+        let mut h = EditorHarness::as_first_run();
+        sized(&mut h, 1280.0, 800.0);
+        open(&mut h, id);
+        let e = h.editor_mut();
+        e.state.manga.snap = snap;
+        e.begin_lesson(amateur(id), 0);
+        e.state.engine.project.app_meta.insert(KEY.to_string(), format!("{id}/{task}"));
+        e.state.untitled_group.push_str(" reopened");
+        assert!(e.lesson_door(), "{id}: the run resumed");
+        h
+    };
+    let lesson = amateur("coat_of_shavings");
+    let locked = lesson.tasks.iter().position(|t| t.done == Done::Locked(true)).expect("the lock");
+    let on_the_lock = resumed(lesson.id, locked, true);
+    assert!(!on_the_lock.editor().canvas.alpha_lock, "not yet");
+    let mut past_it = resumed(lesson.id, locked + 1, true);
+    assert!(past_it.editor().canvas.alpha_lock, "the rims' task stands on the lock");
+    past_it.click(LEAVE);
+    past_it.run_frames(3);
+    assert!(!past_it.editor().canvas.alpha_lock, "left as it was found");
+
+    let lesson = amateur("too_much_coat");
+    let on = lesson.tasks.iter().position(|t| t.say.contains("turn snap on")).expect("the ruler");
+    let off = lesson.tasks.iter().position(|t| t.done == Done::Snap(false)).expect("snap off");
+    let mut snapped = resumed(lesson.id, on + 1, false);
+    assert!(snapped.state().manga.snap, "page two's pencils stand on the snap");
+    snapped.click(LEAVE);
+    snapped.run_frames(3);
+    assert!(!snapped.state().manga.snap, "left as it was found");
+    let mut free = resumed(lesson.id, off + 1, true);
+    assert!(!free.state().manga.snap, "the coat's task stands free of it");
+    free.click(LEAVE);
+    free.run_frames(3);
+    assert!(free.state().manga.snap, "and hands it back on");
+}
+
+/// B1: the coat curls: the snap the pencils stood on is off by the coat's task. A
+/// stroke along its edge keeps its bend, and the same stroke snapped has none.
+#[test]
+fn auamateur_the_coat_curls() {
+    let lesson = amateur("too_much_coat");
+    let art = (lesson.art)();
+    let task = lesson.tasks.iter().position(|t| t.done == Done::Snap(false)).expect("snap off") + 1;
+    let edge: Vec<[f32; 3]> = art[usize::from(lesson.tasks[task].stand_in[0])].points.iter().step_by(4).take(24).copied().collect();
+    let bend = |snap: Option<bool>| {
+        let mut h = EditorHarness::as_shipped();
+        sized(&mut h, 1280.0, 800.0);
+        open(&mut h, lesson.id);
+        ride_tasks(&mut h, &lesson, 0..task, Hand::ShowMe);
+        h.rig_mut().config.pen.stabilizer = 0;
+        if let Some(snap) = snap {
+            h.state_mut().manga.snap = snap;
+        }
+        h.run_frames(2);
+        assert_eq!(h.editor().canvas.snap_rulers.is_some(), snap == Some(true), "the ride leaves the snap off");
+        let xf = h.editor().canvas.view_xform();
+        let path: Vec<Pos2> = edge.iter().map(|p| xf.paper_to_screen(egui::pos2(p[0], p[1]))).collect();
+        h.drag_path(&path);
+        let tap = h.editor().canvas.stroke_tap.clone();
+        assert!(tap.len() >= 6, "{} samples tapped", tap.len());
+        let (a, z) = (tap[0], tap[tap.len() - 1]);
+        let (dx, dy) = (z.x - a.x, z.y - a.y);
+        let long = (dx * dx + dy * dy).sqrt().max(1.0);
+        tap.iter().map(|s| ((s.x - a.x) * dy - (s.y - a.y) * dx).abs() / long).fold(0.0f32, f32::max)
+    };
+    let free = bend(None);
+    assert!(free > 30.0, "the coat's edge bends {free} px");
+    let held = bend(Some(true));
+    assert!(held < 1.0, "the snap would have held it to {held} px");
+}
+
+/// Minor: only what the last task's own ring opened goes when the sentence turns
+/// to the paper: a float the person opened stays.
+#[test]
+fn auamateur_only_the_rings_float_closes() {
+    use crate::floats::Float;
+    use crate::lessons::Target;
+    let lesson = amateur("coat_of_shavings");
+    let ringed = |t: &lessons::Task| t.ring.contains(&Target::Rail(crate::rail::Key::Layers));
+    let i = (0..lesson.tasks.len() - 1).find(|i| ringed(&lesson.tasks[*i]) && lesson.tasks[i + 1].ring == [Target::Paper]).expect("a layer task, then the paper");
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1600.0, 900.0);
+    open(&mut h, lesson.id);
+    ride_tasks(&mut h, &lesson, 0..i, Hand::ShowMe);
+    h.editor_mut().floats.open(Float::Brushes, false);
+    settle(&mut h);
+    ride_tasks(&mut h, &lesson, i..i + 1, Hand::Pen);
+    let floats = &h.editor().floats;
+    assert!(!floats.is_open(Float::Layers), "the ring's own float goes");
+    assert!(floats.is_open(Float::Brushes), "the person's stays");
 }

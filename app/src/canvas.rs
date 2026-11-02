@@ -1915,6 +1915,12 @@ impl CanvasView {
         }
     }
 
+    /// AU24: a floating piece has gone somewhere and the drag that took it has
+    /// ended. A lesson reads this; nothing here acts on it.
+    pub(crate) fn float_moved(&self) -> bool {
+        self.floating.as_ref().is_some_and(|f| f.drag.is_none() && !f.affine().is_identity())
+    }
+
     /// Land any in-flight gesture NOW (commit the floating transform, drop a
     /// half-drawn selection outline). Call before anything that would pull
     /// the document out from under the gesture — Save (the file must contain

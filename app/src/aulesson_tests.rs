@@ -500,7 +500,7 @@ const fn reading(done: Done, room: &'static str, miss: fn(&mut EditorHarness), h
 /// `Done`'s variants, each with its place in the list. No arm is a wildcard: a
 /// new goal does not compile here until it has one, and with one it fails
 /// `aulesson_done_reads_the_state` until it has a row.
-const READERS: usize = 51;
+const READERS: usize = 52;
 
 fn reader(done: Done) -> usize {
     match done {
@@ -555,6 +555,7 @@ fn reader(done: Done) -> usize {
         Done::Locked(_) => 48,
         Done::PanelPicked(_) => 49,
         Done::All(_) => 50,
+        Done::Snap(_) => 51,
     }
 }
 
@@ -1003,6 +1004,7 @@ fn readings() -> Vec<Reading> {
             set: |h| h.rig_mut().config.pen.stabilizer = 0,
             ..reading(Done::All(&[Done::Smoothing, Done::Strokes(1)]), "probe", |h| h.rig_mut().config.pen.stabilizer = 8, stroked)
         },
+        reading(Done::Snap(false), "probe", |h| h.editor_mut().canvas.brush_width += 3.0, |h| h.state_mut().manga.snap = false),
     ]
 }
 

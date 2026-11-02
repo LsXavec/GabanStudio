@@ -109,6 +109,7 @@ pub(crate) const WORDS: &[(&str, &str)] = &[
     ("New page", "New page"),
     ("Panel tool", "Panel tool"),
     ("Export pages", "Export pages"),
+    ("Snap to rulers", "Snap to rulers"),
     // The Effects step's.
     ("Glow", "Glow"),
     ("Strength", crate::vocab::STRENGTH),
@@ -214,6 +215,17 @@ struct Baseline {
     refusals: u32,
 }
 
+/// `fill_gap`, the ink and `canvas.raster`, and what a lesson's tasks turn on and
+/// off: left on, `Keep inside strokes` or the ruler snap would hold the person's
+/// own pen after the run.
+struct Borrowed {
+    fill_gap: u32,
+    ink: [u8; 4],
+    raster: bool,
+    alpha_lock: bool,
+    snap: bool,
+}
+
 /// AU28: `Show me`'s lines on their way. Anything that moves what they stand
 /// over cancels them: a line landing then would land on something the person
 /// never saw it reach for.
@@ -254,8 +266,8 @@ pub(crate) struct LessonRun {
     /// The first reading took the first baseline: the run opens before its
     /// step is entered and its brush armed, and the door sooner still.
     based: bool,
-    /// `fill_gap`, the ink and `canvas.raster`, given back on leaving.
-    back: (u32, [u8; 4], bool),
+    /// What a run borrows, given back on leaving.
+    back: Borrowed,
     /// A hide of Plan's sheet during this run. `plan_sheet_hidden` is the
     /// person's own and stands untouched (spec 3.10).
     pub sheet_off: bool,
@@ -288,8 +300,8 @@ pub(crate) struct LessonRun {
     reveal: Option<Reveal>,
     /// `Hold to see it` is down.
     holding: bool,
-    /// The task and the hold the guide was last set for.
-    guide_for: Option<(usize, bool)>,
+    /// The task, the hold and the page the guide was last set for.
+    guide_for: Option<(usize, bool, usize)>,
 }
 
 impl LessonRun {
@@ -302,13 +314,14 @@ impl LessonRun {
     }
 
     /// The guide's lines: the current task's, so the paper clears as you go,
-    /// or the finish, full size, while it is held. A stand-in is the gate's
-    /// and a wipe the eraser's: neither stands on the paper.
-    fn guide_lines(&self) -> Vec<GuideLine> {
+    /// or the finish, full size, while it is held: the finish of `page`, on a
+    /// book. A stand-in is the gate's and a wipe the eraser's: neither stands
+    /// on the paper.
+    fn guide_lines(&self, page: usize) -> Vec<GuideLine> {
         let line = |p: &lessons::Path| GuideLine::of(&p.points, p.width, p.over);
         let path = |i: &u16| self.art.get(usize::from(*i));
         if self.holding {
-            return self.lesson.finish.iter().filter_map(path).map(line).collect();
+            return self.lesson.held(page).iter().filter_map(path).map(line).collect();
         }
         let shows = |p: &&lessons::Path| !matches!(p.kind, PathKind::StandIn | PathKind::Seed | PathKind::Wipe);
         let guide = self.current().map_or(&[][..], |t| t.guide);
@@ -407,6 +420,15 @@ fn each(done: Done, f: &mut impl FnMut(Done)) {
     match done {
         Done::All(list) => list.iter().for_each(|d| each(*d, f)),
         d => f(d),
+    }
+}
+
+/// AU24: the float a ring's stop opens: its own, or the rail key that opens one.
+fn ring_float(target: &Target) -> Option<crate::floats::Float> {
+    match target {
+        Target::Float(float) => Some(*float),
+        Target::Rail(crate::rail::Key::Layers) => Some(crate::floats::Float::Layers),
+        _ => None,
     }
 }
 
@@ -512,7 +534,13 @@ impl Editor {
     /// states go (spec 5.3), and the first baseline is taken.
     pub(crate) fn begin_lesson(&mut self, lesson: Lesson, task: usize) {
         self.tools_hidden = false;
-        let back = (self.canvas.fill_gap, self.canvas.brush_color, self.canvas.raster);
+        let back = Borrowed {
+            fill_gap: self.canvas.fill_gap,
+            ink: self.canvas.brush_color,
+            raster: self.canvas.raster,
+            alpha_lock: self.canvas.alpha_lock,
+            snap: self.state.manga.snap,
+        };
         if let Some(gap) = lesson.fill_gap {
             self.canvas.fill_gap = gap;
         }
@@ -758,6 +786,7 @@ impl Editor {
                 (0..3).all(|c| (i32::from(ink[c]) - i32::from(rgb[c])).abs() <= PICK_NEAR)
             }
             Done::Locked(on) => self.canvas.alpha_lock == on,
+            Done::Snap(on) => state.manga.snap == on,
             Done::PanelPicked(n) => state.manga.selected == n as usize,
             Done::All(list) => list.iter().all(|d| self.lesson_holds(run, *d)),
         }
@@ -779,21 +808,35 @@ impl Editor {
             self.lesson_rebase(&mut run);
         }
         self.lesson_note(&mut run, facts);
+        // AU24: a piece the Select tool dragged floats until a click away, which
+        // no sentence asks for: the drag's end sets it down, the one commit
+        // `Moved` reads.
+        if run.current().is_some_and(|task| task.done == Done::Moved) && self.canvas.float_moved() {
+            self.canvas.finish_gesture(&mut self.state);
+        }
         let mut ticked = false;
         while let Some(task) = run.current() {
             if !self.lesson_holds(&run, task.done) {
                 break;
             }
+            // AU24: a loop plays on past its pass for as long as they watch it.
+            // Nothing else ends it, and a paper that is playing takes no pen, so
+            // the task after the pass stops it.
+            let watched = run.task.checked_sub(1).and_then(|i| run.lesson.tasks.get(i)).is_some_and(|t| t.done == Done::Played);
+            if watched && self.state.view.playing && self.state.view.loop_playback {
+                self.state.toggle_play();
+            }
             run.task += 1;
             self.lesson_rebase(&mut run);
             ticked = true;
+            // AU24: what the ring opened for this task would stand over the paper
+            // the next one works on. What the person opened is theirs.
+            if run.current().is_some_and(|next| matches!(next.ring, [Target::Paper])) {
+                task.ring.iter().filter_map(ring_float).for_each(|float| self.floats.close(float));
+                self.floats.more &= !task.ring.contains(&Target::Rail(crate::rail::Key::More));
+            }
         }
         if ticked {
-            // AU24: a float the last task opened would stand over this one's work.
-            if run.current().is_some_and(|task| matches!(task.ring, [Target::Paper])) {
-                self.floats.close_left();
-                self.floats.close(crate::floats::Float::Layers);
-            }
             self.state.engine.project.app_meta.insert(KEY.to_string(), format!("{}/{}", run.lesson.id, run.task));
             if run.finished() {
                 write_finished(self.data_dir.as_deref(), run.lesson.id);
@@ -873,6 +916,15 @@ impl Editor {
         if let Some(color) = lesson.tasks[..task].iter().rev().find_map(picked) {
             self.canvas.brush_color = color;
         }
+        // AU24: nor does any hold the lock or the snap, and the next task stands
+        // on what the last ones turned on or off.
+        for before in &lesson.tasks[..task] {
+            each(before.done, &mut |done| match done {
+                Done::Locked(on) => self.canvas.alpha_lock = on,
+                Done::Snap(on) => self.state.manga.snap = on,
+                _ => {}
+            });
+        }
         true
     }
 
@@ -885,7 +937,9 @@ impl Editor {
     /// AU27: the run's end: what it borrowed goes back.
     fn end_lesson(&mut self) -> Option<LessonRun> {
         let run = self.lesson.take()?;
-        (self.canvas.fill_gap, self.canvas.brush_color, self.canvas.raster) = run.back;
+        let Borrowed { fill_gap, ink, raster, alpha_lock, snap } = run.back;
+        (self.canvas.fill_gap, self.canvas.brush_color, self.canvas.raster) = (fill_gap, ink, raster);
+        (self.canvas.alpha_lock, self.state.manga.snap) = (alpha_lock, snap);
         self.canvas.guide = canvas::Guide::default();
         Some(run)
     }
@@ -896,15 +950,16 @@ impl Editor {
     /// stands over, a pill pressed on the way above all.
     pub(crate) fn lesson_guide(&mut self, ctx: &egui::Context) {
         self.lesson_press(ctx);
+        let page = open_page(&self.state);
         let Some(run) = self.lesson.as_mut() else {
             self.canvas.guide = canvas::Guide::default();
             self.state.manga.quiet = false;
             return;
         };
-        let wanted = Some((run.task, run.holding));
+        let wanted = Some((run.task, run.holding, page));
         if run.guide_for != wanted {
             run.guide_for = wanted;
-            self.canvas.guide.lines = run.guide_lines();
+            self.canvas.guide.lines = run.guide_lines(page);
         }
         self.state.manga.quiet = !self.canvas.guide.lines.is_empty();
         let task = run.task;
@@ -1243,7 +1298,10 @@ impl Editor {
         });
         ui.scope_builder(egui::UiBuilder::new().max_rect(foot), |ui| {
             ui.spacing_mut().item_spacing.y = CARD_GAP;
-            let held = hold && plate::ghost_row(ui, HOLD, width, None).is_pointer_button_down_on();
+            // AU24: where no `Show me` is offered it is the card's one help, and
+            // has that button's look: a ghost row reads as a caption.
+            let hold_row = |ui: &mut egui::Ui| if offered { plate::ghost_row(ui, HOLD, width, None) } else { plate::filled_row(ui, HOLD, width) };
+            let held = hold && hold_row(ui).is_pointer_button_down_on();
             if let Some(run) = self.lesson.as_mut() {
                 run.holding = held;
             }
@@ -1280,6 +1338,13 @@ pub(crate) struct LessonLines {
 fn pages(state: &AppState) -> usize {
     let scenes = state.engine.project.scenes.iter();
     scenes.flat_map(|s| s.cuts.iter()).filter(|c| manga::Page::of(c).is_some()).count()
+}
+
+/// AU24: which of the scene's cuts is open: a book's page, counted from 0.
+fn open_page(state: &AppState) -> usize {
+    let at = state.at();
+    let scene = state.engine.project.scene(at.scene);
+    scene.and_then(|s| s.cuts.iter().position(|c| c.id == at.cut)).unwrap_or(0)
 }
 
 /// AU27: a lesson's document: its paper, given its art with no history to

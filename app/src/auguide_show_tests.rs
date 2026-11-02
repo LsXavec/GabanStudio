@@ -173,28 +173,37 @@ fn stand_in(go: &mut Recorder, step: &str, art: &[Path], lines: &[u16], hand: Ha
     }
 }
 
-/// AU24: `Select`'s stroke for a person: `lasso` round the art, lifted, then
-/// `drag`'s two ends by the pointer. A Rig has no engine to lift through
-/// (`try_lift` refuses), and `lift_floating` is the lift's CPU half.
+/// AU24: `Select`'s lasso for a person: the art round `lasso`, lifted. A Rig has
+/// no engine to lift through (`try_lift` refuses), and `lift_floating` is the
+/// lift's CPU half.
+pub(crate) fn lift(h: &mut EditorHarness, lasso: &[[f32; 3]]) {
+    let poly: Vec<Pos2> = lasso.iter().map(|p| pos2(p[0], p[1])).collect();
+    let ctx = h.ctx();
+    let e = h.editor_mut();
+    e.canvas.lift_floating(&mut e.state, &ctx, Some(&poly)).expect("the art lifts");
+    settle(h);
+}
+
+/// The lifted piece by the pointer, along `drag`'s two ends, and nothing after
+/// the release: the lesson's frame sets it down, or it stays afloat.
+pub(crate) fn carry(h: &mut EditorHarness, drag: &[[f32; 3]]) {
+    let (from, to) = (drag[0], drag[drag.len() - 1]);
+    let (from, to) = (pos2(from[0], from[1]), pos2(to[0], to[1]));
+    let xf = h.editor().canvas.view_xform();
+    let (a, b) = (xf.paper_to_screen(from), xf.paper_to_screen(to));
+    // The drag takes hold a step in: the press stands beside the grab.
+    let mut path = vec![a - egui::vec2(10.0, 0.0)];
+    path.extend((0..=8).map(|i| a + (b - a) * (i as f32 / 8.0)));
+    h.drag_path(&path);
+}
+
+/// `Select`'s stroke: the lasso, then the drag.
 fn lasso_and_drag(go: &mut Recorder, step: &str, art: &[Path], lines: &[u16]) {
     let &[lasso, drag] = lines else { panic!("{step}: a lasso and a drag") };
-    let at = |p: &[f32; 3]| pos2(p[0], p[1]);
-    let poly: Vec<Pos2> = art[usize::from(lasso)].points.iter().map(at).collect();
-    let line = &art[usize::from(drag)].points;
-    let (from, to) = (at(&line[0]), at(&line[line.len() - 1]));
+    let (lasso, drag) = (art[usize::from(lasso)].points.clone(), art[usize::from(drag)].points.clone());
     go.act(step, Act::Answer(Box::new(move |h| {
-        let ctx = h.ctx();
-        let e = h.editor_mut();
-        e.canvas.lift_floating(&mut e.state, &ctx, Some(&poly)).expect("the art lifts");
-        settle(h);
-        let xf = h.editor().canvas.view_xform();
-        let (a, b) = (xf.paper_to_screen(from), xf.paper_to_screen(to));
-        // The drag takes hold a step in: the press stands beside the grab.
-        let mut path = vec![a - egui::vec2(10.0, 0.0)];
-        path.extend((0..=8).map(|i| a + (b - a) * (i as f32 / 8.0)));
-        h.drag_path(&path);
-        let e = h.editor_mut();
-        e.canvas.finish_gesture(&mut e.state);
+        lift(h, &lasso);
+        carry(h, &drag);
     })));
 }
 
@@ -582,7 +591,25 @@ pub(crate) fn ride_from(h: &mut EditorHarness, lesson: &Lesson, from: usize, han
     let art = (lesson.art)();
     let mut files = Vec::new();
     let mut go = Recorder::new(h, lesson.id);
-    for (i, task) in lesson.tasks.iter().enumerate().skip(from) {
+    walk(&mut go, lesson, &art, from..lesson.tasks.len(), hand, dir.path(), &mut files);
+    let name = format!("{} by {hand:?}", lesson.id);
+    read_files(go.harness(), lesson, &art, &files, &name);
+    reopens_equal(go.harness(), dir.path(), &name);
+    Ridden { _dir: dir, files }
+}
+
+/// AU24: tasks `tasks` of `lesson`, by the same hands, and no file read: the task
+/// after them stands as a person comes to it.
+pub(crate) fn ride_tasks(h: &mut EditorHarness, lesson: &Lesson, tasks: std::ops::Range<usize>, hand: Hand) {
+    let dir = tempfile::tempdir().expect("dir");
+    let art = (lesson.art)();
+    let mut go = Recorder::new(h, lesson.id);
+    walk(&mut go, lesson, &art, tasks, hand, dir.path(), &mut Vec::new());
+}
+
+/// Tasks `tasks` of `lesson`, each answered and ticked.
+fn walk(go: &mut Recorder, lesson: &Lesson, art: &[Path], tasks: std::ops::Range<usize>, hand: Hand, dir: &FilePath, files: &mut Vec<File>) {
+    for (i, task) in lesson.tasks.iter().enumerate().take(tasks.end).skip(tasks.start) {
         let step = format!("{} task {i} by {hand:?}", lesson.id);
         assert_eq!(at(go.harness()), i, "{step}: the run stands here");
         if lesson.class == Class::Experienced && rings(task) {
@@ -591,8 +618,8 @@ pub(crate) fn ride_from(h: &mut EditorHarness, lesson: &Lesson, from: usize, han
         if ringed(lesson, task) {
             assert!(go.harness().ring_stands().is_some(), "{step}: the ring has a rect");
         }
-        answer(&mut go, &step, lesson, &art, task, hand);
-        dialogs(&mut go, &step, lesson.id, dir.path(), &mut files);
+        answer(go, &step, lesson, art, task, hand);
+        dialogs(go, &step, lesson.id, dir, files);
         for _ in 0..PLAY_STEPS {
             if task.done != Done::Played || at(go.harness()) != i {
                 break;
@@ -601,11 +628,10 @@ pub(crate) fn ride_from(h: &mut EditorHarness, lesson: &Lesson, from: usize, han
         }
         settle(go.harness());
         assert_eq!(at(go.harness()), i + 1, "{step}: this act ticks this task and no other");
+        // The canvas takes no tool while the sheet plays: only the loop's own
+        // pass leaves it so, and the next task stops it.
+        assert!(task.done == Done::Played || !go.harness().state().view.playing, "{step}: still playing");
     }
-    let name = format!("{} by {hand:?}", lesson.id);
-    read_files(go.harness(), lesson, &art, &files, &name);
-    reopens_equal(go.harness(), dir.path(), &name);
-    Ridden { _dir: dir, files }
 }
 
 /// Spec 5.15: every lesson, every task, through the real editor Rig on a

@@ -82,8 +82,17 @@ fn check_shots(dir: &Path, owed: &[(String, u32, u32)]) -> Result<(), String> {
 /// wait is bounded, and a viewer left with no picture stops the walk there:
 /// a shot of its empty state is no shot of the room.
 fn arrive(h: &mut EditorHarness, room: ProbeRoom) {
+    arrive_within(h, room, 200);
+}
+
+/// The looks a lesson's shot gives its picture: a comic's composed page takes
+/// twenty seconds.
+const PAGE_TRIES: usize = 1200;
+
+/// `arrive`, over `tries` looks.
+fn arrive_within(h: &mut EditorHarness, room: ProbeRoom, tries: usize) {
     h.run_frames(30);
-    for _ in 0..200 {
+    for _ in 0..tries {
         if !matches!(h.editor().dbg_graph, GraphView::Rendering(_)) {
             break;
         }
@@ -699,17 +708,30 @@ fn lesson_card(dir: &Path) {
 
     // AU23, AU24: the Rookie and Amateur lessons, part way, on each window; then
     // the file each one ends in, as it left the dialog.
-    use crate::auguide_show_tests::{File, Hand, ride};
-    for (lesson, task) in [(0, 8), (1, 6), (2, 7), (3, 4), (4, 7), (5, 6)] {
+    use crate::auguide_show_tests::{File, Hand, ride, ride_tasks};
+    use crate::lessons::Class;
+    // An Amateur's art is the person's and `Show me` draws none of it: the ride
+    // comes to the task as they do, so the shot shows what they would see.
+    let seated = |lesson: &crate::lessons::Lesson, task: usize, size: (u32, u32), name: String| {
+        let mut h = EditorHarness::with_gpu_ready();
+        open(&mut h, lesson.id);
+        crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
+        if lesson.class == Class::Amateur {
+            ride_tasks(&mut h, lesson, 0..task, Hand::ShowMe);
+        } else {
+            crate::auguide_tests::stand_on_the_tasks_before(&mut h, lesson, task);
+            h.editor_mut().begin_lesson(*lesson, task);
+        }
+        // A room with a Result waits for its picture: a shot taken mid-render is
+        // one of `Rendering effects…`.
+        arrive_within(&mut h, ProbeRoom::Stage(lesson.tasks[task].step), PAGE_TRIES);
+        h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("{name}.png")));
+    };
+    for (lesson, task) in [(0, 8), (1, 6), (2, 7), (3, 4), (4, 7), (5, 7)] {
         let lesson = crate::lessons::ALL[lesson];
-        let class = if lesson.class == crate::lessons::Class::Rookie { "rookie" } else { "amateur" };
+        let class = if lesson.class == Class::Rookie { "rookie" } else { "amateur" };
         for (name, size) in [("", full), ("-1280", (1280, 800))] {
-            let mut h = EditorHarness::with_gpu_ready();
-            open(&mut h, lesson.id);
-            crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
-            crate::auguide_tests::stand_on_the_tasks_before(&mut h, &lesson, task);
-            h.editor_mut().begin_lesson(lesson, task);
-            h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("{class}-{}{name}.png", lesson.id)));
+            seated(&lesson, task, size, format!("{class}-{}{name}", lesson.id));
         }
         // The steps past the paper: Color and Export of each, and the two rooms
         // the card narrows at a laptop's size.
@@ -721,12 +743,13 @@ fn lesson_card(dir: &Path) {
         ];
         for (name, stage, size) in rooms {
             let Some(task) = lesson.tasks.iter().rposition(|t| t.step == stage) else { continue };
-            let mut h = EditorHarness::with_gpu_ready();
-            open(&mut h, lesson.id);
-            crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
-            crate::auguide_tests::stand_on_the_tasks_before(&mut h, &lesson, task);
-            h.editor_mut().begin_lesson(lesson, task);
-            h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("{class}-{}-{name}.png", lesson.id)));
+            seated(&lesson, task, size, format!("{class}-{}-{name}", lesson.id));
+        }
+        // Plan's sheet and paper together, two poses in.
+        if lesson.id == "still_in_the_coat" {
+            for (name, size) in [("", full), ("-1280", (1280, 800))] {
+                seated(&lesson, 2, size, format!("amateur-still_in_the_coat-plan{name}"));
+            }
         }
         let mut h = EditorHarness::as_shipped();
         crate::aurail_tests::sized(&mut h, full.0 as f32, full.1 as f32);
@@ -745,7 +768,7 @@ fn lesson_card(dir: &Path) {
 }
 
 /// AU27: the card's pictures, by file name.
-const LESSON: [(&str, u32, u32); 49] = [
+const LESSON: [(&str, u32, u32); 51] = [
     ("lesson-draw", 1600, 900),
     ("lesson-draw-fold", 832, 520),
     ("lesson-wander", 832, 520),
@@ -785,6 +808,8 @@ const LESSON: [(&str, u32, u32); 49] = [
     ("amateur-coat_of_shavings-1280", 1280, 800),
     ("amateur-still_in_the_coat", 1600, 900),
     ("amateur-still_in_the_coat-1280", 1280, 800),
+    ("amateur-still_in_the_coat-plan", 1600, 900),
+    ("amateur-still_in_the_coat-plan-1280", 1280, 800),
     ("amateur-too_much_coat", 1600, 900),
     ("amateur-too_much_coat-1280", 1280, 800),
     ("amateur-coat_of_shavings-color", 1600, 900),
@@ -1707,7 +1732,7 @@ fn audress_the_ignored_pass_owes_every_shot() {
     let names: BTreeSet<&str> = lists.iter().flat_map(|(_, l)| l.iter().map(|o| o.0.as_str())).collect();
     let owed: usize = lists.iter().map(|(_, l)| l.len()).sum();
     assert_eq!(names.len(), owed, "no two shots share a name");
-    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 14, "the 273 owed before AU15, its panels at both sizes, and AU23's and AU24's lessons: three at both, and eight steps, each");
+    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 16, "the 273 owed before AU15, its panels at both sizes, and AU23's and AU24's lessons: three at both and eight steps each, and AU24's Plan at both");
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of

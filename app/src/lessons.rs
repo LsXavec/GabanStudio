@@ -638,6 +638,8 @@ pub enum Done {
     Preset(&'static str),
     Picked([u8; 3]),
     Locked(bool),
+    /// AU24: `Snap to rulers`, on or off.
+    Snap(bool),
     PanelPicked(u32),
     All(&'static [Done]),
 }
@@ -702,6 +704,9 @@ pub struct Lesson {
     /// AU24: what the card's picture shows, where it is less than the whole
     /// finish `Hold to see it` gives. Empty: `finish`.
     pub card: &'static [u16],
+    /// AU24: what `Hold to see it` shows on each page of a book, which has no
+    /// one picture. Empty: `finish`.
+    pub pages: &'static [&'static [u16]],
     pub tasks: &'static [Task],
     /// Names what the person now knows.
     pub closing: &'static str,
@@ -724,9 +729,16 @@ impl Lesson {
         finish: &[0],
         thumb: &[],
         card: &[],
+        pages: &[],
         tasks: &[],
         closing: "",
     };
+
+    /// What `Hold to see it` shows on `page`, counted from 0: past a book's last
+    /// listed page, that page's.
+    pub fn held(&self, page: usize) -> &'static [u16] {
+        self.pages.get(page).or(self.pages.last()).copied().unwrap_or(self.finish)
+    }
 }
 
 // ---- AU23: the three Rookie lessons (`research/LESSONS-approachable-ui.md`) ----
@@ -1625,13 +1637,14 @@ const RIM_1: u16 = 15;
 const RIM_2: u16 = 16;
 const RIM_3: u16 = 17;
 const S1_MOVED: u16 = 18;
-const COAT_DECKLE: u16 = 19;
+pub(crate) const COAT_DECKLE: u16 = 19;
 const COAT_EYE: u16 = 20;
 const COAT_HOLE_1: u16 = 21;
 const COAT_HOLE_2: u16 = 22;
 const REFERENCE: u16 = 23;
 const REFERENCE_RIM: u16 = 24;
 const OVERLAP_SEED: u16 = 25;
+const REFERENCE_CURL: u16 = 26;
 
 /// Where the night is poured.
 pub(crate) const CORNER: [f32; 2] = [36.0, 36.0];
@@ -1662,17 +1675,26 @@ fn seed_at(at: Pt) -> Path {
     Path { points: vec![[at[0], at[1], 1.0]], width: 1.0, kind: PathKind::Seed, over: false }
 }
 
-/// The strip's middle, as a wide white line: both sides by their share of the way.
+/// What paints the strip's white: one pen, side to side along its length, in from
+/// its outline by what its own round tip reaches. A wide line down the middle
+/// ends in half discs that stand past the cut feet.
+const BODY_PEN: f32 = 10.0;
+
 fn strip_body(deckle: &art::Deckle) -> Vec<Pt> {
-    const ROWS: usize = 120;
+    const ROWS: usize = 240;
+    /// How far along the strip the first and last rows stand, and across it each
+    /// row's ends, of the whole way.
+    const IN_ALONG: f32 = 0.012;
+    const IN_ACROSS: f32 = 0.08;
     let (cut, torn) = (&deckle.cut.points[..deckle.sides[0]], &deckle.torn.points[..deckle.sides[1]]);
     let at = |line: &[[f32; 3]], t: f32| line[((line.len() - 1) as f32 * t).round() as usize];
-    let mid = |i: usize| {
-        let t = i as f32 / ROWS as f32;
+    let row = |i: usize| {
+        let t = IN_ALONG + (1.0 - 2.0 * IN_ALONG) * i as f32 / ROWS as f32;
         let (a, b) = (at(cut, t), at(torn, 1.0 - t));
-        [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
+        let side = if i % 2 == 0 { IN_ACROSS } else { 1.0 - IN_ACROSS };
+        [a[0] + (b[0] - a[0]) * side, a[1] + (b[1] - a[1]) * side]
     };
-    (0..=ROWS).map(mid).collect()
+    (0..=ROWS).map(row).collect()
 }
 
 fn coat_art() -> Vec<Path> {
@@ -1726,11 +1748,12 @@ fn coat_art() -> Vec<Path> {
     art.push(hand(&reference.edge(0.86), SHAVING_LINE, PathKind::Finish, 51));
     // Where two shavings lie over each other the lines shut a space of its own.
     art.push(seed_at([(moved.at[0] + three.at[0]) * 0.5, (moved.at[1] + three.at[1]) * 0.5]));
+    art.push(hand(&reference.swirl(), SHAVING_LINE, PathKind::Finish, 52));
     art
 }
 
 /// Deckle on the color layer, line and white body both, so that hiding the
-/// sketch cannot hide him. The color layer is the slot under the line.
+/// sketch cannot hide it. The color layer is the slot under the line.
 fn coat_prep(s: &mut crate::doc::AppState) {
     const COLOR_SLOT: usize = 1;
     const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
@@ -1742,7 +1765,7 @@ fn coat_prep(s: &mut crate::doc::AppState) {
     };
     let deckle = art::upright(&arch(COAT_ARCH[0], COAT_ARCH[1], COAT_ARCH_LONG), 2);
     let body = strip_body(&deckle).iter().map(|p| [p[0], p[1], 1.0]).collect::<Vec<_>>();
-    let body = PathInk { points: &body, width: COAT_ARCH_LONG * 0.17, rgba: WHITE, erase: false, inside: false };
+    let body = PathInk { points: &body, width: BODY_PEN, rgba: WHITE, erase: false, inside: false };
     let lines = [body, ink(COAT_DECKLE, BLACK), ink(COAT_EYE, BLACK), ink(COAT_HOLE_1, BLACK), ink(COAT_HOLE_2, BLACK)];
     s.commit_path(&lines, COLOR_SLOT);
     s.strokes_done = 0;
@@ -1889,7 +1912,7 @@ const COAT_TASKS: &[Task] = &[
     Task {
         stand_in: &[S1_SEED, S2_SEED, S3_SEED, OVERLAP_SEED],
         ..act(
-            "Pick brown and fill each shaving.",
+            "Pick brown and fill each shaving, and the overlap too.",
             Stage::InkPaint,
             Done::Fills(3),
             &[Target::Named("swatch.brown"), Target::Rail(Key::Fill)],
@@ -1973,7 +1996,7 @@ const EYE_RIGHT: u16 = 8;
 const FLOOR_TICK: u16 = 9;
 const CENTRE_TICK: u16 = 10;
 const STILL_CARD: u16 = 11;
-const STILL_CARD_PATHS: usize = 9;
+const STILL_CARD_PATHS: usize = 12;
 
 /// The desk's top, and the coat's middle over it, at rest.
 pub(crate) const STILL_FLOOR: f32 = 610.0;
@@ -2021,10 +2044,15 @@ fn still_art() -> Vec<Path> {
     let tick = |at: Pt, run: Pt, seed| Path { over: true, ..art::hand(&[at, [at[0] + run[0], at[1] + run[1]]], 4.0, PathKind::Landmark, seed) };
     art.push(tick([STILL_MIDDLE - 20.0, STILL_FLOOR + 6.0], [40.0, 1.0], 70));
     art.push(tick([STILL_MIDDLE, 128.0], [1.0, 40.0], 71));
-    // The card's: a row of the three, each its own place in it.
+    // The card's: a row of the three, each standing off its own floor's mark by
+    // as far as it does on the paper, so left and right read as opposites.
     for i in 0..STILL_POSES {
-        let at = [300.0 + i as f32 * 420.0, 300.0];
-        art.extend(coat_lines(i, at, PathKind::Finish));
+        let mark = [300.0 + i as f32 * 480.0, 300.0];
+        let lines = coat_lines(i, [mark[0] + COAT_POSES[i].1, mark[1]], PathKind::Finish);
+        let floor = lines[0].points.iter().fold(0.0f32, |low, p| low.max(p[1])) + 10.0;
+        let line = [[mark[0] - 230.0, floor], [mark[0], floor], [mark[0], floor + 40.0], [mark[0], floor], [mark[0] + 230.0, floor]];
+        art.extend(lines);
+        art.push(art::hand(&line, 5.0, PathKind::Finish, 72 + i as u32));
     }
     art
 }
@@ -2044,12 +2072,12 @@ fn still_prep(s: &mut crate::doc::AppState) {
 
 /// The Plan keys' three drawings, each its kind: what the sheet's menu writes.
 fn mark_keys(e: &mut Editor) {
-    let column = e.state.view.active_column;
-    let shown = runs_here(e);
-    let drawn = shown.iter().filter_map(|(_, shows)| if let Exposure::Drawing(id) = shows { Some(*id) } else { None });
-    let drawn: Vec<_> = drawn.collect();
-    drawn.into_iter().for_each(|id| e.state.set_drawing_kind(id, DrawingKind::Key));
-    e.state.view.active_column = column;
+    if !at_step(e, Stage::Edit) {
+        return;
+    }
+    let keys = e.state.cut().xsheet.columns.get(usize::from(TRACK_A)).map(|c| c.keys().collect::<Vec<_>>());
+    let drawn = keys.into_iter().flatten().filter_map(|(_, shows)| if let Exposure::Drawing(id) = shows { Some(id) } else { None });
+    drawn.for_each(|id| e.state.set_drawing_kind(id, DrawingKind::Key));
 }
 
 fn goto_first(e: &mut Editor) {
@@ -2203,7 +2231,7 @@ const STILL_TASKS: &[Task] = &[
             "Fill all three drawings: brown for the wood, yellow for the rims.",
             Stage::InkPaint,
             Done::FilledOn(3),
-            &[Target::Rail(Key::Fill), Target::Named("swatch.brown"), Target::Named("swatch.yellow")],
+            &[Target::Rail(Key::Fill), Target::Named("swatch.brown")],
             Show::Run(pick_brown),
         )
     },
@@ -2228,17 +2256,21 @@ const STILL_TASKS: &[Task] = &[
 
 // ---- Too Much Coat ----
 
-// Its art: page one's six, page two's five, its coat, the ticks and the card.
+// Its art: page one's six and their shavings, page two's five, its coat, the
+// ticks and the card.
 const T1: u16 = 0;
-const TREE_1: u16 = 6;
-const COAT_BIG: u16 = 11;
-const COAT_BIG_CURL: u16 = 12;
-const COAT_BIG_EYE: u16 = 13;
-const COAT_BIG_SEED: u16 = 14;
-const HORIZON_TICK: u16 = 15;
-const POINT_TICK: u16 = 16;
-const COMIC_CARD: u16 = 17;
-const COMIC_CARD_PATHS: usize = 14;
+const WOOD_1: u16 = 6;
+const PAGE_ONE_PATHS: usize = 12;
+const TREE_1: u16 = 12;
+const COAT_BIG: u16 = 17;
+const COAT_BIG_CURL: u16 = 18;
+const COAT_BIG_EYE: u16 = 19;
+const PAGE_TWO_PATHS: usize = 8;
+const COAT_BIG_SEED: u16 = 20;
+const HORIZON_TICK: u16 = 21;
+const POINT_TICK: u16 = 22;
+const COMIC_CARD: u16 = 23;
+const COMIC_CARD_PATHS: usize = 27;
 
 /// Where each panel of `split_into_six` stands: two tall, then four small.
 pub(crate) const PANEL_MIDDLES: [Pt; 6] =
@@ -2253,14 +2285,14 @@ fn big_coat() -> art::Shaving {
     art::shaving(COAT_SEED, BIG_COAT_AT, BIG_COAT_REACH)
 }
 
-/// Deckle flat, dragging a shaving: panel `i` of page one, the coat growing.
-fn dragged(i: usize, at: Pt, scale: f32, kind: PathKind) -> [Path; 2] {
+/// Deckle flat, dragging a shaving: panel `i` of page one. On a page a shaving is
+/// one quick curl of the pen, under a long line, and it grows down the page.
+fn dragged(i: usize, at: Pt, kind: PathKind) -> [Path; 2] {
     const LONG: f32 = 150.0;
-    let (seed, reach) = (20 + i as u32, (8.0 + i as f32 * 0.9) * scale);
-    let tail = [at[0] - LONG * 0.2 * scale, at[1] + 30.0 * scale];
-    let spine = art::spine(tail, [tail[0] + LONG * scale, tail[1]], LONG * scale);
+    let (seed, reach) = (20 + i as u32, 8.0 + i as f32 * 1.6);
+    let tail = [at[0] - 20.0, at[1] + 30.0];
+    let spine = art::spine(tail, [tail[0] + LONG, tail[1]], LONG);
     let [line, _] = closed(&spine, seed);
-    // Small on the page: a shaving is one quick curl of the pen, under a long line.
     let from = [tail[0] - reach * 1.1, tail[1] + reach * 0.2];
     let up = |x: f32, y: f32| [from[0] + reach * x, from[1] - reach * y];
     let wood = art::cubic([from, up(0.2, 1.4), up(1.8, 1.4), up(2.0, 0.0)]);
@@ -2289,8 +2321,51 @@ fn tree(i: usize, kind: PathKind) -> Path {
     art::hand(&line, PANEL_LINE, kind, 80 + (i * 5 / 4) as u32)
 }
 
+/// Six panels and the page they turn to, read at a card's width: each panel the
+/// lesson's own drawing in its frame, its shaving growing until it is as long as
+/// Deckle, and page two the desk going away to one point over a coat that fills
+/// its lower half. Drawn large and fitted to the card, as a person's art is.
+fn comic_card() -> Vec<Path> {
+    const INK: f32 = 12.0;
+    const PANEL: Pt = [900.0, 690.0];
+    const INSET: f32 = 24.0;
+    const LONG: f32 = 360.0;
+    const PAGE_AT: f32 = 2820.0;
+    const PAGE: Pt = [990.0, 1380.0];
+    const POINT: Pt = [PAGE_AT + PAGE[0] * 0.5, 450.0];
+    let frame = |at: Pt, size: Pt, seed| {
+        let [x, y, w, h] = [at[0] + INSET, at[1] + INSET, size[0] - 2.0 * INSET, size[1] - 2.0 * INSET];
+        art::hand(&[[x, y], [x + w, y], [x + w, y + h], [x, y + h], [x, y]], INK, PathKind::Finish, seed)
+    };
+    let mut card = Vec::new();
+    for i in 0..6 {
+        let at = [(i % 3) as f32 * PANEL[0], (i / 3) as f32 * PANEL[1]];
+        let (seed, reach) = (20 + i as u32, 130.0 + i as f32 * 10.0);
+        let tail = [at[0] + 450.0, at[1] + 480.0];
+        let [strip, _] = closed(&art::spine(tail, [tail[0] + LONG, tail[1]], LONG), 20 + i as u32 % 2);
+        let wood = art::shaving(seed, [tail[0] - reach * 0.6, tail[1] - reach * 0.4], reach);
+        card.push(frame(at, PANEL, 100 + i as u32));
+        card.push(Path { width: INK, kind: PathKind::Finish, ..strip });
+        card.push(art::hand(&wood.curl(), INK, PathKind::Finish, seed));
+    }
+    card.push(frame([PAGE_AT, 0.0], PAGE, 110));
+    let line = |from: Pt, to: Pt, seed| art::hand(&[from, to], INK, PathKind::Finish, seed);
+    let (left, right) = (PAGE_AT + INSET, PAGE_AT + PAGE[0] - INSET);
+    card.push(line([left, POINT[1]], [right, POINT[1]], 111));
+    let away = [([left, 810.0], 112), ([left, 120.0], 113), ([right, 810.0], 114), ([right, 120.0], 115)];
+    card.extend(away.map(|(from, seed)| line(from, POINT, seed)));
+    let coat = art::shaving(COAT_SEED, [POINT[0], 1020.0], 450.0);
+    card.push(art::hand(&coat.edge(1.0), INK, PathKind::Finish, 116));
+    card.push(art::hand(&coat.swirl(), INK, PathKind::Finish, 117));
+    card.push(art::dash([POINT[0] + 120.0, 930.0], EYE_PULL * 2.0, 42.0, PathKind::Finish));
+    card
+}
+
 fn comic_art() -> Vec<Path> {
-    let mut art: Vec<Path> = (0..6).map(|i| { let [line, _] = dragged(i, PANEL_MIDDLES[i], 1.0, PathKind::StandIn); line }).collect();
+    let page_one: Vec<[Path; 2]> = (0..6).map(|i| dragged(i, PANEL_MIDDLES[i], PathKind::StandIn)).collect();
+    let (lines, woods): (Vec<Path>, Vec<Path>) = page_one.into_iter().map(|[line, wood]| (line, wood)).unzip();
+    let mut art: Vec<Path> = lines;
+    art.extend(woods);
     art.extend((0..TREES.len()).map(|i| tree(i, PathKind::StandIn)));
     let coat = big_coat();
     let line = art::hand(&coat.edge(1.0), 8.0, PathKind::StandIn, 90);
@@ -2301,14 +2376,7 @@ fn comic_art() -> Vec<Path> {
     let tick = |at: Pt, run: Pt, seed| art::hand(&[at, [at[0] + run[0], at[1] + run[1]]], 4.0, PathKind::Landmark, seed);
     art.push(tick([40.0, VANISHING[1]], [40.0, 1.0], 92));
     art.push(tick([VANISHING[0], VANISHING[1] - 20.0], [1.0, 40.0], 93));
-    // The card: six in two rows of three, and page two beside them.
-    for i in 0..6 {
-        let at = [160.0 + (i % 3) as f32 * 330.0, 120.0 + (i / 3) as f32 * 270.0];
-        art.extend(dragged(i, at, 1.4, PathKind::Finish));
-    }
-    let small = art::shaving(COAT_SEED, [1400.0, 370.0], 170.0);
-    art.push(art::hand(&small.edge(1.0), 5.0, PathKind::Finish, 94));
-    art.push(art::hand(&[[1160.0, 150.0], [1640.0, 150.0]], 5.0, PathKind::Finish, 95));
+    art.extend(comic_card());
     art
 }
 
@@ -2349,6 +2417,9 @@ fn open_rulers(e: &mut Editor) {
     e.state.manga.snap = true;
 }
 
+/// The Manga pane's rulers and their snap, which stand together.
+const RULERS: &[Target] = &[Target::Pane(Pane::Manga), Target::Named("manga.rulers"), Target::Action(Action::ToggleRulerSnap)];
+
 const TOO_MUCH_COAT_TASKS: &[Task] = &[
     Task {
         why: Some("A comic's pace is its panels. Six small ones read fast."),
@@ -2372,7 +2443,7 @@ const TOO_MUCH_COAT_TASKS: &[Task] = &[
         )
     },
     Task {
-        stand_in: &[T1, T1 + 1, T1 + 2, T1 + 3, T1 + 4, T1 + 5],
+        stand_in: &[T1, WOOD_1, T1 + 1, WOOD_1 + 1, T1 + 2, WOOD_1 + 2, T1 + 3, WOOD_1 + 3, T1 + 4, WOOD_1 + 4, T1 + 5, WOOD_1 + 5],
         ..act(
             "In each panel, draw Deckle dragging one shaving home. The thumbnails are on this card.",
             Stage::Manga,
@@ -2387,8 +2458,8 @@ const TOO_MUCH_COAT_TASKS: &[Task] = &[
         ..act(
             "Set a 1-point ruler along the desk, and turn snap on.",
             Stage::Manga,
-            Done::Rulers(1),
-            &[Target::Pane(Pane::Manga), Target::Named("manga.rulers"), Target::Action(Action::ToggleRulerSnap)],
+            Done::All(&[Done::Rulers(1), Done::Snap(true)]),
+            RULERS,
             Show::Run(open_rulers),
         )
     },
@@ -2397,6 +2468,8 @@ const TOO_MUCH_COAT_TASKS: &[Task] = &[
         stand_in: &[TREE_1, TREE_1 + 1, TREE_1 + 2, TREE_1 + 3, TREE_1 + 4],
         ..act("Page two is one big picture: pencils going away like trees.", Stage::Manga, Done::Strokes(5), ON_PAPER, Show::Where)
     },
+    // The snap holds every stroke to a ruler's line: the coat has to curl.
+    act("Turn {Snap to rulers} off.", Stage::Manga, Done::Snap(false), RULERS, Show::Perform(Action::ToggleRulerSnap)),
     Task {
         guide: &[HORIZON_TICK, POINT_TICK],
         stand_in: &[COAT_BIG, COAT_BIG_CURL, COAT_BIG_EYE],
@@ -2451,6 +2524,7 @@ pub const ALL: &[Lesson] = &[
         finish: &[BACK, BELLY, HOLE_1, HOLE_2, HOLE_3, PENCIL, STAR_1, STAR_2, STAR_3],
         thumb: &[],
         card: &[],
+        pages: &[],
         tasks: UP_LATE_TASKS,
         closing: "You made that. It is a real file. You can draw, undo, erase, fill a whole sky and add light.",
     },
@@ -2477,6 +2551,7 @@ pub const ALL: &[Lesson] = &[
         },
         thumb: &[THUMB, THUMB + 1],
         card: &[],
+        pages: &[],
         tasks: END_OF_THE_DESK_TASKS,
         closing: "You made that. It is a real file. You can add drawings, play them, set their speed and choose how long each one stays.",
     },
@@ -2495,6 +2570,7 @@ pub const ALL: &[Lesson] = &[
         finish: &[P1_DESK, P1_DECKLE, P1_EYE, P2_DECKLE, P2_EYE, P2_SHADOW, P3_CUP, P3_PENCILS, P3_DECKLE, P4_EDGES, P4_EYE],
         thumb: &[],
         card: &[],
+        pages: &[],
         tasks: NOT_A_PENCIL_TASKS,
         closing: "You made that. It is a real file. You can split a page into panels and make a reader wait between them.",
     },
@@ -2503,7 +2579,7 @@ pub const ALL: &[Lesson] = &[
         kind: ProjectKind::Drawing,
         class: Class::Amateur,
         title: "A Coat of Shavings",
-        hover: "Deckle is cold: sketch, ink, move and paint him a coat of pencil shavings. About 25 minutes. Ends in a PNG.",
+        hover: "Deckle is cold: sketch, ink, move and paint it a coat of pencil shavings. About 20 minutes. Ends in a PNG.",
         paper: &COAT,
         prep: Some(coat_prep),
         fill_gap: None,
@@ -2511,8 +2587,9 @@ pub const ALL: &[Lesson] = &[
         latch: None,
         art: coat_art,
         finish: &[S1_MOVED, S2_INK, S3_INK, RIM_1, RIM_2, RIM_3, COAT_DECKLE, COAT_EYE, COAT_HOLE_1, COAT_HOLE_2],
-        thumb: &[REFERENCE, REFERENCE_RIM],
-        card: &[REFERENCE, REFERENCE_RIM],
+        thumb: &[REFERENCE, REFERENCE_RIM, REFERENCE_CURL],
+        card: &[REFERENCE, REFERENCE_RIM, REFERENCE_CURL],
+        pages: &[],
         tasks: COAT_TASKS,
         closing: "You made that. It is a real file. You can sketch under your ink, move what you drew, check it mirrored and paint inside your own shapes.",
     },
@@ -2521,7 +2598,7 @@ pub const ALL: &[Lesson] = &[
         kind: ProjectKind::Animation,
         class: Class::Amateur,
         title: "Still in the Coat",
-        hover: "Three poses on the rows you choose, a long wait, then a shiver in a coat of shavings. About 25 minutes. Ends in a GIF.",
+        hover: "Three poses on the rows you choose, a long wait, then a shiver in a coat of shavings. About 20 minutes. Ends in a looping GIF.",
         paper: &STILL,
         prep: Some(still_prep),
         fill_gap: None,
@@ -2531,6 +2608,7 @@ pub const ALL: &[Lesson] = &[
         finish: &[COAT_REST, RIM_REST, EYE_REST],
         thumb: &run_of::<STILL_CARD_PATHS>(STILL_CARD),
         card: &run_of::<STILL_CARD_PATHS>(STILL_CARD),
+        pages: &[],
         tasks: STILL_TASKS,
         closing: "You made that. It is a real file. You can plant keys on the rows you choose, wait on purpose and reuse a drawing.",
     },
@@ -2539,16 +2617,17 @@ pub const ALL: &[Lesson] = &[
         kind: ProjectKind::Comic,
         class: Class::Amateur,
         title: "Too Much Coat",
-        hover: "Six fast panels of a coat growing, then a page turn and the surprise. About 30 minutes. Ends in two page PNGs.",
+        hover: "Six fast panels of a coat growing, then a page turn and the surprise. About 25 minutes. Ends in two page PNGs.",
         paper: &PAGE_SMALL,
         prep: None,
         fill_gap: None,
         ink: None,
         latch: None,
         art: comic_art,
-        finish: &[TREE_1, TREE_1 + 1, TREE_1 + 2, TREE_1 + 3, TREE_1 + 4, COAT_BIG, COAT_BIG_CURL, COAT_BIG_EYE],
+        finish: &run_of::<{ PAGE_ONE_PATHS + PAGE_TWO_PATHS }>(T1),
         thumb: &run_of::<COMIC_CARD_PATHS>(COMIC_CARD),
         card: &run_of::<COMIC_CARD_PATHS>(COMIC_CARD),
+        pages: &[&run_of::<PAGE_ONE_PATHS>(T1), &run_of::<PAGE_TWO_PATHS>(TREE_1)],
         tasks: TOO_MUCH_COAT_TASKS,
         closing: "You made that. It is real files. You can pace a page and put the surprise where the reader has to turn.",
     },
