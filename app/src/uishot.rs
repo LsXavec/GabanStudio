@@ -697,18 +697,19 @@ fn lesson_card(dir: &Path) {
     h.shot(egui::vec2(full.0 as f32, full.1 as f32), &dir.join("lesson-deckle-guide.png"));
     drop(h);
 
-    // AU23: the Rookie lessons, part way, on each window; then the file each
-    // one ends in, as it left the dialog.
+    // AU23, AU24: the Rookie and Amateur lessons, part way, on each window; then
+    // the file each one ends in, as it left the dialog.
     use crate::auguide_show_tests::{File, Hand, ride};
-    for (lesson, task) in [(0, 8), (1, 6), (2, 7)] {
+    for (lesson, task) in [(0, 8), (1, 6), (2, 7), (3, 4), (4, 7), (5, 6)] {
         let lesson = crate::lessons::ALL[lesson];
+        let class = if lesson.class == crate::lessons::Class::Rookie { "rookie" } else { "amateur" };
         for (name, size) in [("", full), ("-1280", (1280, 800))] {
             let mut h = EditorHarness::with_gpu_ready();
             open(&mut h, lesson.id);
             crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
             crate::auguide_tests::stand_on_the_tasks_before(&mut h, &lesson, task);
             h.editor_mut().begin_lesson(lesson, task);
-            h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("rookie-{}{name}.png", lesson.id)));
+            h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("{class}-{}{name}.png", lesson.id)));
         }
         // The steps past the paper: Color and Export of each, and the two rooms
         // the card narrows at a laptop's size.
@@ -725,7 +726,7 @@ fn lesson_card(dir: &Path) {
             crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
             crate::auguide_tests::stand_on_the_tasks_before(&mut h, &lesson, task);
             h.editor_mut().begin_lesson(lesson, task);
-            h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("rookie-{}-{name}.png", lesson.id)));
+            h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("{class}-{}-{name}.png", lesson.id)));
         }
         let mut h = EditorHarness::as_shipped();
         crate::aurail_tests::sized(&mut h, full.0 as f32, full.1 as f32);
@@ -738,13 +739,13 @@ fn lesson_card(dir: &Path) {
                 (page.path(), Some("png".to_string()))
             }
         };
-        let to = dir.join(format!("rookie-file-{}.{}", lesson.id, kind.expect("an extension")));
+        let to = dir.join(format!("{class}-file-{}.{}", lesson.id, kind.expect("an extension")));
         std::fs::copy(&from, to).unwrap_or_else(|e| panic!("{from:?}: {e}"));
     }
 }
 
 /// AU27: the card's pictures, by file name.
-const LESSON: [(&str, u32, u32); 35] = [
+const LESSON: [(&str, u32, u32); 49] = [
     ("lesson-draw", 1600, 900),
     ("lesson-draw-fold", 832, 520),
     ("lesson-wander", 832, 520),
@@ -780,6 +781,20 @@ const LESSON: [(&str, u32, u32); 35] = [
     ("rookie-not_a_pencil-color", 1600, 900),
     ("rookie-not_a_pencil-export", 1600, 900),
     ("rookie-not_a_pencil-lettering-1280", 1280, 800),
+    ("amateur-coat_of_shavings", 1600, 900),
+    ("amateur-coat_of_shavings-1280", 1280, 800),
+    ("amateur-still_in_the_coat", 1600, 900),
+    ("amateur-still_in_the_coat-1280", 1280, 800),
+    ("amateur-too_much_coat", 1600, 900),
+    ("amateur-too_much_coat-1280", 1280, 800),
+    ("amateur-coat_of_shavings-color", 1600, 900),
+    ("amateur-coat_of_shavings-export", 1600, 900),
+    ("amateur-still_in_the_coat-color", 1600, 900),
+    ("amateur-still_in_the_coat-export", 1600, 900),
+    ("amateur-still_in_the_coat-timing-1280", 1280, 800),
+    ("amateur-too_much_coat-color", 1600, 900),
+    ("amateur-too_much_coat-export", 1600, 900),
+    ("amateur-too_much_coat-lettering-1280", 1280, 800),
 ];
 
 fn lesson_owed() -> Vec<(String, u32, u32)> {
@@ -1692,7 +1707,7 @@ fn audress_the_ignored_pass_owes_every_shot() {
     let names: BTreeSet<&str> = lists.iter().flat_map(|(_, l)| l.iter().map(|o| o.0.as_str())).collect();
     let owed: usize = lists.iter().map(|(_, l)| l.len()).sum();
     assert_eq!(names.len(), owed, "no two shots share a name");
-    assert_eq!(owed, 273 + 2 * PANELS.len() + 14, "the 273 owed before AU15, its panels at both sizes, and AU23's lessons: three at both, and eight steps");
+    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 14, "the 273 owed before AU15, its panels at both sizes, and AU23's and AU24's lessons: three at both, and eight steps, each");
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of

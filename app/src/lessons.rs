@@ -11,8 +11,8 @@ use anim_core::fill::{FillOpts, flood_fill_mask_in};
 use anim_core::fx::{FxKind, FxValue};
 use anim_core::generator::GenKind;
 use anim_core::graph::{Node, NodeKind};
-use anim_core::manga::Page;
-use anim_core::model::{CelLayer, Drawing, LayerRole};
+use anim_core::manga::{Page, Rulers};
+use anim_core::model::{CelLayer, Drawing, DrawingKind, LayerRole};
 use anim_core::xsheet::{ColumnKind, Exposure};
 use eframe::egui::{Color32, pos2};
 
@@ -275,6 +275,17 @@ pub mod art {
         Path { points, width, kind, over: false }
     }
 
+    /// A short pull of the pen, `long` px: an eye small enough that a press would
+    /// not make a stroke of it.
+    pub fn dash(at: Pt, long: f32, width: f32, kind: PathKind) -> Path {
+        const ROWS: usize = 6;
+        let point = |i: usize| {
+            let t = i as f32 / ROWS as f32;
+            [at[0] + long * 0.85 * t, at[1] + long * 0.5 * t, 0.9 + 0.1 * t]
+        };
+        Path { points: (0..=ROWS).map(point).collect(), width, kind, over: false }
+    }
+
     /// A spine from `tail` to `head`, `long` along the line wherever they
     /// stand: nearer than `long`, it arches up off the paper, and more to the
     /// head than the tail, because the strip is being pushed from behind.
@@ -423,6 +434,128 @@ pub mod art {
             holes: HOLES_AT.map(|at| dab(stood(at), wide * HOLE_WIDE, PathKind::Guide)),
         }
     }
+
+    /// AU24: a ruffle, one size at any reach: how long and how high, the samples
+    /// of each, and how far round a reach of edge goes. Short and steep: each is
+    /// a stroke of its own, as a pen ruffles.
+    const RUFFLE_LONG: f32 = 36.0;
+    const RUFFLE_RISE: f32 = 16.0;
+    const RUFFLE_ROWS: usize = 14;
+    const EDGE_ROUND: f32 = 5.0;
+    /// How much smaller the seed can make one ruffle.
+    const RUFFLE_SPREAD: f32 = 0.15;
+    /// The long side stays plain this far either way: the one long pull of the
+    /// edge, of the way round.
+    const PLAIN_SIDE: f32 = 0.125;
+    /// It sits this far in from the ruffles' feet: the pen stops and turns there.
+    const PLAIN_STEP: f32 = 8.0;
+    /// The curl's bend and end: of the way round and of the way out. It turns
+    /// back under the edge at a corner, and stays wide: a hand's long curve.
+    const CURL_BEND: [f32; 2] = [-0.16, 0.62];
+    const CURL_END: [f32; 2] = [-0.4, 0.28];
+    const CURL_ROWS: usize = 64;
+    /// A stroke that is the edge too ends in a flick, back under the last ruffle
+    /// at a corner: how long, and how far in of that.
+    const FLICK_LONG: f32 = 36.0;
+    const FLICK_IN: f32 = 0.3;
+    /// A shaving lies flatter than it is long.
+    pub const FLAT: f32 = 0.76;
+
+    /// AU24: a pencil shaving, by a seed: a ruffled edge round `at`, in the same
+    /// hand as Deckle's. `wide` and `tall` squeeze it and keep it the same wood.
+    #[derive(Clone, Copy)]
+    pub struct Shaving {
+        pub seed: u32,
+        pub at: Pt,
+        pub reach: f32,
+        pub wide: f32,
+        pub tall: f32,
+    }
+
+    /// A shaving lying flat at `at`.
+    pub fn shaving(seed: u32, at: Pt, reach: f32) -> Shaving {
+        Shaving { seed, at, reach, wide: 1.0, tall: FLAT }
+    }
+
+    impl Shaving {
+        fn ruffles(self) -> u32 {
+            (self.reach * EDGE_ROUND / RUFFLE_LONG).round() as u32 + self.seed % 3
+        }
+
+        /// How far out the edge stands at `lobe`'s foot: `rise` of the way up it.
+        fn out(self, lobe: i32, rise: f32) -> f32 {
+            let side = if self.wide >= self.tall { 0.25 } else { 0.5 };
+            let plain = ((lobe as f32 + 0.5) / self.ruffles() as f32 - side).abs() < PLAIN_SIDE;
+            let big = 1.0 - RUFFLE_SPREAD * (lattice(self.seed, 8 + lobe) + 1.0) * 0.5;
+            self.reach - RUFFLE_RISE + if plain { -PLAIN_STEP } else { RUFFLE_RISE * rise * big }
+        }
+
+        /// The turn of the long side: no two lie the same way.
+        fn lean(self) -> f32 {
+            lattice(self.seed, 1) * std::f32::consts::PI * 0.5
+        }
+
+        /// `from_middle` of the way to the edge, `t` of the way round.
+        pub fn point(self, t: f32, from_middle: f32) -> Pt {
+            let round = self.ruffles() as f32;
+            let lobe = (t.rem_euclid(1.0) * round).floor().min(round - 1.0) as i32;
+            let rise = (t * round * std::f32::consts::PI).sin().abs().sqrt();
+            self.placed(t, self.out(lobe, rise) * from_middle)
+        }
+
+        fn placed(self, t: f32, far: f32) -> Pt {
+            let (sin, cos) = (t * std::f32::consts::TAU).sin_cos();
+            let (x, y) = (cos * far * self.wide, sin * far * self.tall);
+            let (lean_sin, lean_cos) = self.lean().sin_cos();
+            [self.at[0] + x * lean_cos - y * lean_sin, self.at[1] + x * lean_sin + y * lean_cos]
+        }
+
+        /// Its line, `from_middle` of the way out, round and back to the start.
+        pub fn edge(self, from_middle: f32) -> Vec<Pt> {
+            let rows = self.ruffles() as usize * RUFFLE_ROWS;
+            // Each row twice, a hair apart: the step on and off the plain side
+            // goes straight out, a corner, where one row would lean it over.
+            let row = |i: usize| {
+                let t = i as f32 / rows as f32;
+                [self.point(t - 1e-5, from_middle), self.point(t, from_middle)]
+            };
+            (0..=rows).flat_map(row).collect()
+        }
+
+        /// The curl alone, running in from the foot where the edge shuts.
+        pub fn swirl(self) -> Vec<Pt> {
+            let foot = self.placed(0.0, self.out(0, 0.0));
+            let bend = self.placed(CURL_BEND[0], self.reach * CURL_BEND[1]);
+            let end = self.placed(CURL_END[0], self.reach * CURL_END[1]);
+            let at = |c: usize, u: f32| foot[c] * (1.0 - u) * (1.0 - u) + bend[c] * 2.0 * u * (1.0 - u) + end[c] * u * u;
+            let turn = |i: usize| {
+                let u = i as f32 / CURL_ROWS as f32;
+                [at(0, u), at(1, u)]
+            };
+            (0..=CURL_ROWS).map(turn).collect()
+        }
+
+        /// The edge, then its flick: one stroke. It ends in the wood, so one tap
+        /// still fills the whole shaving.
+        pub fn curl(self) -> Vec<Pt> {
+            let mut line = self.edge(1.0);
+            let foot = self.out(0, 0.0);
+            let back = FLICK_LONG / (std::f32::consts::TAU * foot);
+            line.push(self.placed(-back, foot - FLICK_LONG * FLICK_IN));
+            line
+        }
+
+        /// A spot of bare wood: as far from `line` as the middle of the shaving
+        /// goes, among those `keep` allows. A tap here cannot land on the ink.
+        pub fn bare(self, line: &Path, keep: impl Fn(Pt) -> bool) -> Pt {
+            const SPOKES: usize = 48;
+            const RINGS: usize = 6;
+            let clear = |q: Pt| line.points.iter().fold(f32::MAX, |d, p| d.min((p[0] - q[0]).hypot(p[1] - q[1])));
+            let spots = (1..=RINGS).flat_map(|r| (0..SPOKES).map(move |s| (r, s)));
+            let spot = |(r, s): (usize, usize)| self.point(s as f32 / SPOKES as f32, 0.7 * r as f32 / RINGS as f32);
+            spots.map(spot).filter(|q| keep(*q)).fold(self.at, |best, q| if clear(q) > clear(best) { q } else { best })
+        }
+    }
 }
 
 /// What `Show me` does: the demonstration lands on the real document, so a
@@ -524,6 +657,9 @@ pub struct Task {
     pub guide: &'static [u16],
     /// What the gate does for a person's own art: strokes or fill seeds.
     pub stand_in: &'static [u16],
+    /// AU24: what the gate does for a person's hand where no path can say it: a
+    /// right-click, a typed cell, a page's cuts, three drawings' two fills.
+    pub hand: Option<fn(&mut Editor)>,
     /// The act landed, the outcome did not (a leak). Replaces `say`.
     pub miss: Option<&'static str>,
     pub show: Show,
@@ -563,6 +699,9 @@ pub struct Lesson {
     /// AU23: what the Lessons page's row shows, where `finish` cannot read at
     /// that height. Empty: `finish`.
     pub thumb: &'static [u16],
+    /// AU24: what the card's picture shows, where it is less than the whole
+    /// finish `Hold to see it` gives. Empty: `finish`.
+    pub card: &'static [u16],
     pub tasks: &'static [Task],
     /// Names what the person now knows.
     pub closing: &'static str,
@@ -584,6 +723,7 @@ impl Lesson {
         art: stand_in_art,
         finish: &[0],
         thumb: &[],
+        card: &[],
         tasks: &[],
         closing: "",
     };
@@ -604,11 +744,12 @@ const BLACK_INK: Color32 = swatch(0);
 const WHITE_INK: Color32 = swatch(1);
 const RED_INK: Color32 = swatch(2);
 const YELLOW_INK: Color32 = swatch(4);
+const BROWN_INK: Color32 = swatch(9);
 const NIGHT_INK: Color32 = plate::LESSON_NIGHT;
 
 /// A task with no line of its own.
 const fn act(say: &'static str, step: Stage, done: Done, ring: &'static [Target], show: Show) -> Task {
-    Task { say, why: None, step, done, ring, guide: &[], stand_in: &[], miss: None, show }
+    Task { say, why: None, step, done, ring, guide: &[], stand_in: &[], hand: None, miss: None, show }
 }
 
 /// A task that draws `paths` over their guides.
@@ -1150,6 +1291,11 @@ pub(crate) fn desk_texel(x: i32, y: i32) -> [u8; 4] {
 /// The BG track's one plate, under the armed `A`. Its layer has no colour role:
 /// `FilledOn` counts Deckle's drawings.
 fn desk_prep(s: &mut crate::doc::AppState) {
+    bg_plate(s, EDGE.width, EDGE.height, desk_texel);
+}
+
+/// `texel` as the BG track's one plate, held for the shot.
+fn bg_plate(s: &mut crate::doc::AppState, width: u32, height: u32, texel: fn(i32, i32) -> [u8; 4]) {
     // One pass and stop: `Press {Play}` comes twice, and a loop running would
     // turn the second press into a stop. The GIF loops all the same.
     s.view.loop_playback = false;
@@ -1158,7 +1304,7 @@ fn desk_prep(s: &mut crate::doc::AppState) {
     let layer = s.engine.alloc_layer_id();
     let mut plate = Drawing::new(id, "BG");
     let mut desk = CelLayer::new(layer, "desk");
-    desk.raster = crate::sample::raster((0, 0, EDGE.width as i32, EDGE.height as i32), |x, y| Some(desk_texel(x, y)));
+    desk.raster = crate::sample::raster((0, 0, width as i32, height as i32), |x, y| Some(texel(x, y)));
     plate.layers.push(desk);
     let cut = s.engine.project.cut_mut(at.scene, at.cut).expect("the lesson's paper");
     cut.drawings.push(plate);
@@ -1235,7 +1381,7 @@ fn fill_the_rest(e: &mut Editor) {
 const LAST_ARCH: u32 = 6;
 const LAST_ARCH_LEN: u32 = 5;
 /// The track the sheet's rows read: `BG` stands left of it.
-const TRACK_A: u8 = 1;
+pub(crate) const TRACK_A: u8 = 1;
 
 const ADD_KEY: &[Target] = &[Target::Action(Action::AddDrawingAfter)];
 const PLAY_KEY: &[Target] = &[Target::Action(Action::PlayPause)];
@@ -1454,6 +1600,840 @@ const NOT_A_PENCIL_TASKS: &[Task] = &[
     ),
 ];
 
+// ---- A Coat of Shavings ----
+
+const COAT: Template = Template {
+    name: "A Coat of Shavings",
+    kind: Some(ProjectKind::Drawing),
+    width: 1400,
+    height: 1050,
+    ..templates::READY
+};
+
+// Its art. Six ticks, then what the gate draws, then what the picture holds.
+const COAT_TICK: u16 = 0;
+const S1_SKETCH: u16 = 6;
+const S1_INK: u16 = 7;
+const S2_INK: u16 = 8;
+const S3_INK: u16 = 9;
+const COAT_LASSO: u16 = 10;
+const COAT_DRAG: u16 = 11;
+const S1_SEED: u16 = 12;
+const S2_SEED: u16 = 13;
+const S3_SEED: u16 = 14;
+const RIM_1: u16 = 15;
+const RIM_2: u16 = 16;
+const RIM_3: u16 = 17;
+const S1_MOVED: u16 = 18;
+const COAT_DECKLE: u16 = 19;
+const COAT_EYE: u16 = 20;
+const COAT_HOLE_1: u16 = 21;
+const COAT_HOLE_2: u16 = 22;
+const REFERENCE: u16 = 23;
+const REFERENCE_RIM: u16 = 24;
+const OVERLAP_SEED: u16 = 25;
+
+/// Where the night is poured.
+pub(crate) const CORNER: [f32; 2] = [36.0, 36.0];
+/// Each shaving's middle, and how far its edge reaches. They stand clear of Deckle.
+pub(crate) const SHAVINGS: [Pt; 3] = [[260.0, 280.0], [1140.0, 330.0], [300.0, 790.0]];
+const SHAVING_REACH: f32 = 196.0;
+/// `Select`'s drag: the first shaving comes down over the third.
+pub(crate) const COAT_MOVE: Pt = [24.0, 266.0];
+const SHAVING_LINE: f32 = 6.0;
+/// A rim's brush: half of it runs off the wood, 15 px past the edge.
+const RIM_WIDE: f32 = 30.0;
+/// The Deckle a coat is for: a third of the paper's height, on its two feet.
+const COAT_ARCH: [Pt; 2] = [[570.0, 700.0], [834.0, 694.0]];
+const COAT_ARCH_LONG: f32 = 560.0;
+/// `Strength`, where `nudge_strength` leaves it: yellow lifts, brown does not.
+const COAT_GLOW: f32 = 0.5;
+
+fn coat_shavings() -> [art::Shaving; 3] {
+    [0, 1, 2].map(|i| art::shaving(3 + 5 * i as u32, SHAVINGS[i], SHAVING_REACH))
+}
+
+fn moved_by(path: &Path, by: Pt) -> Path {
+    let points = path.points.iter().map(|p| [p[0] + by[0], p[1] + by[1], p[2]]).collect();
+    Path { points, width: path.width, kind: PathKind::Finish, over: false }
+}
+
+fn seed_at(at: Pt) -> Path {
+    Path { points: vec![[at[0], at[1], 1.0]], width: 1.0, kind: PathKind::Seed, over: false }
+}
+
+/// The strip's middle, as a wide white line: both sides by their share of the way.
+fn strip_body(deckle: &art::Deckle) -> Vec<Pt> {
+    const ROWS: usize = 120;
+    let (cut, torn) = (&deckle.cut.points[..deckle.sides[0]], &deckle.torn.points[..deckle.sides[1]]);
+    let at = |line: &[[f32; 3]], t: f32| line[((line.len() - 1) as f32 * t).round() as usize];
+    let mid = |i: usize| {
+        let t = i as f32 / ROWS as f32;
+        let (a, b) = (at(cut, t), at(torn, 1.0 - t));
+        [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5]
+    };
+    (0..=ROWS).map(mid).collect()
+}
+
+fn coat_art() -> Vec<Path> {
+    use art::hand;
+    let [one, two, three] = coat_shavings();
+    let tick = |at: Pt, seed| hand(&[[at[0] - 7.0, at[1] - 15.0], [at[0] + 7.0, at[1] + 15.0]], 4.0, PathKind::Landmark, seed);
+    let ticks = SHAVINGS.iter().enumerate().flat_map(|(i, at)| {
+        let seed = i as u32 * 2;
+        [tick([at[0] - SHAVING_REACH * 1.08, at[1]], seed + 1), tick([at[0] + SHAVING_REACH * 1.08, at[1]], seed + 2)]
+    });
+    let mut art: Vec<Path> = ticks.collect();
+    let ink = |shaving: art::Shaving, seed| hand(&shaving.curl(), SHAVING_LINE, PathKind::StandIn, seed);
+    let sketch = art::Shaving { at: [SHAVINGS[0][0] + 12.0, SHAVINGS[0][1] - 10.0], ..one };
+    let [ink_1, ink_2, ink_3] = [ink(one, 41), ink(two, 42), ink(three, 43)];
+    // The lasso goes round the first shaving and no other.
+    let round = |i: usize| {
+        let t = i as f32 / 60.0 * std::f32::consts::TAU;
+        [SHAVINGS[0][0] + t.cos() * SHAVING_REACH * 1.2, SHAVINGS[0][1] + t.sin() * SHAVING_REACH * 1.02]
+    };
+    let lasso: Vec<Pt> = (0..=60).map(round).collect();
+    let from = SHAVINGS[0];
+    let drag = [from, [from[0] + COAT_MOVE[0], from[1] + COAT_MOVE[1]]];
+    let moved = art::Shaving { at: drag[1], ..one };
+    // Each tap on the side away from the overlap, past the other shaving's edge.
+    let seed_1 = moved.bare(&moved_by(&ink_1, COAT_MOVE), |q| q[1] < drag[1][1]);
+    let seed_2 = two.bare(&ink_2, |_| true);
+    let seed_3 = three.bare(&ink_3, |q| q[1] > SHAVINGS[2][1]);
+    let rim = |shaving: art::Shaving, seed| hand(&shaving.edge(1.0), RIM_WIDE, PathKind::StandIn, seed);
+    let moved_ink = moved_by(&ink_1, COAT_MOVE);
+    art.extend([
+        hand(&sketch.curl(), 3.0, PathKind::StandIn, 40),
+        ink_1,
+        ink_2,
+        ink_3,
+        hand(&lasso, 2.0, PathKind::StandIn, 44),
+        hand(&drag, 2.0, PathKind::StandIn, 45),
+        seed_at(seed_1),
+        seed_at(seed_2),
+        seed_at(seed_3),
+        rim(moved, 54),
+        rim(two, 55),
+        rim(three, 56),
+        moved_ink,
+    ]);
+    let stand = arch(COAT_ARCH[0], COAT_ARCH[1], COAT_ARCH_LONG);
+    let art::Deckle { eye, holes: [hole_1, hole_2], .. } = art::upright(&stand, 2);
+    let [line, _] = joined(art::upright(&stand, 2));
+    art.extend([Path { kind: PathKind::Finish, ..line }, eye, hole_1, hole_2]);
+    let reference = art::shaving(5, [700.0, 525.0], SHAVING_REACH);
+    art.push(hand(&reference.curl(), SHAVING_LINE, PathKind::Finish, 50));
+    art.push(hand(&reference.edge(0.86), SHAVING_LINE, PathKind::Finish, 51));
+    // Where two shavings lie over each other the lines shut a space of its own.
+    art.push(seed_at([(moved.at[0] + three.at[0]) * 0.5, (moved.at[1] + three.at[1]) * 0.5]));
+    art
+}
+
+/// Deckle on the color layer, line and white body both, so that hiding the
+/// sketch cannot hide him. The color layer is the slot under the line.
+fn coat_prep(s: &mut crate::doc::AppState) {
+    const COLOR_SLOT: usize = 1;
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    const BLACK: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+    let art = coat_art();
+    let ink = |i: u16, rgba| {
+        let path = &art[usize::from(i)];
+        PathInk { points: &path.points, width: path.width, rgba, erase: false, inside: false }
+    };
+    let deckle = art::upright(&arch(COAT_ARCH[0], COAT_ARCH[1], COAT_ARCH_LONG), 2);
+    let body = strip_body(&deckle).iter().map(|p| [p[0], p[1], 1.0]).collect::<Vec<_>>();
+    let body = PathInk { points: &body, width: COAT_ARCH_LONG * 0.17, rgba: WHITE, erase: false, inside: false };
+    let lines = [body, ink(COAT_DECKLE, BLACK), ink(COAT_EYE, BLACK), ink(COAT_HOLE_1, BLACK), ink(COAT_HOLE_2, BLACK)];
+    s.commit_path(&lines, COLOR_SLOT);
+    s.strokes_done = 0;
+}
+
+fn add_layer(e: &mut Editor) {
+    if at_step(e, Stage::Drawing) {
+        e.state.layer_add_role(LayerRole::Custom);
+    }
+}
+
+/// `Hide your sketch`: the layer it was drawn on, under the new one.
+fn hide_sketch(e: &mut Editor) {
+    if !at_step(e, Stage::Drawing) {
+        return;
+    }
+    let drawing = e.state.current_drawing().and_then(|id| e.state.cut().drawing(id));
+    let sketch = drawing.and_then(|d| d.layers.iter().find(|l| l.props.role == LayerRole::Line));
+    let Some((id, mut props)) = sketch.map(|l| (l.id, l.props.clone())) else { return };
+    props.visible = false;
+    e.state.layer_set_props(id, props);
+}
+
+/// `Select` is a toggle: the chord would put it down again.
+fn arm_select(e: &mut Editor) {
+    if at_step(e, Stage::Drawing) {
+        e.canvas.set_tool(CanvasTool::Select, &mut e.state);
+    }
+}
+
+fn arm_fill(e: &mut Editor) {
+    e.canvas.set_tool(CanvasTool::Fill, &mut e.state);
+}
+
+fn pick_brown(e: &mut Editor) {
+    pick(e, BROWN_INK);
+    if at_step(e, Stage::InkPaint) {
+        arm_fill(e);
+    }
+}
+
+fn pick_yellow_and_brush(e: &mut Editor) {
+    pick(e, YELLOW_INK);
+    arm_brush(e);
+}
+
+/// The ground comes last: with it down the whole paper counts as inside.
+fn night_at_the_corner(e: &mut Editor) {
+    if on_the_paper(e) {
+        pick(e, NIGHT_INK);
+        arm_fill(e);
+        e.canvas.fill_at(pos2(CORNER[0], CORNER[1]), &mut e.state);
+    }
+}
+
+/// `Strength`, by the shelf's own road, to `to`.
+fn set_glow(e: &mut Editor, to: f32) {
+    if !at_step(e, Stage::Composite) {
+        return;
+    }
+    let glow = |n: &Node| matches!(n.kind, NodeKind::Effect { fx: FxKind::Glow, .. }).then(|| (n.id, n.kind.clone()));
+    let Some((id, mut kind)) = e.state.cut().graph.nodes().find_map(glow) else { return };
+    if let NodeKind::Effect { params, .. } = &mut kind {
+        params.set("intensity", FxValue::Float(to));
+    }
+    e.state.graph_set_kind(id, kind);
+}
+
+fn nudge_strength(e: &mut Editor) {
+    set_glow(e, COAT_GLOW);
+}
+
+const LAYERS_KEY: Target = Target::Rail(Key::Layers);
+const MORE_KEY: Target = Target::Rail(Key::More);
+const KEEP_INSIDE: &[Target] = &[Target::Rail(Key::Brush), Target::Float(crate::floats::Float::Brushes), Target::Named("keep.row")];
+
+const COAT_TASKS: &[Task] = &[
+    Task {
+        why: Some("A sketch is for finding the shape, so it can be ugly."),
+        guide: &[COAT_TICK, COAT_TICK + 1],
+        stand_in: &[S1_SKETCH],
+        ..act(
+            "Deckle is cold, and pencil shavings make a good coat. Sketch one big shaving between the first two ticks. A curl with a ruffled edge. Keep it loose.",
+            Stage::Drawing,
+            Done::Ink(&[S1_SKETCH]),
+            BRUSH_KEY,
+            Show::Where,
+        )
+    },
+    act(
+        "Open {Layers}, press + and pick {Custom layer}. Your sketch stays under it.",
+        Stage::Drawing,
+        Done::Layers(3),
+        &[MORE_KEY, LAYERS_KEY, Target::Named("layers.add"), Target::Named("layers.custom")],
+        Show::Run(add_layer),
+    ),
+    Task {
+        guide: &[COAT_TICK, COAT_TICK + 1],
+        stand_in: &[S1_INK],
+        ..act(
+            "Ink the shaving on the new layer. One clean line, thicker on the turns.",
+            Stage::Drawing,
+            Done::All(&[Done::InkOnLayer, Done::Ink(&[S1_INK])]),
+            ON_PAPER,
+            Show::Where,
+        )
+    },
+    act(
+        "Hide your sketch with its eye.",
+        Stage::Drawing,
+        Done::LayerHidden,
+        &[MORE_KEY, LAYERS_KEY, Target::Named("layers.eye")],
+        Show::Run(hide_sketch),
+    ),
+    Task {
+        guide: &[COAT_TICK + 2, COAT_TICK + 3, COAT_TICK + 4, COAT_TICK + 5],
+        stand_in: &[S2_INK, S3_INK],
+        ..act(
+            "Draw two more shavings at the other ticks. No two alike.",
+            Stage::Drawing,
+            Done::Ink(&[S2_INK, S3_INK]),
+            ON_PAPER,
+            Show::Where,
+        )
+    },
+    Task {
+        stand_in: &[COAT_LASSO, COAT_DRAG],
+        ..act(
+            "Pick {Select}, circle one shaving and drag it over another. A coat overlaps.",
+            Stage::Drawing,
+            Done::Moved,
+            &[Target::Rail(Key::Select)],
+            Show::Run(arm_select),
+        )
+    },
+    act(
+        "Open {View} and press {Mirror view}. A wrong curve shows up at once. Press it again when you have looked.",
+        Stage::Drawing,
+        Done::Mirrored,
+        &[Target::Named("menu.view"), Target::Action(Action::MirrorView)],
+        Show::Perform(Action::MirrorView),
+    ),
+    pill("Press {Color}.", "Color is where the wood gets warm, and your lines stay safe.", Stage::InkPaint, Action::RoomFinishing),
+    Task {
+        stand_in: &[S1_SEED, S2_SEED, S3_SEED, OVERLAP_SEED],
+        ..act(
+            "Pick brown and fill each shaving.",
+            Stage::InkPaint,
+            Done::Fills(3),
+            &[Target::Named("swatch.brown"), Target::Rail(Key::Fill)],
+            Show::Run(pick_brown),
+        )
+    },
+    act(
+        "Press {Brush}, open {Brushes} and turn on {Keep inside strokes}.",
+        Stage::InkPaint,
+        Done::Locked(true),
+        KEEP_INSIDE,
+        Show::Perform(Action::ToggleAlphaLock),
+    ),
+    Task {
+        stand_in: &[RIM_1, RIM_2, RIM_3],
+        ..act(
+            "Pick yellow and paint a rim along each shaving. Paint it rough: it stays inside.",
+            Stage::InkPaint,
+            Done::Strokes(3),
+            &[Target::Named("swatch.yellow"), Target::Rail(Key::Brush)],
+            Show::Run(pick_yellow_and_brush),
+        )
+    },
+    act(
+        "Turn {Keep inside strokes} off.",
+        Stage::InkPaint,
+        Done::Locked(false),
+        KEEP_INSIDE,
+        Show::Perform(Action::ToggleAlphaLock),
+    ),
+    act(
+        "Pick {Night} on this card and fill the paper around the coat.",
+        Stage::InkPaint,
+        Done::Filled { seed: CORNER, keep: None },
+        &[Target::Named(lesson::CHIP), Target::Rail(Key::Fill)],
+        Show::Run(night_at_the_corner),
+    ),
+    pill("Press {Effects}.", "Effects is where the rims catch the light.", Stage::Composite, Action::RoomComposite),
+    act("Tap {Glow}.", Stage::Composite, Done::Effect(FxKind::Glow), GLOW_KEY, Show::Run(add_glow)),
+    act(
+        "Drag {Strength} until only the rims catch the light.",
+        Stage::Composite,
+        Done::Strength,
+        &[Target::Named("shelf.strength")],
+        Show::Run(nudge_strength),
+    ),
+    pill("Press {Export}.", "Export turns your project into a file anyone can open.", Stage::Export, Action::RoomExport),
+    act(
+        "Save your picture.",
+        Stage::Export,
+        Done::Exported(1),
+        &[Target::Action(Action::ExportStill)],
+        Show::Perform(Action::ExportStill),
+    ),
+];
+
+// ---- Still in the Coat ----
+
+const STILL: Template = Template {
+    name: "Still in the Coat",
+    kind: Some(ProjectKind::Animation),
+    width: 1024,
+    height: 768,
+    cut_frames: 24,
+    sheet_on: true,
+    columns: &[("BG", ColumnKind::Bg), ("A", ColumnKind::Cel)],
+    ..templates::READY
+};
+
+// Its art: each pose's outline, rim line and eye, then the two ticks and the card.
+const STILL_POSES: usize = 3;
+const COAT_REST: u16 = 0;
+const RIM_REST: u16 = 1;
+const EYE_REST: u16 = 2;
+const COAT_LEFT: u16 = 3;
+const RIM_LEFT: u16 = 4;
+const EYE_LEFT: u16 = 5;
+const COAT_RIGHT: u16 = 6;
+const RIM_RIGHT: u16 = 7;
+const EYE_RIGHT: u16 = 8;
+const FLOOR_TICK: u16 = 9;
+const CENTRE_TICK: u16 = 10;
+const STILL_CARD: u16 = 11;
+const STILL_CARD_PATHS: usize = 9;
+
+/// The desk's top, and the coat's middle over it, at rest.
+pub(crate) const STILL_FLOOR: f32 = 610.0;
+const STILL_MIDDLE: f32 = 512.0;
+const COAT_REACH: f32 = 170.0;
+/// The rim's inner line, of the way out.
+const COAT_RIM: f32 = 0.84;
+/// Each pose's squeeze across, and where its middle goes. Its height is the rest
+/// of the same wood: `wide` × `tall` is one.
+const COAT_POSES: [(f32, f32); STILL_POSES] = [(1.0, 0.0), (0.78, -110.0), (0.78, 110.0)];
+const COAT_SEED: u32 = 6;
+const COAT_EYE_WIDE: f32 = 16.0;
+/// How long a coat's eye is pulled: a stroke at any fit.
+const EYE_PULL: f32 = 26.0;
+const STILL_NIGHT: [u8; 4] = [0x14, 0x1B, 0x34, 0xFF];
+const STILL_DESK: [u8; 4] = [0x2C, 0x30, 0x4A, 0xFF];
+const STILL_EDGE: [u8; 4] = [0x4A, 0x4F, 0x6E, 0xFF];
+
+/// The coat in pose `i`: a blob of shavings by the same generator.
+pub(crate) fn coat(i: usize) -> art::Shaving {
+    let (wide, by) = COAT_POSES[i];
+    let tall = art::FLAT / wide;
+    let flat = art::Shaving { wide, tall, ..art::shaving(COAT_SEED, [0.0, 0.0], COAT_REACH) };
+    // Stood on the desk: the squeeze goes up, and the feet stay on the floor.
+    let feet = flat.edge(1.0).iter().fold(0.0f32, |low, p| low.max(p[1]));
+    art::Shaving { at: [STILL_MIDDLE + by, STILL_FLOOR - feet], ..flat }
+}
+
+/// Its wood, under the eye; and its rim, between the two lines.
+pub(crate) fn coat_seeds(i: usize) -> [Pt; 2] {
+    let coat = coat(i);
+    [[coat.at[0], coat.at[1] + COAT_REACH * 0.3], coat.point(0.5 + 0.5 / 7.0, (1.0 + COAT_RIM) * 0.5)]
+}
+
+fn coat_lines(i: usize, at: Pt, kind: PathKind) -> [Path; 3] {
+    let coat = coat(i);
+    let moved = art::Shaving { at, ..coat };
+    let seed = 61 + i as u32 * 5;
+    let eye = art::dash([at[0] - 30.0, at[1] - 34.0], EYE_PULL, COAT_EYE_WIDE, kind);
+    [art::hand(&moved.edge(1.0), 5.0, kind, seed), art::hand(&moved.edge(COAT_RIM), 4.0, kind, seed + 1), eye]
+}
+
+fn still_art() -> Vec<Path> {
+    let mut art: Vec<Path> = (0..STILL_POSES).flat_map(|i| coat_lines(i, coat(i).at, PathKind::StandIn)).collect();
+    let tick = |at: Pt, run: Pt, seed| Path { over: true, ..art::hand(&[at, [at[0] + run[0], at[1] + run[1]]], 4.0, PathKind::Landmark, seed) };
+    art.push(tick([STILL_MIDDLE - 20.0, STILL_FLOOR + 6.0], [40.0, 1.0], 70));
+    art.push(tick([STILL_MIDDLE, 128.0], [1.0, 40.0], 71));
+    // The card's: a row of the three, each its own place in it.
+    for i in 0..STILL_POSES {
+        let at = [300.0 + i as f32 * 420.0, 300.0];
+        art.extend(coat_lines(i, at, PathKind::Finish));
+    }
+    art
+}
+
+/// The desk's top under the coat, and the night over it.
+fn still_texel(_: i32, y: i32) -> [u8; 4] {
+    match y as f32 {
+        y if y < STILL_FLOOR => STILL_NIGHT,
+        y if y < STILL_FLOOR + 10.0 => STILL_EDGE,
+        _ => STILL_DESK,
+    }
+}
+
+fn still_prep(s: &mut crate::doc::AppState) {
+    bg_plate(s, STILL.width, STILL.height, still_texel);
+}
+
+/// The Plan keys' three drawings, each its kind: what the sheet's menu writes.
+fn mark_keys(e: &mut Editor) {
+    let column = e.state.view.active_column;
+    let shown = runs_here(e);
+    let drawn = shown.iter().filter_map(|(_, shows)| if let Exposure::Drawing(id) = shows { Some(*id) } else { None });
+    let drawn: Vec<_> = drawn.collect();
+    drawn.into_iter().for_each(|id| e.state.set_drawing_kind(id, DrawingKind::Key));
+    e.state.view.active_column = column;
+}
+
+fn goto_first(e: &mut Editor) {
+    if at_step(e, Stage::Edit) {
+        e.state.goto(0);
+    }
+}
+
+/// Row 16: the blank row past the right pose. A drawing on a blank tail keeps to
+/// its row, so the pose's run is one, and the rest takes the row after it.
+const REST_AGAIN: u32 = 15;
+
+fn goto_rest_row(e: &mut Editor) {
+    if at_step(e, Stage::Edit) {
+        e.state.goto(REST_AGAIN);
+    }
+}
+
+/// `Click row 16 twice, type {rest drawing}`: the name the sheet's first row
+/// shows, typed into its cell.
+fn the_rest_comes_back(e: &mut Editor) {
+    goto_rest_row(e);
+    let name = e.lesson_rest();
+    e.state.enter_cell(&name);
+}
+
+fn turn_on_loop(e: &mut Editor) {
+    if at_step(e, Stage::Edit) {
+        e.state.view.loop_playback = true;
+        let (here, last) = (e.state.view.frame, e.state.shown_length() - 1);
+        e.state.goto(0);
+        e.state.set_loop_in();
+        e.state.goto(last);
+        e.state.set_loop_out();
+        e.state.goto(here);
+    }
+}
+
+/// Task 12's person: on each drawing, brown for the wood and yellow for the rim.
+fn fill_the_coats(e: &mut Editor) {
+    if !at_step(e, Stage::InkPaint) {
+        return;
+    }
+    arm_fill(e);
+    let column = e.state.view.active_column;
+    for (pose, (from, _)) in runs_here(e).into_iter().take(STILL_POSES).enumerate() {
+        e.state.select_cells((column, from), column, from);
+        let [wood, rim] = coat_seeds(pose);
+        for (ink, seed) in [(BROWN_INK, wood), (YELLOW_INK, rim)] {
+            e.canvas.brush_color = ink.to_array();
+            if e.canvas.slot_at_pen_down(true, &mut e.state).is_some() {
+                e.canvas.fill_at(pos2(seed[0], seed[1]), &mut e.state);
+            }
+        }
+    }
+}
+
+const fn cell(frame: u32) -> &'static [Target] {
+    match frame {
+        0 => &[Target::Named("band.sheet"), Target::Cell { track: TRACK_A, frame: 0 }],
+        4 => &[Target::Named("band.sheet"), Target::Cell { track: TRACK_A, frame: 4 }],
+        _ => &[Target::Named("band.sheet"), Target::Cell { track: TRACK_A, frame: 6 }],
+    }
+}
+
+const STILL_TASKS: &[Task] = &[
+    Task {
+        why: Some("Plan is where the main poses land on the rows you choose."),
+        guide: &[FLOOR_TICK, CENTRE_TICK],
+        stand_in: &[COAT_REST, RIM_REST, EYE_REST],
+        ..act(
+            "Deckle has wrapped itself in a coat of shavings. Click row 1 on track A and draw the coat at rest.",
+            Stage::Drawing,
+            Done::KeyArt { track: TRACK_A, frame: 0 },
+            cell(0),
+            Show::Where,
+        )
+    },
+    Task {
+        guide: &[FLOOR_TICK, CENTRE_TICK],
+        stand_in: &[COAT_LEFT, RIM_LEFT, EYE_LEFT],
+        ..act(
+            "Click row 5. Draw the coat squeezed to the left.",
+            Stage::Drawing,
+            Done::KeyArt { track: TRACK_A, frame: 4 },
+            cell(4),
+            Show::Where,
+        )
+    },
+    Task {
+        guide: &[FLOOR_TICK, CENTRE_TICK],
+        stand_in: &[COAT_RIGHT, RIM_RIGHT, EYE_RIGHT],
+        ..act(
+            "Click row 7. Draw it squeezed to the right.",
+            Stage::Drawing,
+            Done::KeyArt { track: TRACK_A, frame: 6 },
+            cell(6),
+            Show::Where,
+        )
+    },
+    act("Press {Play}. Is it twitchy? Good.", Stage::Drawing, Done::Played, PLAY_KEY, Show::Perform(Action::PlayPause)),
+    pill("Press {Timing}.", "This is where nothing gets to happen.", Stage::Edit, Action::RoomEdit),
+    Task {
+        hand: Some(mark_keys),
+        ..act(
+            "Right-click each drawing on the sheet and mark all three as keys.",
+            Stage::Edit,
+            Done::Kinds(3),
+            &[Target::Cell { track: TRACK_A, frame: 0 }],
+            Show::Run(mark_keys),
+        )
+    },
+    act(
+        "Click row 1 and press {Longer} until the rest lasts 12 rows. Wait longer than feels right.",
+        Stage::Edit,
+        Done::Hold { frame: 0, len: 12 },
+        &[Target::Cell { track: TRACK_A, frame: 0 }, Target::Named("band.longer")],
+        Show::Run(goto_first),
+    ),
+    Task {
+        hand: Some(the_rest_comes_back),
+        ..act(
+            "Click row 16 twice, type {rest drawing} and press Enter. The rest drawing comes back after the shiver.",
+            Stage::Edit,
+            Done::All(&[Done::Shows { frame: REST_AGAIN - 1, drawing: 2 }, Done::Shows { frame: REST_AGAIN, drawing: 0 }]),
+            &[Target::Cell { track: TRACK_A, frame: REST_AGAIN }],
+            Show::Run(goto_rest_row),
+        )
+    },
+    Task {
+        hand: Some(turn_on_loop),
+        ..act(
+            "Turn on {Loop}, and set {Loop start} and {Loop end} around the shot.",
+            Stage::Edit,
+            Done::Loop,
+            &[Target::Named("band.loop"), Target::Named("band.fold"), Target::Action(Action::LoopIn), Target::Action(Action::LoopOut)],
+            Show::Run(turn_on_loop),
+        )
+    },
+    act(
+        "Press {Play}. If the wait is not funny yet, change it with {Longer} or {Shorter}.",
+        Stage::Edit,
+        Done::Played,
+        PLAY_KEY,
+        Show::Perform(Action::PlayPause),
+    ),
+    pill("Press {Color}.", "Your lines stay safe here.", Stage::InkPaint, Action::RoomFinishing),
+    Task {
+        hand: Some(fill_the_coats),
+        ..act(
+            "Fill all three drawings: brown for the wood, yellow for the rims.",
+            Stage::InkPaint,
+            Done::FilledOn(3),
+            &[Target::Rail(Key::Fill), Target::Named("swatch.brown"), Target::Named("swatch.yellow")],
+            Show::Run(pick_brown),
+        )
+    },
+    pill("Press {Effects}.", "Effects is where the rims catch the light.", Stage::Composite, Action::RoomComposite),
+    act("Tap {Glow}.", Stage::Composite, Done::Effect(FxKind::Glow), GLOW_KEY, Show::Run(add_glow)),
+    act(
+        "Drag {Strength} until only the rims catch the light.",
+        Stage::Composite,
+        Done::Strength,
+        &[Target::Named("shelf.strength")],
+        Show::Run(nudge_strength),
+    ),
+    pill("Press {Export}.", "Export turns your drawings into a file that loops forever.", Stage::Export, Action::RoomExport),
+    act(
+        "Save a GIF.",
+        Stage::Export,
+        Done::Exported(1),
+        &[Target::Action(Action::ExportGif)],
+        Show::Perform(Action::ExportGif),
+    ),
+];
+
+// ---- Too Much Coat ----
+
+// Its art: page one's six, page two's five, its coat, the ticks and the card.
+const T1: u16 = 0;
+const TREE_1: u16 = 6;
+const COAT_BIG: u16 = 11;
+const COAT_BIG_CURL: u16 = 12;
+const COAT_BIG_EYE: u16 = 13;
+const COAT_BIG_SEED: u16 = 14;
+const HORIZON_TICK: u16 = 15;
+const POINT_TICK: u16 = 16;
+const COMIC_CARD: u16 = 17;
+const COMIC_CARD_PATHS: usize = 14;
+
+/// Where each panel of `split_into_six` stands: two tall, then four small.
+pub(crate) const PANEL_MIDDLES: [Pt; 6] =
+    [[262.0, 350.0], [626.0, 350.0], [262.0, 757.0], [626.0, 757.0], [262.0, 1029.0], [626.0, 1029.0]];
+/// The 1-point ruler's point: `Rulers::preset`'s on this page.
+const VANISHING: Pt = [444.0, 497.0];
+pub(crate) const BIG_COAT_AT: Pt = [444.0, 900.0];
+const BIG_COAT_REACH: f32 = 300.0;
+const PANEL_LINE: f32 = 4.0;
+
+fn big_coat() -> art::Shaving {
+    art::shaving(COAT_SEED, BIG_COAT_AT, BIG_COAT_REACH)
+}
+
+/// Deckle flat, dragging a shaving: panel `i` of page one, the coat growing.
+fn dragged(i: usize, at: Pt, scale: f32, kind: PathKind) -> [Path; 2] {
+    const LONG: f32 = 150.0;
+    let (seed, reach) = (20 + i as u32, (8.0 + i as f32 * 0.9) * scale);
+    let tail = [at[0] - LONG * 0.2 * scale, at[1] + 30.0 * scale];
+    let spine = art::spine(tail, [tail[0] + LONG * scale, tail[1]], LONG * scale);
+    let [line, _] = closed(&spine, seed);
+    // Small on the page: a shaving is one quick curl of the pen, under a long line.
+    let from = [tail[0] - reach * 1.1, tail[1] + reach * 0.2];
+    let up = |x: f32, y: f32| [from[0] + reach * x, from[1] - reach * y];
+    let wood = art::cubic([from, up(0.2, 1.4), up(1.8, 1.4), up(2.0, 0.0)]);
+    [Path { kind, ..line }, art::hand(&wood, PANEL_LINE, kind, seed)]
+}
+
+/// A pencil going away, as a tree does: its near foot and how tall it stands.
+const TREES: [(Pt, f32); 5] = [
+    ([116.0, 590.0], 430.0),
+    ([226.0, 562.0], 300.0),
+    ([316.0, 536.0], 170.0),
+    ([716.0, 590.0], 430.0),
+    ([612.0, 562.0], 300.0),
+];
+
+fn tree(i: usize, kind: PathKind) -> Path {
+    let (foot, tall) = TREES[i];
+    let thick = tall * 0.12;
+    let top = [foot[0] + (VANISHING[0] - foot[0]) * 0.1, foot[1] - tall];
+    let along = |x: f32, up: f32| [top[0] + thick * x, top[1] - thick * up];
+    // The barrel stops square and the point stands on it: a shoulder either side.
+    let point = [along(0.2, 0.0), along(0.5, 0.64), along(0.8, 0.0)];
+    let mut line = vec![foot, top];
+    line.extend(point);
+    line.extend([along(1.0, 0.0), [foot[0] + thick, foot[1]], foot]);
+    art::hand(&line, PANEL_LINE, kind, 80 + (i * 5 / 4) as u32)
+}
+
+fn comic_art() -> Vec<Path> {
+    let mut art: Vec<Path> = (0..6).map(|i| { let [line, _] = dragged(i, PANEL_MIDDLES[i], 1.0, PathKind::StandIn); line }).collect();
+    art.extend((0..TREES.len()).map(|i| tree(i, PathKind::StandIn)));
+    let coat = big_coat();
+    let line = art::hand(&coat.edge(1.0), 8.0, PathKind::StandIn, 90);
+    let curl = art::hand(&coat.swirl(), 6.0, PathKind::StandIn, 91);
+    let eye = art::dash([BIG_COAT_AT[0] + 60.0, BIG_COAT_AT[1] - 60.0], EYE_PULL * 1.7, 22.0, PathKind::StandIn);
+    let seed = coat.bare(&line, |q| q[1] > BIG_COAT_AT[1] + 40.0);
+    art.extend([line, curl, eye, seed_at(seed)]);
+    let tick = |at: Pt, run: Pt, seed| art::hand(&[at, [at[0] + run[0], at[1] + run[1]]], 4.0, PathKind::Landmark, seed);
+    art.push(tick([40.0, VANISHING[1]], [40.0, 1.0], 92));
+    art.push(tick([VANISHING[0], VANISHING[1] - 20.0], [1.0, 40.0], 93));
+    // The card: six in two rows of three, and page two beside them.
+    for i in 0..6 {
+        let at = [160.0 + (i % 3) as f32 * 330.0, 120.0 + (i / 3) as f32 * 270.0];
+        art.extend(dragged(i, at, 1.4, PathKind::Finish));
+    }
+    let small = art::shaving(COAT_SEED, [1400.0, 370.0], 170.0);
+    art.push(art::hand(&small.edge(1.0), 5.0, PathKind::Finish, 94));
+    art.push(art::hand(&[[1160.0, 150.0], [1640.0, 150.0]], 5.0, PathKind::Finish, 95));
+    art
+}
+
+/// Two rows of the first panel's half, then each row across: two tall, four
+/// small. A page's pace, cut by the same `Split` a person's Panel tool makes.
+fn split_into_six(e: &mut Editor) {
+    if !at_step(e, Stage::Manga) {
+        return;
+    }
+    const CUTS: [(usize, PanelOp); 5] = [
+        (0, PanelOp::SplitAcross),
+        (1, PanelOp::SplitAcross),
+        (2, PanelOp::SplitDown),
+        (1, PanelOp::SplitDown),
+        (0, PanelOp::SplitDown),
+    ];
+    for (panel, op) in CUTS {
+        e.state.manga.selected = panel;
+        manga_tools::panels(&mut e.state, op);
+    }
+}
+
+fn open_gutters(e: &mut Editor) {
+    if at_step(e, Stage::Manga) {
+        e.state.manga.side_mm += 1.0;
+        e.state.manga.row_mm += 1.0;
+    }
+}
+
+/// `manga.rulers`' one point, along the desk, and the snap on.
+fn open_rulers(e: &mut Editor) {
+    if !at_step(e, Stage::Manga) {
+        return;
+    }
+    let (w, h) = (e.state.engine.project.width as f32, e.state.engine.project.height as f32);
+    let rulers = Rulers::preset(1, w, h);
+    e.state.manga_edit("perspective rulers", |cut, at| rulers.set(cut, at).into_iter().collect());
+    e.state.manga.snap = true;
+}
+
+const TOO_MUCH_COAT_TASKS: &[Task] = &[
+    Task {
+        why: Some("A comic's pace is its panels. Six small ones read fast."),
+        hand: Some(split_into_six),
+        ..act(
+            "Deckle wants more coat. Page one: pick the {Panel tool} and split it into six panels.",
+            Stage::Manga,
+            Done::Panels(6),
+            &[Target::Action(Action::PanelTool)],
+            Show::Perform(Action::PanelTool),
+        )
+    },
+    Task {
+        hand: Some(open_gutters),
+        ..act(
+            "Open the gutters a little. They are the silence between panels.",
+            Stage::Manga,
+            Done::Gutters,
+            &[Target::Pane(Pane::Manga), Target::Named("manga.gutter.side"), Target::Named("manga.gutter.row")],
+            Show::Run(open_gutters),
+        )
+    },
+    Task {
+        stand_in: &[T1, T1 + 1, T1 + 2, T1 + 3, T1 + 4, T1 + 5],
+        ..act(
+            "In each panel, draw Deckle dragging one shaving home. The thumbnails are on this card.",
+            Stage::Manga,
+            Done::InkInPanels(6),
+            BRUSH_KEY,
+            Show::Where,
+        )
+    },
+    act("Press {New page}.", Stage::Manga, Done::Pages(2), &[Target::Action(Action::NewPage)], Show::Perform(Action::NewPage)),
+    Task {
+        hand: Some(open_rulers),
+        ..act(
+            "Set a 1-point ruler along the desk, and turn snap on.",
+            Stage::Manga,
+            Done::Rulers(1),
+            &[Target::Pane(Pane::Manga), Target::Named("manga.rulers"), Target::Action(Action::ToggleRulerSnap)],
+            Show::Run(open_rulers),
+        )
+    },
+    Task {
+        guide: &[HORIZON_TICK, POINT_TICK],
+        stand_in: &[TREE_1, TREE_1 + 1, TREE_1 + 2, TREE_1 + 3, TREE_1 + 4],
+        ..act("Page two is one big picture: pencils going away like trees.", Stage::Manga, Done::Strokes(5), ON_PAPER, Show::Where)
+    },
+    Task {
+        guide: &[HORIZON_TICK, POINT_TICK],
+        stand_in: &[COAT_BIG, COAT_BIG_CURL, COAT_BIG_EYE],
+        ..act("Put the surprise here, after the page turn: one giant coat, one small eye.", Stage::Manga, Done::Strokes(3), ON_PAPER, Show::Where)
+    },
+    pill("Press {Color}.", "One flat color is this page's whole budget. Spend it on the coat.", Stage::InkPaint, Action::RoomFinishing),
+    Task {
+        stand_in: &[COAT_BIG_SEED],
+        ..act(
+            "Fill the coat with one color.",
+            Stage::InkPaint,
+            Done::Fills(1),
+            &[Target::Named("swatch.brown"), Target::Rail(Key::Fill)],
+            Show::Run(pick_brown),
+        )
+    },
+    pill("Press {Export}.", "Two pages, two files.", Stage::Export, Action::RoomExport),
+    act(
+        "Press {Export pages}.",
+        Stage::Export,
+        Done::Exported(1),
+        &[Target::Action(Action::ExportPages)],
+        Show::Perform(Action::ExportPages),
+    ),
+];
+
+/// The `u16`s from `first`, `N` of them: a run of art, as a table's list.
+const fn run_of<const N: usize>(first: u16) -> [u16; N] {
+    let mut row = [first; N];
+    let mut i = 0;
+    while i < N {
+        row[i] = first + i as u16;
+        i += 1;
+    }
+    row
+}
+
 /// Every lesson that ships.
 pub const ALL: &[Lesson] = &[
     Lesson {
@@ -1470,6 +2450,7 @@ pub const ALL: &[Lesson] = &[
         art: up_late_art,
         finish: &[BACK, BELLY, HOLE_1, HOLE_2, HOLE_3, PENCIL, STAR_1, STAR_2, STAR_3],
         thumb: &[],
+        card: &[],
         tasks: UP_LATE_TASKS,
         closing: "You made that. It is a real file. You can draw, undo, erase, fill a whole sky and add light.",
     },
@@ -1495,6 +2476,7 @@ pub const ALL: &[Lesson] = &[
             row
         },
         thumb: &[THUMB, THUMB + 1],
+        card: &[],
         tasks: END_OF_THE_DESK_TASKS,
         closing: "You made that. It is a real file. You can add drawings, play them, set their speed and choose how long each one stays.",
     },
@@ -1512,8 +2494,63 @@ pub const ALL: &[Lesson] = &[
         art: not_a_pencil_art,
         finish: &[P1_DESK, P1_DECKLE, P1_EYE, P2_DECKLE, P2_EYE, P2_SHADOW, P3_CUP, P3_PENCILS, P3_DECKLE, P4_EDGES, P4_EYE],
         thumb: &[],
+        card: &[],
         tasks: NOT_A_PENCIL_TASKS,
         closing: "You made that. It is a real file. You can split a page into panels and make a reader wait between them.",
+    },
+    Lesson {
+        id: "coat_of_shavings",
+        kind: ProjectKind::Drawing,
+        class: Class::Amateur,
+        title: "A Coat of Shavings",
+        hover: "Deckle is cold: sketch, ink, move and paint him a coat of pencil shavings. About 25 minutes. Ends in a PNG.",
+        paper: &COAT,
+        prep: Some(coat_prep),
+        fill_gap: None,
+        ink: None,
+        latch: None,
+        art: coat_art,
+        finish: &[S1_MOVED, S2_INK, S3_INK, RIM_1, RIM_2, RIM_3, COAT_DECKLE, COAT_EYE, COAT_HOLE_1, COAT_HOLE_2],
+        thumb: &[REFERENCE, REFERENCE_RIM],
+        card: &[REFERENCE, REFERENCE_RIM],
+        tasks: COAT_TASKS,
+        closing: "You made that. It is a real file. You can sketch under your ink, move what you drew, check it mirrored and paint inside your own shapes.",
+    },
+    Lesson {
+        id: "still_in_the_coat",
+        kind: ProjectKind::Animation,
+        class: Class::Amateur,
+        title: "Still in the Coat",
+        hover: "Three poses on the rows you choose, a long wait, then a shiver in a coat of shavings. About 25 minutes. Ends in a GIF.",
+        paper: &STILL,
+        prep: Some(still_prep),
+        fill_gap: None,
+        ink: Some([255, 255, 255, 255]),
+        latch: None,
+        art: still_art,
+        finish: &[COAT_REST, RIM_REST, EYE_REST],
+        thumb: &run_of::<STILL_CARD_PATHS>(STILL_CARD),
+        card: &run_of::<STILL_CARD_PATHS>(STILL_CARD),
+        tasks: STILL_TASKS,
+        closing: "You made that. It is a real file. You can plant keys on the rows you choose, wait on purpose and reuse a drawing.",
+    },
+    Lesson {
+        id: "too_much_coat",
+        kind: ProjectKind::Comic,
+        class: Class::Amateur,
+        title: "Too Much Coat",
+        hover: "Six fast panels of a coat growing, then a page turn and the surprise. About 30 minutes. Ends in two page PNGs.",
+        paper: &PAGE_SMALL,
+        prep: None,
+        fill_gap: None,
+        ink: None,
+        latch: None,
+        art: comic_art,
+        finish: &[TREE_1, TREE_1 + 1, TREE_1 + 2, TREE_1 + 3, TREE_1 + 4, COAT_BIG, COAT_BIG_CURL, COAT_BIG_EYE],
+        thumb: &run_of::<COMIC_CARD_PATHS>(COMIC_CARD),
+        card: &run_of::<COMIC_CARD_PATHS>(COMIC_CARD),
+        tasks: TOO_MUCH_COAT_TASKS,
+        closing: "You made that. It is real files. You can pace a page and put the surprise where the reader has to turn.",
     },
 ];
 
@@ -1564,6 +2601,7 @@ pub const PROBED: Lesson = Lesson {
         ring: &[Target::Paper],
         guide: &[],
         stand_in: &[],
+        hand: None,
         miss: None,
         show: Show::Trace(&[]),
     }],

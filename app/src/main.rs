@@ -100,6 +100,8 @@ mod auguide_tests;
 mod auguide_show_tests;
 #[cfg(test)]
 mod aurookie_tests;
+#[cfg(test)]
+mod auamateur_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;

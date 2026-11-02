@@ -865,7 +865,7 @@ pub(crate) struct Picture {
 
 impl Picture {
     pub(crate) fn of(lesson: &Lesson) -> Self {
-        Self::from_paths(lesson, lesson.finish)
+        Self::from_paths(lesson, if lesson.card.is_empty() { lesson.finish } else { lesson.card })
     }
 
     /// AU23: the Lessons page's, at a row's height.

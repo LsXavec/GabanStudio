@@ -46,6 +46,11 @@ fn rookie(id: &str) -> Lesson {
     *lessons::ALL.iter().find(|l| l.id == id).expect("a Rookie lesson")
 }
 
+/// AU24: the first class, as `ALL` grows past it.
+fn rookies() -> Vec<Lesson> {
+    lessons::ALL.iter().filter(|l| l.class == Class::Rookie).copied().collect()
+}
+
 fn near(a: [u8; 4], b: [u8; 3], by: i32) -> bool {
     (0..3).all(|i| (i32::from(a[i]) - i32::from(b[i])).abs() <= by)
 }
@@ -78,12 +83,11 @@ fn landed(ride: &Ridden) -> &File {
 /// picker offers, each sentence the lessons file's, and Start's second row.
 #[test]
 fn aurookie_three_stand() {
-    let ids: Vec<&str> = lessons::ALL.iter().map(|l| l.id).collect();
+    let ids: Vec<&str> = rookies().iter().map(|l| l.id).collect();
     assert_eq!(ids, ["up_late", "end_of_the_desk", "not_a_pencil"]);
-    assert!(lessons::ALL.iter().all(|l| l.class == Class::Rookie));
-    let kinds: Vec<ProjectKind> = lessons::ALL.iter().map(|l| l.kind).collect();
+    let kinds: Vec<ProjectKind> = rookies().iter().map(|l| l.kind).collect();
     assert_eq!(kinds, [ProjectKind::Drawing, ProjectKind::Animation, ProjectKind::Comic]);
-    let sizes: Vec<(u32, u32)> = lessons::ALL.iter().map(|l| (l.paper.width, l.paper.height)).collect();
+    let sizes: Vec<(u32, u32)> = rookies().iter().map(|l| (l.paper.width, l.paper.height)).collect();
     assert_eq!(sizes, [(1200, 1200), (1024, 768), (888, 1243)]);
     for lesson in lessons::ALL {
         let name = lesson.paper.name;
@@ -92,7 +96,7 @@ fn aurookie_three_stand() {
     let file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../research/LESSONS-approachable-ui.md");
     let file = std::fs::read_to_string(file).expect("the lessons file").replace("\\|", "|");
     let mut read = 0;
-    for lesson in lessons::ALL {
+    for lesson in rookies() {
         let mut sentences = vec![lesson.closing];
         for task in lesson.tasks {
             sentences.extend(std::iter::once(task.say).chain(task.why).chain(task.miss));
@@ -476,7 +480,7 @@ fn aurookie_a_resume_keeps_the_colour() {
 /// The finish card says what the closing also opens with once.
 #[test]
 fn aurookie_the_finish_says_it_once() {
-    for lesson in lessons::ALL {
+    for lesson in rookies() {
         let (h, _ride) = ridden(lesson.id, Hand::ShowMe);
         let words = h.painted_text().join("\n");
         assert_eq!(words.matches("You made that.").count(), 1, "{}: {words}", lesson.id);
@@ -649,7 +653,7 @@ fn aurookie_not_a_pencil_file() {
 /// save dialog. A task it could not answer would stop the ride by name.
 #[test]
 fn aurookie_show_me_alone_reaches_each_file() {
-    for lesson in lessons::ALL {
+    for lesson in rookies() {
         assert!(lesson.tasks.iter().all(|t| !matches!(t.show, Show::Where)), "{}: every task shows", lesson.id);
         let (_h, ride) = ridden(lesson.id, Hand::Alone);
         landed(&ride);
@@ -659,8 +663,8 @@ fn aurookie_show_me_alone_reaches_each_file() {
 /// Spec 5.14 on the three: a load of six, presses not counted.
 #[test]
 fn aurookie_trace_load() {
-    for lesson in lessons::ALL {
-        let load = trace_load(lesson);
+    for lesson in rookies() {
+        let load = trace_load(&lesson);
         assert!((1..=6).contains(&load), "{}: {load}", lesson.id);
     }
 }
@@ -781,7 +785,7 @@ fn aurookie_kinds_share_no_paths() {
 /// each lesson's whole drawing at 64×64.
 #[test]
 fn aurookie_kinds_look_different() {
-    let drawn: Vec<(&str, Vec<bool>)> = lessons::ALL.iter().map(|l| {
+    let drawn: Vec<(&str, Vec<bool>)> = rookies().iter().map(|l| {
         let art = (l.art)();
         let ink: Vec<&Path> = art.iter().filter(|p| matches!(p.kind, PathKind::Guide)).collect();
         (l.id, thumb(&ink, (l.paper.width, l.paper.height)))

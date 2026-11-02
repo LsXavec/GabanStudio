@@ -57,7 +57,7 @@ fn probe_art() -> Vec<Path> {
 }
 
 const fn task(say: &'static str, why: Option<&'static str>, step: Stage, done: Done, show: Show) -> Task {
-    Task { say, why, step, done, ring: &[Target::Paper], guide: &[], stand_in: &[], miss: None, show }
+    Task { say, why, step, done, ring: &[Target::Paper], guide: &[], stand_in: &[], hand: None, miss: None, show }
 }
 
 const TASKS: &[Task] = &[
@@ -1438,7 +1438,7 @@ fn aulesson_next_walks_the_classes() {
     settle(&mut h);
     h.click(lesson::NEXT);
     settle(&mut h);
-    assert!(h.rig().requests.iter().any(|r| *r == crate::AppRequest::Start(WelcomeAction::Lesson(row("probe-square")))));
+    assert!(h.rig().requests.iter().any(|r| *r == crate::AppRequest::Start(WelcomeAction::Lesson(row("coat_of_shavings")))));
     h.editor_mut().lesson = None;
     h.editor_mut().begin_lesson(Lesson { tasks: one, ..TABLE[row("probe-last")] }, 0);
     settle(&mut h);

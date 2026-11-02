@@ -564,9 +564,9 @@ impl Editor {
     }
 
     /// AU27: the name of the drawing on row 1 of track A.
-    fn lesson_rest(&self) -> String {
+    pub(crate) fn lesson_rest(&self) -> String {
         let cut = self.state.cut();
-        let id = track(cut, 0).and_then(|c| c.resolve(0));
+        let id = track(cut, lessons::TRACK_A).and_then(|c| c.resolve(0));
         id.and_then(|id| cut.drawing(id)).map_or_else(String::new, |d| d.name.clone())
     }
 
@@ -789,6 +789,11 @@ impl Editor {
             ticked = true;
         }
         if ticked {
+            // AU24: a float the last task opened would stand over this one's work.
+            if run.current().is_some_and(|task| matches!(task.ring, [Target::Paper])) {
+                self.floats.close_left();
+                self.floats.close(crate::floats::Float::Layers);
+            }
             self.state.engine.project.app_meta.insert(KEY.to_string(), format!("{}/{}", run.lesson.id, run.task));
             if run.finished() {
                 write_finished(self.data_dir.as_deref(), run.lesson.id);

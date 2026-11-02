@@ -11,7 +11,7 @@ use crate::aurail_tests::sized;
 use crate::canvas::extpaper_tests::paint_texels;
 use crate::config::Action;
 use crate::floats::Float;
-use crate::lessons::{self, Class, Done, Lesson, Show, Target, Task};
+use crate::lessons::{self, Class, Done, Lesson, PathKind, Show, Target, Task};
 use crate::rail::Key;
 use crate::steps::ProjectKind;
 use crate::testkit::EditorHarness;
@@ -90,6 +90,15 @@ pub(crate) fn stand_on_the_tasks_before(h: &mut EditorHarness, lesson: &Lesson, 
             e.lesson_land(paths);
         } else {
             e.lesson_show(&ctx);
+        }
+        // AU24: an Amateur's art is the person's, and the table says what stands
+        // for it. A lasso and a seed need a frame: the ride walks those.
+        if let Some(run) = task.hand {
+            run(e);
+        } else if !matches!(task.show, Show::Trace(_)) && task.done != Done::Moved {
+            let art = (lesson.art)();
+            let lines = task.stand_in.iter().filter(|i| art[usize::from(**i)].kind != PathKind::Seed);
+            e.lesson_land(&lines.copied().collect::<Vec<_>>());
         }
         // A pass ends and the head goes home: no frame ran it here.
         if task.done == Done::Played {
