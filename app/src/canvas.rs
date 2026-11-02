@@ -10356,12 +10356,10 @@ pub(crate) mod extpaper_tests {
         };
         let (mut resizes, mut rects, mut ontos) = (Vec::new(), Vec::new(), Vec::new());
         let mut viewer = 0;
-        for entry in std::fs::read_dir(dir).expect("src") {
-            let path = entry.expect("an entry").path();
+        for (name, path) in crate::ausay_tests::files_under(&dir) {
             if path.extension().is_none_or(|e| e != "rs") {
                 continue;
             }
-            let name = path.file_name().expect("a name").to_string_lossy().into_owned();
             let text = std::fs::read_to_string(&path).expect("readable");
             for (at, _) in text.match_indices(concat!(".ensure", "_size(")) {
                 if receiver(&text, at) != "g" {

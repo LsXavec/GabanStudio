@@ -825,10 +825,9 @@ fn literals(line: &str) -> Vec<String> {
 fn shipped_text() -> Vec<(String, String)> {
     let mut all = crate::ausay_tests::sources();
     let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/anim-core/src");
-    for file in std::fs::read_dir(core).expect("the core").flatten() {
-        let name = file.file_name().to_string_lossy().to_string();
+    for (name, path) in crate::ausay_tests::files_under(&core) {
         if name.ends_with(".rs") {
-            all.push((format!("core/{name}"), std::fs::read_to_string(file.path()).expect("readable")));
+            all.push((format!("core/{name}"), std::fs::read_to_string(path).expect("readable")));
         }
     }
     all.into_iter().map(|(n, t)| (n, before_test_modules(&t))).collect()

@@ -2282,8 +2282,7 @@ mod tests {
         // needles are split so this file never counts itself).
         let count = |dir: &str| {
             let (mut modules, mut stages, mut wgsl) = (0, 0, 0);
-            for entry in std::fs::read_dir(dir).expect("the sources") {
-                let path = entry.expect("a source entry").path();
+            for (_, path) in crate::ausay_tests::files_under(std::path::Path::new(dir)) {
                 match path.extension().and_then(|x| x.to_str()) {
                     Some("rs") => {
                         let text = std::fs::read_to_string(&path).expect("a source file");

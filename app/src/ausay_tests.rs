@@ -1080,20 +1080,60 @@ fn filled_in(words: &str) -> String {
     out
 }
 
+/// Every file under `root`, named from `root` with forward slashes, in name
+/// order: a subfolder's sources stay under the gates that walk them.
+pub(crate) fn files_under(root: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    let mut out = Vec::new();
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).expect("the sources").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                let name = path.strip_prefix(root).expect("under the root").to_string_lossy().replace('\\', "/");
+                out.push((name, path));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// The app's sources the person meets: every file past the test-only ones.
 pub(crate) fn sources() -> Vec<(String, String)> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let files = std::fs::read_dir(dir).expect("the sources").flatten();
-    let named = files.map(|f| (f.file_name().to_string_lossy().to_string(), f.path()));
+    sources_under(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"))
+}
+
+/// The sources under `root` the person meets, in any folder.
+fn sources_under(root: &std::path::Path) -> Vec<(String, String)> {
     let ships = |(name, path): &(String, std::path::PathBuf)| {
-        let test_only = name.ends_with("_tests.rs") || ["testkit.rs", "measure.rs", "uishot.rs"].contains(&name.as_str());
+        let file = name.rsplit('/').next().expect("a name");
+        let test_only = file.ends_with("_tests.rs") || ["testkit.rs", "measure.rs", "uishot.rs"].contains(&file);
         path.extension().is_some_and(|e| e == "rs") && !test_only
     };
     let read = |(name, path): (String, std::path::PathBuf)| {
         let source = std::fs::read_to_string(path).expect("readable");
         (name, source)
     };
-    named.filter(ships).map(read).collect()
+    files_under(root).into_iter().filter(ships).map(read).collect()
+}
+
+/// A module folder stays under every gate that walks the sources, at any
+/// depth, and a test file in it stays out, as it does at the top.
+#[test]
+fn ausay_sources_walk_every_folder() {
+    let dir = tempfile::tempdir().expect("a folder");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("watch/deep")).expect("the folders");
+    for file in ["top.rs", "watch/card.rs", "watch/deep/rule.rs", "watch/card_tests.rs", "watch/uishot.rs", "watch/note.txt"] {
+        std::fs::write(root.join(file), file).expect("written");
+    }
+    let found = sources_under(root);
+    let names: Vec<&str> = found.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["top.rs", "watch/card.rs", "watch/deep/rule.rs"]);
+    assert!(found.iter().all(|(name, text)| name == text), "each file read as itself");
+    assert_eq!(files_under(root).len(), 6, "the walk itself skips nothing");
 }
 
 /// A source without its test module.

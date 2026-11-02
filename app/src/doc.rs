@@ -8118,8 +8118,7 @@ mod lighttable_tests {
         // pass (the needles are split so this file never counts itself).
         let (mut modules, mut stages, mut wgsl) = (0, 0, 0);
         let src = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-        for entry in std::fs::read_dir(src).expect("the app's sources") {
-            let path = entry.expect("a source entry").path();
+        for (_, path) in crate::ausay_tests::files_under(std::path::Path::new(src)) {
             match path.extension().and_then(|x| x.to_str()) {
                 Some("rs") => {
                     let text = std::fs::read_to_string(&path).expect("a source file");
