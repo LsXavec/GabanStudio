@@ -446,7 +446,7 @@ fn aulesson_card_reads_in_order() {
     let bottom = view.bottom();
     let card = h.filled_rects(plate::PAPER).into_iter().filter(|r| r.left() >= view.left() && r.bottom() <= bottom);
     let picture = card.max_by(|a, b| a.top().total_cmp(&b.top())).expect("the finish picture's paper");
-    assert_eq!(picture.height(), 72.0, "{picture:?}");
+    assert_eq!(picture.height(), 104.0, "{picture:?}");
     assert!(why.bottom() <= picture.top(), "the picture stands under the words");
     // The finish holds its place: under the words, over the keys.
     let one: &'static [Task] = Box::leak(Box::new([task("", None, Stage::Drawing, Done::OnStep(Stage::Drawing), Show::Where)]));

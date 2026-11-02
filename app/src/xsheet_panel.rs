@@ -554,13 +554,27 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
         let fold = plate::fold_row_width(ui, crate::vocab::DETAILS);
         let gap = ui.spacing().item_spacing.x;
         let room = (ui.available_width() - fold - TRACK_PLUS_W - 2.0 * gap).max(0.0);
+        // AU23: a pane the card narrowed gives the tracks the legend's room, or
+        // the second one stands cut at the scroll's edge. Last frame's widths,
+        // read with the legend or without.
+        let wanted = egui::Id::new("sheet_tracks_wanted");
+        let (legend_w, picks_w): (f32, f32) = ui.data(|d| d.get_temp(wanted)).unwrap_or_default();
+        let legend_shown = legend_w + picks_w <= room;
+        let mut picks = 0.0;
+        let mut legend = 0.0;
         let tracks = egui::ScrollArea::horizontal()
             .id_salt("sheet_tracks")
             .max_width(room)
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    plate::legend(ui, crate::vocab::TRACKS);
+                    legend = legend_w;
+                    if legend_shown {
+                        let from = ui.cursor().left();
+                        plate::legend(ui, crate::vocab::TRACKS);
+                        legend = ui.cursor().left() - from;
+                    }
+                    let from = ui.cursor().left();
                     let columns: Vec<(anim_core::ids::ColumnId, String)> = state
                         .cut()
                         .xsheet
@@ -575,8 +589,10 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                             state.view.active_column = id;
                         }
                     }
+                    picks = ui.cursor().left() - from;
                 });
             });
+        ui.data_mut(|d| d.insert_temp(wanted, (legend, picks)));
         plate::note_viewport(ui, tracks.inner_rect, [true, false]);
         if plate::icon_button(ui, Icon::Plus, "", "Add track").clicked() {
             state.add_column();

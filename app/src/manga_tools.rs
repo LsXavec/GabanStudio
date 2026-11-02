@@ -40,6 +40,9 @@ pub struct MangaState {
     /// The canvas draws the page's guides: the bleed edge, trim and inner
     /// frame, the panels' outlines and the rulers.
     pub guides: bool,
+    /// AU23: a lesson's blue line stands on the page: the guides go neutral,
+    /// so blue on the paper means the line to follow. This session's alone.
+    pub quiet: bool,
     /// How Export pages writes the book: PNG or TIFF, colour, grey or mono
     /// (its threshold), trim marks.
     pub export: PageOpts,
@@ -72,6 +75,7 @@ impl Default for MangaState {
             row_mm: manga::GUTTER_ROW_MM,
             snap: true,
             guides: true,
+            quiet: false,
             export: PageOpts::default(),
             export_job: None,
             held: None,
@@ -947,7 +951,9 @@ fn letter_rows(ui: &mut egui::Ui, state: &mut AppState, edit: &mut Option<Edit>)
     let rows = letters(state.cut());
     let selected = selected_letter(state);
     let by_hand = state.page_hand_built().is_some();
+    let shown = ui.clip_rect().right() - ui.cursor().left();
     ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(shown);
         for (i, (id, kind)) in rows.iter().enumerate() {
             let nth = rows[..=i].iter().filter(|(_, k)| k == kind).count();
             if plate::detent(ui, state.selected_node == Some(*id), &format!("{} {nth}", kind.name())).clicked() {
@@ -1138,6 +1144,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
         ui.add_space(6.0);
         plate::legend(ui, "lettering");
         ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(shown);
             for (kind, word, label, handle, help) in LETTER_VERBS {
                 let r = ui.button(word);
                 plate::mark_row(&r, Target::Named(handle));
@@ -1486,7 +1493,8 @@ pub fn paint_page(
     let pt = |p: [f32; 2]| to_screen(egui::pos2(p[0], p[1]));
     let closed = |q: &[egui::Pos2]| q.iter().chain(q.first()).copied().collect::<Vec<_>>();
     let dim = egui::Stroke::new(1.0, plate::INK3);
-    let ao = egui::Stroke::new(1.0, plate::PENCIL_AO);
+    let quiet = state.manga.quiet;
+    let ao = egui::Stroke::new(1.0, if quiet { plate::INK3 } else { plate::PENCIL_AO });
     let tally = egui::Stroke::new(1.0, plate::TALLY);
     let [bleed, trim, inner] = guide_outlines(page, to_screen);
     painter.extend(egui::Shape::dashed_line(&closed(&bleed), dim, 6.0, 4.0));
@@ -1496,7 +1504,7 @@ pub fn paint_page(
     for (i, poly) in panels.iter().enumerate() {
         let pts = poly.iter().map(|p| pt(*p)).collect();
         let stroke = if i == state.manga.selected {
-            egui::Stroke::new(2.0, plate::TALLY)
+            egui::Stroke::new(2.0, if quiet { plate::INK3 } else { plate::TALLY })
         } else {
             dim
         };

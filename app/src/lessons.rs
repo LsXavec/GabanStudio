@@ -8,9 +8,9 @@
 
 use anim_core::camera::IRect;
 use anim_core::fill::{FillOpts, flood_fill_mask_in};
-use anim_core::fx::FxKind;
+use anim_core::fx::{FxKind, FxValue};
 use anim_core::generator::GenKind;
-use anim_core::graph::NodeKind;
+use anim_core::graph::{Node, NodeKind};
 use anim_core::manga::Page;
 use anim_core::model::{CelLayer, Drawing, LayerRole};
 use anim_core::xsheet::{ColumnKind, Exposure};
@@ -364,6 +364,17 @@ pub mod art {
     /// Pushed out along the bend's normal, the arch's outer side would run
     /// half as long again (spec 5.13).
     pub fn deckle(spine: &[Pt], seed: u32) -> Deckle {
+        strip(spine, seed, false)
+    }
+
+    /// Deckle stood up on his two feet, the one picture of him: the width turns
+    /// with the bend, so an arch this tall comes down to the pencil as wide as it
+    /// went up. Moved one way, its legs would close to nothing where they stand.
+    pub fn upright(spine: &[Pt], seed: u32) -> Deckle {
+        strip(spine, seed, true)
+    }
+
+    fn strip(spine: &[Pt], seed: u32, turning: bool) -> Deckle {
         let long = length(spine);
         let wide = long * STRIP_WIDE;
         let spine = spaced(spine, HAND_STEP);
@@ -372,14 +383,25 @@ pub mod art {
         let chord = [spine[last][0] - spine[0][0], spine[last][1] - spine[0][1]];
         let reach = chord[0].hypot(chord[1]).max(1e-3);
         let up = if chord[0] < 0.0 { -1.0 } else { 1.0 };
-        let across = [chord[1] / reach * up, -chord[0] / reach * up];
-        let moved = |p: Pt, by: f32| [p[0] + across[0] * by, p[1] + across[1] * by];
-        let ribbon: Vec<Pt> = spine.iter().map(|p| moved(*p, wide)).collect();
-        let tear = tear(long, seed);
+        let moved = |i: usize, by: f32| {
+            let across = if turning { side(&spine, i) } else { [chord[1] / reach, -chord[0] / reach] };
+            [spine[i][0] + across[0] * up * by, spine[i][1] + across[1] * up * by]
+        };
+        let ribbon: Vec<Pt> = (0..=last).map(|i| moved(i, wide)).collect();
+        // A turning strip's torn side runs longer than its spine: sampled by its
+        // own length, a nick keeps a nick's width and stays a corner.
+        let (ribbon, along) = if turning {
+            let walked = spaced(&ribbon, HAND_STEP);
+            let along = length(&walked);
+            (walked, along)
+        } else {
+            (ribbon, long)
+        };
+        let tear = tear(along, seed);
         let back = pushed(&ribbon, |i| up * tear[i.min(tear.len() - 1)]);
         let line = wide * LINE_WIDE;
         // On the strip: `[along it, tail to head; across it, cut side to torn]`.
-        let stood = |[along, over]: [f32; 2]| moved(spine[(along * last as f32).round() as usize], wide * over);
+        let stood = |[along, over]: [f32; 2]| moved((along * last as f32).round() as usize, wide * over);
         let past = |from: Pt, to: Pt| {
             let long = (to[0] - from[0]).hypot(to[1] - from[1]).max(1e-3);
             [to[0] + (to[0] - from[0]) / long * OVERSHOOT, to[1] + (to[1] - from[1]) / long * OVERSHOOT]
@@ -538,6 +560,9 @@ pub struct Lesson {
     pub art: fn() -> Vec<Path>,
     /// The paths of `art` that make its picture.
     pub finish: &'static [u16],
+    /// AU23: what the Lessons page's row shows, where `finish` cannot read at
+    /// that height. Empty: `finish`.
+    pub thumb: &'static [u16],
     pub tasks: &'static [Task],
     /// Names what the person now knows.
     pub closing: &'static str,
@@ -558,6 +583,7 @@ impl Lesson {
         latch: None,
         art: stand_in_art,
         finish: &[0],
+        thumb: &[],
         tasks: &[],
         closing: "",
     };
@@ -706,9 +732,6 @@ const STAR_1: u16 = 9;
 const STAR_2: u16 = 10;
 const STAR_3: u16 = 11;
 const OUTLINE: u16 = 12;
-const RIM_1: u16 = 13;
-const RIM_2: u16 = 14;
-const RIM_3: u16 = 15;
 
 pub(crate) const SKY_SEED: [f32; 2] = [100.0, 100.0];
 pub(crate) const BODY_SEED: [f32; 2] = [560.0, 545.0];
@@ -720,32 +743,33 @@ const STAR_WIDE: f32 = 44.0;
 /// Past Glow's reach over the white body: a hole this wide stays dark. The
 /// strip's own, 13 px here, comes out of the file as a grey ghost of itself.
 const HOLE_WIDE: f32 = 20.0;
-/// How far off its middle the finish reads a star. Glow burns the middle nearly
-/// white, and a reading of ink takes that for paper; the rim keeps its colour.
-const STAR_RIM: f32 = 25.0;
 /// The strip, tail foot to front foot: the back foot stands on the pencil, and
-/// the front is lifted clear of it by more than the lesson's gap, so a night
+/// the front is lifted just clear of it, past the lesson's gap, so a night
 /// poured over the sky reaches under the arch. Its peak is the torn side's.
-const ARCH: [Pt; 2] = [[420.0, 797.0], [700.0, 778.0]];
+const ARCH: [Pt; 2] = [[420.0, 785.0], [700.0, 774.0]];
 const ARCH_LONG: f32 = 500.0;
+/// `Strength`, where `glow_down` leaves it. The shelf's first Glow triples what
+/// it reads, which burns a yellow to white and a line beside white to nothing.
+const GLOW_DOWN: f32 = 0.18;
 const SMUDGE_GREY: [f32; 4] = [0.55, 0.55, 0.55, 1.0];
 /// `size_up`'s share: a little bigger.
 const SIZE_UP: f32 = 1.6;
 
 fn up_late_art() -> Vec<Path> {
     use art::{dab, hand};
-    let deckle = art::deckle(&arch(ARCH[0], ARCH[1], ARCH_LONG), 1);
+    let spine = arch(ARCH[0], ARCH[1], ARCH_LONG);
+    let deckle = art::upright(&spine, 1);
     let hole = |path: &Path| art::dab([path.points[0][0], path.points[0][1]], HOLE_WIDE, PathKind::Guide);
     let [hole_2, hole_3] = [hole(&deckle.holes[0]), hole(&deckle.holes[1])];
     let width = deckle.cut.width;
-    let [outline, _] = closed(&arch(ARCH[0], ARCH[1], ARCH_LONG), 1);
-    // One closed stroke: its end runs back over its start.
-    let pencil = [[184.0, 802.0], [860.0, 801.0], [1018.0, 830.0], [862.0, 860.0], [182.0, 858.0], [183.0, 800.0], [240.0, 802.0]];
+    let [outline, _] = joined(art::upright(&spine, 1));
+    // One closed stroke: its end runs back over its start. The point is blunt, a
+    // shade wider than the lesson's gap, so a fill reaches the end of it.
+    let pencil = [[184.0, 802.0], [860.0, 801.0], [1012.0, 820.0], [1016.0, 840.0], [862.0, 860.0], [182.0, 858.0], [183.0, 800.0], [240.0, 802.0]];
     let scribble = [[900.0, 960.0], [1082.0, 985.0], [905.0, 1022.0], [1076.0, 1050.0], [912.0, 1086.0], [1068.0, 1112.0]];
     let smudge = [[176.0, 1006.0], [286.0, 992.0], [182.0, 1038.0], [282.0, 1030.0], [190.0, 1066.0], [270.0, 1062.0]];
     let wipe = [[120.0, 985.0], [340.0, 978.0], [120.0, 1030.0], [340.0, 1026.0], [120.0, 1078.0], [340.0, 1074.0]];
     let star = |at: Pt| dab(at, STAR_WIDE, PathKind::Guide);
-    let rim = |at: Pt| dab([at[0] + STAR_RIM, at[1]], STAR_WIDE, PathKind::Finish);
     vec![
         deckle.torn,
         deckle.cut,
@@ -760,9 +784,6 @@ fn up_late_art() -> Vec<Path> {
         star(STARS[1]),
         star(STARS[2]),
         outline,
-        rim(STARS[0]),
-        rim(STARS[1]),
-        rim(STARS[2]),
     ]
 }
 
@@ -789,29 +810,68 @@ fn arm_brush(e: &mut Editor) {
     }
 }
 
-/// A night poured at the sky would reach Deckle's body: the lines leak.
-fn night_leaks(e: &Editor) -> bool {
-    let paper = IRect { x: 0, y: 0, w: UP_LATE.width, h: UP_LATE.height };
+const UP_LATE_PAPER: IRect = IRect { x: 0, y: 0, w: UP_LATE.width, h: UP_LATE.height };
+
+/// Whether a night poured at the sky would reach each of `points`: the lines
+/// leak there, or are gone.
+fn night_reaches(e: &Editor, points: [[f32; 2]; 2]) -> [bool; 2] {
     let opts = FillOpts { threshold: 0.1, gap_px: e.canvas.fill_gap, grow_px: 0, protect_ink: false };
     let seed = (SKY_SEED[0] as i32, SKY_SEED[1] as i32);
     let lines = e.state.display_cel_flatten().unwrap_or_default();
-    flood_fill_mask_in(&lines, seed, paper, &opts, None).is_ok_and(|mask| mask.get(BODY_SEED[0] as i32, BODY_SEED[1] as i32))
+    let mask = flood_fill_mask_in(&lines, seed, UP_LATE_PAPER, &opts, None);
+    points.map(|p| mask.as_ref().is_ok_and(|mask| mask.get(p[0] as i32, p[1] as i32)))
 }
 
-/// Task 11's `Show me`: the fill, and first the closed outline where the lines
-/// leak. A person's fill arms the Fill key on the way: this does too, or
+/// A paper task's `Show me` that runs: the pen's own gates, the card's reach.
+fn on_the_paper(e: &mut Editor) -> bool {
+    at_step(e, Stage::InkPaint)
+        && crate::visible_panes(&e.dock).contains(&Pane::Canvas)
+        && e.canvas.slot_at_pen_down(true, &mut e.state).is_some()
+}
+
+/// The night's `Show me`: the fill, and first the line that lets it in. That is
+/// the closed outline where Deckle leaks, and the pencil where a second `Undo`
+/// took it. A person's fill arms the Fill key on the way: this does too, or
 /// `Press {Brush}` would stand answered before it was asked.
 fn close_and_fill(e: &mut Editor) {
-    if !at_step(e, Stage::InkPaint) || !crate::visible_panes(&e.dock).contains(&Pane::Canvas) {
-        return;
-    }
-    if e.canvas.slot_at_pen_down(true, &mut e.state).is_none() {
+    if !on_the_paper(e) {
         return;
     }
     e.canvas.set_tool(CanvasTool::Fill, &mut e.state);
-    if !night_leaks(e) || e.lesson_land(&[OUTLINE]) {
+    let [body, pencil] = night_reaches(e, [BODY_SEED, PENCIL_SEED]);
+    let gone = [(body, OUTLINE), (pencil, PENCIL)].into_iter().filter(|(leaks, _)| *leaks).map(|(_, line)| line);
+    let gone: Vec<u16> = gone.collect();
+    if gone.is_empty() || e.lesson_land(&gone) {
         e.canvas.fill_at(pos2(SKY_SEED[0], SKY_SEED[1]), &mut e.state);
     }
+}
+
+/// `Tap the pencil`'s `Show me`. A person's night poured with the pencil's line
+/// gone stands where the pencil goes, and a fill flows into empty paper only: the
+/// line lands again, and the night inside it is refilled.
+fn fill_pencil(e: &mut Editor) {
+    if !on_the_paper(e) {
+        return;
+    }
+    let (seed, fills) = (pos2(PENCIL_SEED[0], PENCIL_SEED[1]), e.state.fills_done);
+    e.canvas.fill_at(seed, &mut e.state);
+    if e.state.fills_done == fills && e.lesson_land(&[PENCIL]) {
+        let chip = e.canvas.brush_color;
+        e.state.refill_at((seed.x as i32, seed.y as i32), chip, false, 0, UP_LATE_PAPER, None);
+    }
+}
+
+/// `Strength`, down by the shelf's own road: one undo, on the cut's Glow.
+fn glow_down(e: &mut Editor) {
+    if !at_step(e, Stage::Composite) {
+        return;
+    }
+    let glow = |n: &Node| matches!(n.kind, NodeKind::Effect { fx: FxKind::Glow, .. }).then(|| (n.id, n.kind.clone()));
+    let Some((id, mut kind)) = e.state.cut().graph.nodes().find_map(glow) else { return };
+    if let NodeKind::Effect { params, .. } = &mut kind {
+        params.set("intensity", FxValue::Float(GLOW_DOWN));
+    }
+    e.state.graph_set_kind(id, kind);
 }
 
 const UP_LATE_TASKS: &[Task] = &[
@@ -875,7 +935,13 @@ const UP_LATE_TASKS: &[Task] = &[
     act("Pick white.", Stage::InkPaint, Done::Picked(rgb(WHITE_INK)), &[Target::Named("swatch.white")], Show::Run(pick_white)),
     fill("Tap inside Deckle.", Stage::InkPaint, BODY_SEED, SKY_SEED),
     act("Pick red.", Stage::InkPaint, Done::Picked(rgb(RED_INK)), &[Target::Named("swatch.red")], Show::Run(pick_red)),
-    fill("Tap the pencil.", Stage::InkPaint, PENCIL_SEED, BODY_SEED),
+    act(
+        "Tap the pencil.",
+        Stage::InkPaint,
+        Done::Filled { seed: PENCIL_SEED, keep: Some(BODY_SEED) },
+        FILL_KEY,
+        Show::Run(fill_pencil),
+    ),
     act("Pick yellow.", Stage::InkPaint, Done::Picked(rgb(YELLOW_INK)), &[Target::Named("swatch.yellow")], Show::Run(pick_yellow)),
     act("Press {Brush}.", Stage::InkPaint, Done::Tool(CanvasTool::Paint), BRUSH_KEY, Show::Run(arm_brush)),
     trace("Press three stars into the sky.", Stage::InkPaint, &[STAR_1, STAR_2, STAR_3], ON_PAPER),
@@ -886,6 +952,13 @@ const UP_LATE_TASKS: &[Task] = &[
         Action::RoomComposite,
     ),
     act("Tap {Glow}.", Stage::Composite, Done::Effect(FxKind::Glow), GLOW_KEY, Show::Run(add_glow)),
+    act(
+        "Too bright. Drag {Strength} down until the stars are yellow again.",
+        Stage::Composite,
+        Done::Strength,
+        &[Target::Named("shelf.strength")],
+        Show::Run(glow_down),
+    ),
     pill("Press {Export}.", "Export turns your project into a file anyone can open.", Stage::Export, Action::RoomExport),
     act(
         "Save your picture.",
@@ -918,9 +991,12 @@ const ARCH_2: u16 = 6;
 const EYE_4: u16 = 7;
 const FLAT_3: u16 = 8;
 const EYE_5: u16 = 9;
-/// The first of the card's six small pictures.
+/// The first of the card's six small pictures, and the page's one after them.
 const ROW: u16 = 10;
-const ROW_PATHS: usize = 11;
+const ROW_PATHS: usize = 16;
+const THUMB: u16 = ROW + ROW_PATHS as u16;
+/// The arch at the edge, where the wait is.
+const THUMB_POSE: usize = 3;
 
 pub(crate) const DESK_Y: f32 = 520.0;
 pub(crate) const DESK_EDGE: f32 = 720.0;
@@ -928,22 +1004,30 @@ pub(crate) const DESK_EDGE: f32 = 720.0;
 /// line stands off any smooth curve the wobble check can lay along it.
 pub(crate) const STRIP_LONG: f32 = 360.0;
 /// Back foot and front foot: each move plants one. The second arch's front foot
-/// stands on the edge.
-pub(crate) const FEET: [[f32; 2]; 5] = [[240.0, 600.0], [360.0, 600.0], [360.0, 720.0], [480.0, 720.0], [480.0, 840.0]];
+/// stands on the edge, and the last back foot about half a strip short of it. An
+/// arch's chord stays 190: at 180 it is all bend, as a shorter strip's is.
+pub(crate) const FEET: [[f32; 2]; 5] = [[190.0, 550.0], [360.0, 550.0], [360.0, 720.0], [530.0, 720.0], [530.0, 890.0]];
 const POSES: usize = FEET.len();
-const DECKLE_SEED: u32 = 2;
-const PEG_BAR: [f32; 2] = [60.0, 220.0];
+const DECKLE_SEED: u32 = 30;
+/// The bar ends short of the first pose's back foot.
+pub(crate) const PEG_BAR: [f32; 2] = [20.0, 160.0];
 const PEG_TOP: f32 = 492.0;
+/// Chalk, a light grey: white fill leaves its eye dark, and Glow's first
+/// strength lifts it to white on a line and no further than grey on an eye.
+const CHALK_INK: [u8; 4] = [100, 100, 112, 255];
 /// The desk's face, the bar and the torn stub left in its first peg.
 const DESK_FACE: [u8; 4] = [46, 34, 40, 255];
 const DESK_TOP: [u8; 4] = [78, 60, 58, 255];
 const PEG_BAR_INK: [u8; 4] = [70, 76, 96, 255];
 const STUB_INK: [u8; 4] = [120, 118, 112, 255];
-/// The card's row: a pose's share of its size, where the first stands, and how
-/// far on the next does. Small enough that a pose is short lines.
-const ROW_SCALE: f32 = 0.06;
+/// The card's six: a pose's share of its size, so the desk is a cell's width,
+/// where the first stands, how far on the next does, and three to a row.
+const ROW_SCALE: f32 = 0.085;
 const ROW_AT: Pt = [150.0, 120.0];
-const ROW_STEP: f32 = 60.0;
+const ROW_STEP: Pt = [66.0, 44.0];
+const ROW_ACROSS: usize = 3;
+/// The page's small picture: one line and a pen wide enough to hold there.
+const THUMB_WIDE: f32 = 12.0;
 
 /// The strip along the desk and over the edge. `spine` arches between two feet;
 /// this one is laid on the desk and bends over its end, and stops at the strip's
@@ -952,7 +1036,7 @@ fn drooped() -> Vec<Pt> {
     let [from, _] = FEET[4];
     let hang = art::curve([from, DESK_Y], &[
         [[from + 40.0, DESK_Y], [DESK_EDGE - 30.0, DESK_Y], [DESK_EDGE, DESK_Y + 1.0]],
-        [[DESK_EDGE + 32.0, DESK_Y + 4.0], [DESK_EDGE + 78.0, DESK_Y + 22.0], [DESK_EDGE + 118.0, DESK_Y + 84.0]],
+        [[DESK_EDGE + 32.0, DESK_Y + 4.0], [DESK_EDGE + 84.0, DESK_Y + 26.0], [DESK_EDGE + 130.0, DESK_Y + 140.0]],
     ]);
     let mut walked = 0.0;
     let mut kept = vec![hang[0]];
@@ -976,12 +1060,22 @@ pub(crate) fn pose_spine(i: usize) -> Vec<Pt> {
 }
 
 /// Deckle as a Rookie traces it: one closed outline and an eye.
-fn closed(spine: &[Pt], seed: u32) -> [Path; 2] {
-    let deckle = art::deckle(spine, seed);
+fn joined(deckle: art::Deckle) -> [Path; 2] {
     let (width, mut points) = (deckle.cut.width, deckle.cut.points);
     points.extend(deckle.torn.points);
     [Path { points, width, kind: PathKind::Guide, over: false }, deckle.eye]
 }
+
+fn closed(spine: &[Pt], seed: u32) -> [Path; 2] {
+    joined(art::deckle(spine, seed))
+}
+
+/// Pose `i` of the Desk: stood up, as at Up Late, or an arch's torn side closes
+/// on its cut side down both legs.
+fn pose(i: usize) -> [Path; 2] {
+    joined(art::upright(&pose_spine(i), DECKLE_SEED))
+}
+
 
 /// Inside pose `i`, where a tap fills it: under the peak's torn side, midway.
 pub(crate) fn pose_seed(i: usize) -> [f32; 2] {
@@ -991,28 +1085,46 @@ pub(crate) fn pose_seed(i: usize) -> [f32; 2] {
     [mid[0], mid[1] - STRIP_LONG * 0.1]
 }
 
-/// The six pictures, tiny: the desk and each pose in its place. The sixth is the
-/// desk alone, which is the joke.
+/// The six pictures, tiny: the desk and each pose in its place, three over
+/// three. In one row a card's width makes each a dash. The sixth is the desk
+/// alone, which is the joke.
 fn card_row() -> Vec<Path> {
     let [left, _] = FEET[0];
-    let place = |at: f32| move |p: &[f32; 3]| [at + (p[0] - left) * ROW_SCALE, ROW_AT[1] + (p[1] - DESK_Y) * ROW_SCALE, p[2]];
     let mut row = Vec::with_capacity(ROW_PATHS);
     for i in 0..=POSES {
-        let at = ROW_AT[0] + i as f32 * ROW_STEP;
-        let desk = [[at, ROW_AT[1]], [at + 46.0, ROW_AT[1]]];
+        let at = ROW_AT[0] + (i % ROW_ACROSS) as f32 * ROW_STEP[0];
+        let y = ROW_AT[1] + (i / ROW_ACROSS) as f32 * ROW_STEP[1];
+        let place = |p: &[f32; 3]| [at + (p[0] - left) * ROW_SCALE, y + (p[1] - DESK_Y) * ROW_SCALE, p[2]];
+        let desk = [[at, y], [at + (DESK_EDGE - left) * ROW_SCALE, y]];
         row.push(art::hand(&desk, 1.0, PathKind::Finish, 20 + i as u32));
         if i < POSES {
-            let [line, _] = closed(&pose_spine(i), DECKLE_SEED);
-            row.push(Path { points: line.points.iter().map(place(at)).collect(), width: 1.0, kind: PathKind::Finish, over: false });
+            // Two halves: at this size one outline is a long line with no room
+            // for a hand in it.
+            let [line, _] = pose(i);
+            let points: Vec<[f32; 3]> = line.points.iter().map(place).collect();
+            let half = points.len() / 2;
+            for part in [&points[..=half], &points[half..]] {
+                row.push(Path { points: part.to_vec(), width: 1.0, kind: PathKind::Finish, over: false });
+            }
         }
     }
     row
 }
 
+/// The page's picture: six poses cannot read at its height, so the last arch and
+/// the desk's end stand for them.
+fn card_thumb() -> [Path; 2] {
+    let [line, _] = pose(THUMB_POSE);
+    let [left, _] = FEET[THUMB_POSE];
+    let desk = [[left - 40.0, DESK_Y], [DESK_EDGE, DESK_Y + 1.0], [DESK_EDGE - 2.0, DESK_Y + 90.0]];
+    [Path { width: THUMB_WIDE, kind: PathKind::Finish, ..line }, art::hand(&desk, THUMB_WIDE, PathKind::Finish, 26)]
+}
+
 fn edge_art() -> Vec<Path> {
-    let mut art: Vec<Path> = (0..POSES).flat_map(|i| closed(&pose_spine(i), DECKLE_SEED)).collect();
+    let mut art: Vec<Path> = (0..POSES).flat_map(pose).collect();
     art.iter_mut().for_each(|path| path.over = true);
     art.extend(card_row());
+    art.extend(card_thumb());
     art
 }
 
@@ -1183,7 +1295,14 @@ const END_OF_THE_DESK_TASKS: &[Task] = &[
     ),
     act("Press {Play}. The wait is the joke.", Stage::Edit, Done::Played, PLAY_KEY, Show::Perform(Action::PlayPause)),
     pill("Press {Color}.", "Color is where each picture gets filled. Your lines stay safe.", Stage::InkPaint, Action::RoomFinishing),
-    act("Tap inside Deckle.", Stage::InkPaint, Done::FilledOn(1), FILL_KEY, Show::Run(fill_here)),
+    act("Pick white.", Stage::InkPaint, Done::Picked(rgb(WHITE_INK)), &[Target::Named("swatch.white")], Show::Run(pick_white)),
+    act(
+        "Click the first picture along the bottom, and tap inside Deckle.",
+        Stage::InkPaint,
+        Done::FilledOn(1),
+        &[Target::Named("strip.next")],
+        Show::Run(fill_here),
+    ),
     act(
         "Click each picture along the bottom, and tap inside Deckle.",
         Stage::InkPaint,
@@ -1255,9 +1374,10 @@ fn not_a_pencil_art() -> Vec<Path> {
     let [line_3, _] = closed(&art::spine(UPRIGHT[0], UPRIGHT[1], LONG), SEED);
     let desk = [[106.0, 488.0], [262.0, 487.0], [424.0, 490.0]];
     // A hand's shadow, three claws coming down out of the top of the panel.
+    // Each ends blunt, a shade wider than the lesson's gap, so the fill reaches it.
     let shadow = [
-        [548.0, 118.0], [576.0, 348.0], [600.0, 262.0], [630.0, 376.0], [654.0, 262.0],
-        [686.0, 342.0], [716.0, 118.0], [540.0, 117.0],
+        [548.0, 104.0], [568.0, 348.0], [584.0, 350.0], [600.0, 262.0], [622.0, 376.0], [638.0, 377.0], [654.0, 262.0],
+        [678.0, 342.0], [694.0, 343.0], [716.0, 104.0], [540.0, 103.0],
     ];
     let cup = [[170.0, 931.0], [350.0, 929.0], [330.0, 1098.0], [260.0, 1104.0], [192.0, 1099.0], [168.0, 926.0]];
     // Each with the small step where its paint stops and its point starts.
@@ -1266,7 +1386,9 @@ fn not_a_pencil_art() -> Vec<Path> {
         [222.0, 929.0], [224.0, 740.0], [231.0, 739.0], [236.0, 708.0], [243.0, 739.0], [250.0, 742.0], [250.0, 931.0],
         [316.0, 930.0], [318.0, 690.0], [325.0, 689.0], [330.0, 660.0], [337.0, 689.0], [344.0, 692.0], [344.0, 930.0],
     ];
-    let edges = [[542.0, 652.0], [536.0, 1122.0], [714.0, 1125.0], [718.0, 650.0]];
+    // So close he overruns the panel: his sides leave by its top, and he stands
+    // on its bottom line, with the eye hard against his far edge.
+    let edges = [[542.0, 637.0], [536.0, 1138.0], [714.0, 1138.0], [718.0, 637.0]];
     let seeded = |points: &[Pt], seed| hand(points, PAGE_LINE, PathKind::Guide, seed);
     vec![
         seeded(&desk, 30),
@@ -1274,12 +1396,12 @@ fn not_a_pencil_art() -> Vec<Path> {
         eye,
         line_2,
         eye_2,
-        seeded(&shadow, 57),
+        seeded(&shadow, 58),
         seeded(&cup, 32),
         seeded(&pencils, 35),
         line_3,
         seeded(&edges, 34),
-        dab([664.0, 860.0], SIDE_EYE, PathKind::Guide),
+        dab([692.0, 860.0], SIDE_EYE, PathKind::Guide),
     ]
 }
 
@@ -1346,7 +1468,8 @@ pub const ALL: &[Lesson] = &[
         ink: None,
         latch: None,
         art: up_late_art,
-        finish: &[BACK, BELLY, HOLE_1, HOLE_2, HOLE_3, PENCIL, RIM_1, RIM_2, RIM_3],
+        finish: &[BACK, BELLY, HOLE_1, HOLE_2, HOLE_3, PENCIL, STAR_1, STAR_2, STAR_3],
+        thumb: &[],
         tasks: UP_LATE_TASKS,
         closing: "You made that. It is a real file. You can draw, undo, erase, fill a whole sky and add light.",
     },
@@ -1359,7 +1482,7 @@ pub const ALL: &[Lesson] = &[
         paper: &EDGE,
         prep: Some(desk_prep),
         fill_gap: Some(LESSON_GAP),
-        ink: Some([255, 255, 255, 255]),
+        ink: Some(CHALK_INK),
         latch: None,
         art: edge_art,
         finish: &{
@@ -1371,6 +1494,7 @@ pub const ALL: &[Lesson] = &[
             }
             row
         },
+        thumb: &[THUMB, THUMB + 1],
         tasks: END_OF_THE_DESK_TASKS,
         closing: "You made that. It is a real file. You can add drawings, play them, set their speed and choose how long each one stays.",
     },
@@ -1387,6 +1511,7 @@ pub const ALL: &[Lesson] = &[
         latch: None,
         art: not_a_pencil_art,
         finish: &[P1_DESK, P1_DECKLE, P1_EYE, P2_DECKLE, P2_EYE, P2_SHADOW, P3_CUP, P3_PENCILS, P3_DECKLE, P4_EDGES, P4_EYE],
+        thumb: &[],
         tasks: NOT_A_PENCIL_TASKS,
         closing: "You made that. It is a real file. You can split a page into panels and make a reader wait between them.",
     },

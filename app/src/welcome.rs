@@ -837,7 +837,7 @@ fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcome
             let lesson = &lessons[i];
             let at = egui::pos2(column(c), top);
             let rect = egui::Rect::from_min_size(at, egui::vec2(across, PAGE_ROW_H));
-            let picture = w.pictures.entry(lesson.id).or_insert_with(|| Picture::of(lesson));
+            let picture = w.pictures.entry(lesson.id).or_insert_with(|| Picture::small(lesson));
             let card = plate::picture_card(ui, rect, lesson.title, |p, paper| picture.paint(p, paper));
             if w.finished.iter().any(|id| id == lesson.id) {
                 plate::finished_tick(ui.painter(), rect);
@@ -851,22 +851,35 @@ fn lessons_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcome
     out
 }
 
+/// The least a press stands at, as a radius, on a picture this small.
+const PRESS_SMALLEST: f32 = 1.5;
+
 /// A lesson's finish, read once: `art` is the whole lesson's paths, too much
 /// to build on each repaint.
 pub(crate) struct Picture {
-    /// Each line, and its width.
-    lines: Vec<(Vec<egui::Pos2>, f32)>,
+    /// Each line, its width, and whether it is a press: a dab drawn as a line
+    /// is a tick.
+    lines: Vec<(Vec<egui::Pos2>, f32, bool)>,
     bounds: egui::Rect,
 }
 
 impl Picture {
     pub(crate) fn of(lesson: &Lesson) -> Self {
+        Self::from_paths(lesson, lesson.finish)
+    }
+
+    /// AU23: the Lessons page's, at a row's height.
+    pub(crate) fn small(lesson: &Lesson) -> Self {
+        Self::from_paths(lesson, if lesson.thumb.is_empty() { lesson.finish } else { lesson.thumb })
+    }
+
+    fn from_paths(lesson: &Lesson, paths: &[u16]) -> Self {
         let art = (lesson.art)();
         let at = |q: &[f32; 3]| egui::pos2(q[0], q[1]);
-        let paths = lesson.finish.iter().filter_map(|i| art.get(*i as usize));
-        let lines: Vec<_> = paths.map(|path| (path.points.iter().map(at).collect::<Vec<_>>(), path.width)).collect();
+        let paths = paths.iter().filter_map(|i| art.get(*i as usize));
+        let lines: Vec<_> = paths.map(|path| (path.points.iter().map(at).collect::<Vec<_>>(), path.width, path.is_press())).collect();
         let mut bounds = egui::Rect::NOTHING;
-        lines.iter().flat_map(|(line, _)| line).for_each(|q| bounds.extend_with(*q));
+        lines.iter().flat_map(|(line, _, _)| line).for_each(|q| bounds.extend_with(*q));
         Self { lines, bounds }
     }
 
@@ -877,9 +890,17 @@ impl Picture {
         }
         let room = paper.shrink(6.0);
         let scale = (room.width() / self.bounds.width()).min(room.height() / self.bounds.height());
-        for (line, width) in &self.lines {
-            let placed = line.iter().map(|q| room.center() + (*q - self.bounds.center()) * scale).collect();
-            p.add(egui::Shape::line(placed, egui::Stroke::new((width * scale).max(1.0), plate::INK)));
+        let placed = |q: &egui::Pos2| room.center() + (*q - self.bounds.center()) * scale;
+        for (line, width, press) in &self.lines {
+            match line.first() {
+                Some(dot) if *press => {
+                    p.circle_filled(placed(dot), (width * scale / 2.0).max(PRESS_SMALLEST), plate::INK);
+                }
+                _ => {
+                    let points = line.iter().map(placed).collect();
+                    p.add(egui::Shape::line(points, egui::Stroke::new((width * scale).max(1.0), plate::INK)));
+                }
+            }
         }
     }
 }

@@ -67,22 +67,27 @@ Each table is grouped by step, in bar order. The first task of every later step 
 | 12 | Pick white. | `swatch.white` | `Picked(WHITE)` | `Run(pick_white)` |
 | 13 | Tap inside Deckle. | `Rail(Fill)` | `Filled { seed: BODY, keep: SKY }` | `Fill(BODY)` |
 | 14 | Pick red. | `swatch.red` | `Picked(RED)` | `Run(pick_red)` |
-| 15 | Tap the pencil. | `Rail(Fill)` | `Filled { seed: PENCIL, keep: BODY }` | `Fill(PENCIL)` |
+| 15 | Tap the pencil. | `Rail(Fill)` | `Filled { seed: PENCIL, keep: BODY }` | `Run(fill_pencil)` |
 | 16 | Pick yellow. | `swatch.yellow` | `Picked(YELLOW)` | `Run(pick_yellow)` |
 | 17 | Press {Brush}. | `Rail(Brush)` | `Tool(Brush)` | `Run(arm_brush)` |
 | 18 | Press three stars into the sky. | `Paper` | `Ink(star_1, star_2, star_3)` | `Trace(star_1, star_2, star_3)` |
 | | **Effects** | | | |
 | 19 | Press {Effects}. *Why: Effects is where light gets added, after the picture is finished.* | `Step(Composite)` | `OnStep(Composite)` | Press |
 | 20 | Tap {Glow}. | `shelf.glow` | `Effect(Glow)` | `Run(add_glow)` |
+| 21 | Too bright. Drag {Strength} down until the stars are yellow again. | `shelf.strength` | `Strength` | `Run(glow_down)` |
 | | **Export** | | | |
-| 21 | Press {Export}. *Why: Export turns your project into a file anyone can open.* | `Step(Export)` | `OnStep(Export)` | Press |
-| 22 | Save your picture. | `Action(ExportStill)` | `Exported(1)` | `Perform(ExportStill)`, the real save dialog |
+| 22 | Press {Export}. *Why: Export turns your project into a file anyone can open.* | `Step(Export)` | `OnStep(Export)` | Press |
+| 23 | Save your picture. | `Action(ExportStill)` | `Exported(1)` | `Perform(ExportStill)`, the real save dialog |
 
-**The leak.** Task 11 has a `miss`: if a fill landed and `keep` changed, the sentence becomes `Night got into Deckle. Press {Undo}, then {Show me} closes the gap.` `close_and_fill` lands the path `outline`, the back and belly closed, then fills. The task cannot tick until Deckle is dry.
+**The leak.** Task 11 has a `miss`: if a fill reached `keep`, the sentence becomes `Night got into Deckle. Press {Undo}, then {Show me} closes the gap.`, and stays through that `Undo`. `close_and_fill` lands the path `outline`, the back and belly closed, then fills. The task cannot tick until Deckle is dry.
+
+**A second Undo.** At task 7 a second `Undo` takes the pencil of task 5. `close_and_fill` lands `pencil` too when the sky would reach it. A night a person pours there stands where the pencil goes, so task 15's `Run(fill_pencil)` lands the line again and refills the night inside it.
+
+**Task 21.** The shelf's first Glow triples what it reads, so at that strength a star burns to white and the line beside white paper goes with it. The lesson shows that and has the person bring it down. `glow_down` leaves `Strength` at 0.18, where a star keeps its yellow (blue well under green), the pencil keeps its red within the file's 8 levels, and the halo still shows 30 px off. Added by the review of AU23: Glow's own start stands.
 
 **The moments.** The first fill anyone does here is the size of the sky. Three presses, and there are stars. One tap, and Deckle shines.
 
-**Guide art.** Pencil lying across the lower third, x 180 to 1020, y 800 to 860, tip to the right, one closed stroke. Deckle stands on it arched: feet at x 420 and x 700, peak y 520, strip 70 wide, built by `deckle(arch, 1)`. `back` is the torn side, `belly` the cut side. Holes along the strip, front hole near the front foot. Stars upper right, in an uneven triangle, (850, 240), (1000, 380), (760, 130). Smudge lower left at (230, 1030), about 120 across, clear of everything. `scribble` and `wipe` are never shown as guides. Seeds: SKY (100, 100), BODY (560, 545), PENCIL (600, 830). Trace load: 6 strokes.
+**Guide art.** Pencil lying across the lower third, x 180 to 1020, y 800 to 860, tip to the right and blunt, wider than the gap, so a fill reaches its end, one closed stroke. Deckle stands on it arched: feet at x 420 and x 700, peak y 520, strip 100 wide, its width turning with the bend so the legs reach the pencil, built by `upright(arch, 1)`. The front foot is lifted just past the gap, so the sky reaches under the arch. `back` is the torn side, `belly` the cut side. Holes along the strip, front hole near the front foot. Stars upper right, in an uneven triangle, (850, 240), (1000, 380), (760, 130). Smudge lower left at (230, 1030), about 120 across, clear of everything. `scribble` and `wipe` are never shown as guides. Seeds: SKY (100, 100), BODY (560, 545), PENCIL (600, 830). Trace load: 6 strokes.
 
 **File facts.** PNG, 1200×1200. Night at SKY within 8 levels, white at BODY, red at PENCIL. Each star's centre yellow, and a point 30 px off it brighter than SKY, by Glow's halo. The smudge's box holds no grey. No pixel in guide colour.
 
@@ -190,9 +195,9 @@ Each table is grouped by step, in bar order. The first task of every later step 
 | Id, kind, class | `end_of_the_desk`, Animation, Rookie. Straight ahead: one drawing after another |
 | Paper | Const `EDGE`: 1024×768, 12 fps, 1 frame, tracks `BG`, `A`, stack `Solo merged` |
 | Prep | BG: a night desk with its edge at x 720, an empty peg bar with a torn stub at the left. `A` armed. `clear_history` |
-| `fill_gap`, `ink` | 8, white. White chalk on a night desk |
+| `fill_gap`, `ink` | 8, chalk grey (100, 100, 112). Chalk on a night desk: the body is filled white in Color, so a white line would lose the eye |
 | Guide | `over: true`, because BG is opaque |
-| Card picture | The six pictures, tiny, in a row |
+| Card picture | The six pictures, tiny, three over three. The Lessons page's row shows one arch at the desk's end: six cannot read at its height |
 | Closing | `You made that. It is a real file. You can add drawings, play them, set their speed and choose how long each one stays.` |
 | Next | Still in the Coat |
 
@@ -218,32 +223,33 @@ Each table is grouped by step, in bar order. The first task of every later step 
 | 16 | Press {Play}. The wait is the joke. | `Action(PlayPause)` | `Played` | `Perform(PlayPause)` |
 | | **Color** | | | |
 | 17 | Press {Color}. *Why: Color is where each picture gets filled. Your lines stay safe.* | `Step(InkPaint)` | `OnStep(InkPaint)` | Press |
-| 18 | Tap inside Deckle. | `Rail(Fill)` | `FilledOn(1)` | `Run(fill_here)` |
-| 19 | Click each picture along the bottom, and tap inside Deckle. | `strip.next` | `FilledOn(5)` | `Run(fill_the_rest)` |
+| 18 | Pick white. | `swatch.white` | `Picked(WHITE)` | `Run(pick_white)` |
+| 19 | Click the first picture along the bottom, and tap inside Deckle. | `strip.next` | `FilledOn(1)` | `Run(fill_here)` |
+| 20 | Click each picture along the bottom, and tap inside Deckle. | `strip.next` | `FilledOn(5)` | `Run(fill_the_rest)` |
 | | **Effects** | | | |
-| 20 | Press {Effects}. *Why: Effects is where the chalk starts to shine.* | `Step(Composite)` | `OnStep(Composite)` | Press |
-| 21 | Tap {Glow}. | `shelf.glow` | `Effect(Glow)` | `Run(add_glow)` |
+| 21 | Press {Effects}. *Why: Effects is where the chalk starts to shine.* | `Step(Composite)` | `OnStep(Composite)` | Press |
+| 22 | Tap {Glow}. | `shelf.glow` | `Effect(Glow)` | `Run(add_glow)` |
 | | **Export** | | | |
-| 22 | Press {Export}. *Why: Export turns your drawings into a file anyone can watch.* | `Step(Export)` | `OnStep(Export)` | Press |
-| 23 | Save your animation. | `Action(ExportGif)` | `Exported(1)` | `Perform(ExportGif)` |
+| 23 | Press {Export}. *Why: Export turns your drawings into a file anyone can watch.* | `Step(Export)` | `OnStep(Export)` | Press |
+| 24 | Save your animation. | `Action(ExportGif)` | `Exported(1)` | `Perform(ExportGif)` |
 
 **Why the numbers work.** Six drawings at one frame each. `Medium` gives `[2, 2, 2, 2, 2, 2]`. `Longer` three times on the fourth, through `set_run_length`, which ripples later keys and takes the cut with it, gives `[2, 2, 2, 5, 2, 2]`: 15 frames, 1.25 s. BG holds to the end, so `shown_length` keeps the empty sixth picture. The empty desk is the punchline.
 
-**Task 12.** Below a band 1040 wide, Speed stands behind `…`, so the 1024×640 gate rings `…` first. The word "strip" stays out of task 19, because Deckle is one.
+**Task 12.** Below a band 1040 wide, Speed stands behind `…`, so the 1024×640 gate rings `…` first. The word "strip" stays out of tasks 19 and 20, because Deckle is one.
 
-**Task 19.** The sheet is gone in Color and the band's Next steps one frame, so it stops on held frames, where Fill refuses. A click on the bottom row lands on the picture's own frame (`strip::tap`), and `strip.next` rings the next one still white. The cursor after Timing does not matter. `Run(fill_here)` in task 18 goes to its drawing's first frame, because task 14 also accepts a held row.
+**Tasks 19 and 20.** The sheet is gone in Color and the band's Next steps one frame, so it stops on held frames, where Fill refuses. The second `Play` stops on the empty sixth picture, so task 19 cannot be a bare tap either. A click on the bottom row lands on the picture's own frame (`strip::tap`), and `strip.next` rings the next one still white. The cursor after Timing does not matter. `Run(fill_here)` in task 19 goes to its drawing's first frame, because task 14 also accepts a held row.
 
-**Guide art.** Six pictures on the desk line y 520. Strip length 200, built by `deckle(spine, 4)`, so the length holds. Each pose one closed outline and one dab: 2 strokes.
+**Guide art.** Six pictures on the desk line y 520. Strip length 360, 72 wide, built by `upright(spine, 30)`, so the length holds and an arch's legs keep their width. A shorter strip is all bend and fails the hand-wobble check, and so does an arch on a chord under 190. Each pose one closed outline and one dab: 2 strokes.
 
 | Pose | Back foot x | Front foot x |
 |---|---:|---:|
-| `flat_1` | 360 | 560 |
-| `arch_1` | 490 | 560 |
-| `flat_2` | 490 | 690 |
-| `arch_2` | 620 | 690 |
-| `flat_3` | 620 | 820, drooping past the edge at x 720 |
+| `flat_1` | 190 | 550 |
+| `arch_1` | 360 | 550 |
+| `flat_2` | 360 | 720 |
+| `arch_2` | 530 | 720 |
+| `flat_3` | 530 | 890, drooping past the edge at x 720, 170 of its 360 past |
 
-Each move plants one foot, so nothing skates. Peg bar x 60 to 220, on the desk. The room right of the edge stays empty, for a fall we never show.
+Each move plants one foot, so nothing skates. Peg bar x 20 to 160, on the desk. The room right of the edge stays empty, for a fall we never show.
 
 **File facts.** GIF, 1024×768, 15 frames, 1.25 s, endless (`gif.rs`'s `LOOP_BLOCK`). 6 distinct pictures. Deckle's mass moves right. The last picture equals BG with Glow. No pixel in guide colour.
 
@@ -360,13 +366,13 @@ Each move plants one foot, so nothing skates. Peg bar x 60 to 220, on the desk. 
 | Prep | None |
 | `fill_gap`, `ink` | 8, default black |
 | Card picture | The finished page, small |
-| Closing | `You made that. It is a real file. You can cut a page into panels and make a reader wait between them.` |
+| Closing | `You made that. It is a real file. You can split a page into panels and make a reader wait between them.` |
 | Next | Too Much Coat |
 
 | # | On screen | Ring | Tick | Show me |
 |---|---|---|---|---|
 | | **Manga** | | | |
-| 1 | Four panels, no words. Press {Split across}. *Why: Manga is where a page is cut into boxes, and the reader's eye goes box to box.* | `Pane(Manga)`, `manga.split_across` | `Panels(2)` | `Run(split_across)` |
+| 1 | Four panels, no words. Press {Split across}. *Why: Manga is where a page is split into boxes, and the reader's eye goes box to box.* | `Pane(Manga)`, `manga.split_across` | `Panels(2)` | `Run(split_across)` |
 | 2 | Press {Split down}. | `manga.split_down` | `Panels(3)` | `Run(split_down)` |
 | 3 | Click {panel 3}. | `manga.panel.3` | `PanelPicked(2)` | `Run(pick_panel_3)` |
 | 4 | Press {Split down} again. Four panels. | `manga.split_down` | `Panels(4)` | `Run(split_down)` |
@@ -386,7 +392,7 @@ Each move plants one foot, so nothing skates. Peg bar x 60 to 220, on the desk. 
 
 **If Color leaves the Comic bar** (the kinds part's first check): tasks 10 and 11 move to the Manga step after task 8, and task 9 goes. Fill stays on Manga's rail. The same holds for tasks 8 and 9 of Too Much Coat and 8 and 9 of The Only Word.
 
-**Guide art.** Four panels, each ≤6 strokes, from `deckle(spine, 7)`. Panel 1: a desk line, Deckle flat, an eye dab. Panel 2: the same Deckle, the shadow one closed shape coming in from the top edge. Panel 3: a cup, three pencils as one stroke each joined to the cup's rim, and Deckle upright among them. Panel 4: two straight edges and one eye looking right. Panel rectangles come from the same fractions as `panel_op`, so guides stay inside. If the numbering of `panel 3` differs when built, this lesson follows it: `manga.panel.<n>` is by index and the tick reads `selected`.
+**Guide art.** Four panels, each ≤6 strokes, from `deckle(spine, 7)`. Panel 1: a desk line, Deckle flat, an eye dab. Panel 2: the same Deckle, the shadow one closed shape coming in from the top edge of the panel, its claws blunt and wider than the gap, so the fill reaches their ends. Panel 3: a cup, three pencils as one stroke each joined to the cup's rim, and Deckle upright among them. Panel 4: two straight edges that leave by the panel's top, standing on its bottom line, and one eye looking right, hard against the far edge. Panel rectangles come from the same fractions as `panel_op`, so guides stay inside. If the numbering of `panel 3` differs when built, this lesson follows it: `manga.panel.<n>` is by index and the tick reads `selected`.
 
 **File facts.** One PNG, about 888×1243. 4 panels with the page border. One black region at SHADOW. No pixel in guide colour. Ink present in each panel.
 

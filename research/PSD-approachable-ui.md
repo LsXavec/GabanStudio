@@ -1575,6 +1575,8 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 13. GIF speed and quality on big frames.
 14. Final review of step names and order, especially Plan and Effects.
 15. `Show in folder` on a file whose path has a space: Explorer opens on that folder with the file picked out. `auexport_a_path_with_a_space_is_its_own_argument` proves the arguments; only this check proves Explorer reads them.
+16. AU23's named exceptions to "Must not change: any engine file". Nothing stored moved; each is a read or a word of the lesson's own, and each is the Lead's to keep or send back: `lesson.rs` (`lesson_press`, `press_under`, a press's span in `inked`, `spilt`, the resume's colour, `MADE`), `manga_tools.rs` (the panel and lettering rows' room, `panels` made `pub(crate)`, the session-only `quiet` that greys the page's guides under a lesson's blue line), `canvas.rs` (`pen_has_pointer`, a read), `plate.rs` and `welcome.rs` (the card's and the page's picture, `Lesson::thumb`, `lesson_path` on one row), `xsheet_panel.rs` (the `Tracks` legend gives way in a narrow pane).
+17. AU23: one first-time user doing Up Late by hand on a real tablet. A real pen's tap lands by the pen route, which the Rig refuses without an engine, so `Tap` tasks ride `fill_at`, the tap's own body.
 
 **AU2 notes.** Choices the build made where this document was silent or spoke twice. None needs a device; they are here so the Lead sees them once.
 

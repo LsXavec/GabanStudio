@@ -710,6 +710,23 @@ fn lesson_card(dir: &Path) {
             h.editor_mut().begin_lesson(lesson, task);
             h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("rookie-{}{name}.png", lesson.id)));
         }
+        // The steps past the paper: Color and Export of each, and the two rooms
+        // the card narrows at a laptop's size.
+        let rooms = [
+            ("color", Stage::InkPaint, full),
+            ("export", Stage::Export, full),
+            ("timing-1280", Stage::Edit, (1280, 800)),
+            ("lettering-1280", Stage::Manga, (1280, 800)),
+        ];
+        for (name, stage, size) in rooms {
+            let Some(task) = lesson.tasks.iter().rposition(|t| t.step == stage) else { continue };
+            let mut h = EditorHarness::with_gpu_ready();
+            open(&mut h, lesson.id);
+            crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
+            crate::auguide_tests::stand_on_the_tasks_before(&mut h, &lesson, task);
+            h.editor_mut().begin_lesson(lesson, task);
+            h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("rookie-{}-{name}.png", lesson.id)));
+        }
         let mut h = EditorHarness::as_shipped();
         crate::aurail_tests::sized(&mut h, full.0 as f32, full.1 as f32);
         open(&mut h, lesson.id);
@@ -727,7 +744,7 @@ fn lesson_card(dir: &Path) {
 }
 
 /// AU27: the card's pictures, by file name.
-const LESSON: [(&str, u32, u32); 27] = [
+const LESSON: [(&str, u32, u32); 35] = [
     ("lesson-draw", 1600, 900),
     ("lesson-draw-fold", 832, 520),
     ("lesson-wander", 832, 520),
@@ -755,6 +772,14 @@ const LESSON: [(&str, u32, u32); 27] = [
     ("rookie-end_of_the_desk-1280", 1280, 800),
     ("rookie-not_a_pencil", 1600, 900),
     ("rookie-not_a_pencil-1280", 1280, 800),
+    ("rookie-up_late-color", 1600, 900),
+    ("rookie-up_late-export", 1600, 900),
+    ("rookie-end_of_the_desk-color", 1600, 900),
+    ("rookie-end_of_the_desk-export", 1600, 900),
+    ("rookie-end_of_the_desk-timing-1280", 1280, 800),
+    ("rookie-not_a_pencil-color", 1600, 900),
+    ("rookie-not_a_pencil-export", 1600, 900),
+    ("rookie-not_a_pencil-lettering-1280", 1280, 800),
 ];
 
 fn lesson_owed() -> Vec<(String, u32, u32)> {
@@ -1667,7 +1692,7 @@ fn audress_the_ignored_pass_owes_every_shot() {
     let names: BTreeSet<&str> = lists.iter().flat_map(|(_, l)| l.iter().map(|o| o.0.as_str())).collect();
     let owed: usize = lists.iter().map(|(_, l)| l.len()).sum();
     assert_eq!(names.len(), owed, "no two shots share a name");
-    assert_eq!(owed, 273 + 2 * PANELS.len() + 6, "the 273 owed before AU15, its panels at both sizes, and AU23's three lessons at both");
+    assert_eq!(owed, 273 + 2 * PANELS.len() + 14, "the 273 owed before AU15, its panels at both sizes, and AU23's lessons: three at both, and eight steps");
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of

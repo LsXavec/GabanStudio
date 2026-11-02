@@ -1084,6 +1084,24 @@ impl EditorHarness {
         found.unwrap_or_else(|| panic!("{word:?} was not painted"))
     }
 
+    /// AU23: the colour of every line painted with a clip that meets `within`.
+    pub fn painted_lines_in(&self, within: egui::Rect) -> Vec<egui::Color32> {
+        use egui::epaint::{ColorMode, PathShape, PathStroke};
+        fn walk(s: &egui::Shape, out: &mut Vec<egui::Color32>) {
+            match s {
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+                egui::Shape::Path(PathShape { stroke: PathStroke { color: ColorMode::Solid(color), .. }, .. }) => out.push(*color),
+                egui::Shape::LineSegment { stroke, .. } => out.push(stroke.color),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for c in self.h.output().shapes.iter().filter(|c| c.clip_rect.intersects(within)) {
+            walk(&c.shape, &mut out);
+        }
+        out
+    }
+
     /// AU13: the words painted inside `within`: what a popover says, without
     /// the screen behind it.
     pub fn painted_text_in(&self, within: egui::Rect) -> Vec<String> {

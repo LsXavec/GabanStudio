@@ -53,8 +53,8 @@ const CARD_GAP: f32 = 8.0;
 /// Between the card's title, strip and path, which read as one heading: the
 /// longest sentence at the worst size needs what this and the pad give back.
 const HEAD_GAP: f32 = 4.0;
-/// A lesson's picture on the card.
-const PICTURE_H: f32 = 72.0;
+/// A lesson's picture on the card: tall enough for six small ones to read.
+const PICTURE_H: f32 = 104.0;
 /// The share of the paper a path's box grows by when a stroke is met.
 const MEET_GROW: f32 = 0.08;
 /// A stroke spans at least this share of the path's longest side.
@@ -279,6 +279,9 @@ pub(crate) struct LessonRun {
     composite_seen: bool,
     /// The person pressed the card's button on this task.
     asked: bool,
+    /// AU23: this task's fill reached what it was to keep. It stays through the
+    /// `Undo` the card's next sentence asks for, until the task is done.
+    spilt: bool,
     /// `{rest drawing}`, read when the task opened.
     rest: String,
     picture: welcome::Picture,
@@ -313,13 +316,17 @@ impl LessonRun {
     }
 
     /// AU23: the current task's dot at `at` on the paper, give or take its own
-    /// width: a press lands near, and the dot is under the pointer.
+    /// width: a press lands near, and the dot is under the pointer. A dot that
+    /// has its mark is done with: three presses of one dot are not three dots.
+    /// A mark is the dot's by its middle: an outline's box holds the eye too.
     fn press_under(&self, at: [f32; 2]) -> Option<u16> {
         let guide = self.current().filter(|_| !self.holding).map_or(&[][..], |t| t.guide);
         let under = |p: &lessons::Path| {
             let b = p.bounds();
             let near = |from: f32, to: f32, v: f32| (from - p.width..=to + p.width).contains(&v);
-            p.is_press() && near(b[0], b[2], at[0]) && near(b[1], b[3], at[1])
+            let on = |at: [f32; 2]| near(b[0], b[2], at[0]) && near(b[1], b[3], at[1]);
+            let met = |m: &[f32; 4]| on([(m[0] + m[2]) * 0.5, (m[1] + m[3]) * 0.5]);
+            p.is_press() && on(at) && !self.marks.iter().any(met)
         };
         guide.iter().copied().find(|i| self.art.get(usize::from(*i)).is_some_and(under))
     }
@@ -535,6 +542,7 @@ impl Editor {
             mirror_seen: self.canvas.view_mirrored(),
             composite_seen: self.canvas.composite_view,
             asked: false,
+            spilt: false,
             rest: self.lesson_rest(),
             picture: welcome::Picture::of(&lesson),
             art,
@@ -618,6 +626,15 @@ impl Editor {
         run.mirror_seen = self.canvas.view_mirrored();
         run.composite_seen = self.canvas.composite_view;
         run.asked = false;
+        run.spilt = false;
+    }
+
+    /// AU23: a fill of this task has reached the pixel it was to keep.
+    fn lesson_spilt(&self, run: &LessonRun, done: Done) -> bool {
+        let Done::Filled { keep: Some(keep), .. } = done else { return false };
+        let cel = run.base.cel.or_else(|| armed_cel(&self.state));
+        let was = run.base.pixels.iter().find(|(q, _)| *q == keep).map(|(_, px)| px);
+        self.state.fills_done != run.base.fills && was.is_some_and(|px| pixels_moved(px, &pixels_at(&self.state, cel, keep)))
     }
 
     /// AU27: does `done` hold now? State, never Actions or clicks: a route the
@@ -794,6 +811,12 @@ impl Editor {
         run.peak = run.peak.max(self.state.engine.undo_depth_by(None));
         run.mirror_seen |= self.canvas.view_mirrored();
         run.composite_seen |= self.canvas.composite_view;
+        run.spilt |= run.current().filter(|t| t.miss.is_some()).is_some_and(|t| self.lesson_spilt(run, t.done));
+        // `commit_path`'s `painted` is doc.rs's word to a log. The card does the
+        // talking here, and the lane must not read like a bug beside it.
+        if self.state.status.starts_with("painted") {
+            self.state.status.clear();
+        }
         let view = &self.state.view;
         let end = self.state.play_range().1;
         // A frame that fell back under a running pass is the wrap. A stop
@@ -839,6 +862,12 @@ impl Editor {
             return false;
         }
         self.begin_lesson(*lesson, task);
+        // AU23: no file holds the brush's colour, and the next fill goes on in
+        // the one the lesson last had the person pick.
+        let picked = |t: &Task| if let Done::Picked([r, g, b]) = t.done { Some([r, g, b, 255]) } else { None };
+        if let Some(color) = lesson.tasks[..task].iter().rev().find_map(picked) {
+            self.canvas.brush_color = color;
+        }
         true
     }
 
@@ -864,6 +893,7 @@ impl Editor {
         self.lesson_press(ctx);
         let Some(run) = self.lesson.as_mut() else {
             self.canvas.guide = canvas::Guide::default();
+            self.state.manga.quiet = false;
             return;
         };
         let wanted = Some((run.task, run.holding));
@@ -871,6 +901,7 @@ impl Editor {
             run.guide_for = wanted;
             self.canvas.guide.lines = run.guide_lines();
         }
+        self.state.manga.quiet = !self.canvas.guide.lines.is_empty();
         let task = run.task;
         let reveal = run.reveal.take();
         self.canvas.guide.reveal.clear();
@@ -891,17 +922,36 @@ impl Editor {
     /// AU23: `Press once on each blue dot` is a press. A pen's tap paints by the
     /// pen route, whose mouse paints nothing for a bare click, and that route
     /// is not this lesson's to move: so a click on a dot lands it as Show me's
-    /// ink does.
+    /// ink does. Only what the canvas would have taken counts: a click on
+    /// chrome over a dot is the chrome's, and the click a pen's tap leaves
+    /// behind is that tap, already painted.
     fn lesson_press(&mut self, ctx: &egui::Context) {
         let click = ctx.input(|i| i.pointer.primary_clicked().then(|| i.pointer.interact_pos()).flatten());
         let (Some(run), Some(at)) = (self.lesson.as_ref(), click) else { return };
-        if self.canvas.stroke_active() || !self.lesson_paper() {
+        let Some(task) = run.current() else { return };
+        let canvas = &self.canvas;
+        let armed = canvas.tool == canvas::CanvasTool::Paint && !self.canvas.erasing;
+        if canvas.stroke_active() || canvas.pen_has_pointer() || !armed {
             return;
         }
-        let paper = self.canvas.view_xform().screen_to_paper(at);
+        if !self.lesson_paper() || self.lesson_wandered(task) || !self.lesson_canvas_under(ctx, at) {
+            return;
+        }
+        let paper = canvas.view_xform().screen_to_paper(at);
         if let Some(dot) = run.press_under([paper.x, paper.y]) {
             self.lesson_land(&[dot]);
         }
+    }
+
+    /// AU23: the canvas is what stands at `at`: its layer on top, inside its
+    /// rect, and no control of that layer over it. `lesson_guide` runs before
+    /// the dock, so these are last frame's, which is what the click landed on.
+    fn lesson_canvas_under(&self, ctx: &egui::Context, at: egui::Pos2) -> bool {
+        let (layer, rect) = (self.canvas.dbg_layer, self.canvas.dbg_rect);
+        let control = |r: &egui::WidgetRect| r.rect != rect && r.sense.interactive() && r.rect.contains(at);
+        ctx.layer_id_at(at) == Some(layer)
+            && rect.contains(at)
+            && !ctx.viewport(|v| v.prev_pass.widgets.get_layer(layer).any(control))
     }
 
     /// AU28: the Canvas pane is on screen: a step may hold none, or have it
@@ -1076,15 +1126,14 @@ impl Editor {
 
     /// AU27: the sentence the card stands on. The wander line takes the
     /// title's place when the task's own step has been left (spec 5.10), and
-    /// `miss` the sentence once the act landed and the outcome did not.
+    /// `miss` the sentence once the act reached what it was to keep.
     pub(crate) fn lesson_lines(&self, run: &LessonRun, ctx: &egui::Context) -> Option<LessonLines> {
         let task = run.current()?;
         let words = |text: &str| resolve(text, |t| self.lesson_word(run, t, ctx));
         let wander = self.lesson_wandered(task).then(|| {
             format!("Go back to {}", self.step_name(task.step))
         });
-        let acted = self.state.strokes_done != run.base.strokes || self.state.fills_done != run.base.fills;
-        let say = task.miss.filter(|_| acted).unwrap_or(task.say);
+        let say = task.miss.filter(|_| run.spilt).unwrap_or(task.say);
         // The carrying task, and the one after it in the same step: a step's
         // reason is read while it is young.
         let prior = run.task.checked_sub(1).and_then(|i| run.lesson.tasks.get(i));
@@ -1167,7 +1216,9 @@ impl Editor {
                 } else {
                     plate::lesson_words(ui, MADE, Role::Heading, plate::INK);
                     ui.add_space(CARD_GAP);
-                    plate::lesson_words(ui, lesson.closing, Role::Panel, plate::INK2);
+                    // A closing in the file's own words opens with the line above.
+                    let closing = lesson.closing.strip_prefix(MADE).unwrap_or(lesson.closing).trim_start();
+                    plate::lesson_words(ui, closing, Role::Panel, plate::INK2);
                 }
                 if chip && !finished {
                     ui.add_space(CARD_GAP);

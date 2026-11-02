@@ -203,6 +203,64 @@ fn ringed(lesson: &Lesson, task: &Task) -> bool {
     lesson.class != Class::Experienced || rings(task)
 }
 
+/// A tap of the armed Fill at `seed`. The Rig's pen route refuses one for want
+/// of an engine (spec 5.9), and `fill_at` is that tap past the gate.
+fn tap(h: &mut EditorHarness, seed: [f32; 2]) {
+    assert_eq!(h.editor().canvas.tool, CanvasTool::Fill, "Fill is armed");
+    let e = h.editor_mut();
+    if e.canvas.slot_at_pen_down(true, &mut e.state).is_some() {
+        e.canvas.fill_at(pos2(seed[0], seed[1]), &mut e.state);
+    }
+}
+
+/// What a person's hand does on the control the ring came to, as its task asks:
+/// never the card's button. A task this does not answer stops the ride by name.
+fn by_hand(go: &mut Recorder, step: &str, task: &Task, rect: egui::Rect) {
+    /// `Longer`, from `Medium`'s 2 to the 5 the lesson holds.
+    const LONGER: usize = 3;
+    /// `Size` up, in screen points, and `Strength` down, of its track.
+    const SIZE_DRAG: f32 = 40.0;
+    const STRENGTH_LEFT: f32 = 0.025;
+    match task.done {
+        Done::BrushChanged => {
+            let from = rect.center();
+            go.act(step, Act::Drag(&[from, from - egui::vec2(0.0, SIZE_DRAG)]));
+        }
+        Done::Strength => {
+            let from = rect.center();
+            go.act(step, Act::Drag(&[from, pos2(rect.left() + rect.width() * STRENGTH_LEFT, from.y)]));
+        }
+        Done::Hold { .. } => {
+            for _ in 0..LONGER {
+                go.act(step, Act::Answer(Box::new(move |h| {
+                    h.click_at(rect);
+                    settle(h);
+                })));
+            }
+        }
+        Done::Filled { seed, .. } => go.act(step, Act::Answer(Box::new(move |h| {
+            h.click_at(rect);
+            settle(h);
+            tap(h, seed);
+        }))),
+        // Each picture by the bottom row, whose ring moves on to the next white one.
+        Done::FilledOn(n) => {
+            let filled = |h: &EditorHarness| h.state().cut().drawings.iter().filter(|d| lesson::color_layer_art(d)).count();
+            let from = filled(go.harness());
+            for pose in from..n as usize {
+                go.act(step, Act::Answer(Box::new(move |h| {
+                    let (_, rect) = h.ring_stands().expect("the next picture");
+                    h.click_at(rect);
+                    settle(h);
+                    tap(h, lessons::pose_seed(pose));
+                    settle(h);
+                })));
+            }
+        }
+        _ => go.act(step, Act::Answer(Box::new(move |h| h.click_at(rect)))),
+    }
+}
+
 /// The act that answers `task`: the card's button, the pen, or the control the
 /// ring came to.
 fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &Task, hand: Hand) {
@@ -213,30 +271,21 @@ fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &T
     let control = rings(task);
     let traced = matches!(task.show, Show::Trace(_));
     if shows && (hand != Hand::Pen || !(traced || control)) {
-        let was = at(go.harness());
+        // AU23: the climb left a menu open, and a person shuts it first.
+        if egui::Popup::is_any_open(&go.harness().ctx()) {
+            go.act(step, Act::Key(egui::Key::Escape));
+            settle(go.harness());
+        }
         go.act(step, Act::Click(SHOW_ME));
         if let Show::Trace(paths) = task.show {
             let secs = REVEAL_SECS * paths.len() as f64 + 0.2;
             go.act(step, Act::Answer(Box::new(move |h| h.wait(secs))));
         }
-        // AU23: the climb left a menu open, and the press outside it shut it.
-        settle(go.harness());
-        if hand == Hand::ShowMe && task.ring.len() > 1 && at(go.harness()) == was {
-            go.act(step, Act::Click(SHOW_ME));
-        }
     } else if !own_lines(task).is_empty() {
         stand_in(go, step, art, own_lines(task), hand);
     } else if control {
         let (_, rect) = go.harness().ring_stands().expect("climbed");
-        let was = at(go.harness());
-        go.act(step, Act::Answer(Box::new(move |h| h.click_at(rect))));
-        // AU23: a control one click does not answer: a drag, three presses, a
-        // key that arms a tool for a tap the Rig's pen route refuses. The card's
-        // button is the driver's other act (spec 5.15).
-        settle(go.harness());
-        if shows && matches!(task.show, Show::Run(_) | Show::Fill(_)) && at(go.harness()) == was {
-            go.act(step, Act::Click(SHOW_ME));
-        }
+        by_hand(go, step, task, rect);
     } else if let Show::Perform(action) = task.show {
         go.act(step, Act::Perform(action));
     } else if let Show::Run(run) = task.show {
@@ -431,11 +480,16 @@ fn reopens_equal(h: &EditorHarness, dir: &FilePath, step: &str) {
 /// `lesson` from where it stands to its file. One loop, on the lesson's own
 /// tables: any refusal or ignored verb fails by name.
 pub(crate) fn ride(h: &mut EditorHarness, lesson: &Lesson, hand: Hand) -> Ridden {
+    ride_from(h, lesson, 0, hand)
+}
+
+/// The same, from task `from`.
+pub(crate) fn ride_from(h: &mut EditorHarness, lesson: &Lesson, from: usize, hand: Hand) -> Ridden {
     let dir = tempfile::tempdir().expect("dir");
     let art = (lesson.art)();
     let mut files = Vec::new();
     let mut go = Recorder::new(h, lesson.id);
-    for (i, task) in lesson.tasks.iter().enumerate() {
+    for (i, task) in lesson.tasks.iter().enumerate().skip(from) {
         let step = format!("{} task {i} by {hand:?}", lesson.id);
         assert_eq!(at(go.harness()), i, "{step}: the run stands here");
         if lesson.class == Class::Experienced && rings(task) {

@@ -1953,24 +1953,38 @@ pub fn lesson_words(ui: &mut Ui, words: &str, role: Role, ink: Color32) -> Respo
     ui.add(egui::Label::new(egui::RichText::new(words).font(role.font()).color(ink)).wrap())
 }
 
-/// AU27: the lesson's steps in bar order, on a line that wraps; the open one
+/// AU27: the lesson's steps in bar order, on a line of their own; the open one
 /// stands in deep ink on the wash, as the bar's pill does: never colour alone.
+/// AU23: a card too narrow for five steps at panel size takes the floor's size
+/// and one space, then tightens that a hair, not a second line.
 pub fn lesson_path(ui: &mut Ui, steps: &[(&str, bool)]) -> Response {
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = ui.available_width();
-    for (i, (name, open)) in steps.iter().enumerate() {
-        let format = |ink| egui::TextFormat::simple(Role::Panel.font(), ink);
-        if i > 0 {
-            job.append("  ", 0.0, format(INK3));
+    /// Off each letter on the narrowest card: five steps at the floor's size
+    /// want 173 pt of its 164.
+    const TIGHT: f32 = -0.3;
+    let wide = ui.available_width();
+    let path = |role: Role, between: &str, letters: f32| {
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = wide;
+        for (i, (name, open)) in steps.iter().enumerate() {
+            let format = |ink| egui::TextFormat {
+                extra_letter_spacing: letters,
+                ..egui::TextFormat::simple(role.font(), ink)
+            };
+            if i > 0 {
+                job.append(between, 0.0, format(INK3));
+            }
+            let word = if *open {
+                egui::TextFormat { background: BLUE_WASH, ..format(BLUE_DEEP) }
+            } else {
+                format(INK3)
+            };
+            job.append(name, 0.0, word);
         }
-        let word = if *open {
-            egui::TextFormat { background: BLUE_WASH, ..format(BLUE_DEEP) }
-        } else {
-            format(INK3)
-        };
-        job.append(name, 0.0, word);
-    }
-    ui.add(egui::Label::new(job))
+        job
+    };
+    let fits = |job: &egui::text::LayoutJob| ui.painter().layout_job(job.clone()).rows.len() == 1;
+    let job = [path(Role::Panel, "  ", 0.0), path(Role::Small, " ", 0.0)].into_iter().find(fits);
+    ui.add(egui::Label::new(job.unwrap_or_else(|| path(Role::Small, " ", TIGHT))))
 }
 
 /// AU27: the strip's height: room for Deckle stood up over the ticks.
@@ -2072,12 +2086,12 @@ fn paint_deckle(p: &egui::Painter, foot: Pos2, pose: usize, standing: bool) {
     }
 }
 
-/// AU27: the finish picture on a square of paper, centred in `rect`.
+/// AU27: the finish picture on a paper as wide as the card gives it: a row of
+/// six has no use for a square. AU23.
 pub fn lesson_picture(ui: &Ui, rect: egui::Rect, picture: impl FnOnce(&egui::Painter, egui::Rect)) {
-    let paper = egui::Rect::from_center_size(rect.center(), Vec2::splat(rect.height()));
     let p = ui.painter();
-    p.rect_filled(paper, R_CONTROL, PAPER);
-    picture(p, paper);
+    p.rect_filled(rect, R_CONTROL, PAPER);
+    picture(p, rect);
 }
 
 /// The card's chip as the brush holds its colour.

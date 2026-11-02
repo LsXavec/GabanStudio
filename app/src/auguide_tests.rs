@@ -79,10 +79,6 @@ fn ends_on_paper(chain: &[Target]) -> bool {
     matches!(chain.last(), None | Some(Target::Paper))
 }
 
-/// Every task of every lesson of the gate, seated by its index in the lesson's
-/// own document, in its own step: a pill's task on the step before it, or the
-/// pill would already be pressed. What `answer` reads depends on no `Done`, so
-/// each lesson that lands is walked with no new test code.
 /// The tasks before `i`, each by its own `Show me`, no frame between them.
 pub(crate) fn stand_on_the_tasks_before(h: &mut EditorHarness, lesson: &Lesson, i: usize) {
     let ctx = h.ctx();
@@ -107,6 +103,10 @@ pub(crate) fn stand_on_the_tasks_before(h: &mut EditorHarness, lesson: &Lesson, 
     }
 }
 
+/// Every task of every lesson of the gate, seated by its index in the lesson's
+/// own document, in its own step: a pill's task on the step before it, or the
+/// pill would already be pressed. What `answer` reads depends on no `Done`, so
+/// each lesson that lands is walked with no new test code.
 fn each_task(size: (f32, f32), mut answer: impl FnMut(&mut EditorHarness, &Lesson, usize)) {
     for lesson in lessons::for_gate() {
         for (i, task) in lesson.tasks.iter().enumerate() {

@@ -1618,6 +1618,12 @@ impl CanvasView {
         }
     }
 
+    /// AU23: a pen has this pointer or had it a moment ago, so a click here is
+    /// Windows's copy of a tap the pen route already painted.
+    pub(crate) fn pen_has_pointer(&self) -> bool {
+        self.seen_pen || self.native_active || self.touch_active || self.mouse_lockout > 0
+    }
+
     /// An edit gesture is live: a stroke (pen down or its pen-up commit
     /// pending), a selection being drawn, a lifted transform in flight, or
     /// (GM18) a panel-tool drag that lands on the page at its release.
@@ -9574,6 +9580,11 @@ pub(crate) mod extpaper_tests {
         state.new_drawing_at_frame();
         state.set_cut_paper(WIDE);
         state
+    }
+
+    /// AU23: the paper slid `by` on the screen, as a pan leaves it.
+    pub(crate) fn nudge_view(canvas: &mut CanvasView, by: egui::Vec2) {
+        canvas.pan += by;
     }
 
     /// Commit opaque `rgba` texels at the given frame pixels to the armed layer.

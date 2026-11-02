@@ -6,26 +6,31 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use anim_core::manga;
-use eframe::egui::pos2;
+use eframe::egui::{Id, LayerId, Order, Pos2, Rect, pos2};
 
 use crate::auguide_show_tests::{
-    File, Hand, Picture, Ridden, at, bounds_a_region, contact_sheet, flood, iou, ride, settle, thumb, trace_load,
+    File, Hand, Picture, Ridden, at, bounds_a_region, contact_sheet, flood, iou, ride, ride_from, settle, thumb, trace_load,
 };
+use crate::auguide_tests::stand_on_the_tasks_before;
 use crate::aulesson_tests::open;
 use crate::aurail_tests::sized;
-use crate::canvas::CanvasTool;
+use crate::canvas::extpaper_tests::nudge_view;
+use crate::canvas::{CanvasTool, PenPhase, PenSample};
 use crate::config::Action;
-use crate::lesson::SHOW_ME;
+use crate::floats::Float;
+use crate::lesson::{self, KEY, LEAVE, SHOW_ME};
 use crate::lessons::art::{self, Pt};
 use crate::lessons::{
-    self, BODY_SEED, Class, DESK_EDGE, FEET, Lesson, P2_PAPER, PENCIL_SEED, Path, PathKind, SHADOW_SEED, SKY_SEED, STARS,
-    STRIP_LONG, Show, desk_texel, pose_spine,
+    self, BODY_SEED, Class, DESK_EDGE, Done, FEET, Lesson, P2_PAPER, PEG_BAR, PENCIL_SEED, Path, PathKind, SHADOW_SEED,
+    SKY_SEED, STARS, STRIP_LONG, Show, desk_texel, pose_seed, pose_spine,
 };
+use crate::measure;
 use crate::plate;
 use crate::render_queue::ExportKind;
 use crate::steps::ProjectKind;
 use crate::testkit::EditorHarness;
-use crate::workspace::Stage;
+use crate::vocab;
+use crate::workspace::{Pane, Stage};
 use crate::templates;
 
 /// How far a pixel may stand from the colour a lesson promises.
@@ -33,6 +38,9 @@ const NEAR: i32 = 8;
 /// `Picture`'s eight bits against the guide's blue: the spec's margin.
 const GUIDE_NEAR: i32 = 3;
 const PANELS: [[i32; 4]; 4] = [[90, 102, 440, 610], [449, 102, 798, 610], [90, 634, 440, 1141], [449, 634, 798, 1141]];
+/// A star's blue under its green: the yellow swatch's own margin, and Glow must
+/// leave most of it (a star burnt to white has none).
+const YELLOW_MARGIN: i32 = 60;
 
 fn rookie(id: &str) -> Lesson {
     *lessons::ALL.iter().find(|l| l.id == id).expect("a Rookie lesson")
@@ -66,12 +74,6 @@ fn landed(ride: &Ridden) -> &File {
     &ride.files[0]
 }
 
-/// Lesson text as the lessons file gives it, but for the two sentences whose
-/// `cut` the word rule refuses (`aulesson_no_old_words`).
-fn in_the_file(sentence: &str) -> String {
-    sentence.replace("is split into boxes", "is cut into boxes").replace("You can split a page", "You can cut a page")
-}
-
 /// Spec AU23: three lessons of the first class, one of each type, on papers no
 /// picker offers, each sentence the lessons file's, and Start's second row.
 #[test]
@@ -96,12 +98,11 @@ fn aurookie_three_stand() {
             sentences.extend(std::iter::once(task.say).chain(task.why).chain(task.miss));
         }
         for sentence in sentences {
-            assert!(file.contains(&in_the_file(sentence)), "{}: {sentence:?} is not the lessons file's", lesson.id);
+            assert!(file.contains(sentence), "{}: {sentence:?} is not the lessons file's", lesson.id);
             read += 1;
         }
     }
     assert!(read > 58, "{read} sentences");
-    assert_ne!(in_the_file("is split into boxes"), "is split into boxes", "the check reads");
 
     // Row two is the lessons' now, and the example stands on their page.
     let mut h = EditorHarness::as_first_run();
@@ -128,22 +129,69 @@ fn aurookie_up_late_file() {
     let body = seed(BODY_SEED);
     assert!(near(body, [255, 255, 255], NEAR), "white at the body seed: {body:?}");
     let pencil = seed(PENCIL_SEED);
-    assert!(pencil[0] > 170 && pencil[1] < 110 && pencil[2] < 110, "red at the pencil seed: {pencil:?}");
+    let [rr, rg, rb, _] = plate::STARTER_SWATCHES[2].1.to_array();
+    assert!(near(pencil, [rr, rg, rb], NEAR), "the swatch's own red at the pencil seed: {pencil:?}");
     for star in STARS {
-        // Glow burns the middle pale; it is still more yellow than white.
+        // Yellow, and no pale copy of it: its blue well under its green.
         let centre = seed(star);
-        assert!(centre[0] > 240 && centre[1] > 240 && centre[2] < centre[1], "a yellow star at {star:?}: {centre:?}");
+        assert!(centre[0] > 230 && centre[1] > 190, "a bright star at {star:?}: {centre:?}");
+        assert!(i32::from(centre[2]) + YELLOW_MARGIN < i32::from(centre[1]), "a yellow star at {star:?}: {centre:?}");
         let halo = picture.pixel(star[0] as i32 + 30, star[1] as i32);
         assert!(bright(halo) > bright(sky), "Glow's halo at {star:?}: {halo:?} on {sky:?}");
     }
-    // The smudge's box: nothing but night, and the eraser's wipe past it.
-    for y in 992..1066 {
-        for x in 176..286 {
+    // The smudge's box: its path's own bounds, grown by its width: nothing but
+    // night, and the eraser's wipe past it.
+    let art = (rookie("up_late").art)();
+    let smudge = art.iter().find(|p| p.kind == PathKind::Landmark).expect("the smudge");
+    let [left, top, right, bottom] = smudge.bounds();
+    let grown = smudge.width;
+    for y in (top - grown) as i32..(bottom + grown) as i32 {
+        for x in (left - grown) as i32..(right + grown) as i32 {
             let p = picture.pixel(x, y);
             assert!(near(p, [nr, ng, nb], NEAR), "a smudge left at ({x}, {y}): {p:?}");
         }
     }
     assert_eq!(guide_pixels(&picture), 0, "no guide colour");
+    let point = picture.pixel(1006, 830);
+    assert!(near(point, pencil[..3].try_into().expect("three"), NEAR), "the fill reaches the point: {point:?}");
+    outline_survives(&picture);
+    // A person's own line, down the pen's route, holds the same.
+    let (_h, pen) = ridden("up_late", Hand::Pen);
+    let File::One(ExportKind::Still, path) = landed(&pen) else { panic!("a PNG") };
+    outline_survives(&Picture::png(path));
+}
+
+/// The paper strip reads in the file: Glow left its line darker than the white
+/// beside it, along each side, by the middle sample of each.
+fn outline_survives(picture: &Picture) {
+    const WHITE_BY: i32 = 3 * 60;
+    let art = (rookie("up_late").art)();
+    for side in &art[..2] {
+        let mut on: Vec<i32> = side.points.iter().map(|p| bright(picture.pixel(p[0] as i32, p[1] as i32))).collect();
+        on.sort_unstable();
+        let middle = on[on.len() / 2];
+        assert!(middle < 3 * 255 - WHITE_BY, "the line stands under Glow: {middle}");
+    }
+}
+
+/// Spec AU23: Deckle stands on the pencil on two feet with width in them: a fill
+/// of the body reaches both, and the front foot hangs no further clear of the
+/// pencil than the sky needs to get under the arch.
+#[test]
+fn aurookie_feet_keep_their_width() {
+    const LEG: usize = 60;
+    const CLEAR: f32 = 14.0;
+    let up_late = rookie("up_late");
+    let body = flood(&lines(&up_late, &[0, 1]), (BODY_SEED[0] as i32, BODY_SEED[1] as i32), (1200, 1200), 8).expect("the body");
+    let wide = |from: i32, to: i32, y: i32| (from..to).filter(|x| body.get(*x, y)).count();
+    for y in [720, 760] {
+        assert!(wide(250, 480, y) >= LEG, "the back leg at y {y}: {} px", wide(250, 480, y));
+        assert!(wide(640, 880, y) >= LEG, "the front leg at y {y}: {} px", wide(640, 880, y));
+    }
+    let art = (up_late.art)();
+    let pencil = art[5].bounds()[1];
+    let front = art[1].points.iter().filter(|p| p[0] > 600.0).map(|p| p[1]).fold(0.0, f32::max);
+    assert!(pencil - front <= CLEAR, "the front foot at y {front} on a pencil at y {pencil}");
 }
 
 /// Spec AU23 acceptance 6: the lines leak, the sentence says so, and Undo and
@@ -178,6 +226,107 @@ fn aurookie_night_leak_recovers() {
     assert!(!h.painted_text().join(" ").contains("Night got into Deckle."));
 }
 
+/// The night's sentence belongs to a night that spilt: a fill that reached
+/// nothing it should keep leaves the task's own words, and a spill's sentence
+/// outlasts the `Undo` it asks for.
+#[test]
+fn aurookie_the_leak_sentence_needs_a_leak() {
+    let lesson = rookie("up_late");
+    let night = lesson.tasks.iter().position(|t| t.miss.is_some()).expect("the leak's task");
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    stand_on_the_tasks_before(&mut h, &lesson, night);
+    h.editor_mut().begin_lesson(lesson, night);
+    settle(&mut h);
+    let e = h.editor_mut();
+    e.canvas.set_tool(CanvasTool::Fill, &mut e.state);
+    e.canvas.fill_at(pos2(PENCIL_SEED[0], PENCIL_SEED[1]), &mut e.state);
+    settle(&mut h);
+    assert_ne!(h.state().fills_done, 0, "a fill landed");
+    assert_eq!(at(&h), night, "the sky is still to do");
+    assert!(!h.painted_text().join(" ").contains("Night got into Deckle."), "no spill, no sentence");
+}
+
+/// A second `Undo` at the Undo task takes the pencil, and the card's button
+/// alone still reaches the file, the pencil back on it.
+#[test]
+fn aurookie_a_second_undo_strands_nobody() {
+    let lesson = rookie("up_late");
+    let undo = lesson.tasks.iter().position(|t| t.done == Done::Undone).expect("the Undo task");
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    stand_on_the_tasks_before(&mut h, &lesson, undo);
+    h.editor_mut().begin_lesson(lesson, undo);
+    settle(&mut h);
+    h.perform(Action::Undo);
+    settle(&mut h);
+    assert_eq!(at(&h), undo + 1, "the first ticks");
+    h.perform(Action::Undo);
+    settle(&mut h);
+    let save = lesson.tasks.iter().position(|t| matches!(t.done, Done::Exported(_))).expect("the save");
+    show_until(&mut h, &lesson, save);
+    // The ride reads the file: the pencil's whole line stands on its ink.
+    ride_from(&mut h, &lesson, save, Hand::ShowMe);
+}
+
+/// The same, with a person's own night poured over the empty place: `Tap the
+/// pencil` can land no fill there, and its `Show me` recovers.
+#[test]
+fn aurookie_a_night_over_the_pencil_recovers() {
+    let lesson = rookie("up_late");
+    let tasks = lesson.tasks;
+    let undo = tasks.iter().position(|t| t.done == Done::Undone).expect("the Undo task");
+    let night = tasks.iter().position(|t| t.miss.is_some()).expect("the leak's task");
+    let pencil = tasks.iter().position(|t| matches!(t.done, Done::Filled { seed, .. } if seed == PENCIL_SEED)).expect("the pencil's");
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    stand_on_the_tasks_before(&mut h, &lesson, undo);
+    h.editor_mut().begin_lesson(lesson, undo);
+    settle(&mut h);
+    h.perform(Action::Undo);
+    settle(&mut h);
+    h.perform(Action::Undo);
+    settle(&mut h);
+    show_until(&mut h, &lesson, night);
+    let e = h.editor_mut();
+    e.canvas.set_tool(CanvasTool::Fill, &mut e.state);
+    e.canvas.fill_at(pos2(SKY_SEED[0], SKY_SEED[1]), &mut e.state);
+    settle(&mut h);
+    assert_eq!(at(&h), night + 1, "the body stayed dry, so the night ticks");
+    show_until(&mut h, &lesson, pencil);
+    let e = h.editor_mut();
+    e.canvas.fill_at(pos2(PENCIL_SEED[0], PENCIL_SEED[1]), &mut e.state);
+    settle(&mut h);
+    assert_eq!(at(&h), pencil, "a tap lands nothing on the night");
+    h.click(SHOW_ME);
+    settle(&mut h);
+    assert_eq!(at(&h), pencil + 1, "Show me got the pencil back: {:?}", h.state().status);
+}
+
+/// Show me, press by press, as far as `stop`.
+fn show_until(h: &mut EditorHarness, lesson: &Lesson, stop: usize) {
+    while at(h) < stop {
+        let task = lesson.tasks[at(h)];
+        let was = at(h);
+        h.click(SHOW_ME);
+        if let Show::Trace(paths) = task.show {
+            h.wait(1.6 * paths.len() as f64 + 0.2);
+        }
+        settle(h);
+        for _ in 0..200 {
+            if task.done != Done::Played || at(h) != was {
+                break;
+            }
+            h.wait(0.1);
+        }
+        settle(h);
+        assert_ne!(at(h), was, "{:?} stands: {:?}", task.say, h.state().status);
+    }
+}
+
 /// `Press the blue dot`, by a mouse: its bare click lands the dot, and away from
 /// the dot it stays what it is on any paper, nothing.
 #[test]
@@ -198,12 +347,186 @@ fn aurookie_a_click_presses_the_dot() {
     assert_ne!(h.state().engine.revision(), before, "on the dot");
 }
 
+/// One stroke's worth of history and strokes, from a harness's state.
+fn landed_so_far(h: &EditorHarness) -> (u64, usize) {
+    (h.state().strokes_done, h.state().engine.undo_depth_by(None))
+}
+
+/// The dots of Up Late's press task, on screen, in their own harness.
+fn at_the_dots() -> (EditorHarness, Vec<Pos2>) {
+    let lesson = rookie("up_late");
+    let press = lesson.tasks.iter().position(|t| t.say.starts_with("Press once on each blue dot")).expect("the dots");
+    let mut h = EditorHarness::as_shipped();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    h.editor_mut().begin_lesson(lesson, press);
+    settle(&mut h);
+    let xf = h.editor().canvas.view_xform();
+    let art = (lesson.art)();
+    let dots = lesson.tasks[press].guide.iter().map(|i| {
+        let [x, y, _] = art[usize::from(*i)].points[0];
+        xf.paper_to_screen(pos2(x, y))
+    });
+    let dots = dots.collect();
+    (h, dots)
+}
+
+/// A click that chrome took lands nothing, whatever dot lies under it.
+#[test]
+fn aurookie_a_click_on_chrome_is_the_chromes() {
+    let (mut h, dots) = at_the_dots();
+    let pill = h.rect("Color").center();
+    nudge_view(&mut h.editor_mut().canvas, pill - dots[0]);
+    settle(&mut h);
+    let before = landed_so_far(&h);
+    h.click_pos(pill);
+    settle(&mut h);
+    assert_eq!(landed_so_far(&h), before, "the pill's click is the pill's");
+}
+
+/// A float over a dot: the click is the float's and lands nothing.
+#[test]
+fn aurookie_a_float_over_a_dot_keeps_the_click() {
+    let (mut h, dots) = at_the_dots();
+    h.open_float(Float::Brushes);
+    settle(&mut h);
+    let layer = LayerId::new(Order::Middle, Id::new(("float", Float::Brushes.heading())));
+    let body = h.ctx().viewport(|v| v.prev_pass.widgets.get_layer(layer).map(|r| r.rect).reduce(Rect::union));
+    let at_float = body.expect("the float stands").center();
+    nudge_view(&mut h.editor_mut().canvas, at_float - dots[0]);
+    settle(&mut h);
+    assert_eq!(h.ctx().layer_id_at(at_float), Some(layer), "the float is what stands there");
+    let before = landed_so_far(&h);
+    h.click_pos(at_float);
+    settle(&mut h);
+    assert_eq!(landed_so_far(&h), before, "a float's click is the float's");
+}
+
+/// A pen's tap is the pen route's, and the click Windows copies from it lands no
+/// second dot, by Touch or by the native stream. The Rig has no engine to paint
+/// the tap itself, so landing nothing here is the copy landing nothing.
+#[test]
+fn aurookie_a_pen_tap_paints_once() {
+    let (mut h, dots) = at_the_dots();
+    let before = landed_so_far(&h);
+    h.pen_tap(dots[0]);
+    settle(&mut h);
+    assert_eq!(landed_so_far(&h), before, "the copied click is no stroke");
+    let (mut h, dots) = at_the_dots();
+    let before = landed_so_far(&h);
+    h.rig_mut().pen.push(PenSample { pos: dots[0], pressure: Some(0.5), tilt: None, phase: PenPhase::Down });
+    h.run_frames(1);
+    h.rig_mut().pen.push(PenSample { pos: dots[0], pressure: Some(0.5), tilt: None, phase: PenPhase::Up });
+    h.run_frames(2);
+    let tapped = landed_so_far(&h);
+    h.click_pos(dots[0]);
+    settle(&mut h);
+    assert_eq!(landed_so_far(&h), tapped, "Windows's copy lands nothing, after {before:?}");
+}
+
+/// Three presses of one dot are one dot, and the task waits for the other two.
+#[test]
+fn aurookie_one_dot_is_pressed_once() {
+    let (mut h, dots) = at_the_dots();
+    let task = at(&h);
+    let before = landed_so_far(&h);
+    for _ in 0..3 {
+        h.click_pos(dots[1]);
+        settle(&mut h);
+    }
+    assert_eq!(landed_so_far(&h).0, before.0 + 1, "one dot's stroke");
+    assert_eq!(at(&h), task, "two dots to go");
+    h.click_pos(dots[0]);
+    settle(&mut h);
+    h.click_pos(dots[2]);
+    settle(&mut h);
+    assert_eq!(at(&h), task + 1, "each dot once");
+}
+
+/// A click with no brush in hand lands no dot.
+#[test]
+fn aurookie_only_the_brush_presses() {
+    let (mut h, dots) = at_the_dots();
+    let e = h.editor_mut();
+    e.canvas.set_tool(CanvasTool::Fill, &mut e.state);
+    settle(&mut h);
+    let before = landed_so_far(&h);
+    h.click_pos(dots[0]);
+    settle(&mut h);
+    assert_eq!(landed_so_far(&h), before, "Fill armed");
+}
+
+/// Resuming a saved run with a colour already picked: the next fill goes on in
+/// that colour, not the brush's start.
+#[test]
+fn aurookie_a_resume_keeps_the_colour() {
+    let lesson = rookie("up_late");
+    let body = lesson.tasks.iter().position(|t| matches!(t.done, Done::Filled { seed, .. } if seed == BODY_SEED)).expect("the body");
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    let e = h.editor_mut();
+    e.state.engine.project.app_meta.insert(KEY.to_string(), format!("{}/{body}", lesson.id));
+    e.state.untitled_group.push_str(" reopened");
+    assert!(e.lesson_door(), "the run resumed");
+    let [r, g, b, _] = plate::STARTER_SWATCHES[1].1.to_array();
+    assert_eq!(h.editor().canvas.brush_color, [r, g, b, 255], "white, as the last task had it");
+}
+
+/// The finish card says what the closing also opens with once.
+#[test]
+fn aurookie_the_finish_says_it_once() {
+    for lesson in lessons::ALL {
+        let (h, _ride) = ridden(lesson.id, Hand::ShowMe);
+        let words = h.painted_text().join("\n");
+        assert_eq!(words.matches("You made that.").count(), 1, "{}: {words}", lesson.id);
+    }
+}
+
+/// The lane keeps out of a lesson: `painted` is no sentence for a newcomer.
+#[test]
+fn aurookie_the_lane_says_no_painted() {
+    let lesson = rookie("up_late");
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    h.click(SHOW_ME);
+    h.wait(1.8);
+    settle(&mut h);
+    assert_eq!(at(&h), 1, "a line landed");
+    assert!(!h.painted_text().iter().any(|t| t.contains("painted")), "{:?}", h.state().status);
+}
+
+/// While a trace task's blue line stands, it is the only blue on the paper: the
+/// selected panel's frame and the page guides stand neutral, and come back.
+#[test]
+fn aurookie_the_only_blue_is_the_line() {
+    let lesson = rookie("not_a_pencil");
+    let trace = lesson.tasks.iter().position(|t| !t.guide.is_empty()).expect("a trace task");
+    let mut h = EditorHarness::as_first_run();
+    sized(&mut h, 1280.0, 800.0);
+    open(&mut h, lesson.id);
+    stand_on_the_tasks_before(&mut h, &lesson, trace);
+    h.editor_mut().begin_lesson(lesson, trace);
+    settle(&mut h);
+    let blues = |h: &EditorHarness| {
+        let paper = h.editor().canvas.dbg_rect;
+        h.painted_lines_in(paper).into_iter().filter(|c| *c == plate::TALLY || *c == plate::PENCIL_AO).count()
+    };
+    assert_eq!(blues(&h), 0, "no blue but the guide on the paper during a trace task");
+    h.click(LEAVE);
+    settle(&mut h);
+    assert_ne!(blues(&h), 0, "the guides are themselves again once the card goes");
+}
+
 /// Spec AU23 acceptance 4.
 #[test]
 fn aurookie_end_of_the_desk_file() {
     const CHALK: i32 = 200 * 3;
+    /// How far under the white body an eye must stand, summed over its channels.
+    const EYE_DARK: i32 = 3 * 40;
     // Glow lights the torn stub in the first peg too, and the stub stays.
-    const PEG_BAR_ENDS: i32 = 240;
+    const PEG_BAR_ENDS: i32 = PEG_BAR[1] as i32 + 20;
     let (h, ride) = ridden("end_of_the_desk", Hand::ShowMe);
     let File::One(ExportKind::Gif, path) = landed(&ride) else { panic!("a GIF") };
     // The encoder holds a repeated picture rather than writing it again.
@@ -231,6 +554,14 @@ fn aurookie_end_of_the_desk_file() {
     assert!(masses.iter().all(|m| m.0 > 500), "Deckle stands in each: {masses:?}");
     assert!(masses.windows(2).all(|m| m[1].1 >= m[0].1 - 1.0), "and never goes back: {masses:?}");
     assert!(masses[4].1 > masses[0].1 + 200.0, "his mass moves right: {masses:?}");
+    // Each pose keeps its eye: dark on the white.
+    let art = (rookie("end_of_the_desk").art)();
+    for (i, picture) in distinct[..5].iter().enumerate() {
+        let [x, y, _] = art[2 * i + 1].points[0];
+        let [sx, sy] = pose_seed(i);
+        let (eye, white) = (picture.pixel(x as i32, y as i32), picture.pixel(sx as i32, sy as i32));
+        assert!(bright(eye) + EYE_DARK < bright(white), "pose {i}'s eye: {eye:?} on {white:?}");
+    }
     // The last picture is the desk, and nobody on it.
     let last = distinct[5];
     assert_eq!(mass(last).0, 0, "nobody on the desk");
@@ -302,6 +633,16 @@ fn aurookie_not_a_pencil_file() {
     }
     let paper = page.pixel(P2_PAPER[0] as i32, P2_PAPER[1] as i32);
     assert!(bright(paper) > 3 * 240, "panel 2's paper stays paper: {paper:?}");
+    // The fill reaches the claws' ends, and the shadow falls from the panel's top.
+    for [x, y] in [[576, 342], [630, 370], [686, 336]] {
+        assert!(bright(page.pixel(x, y)) < 90, "a claw's end at ({x}, {y}): {:?}", page.pixel(x, y));
+    }
+    let art = (lesson.art)();
+    let close_up = art[9].bounds();
+    assert!(close_up[1] <= PANELS[3][1] as f32 + 6.0 && close_up[3] >= PANELS[3][3] as f32 - 6.0, "the close-up runs the panel: {close_up:?}");
+    let eye = art[10].bounds();
+    assert!(close_up[2] - eye[0] - art[10].width <= 6.0, "the eye is hard against his edge: {eye:?} in {close_up:?}");
+    assert!(art[5].bounds()[1] <= PANELS[1][1] as f32 + 6.0, "the shadow comes in from the top");
 }
 
 /// Spec AU23 acceptance 2: the card's button alone, one press a task and the
@@ -322,6 +663,66 @@ fn aurookie_trace_load() {
         let load = trace_load(lesson);
         assert!((1..=6).contains(&load), "{}: {load}", lesson.id);
     }
+}
+
+/// The lesson's steps stand on one row at both of the card's widths, five of them
+/// on the Desk's, the longest path a Rookie walks.
+#[test]
+fn aurookie_the_path_is_one_row() {
+    const ONE_ROW: f32 = 1.5;
+    let lesson = rookie("end_of_the_desk");
+    for (window, card) in [(1280.0, 220.0), (832.0, 180.0)] {
+        let mut h = EditorHarness::as_first_run();
+        sized(&mut h, window, 800.0);
+        open(&mut h, lesson.id);
+        assert_eq!(lesson::card_width(window), card);
+        let words = ["Plan", "Export"];
+        let painted = h.painted_text();
+        let path = painted.iter().find(|t| words.iter().all(|w| t.contains(w)));
+        let path = path.unwrap_or_else(|| panic!("the path: {painted:?}"));
+        assert_eq!(path.matches(char::is_uppercase).count(), 5, "five steps: {path}");
+        let (block, size) = h.painted_block(path);
+        assert!(block.height() < size * ONE_ROW, "{path} at {card}: {block:?} at {size}");
+        assert!(block.width() <= card, "{path} at {card}: {block:?}");
+    }
+}
+
+/// Every Rookie task's room stands whole beside the card at a laptop's size: the
+/// Timing sheet's row and the comic's lettering among them.
+#[test]
+fn aurookie_the_card_clips_no_room() {
+    let mut found = Vec::new();
+    for lesson in lessons::ALL {
+        for task in 0..lesson.tasks.len() {
+            let mut h = EditorHarness::as_first_run();
+            sized(&mut h, 1280.0, 800.0);
+            open(&mut h, lesson.id);
+            stand_on_the_tasks_before(&mut h, lesson, task);
+            h.editor_mut().begin_lesson(*lesson, task);
+            settle(&mut h);
+            let clip = measure::clip_here(&h, measure::Scope::All);
+            found.extend(clip.found.into_iter().map(|f| format!("{} task {task}: {f}", lesson.id)));
+        }
+    }
+    assert!(found.is_empty(), "{} findings:\n{}", found.len(), found.join("\n"));
+    // A scroll's own edge is no finding of the audit's, so these two by name: the
+    // sheet's second track on the Desk's narrow pane, and the lettering verbs.
+    let stands = |id: &str, stage: Stage, pane: Pane, words: &[&str]| {
+        let lesson = rookie(id);
+        let task = lesson.tasks.iter().position(|t| t.step == stage).expect("the step");
+        let mut h = EditorHarness::as_first_run();
+        sized(&mut h, 1280.0, 800.0);
+        open(&mut h, id);
+        stand_on_the_tasks_before(&mut h, &lesson, task);
+        h.editor_mut().begin_lesson(lesson, task);
+        settle(&mut h);
+        let shown = h.editor().pane_rects.iter().find(|(p, ..)| *p == pane).expect("the pane is forward").1;
+        for word in words {
+            assert!(shown.contains_rect(h.rect(word)), "{word} {:?} of {shown:?}", h.rect(word));
+        }
+    };
+    stands("end_of_the_desk", Stage::Drawing, Pane::XSheet, &["BG", "A"]);
+    stands("not_a_pencil", Stage::Manga, Pane::Manga, &[vocab::ADD_BALLOON, vocab::ADD_TEXT, vocab::SPEED_LINES]);
 }
 
 /// The lines these paths draw, with none of the eraser's or the seeds'.
@@ -349,14 +750,16 @@ fn aurookie_shapes_close() {
     }
     let edge = rookie("end_of_the_desk");
     let paper = (edge.paper.width, edge.paper.height);
-    for i in 0..FEET.len() {
-        let pose = lines(&edge, &[2 * i]);
-        assert!(bounds_a_region(&pose, lessons::pose_seed(i), paper, 8), "pose {i}");
-    }
     let page = rookie("not_a_pencil");
-    let paper = (page.paper.width, page.paper.height);
+    let page_paper = (page.paper.width, page.paper.height);
     let art: Vec<usize> = (0..(page.art)().len()).collect();
-    assert!(bounds_a_region(&lines(&page, &art), SHADOW_SEED, paper, 8), "the shadow");
+    for gap in [2, 8] {
+        for i in 0..FEET.len() {
+            let pose = lines(&edge, &[2 * i]);
+            assert!(bounds_a_region(&pose, pose_seed(i), paper, gap), "pose {i} at gap {gap}");
+        }
+        assert!(bounds_a_region(&lines(&page, &art), SHADOW_SEED, page_paper, gap), "the shadow at gap {gap}");
+    }
 }
 
 /// Spec AU23 acceptance 8.
@@ -410,6 +813,11 @@ fn aurookie_poses_stay_on_model() {
         let far = |a: Pt, b: Pt| (a[0] - b[0]).hypot(a[1] - b[1]);
         assert!(far(tail, next_tail).min(far(head, next_head)) <= STAYS, "poses {i} and {}: both feet slid", i + 1);
     }
+    // `Half of Deckle is past the edge`: the last pose's strip, measured.
+    let last = &spines[FEET.len() - 1];
+    let past: Vec<Pt> = last.iter().copied().filter(|p| p[0] >= DESK_EDGE).collect();
+    let share = art::length(&past) / STRIP_LONG;
+    assert!((share - 0.5).abs() <= 0.03, "{share} of him is past the edge");
     let up_late = rookie("up_late");
     let art = (up_late.art)();
     assert!(art[0].points.iter().all(|p| p[1] >= 500.0), "the arch's peak stands where the lessons file puts it");
