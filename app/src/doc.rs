@@ -677,7 +677,7 @@ pub struct ViewContext {
     pub active_role: anim_core::model::LayerRole,
     /// Loop playback at the end of the cut (off = stop on the last frame).
     pub loop_playback: bool,
-    /// LINE GUARD (shiage charter): while on, the `line`-named layer
+    /// LINE GUARD: while on, the `line`-named layer
     /// cannot be ARMED as the ink target — cycling skips it, tapping its
     /// row refuses. Arming-only: the pen path is untouched. Defaults ON
     /// when entering the Finishing room, OFF elsewhere.
@@ -2567,7 +2567,7 @@ impl AppState {
     /// new cel first. One undo step.
     pub fn paste_pixels(&mut self) {
         let Some(clip) = self.pixel_clip.clone() else {
-            self.refuse("refused — copy pixels first");
+            self.refuse("Copy part of a drawing first.");
             return;
         };
         if self.refuse_if_locked() {
@@ -6073,7 +6073,7 @@ impl AppState {
         self.begin_save(path);
     }
 
-    /// GM2: unsaved changes exist — the ● in the title and on the slate.
+    /// GM2: unsaved changes exist — the ● in the title and on the top row.
     /// A save still on its worker is not on disk yet, so it counts.
     pub fn is_dirty(&self) -> bool {
         self.meta_dirty

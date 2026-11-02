@@ -542,9 +542,9 @@ fn kind_color(kind: &NodeKind) -> Color32 {
         NodeKind::DrawingSource { .. } => crate::plate::INK2,
         NodeKind::Solid { .. } => crate::plate::INK2,
         NodeKind::ImageSource { .. } => crate::plate::INK,
-        // AUDIT [28]: these two hues are in no ratified palette. Node
-        // identity comes from tokens now — Legend for an operation. Blue is
-        // the selected node's and the output's, and no kind's (spec 2.2).
+        // AUDIT [28]: these two hues are in no palette. Node identity comes
+        // from tokens now — `INK2` for an operation. Blue is the selected
+        // node's and the output's, and no kind's (spec 2.2).
         NodeKind::Transform { .. }
         | NodeKind::Effect { .. }
         | NodeKind::Camera { .. }
@@ -556,7 +556,7 @@ fn kind_color(kind: &NodeKind) -> Color32 {
         }
         // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
         // means refusal or destruction, and the graph's result is
-        // neither. Its identity is carried by its Struck edge instead.
+        // neither. Its identity is carried by its strong edge instead.
         NodeKind::Output => crate::plate::INK,
     }
 }
@@ -741,9 +741,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
             Stroke::new(
                 edge,
                 // Selection is blue — the one colour meaning current/armed
-                // (Ao is never a selection; the colour law). The output
-                // node's identity edge is Struck, not Aka — the result is
-                // not a correction.
+                // The output node's identity edge is strong ink, not red —
+                // the result is not a correction.
                 if selected {
                     crate::plate::BLUE
                 } else if is_output {

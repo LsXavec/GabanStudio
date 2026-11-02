@@ -2074,7 +2074,7 @@ mod tests {
 
     // ---- AU16: the old token names ----
 
-    /// The six names the plate look wore and its compiled-in grain, spelt in
+    /// The six names the old look wore and its compiled-in grain, spelt in
     /// pieces so that this file is not a hit of its own scan.
     const OLD_NAMES: [&str; 7] = [
         concat!("GRAPH", "ITE"),
@@ -2218,14 +2218,15 @@ mod tests {
         }
     }
 
-    /// 0.5.0 in the app, the installer and the wire floor, and Help ▸ About
-    /// says it.
+    /// 0.6.0 in the app and the installer, and Help ▸ About says it. The wire
+    /// floor stays 0.5.0: this release adds no `Pane`, so a 0.5.0 peer still
+    /// reads the host's layout.
     #[test]
-    fn ship_version_is_0_5_0_everywhere() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.5.0");
-        assert_eq!(crate::update::CURRENT_VERSION, "0.5.0");
+    fn ship_version_is_0_6_0_everywhere() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.0");
+        assert_eq!(crate::update::CURRENT_VERSION, "0.6.0");
         assert_eq!(crate::net::MIN_PEER_VERSION, "0.5.0");
-        assert_eq!(crate::welcome::VERSION, "0.5.0");
+        assert_eq!(crate::welcome::VERSION, "0.6.0");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/installer/Cargo.toml");
         let text = std::fs::read_to_string(&manifest).unwrap();
         let version = text
@@ -2233,11 +2234,11 @@ mod tests {
             .map(str::trim)
             .find(|l| l.starts_with("version"))
             .expect("the installer's [package] version");
-        assert_eq!(version, "version = \"0.5.0\"", "{}", manifest.display());
+        assert_eq!(version, "version = \"0.6.0\"", "{}", manifest.display());
         let mut h = EditorHarness::new();
         h.perform(Action::About);
         h.run();
-        assert!(h.has("version 0.5.0"), "{}", h.describe());
+        assert!(h.has("version 0.6.0"), "{}", h.describe());
     }
 
     /// The refreshed sample shows off the release — a camera pan over a BG
@@ -2331,12 +2332,10 @@ mod tests {
     }
 
     /// The first launch of a new version opens the Welcome screen on What's
-    /// New, grouped by persona; Start brings the cards back.
+    /// New, one page of old words and new; Start brings the cards back.
     #[test]
-    fn ship_whats_new_is_grouped_by_persona_and_opens_first() {
-        let personas: Vec<&str> = crate::welcome::WHATS_NEW.iter().map(|(p, _)| *p).collect();
-        assert_eq!(personas, ["Animator", "Painter", "Compositor", "3D", "Manga", "Editor"]);
-        assert!(crate::welcome::WHATS_NEW.iter().all(|(_, items)| !items.is_empty()));
+    fn ship_whats_new_is_one_page_and_opens_first() {
+        assert!(!crate::vocab::OLD_WORDS.is_empty());
         assert!(crate::welcome::whats_new_due(""), "a first launch is due");
         assert!(!crate::welcome::whats_new_due(crate::welcome::VERSION), "seen once, not again");
         assert!(Config::default().ui.whats_new_seen.is_empty());
@@ -2346,14 +2345,15 @@ mod tests {
         let mut h = PanelHarness::new(egui::vec2(1280.0, 800.0), (w, true), move |ui, (w, show)| {
             let _ = crate::welcome::ui(ui, w, show, &[false; 5], &binds);
         });
-        assert!(h.has("What's New in 0.5.0"), "{}", h.describe());
-        for p in personas {
-            assert!(h.has(p), "{p}\n{}", h.describe());
+        assert!(h.has("What's New in 0.6.0"), "{}", h.describe());
+        for (old, new) in crate::vocab::OLD_WORDS {
+            let row = format!("{old} → {new}");
+            assert!(h.has(&row), "{row}\n{}", h.describe());
         }
         assert!(!h.has("New from template"), "the Start cards hide behind the tab");
         h.click("Start");
         assert!(h.has("New from template"), "{}", h.describe());
-        assert!(!h.has("What's New in 0.5.0"));
+        assert!(!h.has("What's New in 0.6.0"));
     }
 
     /// The start-up route (Startup::Welcome) through
@@ -2441,6 +2441,8 @@ mod tests {
     /// research lives (every path it names is there), at this version.
     #[test]
     fn ship_readme_covers_the_release() {
+        use crate::export_step::GIF_INSTEAD;
+        use crate::steps::{ProjectKind, bar};
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let readme = std::fs::read_to_string(root.join("README.md")).expect("the README");
         let section = |heading: &str| -> String {
@@ -2450,6 +2452,16 @@ mod tests {
             body.split("\n## ").next().unwrap_or_default().to_string()
         };
         assert!(readme.contains(&format!("Version {}.", crate::welcome::VERSION)));
+        // AU17: the new look, the steps of every bar and GIF export.
+        let look = section("## What's new in the look");
+        for kind in [ProjectKind::Drawing, ProjectKind::Animation, ProjectKind::Comic] {
+            let words: Vec<&str> = bar(kind).iter().map(|s| s.label).collect();
+            let row = words.join(", ");
+            assert!(look.contains(&format!("| {row} |")), "no {row:?} row in the README");
+        }
+        for word in ["GIF", "PNG image", GIF_INSTEAD, "ffmpeg"] {
+            assert!(section("## Export").contains(word), "no {word:?} under Export");
+        }
         let features = section("## What it does, by who reaches for it");
         for persona in ["Animator", "Painter", "Compositor", "3D artist", "Manga artist", "Editor"] {
             assert!(features.contains(&format!("**{persona}")), "no {persona} in the features");
@@ -2460,6 +2472,11 @@ mod tests {
         }
         let keys = section("## Keyboard basics");
         let cfg = Config::default();
+        // AU17: the keymap notes, the stock chords as they stand.
+        for action in crate::welcome::MOVED_CHORDS {
+            let chord = cfg.chord_for(action).expect("a stock key").label();
+            assert!(keys.contains(&chord), "{chord} is not in the keymap notes");
+        }
         let rows: [(&str, &[Action]); 8] = [
             ("the command palette", &[Action::CommandPalette]),
             ("the shortcut sheet", &[Action::ShortcutSheet]),
@@ -2848,8 +2865,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 1295;
-    const ASSERT_FLOOR: usize = 7700;
+    const TEST_FLOOR: usize = 1369;
+    const ASSERT_FLOOR: usize = 8070;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

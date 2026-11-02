@@ -49,7 +49,7 @@ pub struct DeckReads {
     pub flip_held: bool,
 }
 
-/// An engraved label over a track, with its value beside it.
+/// A label over a track, with its value beside it.
 fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
     let mut job = egui::text::LayoutJob::default();
     job.append(
@@ -843,7 +843,7 @@ pub struct CanvasView {
     /// Active layer name last frame — detects layer switches so the brush
     /// colour follows the layer.
     /// The pencil-box preset the brush was last armed FROM (by name). The
-    /// slot's Tally ring draws broken once the live numbers drift off it.
+    /// slot's blue ring draws broken once the live numbers drift off it.
     pub(crate) armed_preset: Option<String>,
     /// SESSION v2: this app is a GUEST in someone's room — finished
     /// strokes are SENT, never committed locally (one writer, NEVER-DO 1).
@@ -895,7 +895,7 @@ pub struct CanvasView {
     pub(crate) peers: Vec<crate::net::PeerView>,
     pub(crate) presence_pos: Option<[f32; 2]>,
     /// MISS CHECK (shiage): the hole-hunt — the ground the cel
-    /// composites over flips Paper -> Graphite so unpainted pixels read
+    /// composites over flips from paper to dark so unpainted pixels read
     /// as dark pits. Pure UI paint; health is a meter, never a lamp.
     pub(crate) miss_check: bool,
     /// R-FLIP (momentary): while held, the canvas shows the PREVIOUS
@@ -2327,7 +2327,7 @@ impl CanvasView {
         }
     }
 
-    /// The slate's arming line: what the pen does right now, in a word.
+    /// What the pen does right now, in a word.
     pub fn arming_pencil(&self) -> String {
         match self.tool {
             CanvasTool::Select => "select".into(),
@@ -2357,9 +2357,8 @@ impl CanvasView {
             && self.brush_aliased == p.aliased
     }
 
-    /// One pencil-box slot (genga room charter): an XL detent carrying the
-    /// preset's specimen stroke in its own ink, engraved name, and hotkey
-    /// digit. The specimen is painted from the preset's REAL numbers — the
+    /// One pencil-box slot: an XL detent carrying the preset's specimen
+    /// stroke in its own ink, its name, and hotkey digit. The specimen is painted from the preset's REAL numbers — the
     /// pressure story you see is the one you'll get.
     fn pencil_slot(
         &mut self,
@@ -2395,8 +2394,8 @@ impl CanvasView {
             return;
         }
         let painter = ui.painter();
-        // The specimen sits in a Well recess: paint is MATERIAL, seated,
-        // never a signal (the charters' material rule).
+        // The specimen sits in a `WELL` recess, so its paint reads as a
+        // sample of the brush, not as a state of the slot.
         painter.rect_filled(rect, plate::R_CONTROL, plate::WELL);
         let ink = p.color.unwrap_or(plate::INK.to_array());
         let n = 12;
@@ -3268,8 +3267,7 @@ impl CanvasView {
 
     /// The Brushes float: the old brush rail, the pencil box and the deck's
     /// pen aids. Its essentials stand first, the rest behind `More`. Every
-    /// slider is a bare track; labels ride ABOVE the tracks as engraved
-    /// value lines.
+    /// slider is a bare track; labels ride ABOVE the tracks as value lines.
     pub(crate) fn brush_rail_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -3285,9 +3283,9 @@ impl CanvasView {
         // Never the bare word: the rail's keys are spoken `Brush` and `Eraser`.
         plate::legend(ui, &format!("{}: {title}", crate::vocab::DRAWING_WITH));
         ui.add_space(8.0);
-        // THE PENCIL BOX (genga room charter): the three named pencils.
-        // Arming a pencil arms the brush; the Tally ring breaks when the
-        // live brush drifts off the preset.
+        // THE PENCIL BOX: the three named pencils. Arming a pencil arms the
+        // brush; the blue ring breaks when the live brush drifts off the
+        // preset.
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             // Three across what the float leaves: its handle takes a gutter.
@@ -3714,8 +3712,8 @@ impl CanvasView {
                 });
                 ui.add_space(4.0);
                 if self.tool == CanvasTool::Fill {
-                    // Engraved label BEFORE, 64pt value (shiage:
-                    // leak-chasing nudges these several times a cel).
+                    // Label BEFORE, 64pt value (chasing a leak nudges these
+                    // several times a drawing).
                     ui.horizontal(|ui| {
                         plate::legend(ui, "gap");
                         let mut gap = self.fill_gap;
@@ -4873,8 +4871,8 @@ impl CanvasView {
             && self.raster
             && let Some(p) = paint
         {
-            // Ghost BEHIND leans Ao (continuity), ghost AHEAD leans
-            // Legend (spec defect 14) — as multiply tints for now; the
+            // Ghost BEHIND leans blue (continuity), ghost AHEAD leans
+            // grey (spec defect 14) — as multiply tints for now; the
             // true re-ink lands on the VECTOR path in Phase 4, and the
             // raster blit shader stays untouched (Do-NOT-build).
             let ga = (255.0 * self.onion.opacity.clamp(0.0, 1.0)) as u8;
@@ -4886,8 +4884,8 @@ impl CanvasView {
                 }
             } else {
                 // GM6: the light table's pins first (SCAFFOLD, in Ao at the
-                // light table's opacity), then the ghosts behind (Ao) and
-                // ahead (the quiet Legend lean).
+                // light table's opacity), then the ghosts behind (blue) and
+                // ahead (a quiet grey lean).
                 if let Some(id) = p.onion_id(2) {
                     let la = (255.0 * self.light_table.opacity.clamp(0.0, 1.0)) as u8;
                     paint_paper_image(&painter, &xf, id, ghost_tint(ONION_BEHIND_TINT, la));
@@ -5038,8 +5036,8 @@ impl CanvasView {
                 "Playing — space to stop",
             );
         }
-        // GM6: shift & trace rests the pen — the paper says so (the Tally
-        // dot: the latch is ARMED), and a click on the chip ends the latch.
+        // GM6: shift & trace rests the pen — the paper says so (the blue
+        // dot: the latch is on), and a click on the chip ends the latch.
         if tracing {
             let text = "Shift and trace: pen resting. Click to end.";
             let font = plate::Role::Small.font();
@@ -5108,7 +5106,7 @@ impl CanvasView {
         // ---- SESSION PRESENCE (PSD-session-room): the other artists.
         // Same-frame peers draw at full presence — blue pencil cursor ring,
         // name tag, live wet ghost; peers on other frames are named at the
-        // paper's top edge in Legend (you know where they are, they never
+        // paper's top edge in quiet ink (you know where they are, they never
         // paint over your frame).
         if !self.peers.is_empty() {
             let mut away = 0;
@@ -5172,7 +5170,7 @@ impl CanvasView {
             );
         }
 
-        // ---- THE RULE's mirror (spec §5.4): the active column's run
+        // ---- The sheet's run marks, mirrored: the active track's run
         // marks at the canvas's left edge, at the sheet's own 18pt pitch —
         // "how long is this hold, am I on ones, which frame" answered in
         // peripheral vision at the pen tip, like a VU meter at a desk.
@@ -5248,7 +5246,7 @@ impl CanvasView {
                     );
                 }
             }
-            // The current frame: the strip's one Tally notch.
+            // The current frame: the strip's one notch.
             let ncy = origin + (state.view.frame as f32 + 0.5) * 18.0;
             mp.add(egui::Shape::convex_polygon(
                 vec![
@@ -6081,7 +6079,7 @@ impl CanvasView {
             {
                 self.asked.push(Action::PastePixels);
             } else {
-                state.refuse("refused — the clipboard holds text, not pixels (copy pixels first)");
+                state.refuse("The clipboard holds text, not pixels. Copy part of a drawing first.");
             }
         }
     }
@@ -8170,9 +8168,9 @@ pub fn shift_tiles(
 
 /// The onion's ghosts of `column` at `frame` for the vector path, each
 /// with its tint, farthest first so the nearest lies on top. Ghost BEHIND
-/// = Ao (continuity — where the motion came from); ghost AHEAD = Legend
-/// (the plate stating what is next). Spec defect 14: the old red/green
-/// pair is dead — Aka never sits on the paper for hours, and there is no
+/// = blue (continuity — where the motion came from); ghost AHEAD = grey
+/// (what is next). Spec defect 14: the old red/green
+/// pair is dead — red never sits on the paper for hours, and there is no
 /// green in this application. The drawing shown here never ghosts, and on
 /// a held frame the side behind starts past it ([`vector_onion_set`]).
 pub(crate) fn onion_ghosts(
@@ -8213,9 +8211,9 @@ pub fn chart_glyph(painter: &egui::Painter, rect: Rect, marks: &[f32], ink: Colo
     }
 }
 
-/// The onion's raster tints, unchanged since spec defect 14: Ao's paper
-/// wash behind (the light table's pins wear it too), Legend's ahead. Aka
-/// is never an onion tint (D7 keeps it for refusals).
+/// The onion's raster tints, unchanged since spec defect 14: a blue paper
+/// wash behind (the light table's pins wear it too), grey ahead. Red is
+/// never an onion tint (D7 keeps it for refusals).
 pub const ONION_BEHIND_TINT: [u8; 3] = [160, 195, 232];
 pub const ONION_AHEAD_TINT: [u8; 3] = [205, 206, 199];
 

@@ -439,15 +439,15 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     // takes comes off the rows (spec 2.6: row density unchanged).
     ui.spacing_mut().item_spacing.y = plate::SHEET_GAP;
 
-    // (The title row is EVICTED — the dock tab and the Slate already name
-    // this sheet; ~145pt of header chrome becomes grid rows. Spec §4.2.)
+    // (The title row is EVICTED — the dock tab already names this sheet;
+    // ~145pt of header chrome becomes grid rows.)
 
     // AU15: one line stands, the tracks and `Details`. The rest of the head
     // folds under it (spec 7.1), and the rows take the room.
     let details = state.panel_more.is_open(plate::MORE_SHEET);
 
-    // ---- THE HENSHU HEAD (charter §B): ONE fixed 26pt row, Edit room
-    // only — cut nav, the cut's identity, standing LIFT KEY, and the
+    // ---- THE TIMING HEAD: ONE fixed 26pt row, Timing step only — shot
+    // nav, the shot's identity, standing LIFT KEY, and the
     // HOLD readout. The editor of timing stays the tail drag; this row
     // answers the questions around it.
     if edit_room && details {
@@ -509,7 +509,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                 }
             }
             ui.add_space(8.0);
-            // Standing Remove from timeline (charter element 12): the big
+            // Standing Remove from timeline: the big
             // target is safe BECAUSE the guard is temporal — the hold, not
             // the size.
             if plate::danger(ui, crate::vocab::REMOVE_FROM_TIMELINE) && gesture_safe {
@@ -582,8 +582,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                         .iter()
                         .map(|c| (c.id, c.name.clone()))
                         .collect();
-                    // AUDIT [4]: a mutually-exclusive pick is a DETENT — the Legend
-                    // ring + Tally disc — not a selectable whose text turns amber.
+                    // AUDIT [4]: a mutually-exclusive pick is a DETENT — a grey
+                    // ring and a blue disc — not a selectable whose text turns amber.
                     for (id, name) in columns {
                         if plate::detent(ui, state.view.active_column == id, &name).clicked() {
                             state.view.active_column = id;
@@ -640,8 +640,8 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
     });
     }
 
-    // (Scratch audio import/remove is EVICTED to the Slate's file detent —
-    // the sheet still draws the waveform column when a clip exists.)
+    // (Scratch audio import/remove is EVICTED to the File menu — the sheet
+    // still draws the waveform track when a clip exists.)
     param_key_strip(ui, state);
 
     // Drawing library — a DRAWER (spec §4.2): collapsed until reached for.
@@ -920,7 +920,7 @@ fn grid(
         .show_rows(ui, ROW_H, frame_count as usize, |ui, rows| {
             ui.spacing_mut().item_spacing.y = 0.0;
             state.sheet_ui.rows_shown = rows.clone();
-            // THE RULE paints in ONE pass after the rows (spec §5.2) — from
+            // The run marks paint in ONE pass after the rows — from
             // a whole-sheet painter, never from painter_at(row_rect), which
             // would clip every stroke to one row.
             let sheet_painter = ui.painter().clone();
@@ -967,7 +967,7 @@ fn grid(
                     },
                 );
 
-                // (Drawing-column marks are painted by THE RULE's
+                // (Drawing-track marks are painted by the run marks'
                 // post-pass below — identity and duration as one stroke,
                 // not per-row text islands.)
                 let cut = state.cut();
@@ -1203,9 +1203,9 @@ fn grid(
                 }
             }
 
-            // ---- THE RULE (spec §5.2–5.3): rules of time, then one
-            // continuous mark per run — key dot, Ao hold stroke, tail
-            // cross-tick, name at the head only. Hover turns a run Tally.
+            // ---- The run marks: rules of time, then one continuous mark
+            // per run — key dot, blue hold stroke, tail cross-tick, name at
+            // the head only. Hover turns a run the armed blue.
             if let Some((ctop, cleft)) = geom {
                 let cut = state.cut();
                 let right = cleft + sheet_w;
@@ -1375,7 +1375,7 @@ fn grid(
                         );
                     }
                     // GM15: a storyboard panel's cut number at its head, on
-                    // the cell's right edge — Tally when set from the
+                    // the cell's right edge — blue when set from the
                     // cell's menu, dim when it is the panel's order.
                     if state.is_panel_column(col.id) {
                         let right = cleft + GUTTER_W + (ci + 1) as f32 * COL_W - 4.0;
@@ -2303,7 +2303,7 @@ fn opacity_cells(
     };
     // AUDIT [3]: this was an egui Slider whose track is invisible
     // under our Visuals — a bare handle on the plate with no 0 or
-    // full. The rail shows its range; the readout is Small, Struck.
+    // full. The rail shows its range; the readout is Small, strong ink.
     let resp = plate::rail(ui, &mut live, 0.0..=1.0, track);
     ui.label(
         egui::RichText::new(format!("{:3.0}%", live * 100.0))

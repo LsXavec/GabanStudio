@@ -1,3 +1,5 @@
+> History: the app's look and words now follow `research/PSD-approachable-ui.md`; where they differ, that document wins.
+
 <!-- RATIFIED for implementation 2026-08-17 under research/PSD-editor-repaint.md.
      Root: the repaint never changes what the document contains or how the
      pen reaches it. Phase boundaries and the Do-NOT-build list bind as law. -->

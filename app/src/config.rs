@@ -1209,8 +1209,8 @@ impl Action {
             RoomLayout => &["genga", "lo", "layout", "room"],
             RoomDrawing => &["drawing", "douga", "genga", "room"],
             RoomFinishing => &["paint", "ink", "colour", "shiage", "finishing", "room"],
-            RoomComposite => &["composite", "compositing", "photography", "satsuei", "room"],
-            RoomEdit => &["edit", "henshu", "henshū", "editing", "room"],
+            RoomComposite => &["composite", "compositing", "photography", "satsuei", "node graph", "room"],
+            RoomEdit => &["edit", "henshu", "henshū", "editing", "x-sheet", "room"],
             // GM8: the auto-comp and the project's settings.
             BuildComposite => &["build composite", "composite", "auto comp", "autocomp", "wire graph", "build graph"],
             // GM9: the FX it adds, by their trade words too.
@@ -1544,7 +1544,7 @@ impl Action {
             PrevFrame => Some(k("S")),
             FirstFrame => Some(k("Home")),
             LastFrame => Some(k("End")),
-            // One verb, one key (room charters): Q/W step the exposure.
+            // One verb, one key: Q/W step the exposure.
             PrevKey => Some(k("Q")),
             NextKey => Some(k("W")),
             MissCheck => Some(k("M")),
@@ -2382,8 +2382,7 @@ pub const SKETCH_PENCIL: &str = "atari";
 pub const CLEAN_PENCIL: &str = "genga";
 
 /// Starter presets mapped to the anime pipeline stages.
-/// THE PENCIL BOX (genga room charter): the three named pencils, hotkeys
-/// 1/2/3. Numbers ratified 2026-08-17 (research/ROOM-CHARTERS.md) — each is
+/// THE PENCIL BOX: the three named pencils, hotkeys 1/2/3. Numbers ratified 2026-08-17 (research/ROOM-CHARTERS.md) — each is
 /// justified against the engine's pressure pipeline, not taste.
 pub fn pencil_box_presets() -> [BrushPreset; 3] {
     [
@@ -3486,8 +3485,8 @@ pub fn settings_window(
                         "Keyboard shortcuts",
                     );
                     // AUDIT [18]: a mutually-exclusive pick is a DETENT.
-                    // As selectables these rendered their labels in Tally,
-                    // which is the armed LAMP, never text.
+                    // As selectables these rendered their labels in the
+                    // armed blue, which is a state, never text.
                     for (cat, label) in [
                         (SettingsCategory::General, "General"),
                         (SettingsCategory::Performance, "Performance"),

@@ -1,4 +1,5 @@
-//! THE RULE's data model (spec §5.1) — a drawing's life as one interval.
+//! The Timing sheet's run marks: the data model of a drawing's life as one
+//! interval.
 //!
 //! The core crate stores timing as sparse keys with hold semantics, so runs
 //! are the model's NATIVE shape; the old per-row `key_at` rendering painted
@@ -19,7 +20,7 @@ pub struct Run {
     pub drawing: DrawingId,
 }
 
-/// Everything THE RULE paints for one column.
+/// Everything the sheet's run marks paint for one track.
 pub struct ColumnMarks {
     pub runs: Vec<Run>,
     /// Frames carrying an explicit Empty key (the hold-terminator ring).

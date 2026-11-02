@@ -379,7 +379,7 @@ fn rail_at(ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32) -> egu
     .inner
 }
 
-/// A pressure-curve editor row: a Well the artist drags a control point
+/// A pressure-curve editor row: a `WELL` the artist drags a control point
 /// in (three-point curve: fixed ends' Y + one movable middle).
 fn curve_row(
     ui: &mut egui::Ui,
@@ -408,7 +408,7 @@ fn curve_row(
             .iter_mut()
             .find(|c| c.target == target && c.sensor == "pressure")
         {
-            // The editor: 96×36 Well; drag moves the nearest point.
+            // The editor: 96×36 `WELL`; drag moves the nearest point.
             let (rect, resp) = ui.allocate_exact_size(vec2(96.0, 36.0), Sense::drag());
             let p = ui.painter();
             p.rect_filled(rect, 0.0, plate::WELL);

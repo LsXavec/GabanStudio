@@ -1,5 +1,5 @@
-//! THE COLORS PANEL (the swatch board of the shiage charter, built 2026-08-17,
-//! AU13: made canvas-first). Ten starter swatches, `Add color` and `Edit
+//! THE COLORS PANEL (the swatch board, built 2026-08-17, AU13: made
+//! canvas-first). Ten starter swatches, `Add color` and `Edit
 //! colors` stand above the scroll, so none of them can leave the screen. A
 //! person's own colors are pots under them, a pot's own colour its icon; the
 //! armed pot is ringed. Character groups and color names are disclosed. The

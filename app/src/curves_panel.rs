@@ -149,9 +149,9 @@ pub struct CurvesState {
     value_editing: bool,
 }
 
-/// One ink per shown column, from the plate's inks that carry no other
-/// meaning here — Tally is the current frame, Aka a refusal, and a selected
-/// key wears a ring, not a colour.
+/// One ink per shown track, from the inks that carry no other meaning here —
+/// blue is the current frame, red a refusal, and a selected key wears a ring,
+/// not a colour.
 fn ink(i: usize) -> egui::Color32 {
     [
         plate::INK,

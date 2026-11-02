@@ -1112,7 +1112,7 @@ mod tests {
         assert!(h.editor().close_ok && !h.has("Save changes?"), "then closed");
     }
 
-    /// The slate's file menu, one item (a click inside a menu closes it).
+    /// The File menu, one item (a click inside a menu closes it).
     fn file_menu(h: &mut EditorHarness, item: &str) {
         h.click(crate::vocab::MENU_FILE);
         h.click(item);
@@ -1120,7 +1120,7 @@ mod tests {
 
     #[test]
     fn worksafe_new_and_open_ask_first() {
-        // The slate's New… / Open… — and the shell's Ctrl+N / Ctrl+O, which
+        // The File menu's New… / Open… — and the shell's Ctrl+N / Ctrl+O, which
         // carry out the editor's request through the same Editor::leave.
         let mut clean = EditorHarness::with_state(doc());
         file_menu(&mut clean, "New…");

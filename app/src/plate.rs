@@ -975,7 +975,7 @@ pub fn dock_style(style: &egui::Style) -> egui_dock::Style {
 }
 
 // ---------------------------------------------------------------------------
-// Words: the two inks as text helpers.
+// Words: the inks as text helpers.
 // ---------------------------------------------------------------------------
 
 /// A legend's words in sentence case: the first letter up and the rest as

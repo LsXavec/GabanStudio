@@ -144,6 +144,27 @@ pub const MANGA_PANE: &str = "Manga (pages)";
 pub const CANVAS_GESTURES: &str = "Canvas gestures";
 pub const LIP_FLAP_TITLE: &str = "Lip flap";
 
+/// AU17: What's New's list, old word to new word: the words of section 3 an
+/// upgrader meets first. This one page says the old words; everywhere else
+/// they live on as Search aliases.
+pub static OLD_WORDS: &[(&str, &str)] = &[
+    ("room", STEP),
+    ("layout", STEP_PLAN),
+    ("genga", "Plan, Draw"),
+    ("shiage", STEP_COLOR),
+    ("satsuei", STEP_EFFECTS),
+    ("henshū", STEP_TIMING),
+    ("cut", SHOT),
+    ("cel", DRAWING),
+    ("column", TRACK),
+    ("X-Sheet", TIMING_SHEET),
+    ("onion", GHOST_FRAMES),
+    ("Render Queue", EXPORT_QUEUE),
+    ("Node Graph", EFFECTS_GRAPH),
+    ("Brush Forge", BRUSH_MAKER),
+    ("Shinkō board", SHOTS),
+];
+
 /// A stack's stored name as the screen says it. Stored names stay
 /// (`config.rs` matches them by string); a name the user gave shows as typed.
 pub fn stack(stored: &str) -> &str {

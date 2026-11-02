@@ -805,8 +805,9 @@ impl Editor {
         let exported = landed > 0;
         let added = std::mem::take(&mut self.say.added);
         let row_clicked = std::mem::take(&mut self.state.sheet_ui.row_clicked);
-        // Work goes on, and the report has been overtaken.
-        if stroked || added {
+        // Work goes on, and the report has been overtaken: it must not hold
+        // the row of what comes next over a fill or a play.
+        if stroked || filled || added || self.state.view.playing {
             self.say.exported = None;
         }
         let state = &self.state;

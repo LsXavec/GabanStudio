@@ -1229,11 +1229,26 @@ fn end_job(state: &mut AppState, i: usize, result: Result<usize, String>) -> Opt
         Err(why) if why != CANCELLED => {
             let asked = rq.queue.jobs.get(i).and_then(|j| j.asked);
             let again = asked.map(|kind| Ask::App(crate::AppRequest::ExportTo(kind)));
-            rq.panel.failed = Some(Failed { why: why.clone(), again });
+            rq.panel.failed = Some(Failed { why: plain_why(why), again });
         }
         _ => {}
     }
     rq.queue.finish(i, result)
+}
+
+/// AU17: the reason an export stopped, in words a person can act on. Rust
+/// prints an OS failure as `Access is denied. (os error 5)`; a reason with no
+/// such number is already ours and stands as it is.
+pub(crate) fn plain_why(why: &str) -> String {
+    let Some((said, code)) = why.split_once(" (os error ") else {
+        return why.to_string();
+    };
+    match code.trim_end_matches(')').parse() {
+        Ok(5 | 32 | 33) => "this folder cannot be written to. Pick another, or close what is using the file".into(),
+        Ok(39 | 112) => "the disk is full".into(),
+        Ok(2 | 3) => "that folder is not there any more".into(),
+        Ok::<u32, std::num::ParseIntError>(_) | Err(_) => said.trim_end().to_string(),
+    }
 }
 
 /// Tests: block until the running job ends (no sleep, no clock).

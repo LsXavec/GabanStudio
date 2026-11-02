@@ -1582,6 +1582,12 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 20. Decision: AU25, The Only Word's speed lines. The generator has no panel to stay in, so they cross the page, and the sentence now says so. Confining them to the dive needs a panel scope on the generator, an engine change.
 21. AU25: The Only Word's Export page at 2591×3624 has no timing and no shot: the headless page export of a real B5 is long. One timed run of `Export pages` on the target rig.
 22. AU25: The Only Word's balloon lands on the panel's middle, so it covers most of the black wall the lesson floods; the wall shows at its corners. Decision: leave it, or draw the wall larger than the balloon or the balloon off to a side.
+23. AU10: once the Hide tools row is answered the band is gone, so a refusal on the return dot's card may stand on the paper's corner for its 4 s dwell, with the pen drawing through it. Decision: is that "hints never cover art", or does it need a new placement?
+24. AU10: on real hardware, OS key repeat with a physically held key, and a canvas torn out to its own OS window, which loses its rail and keeps T.
+25. AU23: a Japanese reader checks the lessons' hover lines before release. The `shakutori-mushi` line was not added, as the lessons file asks.
+26. AU25: nobody has walked the nine lessons by hand. The gate's Experienced hands stand in for some controls: the Brushes rows, the camera move, ease, dust, the three rulers and the balloon words go through the state functions the controls call. Desk to Lamp's stand-in fills A only, in one colour, and seeds no drawing of W; The Only Word's stand-in balloon lands in the selected panel.
+27. Decision: AU25, the Lip flap window stays open over the menu bar after `generate`, so a ring on More is not painted until the window is shut. `playback`'s test pins the window as non-modal, so AU17 did not close it.
+28. Decision: AU12, painted text on the frozen arrangement misses the spec numbers at median 9 px and 12.9% at 8 px or less. The Body-to-14 step in 2.5 was not tried; it would ripple through the layouts.
 
 **AU2 notes.** Choices the build made where this document was silent or spoke twice. None needs a device; they are here so the Lead sees them once.
 
@@ -1731,6 +1737,33 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - Every panel scrolls by `Pane::scroll_policy`: `keep_minimum` holds its minimum, scrolls whatever outgrows the slot, and registers a viewport only on an axis that truly runs over. Scroll handles show at rest (0.5), so a word cut at a scroll's edge has its cue; the audit counts a viewport that shows nothing as a clip.
 - At a panel's minimum, a control past the corner of two views is the pair's: the pane pans across, its list goes down. The audit reads that by axis.
 - Plan's canvas tab says `Canvas`, as feedback 4.3 has it, and the `Preview` row left `vocab`. `Shots`' count keeps its `shot(s)`: a pin, and no budget line moves it; a lone shot shows the sentence alone. Sentence case for Forge's rows and Export's `preset`, `size` and `tone` waits on the same budget line.
+
+**AU17 notes: the final tally.** Run on 2026-11-02 at version 0.6.0, on WARP, as one ordinary pass and one ignored pass. Ordinary: 1361 passed, 0 failed, 13 ignored in `animstudio`, plus `anim-core`'s, against 828 at the start. Ignored: all 13 of `animstudio` passed, with 344 shots at both sizes. `soak_real_projects` did not run: it needs `ANIMSTUDIO_SOAK` to name real `.animproj` files, and none were given. A row not listed here is a named test, green in the ordinary pass.
+
+| Gate | Today | Target | Measured |
+|---|---:|---:|---:|
+| Controls, blank Draw | 72 | ≤30 | 23 |
+| Controls after a stroke | 98 | ≤36 | 24 |
+| Words, blank Draw | 100 | ≤40 | 22 |
+| Menus, first-level rows | 9, 143 | ≤6, ≤60 | 6, 60 |
+| Start float, worst case | 19, 74 | ≤14, ≤30 | 14, 30 |
+| First screen | 19, 74 | ≤44, ≤70 | 35, 47 |
+| Lessons page | n/a | ≤12, ≤48 | 12, 44 |
+| Paper uncovered with Start at its largest | n/a | ≥58.0% | 60.84% |
+| Plan paper share | n/a | ≥49.5%, ≥43.0% | 50.00%, 43.55% |
+| Plan whole sheet rows | n/a | ≥32, ≥27 | 40, 35 |
+| Tooltip jargon kinds | 24 | ≤3 | 3 of 428 strings |
+| Shapes per room | 298–615 | Not above today | 235–433 |
+| Vertices per room | 5,154–9,124 | Not above today | 5,010–7,968 |
+| Tessellation | n/a | ≤407 µs | 96–162 µs |
+| Suite floors | n/a | Only rise | 1369 tests, 8078 asserts |
+
+Named misses and limits: MP4 with nothing installed stays **not met by this plan**, a Lead decision. Painted text on the frozen arrangement stays the AU12 miss (item 28 of the list above). Idle repaint was not touched and not measured. J1 to J5 hold their ceilings in their tests; J1's and J2's jargon now reads the words the Export step paints, not only the lane, and the limits held unloosened.
+
+- What's New stands for an upgrader with the Start latch off too: `startup_route` asked only the latch, so the page could be due and never drawn. `welcome_startup_route_picks_the_screen` now sets `whats_new_seen`, because its subject is the latch and What's New outranks it.
+- The chords are read through `menus::first_chord`, the live published binds, not `Config::chord_for`, which the page cannot reach. `vocab::OLD_WORDS` is a `static` so `auseam_vocab_table_is_pinned` still counts one constant per word.
+- AU9's leftovers: a report gives way to a fill or a play, a sequence or MP4 row says what it makes, and OS failure words are plain. The Lip flap window is left as it is (item 27 above).
+- `app/assets/tex/plate_grain.png` stays on disk, nothing reads it, and `iconforge` still writes it: deleting it is the Lead's.
 
 ---
 

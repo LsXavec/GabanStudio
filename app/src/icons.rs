@@ -167,15 +167,51 @@ const MASKS: &[(Icon, &str, &[u8], &[u8])] = &[
     ),
 ];
 
-/// Decode a white-alpha PNG mask into a texture, cached per-Context. The
-/// 24px render serves targets up to 28pt; larger targets get the 48px cut.
+/// Spec 2.7: the 96px cut, for a key on a large or high-density display.
+const MASKS_96: &[(Icon, &[u8])] = &[
+    (Icon::Brush, mask_bytes!("brush", 96)),
+    (Icon::Eraser, mask_bytes!("eraser", 96)),
+    (Icon::Lock, mask_bytes!("lock", 96)),
+    (Icon::Select, mask_bytes!("select", 96)),
+    (Icon::Lasso, mask_bytes!("lasso", 96)),
+    (Icon::Marquee, mask_bytes!("marquee", 96)),
+    (Icon::Fill, mask_bytes!("fill", 96)),
+    (Icon::Comp, mask_bytes!("comp", 96)),
+    (Icon::Eye, mask_bytes!("eye", 96)),
+    (Icon::EyeOff, mask_bytes!("eye_off", 96)),
+    (Icon::Down, mask_bytes!("down", 96)),
+    (Icon::Fit, mask_bytes!("fit", 96)),
+    (Icon::Plus, mask_bytes!("plus", 96)),
+    (Icon::Undo, mask_bytes!("undo", 96)),
+    (Icon::Redo, mask_bytes!("redo", 96)),
+    (Icon::Search, mask_bytes!("search", 96)),
+    (Icon::Sheet, mask_bytes!("sheet", 96)),
+    (Icon::Hand, mask_bytes!("hand", 96)),
+    (Icon::Flip, mask_bytes!("flip", 96)),
+    (Icon::Layers, mask_bytes!("layers", 96)),
+    (Icon::Ghosts, mask_bytes!("ghosts", 96)),
+    (Icon::Sound, mask_bytes!("sound", 96)),
+    (Icon::Hide, mask_bytes!("hide", 96)),
+];
+
+/// The cut for a target of this many device pixels: 24 up to 28, 48 up to 56,
+/// and 96 past that.
+pub(crate) fn cut_for(device: f32) -> u32 {
+    match device {
+        d if d > 56.0 => 96,
+        d if d > 28.0 => 48,
+        _ => 24,
+    }
+}
+
+/// Decode a white-alpha PNG mask into a texture, cached per-Context.
 fn mask_texture(ctx: &egui::Context, icon: Icon, target: f32) -> Option<egui::TextureHandle> {
     let (_, name, png24, png48) = MASKS.iter().find(|(i, ..)| *i == icon)?;
-    let big = target * ctx.pixels_per_point() > 28.0;
-    let (bytes, size) = if big {
-        (*png48, 48u32)
-    } else {
-        (*png24, 24u32)
+    let size = cut_for(target * ctx.pixels_per_point());
+    let bytes = match size {
+        96 => MASKS_96.iter().find(|(i, _)| *i == icon)?.1,
+        48 => *png48,
+        _ => *png24,
     };
     let key = egui::Id::new(("icon_mask", *name, size));
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(key)) {
@@ -222,7 +258,7 @@ pub enum Icon {
     Comp,
     /// Open eye — layer visible.
     Eye,
-    /// Struck eye — layer hidden.
+    /// Crossed-out eye — layer hidden.
     EyeOff,
     /// Chevron up / down — reorder.
     Up,

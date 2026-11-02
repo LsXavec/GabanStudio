@@ -104,6 +104,8 @@ mod aurookie_tests;
 mod auamateur_tests;
 #[cfg(test)]
 mod auveteran_tests;
+#[cfg(test)]
+mod aurel_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;
@@ -3509,10 +3511,9 @@ impl Editor {
             _ => None,
         };
         if let Some(i) = preset_idx {
-            // THE POT LENS (shiage charter, the grammar's sole key
-            // exception): with FILL armed, 1–8 arm the active character's
-            // pots; with the brush armed they arm brush presets as
-            // everywhere else. The Slate names what got armed.
+            // THE POT LENS (the grammar's sole key exception): with FILL
+            // armed, 1–8 arm the active character's pots; with the brush
+            // armed they arm brush presets as everywhere else.
             if ed.canvas.arming_pencil() == "fill" && !ed.canvas.stroke_active() {
                 let nchars = ed.state.palettes.characters.len();
                 *out = Performed::Ignored; // until a pot is armed
@@ -3574,7 +3575,7 @@ impl Editor {
                 let last = s.frame_count() - 1;
                 s.goto(last);
             }
-            // One verb, one key (room charters): Q/W step the exposure —
+            // One verb, one key: Q/W step the exposure —
             // jump to the adjacent KEY on the active column, not the
             // adjacent frame.
             Action::PrevKey => s.goto_adjacent_key(false),
@@ -4611,7 +4612,7 @@ struct Editor {
     /// GM2: the last autosave written for this document (for the running
     /// record).
     pub last_autosave: Option<std::path::PathBuf>,
-    /// GM2: when it was written (Unix seconds; the slate dot's hover).
+    /// GM2: when it was written (Unix seconds; the saved dot's hover).
     last_autosave_at: Option<u64>,
     /// GM2: autosaves are failing — said once on the Aka lane per streak.
     autosave_failing: bool,
@@ -4764,7 +4765,9 @@ fn startup_route(
 ) -> Startup {
     match welcome {
         None if !editor && !form => {
-            if startup_shows_welcome(config) {
+            // AU17: What's New stands once for every upgrader, the latch off
+            // or on. The latch says nothing about the launches after it.
+            if startup_shows_welcome(config) || welcome::whats_new_due(&config.ui.whats_new_seen) {
                 Startup::Welcome
             } else {
                 Startup::ReadyPaper
@@ -5217,9 +5220,8 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
                 history_panel::ui(ui, self.state, gesture_safe, shared)
             }
             Pane::XSheet => {
-                // The henshu lens (charter delta 4): the sheet grows its
-                // edit-room HEAD only in the Edit stage; content lensing,
-                // dock recipes untouched.
+                // The sheet grows its Timing HEAD only in the Timing step;
+                // content lensing, dock recipes untouched.
                 let edit_room = self.stage == Some(Stage::Edit);
                 let gesture_safe = !self.canvas.stroke_active();
                 xsheet_panel::ui(ui, self.state, edit_room, gesture_safe)
@@ -5469,8 +5471,7 @@ impl Editor {
         self.dock = self.recipe(st);
         if self.canvas.apply_view(&st.view(), &mut self.state) {
             self.stage = Some(st);
-            // LINE GUARD defaults ON in the ink & paint room (shiage
-            // charter) and OFF elsewhere.
+            // LINE GUARD defaults ON in the Color step and OFF elsewhere.
             self.state.view.line_guard = matches!(st, Stage::InkPaint);
             self.state.status = format!("{}: {}", vocab::STEP, self.step_name(st));
             self.export_left();
@@ -6758,9 +6759,9 @@ impl Editor {
             Action::FrameCurves if s.curves.plot.is_none() => Err("open Motion curves first"),
             // GM6: the genga-to-douga verbs that would refuse.
             Action::CopyPixels if self.canvas.selection_poly().is_none() => {
-                Err("select pixels first")
+                Err("select part of a drawing first")
             }
-            Action::PastePixels if s.pixel_clip.is_none() => Err("copy pixels first"),
+            Action::PastePixels if s.pixel_clip.is_none() => Err("copy part of a drawing first"),
             Action::DuplicateCel
             | Action::KindKey
             | Action::KindBreakdown
@@ -6880,8 +6881,8 @@ impl Editor {
 
     /// GM3: run an action from the menus or the command palette — the
     /// same one dispatch as a shortcut (D6). What only the shell can do
-    /// goes the way the slate always sent it: New/Open through the unsaved
-    /// guard, the rest to the shell's outbox.
+    /// goes the one way it always went: New/Open through the unsaved guard,
+    /// the rest to the shell's outbox.
     pub fn invoke(&mut self, action: Action, ctx: &egui::Context) -> Performed {
         if let Err(why) = self.can_perform(action) {
             self.state.refuse(format!("refused — {why}"));
@@ -8084,7 +8085,7 @@ impl ProbeRoom {
     fn name(self) -> &'static str {
         match self {
             ProbeRoom::Stage(st) => st.name(),
-            ProbeRoom::Forge => "forge",
+            ProbeRoom::Forge => vocab::BRUSH_MAKER,
             ProbeRoom::Layout3d => vocab::LAYOUT_3D,
             ProbeRoom::Lessons => "Lessons page",
             ProbeRoom::Lesson(name, ..) => name,
@@ -8923,7 +8924,7 @@ impl Editor {
     }
 
     /// PSD-shipping: UPDATE READY — the published build moved past this one.
-    /// Tally lamp; the click IS the relaunch (session carried like a dev-loop
+    /// A blue lamp; the click IS the relaunch (session carried like a dev-loop
     /// restart).
     fn relaunch_key(&mut self, ui: &mut egui::Ui) {
         if let Some(tag) = self.update_tag.clone() {

@@ -369,8 +369,8 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
                                 .response
                         })
                         .inner;
-                    // The status on the card's edge: Aka for a retake,
-                    // Tally once done.
+                    // The status on the card's edge: red for a retake, blue
+                    // once done.
                     let edge = match info.prod.status {
                         Some(CutStatus::Retake) => Some(plate::RED),
                         Some(CutStatus::Done) => Some(plate::BLUE),

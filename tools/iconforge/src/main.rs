@@ -2,15 +2,14 @@
 //! work owned by this repo:
 //!
 //! 1. ICONS: render every `app/assets/icons/svg/*.svg` (authored in-repo,
-//!    drawn in white + greys) at 24px and 48px into
+//!    drawn in white + greys) at 24px, 48px and 96px into
 //!    `app/assets/icons/png/<name>_<size>.png`. The app embeds the PNGs and
-//!    tints them at draw time, so ONE mask serves every ink the colour law
-//!    allows (Legend at rest, Struck armed, dim disabled).
+//!    tints them at draw time, so ONE mask serves every ink of the look
+//!    (`INK2` at rest, `BLUE_DEEP` on a wash, dim disabled).
 //!
-//! 2. GRAIN: generate the chrome's material textures procedurally —
-//!    a 256x256 tileable value-noise grain with a faint horizontal brush,
-//!    seeded, deterministic. `plate_grain.png` IS the plate: opaque
-//!    Graphite with +-4 levels of relief, hue preserved — never a new hue.
+//! 2. GRAIN: a 256x256 tileable value-noise grain with a faint horizontal
+//!    brush, seeded, deterministic. The app stopped reading `plate_grain.png`
+//!    with AU16; the job stays so the file stays reproducible.
 //!
 //! Deterministic: same inputs → byte-identical outputs. Re-run after adding
 //! or editing an SVG, then rebuild the app.
@@ -41,7 +40,7 @@ fn main() {
         let data = std::fs::read(path).expect("read svg");
         let tree = usvg::Tree::from_data(&data, &usvg::Options::default())
             .unwrap_or_else(|e| panic!("{name}.svg: {e}"));
-        for size in [24u32, 48u32] {
+        for size in [24u32, 48u32, 96u32] {
             let mut pixmap = tiny_skia::Pixmap::new(size, size).unwrap();
             let scale = size as f32 / tree.size().width();
             resvg::render(
@@ -54,13 +53,11 @@ fn main() {
         }
         count += 1;
     }
-    println!("icons: {count} SVGs → {} PNGs", count * 2);
+    println!("icons: {count} SVGs → {} PNGs", count * 3);
 
     // ---- 2. Grain ---------------------------------------------------------
     // Tileable value noise, two octaves, plus a faint horizontal brushed
-    // streak. Emitted as a NEUTRAL grain centred on 128: the app blends it
-    // over Graphite (or any panel fill) at low alpha, so the texture adds
-    // material, never colour.
+    // streak, as a neutral grain centred on 128.
     let n = 256u32;
     let mut pixmap = tiny_skia::Pixmap::new(n, n).unwrap();
     {
@@ -74,9 +71,8 @@ fn main() {
                 // Horizontal brush: a slow noise sampled only on y, stretched.
                 let streak = value_noise(y as f32 / 4.0, 0.0, 64, 13);
                 let g = 0.55 * v1 + 0.30 * v2 + 0.15 * streak; // 0..1
-                // The plate itself: Graphite (26,27,24) with ±4 levels of
-                // relief, hue offset preserved — opaque, laid down as the
-                // panel surface. Material, never a new colour.
+                // Opaque (26,27,24) with ±4 levels of relief, hue offset
+                // preserved.
                 let rel = ((g - 0.5) * 8.0).round();
                 let ch = |base: f32| (base + rel).clamp(0.0, 255.0) as u8;
                 px[(y * n + x) as usize] =

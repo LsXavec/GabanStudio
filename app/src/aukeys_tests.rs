@@ -86,7 +86,7 @@ fn chord_json(spec: &str) -> Value {
     })
 }
 
-fn chord(spec: &str) -> Chord {
+pub(crate) fn chord(spec: &str) -> Chord {
     serde_json::from_value(chord_json(spec)).expect("a chord")
 }
 

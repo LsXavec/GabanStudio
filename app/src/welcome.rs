@@ -401,8 +401,8 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum WelcomeTab {
     #[default]
     Start,
-    /// What this release brings, grouped by who reaches for it — the tab
-    /// the first launch of a new version opens on.
+    /// What this release brings, on one page — the tab the first launch of a
+    /// new version opens on.
     WhatsNew,
     /// AU20: the grid of lessons, on its own scroll.
     Lessons,
@@ -429,71 +429,54 @@ pub fn open_at_startup(ui: &mut crate::config::UiConfig, recent: &[PathBuf]) -> 
     (w, due)
 }
 
-/// GM19: what 0.5 brings, by persona — the What's New tab's groups.
-pub const WHATS_NEW: [(&str, &[&str]); 6] = [
-    (
-        "Animator",
-        &[
-            "Timing sheet editing: insert and delete frames (every track ripples), holds, retimes, typed entry — all undoable",
-            "Light table: Ghost frames depth 0–5, key poses and inbetweens marked on the sheet, spacing charts, Make inbetweens",
-            "Canvas rotate and mirror, Steady stroke, straight lines, brush size keys, the Alt-click eyedropper",
-            "Menus, the command palette (Ctrl+K), the History pane and the F1 shortcut sheet",
-            "Never lose work: the unsaved guard, autosave every 5 minutes, recovery after a crash",
-        ],
-    ),
-    (
-        "Painter",
-        &[
-            "Exact color: new projects keep chips exactly as picked (older ones convert, with a backup first)",
-            "Recolor by editing a chip, refill, chip pick, and the paint check for holes and strays",
-            "Palette variants and palette maps",
-        ],
-    ),
-    (
-        "Compositor",
-        &[
-            "Effects, the same in the view and the delivery: blur, glow, soft focus, color look and .cube color tables",
-            "Passes by color name, light wrap, rim, color wash, vignette, grain, directional motion blur, the full finishing setup",
-            "The camera: pan, zoom in and out, rotate and shake over paper larger than the frame; multiplane depth",
-            "Particles, speed lines and focus lines as effects",
-            "The Export queue: PNG16, TIFF16 and EXR built in; ProRes, DNxHR, H.264 and H.265 through your ffmpeg, sound muxed",
-        ],
-    ),
-    (
-        "3D",
-        &[
-            "glTF and OBJ import, toon-rendered with outlines and passes",
-            "View3D with Blender navigation; set the shot camera from the view",
-            "Image sequences from other apps referenced on disk, and the canvas 3D underlay",
-        ],
-    ),
-    (
-        "Manga",
-        &[
-            "B5 and A4 pages at 350 dpi and webtoon strips; panels with gutters, tones, perspective rulers",
-            "Lettering with tategaki, and balloons",
-        ],
-    ),
-    (
-        "Editor",
-        &[
-            "Sound tracks (WAV, MP3, OGG, FLAC): waveforms, audio-locked playback, sound while dragging, lip flap, sound file",
-            "The Shots board, the Episode timeline with TRT, CMX3600 EDL export",
-            "Batch render with no window: animstudio --render <file | --sample> --preset <name> --out <dir>",
-        ],
-    ),
-];
+/// AU17: the two chords this release moved (spec 6.5), said by their live
+/// keys, so a person's own binding reads as it stands.
+pub const MOVED_CHORDS: [Action; 2] = [Action::ColumnKindBook, Action::ColumnKindBg];
+/// AU17: one line on the bars and one on the lessons (feedback 1.11).
+pub const WHATS_NEW_BARS: &str = "An animation opens on Plan with its sheet; a drawing opens on Draw, with no sheet.";
+pub const WHATS_NEW_LESSONS: &str = "Nine lessons make something real, rookie to experienced: Help ▸ Lessons.";
+/// The word list's columns, and a row's height: one line of panel text.
+const WORD_COLUMNS: usize = 3;
+const WORD_ROW: f32 = 20.0;
 
-/// GM19: the What's New tab — this release's groups, by persona.
-fn whats_new_ui(ui: &mut egui::Ui) {
-    section(ui, &format!("What's New in {VERSION}"));
-    for (persona, items) in WHATS_NEW {
-        ui.add_space(6.0);
-        section(ui, persona);
-        for item in items {
-            ui.label(egui::RichText::new(format!("· {item}")).color(plate::INK));
-        }
+/// AU17: where a moved chord stands now.
+fn moved_chord(ctx: &egui::Context, action: Action) -> String {
+    match crate::menus::first_chord(ctx, action) {
+        Some(chord) => format!("{} is on {chord}", action.label()),
+        None => format!("{} has no key", action.label()),
     }
+}
+
+/// The page's title, with this build's version.
+fn whats_new_title() -> String {
+    format!("What's New in {VERSION}")
+}
+
+/// AU17: the What's New page under its title, one screen: the bars, the
+/// lessons, the moved chords, and the old words beside the new. It stands
+/// unscrolled in the float's cap.
+fn whats_new_ui(ui: &mut egui::Ui) {
+    ui.label(egui::RichText::new(WHATS_NEW_BARS).color(plate::INK));
+    ui.label(egui::RichText::new(WHATS_NEW_LESSONS).color(plate::INK));
+    let moved: Vec<String> = MOVED_CHORDS.iter().map(|a| moved_chord(ui.ctx(), *a)).collect();
+    ui.label(egui::RichText::new(format!("Keys that moved: {}.", moved.join(", "))).color(plate::INK));
+    ui.add_space(GROUP_GAP);
+    let wide = ui.available_width() / WORD_COLUMNS as f32;
+    // The rows are text, not controls: a grid's default row is a control's
+    // height, which would push the last row off the card.
+    let grid = egui::Grid::new("whats_new_words").num_columns(WORD_COLUMNS).min_col_width(wide);
+    grid.min_row_height(WORD_ROW).spacing([0.0, 0.0]).show(ui, |ui| {
+        for row in crate::vocab::OLD_WORDS.chunks(WORD_COLUMNS) {
+            for (old, new) in row {
+                let font = plate::Role::Panel.font();
+                let mut job = egui::text::LayoutJob::default();
+                job.append(&format!("{old} → "), 0.0, egui::TextFormat::simple(font.clone(), plate::INK2));
+                job.append(new, 0.0, egui::TextFormat::simple(font, plate::INK));
+                ui.label(job);
+            }
+            ui.end_row();
+        }
+    });
 }
 
 #[derive(Default)]
@@ -657,6 +640,8 @@ const CHIP_GAP: f32 = 4.0;
 /// the next.
 const ROW_GAP: f32 = 2.0;
 const GROUP_GAP: f32 = 4.0;
+/// What's New's `Back to Start`, beside the title.
+const BACK_W: f32 = 140.0;
 /// `Open the example`'s hover, on either page.
 const EXAMPLE_CARD: &str = "A ball bounce to look through and draw on";
 /// The Lessons page (spec 4.5): the legends over its columns, the words of its
@@ -682,9 +667,15 @@ pub fn float_body(ui: &mut egui::Ui, w: &mut Welcome) -> Option<WelcomeAction> {
     let wide = ui.available_width();
     ui.spacing_mut().item_spacing.y = ROW_GAP;
     if w.tab == WelcomeTab::WhatsNew {
-        if plate::ghost_row(ui, "Back to Start", wide, None).clicked() {
-            w.tab = WelcomeTab::Start;
-        }
+        // AU17: the way back shares the title's row, so the page stands
+        // unscrolled under the cap.
+        ui.horizontal(|ui| {
+            on_edge(ui, |ui| section(ui, &whats_new_title()));
+            ui.add_space(ui.available_width() - BACK_W);
+            if plate::filled_row(ui, "Back to Start", BACK_W).clicked() {
+                w.tab = WelcomeTab::Start;
+            }
+        });
         ui.add_space(GROUP_GAP);
         on_edge(ui, whats_new_ui);
         return None;
@@ -967,10 +958,7 @@ pub fn ui(
                 w.tab = WelcomeTab::Start;
             }
             if plate::detent(ui, w.tab == WelcomeTab::WhatsNew, "What's New")
-                .on_hover_text(
-                    "What this release brings, by who reaches for it: animator, painter, \
-                     compositor, 3D, manga, editor",
-                )
+                .on_hover_text("What this release brings, on one page")
                 .clicked()
             {
                 w.tab = WelcomeTab::WhatsNew;
@@ -986,6 +974,7 @@ pub fn ui(
         });
         ui.add_space(8.0);
         if w.tab == WelcomeTab::WhatsNew {
+            section(ui, &whats_new_title());
             whats_new_ui(ui);
             return;
         }
@@ -1699,6 +1688,9 @@ mod tests {
     fn welcome_startup_route_picks_the_screen() {
         use crate::{Startup, startup_route};
         let mut c = crate::config::Config::default();
+        // Someone who has read this version's What's New: while it is due it
+        // stands whatever the latch says (`aurel_upgrader_sees_whats_new_once`).
+        c.ui.whats_new_seen = VERSION.into();
         // Nothing open: the Welcome screen.
         assert_eq!(startup_route(false, false, None, &c), Startup::Welcome);
         // The latch off: the same paper with no float (AU6; a form before).

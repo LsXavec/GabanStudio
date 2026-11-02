@@ -1,3 +1,5 @@
+> History: the app's steps and words now follow `research/PSD-approachable-ui.md`; where they differ, that document wins.
+
 # ROOM CHARTERS — the three workflows (addendum to DESIGN-SPEC-editor-ui.md)
 
 Ratified inputs: the Plate & Pencil spec (tokens §2, colour law §3, DETENT/LATCH/DANGER §6.3, Do-NOT-build §7 — binding), the Owner's Amendment of 2026-08-17, the grounding report, and the live tree (`app/src/config.rs`, `canvas.rs`, `main.rs`, `workspace.rs`, `xsheet_panel.rs`, `palette_panel.rs`, `icons.rs`, `plate.rs`, `nodegraph_panel.rs`). Blast radius honored throughout: app-crate UI only; `crates/anim-core` untouched; `workspace.rs`'s dock untouched; no document format, no save/load, no undo semantics, no stroke path, no wgpu.

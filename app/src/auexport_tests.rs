@@ -42,7 +42,7 @@ fn sized(h: &mut EditorHarness, w: f32, tall: f32) {
 
 /// `n` drawings, each with ink of its own, on paper small enough that a job
 /// ends quickly.
-fn ball(n: u32) -> AppState {
+pub(crate) fn ball(n: u32) -> AppState {
     let mut state = AppState::new_project("ball", 64, 36, 12, 72.0);
     state.set_cut_length(n);
     for frame in 0..n {
@@ -55,7 +55,7 @@ fn ball(n: u32) -> AppState {
 }
 
 /// A shipped install at 1600×900 on `state`, with no encoder on this PC.
-fn shipped(state: AppState) -> EditorHarness {
+pub(crate) fn shipped(state: AppState) -> EditorHarness {
     let mut h = EditorHarness::with_state_shipped(state);
     h.state_mut().render_queue.ffmpeg = Some((String::new(), None));
     sized(&mut h, 1600.0, 900.0);
@@ -72,12 +72,12 @@ fn says(h: &EditorHarness, words: &str) -> bool {
     h.painted_text().iter().any(|w| w == words)
 }
 
-fn lane(h: &EditorHarness) -> Option<String> {
+pub(crate) fn lane(h: &EditorHarness) -> Option<String> {
     h.editor().say.hint.as_ref().map(|s| s.words.clone())
 }
 
 /// The remark gone, as it is after its dwell.
-fn quiet(h: &mut EditorHarness) {
+pub(crate) fn quiet(h: &mut EditorHarness) {
     h.wait(4.2);
     settle(h);
 }
@@ -88,7 +88,7 @@ fn asked(h: &EditorHarness) -> Vec<AppRequest> {
 }
 
 /// `action`, as a menu row or the palette runs it.
-fn invoke(h: &mut EditorHarness, action: Action) -> Performed {
+pub(crate) fn invoke(h: &mut EditorHarness, action: Action) -> Performed {
     let ctx = h.ctx();
     let done = h.editor_mut().invoke(action, &ctx);
     settle(h);
@@ -694,10 +694,14 @@ fn pose_ink(h: &mut EditorHarness, pose: i32) {
 }
 
 /// What the lane puts in front of a person on a journey: the hint, and the
-/// machine's remark that stands over it for its dwell.
+/// machine's remark that stands over it for its dwell. In the Export step, the
+/// words the panel paints as well: the journey's whole point is that screen.
 fn read_lane(h: &EditorHarness, read: &mut Vec<String>) {
     read.extend(h.editor().say.hint.as_ref().map(|s| s.words.clone()));
     read.extend(Some(h.state().status.clone()).filter(|remark| !remark.is_empty()));
+    if h.editor().stage == Some(Stage::Export) {
+        read.extend(h.painted_text());
+    }
 }
 
 /// Spec 9's J1, on the path a first-time animator takes: 12 poses, a play and

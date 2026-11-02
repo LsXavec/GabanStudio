@@ -419,13 +419,19 @@ fn done_card(ui: &mut egui::Ui, state: &mut AppState, landed: &Landed, view: &Vi
 }
 
 /// A job as this list names it: the file a person chose, or the cut and what
-/// it makes, in words a screen reader tells from the queue's own row.
-fn job_name(job: &render_queue::Job) -> String {
+/// it makes, in words a screen reader tells from the queue's own row. A job
+/// from these choices reads as the choice; one set up in the queue keeps the
+/// preset its maker named.
+pub(crate) fn job_name(job: &render_queue::Job) -> String {
     if job.exact_name {
-        format!("{}.{}", job.pattern, job.preset().format.ext())
-    } else {
-        format!("{}, {}", job.label, job.preset().name)
+        return format!("{}.{}", job.pattern, job.preset().format.ext());
     }
+    let makes = match job.asked {
+        Some(render_queue::ExportKind::Png) => "a picture sequence",
+        Some(render_queue::ExportKind::Mp4) => "an MP4 video",
+        _ => job.preset().name,
+    };
+    format!("{}, {makes}", job.label)
 }
 
 /// One job on its way, in words and a meter.

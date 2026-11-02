@@ -156,9 +156,7 @@ pub fn form_ui(
 ) -> Option<FormAction> {
     let mut action = None;
 
-    // THE SLATE, at rest: the first screen an artist meets should look
-    // like the instrument they are about to use — engraved legends,
-    // Struck values, one clear verb. (Repaint sweep 2026-08-18.)
+    // The form at rest: legends over values and one clear verb.
     plate::legend(ui, "new shot");
     ui.label(
         egui::RichText::new("The paper you will draw on, and how fast it plays.")
