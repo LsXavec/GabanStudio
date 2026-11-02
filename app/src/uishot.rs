@@ -1667,7 +1667,7 @@ fn audress_the_ignored_pass_owes_every_shot() {
     let names: BTreeSet<&str> = lists.iter().flat_map(|(_, l)| l.iter().map(|o| o.0.as_str())).collect();
     let owed: usize = lists.iter().map(|(_, l)| l.len()).sum();
     assert_eq!(names.len(), owed, "no two shots share a name");
-    assert_eq!(owed, 273 + 2 * PANELS.len(), "the 273 owed before this part, and its panels at both sizes");
+    assert_eq!(owed, 273 + 2 * PANELS.len() + 6, "the 273 owed before AU15, its panels at both sizes, and AU23's three lessons at both");
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of
