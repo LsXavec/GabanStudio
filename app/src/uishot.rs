@@ -716,7 +716,7 @@ fn lesson_card(dir: &Path) {
         let mut h = EditorHarness::with_gpu_ready();
         open(&mut h, lesson.id);
         crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
-        if lesson.class == Class::Amateur {
+        if lesson.class != Class::Rookie {
             ride_tasks(&mut h, lesson, 0..task, Hand::ShowMe);
         } else {
             crate::auguide_tests::stand_on_the_tasks_before(&mut h, lesson, task);
@@ -727,9 +727,28 @@ fn lesson_card(dir: &Path) {
         arrive_within(&mut h, ProbeRoom::Stage(lesson.tasks[task].step), PAGE_TRIES);
         h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("{name}.png")));
     };
-    for (lesson, task) in [(0, 8), (1, 6), (2, 7), (3, 4), (4, 7), (5, 7)] {
+    // AU25: Experienced, the card that asks nothing of the paper; then its ring,
+    // asked for, in the Brush maker a sentence sends the person to.
+    for (name, size) in [("", full), ("-1280", (1280, 800))] {
+        let plate = crate::lessons::ALL.iter().find(|l| l.id == "plate_one").expect("the row");
+        let mut h = EditorHarness::with_gpu_ready();
+        open(&mut h, plate.id);
+        crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
+        ride_tasks(&mut h, plate, 0..5, Hand::ShowMe);
+        h.editor_mut().perform(crate::config::Action::BrushMakerRoom);
+        h.run_frames(4);
+        h.click(crate::lesson::SHOW_WHERE);
+        h.run_frames(8);
+        h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("experienced-plate_one-asked{name}.png")));
+        drop(h);
+    }
+    for (lesson, task) in [(0, 8), (1, 6), (2, 7), (3, 4), (4, 7), (5, 7), (6, 8), (7, 11), (8, 7)] {
         let lesson = crate::lessons::ALL[lesson];
-        let class = if lesson.class == Class::Rookie { "rookie" } else { "amateur" };
+        let class = match lesson.class {
+            Class::Rookie => "rookie",
+            Class::Amateur => "amateur",
+            Class::Experienced => "experienced",
+        };
         for (name, size) in [("", full), ("-1280", (1280, 800))] {
             seated(&lesson, task, size, format!("{class}-{}{name}", lesson.id));
         }
@@ -742,6 +761,11 @@ fn lesson_card(dir: &Path) {
             ("lettering-1280", Stage::Manga, (1280, 800)),
         ];
         for (name, stage, size) in rooms {
+            // AU25: Export's preview of a full Manga B5 outruns the test
+            // renderer's fixed wait; the page itself is read off its file.
+            if lesson.id == "only_word" && stage == Stage::Export {
+                continue;
+            }
             let Some(task) = lesson.tasks.iter().rposition(|t| t.step == stage) else { continue };
             seated(&lesson, task, size, format!("{class}-{}-{name}", lesson.id));
         }
@@ -768,7 +792,7 @@ fn lesson_card(dir: &Path) {
 }
 
 /// AU27: the card's pictures, by file name.
-const LESSON: [(&str, u32, u32); 51] = [
+const LESSON: [(&str, u32, u32); 66] = [
     ("lesson-draw", 1600, 900),
     ("lesson-draw-fold", 832, 520),
     ("lesson-wander", 832, 520),
@@ -820,6 +844,21 @@ const LESSON: [(&str, u32, u32); 51] = [
     ("amateur-too_much_coat-color", 1600, 900),
     ("amateur-too_much_coat-export", 1600, 900),
     ("amateur-too_much_coat-lettering-1280", 1280, 800),
+    ("experienced-plate_one-asked", 1600, 900),
+    ("experienced-plate_one-asked-1280", 1280, 800),
+    ("experienced-plate_one", 1600, 900),
+    ("experienced-plate_one-1280", 1280, 800),
+    ("experienced-desk_to_lamp", 1600, 900),
+    ("experienced-desk_to_lamp-1280", 1280, 800),
+    ("experienced-only_word", 1600, 900),
+    ("experienced-only_word-1280", 1280, 800),
+    ("experienced-plate_one-color", 1600, 900),
+    ("experienced-plate_one-export", 1600, 900),
+    ("experienced-desk_to_lamp-color", 1600, 900),
+    ("experienced-desk_to_lamp-export", 1600, 900),
+    ("experienced-desk_to_lamp-timing-1280", 1280, 800),
+    ("experienced-only_word-color", 1600, 900),
+    ("experienced-only_word-lettering-1280", 1280, 800),
 ];
 
 fn lesson_owed() -> Vec<(String, u32, u32)> {
@@ -1732,7 +1771,7 @@ fn audress_the_ignored_pass_owes_every_shot() {
     let names: BTreeSet<&str> = lists.iter().flat_map(|(_, l)| l.iter().map(|o| o.0.as_str())).collect();
     let owed: usize = lists.iter().map(|(_, l)| l.len()).sum();
     assert_eq!(names.len(), owed, "no two shots share a name");
-    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 16, "the 273 owed before AU15, its panels at both sizes, and AU23's and AU24's lessons: three at both and eight steps each, and AU24's Plan at both");
+    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 16 + 15, "the 273 owed before AU15, its panels at both sizes, AU23's and AU24's lessons: three at both and eight steps each, AU24's Plan at both, and AU25's three at both, seven steps and its ring at both");
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of

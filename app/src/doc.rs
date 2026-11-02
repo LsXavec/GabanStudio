@@ -257,6 +257,9 @@ pub fn solo_template() -> Vec<LayerProps> {
         .collect()
 }
 
+/// AU25: the preset a lesson's ring stands on: `quarters`, three even marks.
+pub const CHART_EVEN: usize = 2;
+
 /// GM6: the spacing-chart presets (タイミング指示) — marks between the keys,
 /// 0..1: even halves / thirds / quarters, or bunched toward one key; each
 /// with the line its button says on hover.
@@ -5495,7 +5498,7 @@ impl AppState {
     /// AU14: `kind` as the shelf starts it, where the kind's stored default
     /// would leave the picture as it is. `fx.rs` keeps those defaults: the
     /// finishing chain reads them.
-    fn shelf_start(&self, mut kind: anim_core::graph::NodeKind) -> anim_core::graph::NodeKind {
+    pub(crate) fn shelf_start(&self, mut kind: anim_core::graph::NodeKind) -> anim_core::graph::NodeKind {
         use anim_core::fx::{FxKind, FxValue};
         use anim_core::graph::NodeKind;
         if let NodeKind::Effect { fx, params, .. } = &mut kind {

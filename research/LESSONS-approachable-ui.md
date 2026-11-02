@@ -160,7 +160,7 @@ Each table is grouped by step, in bar order. The first task of every later step 
 | | **Draw** | | | |
 | 1 | Plate One of a field guide. Three stages of one life: the strip, the coat, and what comes out. What comes out is yours. Rough all three with {Sketch pencil}. *Why: Roughs are for deciding. Decide here.* | `Rail(Brush)`, `Float(Brushes)`, `brush.sketch` | `All([Armed(sketch), Strokes(6)])` | `Where` |
 | 2 | Add a {Custom layer} for your ink. | `Rail(Layers)`, `layers.add`, `layers.custom` | `Layers(3)` | `Where` |
-| 3 | Pick {Clean pencil} and raise {Steady stroke} until your hand stops showing in the long curves. | `Rail(Brush)`, `Float(Brushes)`, `brush.clean`, `steady.row` | `All([Armed(clean), Smoothing])` | `Where` |
+| 3 | Pick {Clean pencil} and raise {Steady stroke} until your hand stops showing in the long lines. | `Rail(Brush)`, `Float(Brushes)`, `brush.clean`, `steady.row` | `All([Armed(clean), Smoothing])` | `Where` |
 | 4 | Ink all three stages. | `Paper` | `All([InkOnLayer, Strokes(6)])` | `Where` |
 | 5 | Set the rough layer's role to Rough, so it never reaches a file. | `Rail(Layers)`, `layers.role` | `LayerRole(Rough)` | `Where` |
 | 6 | Make a brush with a paper grain in {Brush maker}, press {Draw} to come back, and shade one stage with it. | `menu.more`, `Action(BrushMakerRoom)`, `Pane(Forge)` | `All([Preset(my_brushes), Strokes(1)])` | `Where` |
@@ -453,7 +453,7 @@ Each move plants one foot, so nothing skates. Peg bar x 20 to 160, on the desk. 
 | # | On screen | Ring | Tick | Show me where |
 |---|---|---|---|---|
 | | **Manga** | | | |
-| 1 | The moth has seen the bulb. Draw the most serious page ever made about something very small. Cut at least five panels, one tall for the dive. *Why: Save the only word in this course for the end.* | `Action(PanelTool)` | `Panels(5)` | `Where` |
+| 1 | The moth has seen the bulb. Draw the most serious page ever made about something very small. Split it into at least five panels, one tall for the dive. *Why: Save the only word in this course for the end.* | `Action(PanelTool)` | `Panels(5)` | `Where` |
 | 2 | Set a 3-point ruler, snap on. Build a canyon of book spines. | `manga.rulers`, `Action(ToggleRulerSnap)` | `All([Rulers(3), Strokes(6)])` | `Where` |
 | 3 | Ink the dive. Small moth, huge canyon. | `Rail(Brush)` | `InkInPanels(3)` | `Where` |
 | 4 | Lay tone on the sky only. | `manga.ink_tone`, `manga.tone_preset` | `Tone` | `Where` |

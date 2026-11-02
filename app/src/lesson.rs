@@ -754,8 +754,13 @@ impl Editor {
                 reached(&cut.graph).iter().any(|n| matches!(n, NodeKind::Effect { fx, .. } if *fx == kind))
             }
             Done::AnyEffect => reached(&cut.graph).iter().any(|n| matches!(n, NodeKind::Effect { .. })),
+            // AU25: an effect added since the task began reads against the
+            // shelf's own start: Plate One adds one and tunes it in one task.
             Done::Strength => cut.graph.nodes().any(|n| match &n.kind {
-                NodeKind::Effect { params, .. } => base.effects.iter().any(|(id, was)| *id == n.id && was != params),
+                NodeKind::Effect { fx, params, .. } => match base.effects.iter().find(|(id, _)| *id == n.id) {
+                    Some((_, was)) => was != params,
+                    None => ![NodeKind::effect(*fx), state.shelf_start(NodeKind::effect(*fx))].contains(&n.kind),
+                },
                 _ => false,
             }),
             Done::CameraKeys(n) => cut.xsheet.params.iter().any(|c| c.keys().count() >= n as usize),
@@ -1149,12 +1154,29 @@ impl Editor {
 
     /// The task's own step has been left. A task that is the pill stays itself,
     /// and a place off the spine stands when the chain itself goes there: Plate
-    /// One sends the person into the Brush maker, a pane no step holds.
+    /// One sends the person into the Brush maker, a pane no step holds. AU25: until
+    /// the new preset lands: the rest of the task is back on the paper.
     fn lesson_wandered(&self, task: &Task) -> bool {
         if matches!(task.done, Done::OnStep(_)) || self.stage == Some(task.step) {
             return false;
         }
-        !(self.stage.is_none() && self.lesson_place(task))
+        !(self.stage.is_none() && self.lesson_place(task) && !self.lesson_preset_landed(task))
+    }
+
+    /// A preset this task asks for has been saved.
+    fn lesson_preset_landed(&self, task: &Task) -> bool {
+        let Some(run) = self.lesson.as_ref() else { return false };
+        let mut landed = false;
+        each(task.done, &mut |done| landed |= matches!(done, Done::Preset(_)) && self.lesson_holds(run, done));
+        landed
+    }
+
+    /// The latch the lesson's file stands on is on, or it has none.
+    fn lesson_latched(&self, lesson: &Lesson) -> bool {
+        lesson.latch.is_none_or(|latch| match latch {
+            Latch::Transparent => self.state.render_queue.panel.transparent,
+            Latch::Mono => self.state.manga.export.mode == anim_core::deliver::PageMode::Mono,
+        })
     }
 
     /// The dock shows a pane the task's chain names and its step does not hold.
@@ -1181,7 +1203,13 @@ impl Editor {
         if run.lesson.class == Class::Experienced && !run.asked {
             return Vec::new();
         }
-        task.ring.to_vec()
+        let mut chain = task.ring.to_vec();
+        // AU25: a file counts only with the latch on, and the export's own
+        // button is always on screen: the ring reads the latch first.
+        if matches!(task.done, Done::Exported(_)) && !self.lesson_latched(&run.lesson) {
+            chain.pop();
+        }
+        chain
     }
 
     /// AU27: the sentence the card stands on. The wander line takes the
@@ -1288,10 +1316,13 @@ impl Editor {
                         self.canvas.brush_color = night;
                     }
                 }
-                ui.add_space(CARD_GAP);
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(width, PICTURE_H), egui::Sense::hover());
-                if let Some(run) = self.lesson.as_ref() {
-                    plate::lesson_picture(ui, rect, |p, paper| run.picture.paint(p, paper));
+                // AU25: a learner's plate is not compared with ours until the end.
+                if lesson.class != Class::Experienced || finished {
+                    ui.add_space(CARD_GAP);
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, PICTURE_H), egui::Sense::hover());
+                    if let Some(run) = self.lesson.as_ref() {
+                        plate::lesson_picture(ui, rect, |p, paper| run.picture.paint(p, paper));
+                    }
                 }
             });
             plate::note_viewport(ui, shown.inner_rect, [false, true]);

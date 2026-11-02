@@ -2377,6 +2377,10 @@ impl Default for BrushPreset {
     }
 }
 
+/// The stored names of two of the box's pencils, as a lesson reads them.
+pub const SKETCH_PENCIL: &str = "atari";
+pub const CLEAN_PENCIL: &str = "genga";
+
 /// Starter presets mapped to the anime pipeline stages.
 /// THE PENCIL BOX (genga room charter): the three named pencils, hotkeys
 /// 1/2/3. Numbers ratified 2026-08-17 (research/ROOM-CHARTERS.md) — each is

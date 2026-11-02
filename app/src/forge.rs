@@ -40,7 +40,7 @@ impl Default for ForgeState {
     }
 }
 
-fn blank_draft() -> BrushPreset {
+pub(crate) fn blank_draft() -> BrushPreset {
     BrushPreset {
         name: "new brush".into(),
         bank: "my brushes".into(),
@@ -307,7 +307,9 @@ fn forge_body(
         let name = forge.draft.name.trim().to_string();
         let exists = presets.iter().any(|p| p.name == name);
         if !exists {
-            if ui.button("Save to Brushes").clicked() && !name.is_empty() {
+            let save = ui.button("Save to Brushes");
+            plate::mark_row(&save, crate::lessons::Target::Named("forge.save"));
+            if save.clicked() && !name.is_empty() {
                 let mut p = forge.draft.clone();
                 p.name = name.clone();
                 presets.push(p);

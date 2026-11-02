@@ -95,10 +95,24 @@ pub(crate) fn stand_on_the_tasks_before(h: &mut EditorHarness, lesson: &Lesson, 
         // for it. A lasso and a seed need a frame: the ride walks those.
         if let Some(run) = task.hand {
             run(e);
-        } else if !matches!(task.show, Show::Trace(_)) && task.done != Done::Moved {
+        }
+        if !matches!(task.show, Show::Trace(_)) && task.done != Done::Moved {
             let art = (lesson.art)();
-            let lines = task.stand_in.iter().filter(|i| art[usize::from(**i)].kind != PathKind::Seed);
-            e.lesson_land(&lines.copied().collect::<Vec<_>>());
+            // AU25: each line on its own cell, or a task of no lines on its one.
+            if let (true, Some(&cell)) = (task.stand_in.is_empty(), task.cells.first()) {
+                super::auguide_show_tests::click_cell(&mut e.state, cell);
+            }
+            let lines = task.stand_in.iter().enumerate().filter(|(_, i)| art[usize::from(**i)].kind != PathKind::Seed);
+            let lines: Vec<(usize, u16)> = lines.map(|(n, i)| (n, *i)).collect();
+            match task.cells.is_empty() {
+                true => drop(e.lesson_land(&lines.iter().map(|(_, i)| *i).collect::<Vec<_>>())),
+                false => {
+                    for (n, line) in lines {
+                        super::auguide_show_tests::click_cell(&mut e.state, task.cells[n]);
+                        e.lesson_land(&[line]);
+                    }
+                }
+            }
         }
         // A pass ends and the head goes home: no frame ran it here.
         if task.done == Done::Played {
@@ -142,6 +156,11 @@ fn each_task(size: (f32, f32), mut answer: impl FnMut(&mut EditorHarness, &Lesso
             h.editor_mut().begin_lesson(*lesson, i);
             settle(&mut h);
             assert_eq!(h.editor().lesson.as_ref().map(|r| r.task), Some(i), "{} seats task {i}", lesson.id);
+            // AU25: an Experienced lesson's ring stands once it is asked for.
+            if lesson.class == Class::Experienced && h.has(crate::lesson::SHOW_WHERE) {
+                h.click(crate::lesson::SHOW_WHERE);
+                settle(&mut h);
+            }
             answer(&mut h, lesson, i);
         }
     }

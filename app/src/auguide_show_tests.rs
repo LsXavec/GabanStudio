@@ -62,7 +62,7 @@ fn row(id: &str) -> Lesson {
 
 /// A task on the paper with nothing but its `Done` and its `Show`.
 const fn on_paper(done: Done, show: Show) -> Task {
-    Task { say: "Draw.", why: None, step: Stage::Drawing, done, ring: &[Target::Paper], guide: &[], stand_in: &[], hand: None, miss: None, show }
+    Task { say: "Draw.", why: None, step: Stage::Drawing, done, ring: &[Target::Paper], guide: &[], stand_in: &[], hand: None, cells: &[], miss: None, show }
 }
 
 const NEVER: Task = on_paper(Done::Strokes(u32::MAX), Show::Where);
@@ -152,10 +152,28 @@ fn own_lines(task: &Task) -> &'static [u16] {
     }
 }
 
-/// `lines` as a person's own art: strokes or fill seeds.
-fn stand_in(go: &mut Recorder, step: &str, art: &[Path], lines: &[u16], hand: Hand) {
-    for &index in lines {
+/// AU25: the cell a person clicked, by `(track, frame)`.
+pub(crate) fn click_cell(state: &mut doc::AppState, (track, frame): (u8, u32)) {
+    let column = state.cut().xsheet.columns[usize::from(track)].id;
+    state.select_cells((column, frame), column, frame);
+}
+
+/// `lines` as a person's own art: strokes or fill seeds. AU25: each on its cell
+/// of `cells`, and the pen reaches a paper no float stands over.
+fn stand_in(go: &mut Recorder, step: &str, art: &[Path], lines: &[u16], cells: &[(u8, u32)], hand: Hand) {
+    for (i, &index) in lines.iter().enumerate() {
+        if let Some(&cell) = cells.get(i) {
+            go.act(step, Act::Answer(Box::new(move |h| click_cell(h.state_mut(), cell))));
+        }
         let path = &art[usize::from(index)];
+        if hand == Hand::Pen && (i == 0 || !cells.is_empty()) {
+            go.act(step, Act::Answer(Box::new(|h| {
+                let floats = &mut h.editor_mut().floats;
+                floats.close_left();
+                floats.close(crate::floats::Float::Layers);
+                settle(h);
+            })));
+        }
         match (path.kind, hand) {
             (PathKind::Seed, _) => {
                 let seed = pos2(path.points[0][0], path.points[0][1]);
@@ -168,7 +186,10 @@ fn stand_in(go: &mut Recorder, step: &str, art: &[Path], lines: &[u16], hand: Ha
                 go.act(step, Act::Answer(Box::new(fill)));
             }
             (_, Hand::Pen) => pen_line(go, step, art, index),
-            (_, Hand::ShowMe | Hand::Alone) => go.act(step, Act::Answer(Box::new(move |h| assert!(h.editor_mut().lesson_land(&[index]), "the line landed")))),
+            (_, Hand::ShowMe | Hand::Alone) => go.act(step, Act::Answer(Box::new(move |h| {
+                let landed = h.editor_mut().lesson_land(&[index]);
+                assert!(landed, "the line landed: {}", h.state().refusal);
+            }))),
         }
     }
 }
@@ -267,6 +288,20 @@ fn by_hand(go: &mut Recorder, step: &str, task: &Task, rect: egui::Rect) {
             let from = rect.center();
             go.act(step, Act::Drag(&[from, pos2(rect.left() + rect.width() * STRENGTH_LEFT, from.y)]));
         }
+        // AU25: an effect added and tuned in one task: the ring is on `Strength`.
+        Done::All(parts) if parts.contains(&Done::Strength) => {
+            let from = rect.center();
+            go.act(step, Act::Drag(&[from, pos2(rect.left() + rect.width() * STRENGTH_LEFT, from.y)]));
+        }
+        // AU25: on, a look, and off.
+        Done::PageSeen => {
+            for _ in 0..2 {
+                go.act(step, Act::Answer(Box::new(move |h| {
+                    h.click_at(rect);
+                    settle(h);
+                })));
+            }
+        }
         // `Longer`, until the run is as long as the task holds.
         Done::Hold { frame, len } => {
             let state = go.harness().state();
@@ -308,6 +343,10 @@ fn by_hand(go: &mut Recorder, step: &str, task: &Task, rect: egui::Rect) {
 /// art, so a `Run` that has not ticked leaves the person's part for `own_work`.
 fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &Task, hand: Hand) {
     let here = at(go.harness());
+    // AU25: the sentence names a track or a row, and the person clicks it first.
+    if let (true, Some(&cell)) = (own_lines(task).is_empty(), task.cells.first()) {
+        go.act(step, Act::Answer(Box::new(move |h| click_cell(h.state_mut(), cell))));
+    }
     if ringed(lesson, task) && hand != Hand::Alone {
         climb(go, step, task);
         if at(go.harness()) != here {
@@ -341,7 +380,9 @@ fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &T
         // The control the ring came to, unless the cursor already stands on it:
         // a second click on a cell opens the cell, and on a key that is armed its
         // float, over the paper. A trace's tool is in hand.
-        if let (true, false, Some((target, rect))) = (control, traced, go.harness().ring_stands()) {
+        // AU25: an Experienced `hand` is the person's whole act at the control.
+        let whole = lesson.class == Class::Experienced && task.hand.is_some();
+        if let (true, false, false, Some((target, rect))) = (control, traced, whole, go.harness().ring_stands()) {
             let on_it = match target {
                 Target::Cell { track, frame } => {
                     let state = go.harness().state();
@@ -349,6 +390,8 @@ fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &T
                     frame == state.view.frame && column == Some(state.view.active_column)
                 }
                 Target::Rail(crate::rail::Key::Brush) => go.harness().editor().canvas.tool == CanvasTool::Paint,
+                // A pane is a place: the task's work is what stands in it.
+                Target::Pane(_) => true,
                 _ => false,
             };
             if !on_it {
@@ -358,12 +401,21 @@ fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &T
                 })));
             }
         }
+        // AU25: `Add effect`'s menu stood open, and a person's hand goes on from it.
+        if task.hand.is_some() && egui::Popup::is_any_open(&go.harness().ctx()) {
+            go.act(step, Act::Key(egui::Key::Escape));
+            settle(go.harness());
+        }
         own_work(go, step, art, task, hand);
     } else if control {
         let (_, rect) = go.harness().ring_stands().expect("climbed");
         by_hand(go, step, task, rect);
         if task.done == Done::Mirrored {
             again(go, step, task);
+        }
+        // AU25: the Lip flap window stands over the menu bar until it is shut.
+        if task.done == Done::Lipped {
+            go.act(step, Act::Answer(Box::new(|h| h.editor_mut().lip_form = None)));
         }
     } else if let Show::Perform(action) = task.show {
         go.act(step, Act::Perform(action));
@@ -386,13 +438,25 @@ fn again(go: &mut Recorder, step: &str, task: &Task) {
 fn own_work(go: &mut Recorder, step: &str, art: &[Path], task: &Task, hand: Hand) {
     if let Some(run) = task.hand {
         go.act(step, Act::Answer(Box::new(move |h| run(h.editor_mut()))));
-    } else if task.done == Done::Moved {
+        settle(go.harness());
+        // AU25: what the hand did was off the spine: its save is the ring's, and
+        // then the ring is the way back.
+        for _ in 0..2 {
+            if let Some((Target::Named("forge.save") | Target::Step(_), rect)) = go.harness().ring_stands().filter(|_| !own_lines(task).is_empty()) {
+                go.act(step, Act::Answer(Box::new(move |h| {
+                    h.click_at(rect);
+                    settle(h);
+                })));
+            }
+        }
+    }
+    if task.done == Done::Moved {
         lasso_and_drag(go, step, art, task.stand_in);
-    } else if own_lines(task).is_empty() {
+    } else if !own_lines(task).is_empty() {
+        stand_in(go, step, art, own_lines(task), task.cells, hand);
+    } else if task.hand.is_none() {
         let (_, rect) = go.harness().ring_stands().expect("climbed");
         by_hand(go, step, task, rect);
-    } else {
-        stand_in(go, step, art, own_lines(task), hand);
     }
 }
 
@@ -442,7 +506,10 @@ pub(crate) struct Picture {
 impl Picture {
     pub(crate) fn png(file: &FilePath) -> Picture {
         let bytes = std::fs::File::open(file).unwrap_or_else(|_| panic!("{file:?} is there"));
-        let mut read = png::Decoder::new(std::io::BufReader::new(bytes)).read_info().expect("a PNG");
+        let mut decoder = png::Decoder::new(std::io::BufReader::new(bytes));
+        // AU25: a Mono page is one bit deep: a pixel of it reads as any other.
+        decoder.set_transformations(png::Transformations::EXPAND);
+        let mut read = decoder.read_info().expect("a PNG");
         let mut data = vec![0; read.output_buffer_size()];
         let info = read.next_frame(&mut data).expect("its picture");
         assert_eq!(info.bit_depth, png::BitDepth::Eight, "{file:?}");
@@ -469,6 +536,8 @@ impl Picture {
     /// Each PNG in `dir`, by name.
     pub(crate) fn folder(dir: &FilePath) -> Vec<Picture> {
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir).expect("the folder").flatten().map(|f| f.path()).collect();
+        // AU25: a cut with sound writes its WAV beside the frames.
+        files.retain(|f| f.extension().is_some_and(|e| e == "png"));
         files.sort();
         files.iter().map(|f| Picture::png(f)).collect()
     }
@@ -761,6 +830,11 @@ fn auguide_pen_ticks_every_stroke_task() {
                 }
                 h.editor_mut().begin_lesson(*lesson, i);
                 settle(&mut h);
+                // AU25: an Experienced lesson's ring stands once it is asked for.
+                if lesson.class == Class::Experienced && rings(task) {
+                    h.click(SHOW_WHERE);
+                    settle(&mut h);
+                }
                 let step = format!("{} task {i} at {size:?}", lesson.id);
                 let mut go = Recorder::new(&mut h, lesson.id);
                 answer(&mut go, &step, lesson, &art, task, Hand::Pen);
@@ -2027,14 +2101,23 @@ fn auguide_real_route_with_gpu() {
         h.click_pos(spot);
         settle(&mut h);
         assert_eq!(h.state().fills_done, fills + 1, "{}: a real fill", lesson.id);
-        let rung = lessons::for_gate().iter().filter(|l| l.kind == kind).flat_map(|l| l.tasks).flat_map(|t| t.ring);
-        let rung: Vec<(Target, Stage)> = rung.filter(|t| matches!(t, Target::Rail(_))).map(|t| (*t, Stage::Drawing)).collect();
+        // AU25: each on its task's own step: a comic's pen stands in Pages.
+        let rung = lessons::for_gate().iter().filter(|l| l.kind == kind).flat_map(|l| l.tasks);
+        let rung: Vec<(Target, Stage)> = rung.flat_map(|t| t.ring.iter().map(|r| (*r, t.step))).filter(|(t, _)| matches!(t, Target::Rail(_))).collect();
         let here = h.editor().stage.expect("the lesson's step");
         let chains = [FILL_KEY, ERASER_KEY].into_iter().map(|c| (c, here));
         let own = rung.iter().map(|(t, s)| (&*Box::leak(vec![*t].into_boxed_slice()), *s));
         for (chain, step) in chains.chain(own).collect::<Vec<(&'static [Target], Stage)>>() {
+            // AU25: `More` is the keys a short window leaves out: read it there.
+            let short = chain == [Target::Rail(Key::More)];
+            if short {
+                sized(&mut h, 853.0, 480.0);
+            }
             stand(&mut h, chain, step);
             assert!(h.ring_rect().is_some(), "{}: {chain:?} has a rect", lesson.id);
+            if short {
+                sized(&mut h, 1280.0, 800.0);
+            }
         }
         drop(h); // the device is one at a time: the next harness waits on this one
     }

@@ -57,7 +57,7 @@ fn probe_art() -> Vec<Path> {
 }
 
 const fn task(say: &'static str, why: Option<&'static str>, step: Stage, done: Done, show: Show) -> Task {
-    Task { say, why, step, done, ring: &[Target::Paper], guide: &[], stand_in: &[], hand: None, miss: None, show }
+    Task { say, why, step, done, ring: &[Target::Paper], guide: &[], stand_in: &[], hand: None, cells: &[], miss: None, show }
 }
 
 const TASKS: &[Task] = &[

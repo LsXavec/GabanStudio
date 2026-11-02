@@ -759,7 +759,7 @@ fn grown_for(size: (f32, f32), kind: &NodeKind, text: &NodeKind) -> Option<NodeK
 /// them in it. A balloon has no words of its own, so the first it is given
 /// stand in a new Text at its centre, wrapped to it, and the balloon stays
 /// selected. Words the page already holds are no step.
-fn set_words(state: &mut AppState, id: NodeId, words: &str) {
+pub(crate) fn set_words(state: &mut AppState, id: NodeId, words: &str) {
     let size = page_size(state);
     let cut = state.cut();
     let Some(v) = values(cut, id).filter(|v| placed(v.kind)) else {
@@ -1082,6 +1082,10 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
             for (column, word, name, help) in tracks {
                 let r = plate::detent(ui, active == column, word);
                 plate::speak(&r, egui::WidgetType::RadioButton, Some(active == column), name);
+                // AU25: the ring stands on the detent there is to press.
+                if active != column {
+                    plate::mark_row(&r, Target::Named("manga.ink_tone"));
+                }
                 if r.on_hover_text(help).clicked() {
                     *edit = Some(Edit::Track(column));
                 }
@@ -1252,7 +1256,13 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
     }
 
     // AU15: the screen tone and the rulers fold; a lesson's ring opens them.
-    let wished = ["manga.tone_preset", "manga.rulers"].map(|name| plate::wishes(ui.ctx(), Target::Named(name)));
+    // AU25: a chain through the Tone detent comes here once that is pressed.
+    let on_tone = ink_tone(state.cut()).is_some_and(|(_, tone)| state.view.active_column == tone);
+    let tone_next = on_tone || !plate::wishes(ui.ctx(), Target::Named("manga.ink_tone"));
+    let wished = [
+        tone_next && plate::wishes(ui.ctx(), Target::Named("manga.tone_preset")),
+        plate::wishes(ui.ctx(), Target::Named("manga.rulers")),
+    ];
     ui.add_space(6.0);
     let open = plate::more_row(ui, &mut state.panel_more, plate::MORE_MANGA, vocab::MENU_MORE);
     if open || wished.contains(&true) {

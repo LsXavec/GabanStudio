@@ -95,7 +95,8 @@ fn without_glow(h: &mut EditorHarness, dir: &std::path::Path) -> Picture {
 /// offers, each sentence the lessons file's, and no Amateur task a `Guide`.
 #[test]
 fn auamateur_six_stand() {
-    assert_eq!(lessons::ALL.len(), 6);
+    // AU25: the whole table's pin is nine now, `auveteran_nine_stand`'s.
+    assert_eq!(lessons::ALL.iter().filter(|l| l.class != lessons::Class::Experienced).count(), 6);
     let ids: Vec<&str> = amateurs().iter().map(|l| l.id).collect();
     assert_eq!(ids, ["coat_of_shavings", "still_in_the_coat", "too_much_coat"]);
     let kinds: Vec<ProjectKind> = amateurs().iter().map(|l| l.kind).collect();

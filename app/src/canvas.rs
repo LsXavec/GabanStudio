@@ -3157,8 +3157,14 @@ impl CanvasView {
                         chart.as_ref().map_or("none".to_string(), |c| format!("{} marks", c.marks.len())),
                     );
                     let presets = ui.horizontal_wrapped(|ui| {
-                        for (name, marks, tip) in crate::doc::CHART_PRESETS {
-                            if ui.small_button(*name).card(*tip).clicked() && !busy {
+                        for (i, (name, marks, tip)) in crate::doc::CHART_PRESETS.iter().enumerate() {
+                            let chip = ui.small_button(*name).card(*tip);
+                            // AU25: a target of its own: the fold's header has
+                            // met the row's, and a row that opens hidden stays so.
+                            if i == crate::doc::CHART_EVEN {
+                                plate::mark_row(&chip, Target::Named("options.chart.even"));
+                            }
+                            if chip.clicked() && !busy {
                                 state.set_chart(here, marks);
                             }
                         }
