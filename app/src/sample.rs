@@ -89,7 +89,7 @@ pub fn dialogue_wav() -> Vec<u8> {
 }
 
 /// Rasterise `paint(x, y)` over the tiles covering `[x0, x1) × [y0, y1)`.
-fn raster(
+pub(crate) fn raster(
     (x0, y0, x1, y1): (i32, i32, i32, i32),
     paint: impl Fn(i32, i32) -> Option<[u8; 4]>,
 ) -> RasterLayer {

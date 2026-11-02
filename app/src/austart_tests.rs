@@ -665,24 +665,31 @@ fn stand_in(h: &mut EditorHarness, tab: WelcomeTab) {
     settle(h);
 }
 
-/// Until a lesson ships, row two is `Open the example`, and nothing reaches
-/// the page: the card is not there, and `Help ▸ Lessons` and the palette say
-/// why. The first row of `ALL` flips all of it, which a stand-in table proves.
+/// With no lesson on the table row two is `Open the example`, and the page has
+/// no way in. AU23: three lessons ship, so a first run reads `Follow a lesson`,
+/// one control for the other, and `Help ▸ Lessons` opens the page; the empty
+/// table stays the row's other state, set here by hand.
 #[test]
 fn austart_row_two_waits_for_lessons() {
-    assert!(lessons::ALL.is_empty(), "no lesson ships yet: this test moves with the first");
+    assert!(!lessons::ALL.is_empty(), "the Rookie lessons ship");
+    let empty = || {
+        let mut w = Welcome::new(&[]);
+        w.lessons = &[];
+        w
+    };
     let mut h = first_run();
+    h.editor_mut().start = Some(empty());
+    settle(&mut h);
     assert!(h.has("Open the example") && !h.has("Follow a lesson"));
-    assert_eq!(h.editor().can_perform(Action::OpenLessons), Err("no lessons yet"));
     assert_eq!(Action::OpenLessons.menu(), Some("Help/Lessons"));
-    assert_eq!(Welcome::new(&[]).on_lessons().tab, WelcomeTab::Start, "no way in by the verb");
+    assert_eq!(empty().on_lessons().tab, WelcomeTab::Start, "no way in by the verb");
+    let (row, card) = (h.rect("Open the example"), float_open(&h));
     h.click("Open the example");
     settle(&mut h);
     assert_eq!(h.rig().requests, [AppRequest::Start(WelcomeAction::Sample)]);
-    // The same row, the same place, once there are lessons.
+    // The same row, the same place, now there are lessons.
     let mut h = first_run();
-    let (row, card) = (h.rect("Open the example"), float_open(&h));
-    stand_in(&mut h, WelcomeTab::Start);
+    assert_eq!(h.editor().can_perform(Action::OpenLessons), Ok(()));
     assert!(h.has("Follow a lesson") && !h.has("Open the example"));
     assert_eq!((h.rect("Follow a lesson"), float_open(&h)), (row, card), "one control for one");
     h.click("Follow a lesson");
@@ -1487,7 +1494,7 @@ fn austart_words_stand_on_one_edge() {
     let mut h = first_run();
     with_recents(&mut h, dir.path());
     let edge = float_open(&h).left() + 12.0 + plate::CARD_PAD;
-    for word in ["Start", "A drawing", "Open the example", "Open a project", "Recent", RECENT[0]] {
+    for word in ["Start", "A drawing", "Follow a lesson", "Open a project", "Recent", RECENT[0]] {
         assert_eq!(h.painted_at(word).x, edge, "{word}");
     }
     // Each column keeps its own: a card's, a half row's.

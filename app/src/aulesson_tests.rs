@@ -140,6 +140,12 @@ pub static TABLE: LazyLock<Vec<Lesson>> = LazyLock::new(|| {
     rows
 });
 
+/// The probes alone: a cell of the Lessons page holds its class's one lesson,
+/// so a real lesson stands where the probe of its class and type would.
+fn probes() -> &'static [Lesson] {
+    &TABLE[lessons::ALL.len()..]
+}
+
 fn row(id: &str) -> usize {
     TABLE.iter().position(|l| l.id == id).expect("a row of the table")
 }
@@ -210,7 +216,7 @@ const NEVER: Task = task("", None, Stage::Drawing, Done::Strokes(u32::MAX), Show
 fn aulesson_page_is_one_click() {
     let mut h = EditorHarness::as_first_run();
     let mut w = Welcome::new(&[]);
-    w.lessons = lessons::table();
+    w.lessons = probes();
     h.editor_mut().start = Some(w);
     settle(&mut h);
     assert!(!h.has(PROBE.title), "still on Start");
@@ -1414,7 +1420,7 @@ fn aulesson_finish_ticks_the_grid() {
     assert!(h.has(lesson::NEXT));
     assert!(h.state().file_path.is_none() && h.has(LEAVE), "the document stays open");
     let mut w = Welcome::new(&[]);
-    w.lessons = lessons::table();
+    w.lessons = probes();
     h.editor_mut().open_start(w.on_lessons());
     settle(&mut h);
     assert_eq!(h.editor().start.as_ref().map(|w| w.ticks_painted), Some(1));

@@ -549,9 +549,9 @@ fn start_float(dir: &Path) {
         if state.contains("whats-new") {
             w.tab = crate::welcome::WelcomeTab::WhatsNew;
         }
-        // AU20: on the stand-in table, until a lesson ships.
+        // AU20, AU23: on the shipped table.
         if state.contains("follow") || state.contains("lessons") {
-            w.lessons = crate::lessons::STAND_IN;
+            w.lessons = crate::lessons::ALL;
         }
         if state.contains("lessons") {
             w.tab = crate::welcome::WelcomeTab::Lessons;
@@ -695,10 +695,39 @@ fn lesson_card(dir: &Path) {
     h.editor_mut().begin_lesson(crate::auguide_show_tests::deckle_lesson(), 0);
     crate::aurail_tests::sized(&mut h, full.0 as f32, full.1 as f32);
     h.shot(egui::vec2(full.0 as f32, full.1 as f32), &dir.join("lesson-deckle-guide.png"));
+    drop(h);
+
+    // AU23: the Rookie lessons, part way, on each window; then the file each
+    // one ends in, as it left the dialog.
+    use crate::auguide_show_tests::{File, Hand, ride};
+    for (lesson, task) in [(0, 8), (1, 6), (2, 7)] {
+        let lesson = crate::lessons::ALL[lesson];
+        for (name, size) in [("", full), ("-1280", (1280, 800))] {
+            let mut h = EditorHarness::with_gpu_ready();
+            open(&mut h, lesson.id);
+            crate::aurail_tests::sized(&mut h, size.0 as f32, size.1 as f32);
+            crate::auguide_tests::stand_on_the_tasks_before(&mut h, &lesson, task);
+            h.editor_mut().begin_lesson(lesson, task);
+            h.shot(egui::vec2(size.0 as f32, size.1 as f32), &dir.join(format!("rookie-{}{name}.png", lesson.id)));
+        }
+        let mut h = EditorHarness::as_shipped();
+        crate::aurail_tests::sized(&mut h, full.0 as f32, full.1 as f32);
+        open(&mut h, lesson.id);
+        let ridden = ride(&mut h, &lesson, Hand::ShowMe);
+        let (from, kind) = match ridden.files.last().expect("a file") {
+            File::One(_, path) => (path.clone(), path.extension().map(|e| e.to_string_lossy().into_owned())),
+            File::Pages(pages) => {
+                let page = std::fs::read_dir(pages).expect("the pages").flatten().next().expect("a page");
+                (page.path(), Some("png".to_string()))
+            }
+        };
+        let to = dir.join(format!("rookie-file-{}.{}", lesson.id, kind.expect("an extension")));
+        std::fs::copy(&from, to).unwrap_or_else(|e| panic!("{from:?}: {e}"));
+    }
 }
 
 /// AU27: the card's pictures, by file name.
-const LESSON: [(&str, u32, u32); 21] = [
+const LESSON: [(&str, u32, u32); 27] = [
     ("lesson-draw", 1600, 900),
     ("lesson-draw-fold", 832, 520),
     ("lesson-wander", 832, 520),
@@ -720,6 +749,12 @@ const LESSON: [(&str, u32, u32); 21] = [
     ("lesson-reveal", 1600, 900),
     ("lesson-by-hand", 1600, 900),
     ("lesson-deckle-guide", 1600, 900),
+    ("rookie-up_late", 1600, 900),
+    ("rookie-up_late-1280", 1280, 800),
+    ("rookie-end_of_the_desk", 1600, 900),
+    ("rookie-end_of_the_desk-1280", 1280, 800),
+    ("rookie-not_a_pencil", 1600, 900),
+    ("rookie-not_a_pencil-1280", 1280, 800),
 ];
 
 fn lesson_owed() -> Vec<(String, u32, u32)> {

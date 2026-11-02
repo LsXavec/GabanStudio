@@ -312,6 +312,18 @@ impl LessonRun {
         guide.iter().filter_map(path).filter(shows).map(line).collect()
     }
 
+    /// AU23: the current task's dot at `at` on the paper, give or take its own
+    /// width: a press lands near, and the dot is under the pointer.
+    fn press_under(&self, at: [f32; 2]) -> Option<u16> {
+        let guide = self.current().filter(|_| !self.holding).map_or(&[][..], |t| t.guide);
+        let under = |p: &lessons::Path| {
+            let b = p.bounds();
+            let near = |from: f32, to: f32, v: f32| (from - p.width..=to + p.width).contains(&v);
+            p.is_press() && near(b[0], b[2], at[0]) && near(b[1], b[3], at[1])
+        };
+        guide.iter().copied().find(|i| self.art.get(usize::from(*i)).is_some_and(under))
+    }
+
     /// The reveal `secs` along: those lines done, and the one the hand is on
     /// as far as it has come, ink first and the eraser's after.
     fn revealed(&self, paths: &[u16], secs: f64) -> (Vec<GuideLine>, Vec<GuideLine>) {
@@ -340,7 +352,8 @@ impl LessonRun {
         let answers = |path: u16, mark: &[f32; 4]| {
             self.art.get(usize::from(path)).is_some_and(|p| {
                 let b = p.bounds();
-                let span = (b[2] - b[0]).max(b[3] - b[1]);
+                // A press has no length to span: a pen's tap is one point.
+                let span = if p.is_press() { 0.0 } else { (b[2] - b[0]).max(b[3] - b[1]) };
                 let inside = mark[0] >= b[0] - grow[0]
                     && mark[1] >= b[1] - grow[1]
                     && mark[2] <= b[2] + grow[0]
@@ -848,6 +861,7 @@ impl Editor {
     /// on as it would have (spec 5.9); so does anything that moves what it
     /// stands over, a pill pressed on the way above all.
     pub(crate) fn lesson_guide(&mut self, ctx: &egui::Context) {
+        self.lesson_press(ctx);
         let Some(run) = self.lesson.as_mut() else {
             self.canvas.guide = canvas::Guide::default();
             return;
@@ -872,6 +886,22 @@ impl Editor {
             return;
         }
         self.lesson_land(reveal.paths);
+    }
+
+    /// AU23: `Press once on each blue dot` is a press. A pen's tap paints by the
+    /// pen route, whose mouse paints nothing for a bare click, and that route
+    /// is not this lesson's to move: so a click on a dot lands it as Show me's
+    /// ink does.
+    fn lesson_press(&mut self, ctx: &egui::Context) {
+        let click = ctx.input(|i| i.pointer.primary_clicked().then(|| i.pointer.interact_pos()).flatten());
+        let (Some(run), Some(at)) = (self.lesson.as_ref(), click) else { return };
+        if self.canvas.stroke_active() || !self.lesson_paper() {
+            return;
+        }
+        let paper = self.canvas.view_xform().screen_to_paper(at);
+        if let Some(dot) = run.press_under([paper.x, paper.y]) {
+            self.lesson_land(&[dot]);
+        }
     }
 
     /// AU28: the Canvas pane is on screen: a step may hold none, or have it
@@ -935,7 +965,7 @@ impl Editor {
     /// reaches for a paper the person has left, or that no pane shows: the
     /// card is pointing back. A paper the pen would refuse is refused here,
     /// as the circle's is, before the hand sets out.
-    fn lesson_show(&mut self, ctx: &egui::Context) {
+    pub(crate) fn lesson_show(&mut self, ctx: &egui::Context) {
         let Some(run) = self.lesson.as_mut() else { return };
         run.asked = true;
         if run.lesson.class == Class::Experienced {

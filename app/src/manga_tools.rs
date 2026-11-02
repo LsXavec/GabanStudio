@@ -1114,7 +1114,11 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
             }
         });
     });
+    // AU23: the page beside its verbs can outgrow a narrow pane: the panels wrap
+    // at what the pane shows, or the third stands past its edge.
+    let shown = ui.clip_rect().right() - ui.cursor().left();
     ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(shown);
         for (i, poly) in panels.iter().enumerate() {
             let [x0, y0, x1, y1] = bounds(poly);
             let name = format!("panel {}", i + 1);
@@ -1682,7 +1686,7 @@ pub fn paint_letters(
 }
 
 /// The panel tool's `op` on the open page as one undo step.
-fn panels(state: &mut AppState, op: PanelOp) {
+pub(crate) fn panels(state: &mut AppState, op: PanelOp) {
     let Some(page) = Page::of(state.cut()) else {
         state.refuse("refused — this shot is no page (New page makes one)");
         return;

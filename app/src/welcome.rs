@@ -664,7 +664,7 @@ const EXAMPLE_CARD: &str = "A ball bounce to look through and draw on";
 /// head and the margins leave the body 229: rows of 56, not 60, keep the grid
 /// unscrolled.
 const PAGE_LEGEND_H: f32 = 16.0;
-const PAGE_GUTTER: f32 = 72.0;
+const PAGE_GUTTER: f32 = 84.0;
 pub const PAGE_ROW_H: f32 = 56.0;
 const PAGE_GAP: f32 = 6.0;
 

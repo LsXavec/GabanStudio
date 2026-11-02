@@ -17,7 +17,7 @@ use egui_kittest::kittest::Queryable;
 
 use crate::aulesson_tests::{along, export_asked, open, pen};
 use crate::aurail_tests::sized;
-use crate::auguide_tests::stand;
+use crate::auguide_tests::{stand, stand_on_the_tasks_before};
 use crate::canvas::extpaper_tests::{paint_texels, texel};
 use crate::canvas::{CanvasTool, CanvasView, GuideLine, NEEDS_ENGINE};
 use crate::config::Action;
@@ -42,12 +42,12 @@ const PLAY_STEPS: usize = 600;
 /// The default gap the closed-shape checks read at.
 const GAP: u32 = 2;
 
-fn settle(h: &mut EditorHarness) {
+pub(crate) fn settle(h: &mut EditorHarness) {
     h.run();
     h.run_frames(4);
 }
 
-fn at(h: &EditorHarness) -> usize {
+pub(crate) fn at(h: &EditorHarness) -> usize {
     h.editor().lesson.as_ref().expect("a lesson stands").task
 }
 
@@ -107,15 +107,24 @@ fn under(path: &Path) -> Vec<(i32, i32)> {
 
 /// Who answers a lesson's tasks.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Hand {
+pub(crate) enum Hand {
     ShowMe,
     Pen,
+    /// AU23: the card's button and nothing else: one press a task, and the
+    /// ring never climbed.
+    Alone,
 }
 
 /// What a lesson ended in.
-enum File {
+pub(crate) enum File {
     One(ExportKind, PathBuf),
     Pages(PathBuf),
+}
+
+/// A ride's files, and the folder they stand in, kept for as long as they are read.
+pub(crate) struct Ridden {
+    _dir: tempfile::TempDir,
+    pub(crate) files: Vec<File>,
 }
 
 /// `path`'s stroke by the pen route: a Rig stroke takes the vector route, so
@@ -159,7 +168,7 @@ fn stand_in(go: &mut Recorder, step: &str, art: &[Path], lines: &[u16], hand: Ha
                 go.act(step, Act::Answer(Box::new(fill)));
             }
             (_, Hand::Pen) => pen_line(go, step, art, index),
-            (_, Hand::ShowMe) => go.act(step, Act::Answer(Box::new(move |h| assert!(h.editor_mut().lesson_land(&[index]), "the line landed")))),
+            (_, Hand::ShowMe | Hand::Alone) => go.act(step, Act::Answer(Box::new(move |h| assert!(h.editor_mut().lesson_land(&[index]), "the line landed")))),
         }
     }
 }
@@ -197,23 +206,37 @@ fn ringed(lesson: &Lesson, task: &Task) -> bool {
 /// The act that answers `task`: the card's button, the pen, or the control the
 /// ring came to.
 fn answer(go: &mut Recorder, step: &str, lesson: &Lesson, art: &[Path], task: &Task, hand: Hand) {
-    if ringed(lesson, task) {
+    if ringed(lesson, task) && hand != Hand::Alone {
         climb(go, step, task);
     }
     let shows = lesson.class != Class::Experienced && !matches!(task.show, Show::Where);
     let control = rings(task);
     let traced = matches!(task.show, Show::Trace(_));
-    if shows && (hand == Hand::ShowMe || !(traced || control)) {
+    if shows && (hand != Hand::Pen || !(traced || control)) {
+        let was = at(go.harness());
         go.act(step, Act::Click(SHOW_ME));
         if let Show::Trace(paths) = task.show {
             let secs = REVEAL_SECS * paths.len() as f64 + 0.2;
             go.act(step, Act::Answer(Box::new(move |h| h.wait(secs))));
         }
+        // AU23: the climb left a menu open, and the press outside it shut it.
+        settle(go.harness());
+        if hand == Hand::ShowMe && task.ring.len() > 1 && at(go.harness()) == was {
+            go.act(step, Act::Click(SHOW_ME));
+        }
     } else if !own_lines(task).is_empty() {
         stand_in(go, step, art, own_lines(task), hand);
     } else if control {
         let (_, rect) = go.harness().ring_stands().expect("climbed");
+        let was = at(go.harness());
         go.act(step, Act::Answer(Box::new(move |h| h.click_at(rect))));
+        // AU23: a control one click does not answer: a drag, three presses, a
+        // key that arms a tool for a tap the Rig's pen route refuses. The card's
+        // button is the driver's other act (spec 5.15).
+        settle(go.harness());
+        if shows && matches!(task.show, Show::Run(_) | Show::Fill(_)) && at(go.harness()) == was {
+            go.act(step, Act::Click(SHOW_ME));
+        }
     } else if let Show::Perform(action) = task.show {
         go.act(step, Act::Perform(action));
     } else if let Show::Run(run) = task.show {
@@ -261,13 +284,13 @@ fn dialogs(go: &mut Recorder, step: &str, id: &str, dir: &FilePath, files: &mut 
 }
 
 /// A file's first picture: width, height, RGBA.
-struct Picture {
-    size: (u32, u32),
-    rgba: Vec<u8>,
+pub(crate) struct Picture {
+    pub(crate) size: (u32, u32),
+    pub(crate) rgba: Vec<u8>,
 }
 
 impl Picture {
-    fn png(file: &FilePath) -> Picture {
+    pub(crate) fn png(file: &FilePath) -> Picture {
         let bytes = std::fs::File::open(file).unwrap_or_else(|_| panic!("{file:?} is there"));
         let mut read = png::Decoder::new(std::io::BufReader::new(bytes)).read_info().expect("a PNG");
         let mut data = vec![0; read.output_buffer_size()];
@@ -285,7 +308,7 @@ impl Picture {
 
     /// Each picture of the file, and its length in hundredths of a second. A
     /// held drawing is one GIF frame, standing for its whole run.
-    fn gif(file: &FilePath) -> (Vec<Picture>, u32) {
+    pub(crate) fn gif(file: &FilePath) -> (Vec<Picture>, u32) {
         let bytes = std::fs::read(file).expect("the GIF");
         let gif = crate::gif_decode::decode(&bytes).expect("a GIF");
         let size = (u32::from(gif.size.0), u32::from(gif.size.1));
@@ -294,13 +317,13 @@ impl Picture {
     }
 
     /// Each PNG in `dir`, by name.
-    fn folder(dir: &FilePath) -> Vec<Picture> {
+    pub(crate) fn folder(dir: &FilePath) -> Vec<Picture> {
         let mut files: Vec<PathBuf> = std::fs::read_dir(dir).expect("the folder").flatten().map(|f| f.path()).collect();
         files.sort();
         files.iter().map(|f| Picture::png(f)).collect()
     }
 
-    fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
+    pub(crate) fn pixel(&self, x: i32, y: i32) -> [u8; 4] {
         let (w, h) = (self.size.0 as i32, self.size.1 as i32);
         if x < 0 || y < 0 || x >= w || y >= h {
             return [255, 255, 255, 0];
@@ -320,7 +343,7 @@ impl Picture {
     }
 
     /// The pixels of this colour, as near as eight bits keep it.
-    fn count(&self, rgb: [u8; 3]) -> usize {
+    pub(crate) fn count(&self, rgb: [u8; 3]) -> usize {
         let near = |px: &&[u8]| px.iter().zip(rgb).all(|(a, b)| a.abs_diff(b) <= 3);
         self.rgba.chunks_exact(4).filter(near).count()
     }
@@ -351,7 +374,8 @@ fn reads_the_finish(lesson: &Lesson, art: &[Path], pictures: &[Picture], count: 
         let on = |picture: &Picture| path.points.iter().filter(|p| picture.inked_near(p[0], p[1], 3)).count();
         let met = pictures.iter().map(on).max().unwrap_or(0);
         if met * 10 < path.points.len() * 9 {
-            return Err(format!("path {index}: {met} of {} on ink", path.points.len()));
+            let first = pictures.first().map(|p| p.pixel(path.points[0][0] as i32, path.points[0][1] as i32));
+            return Err(format!("path {index}: {met} of {} on ink, {first:?} where it starts", path.points.len()));
         }
     }
     Ok(())
@@ -406,7 +430,7 @@ fn reopens_equal(h: &EditorHarness, dir: &FilePath, step: &str) {
 
 /// `lesson` from where it stands to its file. One loop, on the lesson's own
 /// tables: any refusal or ignored verb fails by name.
-fn ride(h: &mut EditorHarness, lesson: &Lesson, hand: Hand) {
+pub(crate) fn ride(h: &mut EditorHarness, lesson: &Lesson, hand: Hand) -> Ridden {
     let dir = tempfile::tempdir().expect("dir");
     let art = (lesson.art)();
     let mut files = Vec::new();
@@ -434,17 +458,22 @@ fn ride(h: &mut EditorHarness, lesson: &Lesson, hand: Hand) {
     let name = format!("{} by {hand:?}", lesson.id);
     read_files(go.harness(), lesson, &art, &files, &name);
     reopens_equal(go.harness(), dir.path(), &name);
+    Ridden { _dir: dir, files }
 }
 
 /// Spec 5.15: every lesson, every task, through the real editor Rig on a
-/// first-run boot, to a real finished file, by Show me and by the pen.
+/// first-run boot, to a real finished file, by Show me and by the pen. AU23: at
+/// the two sizes a laptop opens at, where the rail and the band fold.
 #[test]
 fn auguide_every_lesson_ends_in_its_file() {
     for lesson in lessons::for_gate() {
         for hand in [Hand::ShowMe, Hand::Pen] {
-            let mut h = EditorHarness::as_first_run();
-            open(&mut h, lesson.id);
-            ride(&mut h, lesson, hand);
+            for size in [(1280.0, 800.0), (1024.0, 640.0)] {
+                let mut h = EditorHarness::as_first_run();
+                sized(&mut h, size.0, size.1);
+                open(&mut h, lesson.id);
+                ride(&mut h, lesson, hand);
+            }
         }
     }
 }
@@ -551,7 +580,11 @@ fn auguide_pen_ticks_every_stroke_task() {
                 let mut h = EditorHarness::as_shipped();
                 sized(&mut h, size.0, size.1);
                 open(&mut h, lesson.id);
-                h.editor_mut().enter_room(task.step);
+                stand_on_the_tasks_before(&mut h, lesson, i);
+                // A room's door arms its tool: the task before chose another.
+                if h.editor().stage != Some(task.step) {
+                    h.editor_mut().enter_room(task.step);
+                }
                 h.editor_mut().begin_lesson(*lesson, i);
                 settle(&mut h);
                 let step = format!("{} task {i} at {size:?}", lesson.id);
@@ -1492,12 +1525,15 @@ fn auguide_art_has_no_stock_shape() {
     assert!(!is_stock(&parabola(0.7)), "a gentle curve stays under the floor");
 }
 
-/// The most lines a Rookie traces on one drawing, presses not counted.
-fn trace_load(lesson: &Lesson) -> usize {
+/// The most lines a Rookie traces on one drawing, presses not counted. A
+/// comic's page is one drawing and its panels are the pictures: the lessons
+/// file's number there is per panel, and each panel is a task (AU23).
+pub(crate) fn trace_load(lesson: &Lesson) -> usize {
     let art = (lesson.art)();
     let (mut load, mut most) = (0, 0);
     for task in lesson.tasks {
-        if matches!(task.done, Done::Drawings(_)) {
+        let panel = lesson.kind == ProjectKind::Comic && matches!(task.done, Done::Ink(_));
+        if panel || matches!(task.done, Done::Drawings(_)) {
             load = 0;
         }
         load += own_lines(task).iter().filter(|i| !art[usize::from(**i)].is_press()).count();
@@ -1549,7 +1585,7 @@ fn inked(paths: &[Path]) -> BTreeMap<(i32, i32), Arc<TileData>> {
 
 /// The flood from `seed` over `paper`, at `gap`: `None` where it finds no
 /// region at all.
-fn flood(paths: &[Path], seed: (i32, i32), paper: (u32, u32), gap: u32) -> Option<anim_core::fill::FillMask> {
+pub(crate) fn flood(paths: &[Path], seed: (i32, i32), paper: (u32, u32), gap: u32) -> Option<anim_core::fill::FillMask> {
     let opts = FillOpts { threshold: 0.5, gap_px: gap, grow_px: 0, protect_ink: false };
     let area = IRect { x: 0, y: 0, w: paper.0, h: paper.1 };
     flood_fill_mask_in(&inked(paths), seed, area, &opts, None).ok()
@@ -1573,7 +1609,7 @@ fn auguide_deckle_shuts_at_gap_two() {
 }
 
 /// A seed's flood stays off the paper's edge.
-fn bounds_a_region(paths: &[Path], seed: [f32; 2], paper: (u32, u32), gap: u32) -> bool {
+pub(crate) fn bounds_a_region(paths: &[Path], seed: [f32; 2], paper: (u32, u32), gap: u32) -> bool {
     flood(paths, (seed[0] as i32, seed[1] as i32), paper, gap).is_some_and(|mask| {
         let (w, h) = (paper.0 as i32, paper.1 as i32);
         (0..w).all(|x| !mask.get(x, 0) && !mask.get(x, h - 1)) && (0..h).all(|y| !mask.get(0, y) && !mask.get(w - 1, y))
@@ -1609,7 +1645,7 @@ fn auguide_guide_closes_where_filled() {
 }
 
 /// A finish, 64×64.
-fn thumb(paths: &[&Path], paper: (u32, u32)) -> Vec<bool> {
+pub(crate) fn thumb(paths: &[&Path], paper: (u32, u32)) -> Vec<bool> {
     const SIDE: usize = 64;
     let mut out = vec![false; SIDE * SIDE];
     let (sx, sy) = (SIDE as f32 / paper.0 as f32, SIDE as f32 / paper.1 as f32);
@@ -1624,7 +1660,7 @@ fn thumb(paths: &[&Path], paper: (u32, u32)) -> Vec<bool> {
     out
 }
 
-fn iou(a: &[bool], b: &[bool]) -> f32 {
+pub(crate) fn iou(a: &[bool], b: &[bool]) -> f32 {
     let both = a.iter().zip(b).filter(|(a, b)| **a && **b).count();
     let either = a.iter().zip(b).filter(|(a, b)| **a || **b).count();
     both as f32 / either.max(1) as f32
@@ -1727,6 +1763,13 @@ fn planted(pose: &[Pt], other: &[Pt]) -> Pt {
 #[test]
 #[ignore = "needs UISHOT_DIR; writes a PNG"]
 fn uishot_deckle_contact_sheet() {
+    let dir = PathBuf::from(std::env::var("UISHOT_DIR").expect("set UISHOT_DIR to the output folder"));
+    std::fs::create_dir_all(&dir).expect("make UISHOT_DIR");
+    contact_sheet(&dir);
+}
+
+/// The sheet, in `dir`, and the box of each lesson's finish on it.
+pub(crate) fn contact_sheet(dir: &FilePath) -> (PathBuf, Vec<[i32; 4]>) {
     const WIDE: usize = 1800;
     const MARGIN: f32 = 30.0;
     const BEND_LINE: f32 = 230.0;
@@ -1737,8 +1780,6 @@ fn uishot_deckle_contact_sheet() {
     const COLUMNS: usize = 3;
     const CELL: (usize, usize) = (600, 300);
     const SCALE: f32 = 0.5;
-    let dir = PathBuf::from(std::env::var("UISHOT_DIR").expect("set UISHOT_DIR to the output folder"));
-    std::fs::create_dir_all(&dir).expect("make UISHOT_DIR");
     let finishes: Vec<Vec<Path>> = lessons::ALL.iter().map(|l| {
         let mut art: Vec<Option<Path>> = (l.art)().into_iter().map(Some).collect();
         l.finish.iter().filter_map(|i| art[usize::from(*i)].take()).collect()
@@ -1770,15 +1811,19 @@ fn uishot_deckle_contact_sheet() {
         sheet.line([x - 7.0, y + 16.0], [x + 7.0, y + 16.0], 2.0);
     }
     // Each lesson's finish.
+    let mut cells = Vec::new();
     for (n, paths) in finishes.iter().enumerate() {
         let (cx, cy) = ((n % COLUMNS * CELL.0) as f32, (FINISHES_AT + n / COLUMNS * CELL.1) as f32);
+        cells.push([cx as i32, cy as i32, cx as i32 + CELL.0 as i32, cy as i32 + CELL.1 as i32]);
         let all: Vec<f32> = paths.iter().flat_map(|p| p.bounds()).collect();
         let (lx, ly) = (all.iter().step_by(2).fold(f32::MAX, |a, b| a.min(*b)), all[1..].iter().step_by(2).fold(f32::MAX, |a, b| a.min(*b)));
         let (rx, ry) = (all.iter().step_by(2).fold(f32::MIN, |a, b| a.max(*b)), all[1..].iter().step_by(2).fold(f32::MIN, |a, b| a.max(*b)));
         let scale = SCALE.min((CELL.0 - 40) as f32 / (rx - lx)).min((CELL.1 - 40) as f32 / (ry - ly));
         sheet.paths(paths, scale, |p| [(p[0] - lx) * scale + cx + 20.0, (p[1] - ly) * scale + cy + 20.0]);
     }
-    sheet.write(&dir.join("deckle-sheet.png"));
+    let file = dir.join("deckle-sheet.png");
+    sheet.write(&file);
+    (file, cells)
 }
 
 /// Spec 5.3, main spec 1.5 rules 5 and 11: on a real device, for each type, the

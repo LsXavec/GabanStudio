@@ -98,6 +98,8 @@ mod auwords_tests;
 mod auguide_tests;
 #[cfg(test)]
 mod auguide_show_tests;
+#[cfg(test)]
+mod aurookie_tests;
 mod uidump;
 #[cfg(test)]
 mod uishot;

@@ -83,6 +83,30 @@ fn ends_on_paper(chain: &[Target]) -> bool {
 /// own document, in its own step: a pill's task on the step before it, or the
 /// pill would already be pressed. What `answer` reads depends on no `Done`, so
 /// each lesson that lands is walked with no new test code.
+/// The tasks before `i`, each by its own `Show me`, no frame between them.
+pub(crate) fn stand_on_the_tasks_before(h: &mut EditorHarness, lesson: &Lesson, i: usize) {
+    let ctx = h.ctx();
+    for (j, task) in lesson.tasks[..i].iter().enumerate() {
+        let e = h.editor_mut();
+        e.enter_room(task.step);
+        e.begin_lesson(*lesson, j);
+        if let Show::Trace(paths) = task.show {
+            e.lesson_land(paths);
+        } else {
+            e.lesson_show(&ctx);
+        }
+        // A pass ends and the head goes home: no frame ran it here.
+        if task.done == Done::Played {
+            e.state.view.playing = false;
+            e.state.goto(0);
+        }
+    }
+    // The panes lay out what these left, before a ring asks them to scroll.
+    if i > 0 {
+        settle(h);
+    }
+}
+
 fn each_task(size: (f32, f32), mut answer: impl FnMut(&mut EditorHarness, &Lesson, usize)) {
     for lesson in lessons::for_gate() {
         for (i, task) in lesson.tasks.iter().enumerate() {
@@ -96,9 +120,14 @@ fn each_task(size: (f32, f32), mut answer: impl FnMut(&mut EditorHarness, &Lesso
                 e.canvas.slot_at_pen_down(true, &mut e.state).expect("a cel to draw on");
                 paint_texels(&mut e.state, &[(10, 10)], [0.0, 0.0, 0.0, 1.0]);
             }
+            // AU23: and on what they left: frame 7 of a strip, a page's panels.
+            if !ends_on_paper(task.ring) {
+                stand_on_the_tasks_before(&mut h, lesson, i);
+            }
             let earlier = lesson.tasks[..i].iter().rev().map(|t| t.step).find(|s| *s != task.step);
             let room = if matches!(task.done, Done::OnStep(_)) { earlier } else { Some(task.step) };
-            if let Some(room) = room {
+            // A door refits its panes: a room already entered keeps its scroll.
+            if let Some(room) = room.filter(|r| h.editor().stage != Some(*r)) {
                 h.editor_mut().enter_room(room);
             }
             h.editor_mut().begin_lesson(*lesson, i);
