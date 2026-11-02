@@ -57,7 +57,7 @@ fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
         0.0,
         egui::TextFormat {
             font_id: plate::Role::Small.font(),
-            color: plate::LEGEND,
+            color: plate::INK2,
             ..Default::default()
         },
     );
@@ -66,7 +66,7 @@ fn value_line(ui: &mut egui::Ui, label: &str, value: String) {
         0.0,
         egui::TextFormat {
             font_id: plate::Role::Small.font(),
-            color: plate::STRUCK,
+            color: plate::INK,
             ..Default::default()
         },
     );
@@ -2398,7 +2398,7 @@ impl CanvasView {
         // The specimen sits in a Well recess: paint is MATERIAL, seated,
         // never a signal (the charters' material rule).
         painter.rect_filled(rect, plate::R_CONTROL, plate::WELL);
-        let ink = p.color.unwrap_or(plate::STRUCK.to_array());
+        let ink = p.color.unwrap_or(plate::INK.to_array());
         let n = 12;
         let x0 = rect.left() + 8.0;
         let x1 = rect.right() - 8.0;
@@ -2427,9 +2427,9 @@ impl CanvasView {
             prev = pt;
         }
         let name_ink = if armed || resp.hovered() {
-            plate::STRUCK
+            plate::INK
         } else {
-            plate::LEGEND
+            plate::INK2
         };
         // AU12: a third of the float has no room for "pencil": the face says
         // the first word, the spoken name and the card say all of it.
@@ -2455,7 +2455,7 @@ impl CanvasView {
                 painter.rect_stroke(
                     rect,
                     plate::R_CONTROL,
-                    egui::Stroke::new(2.0, plate::TALLY),
+                    egui::Stroke::new(2.0, plate::BLUE),
                     egui::StrokeKind::Inside,
                 );
             } else {
@@ -2468,7 +2468,7 @@ impl CanvasView {
                 ];
                 painter.extend(egui::Shape::dashed_line(
                     &c,
-                    egui::Stroke::new(2.0, plate::TALLY),
+                    egui::Stroke::new(2.0, plate::BLUE),
                     7.0,
                     5.0,
                 ));
@@ -2477,7 +2477,7 @@ impl CanvasView {
             painter.rect_stroke(
                 rect,
                 plate::R_CONTROL,
-                egui::Stroke::new(1.0, plate::LEGEND),
+                egui::Stroke::new(1.0, plate::INK2),
                 egui::StrokeKind::Inside,
             );
         }
@@ -2543,7 +2543,7 @@ impl CanvasView {
                 p.rect_stroke(
                     wrect,
                     0.0,
-                    egui::Stroke::new(1.0, plate::LEGEND),
+                    egui::Stroke::new(1.0, plate::INK2),
                     egui::StrokeKind::Outside,
                 );
                 ui.vertical(|ui| {
@@ -2553,7 +2553,7 @@ impl CanvasView {
                             self.brush_color[0], self.brush_color[1], self.brush_color[2]
                         ))
                         .font(plate::Role::Small.font())
-                        .color(plate::STRUCK),
+                        .color(plate::INK),
                     );
                     if let Some(n) = &armed_role {
                         plate::legend(ui, n);
@@ -2596,7 +2596,7 @@ impl CanvasView {
             ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
             let font = plate::Role::Small.font();
             let word_w = |word: &str| {
-                let galley = ui.painter().layout_no_wrap(plate::sentence(word), font.clone(), plate::LEGEND);
+                let galley = ui.painter().layout_no_wrap(plate::sentence(word), font.clone(), plate::INK2);
                 galley.size().x
             };
             let words = state.palettes.characters.iter().flat_map(|c| &c.roles).map(|r| word_w(&r.name));
@@ -2669,7 +2669,7 @@ impl CanvasView {
                             pnt.rect_stroke(
                                 well.expand(1.0),
                                 0.0,
-                                egui::Stroke::new(2.0, plate::TALLY),
+                                egui::Stroke::new(2.0, plate::BLUE),
                                 egui::StrokeKind::Outside,
                             );
                         } else {
@@ -2685,7 +2685,7 @@ impl CanvasView {
                             egui::Align2::CENTER_BOTTOM,
                             plate::sentence(&rname),
                             font.clone(),
-                            plate::LEGEND,
+                            plate::INK2,
                         );
                         if presp.double_clicked() {
                             self.brush_color = color;
@@ -2837,7 +2837,7 @@ impl CanvasView {
                 svr.top() + (1.0 - self.eye_hsv[2]) * svr.height(),
             );
             // Dark and light rings: the square runs from white to black.
-            pnt.circle_stroke(marker, 4.0, egui::Stroke::new(1.5, plate::STRUCK));
+            pnt.circle_stroke(marker, 4.0, egui::Stroke::new(1.5, plate::INK));
             pnt.circle_stroke(marker, 5.5, egui::Stroke::new(1.0, plate::halo(255)));
             if svresp.dragged() || svresp.clicked() {
                 if let Some(hp) = svresp.interact_pointer_pos() {
@@ -2866,7 +2866,7 @@ impl CanvasView {
             let hx = hue_r.left() + (self.eye_hsv[0] / 360.0) * hue_r.width();
             pnt.line_segment(
                 [pos2(hx, hue_r.top() - 1.0), pos2(hx, hue_r.bottom() + 1.0)],
-                egui::Stroke::new(2.0, plate::STRUCK),
+                egui::Stroke::new(2.0, plate::INK),
             );
             if hue_resp.dragged() || hue_resp.clicked() {
                 if let Some(hp) = hue_resp.interact_pointer_pos() {
@@ -2892,7 +2892,7 @@ impl CanvasView {
                         ui.label(
                             egui::RichText::new(format!("→ {l}"))
                                 .font(plate::Role::Small.font())
-                                .color(plate::LEGEND),
+                                .color(plate::INK2),
                         );
                         // Writes the model — held DANGER (no undo there).
                         if plate::danger(ui, "set") {
@@ -2959,7 +2959,7 @@ impl CanvasView {
         }
         let lit = resp.hovered() || resp.dragged();
         ui.painter().rect_filled(r, 0.0, plate::WELL);
-        chart_glyph(ui.painter(), g, &shown, if lit { plate::STRUCK } else { plate::AO });
+        chart_glyph(ui.painter(), g, &shown, if lit { plate::INK } else { plate::INK3 });
         if lit {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
         }
@@ -3070,7 +3070,7 @@ impl CanvasView {
                 ui.label(
                     egui::RichText::new("No key drawings yet. Mark one from its cell's menu.")
                         .small()
-                        .color(plate::LEGEND),
+                        .color(plate::INK2),
                 );
             }
             plate::latch(ui, &mut cfg.other_columns, "Other tracks")
@@ -3255,7 +3255,7 @@ impl CanvasView {
                 egui::Label::new(
                     egui::RichText::new(val)
                         .font(plate::Role::Small.font())
-                        .color(plate::STRUCK),
+                        .color(plate::INK),
                 )
                 .sense(Sense::click()),
             )
@@ -3480,7 +3480,7 @@ impl CanvasView {
                                     painter.circle_filled(
                                         rect.center(),
                                         r,
-                                        plate::STRUCK,
+                                        plate::INK,
                                     );
                                 }
                             }
@@ -3488,14 +3488,14 @@ impl CanvasView {
                                 painter.rect_stroke(
                                     rect.shrink(1.0),
                                     plate::R_CONTROL,
-                                    egui::Stroke::new(2.0, plate::TALLY),
+                                    egui::Stroke::new(2.0, plate::BLUE),
                                     egui::StrokeKind::Inside,
                                 );
                             } else if resp.hovered() {
                                 painter.rect_stroke(
                                     rect,
                                     plate::R_CONTROL,
-                                    egui::Stroke::new(1.0, plate::LEGEND),
+                                    egui::Stroke::new(1.0, plate::INK2),
                                     egui::StrokeKind::Inside,
                                 );
                             }
@@ -4161,7 +4161,7 @@ impl CanvasView {
                     egui::Align2::LEFT_TOP,
                     format!("{}", n + 1),
                     plate::Role::Small.font(),
-                    plate::AO,
+                    plate::INK3,
                 );
             }
             if let Some(s) = furniture.safe {
@@ -4723,19 +4723,19 @@ impl CanvasView {
             if composite_pending {
                 // GM9: the lamp, and in words — an FX render is pending
                 // (the last result shows until it lands).
-                painter.circle_filled(pos2(tag.right() + 12.0, tag.center().y), 4.0, crate::plate::TALLY);
+                painter.circle_filled(pos2(tag.right() + 12.0, tag.center().y), 4.0, crate::plate::BLUE);
                 plate::picture_tag(&painter, pos2(tag.right() + 24.0, tag.top()), "Rendering effects…");
             }
         }
         if let Some(note) = composite_note {
             // Red overrules the hand; the wash holds it on any desk.
-            let words = painter.layout_no_wrap(note.to_string(), plate::Role::Panel.font(), plate::AKA);
+            let words = painter.layout_no_wrap(note.to_string(), plate::Role::Panel.font(), plate::RED);
             let pill = Rect::from_center_size(
                 pos2(rect.center().x, rect.top() + 34.0),
                 words.size() + vec2(16.0, 4.0),
             );
             painter.rect_filled(pill, plate::R_PILL, plate::RED_WASH);
-            painter.galley(pill.min + vec2(8.0, 2.0), words, plate::AKA);
+            painter.galley(pill.min + vec2(8.0, 2.0), words, plate::RED);
         }
 
         // 0. GM22: the 3D underlay, faded under every column, on the frame,
@@ -5043,19 +5043,19 @@ impl CanvasView {
         if tracing {
             let text = "Shift and trace: pen resting. Click to end.";
             let font = plate::Role::Small.font();
-            let w = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), plate::LEGEND).size().x);
+            let w = ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), plate::INK2).size().x);
             // Below the FLIP line and composite view's note.
             let chip = Rect::from_center_size(pos2(rect.center().x, rect.top() + 58.0), vec2(w + 30.0, 20.0));
             let resp = ui.interact(chip, ui.id().with("shift_trace_chip"), Sense::click());
             plate::speak(&resp, egui::WidgetType::Button, Some(true), "shift & trace: pen resting (click to end)");
             painter.rect_filled(chip, plate::R_PILL, plate::WELL);
-            painter.circle_filled(pos2(chip.left() + 11.0, chip.center().y), 3.5, plate::TALLY);
+            painter.circle_filled(pos2(chip.left() + 11.0, chip.center().y), 3.5, plate::BLUE);
             painter.text(
                 pos2(chip.left() + 21.0, chip.center().y),
                 egui::Align2::LEFT_CENTER,
                 text,
                 font,
-                plate::LEGEND,
+                plate::INK2,
             );
             if resp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -5075,7 +5075,7 @@ impl CanvasView {
         let fage = ui.input(|i| i.time) - self.flash_since;
         if fage < 0.9 && state.refusal_seq != 0 {
             let fppp = ui.ctx().pixels_per_point();
-            let flash = egui::Stroke::new(crate::plate::device_px(2.0, fppp), crate::plate::AKA);
+            let flash = egui::Stroke::new(crate::plate::device_px(2.0, fppp), crate::plate::RED);
             if upright {
                 painter.rect_stroke(paper_rect, 0, flash, egui::StrokeKind::Outside);
             } else {
@@ -5125,7 +5125,7 @@ impl CanvasView {
                             egui::Align2::LEFT_BOTTOM,
                             &peer.name,
                             egui::FontId::new(plate::Role::Small.size(), crate::plate::semibold()),
-                            crate::plate::AO,
+                            crate::plate::INK3,
                         );
                     }
                     if peer.wet.len() >= 2 {
@@ -5162,13 +5162,13 @@ impl CanvasView {
         // words, in the canvas's corner past the rule (View3D's dot).
         if underlay_pending {
             let at = rect.left_top() + vec2(24.0, 14.0);
-            painter.circle_filled(at, 4.0, crate::plate::TALLY);
+            painter.circle_filled(at, 4.0, crate::plate::BLUE);
             painter.text(
                 at + vec2(8.0, 0.0),
                 egui::Align2::LEFT_CENTER,
                 "3D underlay rendering…",
                 plate::Role::Small.font(),
-                crate::plate::LEGEND,
+                crate::plate::INK2,
             );
         }
 
@@ -5231,11 +5231,11 @@ impl CanvasView {
                 for r in &marks.runs {
                     let y0 = crate::plate::snap(origin + r.start as f32 * 18.0 + 9.0, ppp);
                     let y1 = crate::plate::snap(origin + (r.end + 1) as f32 * 18.0, ppp) - 1.0;
-                    mp.circle_filled(pos2(cx, y0), 2.5, crate::plate::TALLY);
+                    mp.circle_filled(pos2(cx, y0), 2.5, crate::plate::BLUE);
                     if y1 > y0 + 2.5 {
                         mp.line_segment(
                             [pos2(cx, y0 + 2.5), pos2(cx, y1)],
-                            egui::Stroke::new(crate::plate::device_px(2.0, ppp), crate::plate::AO),
+                            egui::Stroke::new(crate::plate::device_px(2.0, ppp), crate::plate::INK3),
                         );
                     }
                 }
@@ -5244,7 +5244,7 @@ impl CanvasView {
                     mp.circle_stroke(
                         pos2(cx, y),
                         2.5,
-                        egui::Stroke::new(1.0, crate::plate::LEGEND),
+                        egui::Stroke::new(1.0, crate::plate::INK2),
                     );
                 }
             }
@@ -5256,7 +5256,7 @@ impl CanvasView {
                     pos2(strip.left() + 5.0, ncy),
                     pos2(strip.left(), ncy + 4.0),
                 ],
-                crate::plate::TALLY,
+                crate::plate::BLUE,
                 egui::Stroke::NONE,
             ));
         }
@@ -7374,8 +7374,8 @@ impl CanvasView {
 pub fn role_chip_color(role: anim_core::model::LayerRole) -> Color32 {
     use anim_core::model::LayerRole as R;
     match role {
-        R::Line => plate::STRUCK,
-        R::Color => plate::LEGEND,
+        R::Line => plate::INK,
+        R::Color => plate::INK2,
         R::Shadow => plate::alpha(plate::PENCIL_AO, 150), // ao, dimmed
         R::Highlight => plate::PAPER,
         R::Rough => plate::PENCIL_AO,
@@ -7383,7 +7383,7 @@ pub fn role_chip_color(role: anim_core::model::LayerRole) -> Color32 {
         R::HighlightLine => plate::alpha(plate::PENCIL_AKA, 170),
         R::Correction => plate::PENCIL_AKA,
         R::Reference => plate::INK3,
-        R::Custom => plate::LEGEND,
+        R::Custom => plate::INK2,
     }
 }
 
@@ -10130,7 +10130,7 @@ pub(crate) mod extpaper_tests {
         let papers = h.filled_rects(plate::PAPER);
         assert!(papers.iter().any(|r| near(*r, sheet)), "the whole paper laid down: {papers:?}");
         assert!(!papers.iter().any(|r| near(*r, frame)), "not the frame alone");
-        let outlines = h.outlined_rects(plate::LEGEND);
+        let outlines = h.outlined_rects(plate::INK2);
         assert!(outlines.iter().any(|r| near(*r, frame)), "the frame drawn on it: {outlines:?}");
         assert!(h.filled_rects(plate::paper_veil()).is_empty(), "3000 px: nothing veiled");
         // Capped (10000 px at 8192): the paper past the window is veiled.

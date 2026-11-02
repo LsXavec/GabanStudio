@@ -1564,7 +1564,7 @@ mod tests {
                 // Compact: no caption, the full name all the same.
                 crate::plate::tool_button(ui, false, Icon::Lasso, "", "lasso fill");
                 crate::plate::swatch(ui, crate::plate::PAPER, false, "skin shadow");
-                crate::plate::swatch(ui, crate::plate::AKA, false, "");
+                crate::plate::swatch(ui, crate::plate::RED, false, "");
             });
         });
         let tree = p.describe();
@@ -1572,7 +1572,7 @@ mod tests {
         assert!(p.has("fill"), "{tree}");
         assert!(p.has("lasso fill") && !p.has("lasso"), "{tree}");
         assert!(p.has(&format!("{}: skin shadow", crate::vocab::COLOR_WELL)), "{tree}");
-        let hex = format!("{}: {}", crate::vocab::COLOR_WELL, crate::plate::AKA.to_hex());
+        let hex = format!("{}: {}", crate::vocab::COLOR_WELL, crate::plate::RED.to_hex());
         assert!(p.has(&hex), "{tree}");
     }
 
@@ -2070,6 +2070,86 @@ mod tests {
             .collect();
         assert_eq!(left, vec![], "use plate tokens or plate helpers");
         assert_eq!(COLOUR_LITERALS_PINNED, 0);
+    }
+
+    // ---- AU16: the old token names ----
+
+    /// The six names the plate look wore and its compiled-in grain, spelt in
+    /// pieces so that this file is not a hit of its own scan.
+    const OLD_NAMES: [&str; 7] = [
+        concat!("GRAPH", "ITE"),
+        concat!("LEG", "END"),
+        concat!("STR", "UCK"),
+        concat!("TAL", "LY"),
+        concat!("A", "O"),
+        concat!("A", "KA"),
+        concat!("PLATE_GRAIN", "_PNG"),
+    ];
+
+    /// The old names `text` holds as whole words: `PENCIL_AO` is a word of
+    /// its own, and so is every `CHIP_*`.
+    fn old_names(text: &str) -> usize {
+        let words = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+        words.filter(|word| OLD_NAMES.contains(word)).count()
+    }
+
+    /// `pub const X: Color32 = Y;` lines: one token that is only another
+    /// token's second name. `GUIDE` and `ON_FILL` are computed, not named.
+    fn bare_aliases(text: &str) -> Vec<String> {
+        let held = |line: &str| {
+            let (name, value) = line.trim().strip_prefix("pub const ")?.split_once(": Color32 = ")?;
+            let value = value.strip_suffix(';')?;
+            let bare = value.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+            bare.then(|| name.to_string())
+        };
+        text.lines().filter_map(held).collect()
+    }
+
+    /// Spec AU16: the names are gone from every source, comments and tests
+    /// included, and the scan still sees one: the zero is not a blind scanner's.
+    #[test]
+    fn autoken_old_names_are_gone() {
+        let planted = concat!(
+            "plate::GRAPH", "ITE; plate::TAL", "LY, `A", "O`; PENCIL_A", "O CHIP_STR", "UCK LEG", "END_SIZE"
+        );
+        assert_eq!(old_names(planted), 3, "whole words only");
+        let left: Vec<(String, usize)> = sources()
+            .into_iter()
+            .map(|(name, text)| (name, old_names(&text)))
+            .filter(|&(_, n)| n > 0)
+            .collect();
+        assert_eq!(left, vec![], "use the tokens of spec 2.2");
+        // The grain stops being compiled in, and its file stays on disk.
+        let grain = concat!("plate_gr", "ain.png");
+        assert!(sources().iter().all(|(_, text)| !text.contains(grain)), "no code reads it");
+        let asset = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/tex").join(grain);
+        assert!(asset.is_file(), "the asset stays: {asset:?}");
+    }
+
+    /// Spec AU16: the ratchet holds with the aliases gone, and what stored
+    /// data reads kept its value: the retirement moved no colour.
+    #[test]
+    fn autoken_no_colour_literals_came_back() {
+        use crate::plate;
+        assert_eq!(COLOUR_LITERALS_PINNED, 0);
+        let outside: usize =
+            sources().iter().filter(|(name, _)| name != "plate.rs").map(|(_, text)| colour_literals(text)).sum();
+        assert_eq!(outside, 0, "every colour outside the plate is a token");
+        // No alias came back under a new name.
+        let planted = concat!("pub const OLD: Color32 = INK;\npub const NEW: Color32 = Color32", "::WHITE;");
+        assert_eq!(bare_aliases(planted), ["OLD"], "the scan sees one");
+        assert_eq!(bare_aliases(&source("plate.rs")), Vec::<String>::new(), "one name per token");
+        // Spec AU16's Must not change.
+        let pencils = [plate::PENCIL_AO, plate::PENCIL_AKA, plate::PENCIL_LEGEND].map(|c| c.to_array());
+        assert_eq!(pencils, [[83, 137, 196, 255], [228, 82, 47, 255], [139, 141, 131, 255]]);
+        let chips = [plate::CHIP_STRUCK, plate::CHIP_LEGEND, plate::CHIP_PAPER, plate::CHIP_AO, plate::CHIP_AKA];
+        assert_eq!(chips, [
+            [228, 225, 214, 255],
+            [139, 141, 131, 255],
+            [242, 238, 230, 255],
+            [83, 137, 196, 255],
+            [228, 82, 47, 255],
+        ]);
     }
 
     /// A file's shipped part: everything before its first test module.

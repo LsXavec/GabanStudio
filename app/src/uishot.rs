@@ -906,6 +906,8 @@ fn guide_placed(dir: &Path) {
         let (name, w, tall) = GUIDE_AT[at];
         sized(&mut h, w as f32, tall as f32);
         stand(&mut h, chain, step);
+        // AU16: the Result pane's picture back: half drawn, two runs differ.
+        arrive(&mut h, ProbeRoom::Stage(step));
         assert_eq!(h.ring_stands().map(|s| s.0), Some(rings), "{name}");
         h.shot(egui::vec2(w as f32, tall as f32), &dir.join(format!("{name}.png")));
     };
@@ -1625,7 +1627,9 @@ fn export_moments(dir: &Path) {
     use crate::render_queue::{self, ExportKind};
     let work = tempfile::tempdir().expect("a temp folder");
     let file = work.path().join("ball.gif");
-    let wall = work.path().join("wall");
+    // AU16: a name of its own, for the failed shot prints the path, and a temp
+    // folder's name would make two runs' pictures differ.
+    let wall = std::env::temp_dir().join("gaban-uishot-wall");
     std::fs::write(&wall, b"a file, not a folder").expect("a file");
     let room = ProbeRoom::Stage(Stage::Export);
     for (state, w, height) in EXPORT {
@@ -1694,6 +1698,7 @@ fn export_moments(dir: &Path) {
             h.run_export_to_end();
         }
     }
+    std::fs::remove_file(&wall).expect("the wall goes");
 }
 
 #[test]
@@ -1746,6 +1751,87 @@ fn uishot_rooms() {
     check_shots(&dir, &fx_owed()).expect("the Effects step");
     panel_moments(&dir);
     check_shots(&dir, &panels_owed()).expect("the panels no walk stops on");
+}
+
+/// AU16: a PNG's size and its pixels' bytes.
+fn picture(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("{e}"))?;
+    let mut reader = png::Decoder::new(std::io::BufReader::new(file)).read_info().map_err(|e| format!("{e}"))?;
+    let mut bytes = vec![0; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut bytes).map_err(|e| format!("{e}"))?;
+    bytes.truncate(info.buffer_size());
+    Ok((info.width, info.height, bytes))
+}
+
+/// AU16: every picture in `base` against its namesake in `after`, by decoded
+/// pixels: one line for each that moved, and none if nothing did.
+fn pixel_diff(base: &Path, after: &Path) -> Vec<String> {
+    let files = std::fs::read_dir(base).expect("the base shots").flatten();
+    let mut names: Vec<String> = files.map(|f| f.file_name().to_string_lossy().to_string()).collect();
+    names.retain(|name| name.ends_with(".png"));
+    names.sort();
+    let mut moved = Vec::new();
+    for name in names {
+        match (picture(&base.join(&name)), picture(&after.join(&name))) {
+            (Ok((w, h, a)), Ok((got_w, got_h, b))) if (w, h) == (got_w, got_h) => {
+                // A page's mono PNG holds under a byte a pixel: there, bytes.
+                let width = (a.len() / (w * h) as usize).max(1);
+                let differ = a.chunks(width).zip(b.chunks(width)).filter(|(x, y)| x != y).count();
+                if differ > 0 {
+                    moved.push(format!("{name}: {differ} pixels"));
+                }
+            }
+            (Ok((w, h, _)), Ok((got_w, got_h, _))) => moved.push(format!("{name}: {w}x{h} became {got_w}x{got_h}")),
+            (Err(e), _) | (_, Err(e)) => moved.push(format!("{name}: {e}")),
+        }
+    }
+    moved
+}
+
+/// Spec AU16's gate, and more than its rooms: every picture the ignored pass
+/// owes, at both sizes, against the part's start, so the sweep's diff covers
+/// the lesson surfaces (feedback spec 1.11). `AUTOKEN_BASE` is a folder of
+/// `uishot_rooms` run on the commit before the part.
+#[test]
+#[ignore = "needs a GPU adapter, UISHOT_DIR and AUTOKEN_BASE; writes PNGs"]
+fn autoken_render_is_unchanged_by_the_removal() {
+    let base = PathBuf::from(std::env::var("AUTOKEN_BASE").expect("set AUTOKEN_BASE to the part's start's shots"));
+    check_shots(&base, &shots_owed()).expect("the part's start's rooms");
+    check_shots(&base, &lesson_owed()).expect("and its lesson surfaces");
+    uishot_rooms();
+    crate::auguide_show_tests::uishot_deckle_contact_sheet();
+    let moved = pixel_diff(&base, &out_dir());
+    assert!(moved.is_empty(), "{} pictures moved:\n{}", moved.len(), moved.join("\n"));
+}
+
+/// The diff behind that gate, which only the ignored pass runs: one pixel of
+/// one picture is enough, and so is a picture gone or a size changed.
+#[test]
+fn autoken_the_pixel_diff_sees_one_pixel() {
+    let write = |path: PathBuf, (w, h): (u32, u32), bytes: &[u8]| {
+        let mut encoder = png::Encoder::new(std::fs::File::create(path).expect("a file"), w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().expect("a header").write_image_data(bytes).expect("its pixels");
+    };
+    let (base, after) = (tempfile::tempdir().expect("a folder"), tempfile::tempdir().expect("a folder"));
+    let pixels = vec![200u8; 2 * 2 * 4];
+    for name in ["same.png", "moved.png", "gone.png"] {
+        write(base.path().join(name), (2, 2), &pixels);
+    }
+    write(base.path().join("sized.png"), (2, 2), &pixels);
+    write(after.path().join("same.png"), (2, 2), &pixels);
+    write(after.path().join("sized.png"), (1, 4), &pixels);
+    let mut one = pixels.clone();
+    one[7] = 199;
+    write(after.path().join("moved.png"), (2, 2), &one);
+    std::fs::write(base.path().join("note.txt"), "not a picture").expect("a note");
+    let moved = pixel_diff(base.path(), after.path());
+    assert_eq!(moved.len(), 3, "{moved:?}");
+    assert!(moved[0].starts_with("gone.png: "), "{moved:?}");
+    assert_eq!(moved[1], "moved.png: 1 pixels");
+    assert_eq!(moved[2], "sized.png: 2x2 became 1x4");
+    assert_eq!(pixel_diff(base.path(), base.path()), Vec::<String>::new(), "a folder equals itself");
 }
 
 /// Only the ignored pass writes them, so this holds it to the whole count:

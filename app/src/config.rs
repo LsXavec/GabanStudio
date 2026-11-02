@@ -3601,7 +3601,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                         btn.fill(crate::plate::BLUE_WASH)
                     } else if clash.is_some() {
                         btn.fill(crate::plate::WELL)
-                            .stroke(egui::Stroke::new(1.0, crate::plate::AKA))
+                            .stroke(egui::Stroke::new(1.0, crate::plate::RED))
                     } else {
                         btn
                     };
@@ -3630,7 +3630,7 @@ fn shortcuts_page(ui: &mut egui::Ui, config: &mut Config, capturing: &mut Option
                         Some(other) => {
                             ui.label(
                                 egui::RichText::new(format!("⚠ also {}", other.label()))
-                                    .color(crate::plate::AKA),
+                                    .color(crate::plate::RED),
                             );
                         }
                         None => {
@@ -3702,7 +3702,7 @@ pub fn connect_window(
                     });
                     if !error.is_empty() {
             ui.add_space(4.0);
-            ui.label(egui::RichText::new(error).color(crate::plate::AKA));
+            ui.label(egui::RichText::new(error).color(crate::plate::RED));
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -3781,12 +3781,12 @@ fn layout_page(
             ui.label(
                 egui::RichText::new("host's arrangement")
                     .font(crate::plate::Role::Small.font())
-                    .color(crate::plate::STRUCK),
+                    .color(crate::plate::INK),
             );
             ui.label(
                 egui::RichText::new("from this session")
                     .font(crate::plate::Role::Small.font())
-                    .color(crate::plate::LEGEND),
+                    .color(crate::plate::INK2),
             );
             if ui.button("LOAD").clicked() {
                 *act = Some(LayoutAct::LoadHost);
@@ -3806,7 +3806,7 @@ fn layout_page(
                 ui.label(
                     egui::RichText::new(n)
                         .font(crate::plate::Role::Small.font())
-                        .color(crate::plate::STRUCK),
+                        .color(crate::plate::INK),
                 );
                 if ui.button("LOAD").clicked() {
                     *act = Some(LayoutAct::Load(n.clone()));
@@ -3869,7 +3869,7 @@ fn session_page(
         ui.separator();
         ui.label(
             egui::RichText::new("Authenticator (host only — guests never need this)")
-                .color(crate::plate::LEGEND),
+                .color(crate::plate::INK2),
         );
         ui.horizontal(|ui| {
             ui.label("Secret");
@@ -3886,11 +3886,11 @@ fn session_page(
                 ui.label(
                     egui::RichText::new(code)
                         .font(crate::plate::Role::Card.font())
-                        .color(crate::plate::STRUCK),
+                        .color(crate::plate::INK),
                 );
                 ui.label(
                     egui::RichText::new(format!("{secs}s left"))
-                        .color(crate::plate::LEGEND),
+                        .color(crate::plate::INK2),
                 );
             });
             ui.label(
@@ -3902,7 +3902,7 @@ fn session_page(
         } else {
             ui.label(
                 egui::RichText::new("that secret is not valid base32 — regenerate it")
-                    .color(crate::plate::AKA),
+                    .color(crate::plate::RED),
             );
         }
     }
@@ -3910,7 +3910,7 @@ fn session_page(
     if joined {
         ui.label(
             egui::RichText::new(format!("Connected to a {}.", crate::vocab::SHARED_SESSION))
-                .color(crate::plate::STRUCK),
+                .color(crate::plate::INK),
         );
         if !peer_names.is_empty() {
             ui.label(format!("With: {}", peer_names.join(", ")));
@@ -3921,7 +3921,7 @@ fn session_page(
     } else if hosting {
         ui.label(
             egui::RichText::new("Hosting — share the session key and read codes from your Authy.")
-                .color(crate::plate::STRUCK),
+                .color(crate::plate::INK),
         );
         ui.horizontal(|ui| {
             ui.label("Port");
@@ -3958,20 +3958,20 @@ fn session_page(
                     ui.label(
                         egui::RichText::new(&b.name)
                             .font(crate::plate::Role::Small.font())
-                            .color(crate::plate::STRUCK),
+                            .color(crate::plate::INK),
                     );
                     if !b.open {
                         ui.label(
                             egui::RichText::new("key")
                                 .font(crate::plate::Role::Small.font())
-                                .color(crate::plate::LEGEND),
+                                .color(crate::plate::INK2),
                         )
                         .on_hover_text("this session requires its key");
                     }
                     ui.label(
                         egui::RichText::new(format!("v{} · {}", b.version, b.addr))
                             .font(crate::plate::Role::Small.font())
-                            .color(crate::plate::LEGEND),
+                            .color(crate::plate::INK2),
                     );
                     if ui.button("JOIN").clicked() {
                         *join_room = Some(b.addr.clone());
@@ -4043,7 +4043,7 @@ fn session_page(
     ui.label(
         egui::RichText::new(status)
             .italics()
-            .color(crate::plate::LEGEND),
+            .color(crate::plate::INK2),
     );
     if changed {
         config.save();
@@ -4103,7 +4103,7 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
              brush, honestly.",
         )
         .font(crate::plate::Role::Small.font())
-        .color(crate::plate::LEGEND),
+        .color(crate::plate::INK2),
     );
     ui.add_space(6.0);
     if ui
@@ -4143,12 +4143,12 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
             ui.label(
                 egui::RichText::new(shown)
                     .font(crate::plate::Role::Small.font())
-                    .color(crate::plate::STRUCK),
+                    .color(crate::plate::INK),
             );
             ui.label(
                 egui::RichText::new(format!("{count} brush(es)"))
                     .font(crate::plate::Role::Small.font())
-                    .color(crate::plate::LEGEND),
+                    .color(crate::plate::INK2),
             );
             if !bank.is_empty() && crate::plate::danger(ui, "REMOVE BANK") {
                 remove = Some(bank.clone());
@@ -4179,7 +4179,7 @@ fn plugins_page(ui: &mut egui::Ui, config: &mut Config, update_note: &str, check
                 no_tip.len(),
                 no_grain.len()
             ))
-            .color(crate::plate::AKA),
+            .color(crate::plate::RED),
         );
         for n in no_tip.iter().take(8) {
             ui.label(
@@ -4228,7 +4228,7 @@ pub(crate) fn general_page(
             egui::Label::new(
                 egui::RichText::new(dir.display().to_string())
                     .font(crate::plate::Role::Small.font())
-                    .color(crate::plate::LEGEND),
+                    .color(crate::plate::INK2),
             )
             .selectable(true),
         );
@@ -4619,7 +4619,7 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
             ui.label(
                 egui::RichText::new(format!("{label} {}", crate::vocab::STEP))
                     .font(crate::plate::Role::Small.font())
-                    .color(crate::plate::STRUCK),
+                    .color(crate::plate::INK),
             );
             let current = config.layers.stack_for_room(room).name;
             ui.menu_button(crate::vocab::stack(&current), |ui| {
@@ -4644,13 +4644,13 @@ fn layers_page(ui: &mut egui::Ui, config: &mut Config) {
             ui.label(
                 egui::RichText::new(crate::vocab::stack(&s.name))
                     .font(crate::plate::Role::Small.font())
-                    .color(crate::plate::STRUCK),
+                    .color(crate::plate::INK),
             );
             if is_builtin {
                 ui.label(
                     egui::RichText::new("built-in")
                         .font(crate::plate::Role::Small.font())
-                        .color(crate::plate::LEGEND),
+                        .color(crate::plate::INK2),
                 );
                 if ui
                     .small_button("duplicate")
@@ -4925,7 +4925,7 @@ fn pressure_curve_editor(ui: &mut egui::Ui, curve: &mut PressureCurve) -> bool {
         .collect();
     painter.add(egui::Shape::line(
         line,
-        egui::Stroke::new(2.0, crate::plate::AO),
+        egui::Stroke::new(2.0, crate::plate::INK3),
     ));
     let n = curve.points.len();
     for i in 1..n.saturating_sub(1) {
@@ -4943,13 +4943,13 @@ fn pressure_curve_editor(ui: &mut egui::Ui, curve: &mut PressureCurve) -> bool {
             changed = true;
         }
         let col = if hr.hovered() || hr.dragged() {
-            crate::plate::STRUCK
+            crate::plate::INK
         } else {
-            crate::plate::AO
+            crate::plate::INK3
         };
         painter.circle_filled(center, 5.0, col);
     }
-    painter.circle_filled(to_screen(curve.points[0]), 4.0, crate::plate::STRUCK);
-    painter.circle_filled(to_screen(curve.points[n - 1]), 4.0, crate::plate::STRUCK);
+    painter.circle_filled(to_screen(curve.points[0]), 4.0, crate::plate::INK);
+    painter.circle_filled(to_screen(curve.points[n - 1]), 4.0, crate::plate::INK);
     changed
 }

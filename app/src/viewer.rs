@@ -35,7 +35,7 @@ pub enum GraphView {
     EvalFailed,
     Ready(egui::TextureId),
     /// GM9: shown, while a CPU subtree (an Effect) renders on the worker —
-    /// the texture holds its last result; the views light a TALLY dot.
+    /// the texture holds its last result; the views light a blue dot.
     Rendering(egui::TextureId),
 }
 
@@ -43,7 +43,7 @@ pub enum GraphView {
 /// rough, reference or correction (sakkan) layers and no Ref columns —
 /// rendered by the CPU on a worker from a snapshot (D9) and shown by every
 /// composite view in place of the graph's GPU render while its latch is
-/// on. The last finished frame stays up, with the TALLY dot, while the
+/// on. The last finished frame stays up, with the blue dot, while the
 /// next one renders; one render runs at a time.
 #[derive(Default)]
 pub struct FinalLook {
@@ -315,11 +315,11 @@ fn empty_state(ui: &mut egui::Ui, rect: Rect, words: &str, button: &str, verb: A
         egui::Align2::CENTER_BOTTOM,
         words,
         crate::plate::Role::Chrome.font(),
-        crate::plate::LEGEND,
+        crate::plate::INK2,
     );
     // Measured in the Ui's own font: the plain panel tests dress none.
     let font = egui::TextStyle::Button.resolve(ui.style());
-    let wide = ui.fonts_mut(|f| f.layout_no_wrap(button.to_string(), font, crate::plate::LEGEND).size().x) + 24.0;
+    let wide = ui.fonts_mut(|f| f.layout_no_wrap(button.to_string(), font, crate::plate::INK2).size().x) + 24.0;
     let at = Rect::from_center_size(rect.center() + vec2(0.0, 6.0), vec2(wide, crate::plate::CTRL_H));
     if ui.put(at, egui::Button::new(button)).clicked() {
         vs.asked = Some(verb);
@@ -408,7 +408,7 @@ pub fn ui(
             egui::Align2::CENTER_CENTER,
             msg,
             crate::plate::Role::Chrome.font(),
-            crate::plate::LEGEND,
+            crate::plate::INK2,
         );
     };
     match graph {
@@ -423,7 +423,7 @@ pub fn ui(
             if matches!(graph, GraphView::Rendering(_)) {
                 // GM9: the lamp, and in words — an FX render is pending
                 // (GM11: or the final look's CPU frame).
-                painter.circle_filled(pos2(tag.right() + 14.0, tag.center().y), 4.0, crate::plate::TALLY);
+                painter.circle_filled(pos2(tag.right() + 14.0, tag.center().y), 4.0, crate::plate::BLUE);
                 crate::plate::picture_tag(
                     &painter,
                     pos2(tag.right() + 28.0, tag.top()),
@@ -462,7 +462,7 @@ pub fn ui(
         // holds the box off the surround, and the grips say it is a thing to
         // take hold of, not the paper's border.
         painter.rect_stroke(boxed, 0, egui::Stroke::new(4.0, crate::plate::ON_FILL), egui::StrokeKind::Outside);
-        let edge = egui::Stroke::new(2.0, crate::plate::TALLY);
+        let edge = egui::Stroke::new(2.0, crate::plate::BLUE);
         painter.rect_stroke(boxed, 0, edge, egui::StrokeKind::Outside);
         for corner in box_corners(boxed) {
             let grip = Rect::from_center_size(corner, egui::Vec2::splat(CORNER_GRIP));

@@ -25,7 +25,7 @@ use crate::templates::{self, Template};
 use crate::testkit::EditorHarness;
 use crate::welcome::{Welcome, WelcomeAction, WelcomeTab};
 use crate::workspace::Stage;
-use crate::{PROBE_SCALES, StartOutcome, measure, plate, steps, vocab};
+use crate::{LESSON_ROOMS, PROBE_SCALES, ProbeRoom, StartOutcome, measure, plate, steps, vocab};
 
 fn settle(h: &mut EditorHarness) {
     h.run_frames(4);
@@ -1935,4 +1935,36 @@ fn aulesson_tokens_resolve() {
     assert_eq!(lesson::chord_action("chord:Undo"), Some(Action::Undo));
     let source = include_str!("lessons.rs").replace("Action::label", "");
     assert!(!source.contains(".label()"), "lesson text never uses Action::label()");
+}
+
+/// AU16: a card's fullest task in a step: on that step wherever the lesson
+/// comes to it, and no task there holds more words.
+#[test]
+fn autoken_fullest_task_is_the_most_words_on_its_step() {
+    let words = |t: &Task| t.say.len() + t.why.map_or(0, str::len);
+    for lesson in lessons::ALL {
+        for step in Stage::ALL.iter().copied().chain([Stage::Export]) {
+            let fullest = &lesson.tasks[lesson.fullest_on(step)];
+            let here: Vec<&Task> = lesson.tasks.iter().filter(|t| t.step == step).collect();
+            let pool = if here.is_empty() { lesson.tasks.iter().collect() } else { here };
+            assert!(pool.iter().all(|t| words(t) <= words(fullest)), "{} in {step:?}", lesson.id);
+            assert!(pool.iter().any(|t| std::ptr::eq(*t, fullest)), "{} in {step:?}", lesson.id);
+        }
+    }
+}
+
+/// AU16: the audits' lesson rooms stand on the table a person meets: each
+/// room's card is the real row of its type and class, on that step's task.
+#[test]
+fn autoken_lesson_rooms_stand_on_real_rows() {
+    let mut h = EditorHarness::as_shipped();
+    for room in LESSON_ROOMS {
+        let ProbeRoom::Lesson(name, kind, step, class) = room else { panic!("a lesson room") };
+        room.enter(h.editor_mut());
+        let run = h.editor().lesson.as_ref().expect("the card");
+        let real = lessons::ALL.iter().find(|l| l.id == run.lesson.id).expect("a row of the table");
+        assert!(real.kind == kind && real.class == class, "{name}: {}", real.id);
+        assert!(!run.lesson.tasks.is_empty(), "{name}: a real row has tasks");
+        assert_eq!(run.task, real.fullest_on(step), "{name}");
+    }
 }

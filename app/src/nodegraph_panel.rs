@@ -539,25 +539,25 @@ fn pin_label(kind: &NodeKind, pin: usize) -> (&'static str, &'static str) {
 
 fn kind_color(kind: &NodeKind) -> Color32 {
     match kind {
-        NodeKind::DrawingSource { .. } => crate::plate::LEGEND,
-        NodeKind::Solid { .. } => crate::plate::LEGEND,
-        NodeKind::ImageSource { .. } => crate::plate::STRUCK,
+        NodeKind::DrawingSource { .. } => crate::plate::INK2,
+        NodeKind::Solid { .. } => crate::plate::INK2,
+        NodeKind::ImageSource { .. } => crate::plate::INK,
         // AUDIT [28]: these two hues are in no ratified palette. Node
         // identity comes from tokens now — Legend for an operation. Blue is
         // the selected node's and the output's, and no kind's (spec 2.2).
         NodeKind::Transform { .. }
         | NodeKind::Effect { .. }
         | NodeKind::Camera { .. }
-        | NodeKind::Blend { .. } => crate::plate::LEGEND,
+        | NodeKind::Blend { .. } => crate::plate::INK2,
         // GM16: a generator makes the cut's own picture, as an image does;
         // GM17: so do a 3D model and another app's frames.
         NodeKind::Generator { .. } | NodeKind::Model3D { .. } | NodeKind::ImageSequence { .. } => {
-            crate::plate::STRUCK
+            crate::plate::INK
         }
         // AUDIT [17]: this was Aka, PAINTED AS A TITLE FILL — Aka
         // means refusal or destruction, and the graph's result is
         // neither. Its identity is carried by its Struck edge instead.
-        NodeKind::Output => crate::plate::STRUCK,
+        NodeKind::Output => crate::plate::INK,
     }
 }
 
@@ -704,7 +704,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
                     &painter,
                     out_pin_pos(sv),
                     in_pin_pos(nv, pin),
-                    crate::plate::LEGEND,
+                    crate::plate::INK2,
                 );
             }
         }
@@ -718,7 +718,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
             &painter,
             out_pin_pos(fv),
             ptr,
-            crate::plate::TALLY,
+            crate::plate::BLUE,
         );
     }
 
@@ -728,7 +728,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
     for nv in &nodes {
         let selected = state.selected_node == Some(nv.id);
         let is_output = output_node == Some(nv.id);
-        let body = crate::plate::GRAPHITE;
+        let body = crate::plate::ISLAND;
         // AU15: one shape for the card and its edge, at the sheet's radius: a
         // graph is the costliest thing in a room (spec section 10), and a
         // corner past 5 spends twice the vertices. The edge stands inside a
@@ -740,14 +740,14 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
             body,
             Stroke::new(
                 edge,
-                // Selection is TALLY — the one colour meaning current/armed
+                // Selection is blue — the one colour meaning current/armed
                 // (Ao is never a selection; the colour law). The output
                 // node's identity edge is Struck, not Aka — the result is
                 // not a correction.
                 if selected {
-                    crate::plate::TALLY
+                    crate::plate::BLUE
                 } else if is_output {
-                    crate::plate::STRUCK
+                    crate::plate::INK
                 } else {
                     crate::plate::legend_muted()
                 },
@@ -770,7 +770,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
                 node_title(&nv.kind)
             },
             crate::plate::Role::Small.font(),
-            crate::plate::STRUCK,
+            crate::plate::INK,
         );
 
         // Body drag = move (GM9: shown live, saved once on release — one
@@ -840,9 +840,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
             op,
             PIN_R,
             if op_resp.hovered() {
-                crate::plate::TALLY
+                crate::plate::BLUE
             } else {
-                crate::plate::LEGEND
+                crate::plate::INK2
             },
         );
 
@@ -876,9 +876,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
                 ip,
                 PIN_R,
                 if ip_resp.hovered() {
-                    crate::plate::TALLY
+                    crate::plate::BLUE
                 } else if nv.inputs[pin].is_some() {
-                    crate::plate::STRUCK
+                    crate::plate::INK
                 } else {
                     crate::plate::legend_muted()
                 },
@@ -910,7 +910,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
             egui::Align2::CENTER_BOTTOM,
             format!("{add} to add an effect: this shot's effects graph lives here"),
             crate::plate::Role::Panel.font(),
-            crate::plate::LEGEND,
+            crate::plate::INK2,
         );
         // AU14: the way on, as the Result's empty state offers it.
         let word = crate::viewer::SET_UP_COMPOSITE;
@@ -931,7 +931,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<Shelf>) {
             egui::Align2::LEFT_TOP,
             why,
             crate::plate::Role::Panel.font(),
-            crate::plate::LEGEND,
+            crate::plate::INK2,
         );
     }
 }
@@ -1138,7 +1138,7 @@ fn toolbar(ui: &mut egui::Ui, state: &mut AppState) {
             ui.painter().rect_stroke(
                 button.rect,
                 crate::plate::R_CONTROL,
-                Stroke::new(1.0, crate::plate::AKA),
+                Stroke::new(1.0, crate::plate::RED),
                 egui::StrokeKind::Inside,
             );
         }
@@ -1325,7 +1325,7 @@ fn inspector_controls(ui: &mut egui::Ui, state: &mut AppState, shelf: Option<She
                 None => {
                     ui.label(
                         egui::RichText::new("missing image (renders transparent)")
-                            .color(crate::plate::AKA),
+                            .color(crate::plate::RED),
                     );
                 }
             },

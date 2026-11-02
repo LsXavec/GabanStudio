@@ -1096,7 +1096,7 @@ impl crate::Editor {
                     let x = rect.left() + i as f32 * bar;
                     let top = rect.bottom() - v * rect.height();
                     let ink = match m {
-                        Mouth::Open => plate::LEGEND,
+                        Mouth::Open => plate::INK2,
                         Mouth::Half => plate::INK3,
                         Mouth::Closed => plate::rule_beat(),
                     };
@@ -1113,7 +1113,7 @@ impl crate::Editor {
                     let y = rect.bottom() - t * rect.height();
                     p.line_segment(
                         [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
-                        egui::Stroke::new(1.0, plate::AO),
+                        egui::Stroke::new(1.0, plate::INK3),
                     );
                 }
                 let opens = mouths.iter().filter(|m| **m == Mouth::Open).count();

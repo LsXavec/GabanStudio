@@ -245,7 +245,7 @@ fn length_field(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     ui.label(
         egui::RichText::new(seconds_plus_frames(frames, fps))
             .font(plate::legend_font())
-            .color(plate::LEGEND),
+            .color(plate::INK2),
     );
     if resp.lost_focus() {
         // The Enter that sets the length is the field's, not the sheet's
@@ -368,7 +368,7 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
         ui.painter().rect_stroke(
             cell,
             0.0,
-            egui::Stroke::new(1.0, plate::LEGEND),
+            egui::Stroke::new(1.0, plate::INK2),
             egui::StrokeKind::Inside,
         );
     } else if state.sheet_ui.entry.is_empty() {
@@ -389,7 +389,7 @@ fn entry_field(ui: &mut egui::Ui, state: &mut AppState, cell: Rect, gesture_safe
                 .lock_focus(true)
                 .desired_width(cell.width())
                 .font(plate::Role::Small.font())
-                .text_color(plate::STRUCK),
+                .text_color(plate::INK),
         )
         .card(
             "type a drawing name (x = empty; a digit over the sheet starts it): Enter enters it \
@@ -475,7 +475,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
                     let cname = state.cut().name.clone();
                     ui.menu_button(
                         egui::RichText::new(cname.chars().take(10).collect::<String>())
-                            .color(plate::STRUCK),
+                            .color(plate::INK),
                         |ui| {
                             let scenes: Vec<(
                                 anim_core::ids::SceneId,
@@ -541,7 +541,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, edit_room: bool, gesture_safe
             ui.label(
                 egui::RichText::new(hold_txt)
                     .font(plate::Role::Small.font())
-                    .color(plate::STRUCK),
+                    .color(plate::INK),
             );
         });
     }
@@ -791,9 +791,9 @@ fn grid(
                 &col.name,
                 plate::Role::Small.font(),
                 if is_active {
-                    plate::STRUCK
+                    plate::INK
                 } else {
-                    plate::LEGEND
+                    plate::INK2
                 },
             );
         }
@@ -808,12 +808,12 @@ fn grid(
                 egui::Align2::LEFT_CENTER,
                 &pcol.name,
                 plate::Role::Small.font(),
-                if is_sel { plate::STRUCK } else { plate::LEGEND },
+                if is_sel { plate::INK } else { plate::INK2 },
             );
         }
         if has_audio {
             let (rect, _) = ui.allocate_exact_size(vec2(AUDIO_COL_W, ROW_H), Sense::hover());
-            plate::note_mark(ui.painter(), rect.left_center() + vec2(16.0, 0.0), plate::LEGEND);
+            plate::note_mark(ui.painter(), rect.left_center() + vec2(16.0, 0.0), plate::INK2);
         }
         // GM14: the memo/dialogue row beside the sheet.
         let (rect, resp) = ui.allocate_exact_size(vec2(MEMO_COL_W, ROW_H), Sense::hover());
@@ -822,7 +822,7 @@ fn grid(
             egui::Align2::LEFT_CENTER,
             crate::vocab::NOTES,
             plate::legend_font(),
-            plate::LEGEND,
+            plate::INK2,
         );
         resp.card(crate::vocab::with_studio_word(
             crate::vocab::NOTES,
@@ -855,7 +855,7 @@ fn grid(
                     _ => (String::new(), def.locked, format!("{} {}", crate::vocab::LOCK_TRACK, col.name)),
                 };
                 let lit = on.then_some(if what == 1 {
-                    (plate::RED_WASH, plate::AKA)
+                    (plate::RED_WASH, plate::RED)
                 } else {
                     (plate::BLUE_WASH, plate::BLUE_DEEP)
                 });
@@ -961,9 +961,9 @@ fn grid(
                         plate::Role::Panel.font()
                     },
                     if is_current {
-                        plate::STRUCK
+                        plate::INK
                     } else {
-                        plate::LEGEND
+                        plate::INK2
                     },
                 );
 
@@ -977,7 +977,7 @@ fn grid(
                     painter.rect_filled(
                         Rect::from_min_size(row_rect.min, vec2(3.0, ROW_H)),
                         0,
-                        plate::AO,
+                        plate::INK3,
                     );
                 }
 
@@ -1022,7 +1022,7 @@ fn grid(
                         painter.circle_filled(
                             pos2(cell.left() + 5.0, cell.center().y),
                             2.5,
-                            plate::TALLY,
+                            plate::BLUE,
                         );
                     }
                     let (text, color) = match pcol.key_at(frame) {
@@ -1031,7 +1031,7 @@ fn grid(
                                 .trim_end_matches('0')
                                 .trim_end_matches('.')
                                 .to_string(),
-                            plate::STRUCK,
+                            plate::INK,
                         ),
                         None => match pcol.resolve(frame) {
                             Some(v) => (format!("{v:.1}"), plate::legend_dim()),
@@ -1062,7 +1062,7 @@ fn grid(
                         egui::Align2::LEFT_CENTER,
                         memo,
                         plate::Role::Small.font(),
-                        plate::STRUCK,
+                        plate::INK,
                     );
                 }
 
@@ -1078,7 +1078,7 @@ fn grid(
                     Some((cols, f0, f1)) if (*f0..*f1).contains(&frame) => {
                         for c in cols {
                             if let Some(ci) = col_ids.iter().position(|x| x == c) {
-                                painter.rect_filled(cell_of(ci), 0.0, plate::TALLY.gamma_multiply(0.22));
+                                painter.rect_filled(cell_of(ci), 0.0, plate::BLUE.gamma_multiply(0.22));
                             }
                         }
                     }
@@ -1087,7 +1087,7 @@ fn grid(
                             painter.rect_stroke(
                                 cell_of(ci),
                                 0.0,
-                                egui::Stroke::new(1.0, plate::TALLY),
+                                egui::Stroke::new(1.0, plate::BLUE),
                                 egui::StrokeKind::Inside,
                             );
                         }
@@ -1228,7 +1228,7 @@ fn grid(
                                 egui::Align2::LEFT_CENTER,
                                 format!("{}s", f / fps.max(1)),
                                 plate::Role::Small.font(),
-                                plate::LEGEND,
+                                plate::INK2,
                             );
                         }
                     }
@@ -1249,7 +1249,7 @@ fn grid(
                         pos2(cleft + 5.0, ncy),
                         pos2(cleft, ncy + 4.0),
                     ],
-                    plate::TALLY,
+                    plate::BLUE,
                     egui::Stroke::NONE,
                 ));
                 let hover_pos = ui.input(|i| i.pointer.hover_pos());
@@ -1265,8 +1265,8 @@ fn grid(
                                 && hp.y >= y_dot - 9.0
                                 && hp.y <= y_end
                         });
-                        let rule_ink = if hot { plate::TALLY } else { plate::AO };
-                        sheet_painter.circle_filled(pos2(cx, y_dot), 3.5, plate::TALLY);
+                        let rule_ink = if hot { plate::BLUE } else { plate::INK3 };
+                        sheet_painter.circle_filled(pos2(cx, y_dot), 3.5, plate::BLUE);
                         if y_end > y_dot + 3.5 {
                             // Tape-measure law (owner 2026-08-17, refined):
                             // a hold running to the sheet's END is RETRACTED
@@ -1309,13 +1309,13 @@ fn grid(
                             egui::Align2::LEFT_CENTER,
                             &name,
                             plate::Role::Panel.font(),
-                            plate::STRUCK,
+                            plate::INK,
                         );
                         // GM6: a key's number circled, a breakdown's
                         // underlined, and a chart's glyph beside it; the
                         // cell answers to its kind by name.
                         let def = cut.drawing_def(r.drawing);
-                        let ink = egui::Stroke::new(plate::device_px(1.0, ppp), plate::STRUCK);
+                        let ink = egui::Stroke::new(plate::device_px(1.0, ppp), plate::INK);
                         match cell_mark(def.kind) {
                             CellMark::Circle => {
                                 let rad = (text_rect.width().max(text_rect.height()) * 0.5 + 2.0)
@@ -1345,7 +1345,7 @@ fn grid(
                                 &sheet_painter,
                                 Rect::from_min_max(pos2(x, top), pos2(x + 9.0, bottom)),
                                 &chart.marks,
-                                plate::AO,
+                                plate::INK3,
                             );
                         }
                         if def.kind != anim_core::model::DrawingKind::Unset {
@@ -1371,7 +1371,7 @@ fn grid(
                         sheet_painter.circle_stroke(
                             pos2(cx, y),
                             3.5,
-                            egui::Stroke::new(1.0, plate::LEGEND),
+                            egui::Stroke::new(1.0, plate::INK2),
                         );
                     }
                     // GM15: a storyboard panel's cut number at its head, on
@@ -1384,7 +1384,7 @@ fn grid(
                                 continue;
                             }
                             let set = cut.drawing_def(p.drawing).cut.is_some();
-                            let ink = if set { plate::TALLY } else { plate::legend_dim() };
+                            let ink = if set { plate::BLUE } else { plate::legend_dim() };
                             let r = sheet_painter.text(
                                 pos2(right, ctop + p.start as f32 * ROW_H + ROW_H * 0.5),
                                 egui::Align2::RIGHT_CENTER,
@@ -1418,7 +1418,7 @@ fn grid(
                         pos2(x, ctop + *f as f32 * ROW_H + 2.0),
                         vec2(NOTE_TICK_W, ROW_H - 4.0),
                     );
-                    sheet_painter.rect_filled(tick, 0.0, if open { plate::AKA } else { plate::INK3 });
+                    sheet_painter.rect_filled(tick, 0.0, if open { plate::RED } else { plate::INK3 });
                     let resp = ui.interact(tick.expand(2.0), ui.id().with(("note_tick", *f)), Sense::hover());
                     plate::speak(
                         &resp,
@@ -1548,7 +1548,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     let cut = state.cut();
     ui.horizontal_wrapped(|ui| {
         let (mark, note) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
-        plate::note_mark(ui.painter(), mark.center(), plate::LEGEND);
+        plate::note_mark(ui.painter(), mark.center(), plate::INK2);
         plate::speak(&note, egui::WidgetType::Label, None, "♪");
         note.card("the sound the waveform track shows");
         let picker = egui::ComboBox::from_id_salt("sheet_track")
@@ -1595,7 +1595,7 @@ fn track_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         ] {
             let (r, resp) = ui.allocate_exact_size(vec2(22.0, ROW_H), Sense::click());
             let lit = on.then_some(if what == 0 {
-                (plate::RED_WASH, plate::AKA)
+                (plate::RED_WASH, plate::RED)
             } else {
                 (plate::BLUE_WASH, plate::BLUE_DEEP)
             });
@@ -1735,7 +1735,7 @@ fn param_key_strip(ui: &mut egui::Ui, state: &mut AppState) {
     // playhead happened to reach. Disabled, not hidden (UI-STABILITY law).
     let editable = !state.view.playing;
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(format!("{name} @ {}", frame + 1)).color(plate::LEGEND));
+        ui.label(egui::RichText::new(format!("{name} @ {}", frame + 1)).color(plate::INK2));
         plate::field_if(
             ui,
             editable,
@@ -1942,7 +1942,7 @@ fn continuation_handles(
         }
         if show {
             let active = hr.dragged() || hr.hovered() || near;
-            let col = if active { plate::TALLY } else { plate::AO };
+            let col = if active { plate::BLUE } else { plate::INK3 };
             // The rule's post-pass already paints the hold stroke —
             // the handle contributes only its grab circle. While dragging,
             // a live guide shows where the terminator will land.
@@ -2031,7 +2031,7 @@ pub(crate) fn cell_menu(
         match state.resolve_at(col, frame) {
             Some(drawing) => kind_menu(ui, state, drawing),
             None => {
-                ui.label(egui::RichText::new("a blank cell: no drawing to mark").color(plate::LEGEND));
+                ui.label(egui::RichText::new("a blank cell: no drawing to mark").color(plate::INK2));
             }
         }
         if state.is_panel_column(col) {
@@ -2062,7 +2062,7 @@ fn panel_menu(ui: &mut egui::Ui, state: &mut AppState, column: ColumnId, frame: 
         .into_iter()
         .find(|p| (p.start..p.start + p.frames).contains(&frame))
     else {
-        ui.label(egui::RichText::new("no panel on this frame").color(plate::LEGEND));
+        ui.label(egui::RichText::new("no panel on this frame").color(plate::INK2));
         return;
     };
     let set = cut.drawing_def(panel.drawing).cut.is_some();
@@ -2173,7 +2173,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
     ui.horizontal(|ui| {
         let (dot, _) = ui.allocate_exact_size(vec2(10.0, 16.0), Sense::hover());
         plate::identity_dot(ui.painter(), dot.center(), 3.5, props_chip_color(props));
-        ui.label(egui::RichText::new(&props.name).font(plate::Role::Panel.font()).strong().color(plate::STRUCK));
+        ui.label(egui::RichText::new(&props.name).font(plate::Role::Panel.font()).strong().color(plate::INK));
     });
     ui.label(
         egui::RichText::new("Double-click the name in the strip to rename.")
@@ -2237,7 +2237,7 @@ fn layer_card(ui: &mut egui::Ui, state: &mut AppState, lid: LayerId, props: &Lay
                 ui.painter().circle_stroke(
                     r.center(),
                     7.5,
-                    egui::Stroke::new(1.5, plate::TALLY),
+                    egui::Stroke::new(1.5, plate::BLUE),
                 );
             }
             if resp.card(label).clicked() && props.chip != Some(rgba) {
@@ -2308,7 +2308,7 @@ fn opacity_cells(
     ui.label(
         egui::RichText::new(format!("{:3.0}%", live * 100.0))
             .font(plate::Role::Small.font())
-            .color(plate::STRUCK),
+            .color(plate::INK),
     );
     if resp.drag_stopped() {
         state.strip_opacity = None;
@@ -2422,7 +2422,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                 }
             }
             ui.separator();
-            let custom = ui.button(egui::RichText::new("Custom layer").color(plate::LEGEND));
+            let custom = ui.button(egui::RichText::new("Custom layer").color(plate::INK2));
             plate::mark(ui, custom.interact_rect, Target::Named("layers.custom"));
             if custom.clicked() {
                 state.layer_add_role(anim_core::model::LayerRole::Custom);
@@ -2591,7 +2591,7 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
             // undo step. Unlocked is the quiet state (dim shackle).
             if more {
             let lock_color = if props.locked {
-                plate::STRUCK
+                plate::INK
             } else {
                 plate::INK3
             };
@@ -2722,9 +2722,9 @@ pub fn cel_layers_strip(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: b
                         // (and with it the panel); renaming edits the full name.
                         let shown = truncate_name(name);
                         let text = if is_active {
-                            egui::RichText::new(shown).strong().color(plate::STRUCK)
+                            egui::RichText::new(shown).strong().color(plate::INK)
                         } else {
-                            egui::RichText::new(shown).color(plate::LEGEND)
+                            egui::RichText::new(shown).color(plate::INK2)
                         };
                         let resp = ui.selectable_label(is_active, text).card(
                             "click: edit this layer — double-click: rename — right-click: define",

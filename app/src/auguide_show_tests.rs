@@ -2007,7 +2007,7 @@ fn planted(pose: &[Pt], other: &[Pt]) -> Pt {
 /// poses. A PNG in `UISHOT_DIR`, no window.
 #[test]
 #[ignore = "needs UISHOT_DIR; writes a PNG"]
-fn uishot_deckle_contact_sheet() {
+pub(crate) fn uishot_deckle_contact_sheet() {
     let dir = PathBuf::from(std::env::var("UISHOT_DIR").expect("set UISHOT_DIR to the output folder"));
     std::fs::create_dir_all(&dir).expect("make UISHOT_DIR");
     contact_sheet(&dir);

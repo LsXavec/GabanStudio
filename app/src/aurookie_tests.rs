@@ -515,7 +515,7 @@ fn aurookie_the_only_blue_is_the_line() {
     settle(&mut h);
     let blues = |h: &EditorHarness| {
         let paper = h.editor().canvas.dbg_rect;
-        h.painted_lines_in(paper).into_iter().filter(|c| *c == plate::TALLY || *c == plate::PENCIL_AO).count()
+        h.painted_lines_in(paper).into_iter().filter(|c| *c == plate::BLUE || *c == plate::PENCIL_AO).count()
     };
     assert_eq!(blues(&h), 0, "no blue but the guide on the paper during a trace task");
     h.click(LEAVE);

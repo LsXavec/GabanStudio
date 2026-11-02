@@ -153,7 +153,7 @@ fn draw(ui: &mut egui::Ui, shared: &RwLock<Shared>) {
                 egui::Align2::CENTER_CENTER,
                 &s.hint,
                 crate::plate::Role::Chrome.font(),
-                crate::plate::LEGEND,
+                crate::plate::INK2,
             );
         }
     }

@@ -520,7 +520,7 @@ fn specs_rows(
                 let shown = if from.is_empty() {
                     egui::RichText::new("none")
                 } else if !choices.contains(&from) {
-                    egui::RichText::new(format!("{from} (gone)")).color(crate::plate::AKA)
+                    egui::RichText::new(format!("{from} (gone)")).color(crate::plate::RED)
                 } else {
                     egui::RichText::new(from.clone())
                 };

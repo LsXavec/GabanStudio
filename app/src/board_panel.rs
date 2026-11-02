@@ -372,8 +372,8 @@ pub fn ui_board(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
                     // The status on the card's edge: Aka for a retake,
                     // Tally once done.
                     let edge = match info.prod.status {
-                        Some(CutStatus::Retake) => Some(plate::AKA),
-                        Some(CutStatus::Done) => Some(plate::TALLY),
+                        Some(CutStatus::Retake) => Some(plate::RED),
+                        Some(CutStatus::Done) => Some(plate::BLUE),
                         _ => None,
                     };
                     if let Some(ink) = edge {
@@ -499,7 +499,7 @@ fn card(
     } else {
         format!("notes: {open_notes} open of {}", p.notes.len())
     };
-    let ink = if open_notes > 0 { plate::AKA } else { plate::LEGEND };
+    let ink = if open_notes > 0 { plate::RED } else { plate::INK2 };
     let m = ui.menu_button(egui::RichText::new(&summary).color(ink), |ui| {
         plate::legend(ui, &format!("retake notes on {name}"));
         note_latches(ui, state, at, None);
@@ -560,7 +560,7 @@ pub fn note_latches(ui: &mut egui::Ui, state: &mut AppState, at: CutRef, frame: 
         }
     }
     if !any {
-        ui.label(egui::RichText::new("no notes yet").color(plate::LEGEND));
+        ui.label(egui::RichText::new("no notes yet").color(plate::INK2));
     }
 }
 
@@ -661,9 +661,9 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
             Some(target) => {
                 let mark = board::trt_mark(trt, target);
                 let (word, color) = match mark {
-                    TrtMark::Over => ("over", plate::AKA),
-                    TrtMark::Under => ("under", plate::AO),
-                    TrtMark::OnTarget => ("on target", plate::TALLY),
+                    TrtMark::Over => ("over", plate::RED),
+                    TrtMark::Under => ("under", plate::INK3),
+                    TrtMark::OnTarget => ("on target", plate::BLUE),
                 };
                 ui.label(format!("target {}", board::format_trt(target, fps)));
                 ui.colored_label(
@@ -762,14 +762,14 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
                 let (fill, ink) = if *id == current {
                     (plate::BLUE_WASH, plate::BLUE_DEEP)
                 } else {
-                    (plate::WELL, plate::STRUCK)
+                    (plate::WELL, plate::INK)
                 };
                 painter.rect_filled(rect, plate::R_SHEET, fill);
                 if state.board.drag == Some(i) {
                     painter.rect_stroke(
                         rect,
                         plate::R_SHEET,
-                        egui::Stroke::new(2.0, plate::TALLY),
+                        egui::Stroke::new(2.0, plate::BLUE),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -787,7 +787,7 @@ pub fn ui_episode(ui: &mut egui::Ui, state: &mut AppState) {
                     let x = x.clamp(rect.left() + 1.0, rect.right() - 1.0);
                     painter.line_segment(
                         [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
-                        egui::Stroke::new(2.0, plate::TALLY),
+                        egui::Stroke::new(2.0, plate::BLUE),
                     );
                 }
                 if r.clicked() {

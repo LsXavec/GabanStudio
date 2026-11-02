@@ -23,7 +23,7 @@
 //! `anim_core::fx`. Its whole subtree renders on the CPU, on a worker
 //! thread, from a `Cut` snapshot; the result uploads into a texture filed
 //! under (node, frame, eval hash). Until it lands the last upload shows
-//! and `rendering()` is true (the views' TALLY dot) — the pen never waits.
+//! and `rendering()` is true (the views' blue dot) — the pen never waits.
 
 use anim_core::color::ColorLaw;
 use anim_core::graph::{BlendMode, NodeKind};
@@ -482,7 +482,7 @@ impl GraphCompositor {
         self.out_id
     }
 
-    /// GM9: is a CPU render in flight? (The views show a TALLY dot and the
+    /// GM9: is a CPU render in flight? (The views show a blue dot and the
     /// caller keeps repainting until it lands.)
     pub fn rendering(&self) -> bool {
         self.fx.rendering()

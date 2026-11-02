@@ -87,17 +87,6 @@ pub const SHADOW: Color32 = Color32::from_rgb(0x14, 0x18, 0x1F);
 /// White on a solid fill: armed, primary, danger.
 pub const ON_FILL: Color32 = Color32::WHITE;
 
-// The old names, as aliases until the alias retirement (spec 2.4), so the
-// uses across the app do not all move at once. They flip light and dark:
-// `GRAPHITE` was a dark ink on pale paper and is a pale surface now, so a
-// mark on paper never reads one of these.
-pub const GRAPHITE: Color32 = ISLAND;
-pub const LEGEND: Color32 = INK2;
-pub const STRUCK: Color32 = INK;
-pub const AO: Color32 = INK3;
-pub const AKA: Color32 = RED;
-pub const TALLY: Color32 = BLUE;
-
 // Document colours. The trade's pencils are what a document shows and stores,
 // so they keep their values through any change of look: the swatch board, the
 // presets' inks, the ghosts' tints and the layer roles read these.
@@ -117,7 +106,7 @@ pub const CHIP_PAPER: [u8; 4] = [242, 238, 230, 255];
 pub const CHIP_AO: [u8; 4] = [83, 137, 196, 255];
 pub const CHIP_AKA: [u8; 4] = [228, 82, 47, 255];
 /// AU28: a lesson's blue line (spec 5.7). Non-photo blue, the scaffold's ink:
-/// `AO` is grey now. It never reaches a file.
+/// the chrome has no such blue. It never reaches a file.
 pub const GUIDE: Color32 = Color32::from_rgb(CHIP_AO[0], CHIP_AO[1], CHIP_AO[2]);
 /// AU28: `Show me`'s eraser on its way: paper, soft, over the ink it will take.
 pub const RUBBING: Color32 = Color32::from_rgba_premultiplied(190, 190, 190, 190);
@@ -226,7 +215,7 @@ pub fn rule_half() -> Color32 {
 /// Second rule (every 24 frames), 2 device px.
 #[inline]
 pub fn rule_sec() -> Color32 {
-    LEGEND
+    INK2
 }
 /// The current row's ground, over whatever the row already holds: the blue
 /// at the wash's strength, so the cells' marks still read through it.
@@ -724,7 +713,7 @@ pub fn dot_refusal(dot: &Response, words: &str) {
 /// float open, a ghost at rest.
 fn rail_inks(ui: &Ui, resp: &Response, armed: bool, opened: bool) -> (Color32, Color32) {
     if armed {
-        (TALLY, ON_FILL)
+        (BLUE, ON_FILL)
     } else if opened {
         (BLUE_WASH, BLUE_DEEP)
     } else {
@@ -1020,7 +1009,7 @@ pub fn legend(ui: &mut Ui, text: &str) -> Response {
         0.0,
         TextFormat {
             font_id: legend_font(),
-            color: LEGEND,
+            color: INK2,
             // A wrapped row stretches a label to its own height: unset, the
             // letters sit on that floor, under the middle of what they name.
             valign: egui::Align::Center,
@@ -1038,7 +1027,7 @@ pub fn value(ui: &mut Ui, text: &str) -> Response {
         0.0,
         TextFormat {
             font_id: Role::Panel.font(),
-            color: STRUCK,
+            color: INK,
             ..Default::default()
         },
     );
@@ -1156,7 +1145,7 @@ pub fn say_dots(ui: &Ui, row: egui::Rect, ticks: &[bool; 5]) -> Response {
     let next = ticks.iter().position(|done| !done);
     for (i, done) in ticks.iter().enumerate() {
         let at = Pos2::new(first + step * i as f32, row.center().y);
-        let ink = if *done || next == Some(i) { TALLY } else { INK3 };
+        let ink = if *done || next == Some(i) { BLUE } else { INK3 };
         if *done {
             ui.painter().circle_filled(at, radius, ink);
         } else {
@@ -1306,10 +1295,10 @@ fn detent_sized(ui: &mut Ui, armed: bool, label: &str, dim: bool, width: f32) ->
         );
         p.circle_stroke(c, 6.0, Stroke::new(1.0, at_rest(ui, INK3)));
         if armed {
-            p.circle_filled(c, 3.5, at_rest(ui, TALLY));
+            p.circle_filled(c, 3.5, at_rest(ui, BLUE));
         }
         let rest = at_rest(ui, if dim { INK3 } else { INK2 });
-        let ink = if armed || resp.hovered() { STRUCK } else { rest };
+        let ink = if armed || resp.hovered() { INK } else { rest };
         label_at(
             ui,
             rect.left() + DETENT_W + 4.0,
@@ -1365,18 +1354,18 @@ fn latch_drawn(ui: &mut Ui, on: &mut bool, label: &str, loud: bool) -> Response 
         );
         let solid = loud && *on && ui.is_enabled();
         if solid {
-            p.rect_filled(tick_box, R_SHEET, TALLY);
+            p.rect_filled(tick_box, R_SHEET, BLUE);
         } else {
-            let edge = if resp.hovered() { LEGEND } else { at_rest(ui, INK3) };
+            let edge = if resp.hovered() { INK2 } else { at_rest(ui, INK3) };
             p.rect_stroke(tick_box, R_SHEET, Stroke::new(1.0, edge), StrokeKind::Inside);
         }
         if *on {
             paint_tick(p, tick_box, if solid { ON_FILL } else { INK });
         }
         let ink = if *on || resp.hovered() {
-            STRUCK
+            INK
         } else {
-            at_rest(ui, LEGEND)
+            at_rest(ui, INK2)
         };
         label_at(ui, rect.left() + LATCH_TEXT_X, rect.center().y, label, CTRL_TEXT, ink);
     }
@@ -1422,9 +1411,9 @@ pub fn tool_button(
         let p = ui.painter();
         let (ground, rest) = filled(&resp);
         let (fill, ink, words) = if armed && ui.is_enabled() {
-            (TALLY, ON_FILL, ON_FILL)
+            (BLUE, ON_FILL, ON_FILL)
         } else {
-            (ground_of(ui, ground), at_rest(ui, rest), STRUCK)
+            (ground_of(ui, ground), at_rest(ui, rest), INK)
         };
         p.rect_filled(rect, R_CONTROL, fill);
         let icon_rect = egui::Rect::from_center_size(
@@ -1559,7 +1548,7 @@ fn latch_face(
     let (fill, ink, words) = if on && ui.is_enabled() {
         (BLUE_WASH, BLUE_DEEP, BLUE_DEEP)
     } else {
-        (ground_of(ui, ground), at_rest(ui, rest), STRUCK)
+        (ground_of(ui, ground), at_rest(ui, rest), INK)
     };
     p.rect_filled(rect, R_CONTROL, fill);
     let icon_rect = egui::Rect::from_center_size(
@@ -2107,9 +2096,9 @@ pub fn card_chip(ui: &mut Ui, rect: egui::Rect, label: &str) -> Response {
         let (fill, ink) = if resp.is_pointer_button_down_on() {
             (BLUE_WASH, BLUE_DEEP)
         } else if resp.hovered() {
-            (HOVER, STRUCK)
+            (HOVER, INK)
         } else {
-            (WELL, LEGEND)
+            (WELL, INK2)
         };
         let p = ui.painter();
         p.rect_filled(rect, R_CONTROL, fill);
@@ -2331,7 +2320,7 @@ pub fn filled_named(ui: &mut Ui, label: &str, name: &str, width: f32) -> Respons
 pub fn armed_row(ui: &mut Ui, label: &str, width: f32, armed: bool) -> Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(width, CTRL_H), Sense::click());
     if ui.is_rect_visible(rect) {
-        let (fill, ink) = if armed && ui.is_enabled() { (TALLY, ON_FILL) } else { (filled(&resp).0, INK) };
+        let (fill, ink) = if armed && ui.is_enabled() { (BLUE, ON_FILL) } else { (filled(&resp).0, INK) };
         row_words(ui, rect, label, 0.0, fill, ink);
     }
     speak(&resp, egui::WidgetType::Button, Some(armed), label);
@@ -2506,9 +2495,9 @@ fn ghost(ui: &Ui, resp: &Response) -> (Color32, Color32) {
     if resp.is_pointer_button_down_on() {
         (BLUE_WASH, BLUE_DEEP)
     } else if resp.hovered() {
-        (WELL, STRUCK)
+        (WELL, INK)
     } else {
-        (Color32::TRANSPARENT, at_rest(ui, LEGEND))
+        (Color32::TRANSPARENT, at_rest(ui, INK2))
     }
 }
 
@@ -2533,14 +2522,14 @@ pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response 
             p.rect_stroke(
                 well.expand(3.0),
                 R_INPUT,
-                Stroke::new(2.0, at_rest(ui, TALLY)),
+                Stroke::new(2.0, at_rest(ui, BLUE)),
                 StrokeKind::Outside,
             );
         } else if resp.hovered() {
             p.rect_stroke(
                 well.expand(3.0),
                 R_INPUT,
-                Stroke::new(1.0, STRUCK),
+                Stroke::new(1.0, INK),
                 StrokeKind::Outside,
             );
         }
@@ -2608,12 +2597,12 @@ pub fn rail(
         if t > 0.0 {
             let mut fill = track;
             fill.max.x = snap(track.left() + track.width() * t, ppp);
-            p.rect_filled(fill.shrink(1.0), 3, at_rest(ui, TALLY));
+            p.rect_filled(fill.shrink(1.0), 3, at_rest(ui, BLUE));
         }
         p.rect_stroke(
             track,
             4,
-            Stroke::new(1.0, if resp.hovered() { LEGEND } else { at_rest(ui, INK3) }),
+            Stroke::new(1.0, if resp.hovered() { INK2 } else { at_rest(ui, INK3) }),
             StrokeKind::Inside,
         );
         // The handle: an ink bar the eye can find at any fill level.
@@ -2624,7 +2613,7 @@ pub fn rail(
                 Pos2::new(hx + 2.0, rect.center().y + 7.0),
             ),
             2,
-            STRUCK,
+            INK,
         );
     }
     resp
@@ -2707,7 +2696,7 @@ pub fn meter(ui: &mut Ui, frac: Option<f32>, w: f32) {
             if t > 0.0 {
                 let mut fill = track;
                 fill.max.x = snap(track.left() + track.width() * t, ppp);
-                p.rect_filled(fill.shrink(1.0), 4, at_rest(ui, TALLY));
+                p.rect_filled(fill.shrink(1.0), 4, at_rest(ui, BLUE));
             }
         }
         None => {
@@ -2721,7 +2710,7 @@ pub fn meter(ui: &mut Ui, frac: Option<f32>, w: f32) {
                 Pos2::new((x + bw).min(track.right()), track.bottom() - 1.0),
             );
             if band.width() > 0.0 {
-                p.rect_filled(band, 4, at_rest(ui, TALLY));
+                p.rect_filled(band, 4, at_rest(ui, BLUE));
             }
             ui.ctx().request_repaint();
         }
@@ -3092,13 +3081,13 @@ mod tests {
     #[test]
     fn the_palette_is_exactly_the_ratified_one() {
         // The spec's hex values, transcribed independently of the constants.
-        assert_eq!(GRAPHITE, Color32::from_rgb(0xF6, 0xF7, 0xF8));
+        assert_eq!(ISLAND, Color32::from_rgb(0xF6, 0xF7, 0xF8));
         assert_eq!(WELL, Color32::from_rgb(0xE8, 0xEA, 0xED));
-        assert_eq!(LEGEND, Color32::from_rgb(0x4C, 0x52, 0x5B));
-        assert_eq!(STRUCK, Color32::from_rgb(0x1E, 0x22, 0x27));
-        assert_eq!(AO, Color32::from_rgb(0x70, 0x76, 0x7F));
-        assert_eq!(AKA, Color32::from_rgb(0xB9, 0x2D, 0x1C));
-        assert_eq!(TALLY, Color32::from_rgb(0x1F, 0x5F, 0xBF));
+        assert_eq!(INK2, Color32::from_rgb(0x4C, 0x52, 0x5B));
+        assert_eq!(INK, Color32::from_rgb(0x1E, 0x22, 0x27));
+        assert_eq!(INK3, Color32::from_rgb(0x70, 0x76, 0x7F));
+        assert_eq!(RED, Color32::from_rgb(0xB9, 0x2D, 0x1C));
+        assert_eq!(BLUE, Color32::from_rgb(0x1F, 0x5F, 0xBF));
         assert_eq!(PAPER, Color32::from_rgb(0xFF, 0xFF, 0xFF));
     }
 
@@ -3128,8 +3117,6 @@ mod tests {
         for (token, [r, g, b]) in table {
             assert_eq!(token.to_array(), [r, g, b, 255]);
         }
-        // The old names read the new roles until the alias retirement.
-        assert_eq!([GRAPHITE, LEGEND, STRUCK, AO, AKA, TALLY], [ISLAND, INK2, INK, INK3, RED, BLUE]);
         // The derived colours, each a token opaque or at a set transparency.
         assert_eq!([legend_dim(), hairline(), rule_sec(), legend_muted()], [INK2, RULE, INK2, INK3]);
         assert_eq!([rule_beat(), rule_half()], [alpha(INK2, 56), alpha(INK2, 102)]);

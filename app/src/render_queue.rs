@@ -1559,9 +1559,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                 ui.horizontal_wrapped(|ui| {
                     let (word, color) = match &job.state {
                         JobState::Queued => ("queued".to_string(), plate::legend_dim()),
-                        JobState::Running => ("rendering".to_string(), plate::TALLY),
-                        JobState::Done => ("done".to_string(), plate::AO),
-                        JobState::Failed(e) => (format!("failed: {e}"), plate::AKA),
+                        JobState::Running => ("rendering".to_string(), plate::BLUE),
+                        JobState::Done => ("done".to_string(), plate::INK3),
+                        JobState::Failed(e) => (format!("failed: {e}"), plate::RED),
                         JobState::Stopped => ("stopped".to_string(), plate::legend_dim()),
                     };
                     let half = if job.half { " · 50%" } else { "" };
@@ -1572,7 +1572,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, view: &View) {
                     ui.label(
                         egui::RichText::new(format!("{}/{}", job.done, job.total()))
                             .font(plate::Role::Small.font())
-                            .color(plate::STRUCK),
+                            .color(plate::INK),
                     );
                     ui.label(egui::RichText::new(word).color(color));
                     if job.state == JobState::Done && ui.small_button("show folder").clicked() {

@@ -419,7 +419,7 @@ impl crate::Editor {
             ui.painter().rect_stroke(
                 resp.rect,
                 plate::R_CONTROL,
-                egui::Stroke::new(1.0, plate::AKA),
+                egui::Stroke::new(1.0, plate::RED),
                 egui::StrokeKind::Inside,
             );
         }

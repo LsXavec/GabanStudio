@@ -16,7 +16,7 @@
 //!
 //! GM22: the pane's render and the canvas's 3D underlay run on a worker,
 //! one keyed job at a time ([`JobLogic`], FinalLook's law): the last picture
-//! stays up with the TALLY dot until the next one lands.
+//! stays up with the blue dot until the next one lands.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -138,7 +138,7 @@ impl JobLogic {
         self.land(Err(WORKER_LOST.to_string()))
     }
 
-    /// The TALLY dot: a job runs, or the newest key's picture is to come.
+    /// The blue dot: a job runs, or the newest key's picture is to come.
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.wanted.is_some_and(|k| self.shown != Some(k) && self.failed != Some(k))
     }
@@ -604,13 +604,13 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState) {
     if state.view3d.worker.jobs.busy() {
         // The lamp, and in words (the viewers' FX dot).
         let at = rect.left_top() + egui::vec2(10.0, 10.0);
-        painter.circle_filled(at, 4.0, crate::plate::TALLY);
+        painter.circle_filled(at, 4.0, crate::plate::BLUE);
         painter.text(
             at + egui::vec2(8.0, 0.0),
             egui::Align2::LEFT_CENTER,
             "rendering…",
             crate::plate::Role::Small.font(),
-            crate::plate::LEGEND,
+            crate::plate::INK2,
         );
     }
 }
@@ -671,7 +671,7 @@ impl Underlay {
         Some(UnderlayPicture { tex, node, frame })
     }
 
-    /// The TALLY dot: on, with a picture still to come (a first one, or
+    /// The blue dot: on, with a picture still to come (a first one, or
     /// the current frame's).
     pub fn busy(&self) -> bool {
         self.on && self.worker.jobs.busy()

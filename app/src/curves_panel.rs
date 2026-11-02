@@ -154,11 +154,11 @@ pub struct CurvesState {
 /// key wears a ring, not a colour.
 fn ink(i: usize) -> egui::Color32 {
     [
-        plate::STRUCK,
+        plate::INK,
         plate::PENCIL_AO,
         plate::INK3,
         plate::PENCIL_AO.gamma_multiply(0.6),
-        plate::STRUCK.gamma_multiply(0.6),
+        plate::INK.gamma_multiply(0.6),
     ][i % 5]
 }
 
@@ -455,7 +455,7 @@ fn key_header(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         ui.label(egui::RichText::new(text).color(plate::legend_dim()));
         return;
     };
-    ui.label(egui::RichText::new(format!("{name} @ {}", frame + 1)).color(plate::LEGEND));
+    ui.label(egui::RichText::new(format!("{name} @ {}", frame + 1)).color(plate::INK2));
     // A resting field follows the key (an undo, a drag in the plot).
     if !state.curves.value_editing || state.curves.value.map(|(k, _)| k) != Some((pid, frame)) {
         state.curves.value = Some(((pid, frame), key.value));
@@ -704,9 +704,9 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         );
         // AU15: a time that would run past the plot's edge waits for the
         // pan that brings it in whole.
-        let time = painter.layout_no_wrap(time_label(s, tstep, fps), numbers.clone(), plate::LEGEND);
+        let time = painter.layout_no_wrap(time_label(s, tstep, fps), numbers.clone(), plate::INK2);
         if x + 3.0 + time.size().x <= plot.right() {
-            painter.galley(pos2(x + 3.0, plot.top() + 2.0), time, plate::LEGEND);
+            painter.galley(pos2(x + 3.0, plot.top() + 2.0), time, plate::INK2);
         }
         let Some(next) = s.checked_add(tstep) else { break };
         s = next;
@@ -718,14 +718,14 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
         let y = view.to_screen(plot, 0.0, v).y;
         painter.line_segment(
             [pos2(plot.left(), y), pos2(plot.left() + 6.0, y)],
-            egui::Stroke::new(1.0, plate::LEGEND),
+            egui::Stroke::new(1.0, plate::INK2),
         );
         painter.text(
             pos2(plot.left() + 8.0, y),
             egui::Align2::LEFT_CENTER,
             value_label(v, vstep),
             numbers.clone(),
-            plate::LEGEND,
+            plate::INK2,
         );
         t += 1.0;
     }
@@ -738,7 +738,7 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
     let xf = view.to_screen(plot, state.view.frame as f64, 0.0).x;
     painter.line_segment(
         [pos2(xf, plot.top()), pos2(xf, plot.bottom())],
-        egui::Stroke::new(1.0, plate::TALLY),
+        egui::Stroke::new(1.0, plate::BLUE),
     );
     let sel = &state.curves.selected;
     for col in &cols {
@@ -781,20 +781,20 @@ pub fn ui(ui: &mut egui::Ui, state: &mut AppState, gesture_safe: bool) {
                         continue;
                     }
                     let hs = view.to_screen(plot, hp.0, hp.1);
-                    painter.line_segment([at, hs], egui::Stroke::new(1.0, plate::LEGEND));
-                    painter.rect_filled(Rect::from_center_size(hs, vec2(5.0, 5.0)), 0.0, plate::LEGEND);
+                    painter.line_segment([at, hs], egui::Stroke::new(1.0, plate::INK2));
+                    painter.rect_filled(Rect::from_center_size(hs, vec2(5.0, 5.0)), 0.0, plate::INK2);
                 }
             }
             painter.circle_filled(at, 3.5, ink(i));
             if picked {
-                painter.circle_stroke(at, 6.5, egui::Stroke::new(1.5, plate::STRUCK));
+                painter.circle_stroke(at, 6.5, egui::Stroke::new(1.5, plate::INK));
             }
         }
     }
     if let (Some(Drag::Box { from }), Some(p)) = (state.curves.drag, pointer) {
         let r = Rect::from_two_pos(from, p);
-        painter.rect_filled(r, 0.0, plate::LEGEND.gamma_multiply(0.12));
-        painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, plate::LEGEND), egui::StrokeKind::Inside);
+        painter.rect_filled(r, 0.0, plate::INK2.gamma_multiply(0.12));
+        painter.rect_stroke(r, 0.0, egui::Stroke::new(1.0, plate::INK2), egui::StrokeKind::Inside);
     }
     // AU15: the line wraps in a plot narrower than it, whole at the minimum.
     let hint = painter.layout(

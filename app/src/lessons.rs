@@ -750,6 +750,15 @@ impl Lesson {
     pub fn held(&self, page: usize) -> &'static [u16] {
         self.pages.get(page).or(self.pages.last()).copied().unwrap_or(self.finish)
     }
+
+    /// AU16: the task the audits stand this row on in `step`: the most words
+    /// the card holds there, or anywhere if the lesson never comes to `step`.
+    pub fn fullest_on(&self, step: Stage) -> usize {
+        let words = |(_, task): &(usize, &Task)| task.say.len() + task.why.map_or(0, str::len);
+        let tasks = || self.tasks.iter().enumerate();
+        let here = tasks().filter(|(_, task)| task.step == step).max_by_key(words);
+        here.or_else(|| tasks().max_by_key(words)).map_or(0, |(i, _)| i)
+    }
 }
 
 // ---- AU23: the three Rookie lessons (`research/LESSONS-approachable-ui.md`) ----
@@ -3437,9 +3446,10 @@ const fn stand_in(id: &'static str, kind: ProjectKind, class: Class, title: &'st
     Lesson { id, kind, class, title, hover, ..Lesson::BLANK }
 }
 
-/// The card with its fullest task: what the audits' lesson rooms stand on, of
-/// any type and class. Its words are no lesson's; the longest in the lessons
-/// file is what `aulesson_card_fits_every_sentence` reads.
+/// The card with its fullest task: what a test builds a row of its own on, of
+/// any type and class. AU16: the audits' lesson rooms stand on `ALL`. Its words
+/// are no lesson's; the longest in the lessons file is what
+/// `aulesson_card_fits_every_sentence` reads.
 pub const PROBED: Lesson = Lesson {
     id: "stand-in-card",
     title: "Up Late",

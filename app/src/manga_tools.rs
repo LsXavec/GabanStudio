@@ -1259,7 +1259,7 @@ fn pane(ui: &mut egui::Ui, state: &mut AppState, koma_armed: bool, see_page: boo
         ui.painter().rect_stroke(
             clip.rect,
             plate::R_CONTROL,
-            egui::Stroke::new(1.0, plate::AKA),
+            egui::Stroke::new(1.0, plate::RED),
             egui::StrokeKind::Inside,
         );
     }
@@ -1464,12 +1464,12 @@ fn page_thumb(
     p.rect_filled(rect, 0.0, plate::PAPER);
     for r in [page.trim, page.inner] {
         let pts = manga::rect_poly(r).into_iter().map(to_screen).collect();
-        p.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.0, plate::LEGEND)));
+        p.add(egui::Shape::closed_line(pts, egui::Stroke::new(1.0, plate::INK2)));
     }
     for (i, poly) in panels.iter().enumerate() {
         let pts = poly.iter().copied().map(to_screen).collect();
         let stroke = if Some(i) == selected {
-            egui::Stroke::new(2.0, plate::TALLY)
+            egui::Stroke::new(2.0, plate::BLUE)
         } else {
             egui::Stroke::new(1.0, plate::INK3)
         };
@@ -1518,7 +1518,7 @@ pub fn paint_page(
     let dim = egui::Stroke::new(1.0, plate::INK3);
     let quiet = state.manga.quiet;
     let ao = egui::Stroke::new(1.0, if quiet { plate::INK3 } else { plate::PENCIL_AO });
-    let tally = egui::Stroke::new(1.0, plate::TALLY);
+    let tally = egui::Stroke::new(1.0, plate::BLUE);
     let [bleed, trim, inner] = guide_outlines(page, to_screen);
     painter.extend(egui::Shape::dashed_line(&closed(&bleed), dim, 6.0, 4.0));
     painter.add(egui::Shape::closed_line(trim.to_vec(), ao));
@@ -1527,7 +1527,7 @@ pub fn paint_page(
     for (i, poly) in panels.iter().enumerate() {
         let pts = poly.iter().map(|p| pt(*p)).collect();
         let stroke = if i == state.manga.selected {
-            egui::Stroke::new(2.0, if quiet { plate::INK3 } else { plate::TALLY })
+            egui::Stroke::new(2.0, if quiet { plate::INK3 } else { plate::BLUE })
         } else {
             dim
         };
@@ -1767,7 +1767,7 @@ mod tests {
             })
             .filter_map(|c| if let ColorMode::Solid(c) = c { Some(c) } else { None })
             .collect();
-        assert_eq!(outlines, [plate::LEGEND, plate::LEGEND, plate::INK3], "the trim, the inner frame, the panel");
+        assert_eq!(outlines, [plate::INK2, plate::INK2, plate::INK3], "the trim, the inner frame, the panel");
         let paper = effective(plate::PAPER, 1.0, [0.0; 3]);
         let got = ratio(effective(plate::INK3, 1.0, paper), paper);
         assert!(got >= 3.0, "INK3 on PAPER: {got:.2}");

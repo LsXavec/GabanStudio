@@ -364,13 +364,13 @@ fn rail_at(ui: &mut egui::Ui, label: &str, v: &mut f32, lo: f32, hi: f32) -> egu
         ui.label(
             egui::RichText::new(label)
                 .font(plate::Role::Small.font())
-                .color(plate::LEGEND),
+                .color(plate::INK2),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(format!("{v:.2}"))
                     .font(plate::Role::Small.font())
-                    .color(plate::STRUCK),
+                    .color(plate::INK),
             );
             plate::rail(ui, v, lo..=hi, 120.0)
         })
@@ -433,9 +433,9 @@ fn curve_row(
                 let x = i as f32 / 24.0;
                 path.push(to_screen([x, crate::canvas::curve_eval(&c.points, x)]));
             }
-            p.add(egui::Shape::line(path, egui::Stroke::new(1.5, plate::AO)));
+            p.add(egui::Shape::line(path, egui::Stroke::new(1.5, plate::INK3)));
             for pt in c.points.iter() {
-                p.circle_filled(to_screen(*pt), 2.5, plate::STRUCK);
+                p.circle_filled(to_screen(*pt), 2.5, plate::INK);
             }
             if resp.dragged()
                 && let Some(pos) = resp.interact_pointer_pos()

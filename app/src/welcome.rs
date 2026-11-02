@@ -183,7 +183,7 @@ pub fn checklist_ui(
         ui.horizontal(|ui| {
             let mark = if ticks[i] { "✔" } else { "○" };
             ui.label(egui::RichText::new(mark).color(if ticks[i] {
-                plate::STRUCK
+                plate::INK
             } else {
                 plate::legend_dim()
             }));
@@ -491,7 +491,7 @@ fn whats_new_ui(ui: &mut egui::Ui) {
         ui.add_space(6.0);
         section(ui, persona);
         for item in items {
-            ui.label(egui::RichText::new(format!("· {item}")).color(plate::STRUCK));
+            ui.label(egui::RichText::new(format!("· {item}")).color(plate::INK));
         }
     }
 }
@@ -645,7 +645,7 @@ impl Welcome {
 /// A section's heading — a real label, so the screen reader (and the
 /// harness) finds it.
 fn section(ui: &mut egui::Ui, text: &str) {
-    ui.label(egui::RichText::new(text).strong().color(plate::LEGEND));
+    ui.label(egui::RichText::new(text).strong().color(plate::INK2));
 }
 
 /// A card on the float, and the gap between cards.
@@ -743,7 +743,7 @@ pub fn float_body(ui: &mut egui::Ui, w: &mut Welcome) -> Option<WelcomeAction> {
         on_edge(ui, |ui| {
             plate::answer(ui, yes, said);
             if let Some(fix) = fix {
-                ui.label(egui::RichText::new(fix).color(plate::LEGEND));
+                ui.label(egui::RichText::new(fix).color(plate::INK2));
             }
         });
     }

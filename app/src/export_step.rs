@@ -299,7 +299,7 @@ fn video_row(ui: &mut egui::Ui, state: &mut AppState) {
         choice(ui, state, Action::ExportMp4);
         return;
     }
-    plain_words(ui, NO_FFMPEG, plate::LEGEND);
+    plain_words(ui, NO_FFMPEG, plate::INK2);
     let wide = ui.available_width();
     if plate::filled_row(ui, GIF_INSTEAD, wide).card(Action::ExportGif.help()).clicked() {
         state.render_queue.panel.ask(Ask::Do(Action::ExportGif));
@@ -356,7 +356,7 @@ fn range_note(ui: &mut egui::Ui, state: &AppState, view: &View) {
     if view.range.is_some() {
         let (first, last) = render_queue::resolve(state.frame_count(), view.range);
         let words = format!("Frames {} to {} only, as File ▸ Export says.", first + 1, last + 1);
-        plain_words(ui, &words, plate::LEGEND);
+        plain_words(ui, &words, plate::INK2);
     }
 }
 
@@ -372,7 +372,7 @@ fn transparent(ui: &mut egui::Ui, state: &mut AppState) {
 }
 
 fn no_art(ui: &mut egui::Ui, state: &mut AppState, view: &View, lead: bool) {
-    plain_words(ui, NO_ART, plate::LEGEND);
+    plain_words(ui, NO_ART, plate::INK2);
     let resp = if lead {
         plate::primary_card(ui, view.go_first, CHOICE_H, plate::Role::Card)
     } else {
@@ -399,7 +399,7 @@ fn done_card(ui: &mut egui::Ui, state: &mut AppState, landed: &Landed, view: &Vi
         ui.spacing_mut().item_spacing.y = 6.0;
         let heading = format!("Exported {}", landed.name);
         ui.label(egui::RichText::new(heading).font(plate::Role::Card.font()).color(plate::INK));
-        ui.label(egui::RichText::new(landed.line()).color(plate::LEGEND));
+        ui.label(egui::RichText::new(landed.line()).color(plate::INK2));
         let inner = ui.available_width();
         if plate::primary_card(ui, OPEN_FILE, plate::CTRL_H + 8.0, plate::Role::Step).clicked() {
             ask = Some(Ask::App(AppRequest::OpenFile(landed.file.clone())));
@@ -437,10 +437,10 @@ fn job_row(ui: &mut egui::Ui, name: &str, done: usize, total: usize) {
             let count = format!("{done} of {total}");
             let width = ui.fonts_mut(|f| {
                 let font = egui::TextStyle::Body.resolve(ui.style());
-                f.layout_no_wrap(count.clone(), font, plate::LEGEND).size().x
+                f.layout_no_wrap(count.clone(), font, plate::INK2).size().x
             });
             plate::meter(ui, Some(done as f32 / total.max(1) as f32), (wide - width - 8.0).max(40.0));
-            ui.label(egui::RichText::new(count).color(plate::LEGEND));
+            ui.label(egui::RichText::new(count).color(plate::INK2));
         });
     });
 }
@@ -472,7 +472,7 @@ fn job_list(ui: &mut egui::Ui, state: &mut AppState, wide: f32, room: f32) {
     let pages = state.manga.export_job.is_some();
     if rows.is_empty() && failed.is_none() && !pages {
         if Offer::of(state) != Offer::NoArt {
-            plain_words(ui, NOTHING_WAITING, plate::LEGEND);
+            plain_words(ui, NOTHING_WAITING, plate::INK2);
         }
         return;
     }

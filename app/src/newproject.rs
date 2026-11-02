@@ -163,7 +163,7 @@ pub fn form_ui(
     ui.label(
         egui::RichText::new("The paper you will draw on, and how fast it plays.")
             .font(plate::Role::Small.font())
-            .color(plate::LEGEND),
+            .color(plate::INK2),
     );
     ui.add_space(12.0);
     egui::Grid::new("new_project_grid")
@@ -241,7 +241,7 @@ pub fn form_ui(
                     {
                         form.preset = None;
                     }
-                    ui.label(egui::RichText::new("×").color(plate::LEGEND));
+                    ui.label(egui::RichText::new("×").color(plate::INK2));
                     if plate::field(
                         ui,
                         egui::DragValue::new(&mut form.height)
@@ -266,7 +266,7 @@ pub fn form_ui(
                     ui.label(
                         egui::RichText::new("set by the page template")
                             .font(plate::Role::Small.font())
-                            .color(plate::LEGEND),
+                            .color(plate::INK2),
                     );
                 }
             });
@@ -300,7 +300,7 @@ pub fn form_ui(
                         )
                     })
                     .font(plate::Role::Small.font())
-                    .color(plate::LEGEND),
+                    .color(plate::INK2),
                 );
             });
             ui.end_row();
@@ -322,7 +322,7 @@ pub fn form_ui(
                         "recorded with the project; nothing uses it yet"
                     })
                     .font(plate::Role::Small.font())
-                    .color(plate::LEGEND),
+                    .color(plate::INK2),
                 );
             });
             ui.end_row();
@@ -334,7 +334,7 @@ pub fn form_ui(
                 egui::Button::new(
                     egui::RichText::new("Start drawing")
                         .font(plate::Role::Panel.font())
-                        .color(plate::STRUCK),
+                        .color(plate::INK),
                 )
                 .min_size(egui::vec2(140.0, 30.0)),
             )
@@ -354,7 +354,7 @@ pub fn form_ui(
     // for — Aka, and it names the reason.
     if let Some(err) = &form.error {
         ui.add_space(8.0);
-        ui.label(egui::RichText::new(err).color(plate::AKA));
+        ui.label(egui::RichText::new(err).color(plate::RED));
     }
     action
 }

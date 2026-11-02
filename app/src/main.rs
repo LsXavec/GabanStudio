@@ -6494,7 +6494,7 @@ impl Editor {
                 // GM20: what this GPU paints of the paper, and what it costs.
                 let lr = paint::layer_rect(form.rect, (fw, fh), max_dim);
                 if let Some(cap) = paint::cap_text(form.rect, &lr, max_dim) {
-                    ui.label(egui::RichText::new(cap).color(plate::AKA));
+                    ui.label(egui::RichText::new(cap).color(plate::RED));
                 }
                 if let Some(note) = paint::coverage_text(form.rect, (fw, fh)) {
                     ui.label(egui::RichText::new(note).color(plate::legend_dim()));
@@ -7863,7 +7863,7 @@ impl eframe::App for App {
                         .show(ui, |ui| {
                             ui.label(
                                 egui::RichText::new(format!("{:.0} fps", 1.0 / dt))
-                                    .color(plate::LEGEND),
+                                    .color(plate::INK2),
                             );
                         });
                 });
@@ -8035,7 +8035,8 @@ enum ProbeRoom {
     /// it is built for.
     Lessons,
     /// AU27: a step of a kind's bar with the lesson card standing beside it.
-    /// AU28: the class, because an Amateur's foot has a third row.
+    /// AU28: the class, because an Amateur's foot has a third row. AU16: the
+    /// card is that type and class's real row.
     #[cfg_attr(not(test), allow(dead_code))]
     Lesson(&'static str, ProjectKind, Stage, lessons::Class),
 }
@@ -8120,7 +8121,11 @@ impl ProbeRoom {
             }
             ProbeRoom::Lesson(_, kind, st, class) => {
                 kind.stamp(&mut editor.state.engine.project);
-                editor.begin_lesson(lessons::Lesson { kind, class, ..lessons::PROBED }, 0);
+                // AU16: the real row of this type and class, on what its card
+                // holds most of in this step.
+                let row = lessons::ALL.iter().find(|l| l.kind == kind && l.class == class);
+                let lesson = *row.expect("nine rows, one per type and class");
+                editor.begin_lesson(lesson, lesson.fullest_on(st));
                 editor.enter_room(st);
             }
         }
@@ -8673,7 +8678,7 @@ impl Editor {
         // says nothing.
         if self.play_dropped > 0 {
             let dropped = format!("dropped {}", self.play_dropped);
-            playback::readout(ui, &dropped, 96.0, plate::LEGEND)
+            playback::readout(ui, &dropped, 96.0, plate::INK2)
                 .card("Frames passed over to keep up with the sound.");
         }
     }
@@ -8840,7 +8845,7 @@ impl Editor {
         }
         ui.label(
             egui::RichText::new(format!("/ {count}"))
-                .color(plate::LEGEND),
+                .color(plate::INK2),
         );
     }
 
@@ -8927,7 +8932,7 @@ impl Editor {
                 .button(
                     egui::RichText::new(format!("relaunch to update ({tag})"))
                         .font(plate::Role::Small.font())
-                        .color(plate::STRUCK),
+                        .color(plate::INK),
                 )
                 .card("Download the published build and relaunch. Your session carries over.")
                 .clicked()
@@ -8936,7 +8941,7 @@ impl Editor {
             }
             let (dot, _) =
                 ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-            ui.painter().circle_filled(dot.center(), 3.5, plate::TALLY);
+            ui.painter().circle_filled(dot.center(), 3.5, plate::BLUE);
         }
     }
 
@@ -8989,10 +8994,10 @@ impl Editor {
             if refusing {
                 plate::refusal(ui, &self.state.refusal);
             } else if saying {
-                let ink = if age < 3.0 { plate::LEGEND } else { plate::INK3 };
+                let ink = if age < 3.0 { plate::INK2 } else { plate::INK3 };
                 plate::say(ui, &self.state.status, ink);
             } else if let Some(hint) = &hint {
-                words_end = plate::say(ui, &hint.words, plate::LEGEND).rect.right();
+                words_end = plate::say(ui, &hint.words, plate::INK2).rect.right();
             }
         });
         self.say.stands(hint.as_ref().and_then(|h| h.bit), now);
@@ -9211,7 +9216,7 @@ impl Editor {
             Some((a, b)) => format!("{}–{}", a + 1, b + 1),
             None => "—".to_string(),
         };
-        playback::readout(ui, &text, 64.0, plate::LEGEND)
+        playback::readout(ui, &text, 64.0, plate::INK2)
             .card(format!("The loop range, first frame to last. A dash means the whole {shot} plays."));
         let clear = ui.add_enabled_ui(range.is_some(), |ui| {
             let key = playback::transport_key(ui, "×", "clear loop range", 22.0);
@@ -9233,7 +9238,7 @@ impl Editor {
     /// icon, and the name and the card keep them.
     fn sound_keys(&mut self, ui: &mut egui::Ui) {
         let (fps, shot, word) = (self.state.fps(), vocab::SHOT, vocab::SOUND_WHILE_DRAGGING);
-        playback::readout(ui, &format!("{fps} {}", vocab::FPS), 48.0, plate::LEGEND)
+        playback::readout(ui, &format!("{fps} {}", vocab::FPS), 48.0, plate::INK2)
             .card(format!("This {shot} plays {fps} frames each second."));
         let mut scrub = self.scrub_audio;
         let key = if (steps::FOLD..steps::SOUND_WORDS).contains(&ui.ctx().content_rect().width()) {
@@ -9635,7 +9640,7 @@ impl Editor {
             // the artist never opens Settings to answer "am I connected?".
             if let Some((words, names)) = &room {
                 let key = ui.interact(lamp, ui.id().with("room_lamp"), egui::Sense::hover());
-                ui.painter().circle_filled(lamp.center(), 3.5, plate::TALLY);
+                ui.painter().circle_filled(lamp.center(), 3.5, plate::BLUE);
                 plate::speak(&key, egui::WidgetType::Label, None, words);
                 let who = match names.as_slice() {
                     [] => "no one else here yet".to_string(),
@@ -9647,7 +9652,7 @@ impl Editor {
             // "has undo history". A painted dot in reserved space, so it
             // moves nothing when it lights.
             if self.state.is_dirty() {
-                ui.painter().circle_filled(dot.center(), 3.0, plate::TALLY);
+                ui.painter().circle_filled(dot.center(), 3.0, plate::BLUE);
                 // GM2: the dot says what it means — on hover, and to screen
                 // readers and the testkit (D7).
                 let resp = ui.interact(dot, ui.id().with("gm2_unsaved"), egui::Sense::hover());
