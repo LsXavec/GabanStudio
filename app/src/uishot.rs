@@ -1791,11 +1791,16 @@ fn pixel_diff(base: &Path, after: &Path) -> Vec<String> {
 /// Spec AU16's gate, and more than its rooms: every picture the ignored pass
 /// owes, at both sizes, against the part's start, so the sweep's diff covers
 /// the lesson surfaces (feedback spec 1.11). `AUTOKEN_BASE` is a folder of
-/// `uishot_rooms` run on the commit before the part.
+/// `uishot_rooms` run on the commit before the part. This module's name puts
+/// the test in every `uishot` run, which sets no base: that run says so and
+/// proves nothing here, and does not take the pictures twice.
 #[test]
 #[ignore = "needs a GPU adapter, UISHOT_DIR and AUTOKEN_BASE; writes PNGs"]
 fn autoken_render_is_unchanged_by_the_removal() {
-    let base = PathBuf::from(std::env::var("AUTOKEN_BASE").expect("set AUTOKEN_BASE to the part's start's shots"));
+    let Some(base) = std::env::var_os("AUTOKEN_BASE").map(PathBuf::from) else {
+        println!("AUTOKEN_BASE is not set: no pixel diff ran");
+        return;
+    };
     check_shots(&base, &shots_owed()).expect("the part's start's rooms");
     check_shots(&base, &lesson_owed()).expect("and its lesson surfaces");
     uishot_rooms();
