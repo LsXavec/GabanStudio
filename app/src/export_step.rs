@@ -48,6 +48,8 @@ pub const SHOW_IN_FOLDER: &str = "Show in folder";
 pub const STOP_EXPORT: &str = "Stop export";
 pub const TRANSPARENT: &str = "Transparent background (PNG picture)";
 pub const TRY_AGAIN: &str = "Try again";
+/// It asks the same dialog, so a place that failed can be changed there.
+pub const TRY_AGAIN_CARD: &str = "Ask again, and pick another place if this one will not take the file";
 /// A book's pages on their way: no queue job, so no row of its own to read.
 pub const WRITING_PAGES: &str = "Writing the pages…";
 
@@ -459,7 +461,7 @@ fn failed_row(ui: &mut egui::Ui, state: &mut AppState, failed: &Failed) {
     plate::failure(ui, &words, |ui| {
         if failed.again.is_some() {
             let wide = ui.available_width();
-            pressed = plate::filled_row(ui, TRY_AGAIN, wide).clicked();
+            pressed = plate::filled_row(ui, TRY_AGAIN, wide).card(TRY_AGAIN_CARD).clicked();
         }
     });
     if let Some(again) = failed.again.clone().filter(|_| pressed) {

@@ -4752,6 +4752,7 @@ impl AppState {
                 self.render_queue.landed.extend(landed);
             }
             Err(e) => {
+                let e = crate::render_queue::plain_why(&e);
                 self.refuse(format!("refused — the pages were not written ({e})"));
                 let again = Some(crate::export_step::Ask::Do(crate::config::Action::ExportPages));
                 self.render_queue.panel.failed = Some(crate::export_step::Failed { why: e, again });

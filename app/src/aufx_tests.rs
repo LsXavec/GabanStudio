@@ -724,6 +724,7 @@ fn aufx_glow_and_pan_journey() {
     assert!(!labels.iter().any(|l| l.contains("connect")), "0 wires: {labels:?}");
     assert!(concepts.len() <= 3);
     let jargon = measure::jargon_in(&read);
+    println!("J4: {} actions, 0 wires, {} concepts, {} jargon: {tally:?}", tally.actions(), concepts.len(), jargon.len());
     assert!(jargon.len() <= 2, "{jargon:?} in {read:?}");
     let state = h.state();
     let cam = output_camera(state.cut()).expect("the camera");

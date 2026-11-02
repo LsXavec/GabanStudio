@@ -3468,7 +3468,7 @@ impl Editor {
                     }
                 }
                 None => {
-                    ed.state.refuse("refused — select pixels first, then copy");
+                    ed.state.refuse("refused — select part of a drawing first");
                     *out = Performed::Ignored;
                 }
             }
@@ -4199,10 +4199,13 @@ fn pump_tablet(
 /// (config.json, workspaces.json) and the tablet fallback. Pending notes
 /// join into one line; a note said once this session is not said again —
 /// every new project, open or join rebuilds the editor, which re-reads
-/// workspaces.json.
+/// workspaces.json. AU17: `news` is no fault, a key the migration moved, so
+/// it waits the same way as a plain remark, with no red and no cross. A fault
+/// said beside it carries it in the one line.
 #[derive(Default)]
 struct Notes {
     pending: Vec<String>,
+    news: Vec<String>,
     said: std::collections::HashSet<String>,
 }
 
@@ -4213,14 +4216,27 @@ impl Notes {
         }
     }
 
+    fn push_news(&mut self, note: String) {
+        if !self.said.contains(&note) && !self.news.contains(&note) {
+            self.news.push(note);
+        }
+    }
+
     /// Say everything pending, the editor's own load notes included.
     fn say(&mut self, ed: &mut Editor) {
         for n in std::mem::take(&mut ed.load_notes) {
             self.push(n);
         }
         if self.pending.is_empty() {
+            if !self.news.is_empty() {
+                ed.state.status = self.news.join(" · ");
+                ed.news = Some(ed.state.status.clone());
+                ed.news_waits = true;
+                self.said.extend(self.news.drain(..));
+            }
             return;
         }
+        self.pending.append(&mut self.news);
         ed.state.refuse(self.pending.join(" · "));
         ed.notice_seq = Some(ed.state.refusal_seq);
         self.said.extend(self.pending.drain(..));
@@ -4448,6 +4464,11 @@ struct Editor {
     /// The refusal seq of a NOTICE ([`Notes::say`]): it holds the Aka lane
     /// until the artist's first key or click, then dwells as usual.
     notice_seq: Option<u32>,
+    /// AU17: [`Notes`]' news, while it is the remark on the lane: it takes
+    /// the whole lane, as a notice does, and `news_waits` holds its clock
+    /// until the artist's first key or click.
+    news: Option<String>,
+    news_waits: bool,
     /// What this editor's workspaces.json load dropped, not yet said (the
     /// shell's [`Notes`] takes it on the next frame).
     load_notes: Vec<String>,
@@ -5203,8 +5224,8 @@ impl egui_dock::TabViewer for EditorTabs<'_> {
         if self.lone { "".into() } else { tab.title().into() }
     }
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
-        // Every pane sits on the plate's grain (owner's amendment): laid
-        // down first, so all content paints over the material.
+        // Every pane sits on its ground: laid down first, so all content
+        // paints over it.
         plate::surface(ui);
         self.pane_rects.push((*tab, ui.max_rect(), ui.layer_id()));
         plate::mark(ui, ui.max_rect(), Target::Pane(*tab));
@@ -6097,6 +6118,8 @@ impl Editor {
             refusal_seen_seq: 0,
             refusal_since: -10.0,
             notice_seq: None,
+            news: None,
+            news_waits: false,
             load_notes,
             workspaces,
             ws_name: String::new(),
@@ -6223,6 +6246,8 @@ impl Editor {
             refusal_seen_seq: 0,
             refusal_since: -10.0,
             notice_seq: None,
+            news: None,
+            news_waits: false,
             load_notes,
             workspaces,
             ws_name: String::new(),
@@ -7413,6 +7438,9 @@ impl eframe::App for App {
             for n in self.config.load_notes.drain(..) {
                 self.notes.push(n);
             }
+            for n in self.config.keymap_notes.drain(..) {
+                self.notes.push_news(n);
+            }
             self.notes.say(editor);
             editor.state.engine.set_undo_limit(undo_limit);
             if let Some(p) = &mut editor.paint {
@@ -7928,8 +7956,8 @@ impl App {
                 });
         } else {
             egui::CentralPanel::default().show(ui, |ui| {
-                // AUDIT [22]: the only surface in the app with no plate
-                // grain — and the first one an artist ever sees.
+                // AUDIT [22]: this surface gets the panes' ground too: it is
+                // the first one an artist ever sees.
                 plate::surface(ui);
                 ui.vertical_centered(|ui| {
                     ui.add_space(80.0);
@@ -8981,12 +9009,14 @@ impl Editor {
         let button = verb.map_or(0.0, |verb| plate::say_action_width(ui, verb.label(self.kind())) + 6.0);
         let said = if saying { self.state.status.as_str() } else { hint.as_ref().map_or("", |h| h.words.as_str()) };
         let beside = plate::say_width(ui, said) + button + plate::SAY_DOTS <= lane.width();
-        let dots = !fold && !refusing && counting && (wide || beside);
+        // AU17: the lane a refusal gets, for words as long as a notice's.
+        let whole = refusing || (saying && self.lane_holds_news());
+        let dots = !fold && !whole && counting && (wide || beside);
         let spare = match verb {
             _ if dots && wide => plate::SAY_ACTION + plate::SAY_DOTS,
             _ if dots => button + plate::SAY_DOTS,
             Some(_) => button,
-            None if refusing || hint.is_some() => 0.0,
+            None if whole || hint.is_some() => 0.0,
             None => plate::SAY_ACTION,
         };
         let words = egui::vec2((lane.width() - spare).max(0.0), plate::CHROME_H);
@@ -9040,13 +9070,13 @@ impl Editor {
         // dwell starts at the first key or click after it shows, so it is
         // never missed. (Raw events: a widget that consumed the key still
         // saw the artist act.)
+        let acted = ctx.input(|i| {
+            i.pointer.any_pressed()
+                || i.raw.events.iter().any(|e| {
+                    matches!(e, egui::Event::Key { pressed: true, .. })
+                })
+        });
         if self.notice_seq == Some(self.state.refusal_seq) {
-            let acted = ctx.input(|i| {
-                i.pointer.any_pressed()
-                    || i.raw.events.iter().any(|e| {
-                        matches!(e, egui::Event::Key { pressed: true, .. })
-                    })
-            });
             if acted {
                 self.notice_seq = None;
             } else {
@@ -9062,6 +9092,13 @@ impl Editor {
             self.status_since = ctx.input(|i| i.time);
         }
         let now = ctx.input(|i| i.time);
+        // AU17: news waits as a notice does, on the remark's own clock.
+        if self.news_waits && self.lane_holds_news() {
+            self.news_waits = !acted;
+            if !acted {
+                self.status_since = now;
+            }
+        }
         let (rage, age) = (now - self.refusal_since, now - self.status_since);
         let refusing = rage < 4.0 && !self.state.refusal.is_empty();
         let saying = age < 4.0 && !self.state.status.is_empty();
@@ -9071,6 +9108,11 @@ impl Editor {
             ctx.request_repaint_after_secs(dwell as f32);
         }
         (refusing, saying, age)
+    }
+
+    /// AU17: is the remark on the lane [`Notes`]' news?
+    fn lane_holds_news(&self) -> bool {
+        self.news.as_deref() == Some(self.state.status.as_str())
     }
 
     /// AU10: the way back (spec R14), and all that is left to say anything
@@ -9636,9 +9678,10 @@ impl Editor {
                 };
                 plate::place_pill(&mut pills, name, place_width).on_hover_text(card);
             }
-            // THE ROOM LAMP (session): being in a room is a CONFIGURATION — a
-            // plate fact, never Aka. It names the role and who is here, so
-            // the artist never opens Settings to answer "am I connected?".
+            // THE ROOM LAMP (session): being in a room is a CONFIGURATION —
+            // a plain fact, never a refusal's red. It names the role and who
+            // is here, so the artist never opens Settings to answer "am I
+            // connected?".
             if let Some((words, names)) = &room {
                 let key = ui.interact(lamp, ui.id().with("room_lamp"), egui::Sense::hover());
                 ui.painter().circle_filled(lamp.center(), 3.5, plate::BLUE);

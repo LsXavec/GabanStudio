@@ -209,7 +209,8 @@ fn aukeys_stock_gaban_config_migrates() {
     let same = FROZEN.iter().filter(|(name, spec)| chord_of(&config, action(name)) == Some(&chord(spec))).count();
     assert_eq!(same, 118, "118 of 120 stay");
     assert_eq!(config.ui.hints_seen, u32::MAX, "an upgrader has not come to be taught");
-    assert_eq!(config.load_notes, ["Overlay track moved from Alt+K to Alt+O", "Background track moved from Alt+B to Alt+W"]);
+    assert_eq!(config.keymap_notes, ["Overlay track moved from Alt+K to Alt+O", "Background track moved from Alt+B to Alt+W"]);
+    assert!(config.load_notes.is_empty(), "a key that moved is news, not a fault: {:?}", config.load_notes);
 }
 
 /// Industry's seven overrides stand: its frame steps stay on Comma and Period,
@@ -236,7 +237,7 @@ fn aukeys_users_alt_k_is_left_alone() {
     let (_dir, config) = loaded(&mine);
     assert_eq!(chord_of(&config, Action::ColumnKindBook), Some(&chord("Ctrl+Alt+K")));
     assert_eq!(chord_of(&config, Action::ColumnKindBg), Some(&chord("Alt+W")), "the other still moves");
-    assert_eq!(config.load_notes, ["Background track moved from Alt+B to Alt+W"], "no word about Book");
+    assert_eq!(config.keymap_notes, ["Background track moved from Alt+B to Alt+W"], "no word about Book");
     // The artist took Alt+K itself for another verb, and gave Book away.
     let mine = with_chord(with_chord(golden("Gaban"), "ColumnKindBook", None), "KindKey", Some("Ctrl+Alt+J"));
     let mine = with_chord(mine, "History", Some("Alt+K"));
@@ -255,7 +256,7 @@ fn aukeys_users_alt_o_keeps_book_with_one_note() {
     assert_eq!(chord_of(&config, Action::ColumnKindBook), Some(&chord("Alt+K")), "stays");
     assert_eq!(chord_of(&config, Action::History), Some(&chord("Alt+O")), "theirs");
     assert_eq!(chord_of(&config, Action::ColumnKindBg), Some(&chord("Alt+W")));
-    let about_book: Vec<&String> = config.load_notes.iter().filter(|n| n.contains("Overlay")).collect();
+    let about_book: Vec<&String> = config.keymap_notes.iter().filter(|n| n.contains("Overlay")).collect();
     assert_eq!(about_book, ["Overlay track stays on Alt+K: Alt+O is taken"], "one note");
 }
 
@@ -316,6 +317,7 @@ fn aukeys_second_load_changes_nothing() {
     assert_eq!(serde_json::from_slice::<Value>(&bytes).expect("json")["ui"]["keymap_rev"], KEYMAP_REV);
     let second = Config::load_in(dir.path());
     assert!(second.load_notes.is_empty(), "{:?}", second.load_notes);
+    assert!(second.keymap_notes.is_empty(), "{:?}", second.keymap_notes);
     assert!(!second.migrated);
     assert_eq!(second.keybinds, first.keybinds);
     assert_eq!(std::fs::read(dir.path().join("config.json")).expect("still there"), bytes, "not written again");
@@ -342,6 +344,7 @@ fn aukeys_unreadable_config_is_not_written_over() {
     assert_eq!(config.ui.keymap_rev, KEYMAP_REV);
     assert_eq!(config.ui.hints_seen, 0, "an upgrader is someone whose file was read");
     assert!(config.load_notes.is_empty(), "{:?}", config.load_notes);
+    assert!(config.keymap_notes.is_empty(), "{:?}", config.keymap_notes);
     assert!(file.is_dir(), "left where it stood");
 }
 
@@ -363,6 +366,7 @@ fn aukeys_fresh_install_stamps_and_moves_nothing() {
     let bare = Config::fresh();
     assert_eq!(bare.ui.keymap_rev, KEYMAP_REV, "stamped, or the next launch would migrate it");
     assert!(bare.load_notes.is_empty(), "{:?}", bare.load_notes);
+    assert!(bare.keymap_notes.is_empty(), "{:?}", bare.keymap_notes);
     assert!(!bare.migrated);
     assert_eq!(bare.keybinds, config::default_binds(Keymap::Gaban));
 }
@@ -1384,8 +1388,8 @@ fn aukeys_hide_tools_dot_wears_its_own_icon() {
 }
 
 /// The chords that moved, joined, on every window from the Lead's largest to
-/// the smallest the app opens: the sentence stands whole, on the refusal's
-/// lane, and waits for the artist as any notice does.
+/// the smallest the app opens: the sentence stands whole, on the lane's calm
+/// row, and waits for the artist as any notice does.
 #[test]
 fn aukeys_chords_that_moved_fit_the_lane() {
     for size in [vec2(1600.0, 900.0), vec2(1280.0, 800.0), vec2(1280.0, 720.0), vec2(1024.0, 640.0)] {
@@ -1394,7 +1398,7 @@ fn aukeys_chords_that_moved_fit_the_lane() {
         h.kit_mut().set_pixels_per_point(1.0);
         settle(&mut h);
         h.wait(6.0);
-        assert_eq!(h.state().refusal, KEYS_MOVED, "{size:?}");
+        assert_eq!(h.state().status, KEYS_MOVED, "{size:?}");
         assert!(h.painted_text().iter().any(|t| t == KEYS_MOVED), "{size:?}: {:?}", h.painted_text());
         let clip = measure::clip_here(&h, measure::Scope::Chrome);
         assert_eq!((clip.clipped, clip.elided), (0, 0), "{size:?}: {:?}", clip.found);
@@ -1471,6 +1475,7 @@ fn aukeys_keyboard_journey() {
     edit.act("on twos", Act::Chord(Modifiers::ALT, Key::Num2));
     edit.act("play", Act::Key(Key::Space));
     let tally = edit.tally();
+    println!("J5: example edit {tally:?}");
     assert_eq!(tally.keys, 5, "5 presses");
     assert_eq!(tally.clicks, 0, "0 clicks");
     let h = edit.harness();

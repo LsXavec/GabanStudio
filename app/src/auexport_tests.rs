@@ -62,7 +62,7 @@ pub(crate) fn shipped(state: AppState) -> EditorHarness {
     h
 }
 
-fn enter(h: &mut EditorHarness) {
+pub(crate) fn enter(h: &mut EditorHarness) {
     assert_eq!(h.perform(Action::RoomExport), Performed::Done);
     settle(h);
     assert_eq!(h.editor().stage, Some(Stage::Export));
@@ -764,6 +764,7 @@ fn auexport_ball_journey() {
     assert!(concepts.len() <= 3, "{concepts:?}");
     read.extend(["Add drawing", "Export", GIF, "Save"].map(String::from));
     let jargon = measure::jargon_in(&read);
+    println!("J1: {} actions, {overhead} overhead, {} concepts, {} jargon: {tally:?}", tally.actions(), concepts.len(), jargon.len());
     assert!(jargon.len() <= 2, "{jargon:?} in {read:?}");
 
     // A real 12-frame GIF of 1.0 s at 12 fps, in a temp folder.
@@ -823,6 +824,7 @@ fn auexport_still_journey() {
     assert!(concepts.len() <= 2, "{concepts:?}");
     read.extend(["A drawing", "Export", export_step::PNG_IMAGE, "Save"].map(String::from));
     let jargon = measure::jargon_in(&read);
+    println!("J2: {} actions, {overhead} overhead, {} concepts, {} jargon: {tally:?}", tally.actions(), concepts.len(), jargon.len());
     assert!(jargon.len() <= 1, "{jargon:?} in {read:?}");
 
     assert_eq!(file_names(dir.path()), ["picture.png"], "exactly one, by the name it was given");

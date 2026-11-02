@@ -98,15 +98,23 @@ Presets include "Master PNG 16-bit", "ProRes 422 HQ" and "H.264 review".
 
 ## Quick start
 
-1. Open the app. The Welcome screen offers what you are making (a drawing,
-   an animation, a comic), templates, recent files and the sample shot (a
-   glowing ball bounce on twos, a camera pan across a wide background, sakura
-   petals and a dialogue line). After an update it opens on **What's New**;
-   a fresh install opens on Start.
-2. Pick one, or a template (or Custom size…), or open the sample.
-3. Follow the Quick start checklist on the Welcome screen (also Help ▸ Quick
-   start): make a drawing, mark it Key, time it on the sheet, paint it,
-   export it. Each step has a "Show me".
+1. Open the app. It opens on ready paper: draw straight away, nothing to set
+   up first. The Start card in the middle offers **A drawing**, **An
+   animation** or **A comic**, your recent files and More sizes. After an
+   update it opens once on **What's New**.
+2. New here? Press **Follow a lesson** on Start, or Help ▸ Lessons: nine
+   lessons, rookie to experienced, each ending in a real file. The example
+   project (a glowing ball bounce on twos, a camera pan across a wide
+   background, sakura petals and a dialogue line) opens from the same page.
+3. The dots on the line at the foot of the window count your Quick Start
+   steps (also Help ▸ Quick Start), and each step has a **Show me**. They
+   depend on what you are making:
+   - A drawing: draw something, color it, add an effect, save it, export a
+     file.
+   - An animation: draw something, add a drawing, draw the next pose, play
+     it, export a file.
+   - A comic: draw on the page, cut it into panels, add a page, save it,
+     export pages.
 4. Move along the bar at the top, or press F4 to F9. 3D layout and the Brush
    maker sit under the More menu, and Ctrl+K finds everything.
 

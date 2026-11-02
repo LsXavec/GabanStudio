@@ -84,7 +84,7 @@ pub fn ui(
     status: &mut String,
     more: &mut plate::PanelMore,
 ) {
-    // Its own tab (owner's amendment) — the pane IS the forge.
+    // Its own tab — the pane IS the forge.
     ui.add_space(4.0);
     let scroll = egui::ScrollArea::vertical()
         .auto_shrink([false, false])

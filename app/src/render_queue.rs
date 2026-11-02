@@ -1204,7 +1204,7 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
     match &result {
         Ok(n) => state.status = format!("rendered {label}: {n} frame(s){note}"),
         Err(e) if e == CANCELLED => state.status = format!("render of {label} stopped"),
-        Err(e) => state.refuse(format!("the render of {label} did not finish — {e}")),
+        Err(e) => state.refuse(format!("the render of {label} did not finish — {}", plain_why(e))),
     }
     // GM17: what the job could not read (a missing frame), once per job.
     if let Some(first) = warnings.first() {
@@ -1223,13 +1223,15 @@ pub fn poll(state: &mut AppState, ctx: &egui::Context) {
 
 /// AU9: the worker's answer for job `i`, as [`Queue::finish`] takes it, and
 /// the panel's row when it failed. A job stopped on purpose is no failure.
+/// AU17: both keep the plain words, so the queue's list reads as the row does.
 fn end_job(state: &mut AppState, i: usize, result: Result<usize, String>) -> Option<usize> {
     let rq = &mut state.render_queue;
+    let result = result.map_err(|why| plain_why(&why));
     match &result {
         Err(why) if why != CANCELLED => {
             let asked = rq.queue.jobs.get(i).and_then(|j| j.asked);
             let again = asked.map(|kind| Ask::App(crate::AppRequest::ExportTo(kind)));
-            rq.panel.failed = Some(Failed { why: plain_why(why), again });
+            rq.panel.failed = Some(Failed { why: why.clone(), again });
         }
         _ => {}
     }
@@ -1238,16 +1240,27 @@ fn end_job(state: &mut AppState, i: usize, result: Result<usize, String>) -> Opt
 
 /// AU17: the reason an export stopped, in words a person can act on. Rust
 /// prints an OS failure as `Access is denied. (os error 5)`; a reason with no
-/// such number is already ours and stands as it is.
+/// such number is already ours and stands as it is. Only a failure of the
+/// place a person chose (`create <folder>:`, `write <file>:`) may blame that
+/// place: an ffmpeg that went missing is no missing folder, and keeps the
+/// name of what it was doing.
 pub(crate) fn plain_why(why: &str) -> String {
     let Some((said, code)) = why.split_once(" (os error ") else {
         return why.to_string();
     };
+    let said = said.trim_end();
+    let place = ["create ", "write "].iter().any(|head| said.starts_with(head));
     match code.trim_end_matches(')').parse() {
-        Ok(5 | 32 | 33) => "this folder cannot be written to. Pick another, or close what is using the file".into(),
         Ok(39 | 112) => "the disk is full".into(),
-        Ok(2 | 3) => "that folder is not there any more".into(),
-        Ok::<u32, std::num::ParseIntError>(_) | Err(_) => said.trim_end().to_string(),
+        Ok(5 | 32 | 33) if place => {
+            "this folder cannot be written to. Pick another, or close what is using the file".into()
+        }
+        Ok(2 | 3) if place => "that folder is not there any more. Pick another place".into(),
+        Ok(80 | 183) if place => "something with that name is already in the folder. Pick another place".into(),
+        Ok::<u32, std::num::ParseIntError>(_) | Err(_) if place => {
+            said.rsplit_once(": ").map_or(said, |(_, sentence)| sentence).to_string()
+        }
+        Ok(_) | Err(_) => said.to_string(),
     }
 }
 

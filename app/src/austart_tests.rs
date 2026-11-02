@@ -1518,7 +1518,7 @@ fn austart_words_stand_on_one_edge() {
     // That answer scrolled the body: What's New still opens at its own top.
     h.editor_mut().start.as_mut().expect("open").tab = WelcomeTab::WhatsNew;
     settle(&mut h);
-    assert_eq!(h.painted_at(&format!("What's New in {}", welcome::VERSION)).x, edge);
+    assert_eq!(h.painted_at(welcome::WHATS_NEW_BARS).x, edge);
 }
 
 /// The peg bar is the float's rule (spec 2.1): steel, one round peg hole, in
@@ -2096,7 +2096,7 @@ fn austart_menu_rows_open_the_float_with_no_modal() {
     assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::WhatsNew));
     assert!(h.has(welcome::WHATS_NEW_HEADING) && !h.has("Close Start"), "the page says what it is");
     assert!(!h.has("Show at startup"), "the latch is the Start page's");
-    h.click("Close What's new");
+    h.click(&format!("Close {}", welcome::WHATS_NEW_HEADING));
     settle(&mut h);
     // Over unsaved work the row still asks nothing. A card that replaces the
     // cut does, once.

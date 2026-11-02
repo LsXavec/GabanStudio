@@ -1619,6 +1619,7 @@ pub(crate) fn paper_share_sweep(boot: impl Fn(Option<AppState>) -> EditorHarness
             h.perform(Action::ZoomFit);
             settle(&mut h);
             let share = measure::paper_share(&h);
+            println!("share at {w}×{tall}, strip open {strip_open}: {share:?}");
             assert!(share.paper >= PAPER_FLOORS[at], "paper at {w}×{tall}, {strip_open}: {share:?}");
             assert!(share.pen_land >= PEN_FLOORS[at], "pen at {w}×{tall}, {strip_open}: {share:?}");
         }
@@ -1684,10 +1685,13 @@ fn aurail_census_of_shipped_draw() {
         window(&mut h, 1600.0, 900.0, 1.0);
         let c = measure::census(&mut h);
         println!("blank Draw, interim, strip open {strip_open}: {} controls, {} words", c.controls, c.words);
+        println!("median control {}, under 24: {}", c.median_control_height(), c.controls_under(24.0));
         assert!(c.median_control_height() >= 32.0, "median {}", c.median_control_height());
         assert_eq!(c.controls_under(24.0), 0, "{:?}", c.control_heights);
         let screen = h.ctx().content_rect();
-        for essential in ["Size", "Undo (toolbar)", "Redo (toolbar)"] {
+        let essentials = ["Size", "Undo (toolbar)", "Redo (toolbar)"];
+        println!("essentials off screen: {}", essentials.iter().filter(|e| !screen.contains_rect(points(&h, e))).count());
+        for essential in essentials {
             assert!(screen.contains_rect(points(&h, essential)), "{essential} is off screen");
         }
     }

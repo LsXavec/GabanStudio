@@ -1286,6 +1286,29 @@ fn keys_moments(dir: &Path) {
     }
 }
 
+/// AU17: the same upgrader's very first launch: What's New open over the
+/// paper, with the moved keys on the lane's calm row, not a red one.
+const UPGRADE: [(&str, u32, u32); 2] = [("upgrade-first-launch", 1600, 900), ("upgrade-first-launch-1280", 1280, 800)];
+
+fn upgrade_owed() -> Vec<(String, u32, u32)> {
+    UPGRADE.iter().map(|(state, w, h)| (format!("{state}.png"), *w, *h)).collect()
+}
+
+fn upgrade_moments(dir: &Path) {
+    for (state, w, height) in UPGRADE {
+        let size = egui::vec2(w as f32, height as f32);
+        let mut h = EditorHarness::with_gpu_dir_first_run(crate::aukeys_tests::upgraders_dir());
+        h.kit_mut().set_size(size);
+        h.run();
+        h.run_frames(4);
+        h.shot(size, &dir.join(format!("{state}.png")));
+        let said = h.painted_text().join(" ");
+        assert!(said.contains(crate::welcome::WHATS_NEW_BARS), "the page: {said}");
+        assert!(said.contains(crate::aukeys_tests::KEYS_MOVED), "on the lane: {said}");
+        assert!(h.state().refusal.is_empty(), "no refusal: {}", h.state().refusal);
+    }
+}
+
 /// AU26: a new animation's twelve rows, three drawings and the blank tail they
 /// leave, and Timing's two hold keys over them.
 const TAIL: [(&str, u32, u32); 6] = [
@@ -1739,6 +1762,8 @@ fn uishot_rooms() {
     check_shots(&dir, &hide_owed()).expect("Hide tools' moments");
     keys_moments(&dir);
     check_shots(&dir, &keys_owed()).expect("the chords that moved");
+    upgrade_moments(&dir);
+    check_shots(&dir, &upgrade_owed()).expect("an upgrader's first launch");
     kinds_moments(&dir);
     check_shots(&dir, &kinds_owed()).expect("the three bars");
     page_moments(&dir);
@@ -1751,6 +1776,33 @@ fn uishot_rooms() {
     check_shots(&dir, &fx_owed()).expect("the Effects step");
     panel_moments(&dir);
     check_shots(&dir, &panels_owed()).expect("the panels no walk stops on");
+}
+
+/// Every list the pass owes, by the name it checks it under.
+fn every_owed() -> Vec<(&'static str, Vec<(String, u32, u32)>)> {
+    vec![
+        ("shots_owed", shots_owed()),
+        ("states_owed", states_owed()),
+        ("shipped_owed", shipped_owed()),
+        ("plan_owed", plan_owed()),
+        ("rail_owed", rail_owed()),
+        ("strip_owed", strip_owed()),
+        ("start_owed", start_owed()),
+        ("lesson_owed", lesson_owed()),
+        ("guide_owed", guide_owed()),
+        ("say_owed", say_owed()),
+        ("queue_owed", queue_owed()),
+        ("export_owed", export_owed()),
+        ("hide_owed", hide_owed()),
+        ("keys_owed", keys_owed()),
+        ("upgrade_owed", upgrade_owed()),
+        ("kinds_owed", kinds_owed()),
+        ("page_owed", page_owed()),
+        ("tail_owed", tail_owed()),
+        ("color_owed", color_owed()),
+        ("fx_owed", fx_owed()),
+        ("panels_owed", panels_owed()),
+    ]
 }
 
 /// AU16: a PNG's size and its pixels' bytes.
@@ -1848,35 +1900,48 @@ fn audress_the_ignored_pass_owes_every_shot() {
     let taken = pass.find("panel_moments(&dir);").expect("it takes them");
     let checked = pass.find("check_shots(&dir, &panels_owed())").expect("it checks them");
     assert!(taken < checked, "taken, then checked");
-    let lists = [
-        ("shots_owed", shots_owed()),
-        ("states_owed", states_owed()),
-        ("shipped_owed", shipped_owed()),
-        ("plan_owed", plan_owed()),
-        ("rail_owed", rail_owed()),
-        ("strip_owed", strip_owed()),
-        ("start_owed", start_owed()),
-        ("lesson_owed", lesson_owed()),
-        ("guide_owed", guide_owed()),
-        ("say_owed", say_owed()),
-        ("queue_owed", queue_owed()),
-        ("export_owed", export_owed()),
-        ("hide_owed", hide_owed()),
-        ("keys_owed", keys_owed()),
-        ("kinds_owed", kinds_owed()),
-        ("page_owed", page_owed()),
-        ("tail_owed", tail_owed()),
-        ("color_owed", color_owed()),
-        ("fx_owed", fx_owed()),
-        ("panels_owed", panels_owed()),
-    ];
+    let lists = every_owed();
     for (name, _) in &lists {
         assert!(pass.contains(&format!("check_shots(&dir, &{name}())")), "{name} is checked");
     }
     let names: BTreeSet<&str> = lists.iter().flat_map(|(_, l)| l.iter().map(|o| o.0.as_str())).collect();
     let owed: usize = lists.iter().map(|(_, l)| l.len()).sum();
     assert_eq!(names.len(), owed, "no two shots share a name");
-    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 16 + 17, "the 273 owed before AU15, its panels at both sizes, AU23's and AU24's lessons: three at both and eight steps each, AU24's Plan at both, and AU25's three at both, seven steps, its ring at both and its finish at both");
+    assert_eq!(owed, 273 + 2 * PANELS.len() + 14 + 16 + 17 + 2, "the 273 owed before AU15, its panels at both sizes, AU23's and AU24's lessons: three at both and eight steps each, AU24's Plan at both, AU25's three at both, seven steps, its ring at both and its finish at both, and AU17's upgrader at both");
+}
+
+/// AU17: the final shots: every room, the upgrader's first launch and every
+/// group the pass owes are taken and then checked, at both sizes. Each size
+/// has every room; only what one window cannot show stands at one size.
+#[test]
+fn aurel_final_shots_stand_at_both_sizes() {
+    let pass = include_str!("uishot.rs").split("fn uishot_rooms()").nth(1).expect("the pass");
+    let last = pass.find("\n}\n").expect("the pass ends");
+    let pass = &pass[..last];
+    for (name, _) in every_owed() {
+        let check = format!("check_shots(&dir, &{name}())");
+        assert_eq!(pass.matches(&check).count(), 1, "{name} once");
+    }
+    for group in ["upgrade", "keys", "export", "start"] {
+        let taken = pass.find(&format!("{group}_moments(&dir);")).or_else(|| pass.find(&format!("{group}_float(&dir);")));
+        let checked = pass.find(&format!("check_shots(&dir, &{group}_owed())")).expect("it checks them");
+        assert!(taken.expect("it takes them") < checked, "{group}: taken, then checked");
+    }
+    let lists = every_owed();
+    let owed: Vec<&(String, u32, u32)> = lists.iter().flat_map(|(_, l)| l.iter()).collect();
+    for (w, h, suffix) in SIZES {
+        let rooms = PROBE_ROOMS.into_iter().enumerate().map(|(i, room)| shot_name(i, room, suffix));
+        for name in rooms {
+            assert!(owed.contains(&&(name.clone(), w, h)), "{name} at {w}");
+        }
+        let here = owed.iter().filter(|o| (o.1, o.2) == (w, h)).count();
+        assert!(here >= 140, "{w}: {here}");
+        println!("shots at {w}×{h}: {here}");
+    }
+    for state in ["upgrade-first-launch", "start-whats-new", "export-failed", "say-keys-moved"] {
+        assert!(owed.iter().any(|o| o.0 == format!("{state}.png")), "{state} at 1600");
+        assert!(owed.iter().any(|o| o.0 == format!("{state}-1280.png")), "{state} at 1280");
+    }
 }
 
 /// Only the ignored pass takes them, so this holds it to them: all five of

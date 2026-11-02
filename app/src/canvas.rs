@@ -4176,7 +4176,7 @@ impl CanvasView {
             }
             if let Some(c) = furniture.camera {
                 // The scaffold ink at full strength and heavier than the
-                // guides (red is kept for refusals: the plate law).
+                // guides (red is kept for refusals).
                 painter.add(outline(c, egui::Stroke::new(2.0, crate::plate::PENCIL_AO)));
             }
         }

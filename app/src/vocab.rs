@@ -157,12 +157,12 @@ pub static OLD_WORDS: &[(&str, &str)] = &[
     ("cut", SHOT),
     ("cel", DRAWING),
     ("column", TRACK),
-    ("X-Sheet", TIMING_SHEET),
-    ("onion", GHOST_FRAMES),
     ("Render Queue", EXPORT_QUEUE),
+    ("onion", GHOST_FRAMES),
+    ("Shinkō board", SHOTS),
     ("Node Graph", EFFECTS_GRAPH),
     ("Brush Forge", BRUSH_MAKER),
-    ("Shinkō board", SHOTS),
+    ("X-Sheet", TIMING_SHEET),
 ];
 
 /// A stack's stored name as the screen says it. Stored names stay

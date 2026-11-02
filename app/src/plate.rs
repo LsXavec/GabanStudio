@@ -1387,8 +1387,8 @@ pub fn filled(resp: &Response) -> (Color32, Color32) {
 }
 
 /// DETENT with a painted icon — a tool position. The armed position is the
-/// solid blue shape with white content. Larger targets than bare text
-/// (owner's amendment: sparse space is spent on bigger controls). `label`
+/// solid blue shape with white content. Larger targets than bare text:
+/// sparse space is spent on bigger controls. `label`
 /// is the painted caption (empty = icon only); `name` is what the control
 /// answers to (empty = the caption).
 pub fn tool_button(
@@ -2503,7 +2503,7 @@ fn ghost(ui: &Ui, resp: &Response) -> (Color32, Color32) {
 
 /// A colour swatch: an 18×18 fill with its `INK3` ring, so a pale colour
 /// still has an edge on an island; the armed swatch is ringed in blue. The
-/// hit target is larger than the fill (the owner's amendment). It answers to
+/// hit target is larger than the fill. It answers to
 /// "color well: <name>" (the role or color name; empty = the hex value), so a
 /// palette's wells are told apart by name, not position.
 pub fn swatch(ui: &mut Ui, color: Color32, armed: bool, name: &str) -> Response {

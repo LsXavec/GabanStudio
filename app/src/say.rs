@@ -521,6 +521,9 @@ pub struct Say {
     /// An export that finished outside the Export step, until something else
     /// happens: `Open file` opens this one.
     pub exported: Option<Landed>,
+    /// Playing, last frame: a press of play overtakes the report, and a report
+    /// that lands while it plays still has to be read.
+    pub was_playing: bool,
     /// The stroke just read was `Check your pen`'s.
     pub check_line: bool,
     /// The stroke just read was Show me's circle: no pen drew it.
@@ -806,8 +809,11 @@ impl Editor {
         let added = std::mem::take(&mut self.say.added);
         let row_clicked = std::mem::take(&mut self.state.sheet_ui.row_clicked);
         // Work goes on, and the report has been overtaken: it must not hold
-        // the row of what comes next over a fill or a play.
-        if stroked || filled || added || self.state.view.playing {
+        // the row of what comes next over a fill or a play. Only the press of
+        // play counts: a job that lands while it plays still reports.
+        let playing = self.state.view.playing;
+        let was_playing = std::mem::replace(&mut self.say.was_playing, playing);
+        if stroked || filled || added || (playing && !was_playing) {
             self.say.exported = None;
         }
         let state = &self.state;

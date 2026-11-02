@@ -180,6 +180,7 @@ const MASKS_96: &[(Icon, &[u8])] = &[
     (Icon::Eye, mask_bytes!("eye", 96)),
     (Icon::EyeOff, mask_bytes!("eye_off", 96)),
     (Icon::Down, mask_bytes!("down", 96)),
+    (Icon::Up, mask_bytes!("up", 96)),
     (Icon::Fit, mask_bytes!("fit", 96)),
     (Icon::Plus, mask_bytes!("plus", 96)),
     (Icon::Undo, mask_bytes!("undo", 96)),
@@ -204,8 +205,14 @@ pub(crate) fn cut_for(device: f32) -> u32 {
     }
 }
 
+/// Tests: every icon the app paints, by the order it is cut.
+#[cfg(test)]
+pub(crate) fn every_mask() -> Vec<Icon> {
+    MASKS.iter().map(|(icon, ..)| *icon).collect()
+}
+
 /// Decode a white-alpha PNG mask into a texture, cached per-Context.
-fn mask_texture(ctx: &egui::Context, icon: Icon, target: f32) -> Option<egui::TextureHandle> {
+pub(crate) fn mask_texture(ctx: &egui::Context, icon: Icon, target: f32) -> Option<egui::TextureHandle> {
     let (_, name, png24, png48) = MASKS.iter().find(|(i, ..)| *i == icon)?;
     let size = cut_for(target * ctx.pixels_per_point());
     let bytes = match size {

@@ -1587,7 +1587,8 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 25. AU23: a Japanese reader checks the lessons' hover lines before release. The `shakutori-mushi` line was not added, as the lessons file asks.
 26. AU25: nobody has walked the nine lessons by hand. The gate's Experienced hands stand in for some controls: the Brushes rows, the camera move, ease, dust, the three rulers and the balloon words go through the state functions the controls call. Desk to Lamp's stand-in fills A only, in one colour, and seeds no drawing of W; The Only Word's stand-in balloon lands in the selected panel.
 27. Decision: AU25, the Lip flap window stays open over the menu bar after `generate`, so a ring on More is not painted until the window is shut. `playback`'s test pins the window as non-modal, so AU17 did not close it.
-28. Decision: AU12, painted text on the frozen arrangement misses the spec numbers at median 9 px and 12.9% at 8 px or less. The Body-to-14 step in 2.5 was not tried; it would ripple through the layouts.
+28. Decision closed by measure: AU12's first reading of painted text on the frozen arrangement missed at median 9 px and 12.9% at 8 px or less. Today's reads median 10 px and 8.5%, inside the spec numbers, and `auwords_painted_text_size` holds it there. The Body-to-14 step in 2.5 was not tried and is not needed.
+29. AU17: nobody has joined a session from a real 0.5.0 build to this one. `net.rs`, `model.rs` and `store.rs` stand as the v0.5.0 tag has them, by digest, and no step rides the wire, but a live pair of builds has not been run.
 
 **AU2 notes.** Choices the build made where this document was silent or spoke twice. None needs a device; they are here so the Lead sees them once.
 
@@ -1738,32 +1739,131 @@ These cannot run headlessly. They go to the Lead once, at the very end. Target r
 - At a panel's minimum, a control past the corner of two views is the pair's: the pane pans across, its list goes down. The audit reads that by axis.
 - Plan's canvas tab says `Canvas`, as feedback 4.3 has it, and the `Preview` row left `vocab`. `Shots`' count keeps its `shot(s)`: a pin, and no budget line moves it; a lone shot shows the sentence alone. Sentence case for Forge's rows and Export's `preset`, `size` and `tone` waits on the same budget line.
 
-**AU17 notes: the final tally.** Run on 2026-11-02 at version 0.6.0, on WARP, as one ordinary pass and one ignored pass. Ordinary: 1361 passed, 0 failed, 13 ignored in `animstudio`, plus `anim-core`'s, against 828 at the start. Ignored: all 13 of `animstudio` passed, with 344 shots at both sizes. `soak_real_projects` did not run: it needs `ANIMSTUDIO_SOAK` to name real `.animproj` files, and none were given. A row not listed here is a named test, green in the ordinary pass.
+**AU17 notes: the final tally.** Run on 2026-11-02 at version 0.6.0, on WARP, as one ordinary pass and one ignored pass. Ordinary: 1372 passed, 0 failed, 13 ignored in `animstudio`, plus 390 in `anim-core`, against 828 at the start. Ignored: all 13 of `animstudio` passed, with 346 pictures at both sizes (343 PNG, 3 GIF, every one dated by that run). `soak_real_projects` did not run: it needs `ANIMSTUDIO_SOAK` to name real `.animproj` files, and none were given. Every row of section 10 and of feedback 1.10 is below, with what the run read. A prefix count is that prefix's tests passed in the same run, for a gate whose target is a behaviour and not a number.
 
 | Gate | Today | Target | Measured |
 |---|---:|---:|---:|
-| Controls, blank Draw | 72 | ≤30 | 23 |
+| Seeded faults fail their audit, clean fixtures pass | n/a | Every seed fails | Every seed fails, `auseam_` 44 of 44 |
+| Stroke signal | n/a | Vector and raster routes bump it, fill and paste do not | Holds, `auseam_` 44 of 44, 2 of 2 on a device in the ignored pass |
+| A refused step in a journey | Scores as done | Fails the journey, naming the step | Fails it, 0 refused steps in J1 to J5 |
+| Theme: Light and Dark give one style | 148,629 px differ | Style equal | Style equal, 0 px differ in the ignored pass |
+| Contrast pairs | n/a | 44, 0 failures | 44, 0 failures |
+| Painted text contrast | n/a | ≥4.5 after blending, disabled and `INK3` ≥3.0, 0 failures in all rooms, menus and modals | 0 failures |
+| Translucent ink on text | 90 sites | 0 | 0 |
+| Marks on paper | Page outline would be 1.07:1 | Every use reviewed, outline 4.58:1 | Outline 4.58:1, `aulook_` 38 of 38 |
+| `render` config survives restart | Lost | Survives | Survives, `aulook_` 38 of 38 |
+| Old config loads | Yes | Yes | Yes, `ship_` 31 of 31 |
+| Chromeless pane | n/a | Tab bar 0, body equals centre rect | Tab bar 0, body equal, `audock_` 38 of 38 |
+| Every save reloads | Fails on an undrawn dock | 0 null rects | 0 null rects |
+| Sheet choice survives a restart | n/a | Survives | Survives, `audock_` 38 of 38 |
+| Clip audit, chrome | n/a | 0 clipped, 0 elided, 4 sizes × 3 scales, `PROBE_ROOMS` | 0 clipped, 0 elided, 4 sizes × 3 scales |
+| Layout probe | 0 `MOVED` | 0 `MOVED` | 0 `MOVED` |
+| Japanese-first labels | 5 tabs | 0 | 0 |
+| Visible Search | 0 | ≥1 | 1 |
+| Paper share | about 48.7% | ≥63.0, 66.5, 57.5, 60.0 | 63.64, 67.76, 58.46, 60.50 strip open; 73.34, 69.62, 69.79, 64.93 closed |
+| Pen can land (`journeys.md` canvas share, target ≥80% at the default size) | 54.5% | ≥82.5, 80.0, 77.5, 74.0 | 83.22, 80.64, 78.49, 75.06 strip open; 89.45, 87.64, 86.26, 83.81 closed |
+| Paper under chrome | n/a | 0 | 0, every aspect, size and scale of the sweep |
+| Float moves art | n/a | 0 pt | 0 pt |
+| Rail fits | n/a | Inside the pane, table tier, every room with a canvas, 4 sizes × 3 scales | Inside the pane, 4 sizes × 3 scales |
+| Both canvas hosts draw the overlay | Deck lives inside `Canvas::ui` | One function, two call sites, host rect obeyed | 1 function, 2 call sites, host rect obeyed |
+| Deck homes | n/a | Every `TODAY_DECK` row by a pen-only path | Every row, `aurail_` 48 of 48 |
+| Median control height | 24 | ≥32 | 32 |
+| Controls under 24 | 30 of 72 | 0 | 0 of 23 |
+| Essentials off screen | 3 | 0 | 0 |
+| Pen on rail never paints, 1 pt beside paints | n/a | Holds | Holds, `aurail_` 48 of 48 |
+| Float request during a stroke waits | n/a | Holds | Holds, `aurail_` 48 of 48 |
+| `seen_pen` trips on stray Touch | Yes | No | No, `aurail_` 48 of 48 |
+| Chord routing over a float | First rect wins | Top layer wins | Top layer wins, `aurail_` 48 of 48 |
+| Icon-only with no card | 11 | 0 | 0 over 7 band forms |
+| Pen hold survives 0.817 s | n/a | Holds | Holds, `austrip_` 64 of 64 |
+| Band stability | n/a | 0 pt of control movement as the full-band latch opens | 0 pt |
+| Strip opens | n/a | One refit, at pen-up or at open. 0 rail or transport movement | 1 refit, 0 pt of movement |
+| Two views agree | n/a | Runs equal, undo exact | Runs equal, undo exact, `austrip_` 64 of 64 |
+| Held and blank refusals | One status | Two sentences, four sites, reachable without a GPU | 2 sentences, 4 sites, no GPU |
+| First stroke clicks | 1 | 0 from launch, ≤1 from any entry | 0 from launch, ≤1 from any entry |
+| Start entries landing a stroke | 5 of 8 | All | All, `austart_` 64 of 64 |
+| Start float, worst case | 19 controls, 74 words | ≤14, ≤30 | 14, 30 |
+| First screen, `as_first_run()` | 19 controls, 74 words | ≤44, ≤70 | 35, 47 |
+| Paper uncovered with Start at its largest | n/a | ≥58.0% at 1600×900, unchanged | 60.84% |
+| Intent entries | 0 | ≥2 | 4 |
+| Silent rooms | 1 | 0 | 0 |
+| False copy | 4 | 0 | 0 |
+| Stale teaching | 2 | 0 | 0 |
+| Say line fits | n/a | Every hint and refusal, 0 elided, at 832×520 and 853×533 | 0 elided at both sizes |
+| GIF is valid | n/a | Decodes, frames and delays exact | Decodes, exact, `augif_` 40 of 40 |
+| J1 | 33, 10, 8, 9 | ≤28, ≤5, ≤3, ≤2 | 28, 5, 3, 2 |
+| J2 | 11, 48, 7, 6 | ≤4, 1, ≤2, ≤1 | 4, 1, 2, 1 |
+| Quick Start ends in a file | Stops at step 3 | Ends in a file | Ends in a file, `auexport_` 32 of 32 |
+| Show me | 4 of 5 | 5 of 5 | 5 of 5 |
+| MP4 with nothing installed (`journeys.md` target: works) | Greyed | **Not met by this plan.** Plain reason and GIF route instead. The Lead decides on bundling | **Miss, not met by this plan:** 0 routes to MP4 with no ffmpeg; the plain reason and `Export GIF instead` stand, and bundling is the Lead's |
+| J5 | Table above | Table above | Steps 6 of 6, arrows 4 of 4, the example edit 5 presses and 0 clicks |
+| Arrows | 0 of 4 | 4 of 4 | 4 of 4 |
+| Step keys | 0 of 5 | 6 of 6 | 6 of 6 |
+| Pointer-dependent chords (6.4) | 2 | 0, exceptions listed | 0, exceptions listed |
+| Keymap goldens | n/a | 10 cases | 10 cases |
+| Chords | 120 | 118 unchanged, 2 moved and listed | 118 unchanged, 2 moved |
+| Controls, blank Draw, `as_shipped()` | 72 | ≤30 | 23 |
 | Controls after a stroke | 98 | ≤36 | 24 |
-| Words, blank Draw | 100 | ≤40 | 22 |
-| Menus, first-level rows | 9, 143 | ≤6, ≤60 | 6, 60 |
-| Start float, worst case | 19, 74 | ≤14, ≤30 | 14, 30 |
-| First screen | 19, 74 | ≤44, ≤70 | 35, 47 |
-| Lessons page | n/a | ≤12, ≤48 | 12, 44 |
-| Paper uncovered with Start at its largest | n/a | ≥58.0% | 60.84% |
-| Plan paper share | n/a | ≥49.5%, ≥43.0% | 50.00%, 43.55% |
-| Plan whole sheet rows | n/a | ≥32, ≥27 | 40, 35 |
+| Words, blank Draw, `as_shipped()` | 100 | ≤40 | 22 |
+| Menus | 9 | ≤6 | 6 |
+| First-level rows | 143 | ≤60 | 60 |
+| Menu table | n/a | Every `Action` on its 6.2 path in 6.2's order | Every `Action`, `aumenu_` 25 of 25 |
+| Commands in the palette | 154 of 154 | All, computed from `Action::ALL` | All, `aumenu_` 25 of 25 |
+| Homes census | n/a | Every row has a home | Every row, `aumenu_` 25 of 25 |
+| Jargon | 30 | ≤3 | 0 on blank Draw, 3 at the worst step |
+| Japanese words | 9 | 0 | 0 |
 | Tooltip jargon kinds | 24 | ≤3 | 3 of 428 strings |
+| Painted text median | 8 px | ≥10 | 10 px on blank Draw, first run and the frozen arrangement |
+| Painted text at ≤8 px | 58 of 98 | ≤10% | 4.8%, 3.0% and, on the frozen arrangement, 8.5% |
+| Palette reach | n/a | genga, douga, shiage, satsuei, henshū, shaku all found | 6 of 6 |
+| J3 | 8, 17, 8, 9 | ≤3, ≤9, ≤2, ≤1 | 3, 8, 2, 1 in the ignored pass |
+| Fill lands on the color layer | n/a | Pixels change there, the line layer does not | Holds, `aucolor_` 40 of 40 |
+| Result choice survives a restart | n/a | Survives | Survives, `aucolor_` 40 of 40 |
+| Journey controls behind hover or scroll | 3 | 0 | 0 |
+| J4 | 24, 4, 1, 9, 10 | ≤8, 0, 0, ≤3, ≤2 | 7, 0, 0, 3, 2 |
+| Clip audit, all panels | n/a | 0 clipped, 0 elided, 4 sizes × 3 scales, `PROBE_ROOMS` | 0 clipped, 0 elided, 4 sizes × 3 scales |
+| Crowded blank room | 87 | ≤45 | 45 |
+| Sample cut | 132 | ≤80 | 73 |
+| Context-only verbs with a twin | 0 of 7 | 7 of 7 | 7 of 7 |
 | Shapes per room | 298–615 | Not above today | 235–433 |
 | Vertices per room | 5,154–9,124 | Not above today | 5,010–7,968 |
-| Tessellation | n/a | ≤407 µs | 96–162 µs |
-| Suite floors | n/a | Only rise | 1369 tests, 8078 asserts |
+| Tessellation | n/a | ≤407 µs | 58–136 µs |
+| Old token names | Live | 0, render pixel-equal across the removal | 0 names, `autoken_` 5 of 5. The pixel half needs `AUTOKEN_BASE` and did not run today: its base is AU16's start, and the screen has moved on purpose since |
+| Every gate re-run | n/a | All, misses named | 104 rows, 2 named misses |
+| Idle repaint | Today's | Unchanged | **Miss:** not measured. Not touched by this plan, as section 11 says |
+| Schema | 11 | 11, sample byte-stable | 11, byte-stable, `ship_` 31 of 31 |
+| Suite | 828 | ≥828 plus new, green | 1372 and 390 in `anim-core` passed, 0 failed |
+| Room chords, Step keys | 6 of 6 | Every step of every bar has its key: 5, 4, 3 | 5, 4, 3 |
+| Crowded blank room budgets | Plan about 39 | The ceiling ≤45 stands. "About 39" was the old Plan. The first measured value is reported | Plan 36 on a blank animation, 45 at the worst step |
+| Clip audits | `PROBE_ROOMS` | Gains Plan on an animation with the sheet on, the lesson card open in every step, and the Lessons page | 0 clipped, 0 elided, all 3 gained |
+| Paper under chrome in Plan | n/a | 0, 4 sizes × 3 scales, 4 aspects | 0 |
+| Plan paper share, 16:9 at Fit | n/a | ≥49.5% at 1600×900, ≥43.0% at 1280×800. Raise to the first measured value less 0.5 | 50.00%, 43.55% |
+| Plan whole sheet rows | n/a | ≥32 at 1600×900, ≥27 at 1280×800 | 40, 35 |
+| Lessons page | n/a | ≤12 controls, ≤48 words, grid unscrolled | 12, 44, unscrolled |
+| Paper under chrome, lesson card | n/a | 0, every task of every lesson's paper, 4 sizes × 3 scales | 0 |
+| Every lesson, every task, to a real file | n/a | 9 of 9 | 9 of 9 |
+| Every stroke task ticks from a pen route | n/a | 100% | 100% |
+| Ring on its real control | n/a | Every task, every size, Pocket tier included, and every target of a chain reached by opening what the ring stands on | Every task, `auguide_` 60 of 60 |
+| Guide reaches no file | n/a | 0 guide pixels, 0 saved keys | 0 guide pixels, 0 saved keys |
+| Lessons walk their bars | n/a | 9 of 9, every pill pressed, bar order | 9 of 9 |
+| Suite floors | n/a | Only rise | 1380 tests, 8158 asserts |
 
-Named misses and limits: MP4 with nothing installed stays **not met by this plan**, a Lead decision. Painted text on the frozen arrangement stays the AU12 miss (item 28 of the list above). Idle repaint was not touched and not measured. J1 to J5 hold their ceilings in their tests; J1's and J2's jargon now reads the words the Export step paints, not only the lane, and the limits held unloosened.
+Named misses and limits: MP4 with nothing installed stays **not met by this plan**, a Lead decision. Idle repaint was not touched and not measured. The render half of `Old token names` did not run today. A live session against a 0.5.0 build did not run: the wire is held by digest (item 29 of the list above). AU12's first reading of painted text on the frozen arrangement, median 9 px and 12.9% at 8 px or less, is no longer the number: `auwords_painted_text_size` reads 10 px and 8.5% on that arrangement, inside the target, so item 28 closes on the measure. J1 to J5 hold their ceilings in their tests; J1's and J2's jargon now reads the words the Export step paints, not only the lane, and the limits held unloosened.
 
 - What's New stands for an upgrader with the Start latch off too: `startup_route` asked only the latch, so the page could be due and never drawn. `welcome_startup_route_picks_the_screen` now sets `whats_new_seen`, because its subject is the latch and What's New outranks it.
 - The chords are read through `menus::first_chord`, the live published binds, not `Config::chord_for`, which the page cannot reach. `vocab::OLD_WORDS` is a `static` so `auseam_vocab_table_is_pinned` still counts one constant per word.
-- AU9's leftovers: a report gives way to a fill or a play, a sequence or MP4 row says what it makes, and OS failure words are plain. The Lip flap window is left as it is (item 27 above).
+- AU9's leftovers: a report gives way to a fill or a press of play, not to a play already running, so a job that lands during play still reports. A sequence or MP4 row says what it makes. OS failure words are plain on the panel's row, the lane and the queue's row, and only a failure of the chosen place blames that place. `Try again` is the way to another place: it opens the same save dialog, so no second button stands beside it, and its card says so. The Lip flap window is left as it is (item 27 above).
+- A key that moved is news, not a fault. `Config::keymap_notes` is not saved, the note takes the lane's calm row, holds until the first press as a notice does, and rides a fault's line if the same launch has one. `upgrade-first-launch` is the picture of it with What's New open.
+- The What's New keys line names both keys, old and new, the new one live; a key that stayed reads `stays on`. `Help/What's New` stays the menu's label, which 6.2 pins; the page and its Start row say `What's new`.
 - `app/assets/tex/plate_grain.png` stays on disk, nothing reads it, and `iconforge` still writes it: deleting it is the Lead's.
+- Test moves. Each moved test, with its reason:
+  - `ship_whats_new_is_one_page_and_opens_first` follows the heading to sentence case (label).
+  - `aurel_whats_new_names_moved_chords_live` follows the new keys line, and gains the key that stayed (label).
+  - `austart_` Close and top-of-page lines follow the heading (label).
+  - `aukeys_chords_that_moved_fit_the_lane` reads the calm row, not the refusal; the sentence, its fit and its hold are the same (reach).
+  - `aukeys_` load tests read `keymap_notes`, and the load's own notes stay empty of keys (reach).
+  - `ship_readme_covers_the_release` reads today's Quick start, each kind's steps live from `welcome::steps_of` (recipe).
+  - `audress_the_ignored_pass_owes_every_shot` owes the upgrader's two pictures, through `every_owed` (recipe).
 
 ---
 

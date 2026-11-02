@@ -373,6 +373,12 @@ impl EditorHarness {
         Self::build(None, dir, Boot::Shipped, Some(gpu()))
     }
 
+    /// An upgrader's first launch on a real device: their own config, What's
+    /// New over it.
+    pub fn with_gpu_dir_first_run(dir: tempfile::TempDir) -> Self {
+        Self::build(None, dir, Boot::FirstRun, Some(gpu()))
+    }
+
     /// A first launch on a real device: the Start float's pictures.
     pub fn with_gpu_first_run() -> Self {
         Self::build(None, tempfile::tempdir().expect("temp data dir"), Boot::FirstRun, Some(gpu()))
@@ -408,6 +414,9 @@ impl EditorHarness {
         let mut notes = Notes::default();
         for n in config_notes {
             notes.push(n);
+        }
+        for n in config.keymap_notes.drain(..) {
+            notes.push_news(n);
         }
         let rig = Rig {
             editor,
@@ -2345,7 +2354,7 @@ mod tests {
         let mut h = PanelHarness::new(egui::vec2(1280.0, 800.0), (w, true), move |ui, (w, show)| {
             let _ = crate::welcome::ui(ui, w, show, &[false; 5], &binds);
         });
-        assert!(h.has("What's New in 0.6.0"), "{}", h.describe());
+        assert!(h.has("What's new in 0.6.0"), "{}", h.describe());
         for (old, new) in crate::vocab::OLD_WORDS {
             let row = format!("{old} → {new}");
             assert!(h.has(&row), "{row}\n{}", h.describe());
@@ -2353,7 +2362,7 @@ mod tests {
         assert!(!h.has("New from template"), "the Start cards hide behind the tab");
         h.click("Start");
         assert!(h.has("New from template"), "{}", h.describe());
-        assert!(!h.has("What's New in 0.6.0"));
+        assert!(!h.has("What's new in 0.6.0"));
     }
 
     /// The start-up route (Startup::Welcome) through
@@ -2466,9 +2475,25 @@ mod tests {
         for persona in ["Animator", "Painter", "Compositor", "3D artist", "Manga artist", "Editor"] {
             assert!(features.contains(&format!("**{persona}")), "no {persona} in the features");
         }
+        // AU17: what the first screen holds: the ready paper, Start's cards, the
+        // Lessons page, and each kind's own Quick Start steps, read live.
         let quick = section("## Quick start");
-        for step in ["Welcome screen", "sample", "What's New", "Quick start checklist"] {
-            assert!(quick.contains(step), "no {step:?} in the quick start");
+        let first = ["ready paper", "A drawing", "An animation", "A comic", "Follow a lesson", "Help ▸ Lessons"];
+        for word in first.into_iter().chain(["example", "What's New", "Show me"]) {
+            assert!(quick.contains(word), "no {word:?} in the quick start");
+        }
+        for (kind, opening) in [
+            (ProjectKind::Drawing, "A drawing:"),
+            (ProjectKind::Animation, "An animation:"),
+            (ProjectKind::Comic, "A comic:"),
+        ] {
+            let steps = crate::welcome::steps_of(Some(kind));
+            let joined = steps.iter().map(|s| s.label.to_lowercase()).collect::<Vec<_>>().join(", ");
+            let flat = quick.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(flat.contains(&format!("{opening} {joined}.")), "no {opening} {joined} in the quick start");
+        }
+        for gone in ["Welcome screen", "Quick start checklist", "mark it Key", "time it on the sheet"] {
+            assert!(!quick.contains(gone), "{gone:?} is the old first screen");
         }
         let keys = section("## Keyboard basics");
         let cfg = Config::default();
@@ -2865,8 +2890,8 @@ mod tests {
 
     /// The suite's size, in `#[test]`s and assert uses across `sources()`.
     /// Each part raises these to its own count; none lowers them.
-    const TEST_FLOOR: usize = 1369;
-    const ASSERT_FLOOR: usize = 8070;
+    const TEST_FLOOR: usize = 1380;
+    const ASSERT_FLOOR: usize = 8158;
 
     fn suite_counts(files: &[(String, String)]) -> (usize, usize) {
         let test = concat!("#[", "test]");

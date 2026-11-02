@@ -30,7 +30,7 @@ pub const RECENT_CARDS: usize = 12;
 pub const HEADING: &str = "Start";
 /// AU20: its heading on the Lessons page, and on What's New.
 pub const LESSONS_HEADING: &str = "Lessons";
-pub const WHATS_NEW_HEADING: &str = "What's new";
+pub const WHATS_NEW_HEADING: &str = concat!("What's new in ", env!("CARGO_PKG_VERSION"));
 /// AU20: the latch in its heading row, and that latch's hover.
 pub const LATCH: &str = "Show at startup";
 pub const LATCH_CARD: &str = "Off: the app opens on the same paper, without this panel";
@@ -432,40 +432,42 @@ pub fn open_at_startup(ui: &mut crate::config::UiConfig, recent: &[PathBuf]) -> 
 /// AU17: the two chords this release moved (spec 6.5), said by their live
 /// keys, so a person's own binding reads as it stands.
 pub const MOVED_CHORDS: [Action; 2] = [Action::ColumnKindBook, Action::ColumnKindBg];
+/// The keys they left, by `MOVED_CHORDS`' order: the ones a hand still reaches
+/// for, the keys `Config::migrate_keymap` moved them from.
+const LEFT_CHORDS: [&str; 2] = ["Alt+K", "Alt+B"];
 /// AU17: one line on the bars and one on the lessons (feedback 1.11).
-pub const WHATS_NEW_BARS: &str = "An animation opens on Plan with its sheet; a drawing opens on Draw, with no sheet.";
+pub const WHATS_NEW_BARS: &str = "An animation opens on Plan with its sheet, a drawing on Draw, a comic on Manga.";
 pub const WHATS_NEW_LESSONS: &str = "Nine lessons make something real, rookie to experienced: Help ▸ Lessons.";
-/// The word list's columns, and a row's height: one line of panel text.
-const WORD_COLUMNS: usize = 3;
+/// The word list's columns, a row's height (one line of panel text), and the
+/// gap between columns.
+pub(crate) const WORD_COLUMNS: usize = 3;
 const WORD_ROW: f32 = 20.0;
+const WORD_GAP: f32 = plate::CARD_PAD;
 
-/// AU17: where a moved chord stands now.
-fn moved_chord(ctx: &egui::Context, action: Action) -> String {
+/// AU17: the key a moved chord left, and where it stands now.
+fn moved_chord(ctx: &egui::Context, action: Action, left: &str) -> String {
+    let name = action.label();
     match crate::menus::first_chord(ctx, action) {
-        Some(chord) => format!("{} is on {chord}", action.label()),
-        None => format!("{} has no key", action.label()),
+        Some(chord) if chord == left => format!("{name} stays on {chord}"),
+        Some(chord) => format!("{name} was {left}, now {chord}"),
+        None => format!("{name} was {left}, now no key"),
     }
 }
 
-/// The page's title, with this build's version.
-fn whats_new_title() -> String {
-    format!("What's New in {VERSION}")
-}
-
-/// AU17: the What's New page under its title, one screen: the bars, the
+/// AU17: the What's New page under its heading, one screen: the bars, the
 /// lessons, the moved chords, and the old words beside the new. It stands
 /// unscrolled in the float's cap.
 fn whats_new_ui(ui: &mut egui::Ui) {
     ui.label(egui::RichText::new(WHATS_NEW_BARS).color(plate::INK));
     ui.label(egui::RichText::new(WHATS_NEW_LESSONS).color(plate::INK));
-    let moved: Vec<String> = MOVED_CHORDS.iter().map(|a| moved_chord(ui.ctx(), *a)).collect();
-    ui.label(egui::RichText::new(format!("Keys that moved: {}.", moved.join(", "))).color(plate::INK));
+    let moved = MOVED_CHORDS.iter().zip(LEFT_CHORDS);
+    let moved: Vec<String> = moved.map(|(action, left)| moved_chord(ui.ctx(), *action, left)).collect();
+    ui.label(egui::RichText::new(format!("Keys moved: {}.", moved.join("; "))).color(plate::INK));
     ui.add_space(GROUP_GAP);
-    let wide = ui.available_width() / WORD_COLUMNS as f32;
     // The rows are text, not controls: a grid's default row is a control's
     // height, which would push the last row off the card.
-    let grid = egui::Grid::new("whats_new_words").num_columns(WORD_COLUMNS).min_col_width(wide);
-    grid.min_row_height(WORD_ROW).spacing([0.0, 0.0]).show(ui, |ui| {
+    let grid = egui::Grid::new("whats_new_words").num_columns(WORD_COLUMNS);
+    grid.min_row_height(WORD_ROW).spacing([WORD_GAP, 0.0]).show(ui, |ui| {
         for row in crate::vocab::OLD_WORDS.chunks(WORD_COLUMNS) {
             for (old, new) in row {
                 let font = plate::Role::Panel.font();
@@ -640,8 +642,6 @@ const CHIP_GAP: f32 = 4.0;
 /// the next.
 const ROW_GAP: f32 = 2.0;
 const GROUP_GAP: f32 = 4.0;
-/// What's New's `Back to Start`, beside the title.
-const BACK_W: f32 = 140.0;
 /// `Open the example`'s hover, on either page.
 const EXAMPLE_CARD: &str = "A ball bounce to look through and draw on";
 /// The Lessons page (spec 4.5): the legends over its columns, the words of its
@@ -667,15 +667,12 @@ pub fn float_body(ui: &mut egui::Ui, w: &mut Welcome) -> Option<WelcomeAction> {
     let wide = ui.available_width();
     ui.spacing_mut().item_spacing.y = ROW_GAP;
     if w.tab == WelcomeTab::WhatsNew {
-        // AU17: the way back shares the title's row, so the page stands
-        // unscrolled under the cap.
-        ui.horizontal(|ui| {
-            on_edge(ui, |ui| section(ui, &whats_new_title()));
-            ui.add_space(ui.available_width() - BACK_W);
-            if plate::filled_row(ui, "Back to Start", BACK_W).clicked() {
-                w.tab = WelcomeTab::Start;
-            }
-        });
+        // AU17: the way back leads the page, as it does on the Lessons page;
+        // the float's heading is the page's title.
+        let half = (wide - ui.spacing().item_spacing.x) / 2.0;
+        if plate::filled_row(ui, "Back to Start", half).clicked() {
+            w.tab = WelcomeTab::Start;
+        }
         ui.add_space(GROUP_GAP);
         on_edge(ui, whats_new_ui);
         return None;
@@ -957,7 +954,7 @@ pub fn ui(
             {
                 w.tab = WelcomeTab::Start;
             }
-            if plate::detent(ui, w.tab == WelcomeTab::WhatsNew, "What's New")
+            if plate::detent(ui, w.tab == WelcomeTab::WhatsNew, "What's new")
                 .on_hover_text("What this release brings, on one page")
                 .clicked()
             {
@@ -974,7 +971,7 @@ pub fn ui(
         });
         ui.add_space(8.0);
         if w.tab == WelcomeTab::WhatsNew {
-            section(ui, &whats_new_title());
+            section(ui, WHATS_NEW_HEADING);
             whats_new_ui(ui);
             return;
         }

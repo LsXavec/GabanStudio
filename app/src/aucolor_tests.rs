@@ -1151,6 +1151,7 @@ fn aucolor_fill_journey() {
     r.harness().run_frames(8);
     lane(r.harness(), &mut read);
     let tally = r.tally();
+    println!("J3: first fill {} actions: {tally:?}", tally.actions());
     assert!(tally.actions() <= 3, "{tally:?}");
     assert!(h.state().fills_done >= 1, "{} / {}", h.state().refusal, h.state().status);
     assert!(color_tiles(&h) > 0, "pixels on the color layer");
@@ -1188,6 +1189,7 @@ fn aucolor_fill_journey() {
     stayed_in_the_ring(&h, c);
     assert!(concepts.len() <= 2, "{concepts:?}");
     let jargon = measure::jargon_in(&read);
+    println!("J3: {} actions, {} concepts, {} jargon: {tally:?}", tally.actions(), concepts.len(), jargon.len());
     assert!(jargon.len() <= 1, "{jargon:?} in {read:?}");
 }
 

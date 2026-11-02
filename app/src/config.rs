@@ -2710,7 +2710,7 @@ pub struct SessionConfig {
     #[serde(default)]
     pub last_addr: String,
     /// Require the room key to join (OFF while the testing phase lasts —
-    /// LAN-open rooms; the owner's amendment 2026-08-19).
+    /// LAN-open rooms).
     #[serde(default)]
     pub require_key: bool,
     /// GM2: the most recent project files, newest first (deduped, at most
@@ -2935,6 +2935,10 @@ pub struct Config {
     /// lane, then cleared; not persisted).
     #[serde(skip)]
     pub load_notes: Vec<String>,
+    /// Transient: what the keymap migration did for the artist: news, not a
+    /// fault, so the shell says it apart from `load_notes` (not persisted).
+    #[serde(skip)]
+    pub keymap_notes: Vec<String>,
     /// Transient: this load ran the keymap migration, so it is written back
     /// and runs once (not persisted).
     #[serde(skip)]
@@ -2958,6 +2962,7 @@ impl Default for Config {
             render: RenderConfig::default(),
             last_import_note: String::new(),
             load_notes: Vec::new(),
+            keymap_notes: Vec::new(),
             migrated: false,
         }
     }
@@ -3180,7 +3185,7 @@ impl Config {
             Err(_) => cfg.ui.keymap_rev = KEYMAP_REV,
         }
         cfg.fill_missing(before_keymaps);
-        notes.extend(cfg.migrate_keymap());
+        cfg.keymap_notes = cfg.migrate_keymap();
         (cfg, notes)
     }
 
