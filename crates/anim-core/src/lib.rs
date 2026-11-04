@@ -36,6 +36,7 @@ pub mod sheet_ops;
 pub mod store;
 pub mod text;
 pub mod value;
+pub mod watch;
 pub mod xdts;
 pub mod xsheet;
 
