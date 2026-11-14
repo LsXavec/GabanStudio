@@ -2227,15 +2227,15 @@ mod tests {
         }
     }
 
-    /// 0.6.0 in the app and the installer, and Help ▸ About says it. The wire
+    /// 0.6.1 in the app and the installer, and Help ▸ About says it. The wire
     /// floor stays 0.5.0: this release adds no `Pane`, so a 0.5.0 peer still
     /// reads the host's layout.
     #[test]
-    fn ship_version_is_0_6_0_everywhere() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.0");
-        assert_eq!(crate::update::CURRENT_VERSION, "0.6.0");
+    fn ship_version_is_0_6_1_everywhere() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.1");
+        assert_eq!(crate::update::CURRENT_VERSION, "0.6.1");
         assert_eq!(crate::net::MIN_PEER_VERSION, "0.5.0");
-        assert_eq!(crate::welcome::VERSION, "0.6.0");
+        assert_eq!(crate::welcome::VERSION, "0.6.1");
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tools/installer/Cargo.toml");
         let text = std::fs::read_to_string(&manifest).unwrap();
         let version = text
@@ -2243,11 +2243,11 @@ mod tests {
             .map(str::trim)
             .find(|l| l.starts_with("version"))
             .expect("the installer's [package] version");
-        assert_eq!(version, "version = \"0.6.0\"", "{}", manifest.display());
+        assert_eq!(version, "version = \"0.6.1\"", "{}", manifest.display());
         let mut h = EditorHarness::new();
         h.perform(Action::About);
         h.run();
-        assert!(h.has("version 0.6.0"), "{}", h.describe());
+        assert!(h.has("version 0.6.1"), "{}", h.describe());
     }
 
     /// The refreshed sample shows off the release — a camera pan over a BG
@@ -2354,7 +2354,7 @@ mod tests {
         let mut h = PanelHarness::new(egui::vec2(1280.0, 800.0), (w, true), move |ui, (w, show)| {
             let _ = crate::welcome::ui(ui, w, show, &[false; 5], &binds);
         });
-        assert!(h.has("What's new in 0.6.0"), "{}", h.describe());
+        assert!(h.has("What's new in 0.6.1"), "{}", h.describe());
         for (old, new) in crate::vocab::OLD_WORDS {
             let row = format!("{old} → {new}");
             assert!(h.has(&row), "{row}\n{}", h.describe());
@@ -2362,7 +2362,7 @@ mod tests {
         assert!(!h.has("New from template"), "the Start cards hide behind the tab");
         h.click("Start");
         assert!(h.has("New from template"), "{}", h.describe());
-        assert!(!h.has("What's new in 0.6.0"));
+        assert!(!h.has("What's new in 0.6.1"));
     }
 
     /// The start-up route (Startup::Welcome) through

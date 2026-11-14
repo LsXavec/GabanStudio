@@ -479,6 +479,8 @@ struct App {
     session_status: String,
     session_peers: std::collections::HashMap<u64, net::PeerView>,
     connect_open: bool,
+    /// Start ▸ Join a room's window.
+    join_open: bool,
     connect_addr: String,
     connect_code: String,
     connect_error: String,
@@ -665,12 +667,20 @@ impl App {
         }
     }
     fn session_join(&mut self, addr: String, code: String) {
+        // An open room (seen on this network) skips the key check, so a
+        // fresh install with no key may still join it.
+        let open_room = self.discovery.rooms.lock().unwrap().values().any(|b| b.addr == addr && b.open);
         let cfg = &self.config.session;
-        if cfg.api_key.trim().is_empty() {
-            self.connect_error = "set the session key in Settings › Session first".into();
+        if cfg.api_key.trim().is_empty() && !open_room {
+            self.connect_error = "this session needs its key — paste the key the host shares".into();
+            self.session_status = self.connect_error.clone();
             return;
         }
-        match net::Client::connect(&addr, cfg.api_key.trim(), &code, cfg.username.trim()) {
+        let key = match cfg.api_key.trim() {
+            "" => "open",
+            k => k,
+        };
+        match net::Client::connect(&addr, key, &code, cfg.username.trim()) {
             Ok(c) => {
                 self.connect_open = false;
                 self.connect_code.clear();
@@ -678,6 +688,12 @@ impl App {
                 self.config.session.last_addr = addr;
                 self.config.save();
                 self.session_status = "connected — waiting for the host's file".into();
+                // Joined from Start: the window and the card make way for
+                // the host's file.
+                self.join_open = false;
+                if let Some(ed) = &mut self.editor {
+                    ed.start = None;
+                }
                 let host_ver = c.host_version.clone();
                 self.session = net::Session::Joined(c);
                 self.session_peers.clear();
@@ -689,8 +705,28 @@ impl App {
                 net::slog_ship_arm(true);
                 net::slog("debug channel armed — lines ship to the host");
             }
-            Err(e) => self.connect_error = vocab::session_words(&e),
+            Err(e) => {
+                // The Join window and Settings ▸ Session both read the status.
+                self.connect_error = vocab::session_words(&e);
+                self.session_status = self.connect_error.clone();
+            }
         }
+    }
+
+    /// Start ▸ Host a room, once the project is chosen: it opens, and the
+    /// room starts on it. Keys are made if this machine has none.
+    fn host_room_on(&mut self, state: AppState) {
+        let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
+        self.editor = Some(Editor::boot(state, rs, dir, &self.config.ui));
+        if self.config.session.ensure_room_keys() {
+            self.config.save();
+        }
+        self.session_act(config::SessionAction::StartHost);
+        let said = self.session_status.clone();
+        self.notes.push(match self.session {
+            net::Session::Hosting(_) => format!("{said} (Settings › Session shows who joined)"),
+            _ => said,
+        });
     }
 
     /// Once per frame: drain net events, apply snapshots, push presence.
@@ -2623,6 +2659,7 @@ impl App {
             session_status: "offline".into(),
             session_peers: std::collections::HashMap::new(),
             connect_open: false,
+            join_open: false,
             connect_addr: String::new(),
             connect_code: String::new(),
             connect_error: String::new(),
@@ -2953,6 +2990,23 @@ impl App {
                 None => self.new_form = Some(NewProjectForm::default()),
             },
             AppRequest::Settings => self.settings_open = true,
+            // Start ▸ Host a room: one room at a time, on a saved project.
+            AppRequest::HostRoom => {
+                if !matches!(self.session, net::Session::Idle) {
+                    self.notes
+                        .push("you are already in a shared session — leave it first (Settings › Session)".into());
+                    return;
+                }
+                match AppState::pick_and_open() {
+                    Some(Ok(state)) => self.host_room_on(state),
+                    Some(Err(msg)) => self.notes.push(format!("could not open that project — {msg}")),
+                    None => {}
+                }
+            }
+            AppRequest::JoinRoom => {
+                self.connect_error.clear();
+                self.join_open = true;
+            }
             // The close request itself is guarded (Editor::worksafe_frame).
             AppRequest::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             AppRequest::Save | AppRequest::SaveAs | AppRequest::Open => {
@@ -3111,6 +3165,10 @@ pub enum Performed {
 pub enum AppRequest {
     /// AU6: what the Start float chose (spec 8.1).
     Start(welcome::WelcomeAction),
+    /// Start ▸ Host a room: pick a project, open it, host it.
+    HostRoom,
+    /// Start ▸ Join a room: the Join window.
+    JoinRoom,
     NewProject,
     Open,
     /// GM21: Help ▸ Example project.
@@ -5007,6 +5065,8 @@ pub(crate) fn apply_start(
         Choice::Sample => replace(Editor::boot(sample::build_sample(), rs, dir, ui)),
         Choice::ShowMe(step) => replace(welcome_show_me(step, rs, dir, ui).0),
         Choice::Settings => StartOutcome::Request(AppRequest::Settings),
+        Choice::HostRoom => StartOutcome::Request(AppRequest::HostRoom),
+        Choice::JoinRoom => StartOutcome::Request(AppRequest::JoinRoom),
         Choice::Lesson(i) => match lessons::table().get(i) {
             Some(row) => replace(lesson::open_lesson(row, rs, dir, ui)),
             None => StartOutcome::Stay,
@@ -7722,6 +7782,20 @@ impl eframe::App for App {
             autosave_dir.as_deref(),
             &mut show_autosaves,
             ffmpeg_queue,
+        );
+        // Start ▸ Join a room: the same click-out slots as the Session page.
+        if self.join_open && !matches!(self.session, net::Session::Idle) {
+            self.join_open = false;
+        }
+        let join_said = if self.connect_error.is_empty() { &self.session_status } else { &self.connect_error };
+        config::join_window(
+            ui.ctx(),
+            &mut self.join_open,
+            &mut self.config,
+            &lan_rooms,
+            &mut join_room,
+            &mut session_action,
+            join_said,
         );
         if show_autosaves && let Some(dir) = &autosave_dir {
             // Before the first autosave lands the folder may not exist yet.

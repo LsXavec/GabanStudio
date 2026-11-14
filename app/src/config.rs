@@ -2743,6 +2743,24 @@ impl SessionConfig {
     pub fn recent_entries(&self) -> Vec<(PathBuf, bool)> {
         crate::worksafe::on_disk(&self.recent)
     }
+
+    /// Start ▸ Host a room: hosting needs a key and a secret; a machine
+    /// that never pressed Settings ▸ Session ▸ Generate gets them now.
+    /// Existing ones are kept (guests may already hold the key). Returns
+    /// whether anything was made, so the caller saves.
+    pub fn ensure_room_keys(&mut self) -> bool {
+        let mut made = false;
+        if self.api_key.trim().is_empty() {
+            self.api_key = crate::net::generate_key();
+            made = true;
+        }
+        if self.totp_secret.trim().is_empty() {
+            let b: [u8; 20] = rand::random();
+            self.totp_secret = crate::net::base32_encode(&b);
+            made = true;
+        }
+        made
+    }
 }
 
 fn default_update_repo() -> String {
@@ -3947,42 +3965,7 @@ fn session_page(
         }
     } else {
         ui.label("You are offline.");
-        // LAN DISCOVERY (testing phase): rooms on this network, one
-        // click to join — no key, no address.
-        if lan_rooms.is_empty() {
-            ui.label(
-                egui::RichText::new("no shared sessions on this network yet")
-                    .font(crate::plate::Role::Small.font())
-                    .color(crate::plate::legend_dim()),
-            );
-        } else {
-            crate::plate::legend(ui, "Shared sessions on this network");
-            for b in lan_rooms {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(&b.name)
-                            .font(crate::plate::Role::Small.font())
-                            .color(crate::plate::INK),
-                    );
-                    if !b.open {
-                        ui.label(
-                            egui::RichText::new("key")
-                                .font(crate::plate::Role::Small.font())
-                                .color(crate::plate::INK2),
-                        )
-                        .on_hover_text("this session requires its key");
-                    }
-                    ui.label(
-                        egui::RichText::new(format!("v{} · {}", b.version, b.addr))
-                            .font(crate::plate::Role::Small.font())
-                            .color(crate::plate::INK2),
-                    );
-                    if ui.button("JOIN").clicked() {
-                        *join_room = Some(b.addr.clone());
-                    }
-                });
-            }
-        }
+        lan_room_rows(ui, lan_rooms, join_room);
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
@@ -4004,29 +3987,7 @@ fn session_page(
         // The host's address (owner's report: the field lived inside the
         // dormant 2FA window, so removing Authy orphaned it — join needs
         // it HERE, beside the button that uses it).
-        ui.horizontal(|ui| {
-            ui.label("Host address");
-            if crate::plate::text_field(
-                ui,
-                egui::TextEdit::singleline(&mut config.session.last_addr)
-                    .desired_width(180.0)
-                    .hint_text("192.168.1.23 or host:port"),
-            )
-                .on_hover_text(
-                    "the host's IP (they run ipconfig) — port 41100 is                      assumed unless you add :port",
-                )
-                .changed()
-            {
-                config.save();
-            }
-            if ui
-                .button("Connect")
-                .on_hover_text("join with this address and the session key above")
-                .clicked()
-            {
-                *action = Some(SessionAction::OpenConnect);
-            }
-        });
+        address_row(ui, config, action);
         ui.horizontal(|ui| {
             ui.label(format!("Generate a key + secret for a new {}:", crate::vocab::SHARED_SESSION));
             if ui
@@ -4051,6 +4012,142 @@ fn session_page(
     );
     if changed {
         config.save();
+    }
+}
+
+/// LAN DISCOVERY (testing phase): rooms on this network, one click to
+/// join — no key, no address. Settings ▸ Session and Start's Join window
+/// both list them.
+fn lan_room_rows(ui: &mut egui::Ui, lan_rooms: &[crate::net::Beacon], join_room: &mut Option<String>) {
+    if lan_rooms.is_empty() {
+        ui.label(
+            egui::RichText::new("no shared sessions on this network yet")
+                .font(crate::plate::Role::Small.font())
+                .color(crate::plate::legend_dim()),
+        );
+        return;
+    }
+    crate::plate::legend(ui, "Shared sessions on this network");
+    for b in lan_rooms {
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(&b.name)
+                    .font(crate::plate::Role::Small.font())
+                    .color(crate::plate::INK),
+            );
+            if !b.open {
+                ui.label(
+                    egui::RichText::new("key")
+                        .font(crate::plate::Role::Small.font())
+                        .color(crate::plate::INK2),
+                )
+                .on_hover_text("this session requires its key");
+            }
+            ui.label(
+                egui::RichText::new(format!("v{} · {}", b.version, b.addr))
+                    .font(crate::plate::Role::Small.font())
+                    .color(crate::plate::INK2),
+            );
+            if ui.button("JOIN").clicked() {
+                *join_room = Some(b.addr.clone());
+            }
+        });
+    }
+}
+
+/// The host's address and the Connect beside it.
+fn address_row(ui: &mut egui::Ui, config: &mut Config, action: &mut Option<SessionAction>) {
+    ui.horizontal(|ui| {
+        ui.label("Host address");
+        if crate::plate::text_field(
+            ui,
+            egui::TextEdit::singleline(&mut config.session.last_addr)
+                .desired_width(180.0)
+                .hint_text("192.168.1.23 or host:port"),
+        )
+        .on_hover_text("the host's IP (they run ipconfig) — port 41100 is assumed unless you add :port")
+        .changed()
+        {
+            config.save();
+        }
+        if ui
+            .button("Connect")
+            .on_hover_text("join with this address and the session key")
+            .clicked()
+        {
+            *action = Some(SessionAction::OpenConnect);
+        }
+    });
+}
+
+/// Start ▸ Join a room: the rooms this network can see, or a host's
+/// address, with the name and key a join carries. The App performs the
+/// join through the same slots Settings ▸ Session uses.
+pub fn join_window(
+    ctx: &egui::Context,
+    open: &mut bool,
+    config: &mut Config,
+    lan_rooms: &[crate::net::Beacon],
+    join_room: &mut Option<String>,
+    action: &mut Option<SessionAction>,
+    status: &str,
+) {
+    if !*open {
+        return;
+    }
+    let mut close = false;
+    egui::Window::new(format!("Join a {}", crate::vocab::SHARED_SESSION))
+        .frame(crate::plate::dialog_frame(&ctx.global_style()))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_min_width(360.0);
+            ui.label(
+                egui::RichText::new(
+                    "Pick a session on this network, or type the host's address. A session marked key \
+                     needs the key its host shares.",
+                )
+                .color(crate::plate::legend_dim()),
+            );
+            ui.add_space(6.0);
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label("Your name");
+                changed |= crate::plate::text_field(
+                    ui,
+                    egui::TextEdit::singleline(&mut config.session.username).desired_width(180.0),
+                )
+                .on_hover_text("the name other artists see on your cursor")
+                .changed();
+            });
+            ui.horizontal(|ui| {
+                ui.label("Session key");
+                changed |= crate::plate::text_field(
+                    ui,
+                    egui::TextEdit::singleline(&mut config.session.api_key).desired_width(240.0),
+                )
+                .on_hover_text("the key the host shares — open sessions need none")
+                .changed();
+            });
+            if changed {
+                config.save();
+            }
+            ui.separator();
+            lan_room_rows(ui, lan_rooms, join_room);
+            ui.add_space(6.0);
+            address_row(ui, config, action);
+            if !status.is_empty() {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(status).italics().color(crate::plate::INK2));
+            }
+            ui.add_space(8.0);
+            if ui.button("Cancel").clicked() {
+                close = true;
+            }
+        });
+    if close {
+        *open = false;
     }
 }
 

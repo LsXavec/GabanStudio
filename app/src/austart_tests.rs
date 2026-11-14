@@ -380,7 +380,7 @@ fn austart_opens_at_its_head() {
     let mut h = first_run();
     with_recents(&mut h, dir.path());
     let head = h.rect("A drawing");
-    h.scroll_to("What's new");
+    h.scroll_to(welcome::TOGETHER);
     settle(&mut h);
     assert_ne!(h.rect("A drawing"), head, "it did scroll");
     h.click("Close Start");
@@ -418,7 +418,7 @@ fn austart_foot_takes_the_last_line() {
         let (above, foot) = (h.rect("Open a project") / ppp, h.rect("Check your pen") / ppp);
         let at = format!("{w}×{tall} at {stored}: {foot:?} {card:?}");
         println!("{at}");
-        assert_eq!(foot.top(), (h.rect("What's new") / ppp).top(), "{at}");
+        assert_eq!(foot.top(), (h.rect(welcome::TOGETHER) / ppp).top(), "{at}");
         assert!(card.bottom() - foot.bottom() < 16.0, "{at}");
         assert!(foot.top() - above.bottom() > 16.0, "{at}");
     }
@@ -1452,7 +1452,7 @@ fn austart_float_budget_at_worst_case() {
     assert!(fresh.controls <= 12 && fresh.words <= 25, "fresh install: {fresh:?}");
     assert_eq!((shown.controls, shown.words), (fresh.controls, fresh.words), "all of it shows, on one count");
     // A fresh card's body fits: its last row stands in the float unscrolled.
-    let last = h.rect("What's new");
+    let last = h.rect(welcome::TOGETHER);
     assert!(last.bottom() <= float_open(&h).bottom() - 12.0, "{last:?} in {:?}", float_open(&h));
     with_recents(&mut h, dir.path());
     let worst = built_census(&mut h);
@@ -1466,9 +1466,9 @@ fn austart_float_budget_at_worst_case() {
     assert!(tall <= 300.5, "worst case: {tall}");
     // Two recents pass the cap of spec 4.1: the foot is a scroll away, and the
     // head, with the way to close it and the latch, stands.
-    h.scroll_to("What's new");
+    h.scroll_to(welcome::TOGETHER);
     settle(&mut h);
-    let last = h.rect("What's new");
+    let last = h.rect(welcome::TOGETHER);
     assert!(last.bottom() <= float_open(&h).bottom() - 12.0, "{last:?} in {:?}", float_open(&h));
     assert!(float_open(&h).contains_rect(h.rect("Close Start")));
     assert!(float_open(&h).contains_rect(h.rect("Show at startup")));
@@ -1507,7 +1507,7 @@ fn austart_words_stand_on_one_edge() {
     h.scroll_to("Check your pen");
     settle(&mut h);
     assert_eq!(h.painted_at("Check your pen").x, edge);
-    assert_eq!(h.painted_at("What's new").x, half, "the two half rows share their edges");
+    assert_eq!(h.painted_at(welcome::TOGETHER).x, half, "the two half rows share their edges");
     // On the other tab too, and in the answer to a check.
     let w = h.editor_mut().start.as_mut().expect("open");
     (w.pen, w.pen_said) = (PenCheck::Mouse, true);
@@ -2006,7 +2006,7 @@ fn austart_saved_data_stands() {
     settle(&mut h);
     h.click("Back to Start");
     settle(&mut h);
-    h.click("What's new");
+    h.click(welcome::TOGETHER);
     settle(&mut h);
     h.click("Back to Start");
     settle(&mut h);
@@ -2091,7 +2091,7 @@ fn austart_menu_rows_open_the_float_with_no_modal() {
     h.click("Back to Start");
     settle(&mut h);
     assert!(h.has("A drawing"));
-    h.click("What's new");
+    assert_eq!(h.perform(Action::WhatsNew), Performed::Done);
     settle(&mut h);
     assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::WhatsNew));
     assert!(h.has(welcome::WHATS_NEW_HEADING) && !h.has("Close Start"), "the page says what it is");
@@ -2136,4 +2136,88 @@ fn austart_upgrader_opens_once_on_whats_new() {
     // A fresh install has nothing new to say.
     let h = first_run();
     assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::Start));
+}
+
+// ---- Draw together: host or join a shared session ----
+
+/// Start's foot opens the Draw together page; its two rows come through the
+/// door every document does: the unsaved guard first, a guest's refusal,
+/// and the shell's requests after.
+#[test]
+fn austart_room_cards_host_and_join() {
+    assert!(WelcomeAction::HostRoom.replaces_document());
+    assert!(WelcomeAction::JoinRoom.replaces_document());
+    // The door: Start's foot, and back.
+    let mut h = first_run();
+    assert!(!h.has(welcome::HOST_SESSION), "the rows wait on their page");
+    h.click(welcome::TOGETHER);
+    settle(&mut h);
+    assert_eq!(h.editor().start.as_ref().map(|w| w.tab), Some(WelcomeTab::Together));
+    assert!(h.has(welcome::HOST_SESSION) && h.has(welcome::JOIN_SESSION));
+    h.click("Back to Start");
+    settle(&mut h);
+    assert!(h.has("A drawing"));
+    for (word, action) in
+        [(welcome::HOST_SESSION, WelcomeAction::HostRoom), (welcome::JOIN_SESSION, WelcomeAction::JoinRoom)]
+    {
+        let mut h = first_run();
+        stand_in(&mut h, WelcomeTab::Together);
+        h.click(word);
+        settle(&mut h);
+        assert_eq!(h.rig().requests, [AppRequest::Start(action.clone())], "{word}");
+        assert_eq!(h.editor().leave, None, "{word}: a blank asks nothing");
+        // Unsaved work is asked about first.
+        let mut h = first_run();
+        h.click("Close Start");
+        settle(&mut h);
+        let at = paper_middle(&h);
+        line_at(&mut h, at);
+        stand_in(&mut h, WelcomeTab::Together);
+        h.click(word);
+        settle(&mut h);
+        assert_eq!(h.editor().leave, Some(Leave::Start(action.clone())), "{word}: asked first");
+        assert!(h.rig().requests.is_empty(), "{word}");
+        // A guest is already in a shared session.
+        let mut h = first_run();
+        h.editor_mut().canvas.is_guest = true;
+        stand_in(&mut h, WelcomeTab::Together);
+        let seq = h.state().refusal_seq;
+        h.click(word);
+        settle(&mut h);
+        assert!(h.rig().requests.is_empty(), "{word}: {:?}", h.rig().requests);
+        assert_eq!(h.state().refusal_seq, seq + 1, "{word}: said no to");
+    }
+    // The pair sits on one row under the way back, the same width as it.
+    let mut h = first_run();
+    stand_in(&mut h, WelcomeTab::Together);
+    let (host, join, back) = (h.rect(welcome::HOST_SESSION), h.rect(welcome::JOIN_SESSION), h.rect("Back to Start"));
+    assert!(host.top() == join.top() && host.right() < join.left(), "one row");
+    assert!(host.top() > back.bottom(), "under the way back");
+    assert!((host.width() - back.width()).abs() < 1.0, "the way back's width");
+    assert!(h.has(welcome::TOGETHER), "the page says what it is");
+    // Past the guard, each goes to the shell.
+    let ui = UiConfig::default();
+    for (action, want) in
+        [(WelcomeAction::HostRoom, AppRequest::HostRoom), (WelcomeAction::JoinRoom, AppRequest::JoinRoom)]
+    {
+        match crate::apply_start(action, None, None, &ui) {
+            crate::StartOutcome::Request(r) => assert_eq!(r, want),
+            _ => panic!("{want:?}: a request for the shell"),
+        }
+    }
+}
+
+/// Hosting needs a key and a secret: a machine that never generated them
+/// gets both, and one that has them keeps them (guests may hold the key).
+#[test]
+fn austart_host_room_makes_missing_keys_only() {
+    let mut s = crate::config::SessionConfig::default();
+    s.api_key.clear();
+    s.totp_secret.clear();
+    assert!(s.ensure_room_keys());
+    assert!(!s.api_key.trim().is_empty());
+    assert!(crate::net::base32_decode(&s.totp_secret).is_some_and(|b| b.len() == 20));
+    let (key, secret) = (s.api_key.clone(), s.totp_secret.clone());
+    assert!(!s.ensure_room_keys(), "nothing to make");
+    assert_eq!((s.api_key, s.totp_secret), (key, secret), "kept");
 }

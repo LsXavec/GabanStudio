@@ -380,6 +380,10 @@ pub enum WelcomeAction {
     Settings,
     /// Close the screen shown over an open cut (Help ▸ Start screen…).
     Back,
+    /// Pick a saved project, open it, and host a shared session on it.
+    HostRoom,
+    /// The Join window: rooms on this network, or a host's address.
+    JoinRoom,
 }
 
 impl WelcomeAction {
@@ -387,7 +391,10 @@ impl WelcomeAction {
     /// unsaved guard asks first. The rest ask for themselves, or drop nothing.
     pub fn replaces_document(&self) -> bool {
         use WelcomeAction::*;
-        matches!(self, Template(_) | Intent(_) | Lesson(_) | OpenRecent(_) | Sample | ShowMe(_))
+        matches!(
+            self,
+            Template(_) | Intent(_) | Lesson(_) | OpenRecent(_) | Sample | ShowMe(_) | HostRoom | JoinRoom
+        )
     }
 }
 
@@ -406,6 +413,8 @@ pub enum WelcomeTab {
     WhatsNew,
     /// AU20: the grid of lessons, on its own scroll.
     Lessons,
+    /// Draw together: host a shared session on a saved project, or join one.
+    Together,
 }
 
 /// Whether the What's New tab is due: `seen` (the config's last shown
@@ -585,6 +594,7 @@ impl Welcome {
             WelcomeTab::Start => HEADING,
             WelcomeTab::WhatsNew => WHATS_NEW_HEADING,
             WelcomeTab::Lessons => LESSONS_HEADING,
+            WelcomeTab::Together => TOGETHER,
         }
     }
 
@@ -663,6 +673,39 @@ fn on_edge<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 /// in its budget's order. AU20: the latch stands in the heading row, so it
 /// never needs a scroll, and the recents stand as a half row, so a returning
 /// animator's files stand whole under the cap.
+/// The Draw together page: its door on Start's foot, its title, and its
+/// two shared-session rows.
+pub const TOGETHER: &str = "Draw together";
+pub const HOST_SESSION: &str = "Host a session";
+pub const JOIN_SESSION: &str = "Join a session";
+
+fn together_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<WelcomeAction> {
+    let half = (wide - ui.spacing().item_spacing.x) / 2.0;
+    if plate::filled_row(ui, "Back to Start", half).clicked() {
+        w.tab = WelcomeTab::Start;
+    }
+    ui.add_space(GROUP_GAP);
+    on_edge(ui, |ui| {
+        ui.label(
+            egui::RichText::new("Artists on your network draw in one file, live. The host's computer keeps it.")
+                .color(plate::INK2),
+        );
+    });
+    ui.add_space(GROUP_GAP);
+    let mut out = None;
+    ui.horizontal(|ui| {
+        let host = plate::ghost_row(ui, HOST_SESSION, half, None);
+        if host.card("Open a saved project and share it with artists on your network").clicked() {
+            out = Some(WelcomeAction::HostRoom);
+        }
+        let join = plate::ghost_row(ui, JOIN_SESSION, half, None);
+        if join.card("Draw in a session another artist is hosting").clicked() {
+            out = Some(WelcomeAction::JoinRoom);
+        }
+    });
+    out
+}
+
 pub fn float_body(ui: &mut egui::Ui, w: &mut Welcome) -> Option<WelcomeAction> {
     let wide = ui.available_width();
     ui.spacing_mut().item_spacing.y = ROW_GAP;
@@ -679,6 +722,9 @@ pub fn float_body(ui: &mut egui::Ui, w: &mut Welcome) -> Option<WelcomeAction> {
     }
     if w.tab == WelcomeTab::Lessons {
         return lessons_page(ui, w, wide);
+    }
+    if w.tab == WelcomeTab::Together {
+        return together_page(ui, w, wide);
     }
     let mut out = None;
     intent_cards(ui, wide, &mut out);
@@ -723,8 +769,10 @@ pub fn float_body(ui: &mut egui::Ui, w: &mut Welcome) -> Option<WelcomeAction> {
         if check.card("Draw one line and see whether your pen reports pressure").clicked() {
             w.pen = PenCheck::Waiting;
         }
-        if plate::ghost_row(ui, "What's new", half, None).clicked() {
-            w.tab = WelcomeTab::WhatsNew;
+        // What's New opens by itself after an update, and from Help ▸ What's New.
+        let together = plate::ghost_row(ui, TOGETHER, half, None);
+        if together.card("Host a shared session, or join one on your network").clicked() {
+            w.tab = WelcomeTab::Together;
         }
     });
     if let Some((yes, said, fix)) = w.pen.verdict() {
