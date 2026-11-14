@@ -2207,6 +2207,57 @@ fn austart_room_cards_host_and_join() {
     }
 }
 
+/// Hosting does not need a saved file: the page's three new-project rows
+/// open a fresh drawing, animation or comic (no file) and host it, through
+/// the same guard as every other document.
+#[test]
+fn austart_host_new_project_needs_no_file() {
+    use crate::welcome::NewKind;
+    let ui = UiConfig::default();
+    for kind in NewKind::ALL {
+        let action = WelcomeAction::HostNew(kind);
+        assert!(action.replaces_document(), "{kind:?}");
+        // The row stands on the page, and its click is a Start choice.
+        let mut h = first_run();
+        stand_in(&mut h, WelcomeTab::Together);
+        assert!(h.has(kind.label()), "{kind:?}: on the page");
+        h.click(kind.label());
+        settle(&mut h);
+        assert_eq!(h.rig().requests, [AppRequest::Start(action.clone())], "{kind:?}");
+        // Unsaved work is asked about first.
+        let mut h = first_run();
+        h.click("Close Start");
+        settle(&mut h);
+        let at = paper_middle(&h);
+        line_at(&mut h, at);
+        stand_in(&mut h, WelcomeTab::Together);
+        h.click(kind.label());
+        settle(&mut h);
+        assert_eq!(h.editor().leave, Some(Leave::Start(action.clone())), "{kind:?}: asked first");
+        // Past the guard: the document Start's card makes, unsaved, to host.
+        let hosted = match crate::apply_start(action, None, None, &ui) {
+            crate::StartOutcome::Host(e) => e,
+            _ => panic!("{kind:?}: a document to host"),
+        };
+        let plain = match crate::apply_start(kind.as_start(), None, None, &ui) {
+            crate::StartOutcome::Replace(e) => e,
+            _ => panic!("{kind:?}: Start's card makes a document"),
+        };
+        assert!(hosted.state.file_path.is_none(), "{kind:?}: no file");
+        let size = |e: &crate::Editor| {
+            let p = &e.state.engine.project;
+            (p.width, p.height, e.state.frame_count(), e.stage)
+        };
+        assert_eq!(size(&hosted), size(&plain), "{kind:?}: Start's paper");
+    }
+    // The new rows lead; the saved-project and join pair stands under them.
+    let mut h = first_run();
+    stand_in(&mut h, WelcomeTab::Together);
+    let new = h.rect(NewKind::Drawing.label());
+    let saved = h.rect(welcome::HOST_SESSION);
+    assert!(new.bottom() <= saved.top(), "new rows over the saved one");
+}
+
 /// Hosting needs a key and a secret: a machine that never generated them
 /// gets both, and one that has them keeps them (guests may hold the key).
 #[test]

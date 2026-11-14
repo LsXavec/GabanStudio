@@ -38,6 +38,9 @@ mod newproject;
 mod nodegraph_panel;
 mod paint;
 mod paintcheck;
+mod pick;
+#[cfg(test)]
+mod rehost_tests;
 mod palette;
 mod palette_panel;
 mod plate;
@@ -176,6 +179,9 @@ fn peer_tag(p: &net::PeerView) -> String {
     }
 }
 
+/// Headless installed-Krita brush import (see `main`).
+const KRITA_IMPORT_FLAG: &str = "--import-krita-brushes";
+
 fn main() -> eframe::Result<()> {
     // Headless layout probe: runs the REAL panel/canvas layout on the CPU and
     // prints the canvas rect per scripted step, so any drawing-area movement
@@ -188,6 +194,23 @@ fn main() -> eframe::Result<()> {
     // GM11: the batch render (`--render <file | --sample> --preset <name>
     // --out <dir>`) runs one job and exits — no window, no dev loop.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--import-krita-brushes`: the Brushes button's installed-Krita
+    // import, headless — imports into config.json and exits.
+    if args.first().map(String::as_str) == Some(KRITA_IMPORT_FLAG) {
+        attach_console();
+        let mut config = Config::load();
+        let r = crate::brushbank::import_installed_krita(&mut config.presets);
+        config.save();
+        println!(
+            "imported {} Krita brush(es) · {} skipped · {} unreadable · {} unreal removed · {} in the library",
+            r.ok,
+            r.dup,
+            r.failed,
+            r.purged,
+            config.presets.len()
+        );
+        std::process::exit(0);
+    }
     if anim_core::deliver::is_cli(&args) {
         attach_console();
         std::process::exit(cli_exit(&args, config::data_dir().as_deref()));
@@ -473,6 +496,8 @@ struct App {
     devloop: devloop::DevLoop,
     /// UI hook: on-demand frame + state dump (see uidump.rs).
     uidump: uidump::UiDump,
+    /// Ctrl+Alt+G: grab the element under the pointer (pick.rs).
+    pick: pick::Pick,
     /// THE SESSION (research/PSD-session-room.md): the room this app is
     /// in, the peers it draws, and the 2FA connect window's state.
     session: net::Session,
@@ -609,45 +634,66 @@ enum SeqEv {
     Undo { author: String, redo: bool, seq: u64 },
 }
 
+/// A room on `port`, from the Session settings.
+fn start_host(cfg: &config::SessionConfig, port: u16) -> std::io::Result<net::Host> {
+    net::Host::start(
+        port,
+        cfg.api_key.trim().to_string(),
+        cfg.totp_secret.trim().to_string(),
+        format!("{}'s session", cfg.username.trim()),
+        !cfg.require_key,
+        cfg.username.trim().to_string(),
+    )
+}
+
+/// Settings ▸ Session ▸ Port, changed while hosting: the room moves to `want`
+/// without a relaunch. The new room binds FIRST, so a port that will not open
+/// (taken, refused) leaves the old room running. `None`: it is already there.
+fn rehost(
+    old: &net::Host,
+    want: u16,
+    start: impl FnOnce(u16) -> std::io::Result<net::Host>,
+) -> Option<Result<net::Host, String>> {
+    if old.port == want {
+        return None;
+    }
+    Some(start(want).map_err(|e| e.to_string()))
+}
+
+
 impl App {
     // ---- THE SESSION (research/PSD-session-room.md) ----------------------
     fn session_act(&mut self, a: config::SessionAction) {
         match a {
+            config::SessionAction::MovePort => {
+                let net::Session::Hosting(old) = &self.session else { return };
+                let (from, cfg) = (old.port, self.config.session.clone());
+                match rehost(old, cfg.host_port, |port| start_host(&cfg, port)) {
+                    None => {}
+                    Some(Ok(h)) => {
+                        let to = h.port;
+                        self.session_act_hosted(h);
+                        self.session_status = format!("moved the session to port {to} — guests rejoin there");
+                        self.config.save();
+                    }
+                    Some(Err(e)) => {
+                        // The room never stopped: the field shows where it is.
+                        self.config.session.host_port = from;
+                        self.session_status = format!("port {}: {e} — still hosting on port {from}", cfg.host_port);
+                    }
+                }
+            }
             config::SessionAction::StartHost => {
                 let cfg = &self.config.session;
                 if cfg.api_key.trim().is_empty() || cfg.totp_secret.trim().is_empty() {
                     self.session_status = "generate a session key and TOTP secret first".into();
                     return;
                 }
-                match net::Host::start(
-                    cfg.host_port,
-                    cfg.api_key.trim().to_string(),
-                    cfg.totp_secret.trim().to_string(),
-                    format!("{}'s session", cfg.username.trim()),
-                    !cfg.require_key,
-                    cfg.username.trim().to_string(),
-                ) {
+                match start_host(cfg, cfg.host_port) {
                     Ok(h) => {
-                        self.session_status = format!("hosting on port {} — share the key", h.port);
-                        self.session = net::Session::Hosting(h);
-                        self.session_sent_gen = u64::MAX;
-                        self.session_lane_reset();
-                        // v0.2.5: the shared pencil box — built once,
-                        // every joiner receives it.
-                        self.build_session_bank();
-                        // STAGE 0: a fresh room starts a fresh remote log —
-                        // guests' numbered lines land here, in order.
-                        if let Some(base) = std::env::var_os("APPDATA") {
-                            let dir = std::path::PathBuf::from(base).join("AnimStudio");
-                            let _ = std::fs::create_dir_all(&dir);
-                            let _ = std::fs::write(
-                                dir.join("session_log_remote.txt"),
-                                format!(
-                                    "remote session log · host build v{}\n",
-                                    crate::update::CURRENT_VERSION
-                                ),
-                            );
-                        }
+                        let port = h.port;
+                        self.session_act_hosted(h);
+                        self.session_status = format!("hosting on port {port} — share the key");
                     }
                     Err(e) => self.session_status = format!("could not host: {e}"),
                 }
@@ -664,6 +710,27 @@ impl App {
                 self.connect_addr = self.config.session.last_addr.clone();
                 self.connect_open = true;
             }
+        }
+    }
+
+    /// A room is up: it becomes the session (dropping any old one), with a
+    /// fresh lane, the shared pencil box and a fresh remote log.
+    fn session_act_hosted(&mut self, h: net::Host) {
+        self.session = net::Session::Hosting(h);
+        self.session_peers.clear();
+        self.session_sent_gen = u64::MAX;
+        self.session_lane_reset();
+        // v0.2.5: the shared pencil box — built once, every joiner receives it.
+        self.build_session_bank();
+        // STAGE 0: a fresh room starts a fresh remote log — guests' numbered
+        // lines land here, in order.
+        if let Some(base) = std::env::var_os("APPDATA") {
+            let dir = std::path::PathBuf::from(base).join("AnimStudio");
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(
+                dir.join("session_log_remote.txt"),
+                format!("remote session log · host build v{}\n", crate::update::CURRENT_VERSION),
+            );
         }
     }
     fn session_join(&mut self, addr: String, code: String) {
@@ -717,7 +784,22 @@ impl App {
     /// room starts on it. Keys are made if this machine has none.
     fn host_room_on(&mut self, state: AppState) {
         let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
-        self.editor = Some(Editor::boot(state, rs, dir, &self.config.ui));
+        let editor = Editor::boot(state, rs, dir, &self.config.ui);
+        self.host_on(editor);
+    }
+
+    /// One shared session at a time: true (and said) when one is running.
+    fn session_busy(&mut self) -> bool {
+        let busy = !matches!(self.session, net::Session::Idle);
+        if busy {
+            self.notes.push("you are already in a shared session — leave it first (Settings › Session)".into());
+        }
+        busy
+    }
+
+    /// The room starts on `editor`, now the open document.
+    fn host_on(&mut self, editor: Editor) {
+        self.editor = Some(editor);
         if self.config.session.ensure_room_keys() {
             self.config.save();
         }
@@ -2655,6 +2737,7 @@ impl App {
                 d
             },
             uidump: uidump::UiDump::new(),
+            pick: pick::Pick::default(),
             session: net::Session::Idle,
             session_status: "offline".into(),
             session_peers: std::collections::HashMap::new(),
@@ -2992,9 +3075,7 @@ impl App {
             AppRequest::Settings => self.settings_open = true,
             // Start ▸ Host a room: one room at a time, on a saved project.
             AppRequest::HostRoom => {
-                if !matches!(self.session, net::Session::Idle) {
-                    self.notes
-                        .push("you are already in a shared session — leave it first (Settings › Session)".into());
+                if self.session_busy() {
                     return;
                 }
                 match AppState::pick_and_open() {
@@ -3075,6 +3156,12 @@ impl App {
                 let (rs, dir) = (self.render_state.as_ref(), self.data_dir.as_deref());
                 match apply_start(action, rs, dir, &self.config.ui) {
                     StartOutcome::Replace(editor) => self.editor = Some(*editor),
+                    StartOutcome::Host(editor) => {
+                        if self.session_busy() {
+                            return;
+                        }
+                        self.host_on(*editor);
+                    }
                     StartOutcome::Request(r) => self.handle_request(ctx, r),
                     StartOutcome::Failed(why) => self.notes.push(why),
                     StartOutcome::Stay => {}
@@ -5036,6 +5123,8 @@ fn start_over(editor: &mut Editor, config: &mut Config) -> bool {
 pub(crate) enum StartOutcome {
     /// Another document, in an editor of its own.
     Replace(Box<Editor>),
+    /// A new document, hosted in a shared session as it opens.
+    Host(Box<Editor>),
     /// The shell's to carry out: its dialogs, its windows.
     Request(AppRequest),
     /// It could not be done, and this says why. No document was touched.
@@ -5066,6 +5155,10 @@ pub(crate) fn apply_start(
         Choice::ShowMe(step) => replace(welcome_show_me(step, rs, dir, ui).0),
         Choice::Settings => StartOutcome::Request(AppRequest::Settings),
         Choice::HostRoom => StartOutcome::Request(AppRequest::HostRoom),
+        Choice::HostNew(kind) => match apply_start(kind.as_start(), rs, dir, ui) {
+            StartOutcome::Replace(editor) => StartOutcome::Host(editor),
+            other => other,
+        },
         Choice::JoinRoom => StartOutcome::Request(AppRequest::JoinRoom),
         Choice::Lesson(i) => match lessons::table().get(i) {
             Some(row) => replace(lesson::open_lesson(row, rs, dir, ui)),
@@ -7432,7 +7525,9 @@ impl eframe::App for App {
             let desc = self.describe_ui(ui.ctx(), ui.max_rect());
             self.uidump.write(img, desc);
         }
-        if ui.input(|i| i.key_pressed(egui::Key::F12)) || self.uidump.auto_pending() {
+        if pick::Pick::pressed(ui.ctx()) {
+            self.pick.arm(ui.ctx());
+        } else if ui.input(|i| i.key_pressed(egui::Key::F12)) || self.uidump.auto_pending() {
             self.uidump.request(ui.ctx());
         }
         if !self.tablet_boot_tried {
@@ -7998,11 +8093,30 @@ impl eframe::App for App {
         if self.devloop.poll() {
             self.try_handover(ui.ctx());
         }
+        // Ctrl+Alt+G, the frame after the press: every widget is drawn now.
+        if let Some(hits) = self.pick.take(ui.ctx()) {
+            let src = match (hits.first(), pick::src_root()) {
+                (Some(h), Some(root)) => pick::sources(&root, &h.label),
+                _ => Vec::new(),
+            };
+            let where_ = match self.editor.as_ref().and_then(|e| e.start.as_ref()) {
+                Some(w) => format!("Start float, page {:?}", w.tab),
+                None => String::new(),
+            };
+            let state = self.describe_ui(ui.ctx(), ui.max_rect());
+            let said = hits.first().map_or("nothing labelled".to_owned(), |h| format!("\"{}\"", h.label));
+            self.pick.last = Some(match pick::write(&pick::render(&hits, &src, &where_, &state)) {
+                Ok(path) => format!("grabbed {said} → {}", path.display()),
+                Err(e) => format!("⚠ grab failed: {e}"),
+            });
+        }
+        self.pick.paint(ui.ctx());
         // Both instruments write their messages to fields; without this they
         // are written and never read, so a failed autosave and a successful
         // one look identical. The editor's status line is the channel that
         // actually reaches the screen.
-        if let Some(msg) = self.devloop.note.take().or_else(|| self.uidump.last.take()) {
+        if let Some(msg) = self.devloop.note.take().or_else(|| self.uidump.last.take()).or_else(|| self.pick.last.take())
+        {
             if let Some(ed) = &mut self.editor {
                 ed.state.status = msg;
             } else {
@@ -9593,18 +9707,8 @@ impl Editor {
         }
         if self.canvas.request_krita_scan && !self.canvas.stroke_active() {
             self.canvas.request_krita_scan = false;
-            let paths = crate::kpp::installed_krita_paths();
-            let cached = crate::kpp::cache_krita_resource_dirs();
-            let _ = cached;
-            let before: std::collections::HashSet<String> =
-                presets.iter().map(|p| p.name.clone()).collect();
-            let (ok, dup, failed) = crate::kpp::import_files(&paths, presets);
-            for p in presets.iter_mut() {
-                if !before.contains(&p.name) && p.bank.is_empty() {
-                    p.bank = "krita".into();
-                }
-            }
-            let purged = crate::brushbank::purge_unreal(presets);
+            let crate::brushbank::KritaScan { ok, dup, failed, purged } =
+                crate::brushbank::import_installed_krita(presets);
             if ok > 0 || purged > 0 {
                 *presets_dirty = true;
             }

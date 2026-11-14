@@ -382,6 +382,8 @@ pub enum WelcomeAction {
     Back,
     /// Pick a saved project, open it, and host a shared session on it.
     HostRoom,
+    /// A new project, no file yet, hosted as it opens.
+    HostNew(NewKind),
     /// The Join window: rooms on this network, or a host's address.
     JoinRoom,
 }
@@ -393,8 +395,38 @@ impl WelcomeAction {
         use WelcomeAction::*;
         matches!(
             self,
-            Template(_) | Intent(_) | Lesson(_) | OpenRecent(_) | Sample | ShowMe(_) | HostRoom | JoinRoom
+            Template(_) | Intent(_) | Lesson(_) | OpenRecent(_) | Sample | ShowMe(_) | HostRoom | HostNew(_) | JoinRoom
         )
+    }
+}
+
+/// What a new hosted project starts as: Start's three cards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewKind {
+    Drawing,
+    Animation,
+    Comic,
+}
+
+impl NewKind {
+    pub const ALL: [NewKind; 3] = [NewKind::Drawing, NewKind::Animation, NewKind::Comic];
+
+    /// Its row on the Draw together page.
+    pub fn label(self) -> &'static str {
+        match self {
+            NewKind::Drawing => "Host a new drawing",
+            NewKind::Animation => "Host a new animation",
+            NewKind::Comic => "Host a new comic",
+        }
+    }
+
+    /// The Start card it opens as.
+    pub fn as_start(self) -> WelcomeAction {
+        match self {
+            NewKind::Drawing => WelcomeAction::Intent(templates::PICTURE),
+            NewKind::Animation => WelcomeAction::Intent(templates::ANIMATION),
+            NewKind::Comic => WelcomeAction::Template(templates::COMIC),
+        }
     }
 }
 
@@ -676,7 +708,7 @@ fn on_edge<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
 /// The Draw together page: its door on Start's foot, its title, and its
 /// two shared-session rows.
 pub const TOGETHER: &str = "Draw together";
-pub const HOST_SESSION: &str = "Host a session";
+pub const HOST_SESSION: &str = "Host a saved project";
 pub const JOIN_SESSION: &str = "Join a session";
 
 fn together_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<WelcomeAction> {
@@ -693,6 +725,15 @@ fn together_page(ui: &mut egui::Ui, w: &mut Welcome, wide: f32) -> Option<Welcom
     });
     ui.add_space(GROUP_GAP);
     let mut out = None;
+    let third = (wide - 2.0 * ui.spacing().item_spacing.x) / 3.0;
+    ui.horizontal(|ui| {
+        for kind in NewKind::ALL {
+            let row = plate::ghost_row(ui, kind.label(), third, None);
+            if row.card("Start a new project, no file needed, and share it as it opens").clicked() {
+                out = Some(WelcomeAction::HostNew(kind));
+            }
+        }
+    });
     ui.horizontal(|ui| {
         let host = plate::ghost_row(ui, HOST_SESSION, half, None);
         if host.card("Open a saved project and share it with artists on your network").clicked() {

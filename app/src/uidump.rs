@@ -20,7 +20,7 @@ use std::path::PathBuf;
 
 /// Where dumps land: `<exe dir>/ui_dump/`. Beside the binary on purpose —
 /// whoever ran the build can find them without knowing a config path.
-fn dump_dir() -> PathBuf {
+pub(crate) fn dump_dir() -> PathBuf {
     let base = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))

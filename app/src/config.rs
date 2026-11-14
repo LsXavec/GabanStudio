@@ -3760,6 +3760,8 @@ pub fn connect_window(
 pub enum SessionAction {
     StartHost,
     StopHost,
+    /// The Port field changed while hosting: move the room there, live.
+    MovePort,
     /// Open the 2FA connect window (a guest joining).
     OpenConnect,
     Leave,
@@ -3947,10 +3949,16 @@ fn session_page(
         );
         ui.horizontal(|ui| {
             ui.label("Port");
-            crate::plate::field(
+            let port = crate::plate::field(
                 ui,
                 egui::DragValue::new(&mut config.session.host_port).range(1024..=65535),
-            );
+            )
+            .on_hover_text("change it to move the session live; guests rejoin on the new port");
+            // Once the edit is done (drag let go, or typing left the field),
+            // not on every drag step: each move restarts the listener.
+            if port.drag_stopped() || port.lost_focus() {
+                *action = Some(SessionAction::MovePort);
+            }
         });
         ui.label(format!(
             "Artists here: {}",

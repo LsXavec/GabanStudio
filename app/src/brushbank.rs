@@ -458,6 +458,34 @@ pub fn purge_unreal(presets: &mut Vec<BrushPreset>) -> usize {
     before - presets.len()
 }
 
+/// One installed-Krita scan's outcome.
+#[derive(Debug, Default, PartialEq)]
+pub struct KritaScan {
+    pub ok: usize,
+    pub dup: usize,
+    pub failed: usize,
+    pub purged: usize,
+}
+
+/// Import every preset the Krita on this machine ships (bundles, presets,
+/// %APPDATA%/krita) that our engine can paint, under the "krita" bank,
+/// then drop anything unreal. Used by the Brushes button and by
+/// `--import-krita-brushes`.
+pub fn import_installed_krita(presets: &mut Vec<BrushPreset>) -> KritaScan {
+    let paths = crate::kpp::installed_krita_paths();
+    let _ = crate::kpp::cache_krita_resource_dirs();
+    let before: std::collections::HashSet<String> =
+        presets.iter().map(|p| p.name.clone()).collect();
+    let (ok, dup, failed) = crate::kpp::import_files(&paths, presets);
+    for p in presets.iter_mut() {
+        if !before.contains(&p.name) && p.bank.is_empty() {
+            p.bank = "krita".into();
+        }
+    }
+    let purged = purge_unreal(presets);
+    KritaScan { ok, dup, failed, purged }
+}
+
 /// Every bank present, with its preset count. Bankless presets group
 /// under "" (shown as "unsorted").
 pub fn banks(presets: &[BrushPreset]) -> Vec<(String, usize)> {
@@ -471,6 +499,28 @@ pub fn banks(presets: &[BrushPreset]) -> Vec<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The installed-Krita reinstall keeps only brushes our engine paints,
+    /// banks them as "krita", leaves hand-made presets alone, and a second
+    /// run adds nothing. Skips on a machine without Krita.
+    #[test]
+    fn import_installed_krita_keeps_only_real_brushes_once() {
+        if crate::kpp::installed_krita_paths().is_empty() {
+            eprintln!("no Krita installed — skipped");
+            return;
+        }
+        let mine = BrushPreset { name: "my own brush".into(), ..Default::default() };
+        let mut presets = vec![mine.clone()];
+        let first = import_installed_krita(&mut presets);
+        assert!(first.ok > 50, "Krita ships many paint brushes: {first:?}");
+        assert!(presets.iter().all(|p| !crate::kpp::is_unreal(p)));
+        assert!(presets.iter().any(|p| p.name == mine.name && p.bank.is_empty()));
+        assert!(presets.iter().filter(|p| p.name != mine.name).all(|p| p.bank == "krita"));
+        let n = presets.len();
+        let second = import_installed_krita(&mut presets);
+        assert_eq!(second.ok, 0, "{second:?}");
+        assert_eq!(presets.len(), n);
+    }
 
     #[test]
     fn unpackbits_literal_and_run() {
