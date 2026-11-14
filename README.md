@@ -6,7 +6,7 @@ engine that imports Krita, Photoshop and Procreate brushes, a Timing sheet
 that works like the paper timesheets, effects that look the same on screen
 and in the delivery, and a shared drawing session over your network.
 
-Version 0.6.2.
+Version 0.6.3.
 
 ## What's new in the look
 

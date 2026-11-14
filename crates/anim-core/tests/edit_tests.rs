@@ -342,6 +342,120 @@ fn undo_refuses_when_a_later_edit_shares_the_layer() {
     assert!(engine.undo_last_by(Some("kotori")).is_ok(), "now it is safe");
 }
 
+fn tiles_on(engine: &Engine, at: CutRef, d: anim_core::ids::DrawingId) -> usize {
+    engine
+        .project
+        .cut(at.scene, at.cut)
+        .unwrap()
+        .drawing(d)
+        .map(|dr| dr.layers.iter().map(|l| l.raster.tiles.len()).sum())
+        .unwrap_or(0)
+}
+
+/// Live session 2026-11-14: two artists on one layer. Strokes on
+/// DIFFERENT tiles never block each other's undo.
+#[test]
+fn undo_passes_a_later_edit_on_other_tiles_of_the_layer() {
+    let mut engine = Engine::new("session");
+    let (at, d, line, _color) = two_layer_rig(&mut engine);
+    let clean = engine.project.clone();
+    engine.set_author(Some("kotori".into()));
+    engine.apply("guest stroke", vec![dab(at, d, line, 10)]).unwrap();
+    engine.set_author(None);
+    engine.apply("host stroke", vec![dab(at, d, line, 300)]).unwrap();
+    engine.undo_last_by(Some("kotori")).expect("other tiles: safe");
+    assert_eq!(tiles_on(&engine, at, d), 1, "the host's tile survives");
+    engine.undo_last_by(None).unwrap();
+    assert_eq!(engine.project, clean);
+    engine.redo_last_by(Some("kotori")).unwrap();
+    engine.redo_last_by(None).unwrap();
+    assert_eq!(tiles_on(&engine, at, d), 2);
+}
+
+/// Live session 2026-11-14: each artist's FIRST stroke made the drawing
+/// ("paint (new drawing)") and was stuck once the other painted in it.
+/// Undo now takes back the ink and leaves the drawing for the others;
+/// once their work is gone, the drawing itself undoes.
+#[test]
+fn first_stroke_that_made_the_drawing_undoes_its_ink_first() {
+    let mut engine = Engine::new("session");
+    let scene = engine.add_scene("SC");
+    let cut = engine.add_cut(scene, "cut", 24).unwrap();
+    let at = CutRef { scene, cut };
+    let col = engine.add_column(at, "A").unwrap();
+    let d = engine.alloc_drawing_id();
+    let line = engine.alloc_layer_id();
+    let clean = engine.project.clone();
+    engine.set_author(Some("kotori".into()));
+    engine
+        .apply(
+            "paint (new drawing)",
+            vec![
+                Command::AddDrawing {
+                    at,
+                    id: d,
+                    index: 0,
+                    name: "1".into(),
+                    strokes: vec![],
+                    layers: vec![CelLayer::new(line, "line")],
+                },
+                Command::SetCell { at, column: col, frame: 0, key: Some(Exposure::Drawing(d)) },
+                dab(at, d, line, 10),
+            ],
+        )
+        .unwrap();
+    engine.set_author(None);
+    engine.apply("host stroke", vec![dab(at, d, line, 300)]).unwrap();
+
+    engine.undo_last_by(Some("kotori")).expect("the ink comes back off");
+    assert_eq!(tiles_on(&engine, at, d), 1, "only the host's ink is left");
+    assert!(
+        engine.undo_last_by(Some("kotori")).is_err(),
+        "the drawing stays while the host's ink is in it"
+    );
+    engine.undo_last_by(None).unwrap();
+    engine.undo_last_by(Some("kotori")).expect("now the drawing undoes");
+    assert_eq!(engine.project, clean, "back to before the first stroke");
+
+    engine.redo_last_by(Some("kotori")).unwrap();
+    engine.redo_last_by(Some("kotori")).unwrap();
+    assert_eq!(tiles_on(&engine, at, d), 1, "drawing and ink are back");
+}
+
+/// The same first stroke, but the host painted over the SAME tile:
+/// undoing it would wipe the host's pixels, so it still refuses.
+#[test]
+fn first_stroke_undo_refuses_when_the_host_painted_its_tile() {
+    let mut engine = Engine::new("session");
+    let scene = engine.add_scene("SC");
+    let cut = engine.add_cut(scene, "cut", 24).unwrap();
+    let at = CutRef { scene, cut };
+    let col = engine.add_column(at, "A").unwrap();
+    let d = engine.alloc_drawing_id();
+    let line = engine.alloc_layer_id();
+    engine.set_author(Some("kotori".into()));
+    engine
+        .apply(
+            "paint (new drawing)",
+            vec![
+                Command::AddDrawing {
+                    at,
+                    id: d,
+                    index: 0,
+                    name: "1".into(),
+                    strokes: vec![],
+                    layers: vec![CelLayer::new(line, "line")],
+                },
+                Command::SetCell { at, column: col, frame: 0, key: Some(Exposure::Drawing(d)) },
+                dab(at, d, line, 10),
+            ],
+        )
+        .unwrap();
+    engine.set_author(None);
+    engine.apply("host stroke", vec![dab(at, d, line, 20)]).unwrap();
+    assert!(engine.undo_last_by(Some("kotori")).is_err());
+}
+
 #[test]
 fn author_tags_never_reach_the_document() {
     // The file is a SQLite container (page state varies run to run), so the

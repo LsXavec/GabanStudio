@@ -124,13 +124,37 @@ impl History {
     }
 }
 
-/// SESSION v2: the (drawing, layer) a command writes to, when it has
-/// one. Steps with no such target are treated as touching everything
-/// (they can never be jumped over) — the conservative side.
-fn target_of(cmd: &Command) -> Option<(DrawingId, LayerId)> {
+/// SESSION v2: the (drawing, layer, tile) cells a command paints.
+fn tiles_of(cmd: &Command) -> Vec<(DrawingId, LayerId, raster::TileCoord)> {
     match cmd {
-        Command::PaintTiles { id, layer, .. } => Some((*id, *layer)),
-        _ => None,
+        Command::PaintTiles { id, layer, diff, .. } => {
+            diff.iter().map(|(c, _, _)| (*id, *layer, *c)).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn is_paint(cmd: &Command) -> bool {
+    matches!(cmd, Command::PaintTiles { .. })
+}
+
+/// Every drawing a command reads or writes (its exposures included), for
+/// "is anyone still using the drawing this step made".
+fn drawings_of(cmd: &Command) -> Vec<DrawingId> {
+    match cmd {
+        Command::AddDrawing { id, .. }
+        | Command::PaintTiles { id, .. }
+        | Command::RemoveDrawing { id, .. }
+        | Command::RenameDrawing { id, .. }
+        | Command::AddStroke { id, .. }
+        | Command::PopStroke { id, .. } => vec![*id],
+        Command::AddCelLayer { drawing, .. }
+        | Command::RemoveCelLayer { drawing, .. }
+        | Command::MoveCelLayer { drawing, .. }
+        | Command::SetCelLayerProps { drawing, .. }
+        | Command::SetDrawingDef { drawing, .. } => vec![*drawing],
+        Command::SetCell { key: Some(xsheet::Exposure::Drawing(d)), .. } => vec![*d],
+        _ => Vec::new(),
     }
 }
 
@@ -425,17 +449,79 @@ impl Engine {
             .iter()
             .rposition(|a| a.author.as_deref() == author)
             .ok_or(EngineError::NothingToUndo)?;
-        // Safety: every step ABOVE it must be disjoint in target.
-        let mine: Vec<(DrawingId, LayerId)> =
-            self.history.undo_stack[idx].redo.iter().filter_map(target_of).collect();
-        for later in self.history.undo_stack.iter().skip(idx + 1) {
-            for t in later.redo.iter().filter_map(target_of) {
-                if mine.contains(&t) {
-                    return Err(EngineError::InvalidCommand(
-                        "a later edit touches the same layer — undo refused".into(),
-                    ));
-                }
+        // Safety (live session 2026-11-14): judged per TILE, not per layer
+        // — two artists share a layer, and a tile diff restores exactly
+        // when no later step wrote that tile. A drawing this step made, or
+        // a vector stroke it added, stays while later steps use that
+        // drawing; a "paint (new drawing)" step then undoes its INK only
+        // and its creation stays on the stack for later.
+        let later_tiles: HashSet<(DrawingId, LayerId, raster::TileCoord)> = self
+            .history
+            .undo_stack
+            .iter()
+            .skip(idx + 1)
+            .flat_map(|a| a.redo.iter().flat_map(tiles_of))
+            .collect();
+        let later_drawings: HashSet<DrawingId> = self
+            .history
+            .undo_stack
+            .iter()
+            .skip(idx + 1)
+            .flat_map(|a| a.redo.iter().flat_map(drawings_of))
+            .collect();
+        let step = &self.history.undo_stack[idx];
+        if step.redo.iter().flat_map(tiles_of).any(|t| later_tiles.contains(&t)) {
+            return Err(EngineError::InvalidCommand(
+                "a later edit painted over the same spot — undo refused".into(),
+            ));
+        }
+        let pinned = step.redo.iter().any(|c| match c {
+            Command::AddDrawing { id, .. } | Command::AddStroke { id, .. } => {
+                later_drawings.contains(id)
             }
+            _ => false,
+        });
+        if pinned {
+            let ink_only_splits = step.redo.iter().any(is_paint)
+                && step.redo.iter().all(|c| {
+                    is_paint(c)
+                        || matches!(
+                            c,
+                            Command::AddDrawing { .. }
+                                | Command::SetCell { .. }
+                                | Command::SetDrawingDef { .. }
+                        )
+                });
+            if !ink_only_splits {
+                return Err(EngineError::InvalidCommand(
+                    "another artist is drawing in this drawing — undo refused".into(),
+                ));
+            }
+            // Split: the ink goes to redo; the creation stays applied.
+            let step = &mut self.history.undo_stack[idx];
+            let (ink_redo, rest_redo): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut step.redo).into_iter().partition(is_paint);
+            let (ink_undo, rest_undo): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut step.undo).into_iter().partition(is_paint);
+            step.redo = rest_redo;
+            step.undo = rest_undo;
+            let ink = Applied {
+                label: step.label.clone(),
+                redo: ink_redo,
+                undo: ink_undo,
+                author: step.author.clone(),
+                serial: 0,
+            };
+            if let Err(e) = self.replay(&ink.undo) {
+                let step = &mut self.history.undo_stack[idx];
+                step.redo.extend(ink.redo);
+                step.undo.splice(0..0, ink.undo);
+                return Err(e);
+            }
+            let label = ink.label.clone();
+            self.history.redo_stack.push(ink);
+            self.history.reserial_from(idx);
+            return Ok(label);
         }
         let on_top = idx + 1 == self.history.undo_stack.len();
         let step = self
