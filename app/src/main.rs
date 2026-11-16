@@ -28,6 +28,8 @@ mod kpp;
 mod bplist;
 mod brushbank;
 mod kritares;
+#[cfg(test)]
+mod kritaref;
 mod lesson;
 mod lessons;
 mod manga_tools;
