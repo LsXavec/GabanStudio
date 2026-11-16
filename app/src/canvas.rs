@@ -3901,7 +3901,9 @@ impl CanvasView {
         // while typing, playing, mid-stroke, or in composite review. The
         // rail's Flip key is the same hold for a hand on the pen.
         let r_down = ui.input(|i| i.key_down(egui::Key::R)) && !ui.ctx().egui_wants_keyboard_input();
-        self.flip_held = (r_down || self.rail_flip)
+        // Shift+Space+R is the turn's reset (the Space hand below), not the flip.
+        let turn_reset = ui.input(|i| i.key_down(egui::Key::Space) && i.modifiers.shift);
+        self.flip_held = ((r_down && !turn_reset) || self.rail_flip)
             && !self.stroke_active()
             && !state.view.playing
             && !self.composite_view;
@@ -3967,6 +3969,12 @@ impl CanvasView {
         if hand {
             let m = ui.input(|i| i.modifiers);
             let pointer = response.interact_pointer_pos();
+            // Shift+Space+R: the turn goes back upright.
+            if space_hand && m.shift && ui.input(|i| i.key_pressed(egui::Key::R)) {
+                self.hand_turn = None;
+                self.set_view_rotation(0.0);
+                crate::shortcuts::note_hand_drag(ui.ctx());
+            }
             if response.dragged_by(egui::PointerButton::Primary) {
                 // Only a Space hold has a tap to swallow.
                 if space_hand {
@@ -8880,6 +8888,27 @@ mod viewnav_tests {
         assert!(h.editor().canvas.stroke_tap.is_empty(), "the zoom inks nothing");
         assert_eq!(strokes_on_frame(&h), strokes0);
         assert!(!h.state().view.playing, "a dragged hold is not a tap");
+    }
+
+    /// Shift+Space+R turns the view back upright (the Shift+Space turn's
+    /// reset): no flip, no playback, no ink.
+    #[test]
+    fn viewnav_shift_space_r_resets_the_turn() {
+        let mut h = harness();
+        let c = h.editor().canvas.dbg_rect.center();
+        h.set_mods(egui::Modifiers::SHIFT);
+        h.hold_key(Key::Space);
+        h.drag_path(&[c + vec2(100.0, 0.0), c + vec2(80.0, 60.0), c + vec2(0.0, 100.0)]);
+        assert!(h.editor().canvas.rotation_deg.abs() > 30.0, "the turn turned");
+        h.hold_key(Key::R);
+        h.run();
+        assert!(!h.editor().canvas.flip_held, "R under Shift+Space is the reset, not the flip");
+        assert_eq!(h.editor().canvas.rotation_deg, 0.0, "upright again");
+        h.release_key(Key::R);
+        h.release_key(Key::Space);
+        h.set_mods(egui::Modifiers::NONE);
+        assert!(!h.state().view.playing, "the reset is not a Space tap");
+        assert!(h.editor().canvas.stroke_tap.is_empty());
     }
 
     #[test]
