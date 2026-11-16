@@ -59,6 +59,11 @@ pub fn parse_kpp(bytes: &[u8], fallback_name: &str) -> Option<BrushPreset> {
         flow,
         opacity,
         engine: parse_engine(&xml),
+        // BF3: the preset's own sensor curves are its pressure dynamics
+        // (Krita: size = diameter x SizeSensor(p), constant when the gate is
+        // off); Gaban's pen-curve size on top squared the pressure.
+        dyn_size: false,
+        dyn_opacity: false,
         ..Default::default()
     })
 }
@@ -175,9 +180,12 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
         } else {
             (None, 1.0, 0.0)
         };
+    let auto_spacing = (attr_str(&bd, "useAutoSpacing").as_deref() == Some("1"))
+        .then(|| attr_f32(&bd, "autoSpacingCoeff").unwrap_or(1.0).clamp(0.01, 10.0));
     Some(EngineDef {
         engine,
         spacing,
+        auto_spacing,
         auto,
         tip_key,
         curves,
@@ -750,20 +758,24 @@ fn attr_f32(xml: &str, key: &str) -> Option<f32> {
 
 /// `<param name="KEY" ...>VALUE</param>` — value is the element text.
 fn param_f32(xml: &str, key: &str) -> Option<f32> {
-    let pat = format!("name=\"{key}\"");
-    let i = xml.find(&pat)?;
-    let rest = &xml[i..];
-    let gt = rest.find('>')?;
-    let after = &rest[gt + 1..];
-    let end = after.find('<')?;
-    // Some params wrap the value in CDATA.
-    let text = after[..end].trim().trim_start_matches("<![CDATA[").trim();
-    text.parse().ok()
+    // BF3: through param_str, which strips CDATA (Krita 5 wraps numbers in
+    // it; the old scan stopped at its `<` and every such value read None).
+    param_str(xml, key)?.trim().parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BF3: Krita 5 writes numbers as CDATA (airbrush_soft OpacityValue
+    /// `<![CDATA[0.2]]>`); both forms read the same.
+    #[test]
+    fn param_f32_reads_cdata_and_plain_numbers() {
+        let x = "<param type=\"string\" name=\"OpacityValue\"><![CDATA[0.2]]></param>\
+                 <param type=\"internal\" name=\"FlowValue\">0.5</param>";
+        assert_eq!(param_f32(x, "OpacityValue"), Some(0.2));
+        assert_eq!(param_f32(x, "FlowValue"), Some(0.5));
+    }
 
     /// Machine-dependent smoke: when a Krita install is present, its
     /// bundles must actually yield presets through the real import path

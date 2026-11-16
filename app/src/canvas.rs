@@ -5985,8 +5985,14 @@ impl CanvasView {
                 } else {
                     skipped += 1;
                 }
-                // Spacing from the preset (fraction of diameter).
-                let step = (spacing_frac * (2.0 * r)).max(0.75);
+                // Spacing from the preset (fraction of diameter, or Krita's
+                // auto spacing); Krita's 0.5 px floor (MIN_DISTANCE_SPACING).
+                let diam = 2.0 * r;
+                let step = match eng.and_then(|e| e.auto_spacing) {
+                    Some(k) => k * if diam < 1.0 { diam } else { diam.sqrt() },
+                    None => spacing_frac * diam,
+                }
+                .max(if eng.is_some() { 0.5 } else { 0.75 });
                 d += step;
             }
             carry = d - len;

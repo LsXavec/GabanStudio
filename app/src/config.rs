@@ -2216,6 +2216,10 @@ pub struct EngineDef {
     /// Dab spacing as a fraction of diameter (Krita Brush@spacing).
     #[serde(default = "d_spacing")]
     pub spacing: f32,
+    /// BF3: Krita auto spacing (Brush@useAutoSpacing) with its coefficient:
+    /// spacing px = coeff x (d < 1 ? d : sqrt d) instead of spacing x d.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_spacing: Option<f32>,
     /// Generated tip (MaskGenerator) — rasterized to a mask at arm.
     #[serde(default)]
     pub auto: Option<AutoTip>,

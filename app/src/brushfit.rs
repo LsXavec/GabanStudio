@@ -83,14 +83,41 @@ fn param_true(xml: &str, key: &str) -> bool {
 }
 
 /// A pressure sensor's curve, when its gate is on.
-fn sensor(xml: &str, gate: &str, key: &str) -> Option<Spline> {
+/// A size/opacity/flow sensor: Krita's pressure, or "fuzzy" (fuzzy dab: a
+/// fresh uniform value per dab, KisDynamicSensorFuzzy). Other ids are not
+/// modelled here (none in the fixtures; `from_xml` panics on one).
+struct Sensor {
+    fuzzy: bool,
+    spline: Spline,
+}
+
+impl Sensor {
+    /// The curve's value for dab `idx` at pressure `p`.
+    fn value(&self, p: f64, idx: usize) -> f64 {
+        let x = if self.fuzzy { splitmix01(idx as u64) } else { p };
+        self.spline.value(x)
+    }
+}
+
+/// A deterministic uniform 0..1 per dab index (the reference's own random
+/// stream; Gaban's differs, so fuzzy presets compare by their means).
+fn splitmix01(i: u64) -> f64 {
+    let mut z = i.wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+fn sensor(xml: &str, gate: &str, key: &str) -> Option<Sensor> {
     if !param_true(xml, gate) {
         return None;
     }
     let s = param(xml, key)?;
+    let id = attr(&s, "id").unwrap_or_default();
+    assert!(id == "pressure" || id == "fuzzy", "{key}: sensor {id} not modelled by brushfit");
     let c = &s[s.find("<curve>")? + 7..s.find("</curve>")?];
     let pts = kritaref::parse_curve(c);
-    (pts.len() >= 2).then(|| Spline::new(&pts))
+    (pts.len() >= 2).then(|| Sensor { fuzzy: id == "fuzzy", spline: Spline::new(&pts) })
 }
 
 /// What Krita paints from one preset (paintbrush model, rotation 0).
@@ -105,9 +132,9 @@ struct KritaPreset {
     isotropic: bool,
     opacity: f64,
     flow: f64,
-    size_s: Option<Spline>,
-    opacity_s: Option<Spline>,
-    flow_s: Option<Spline>,
+    size_s: Option<Sensor>,
+    opacity_s: Option<Sensor>,
+    flow_s: Option<Sensor>,
 }
 
 impl KritaPreset {
@@ -150,23 +177,30 @@ impl KritaPreset {
         }
     }
 
-    fn dab_diameter(&self, p: f64) -> f64 {
-        self.diameter * self.size_s.as_ref().map_or(1.0, |s| s.value(p))
+    fn dab_diameter(&self, p: f64, idx: usize) -> f64 {
+        self.diameter * self.size_s.as_ref().map_or(1.0, |s| s.value(p, idx))
     }
 
-    fn spacing_at(&self, p: f64) -> (f64, f64) {
-        let d = self.dab_diameter(p);
+    /// The spacing after dab `idx` (Krita reads it from the dab just painted).
+    fn spacing_at(&self, p: f64, idx: usize) -> (f64, f64) {
+        let d = self.dab_diameter(p, idx);
         kritaref::effective_spacing(d, d * self.ratio, self.isotropic, self.spacing, self.auto_spacing, self.auto_coeff)
     }
 
     /// The stroke merged onto an empty layer, alpha 0..1, and the dab centres.
     fn paint(&self, pts: &[Pt]) -> (Vec<f32>, Vec<[f64; 2]>) {
-        let dabs = kritaref::dab_walk(pts, |p| self.spacing_at(p));
+        // dab_walk asks for the spacing once per painted dab, in order.
+        let n = std::cell::Cell::new(0usize);
+        let dabs = kritaref::dab_walk(pts, |p| {
+            let i = n.get();
+            n.set(i + 1);
+            self.spacing_at(p, i)
+        });
         let mut buf = StrokeBuffer::new(W, H);
-        for d in &dabs {
-            let o = self.opacity_s.as_ref().map_or(1.0, |s| s.value(d.p));
-            let f = self.flow * self.flow_s.as_ref().map_or(1.0, |s| s.value(d.p));
-            buf.dab(&self.mask, d.x, d.y, self.dab_diameter(d.p), o, f);
+        for (i, d) in dabs.iter().enumerate() {
+            let o = self.opacity_s.as_ref().map_or(1.0, |s| s.value(d.p, i));
+            let f = self.flow * self.flow_s.as_ref().map_or(1.0, |s| s.value(d.p, i));
+            buf.dab(&self.mask, d.x, d.y, self.dab_diameter(d.p, i), o, f);
         }
         (buf.merged(self.opacity), dabs.iter().map(|d| [d.x, d.y]).collect())
     }
@@ -473,6 +507,53 @@ fn brushfit_harness_reads_a_synthetic_round_brush() {
     // is clear, so the half-maximum width of a 24 px hard round is ~23.
     assert!((m.widths[1] - 23.0).abs() <= 0.5, "kritaref hard round 24 measures {}", m.widths[1]);
     assert!((m.spacing - 6.0).abs() < 1e-6, "spacing 0.25 x 24 = 6, got {}", m.spacing);
+}
+
+/// One preset measured on both sides: (krita, gaban, auto tip).
+fn measure_pair(id: &str) -> (Measure, Measure, bool) {
+    let (ramp, line) = strokes();
+    let bytes = std::fs::read(fixture_dir().join(format!("{id}.kpp"))).unwrap();
+    let gp = crate::kpp::parse_kpp(&bytes, id).expect("parse_kpp");
+    let kp = KritaPreset::from_xml(&preset_xml(&bytes).expect("preset xml"), gp.size_px as f64);
+    let (kr, _) = kp.paint(&krita_pts(&ramp));
+    let (kl, kc) = kp.paint(&krita_pts(&line));
+    let (gr, _) = gaban_paint(&gp, &gaban_pts(&ramp));
+    let (gl, gc) = gaban_paint(&gp, &gaban_pts(&line));
+    (measure(&kr, &kl, &kc), measure(&gr, &gl, &gc), kp.auto_tip)
+}
+
+/// BF3 targets: |g/k - 1| within `rel`, every miss listed.
+fn misses(rel: f64, pick: impl Fn(&Measure) -> Vec<(&'static str, f64)>, only_auto: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in PRESETS {
+        let (k, g, auto) = measure_pair(id);
+        if only_auto && !auto {
+            continue;
+        }
+        for ((name, kv), (_, gv)) in pick(&k).into_iter().zip(pick(&g)) {
+            if kv.abs() > 1e-9 && (gv / kv - 1.0).abs() > rel {
+                out.push(format!("{id} {name}: gaban {gv:.2} krita {kv:.2}"));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn brushfit_spacing_matches_krita() {
+    let m = misses(0.05, |m| vec![("spacing", m.spacing)], false);
+    assert!(m.is_empty(), "spacing off by more than 5 %:\n{}", m.join("\n"));
+}
+
+#[test]
+#[ignore = "BF3 LEFT: red until Krita's cubic sensor curves and CircleMask fade/soft curve are ported (HANDOFF.md)"]
+fn brushfit_auto_tip_widths_match_krita() {
+    let m = misses(
+        0.05,
+        |m| vec![("w25", m.widths[0]), ("w50", m.widths[1]), ("w75", m.widths[2]), ("w95", m.widths[3])],
+        true,
+    );
+    assert!(m.is_empty(), "auto-tip width off by more than 5 %:\n{}", m.join("\n"));
 }
 
 #[test]
