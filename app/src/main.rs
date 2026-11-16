@@ -27,6 +27,8 @@ mod icons;
 mod kpp;
 mod bplist;
 mod brushbank;
+#[cfg(test)]
+mod brushfit;
 mod kritares;
 #[cfg(test)]
 mod kritaref;

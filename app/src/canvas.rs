@@ -7694,6 +7694,23 @@ pub fn pick_chip(state: &AppState, x: f32, y: f32, composite: bool) -> Option<[u
     Some([law.decode(px[0] / a), law.decode(px[1] / a), law.decode(px[2] / a)])
 }
 
+/// BF2 brush fidelity: the dabs the stroke path builds for `pts` with
+/// preset `p` armed (tip on when the preset has an auto tip or a stamp,
+/// as arming on a paint layer does; real pen force, so no no-force cap).
+#[cfg(test)]
+pub(crate) fn dabs_for_preset(
+    p: &crate::config::BrushPreset,
+    pts: &[StrokePoint],
+) -> Vec<crate::paint::Dab> {
+    let mut v = CanvasView::new();
+    v.apply_preset(p);
+    v.tip_active = p.engine.as_ref().is_some_and(|e| e.tip_key.is_some() || e.auto.is_some());
+    v.cur_some = pts.len() as u32;
+    v.current = pts.to_vec();
+    v.extend_stroke_dabs();
+    v.dab_cache.clone()
+}
+
 impl CanvasView {
     /// The brush colour as the stored (straight) value. ONE encode for the
     /// whole app: [`ColorLaw::encode`] is the same function Solid nodes
