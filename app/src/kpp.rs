@@ -91,6 +91,9 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
                 vfade: attr_f32(&bd, "vfade").unwrap_or(1.0).clamp(0.0, 1.0),
                 spikes: attr_f32(&bd, "spikes").unwrap_or(2.0).max(2.0) as u32,
                 soft: attr_str(&bd, "id").as_deref() == Some("soft"),
+                softness_curve: attr_str(&bd, "softness_curve")
+                    .map(|c| parse_curve_points(&format!("<curve>{c}</curve>")))
+                    .unwrap_or_default(),
             }),
             None,
         )

@@ -2292,6 +2292,10 @@ pub struct AutoTip {
     /// The "soft" MaskGenerator (gaussian-ish falloff).
     #[serde(default)]
     pub soft: bool,
+    /// The soft generator's softness_curve points (Krita's KisCubicCurve,
+    /// x = squared normalized distance, y = opacity); empty = Krita's default.
+    #[serde(default)]
+    pub softness_curve: Vec<[f32; 2]>,
 }
 
 fn d_two() -> u32 {

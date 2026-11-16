@@ -7468,24 +7468,45 @@ pub(crate) fn hash01(idx: u32, salt: u32) -> f32 {
     (x as f32) / (u32::MAX as f32)
 }
 
-/// Piecewise-linear through the preset's own curve points; empty = the
-/// sensor's raw value (identity — no invented defaults, room NEVER-DO 5).
+/// Krita's curve through the preset's own points (KisCubicCurve: a natural
+/// cubic spline, x clamped to the points' range, y clamped to 0..1); empty =
+/// the sensor's raw value (identity — no invented defaults, room NEVER-DO 5).
+/// Points must be sorted by x (parse_curve_points sorts them).
 pub(crate) fn curve_eval(points: &[[f32; 2]], x: f32) -> f32 {
     if points.len() < 2 {
         return x.clamp(0.0, 1.0);
     }
-    let x = x.clamp(0.0, 1.0);
-    if x <= points[0][0] {
-        return points[0][1];
-    }
-    for w in points.windows(2) {
-        if x <= w[1][0] {
-            let span = (w[1][0] - w[0][0]).max(1e-6);
-            let t = (x - w[0][0]) / span;
-            return w[0][1] + (w[1][1] - w[0][1]) * t;
+    // KisCubicSpline::createSpline: second derivatives c (0 at both ends)
+    // from the tridiagonal system, solved by the Thomas algorithm.
+    let n = points.len() - 1;
+    let px = |i: usize| points[i][0] as f64;
+    let py = |i: usize| points[i][1] as f64;
+    let h: Vec<f64> = (0..n).map(|i| (px(i + 1) - px(i)).max(1e-9)).collect();
+    let mut c = vec![0.0f64; n + 1];
+    let m = n - 1;
+    if m > 0 {
+        let mut cp = vec![0.0f64; m];
+        let mut dp = vec![0.0f64; m];
+        for i in 0..m {
+            let diag = 2.0 * (h[i] + h[i + 1]);
+            let rhs = 6.0 * ((py(i + 2) - py(i + 1)) / h[i + 1] - (py(i + 1) - py(i)) / h[i]);
+            let (lo, prev_cp, prev_dp) = if i == 0 { (0.0, 0.0, 0.0) } else { (h[i], cp[i - 1], dp[i - 1]) };
+            let den = diag - lo * prev_cp;
+            cp[i] = if i + 1 < m { h[i + 1] / den } else { 0.0 };
+            dp[i] = (rhs - lo * prev_dp) / den;
+        }
+        c[m] = dp[m - 1];
+        for i in (0..m - 1).rev() {
+            c[i + 1] = dp[i] - cp[i] * c[i + 2];
         }
     }
-    points[points.len() - 1][1]
+    // KisCubicSpline::getValue (findRegion) on the clamped x.
+    let x = (x as f64).clamp(px(0), px(n));
+    let i = (0..n).find(|&k| x < px(k) + h[k]).unwrap_or(n - 1);
+    let d = (c[i + 1] - c[i]) / h[i];
+    let b = -0.5 * c[i] * h[i] - d * h[i] * h[i] / 6.0 + (py(i + 1) - py(i)) / h[i];
+    let t = x - px(i);
+    (py(i) + b * t + 0.5 * c[i] * t * t + d * t * t * t / 6.0).clamp(0.0, 1.0) as f32
 }
 
 /// A sensor's 0..1 input for one dab. pressure = the pen; fuzzy = the
@@ -7546,46 +7567,65 @@ pub(crate) fn load_cache_png(path: &std::path::Path) -> Option<(u32, u32, Vec<u8
 }
 
 /// Rasterize a Krita MaskGenerator recipe to a tip mask (white + alpha).
-/// Deterministic pure function of the recipe. The model: unit disc (or
-/// box) squashed by ratio, spiked by the regular-polygon envelope when
-/// spikes > 2, alpha 1 inside the fade start and falling to the rim —
-/// fade 1.0 = crisp edge, 0.0 = cone from the centre; "soft" uses a
-/// squared falloff. An approximation of Krita's generator, said plainly
-/// in the room log.
+/// Deterministic pure function of the recipe. Circles port Krita 5.2:
+/// "default" is KisCircleMaskGenerator::valueAt (n = squared norm, nf the
+/// same through hfade/vfade, alpha = 1 - n(nf-1)/(nf-n); fade 0 = 1 - n),
+/// "soft" is KisCurveCircleMaskGenerator (alpha = softness_curve(n)), and
+/// spikes fold the angle into one spike before the ratio (fixRotation).
+/// Not carried by a fixed-size mask: Krita's antialiasEdges +1 px and its
+/// pixel-unit fade at hfade 0 depend on the dab's diameter. "rect" keeps
+/// the older approximate box fade.
 pub(crate) fn rasterize_auto_tip(a: &crate::config::AutoTip, n: u32) -> (u32, u32, Vec<u8>) {
     let ratio = a.ratio.clamp(0.05, 1.0);
     let is_rect = a.shape == "rect";
-    let fade = |d: f32, f: f32| -> f32 {
-        let f = f.clamp(0.0, 0.995);
-        if a.soft {
-            let t = (1.0 - d).clamp(0.0, 1.0);
-            (t * t).min(1.0)
-        } else {
-            ((1.0 - d) / (1.0 - f)).clamp(0.0, 1.0)
+    let soft_curve: &[[f32; 2]] = if a.softness_curve.len() >= 2 {
+        &a.softness_curve
+    } else {
+        &[[0.0, 1.0], [1.0, 0.0]]
+    };
+    // KisMaskGenerator::fixRotation for spikes > 2.
+    let fold = |mut xr: f32, mut yr: f32| -> (f32, f32) {
+        if a.spikes > 2 {
+            let spike = std::f32::consts::PI / a.spikes as f32;
+            let (cs, ss) = ((-2.0 * spike).cos(), (-2.0 * spike).sin());
+            let mut angle = yr.atan2(xr);
+            while angle > spike {
+                let (sx, sy) = (xr, yr);
+                xr = cs * sx - ss * sy;
+                yr = ss * sx + cs * sy;
+                angle -= 2.0 * spike;
+            }
         }
+        (xr, yr)
     };
     let mut rgba = vec![0u8; (n * n * 4) as usize];
     for y in 0..n {
         for x in 0..n {
             let u = (x as f32 + 0.5) / n as f32 * 2.0 - 1.0;
             let v = (y as f32 + 0.5) / n as f32 * 2.0 - 1.0;
-            let (ex, ey) = (u, v / ratio);
-            let mut d = if is_rect {
-                ex.abs().max(ey.abs())
-            } else {
-                (ex * ex + ey * ey).sqrt()
-            };
-            if a.spikes > 2 && !is_rect {
-                let m = a.spikes as f32;
-                let a0 = std::f32::consts::PI / m;
+            let alpha = if is_rect {
+                let (ex, ey) = (u, v / ratio);
+                let d = ex.abs().max(ey.abs());
                 let th = ey.atan2(ex);
-                let env = (a0.cos() / ((th.rem_euclid(2.0 * a0)) - a0).cos()).abs();
-                d /= env.max(1e-3);
-            }
-            // Direction-blended fade start (h across, v along).
-            let th = ey.atan2(ex);
-            let f = a.hfade * th.cos().abs() + a.vfade * th.sin().abs();
-            let alpha = if d >= 1.0 { 0.0 } else { fade(d, f.clamp(0.0, 1.0)) };
+                let f = (a.hfade * th.cos().abs() + a.vfade * th.sin().abs()).clamp(0.0, 0.995);
+                if d >= 1.0 { 0.0 } else { ((1.0 - d) / (1.0 - f)).clamp(0.0, 1.0) }
+            } else {
+                let (xr, yr) = fold(u, v.abs());
+                let (ex, ey) = (xr, yr / ratio);
+                let nn = ex * ex + ey * ey;
+                if nn > 1.0 {
+                    0.0
+                } else if a.soft {
+                    curve_eval(soft_curve, nn)
+                } else {
+                    // Fade 0 is Krita's pixel-unit coefficient: nf grows with the
+                    // dab, so its limit (nf >> n) is used: alpha -> 1 - n.
+                    let fx = ex / if a.hfade > 0.0 { a.hfade } else { 1e-4 };
+                    let fy = ey / if a.vfade > 0.0 { a.vfade } else { 1e-4 };
+                    let nf = fx * fx + fy * fy;
+                    if nf < 1.0 { 1.0 } else { 1.0 - nn * (nf - 1.0) / (nf - nn).max(1e-9) }
+                }
+            };
             let i = ((y * n + x) * 4) as usize;
             rgba[i] = 255;
             rgba[i + 1] = 255;
@@ -8336,9 +8376,27 @@ mod engine_tests {
     fn curve_eval_matches_its_points() {
         let pts = [[0.0, 0.0], [0.5, 0.8], [1.0, 1.0]];
         assert_eq!(curve_eval(&pts, 0.0), 0.0);
-        assert!((curve_eval(&pts, 0.25) - 0.4).abs() < 1e-5);
         assert!((curve_eval(&pts, 0.5) - 0.8).abs() < 1e-5);
         assert_eq!(curve_eval(&pts, 1.0), 1.0);
+        // BF3b: Krita's curves are cubic (KisCubicCurve), not linear; match
+        // the test-only kritaref::Spline on the reference presets' curves.
+        for s in [
+            "0,0.389558;0.305221,0.658635;1,1;",
+            "0,0;0.562249,0.176707;0.895582,0.682731;1,1;",
+            "0,0.495496;0.253012,0.198198;0.506024,0.0726474;1,0;",
+            "0,0;0.124498,0.341365;0.502008,0.875502;1,1;",
+            "0,0.35533;0.511943,0.486917;",
+        ] {
+            let kp = crate::kritaref::parse_curve(s);
+            let k = crate::kritaref::Spline::new(&kp);
+            let gp: Vec<[f32; 2]> = kp.iter().map(|p| [p.0 as f32, p.1 as f32]).collect();
+            for i in 0..=100 {
+                let x = i as f64 / 100.0;
+                let (g, r) = (curve_eval(&gp, x as f32) as f64, k.value(x));
+                assert!((g - r).abs() < 1e-4, "{s} at {x}: gaban {g} krita {r}");
+            }
+        }
+        assert!((curve_eval(&pts, 0.25) - 0.4).abs() > 0.01, "cubic, not the old linear");
         // Empty curve = the sensor's raw value.
         assert_eq!(curve_eval(&[], 0.37), 0.37);
     }
@@ -8352,6 +8410,7 @@ mod engine_tests {
             vfade: 0.4,
             spikes: 5,
             soft: false,
+            softness_curve: Vec::new(),
         };
         let (w, h, m1) = rasterize_auto_tip(&a, 64);
         let (_, _, m2) = rasterize_auto_tip(&a, 64);

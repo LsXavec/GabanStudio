@@ -545,15 +545,58 @@ fn brushfit_spacing_matches_krita() {
     assert!(m.is_empty(), "spacing off by more than 5 %:\n{}", m.join("\n"));
 }
 
+fn width_pick(m: &Measure) -> Vec<(&'static str, f64)> {
+    vec![("w25", m.widths[0]), ("w50", m.widths[1]), ("w75", m.widths[2]), ("w95", m.widths[3])]
+}
+
 #[test]
-#[ignore = "BF3 LEFT: red until Krita's cubic sensor curves and CircleMask fade/soft curve are ported (HANDOFF.md)"]
+#[ignore = "BF3b LEFT: airbrush_soft w25..w75 -10..-21 % is compositing (Krita alpha-darkens each dab toward its \
+            sensor opacity; Gaban's wet buffer is over: an alpha-darken CPU mirror gave w50 -1.5 %), ink_pressure \
+            w25..w75 is sub-pixel (dabs 0.05..4 px: Krita's +1 px antialias and supersampling, Gaban's 0.7 px floor)"]
 fn brushfit_auto_tip_widths_match_krita() {
-    let m = misses(
-        0.05,
-        |m| vec![("w25", m.widths[0]), ("w50", m.widths[1]), ("w75", m.widths[2]), ("w95", m.widths[3])],
-        true,
-    );
+    let m = misses(0.05, width_pick, true);
     assert!(m.is_empty(), "auto-tip width off by more than 5 %:\n{}", m.join("\n"));
+}
+
+/// BF3b: the auto-tip presets whose dabs are plain over-composited and
+/// wider than a few px already match (cubic size curves, Krita's mask).
+#[test]
+fn brushfit_auto_tip_widths_match_krita_basic_round_smudge() {
+    let m: Vec<String> =
+        misses(0.05, width_pick, true).into_iter().filter(|l| l.starts_with("basic_round") || l.starts_with("smudge")).collect();
+    assert!(m.is_empty(), "auto-tip width off by more than 5 %:\n{}", m.join("\n"));
+}
+
+/// BF3b: rasterize_auto_tip is Krita's circle mask (KisCircleMaskGenerator,
+/// KisCurveCircleMaskGenerator) wherever it does not depend on the dab's
+/// pixel size: each auto preset's own mask, antialias off, a 300 px dab.
+#[test]
+fn brushfit_auto_tip_mask_matches_kritaref() {
+    let mut worst = Vec::new();
+    for id in PRESETS {
+        let bytes = std::fs::read(fixture_dir().join(format!("{id}.kpp"))).unwrap();
+        let gp = crate::kpp::parse_kpp(&bytes, id).unwrap();
+        let mut kp = KritaPreset::from_xml(&preset_xml(&bytes).unwrap(), gp.size_px as f64);
+        let Some(auto) = gp.engine.as_ref().and_then(|e| e.auto.as_ref()) else { continue };
+        kp.mask.antialias = false;
+        let (tw, th, tip) = crate::canvas::rasterize_auto_tip(auto, 256);
+        let dia = 300.0;
+        let mut max = (0.0f64, 0.0, 0.0);
+        for j in 0..40 {
+            for i in 0..40 {
+                let (x, y) = ((i as f64 + 0.5) / 40.0 - 0.5, (j as f64 + 0.5) / 40.0 - 0.5);
+                let kv = 1.0 - kp.mask.value_at(dia, x * dia, y * dia) as f64 / 255.0;
+                let gv = bilinear_alpha(&tip, tw as usize, th as usize, (x + 0.5) as f32, (y + 0.5) as f32) as f64;
+                if (gv - kv).abs() > max.0 {
+                    max = ((gv - kv).abs(), x, y);
+                }
+            }
+        }
+        if max.0 > 0.03 {
+            worst.push(format!("{id}: |gaban - krita| {:.3} at ({:.2}, {:.2})", max.0, max.1, max.2));
+        }
+    }
+    assert!(worst.is_empty(), "tip mask off by more than 0.03 alpha:\n{}", worst.join("\n"));
 }
 
 #[test]

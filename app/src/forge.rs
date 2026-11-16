@@ -61,6 +61,7 @@ fn blank_draft() -> BrushPreset {
                 vfade: 1.0,
                 spikes: 2,
                 soft: false,
+                softness_curve: Vec::new(),
             }),
             curves: vec![CurveDef {
                 target: "size".into(),
