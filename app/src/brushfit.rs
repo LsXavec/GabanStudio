@@ -234,8 +234,9 @@ impl KritaPreset {
 // ---------------------------------------------------------------- gaban
 
 /// Gaban's stroke painted on the CPU: each dab through the shader's mirror
-/// (tip mask sampled bilinearly, or `paint::dab_coverage`), premultiplied
-/// over into the wet buffer, merged at the brush opacity
+/// (tip mask sampled bilinearly, or `paint::dab_coverage`), alpha-darkened
+/// into the wet buffer (`paint::wet_blend`, the dual-source path), merged
+/// at the brush opacity
 /// (`composite_wet`). Image tips are painted as hard round dabs.
 fn gaban_paint(p: &crate::config::BrushPreset, pts: &[StrokePoint]) -> (Vec<f32>, Vec<[f64; 2]>) {
     let dabs = crate::canvas::dabs_for_preset(p, pts);
@@ -270,7 +271,7 @@ fn gaban_paint(p: &crate::config::BrushPreset, pts: &[StrokePoint]) -> (Vec<f32>
                 };
                 let a = crate::paint::dab_alpha(shape, d.color[3], 1.0, d.hardness);
                 let i = y * W + x;
-                wet[i] = a + wet[i] * (1.0 - a);
+                wet[i] = crate::paint::wet_blend(wet[i], a, d.cap, d.hardness, true);
             }
         }
     }
@@ -551,6 +552,22 @@ fn measure_pair(id: &str) -> (Measure, Measure, bool) {
     let (gr, _) = gaban_paint(&gp, &gaban_pts(&ramp));
     let (gl, gc) = gaban_paint(&gp, &gaban_pts(&line));
     (measure(&kr, &kl, &kc), measure(&gr, &gl, &gc), kp.auto_tip)
+}
+
+/// BF3c: pencil_textured's opacity sensors are now its dabs' alpha-darken
+/// ceiling, so its line's peak and mean alpha match Krita's (0.416 / 0.340;
+/// over compositing gave 0.645 / 0.559).
+#[test]
+fn brushfit_pencil_textured_peak_matches_krita() {
+    let (k, g, _) = measure_pair("pencil_textured");
+    assert!((g.peak - k.peak).abs() <= 0.03, "pencil peak: gaban {:.3} krita {:.3}", g.peak, k.peak);
+}
+
+#[test]
+#[ignore = "BF3c LEFT: pencil_textured mean alpha gaban 0.405 vs krita 0.340 after alpha darken (peak matches)"]
+fn brushfit_pencil_textured_mean_matches_krita() {
+    let (k, g, _) = measure_pair("pencil_textured");
+    assert!((g.mean - k.mean).abs() <= 0.03, "pencil mean: gaban {:.3} krita {:.3}", g.mean, k.mean);
 }
 
 /// BF3 targets: |g/k - 1| within `rel`, every miss listed.

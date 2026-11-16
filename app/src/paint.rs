@@ -101,6 +101,10 @@ pub struct Dab {
     /// engine is absent — and then the fragment math is the old body
     /// verbatim (NEVER-DO 1).
     pub tip: f32,
+    /// BF3c: the alpha-darken ceiling (Krita's dab opacity: the opacity
+    /// sensors) for an imported preset's dab, whose `color[3]` then carries
+    /// only the flow; 0 = plain over (every non-engine dab, unchanged).
+    pub cap: f32,
 }
 
 /// GM4: the `Dab::hardness` that marks an ALIASED dab (any value above
@@ -277,6 +281,7 @@ struct VsOut {
     @location(5) aspect: f32,
     @location(6) tip: f32,
     @location(7) center: vec2<f32>,
+    @location(8) cap: f32,
 };
 
 @vertex
@@ -289,6 +294,7 @@ fn vs_main(
     @location(4) dir: vec2<f32>,
     @location(5) aspect: f32,
     @location(6) tip: f32,
+    @location(7) cap: f32,
 ) -> VsOut {
     var corners = array<vec2<f32>, 4>(
     vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
@@ -314,11 +320,11 @@ fn vs_main(
     out.aspect = aspect;
     out.tip = tip;
     out.center = center;
+    out.cap = cap;
     return out;
 }
 
-@fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+fn dab_cover(in: VsOut) -> f32 {
     // Rotate local into the ellipse frame (major axis = dir), squash the
     // major coordinate by aspect: the radial falloff below then draws an
     // ellipse. dir=[1,0] aspect=1 reduces to the plain circle exactly.
@@ -371,9 +377,75 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         // every texel is 0 or 1 (CPU mirror: dab_alpha).
         a = select(0.0, 1.0, opa >= 0.5);
     }
+    return a;
+}
+
+// BF3c: the dab's alpha-darken ceiling, 1 when the dab is plain over
+// (cap 0) or aliased.
+fn dab_cap(in: VsOut) -> f32 {
+    return select(1.0, clamp(in.cap, 0.0, 1.0), in.cap > 0.0 && in.hardness <= 1.5);
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    // Over: an alpha-darken dab without dual-source blending is over at
+    // cover x ceiling (its pre-BF3c look).
+    let a = dab_cover(in) * dab_cap(in);
     return vec4<f32>(in.color.rgb * a, a);       // premultiplied
 }
 "#;
+
+/// BF3c: Krita's alpha darken (KoCompositeOpAlphaDarken) for the wet
+/// buffer, through dual-source blending: blend_src(0) is the dab at its
+/// ceiling (rgb x cap x k, cap x k), blend_src(1) the cover k, and the blend
+/// One / OneMinusSrc1 gives dst + (cap - dst) x k per channel, so
+/// overlapping dabs build toward the ceiling instead of toward 1. A plain
+/// over dab (cap 0) has cap 1 here: exactly premultiplied over. Appended
+/// to `SHADER` behind `enable dual_source_blending;`.
+const DARKEN_FS: &str = r#"
+struct DarkenOut {
+    @location(0) @blend_src(0) c: vec4<f32>,
+    @location(0) @blend_src(1) k: vec4<f32>,
+};
+
+@fragment
+fn fs_darken(in: VsOut) -> DarkenOut {
+    let k = dab_cover(in);
+    let cap = dab_cap(in);
+    var out: DarkenOut;
+    out.c = vec4<f32>(in.color.rgb * cap * k, cap * k);
+    out.k = vec4<f32>(k, k, k, k);
+    return out;
+}
+"#;
+
+/// BF3c: the blend `DARKEN_FS` is drawn with.
+const DARKEN_BLEND: wgpu::BlendState = wgpu::BlendState {
+    color: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrc1,
+        operation: wgpu::BlendOperation::Add,
+    },
+    alpha: wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::One,
+        dst_factor: wgpu::BlendFactor::OneMinusSrc1Alpha,
+        operation: wgpu::BlendOperation::Add,
+    },
+};
+
+/// BF3c: the wet-buffer blend's CPU mirror for one channel of alpha: `dst`
+/// the wet alpha, `k` the dab's cover (`dab_alpha`), `cap` its ceiling
+/// (`Dab::cap`, 0 = over). With dual-source blending (`dual`) the dab
+/// lerps toward its ceiling; without, it is over at cover x ceiling.
+pub fn wet_blend(dst: f32, k: f32, cap: f32, hardness: f32, dual: bool) -> f32 {
+    let c = if cap > 0.0 && hardness <= 1.5 { cap.clamp(0.0, 1.0) } else { 1.0 };
+    if dual {
+        c * k + dst * (1.0 - k)
+    } else {
+        let a = k * c;
+        a + dst * (1.0 - a)
+    }
+}
 
 /// Fullscreen pass: sample the wet buffer, scale by the stroke opacity (uniform
 /// multiply of a premultiplied color = correct opacity in linear space), blend
@@ -501,16 +573,29 @@ impl PaintLayer {
 
         // Brush = premultiplied "over" (adds ink); eraser = destination-out
         // (subtracts coverage). Same dab geometry/shader, different blend.
-        let pipeline = Self::make_dab_pipeline(
-            &device,
-            &pipeline_layout,
-            &shader,
-            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-        );
+        // BF3c: ink is alpha darken where the device has dual-source
+        // blending (`DARKEN_FS`; over for every cap-0 dab), else over.
+        let pipeline = if device.features().contains(wgpu::Features::DUAL_SOURCE_BLENDING) {
+            let darken = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("dab_darken_shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    format!("enable dual_source_blending;\n{SHADER}\n{DARKEN_FS}").into(),
+                ),
+            });
+            Self::make_dab_pipeline(&device, &pipeline_layout, &darken, DARKEN_BLEND, "fs_darken")
+        } else {
+            Self::make_dab_pipeline(
+                &device,
+                &pipeline_layout,
+                &shader,
+                wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+                "fs_main",
+            )
+        };
         let erase_pipeline =
-            Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ERASE_BLEND);
+            Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ERASE_BLEND, "fs_main");
         let alpha_lock_pipeline =
-            Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ALPHA_LOCK_BLEND);
+            Self::make_dab_pipeline(&device, &pipeline_layout, &shader, ALPHA_LOCK_BLEND, "fs_main");
         let filter = wgpu::FilterMode::Linear;
         // GM20: born frame-sized; the canvas's `ensure_size` moves it onto
         // the paper's layer rect.
@@ -805,6 +890,7 @@ impl PaintLayer {
         layout: &wgpu::PipelineLayout,
         shader: &wgpu::ShaderModule,
         blend: wgpu::BlendState,
+        fs_entry: &str,
     ) -> wgpu::RenderPipeline {
         let instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Dab>() as u64,
@@ -845,6 +931,11 @@ impl PaintLayer {
                     shader_location: 6,
                     format: wgpu::VertexFormat::Float32,
                 },
+                wgpu::VertexAttribute {
+                    offset: 48,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32,
+                },
             ],
         };
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -858,7 +949,7 @@ impl PaintLayer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: Some("fs_main"),
+                entry_point: Some(fs_entry),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: wgpu::TextureFormat::Rgba16Float,
                     blend: Some(blend),
@@ -2055,6 +2146,37 @@ mod viewnav_tests {
         )
         .validate(&module)
         .expect("SHADER validates");
+    }
+
+    /// BF3c: the dual-source darken shader parses and validates, and the
+    /// wet blend's mirror is Krita's alpha darken below the ceiling and
+    /// exactly premultiplied over for a cap-0 dab.
+    #[test]
+    fn bf3c_darken_shader_validates_and_wet_blend_is_alpha_darken() {
+        let src = format!("enable dual_source_blending;\n{SHADER}\n{DARKEN_FS}");
+        let module = naga::front::wgsl::parse_str(&src).expect("darken shader parses");
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .expect("darken shader validates");
+        // KoCompositeOpAlphaDarken, flow f, mask m, opacity o, dst d < o:
+        // d + (o - d) m f.
+        for (d, k, cap) in [(0.0f32, 0.5f32, 0.3f32), (0.1, 0.25, 0.6), (0.29, 1.0, 0.3)] {
+            let want = d + (cap - d) * k;
+            assert!((wet_blend(d, k, cap, 0.5, true) - want).abs() < 1e-6);
+            // Without dual source: over at k x cap.
+            assert!((wet_blend(d, k, cap, 0.5, false) - (k * cap + d * (1.0 - k * cap))).abs() < 1e-6);
+        }
+        // Dabs at one ceiling never pass it however many overlap.
+        let mut d = 0.0;
+        for _ in 0..200 {
+            d = wet_blend(d, 0.4, 0.3, 0.5, true);
+        }
+        assert!(d <= 0.3 + 1e-6 && d > 0.299, "builds to the ceiling, got {d}");
+        // Cap 0 and aliased dabs: plain over, both paths.
+        for dual in [true, false] {
+            assert_eq!(wet_blend(0.2, 0.5, 0.0, 0.5, dual), 0.5 + 0.2 * 0.5);
+            assert_eq!(wet_blend(0.2, 1.0, 0.3, ALIASED_HARDNESS, dual), 1.0);
+        }
     }
 
     #[test]

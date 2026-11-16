@@ -8131,8 +8131,9 @@ mod lighttable_tests {
                 _ => {}
             }
         }
-        assert!((1..=4).contains(&modules), "{modules} shader modules (4 before GM6)");
-        assert!(stages <= 8, "{stages} shader entry points (8 before GM6)");
+        // BF3c: +1 module, +1 entry point, the wet buffer's darken pass.
+        assert!((1..=5).contains(&modules), "{modules} shader modules (5 since BF3c's darken pass)");
+        assert!(stages <= 9, "{stages} shader entry points (9 since BF3c's darken pass)");
         assert_eq!(wgsl, 0, "no .wgsl files");
     }
 

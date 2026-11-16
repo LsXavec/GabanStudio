@@ -1960,6 +1960,7 @@ mod tests {
             dir: [1.0, 0.0],
             aspect: 1.0,
             tip: 0.0,
+            cap: 0.5,
         }];
         match dec_stroke(&enc_dabs(9, &dabs)) {
             Some(StrokeFrame::Dabs { stroke_id, dabs: d }) => {

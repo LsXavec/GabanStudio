@@ -2300,7 +2300,8 @@ mod tests {
         let core = concat!(env!("CARGO_MANIFEST_DIR"), "/../crates/anim-core/src");
         assert_eq!(count(core), (0, 0, 0), "the core holds no shader");
         let (modules, stages, wgsl) = count(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
-        assert!(modules <= 4 && stages <= 8 && wgsl == 0, "{modules} modules, {stages} entry points, {wgsl} .wgsl");
+        // BF3c: the wet buffer's darken pass is the fifth module, ninth stage.
+        assert!(modules <= 5 && stages <= 9 && wgsl == 0, "{modules} modules, {stages} entry points, {wgsl} .wgsl");
     }
 }
 

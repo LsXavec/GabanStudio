@@ -258,6 +258,9 @@ fn main() -> eframe::Result<()> {
         viewport: main_viewport(),
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             surface,
+            wgpu_setup: with_dual_source_blending(
+                eframe::egui_wgpu::WgpuConfiguration::default().wgpu_setup,
+            ),
             ..Default::default()
         },
         ..Default::default()
@@ -275,6 +278,23 @@ fn main() -> eframe::Result<()> {
             )))
         }),
     )
+}
+
+/// BF3c: ask for dual-source blending wherever the adapter has it (the wet
+/// buffer's alpha darken, `paint::DARKEN_FS`); without it ink stays over.
+fn with_dual_source_blending(setup: eframe::egui_wgpu::WgpuSetup) -> eframe::egui_wgpu::WgpuSetup {
+    match setup {
+        eframe::egui_wgpu::WgpuSetup::CreateNew(mut s) => {
+            let base = s.device_descriptor.clone();
+            s.device_descriptor = std::sync::Arc::new(move |adapter| {
+                let mut d = base(adapter);
+                d.required_features |= adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING;
+                d
+            });
+            eframe::egui_wgpu::WgpuSetup::CreateNew(s)
+        }
+        other => other,
+    }
 }
 
 /// The main window. AU3: never under 1024×640, the smallest gated size.

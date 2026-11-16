@@ -5846,7 +5846,10 @@ impl CanvasView {
                 1.0
             };
             let mut color = base;
-            color[3] *= flow * a * lighten;
+            // BF3c: an imported preset's opacity parts are its dab's
+            // alpha-darken ceiling (`Dab::cap`), not its alpha.
+            let mut dark_cap = 0.0f32;
+            color[3] *= flow * if eng.is_some() { 1.0 } else { a * lighten };
             // tilt→shape: flatten + rotate the stamp along the lean direction
             // (in paper axes — GM4: the tilt was turned back by the view's
             // angle and unmirrored when it was sampled, `dir_to_paper`).
@@ -5905,7 +5908,8 @@ impl CanvasView {
                 radius = (radius * sf.max(0.01)).max(0.35);
                 let of = curve_fac("opacity", pr, tv, idx, dist);
                 let ff = curve_fac("flow", pr, tv, idx, dist);
-                color[3] *= (of * ff).clamp(0.0, 1.0);
+                color[3] *= ff.clamp(0.0, 1.0);
+                dark_cap = (a * lighten * of).clamp(0.001, 1.0);
                 let mut rot_deg = e.angle_deg;
                 let rf = curve_fac("rotation", pr, tv, idx, dist);
                 if rf != 1.0 {
@@ -5935,6 +5939,7 @@ impl CanvasView {
                 tip_flag
             };
             Dab {
+                cap: dark_cap,
                 center,
                 radius,
                 hardness,
