@@ -109,7 +109,10 @@ fn splitmix01(i: u64) -> f64 {
 }
 
 fn sensor(xml: &str, gate: &str, key: &str) -> Option<Sensor> {
-    if !param_true(xml, gate) {
+    // BF4: Krita reads an option's sensors only with its pen settings on
+    // (`<Option>UseCurve`, default true; KisCurveOption::computeValueComponents).
+    let use_curve = format!("{}UseCurve", key.trim_end_matches("Sensor"));
+    if !param_true(xml, gate) || param(xml, &use_curve).as_deref() == Some("false") {
         return None;
     }
     let s = param(xml, key)?;
@@ -135,6 +138,10 @@ struct KritaPreset {
     size_s: Option<Sensor>,
     opacity_s: Option<Sensor>,
     flow_s: Option<Sensor>,
+    /// BF4: KisScatterOption with both axes (0 = off): each dab moves by
+    /// (2u - 1) x its width x scatter x the sensor, per axis.
+    scatter: f64,
+    scatter_s: Option<Sensor>,
 }
 
 impl KritaPreset {
@@ -174,6 +181,16 @@ impl KritaPreset {
             size_s: sensor(xml, "PressureSize", "SizeSensor"),
             opacity_s: sensor(xml, "PressureOpacity", "OpacitySensor"),
             flow_s: sensor(xml, "PressureFlow", "FlowSensor"),
+            scatter: if param_true(xml, "PressureScatter") {
+                assert!(
+                    param_true(xml, "Scattering/AxisX") && param_true(xml, "Scattering/AxisY"),
+                    "one-axis scatter (along the drawing angle) is not modelled by brushfit"
+                );
+                num("ScatterValue").or_else(|| num("Scattering/Amount")).unwrap_or(1.0)
+            } else {
+                0.0
+            },
+            scatter_s: sensor(xml, "PressureScatter", "ScatterSensor"),
         }
     }
 
@@ -200,8 +217,16 @@ impl KritaPreset {
         for (i, d) in dabs.iter().enumerate() {
             let o = self.opacity_s.as_ref().map_or(1.0, |s| s.value(d.p, i));
             let f = self.flow * self.flow_s.as_ref().map_or(1.0, |s| s.value(d.p, i));
-            buf.dab(&self.mask, d.x, d.y, self.dab_diameter(d.p, i), o, f);
+            let dia = self.dab_diameter(d.p, i);
+            let (mut x, mut y) = (d.x, d.y);
+            if self.scatter > 0.0 {
+                let s = self.scatter * self.scatter_s.as_ref().map_or(1.0, |s| s.value(d.p, i));
+                x += (2.0 * splitmix01(i as u64 | 1 << 40) - 1.0) * dia * s;
+                y += (2.0 * splitmix01(i as u64 | 2 << 40) - 1.0) * dia * self.ratio * s;
+            }
+            buf.dab(&self.mask, x, y, dia, o, f);
         }
+        // The centres before scatter: spacing is the walk's.
         (buf.merged(self.opacity), dabs.iter().map(|d| [d.x, d.y]).collect())
     }
 }
@@ -250,9 +275,15 @@ fn gaban_paint(p: &crate::config::BrushPreset, pts: &[StrokePoint]) -> (Vec<f32>
         }
     }
     let o = p.opacity.clamp(0.0, 1.0);
+    // The centres before scatter (the same walk with scatter off): spacing
+    // is the walk's, as on the Krita side.
+    let mut walk = p.clone();
+    if let Some(e) = walk.engine.as_mut() {
+        e.scatter = 0.0;
+    }
     (
         wet.iter().map(|a| a * o).collect(),
-        dabs.iter().map(|d| [d.center[0] as f64, d.center[1] as f64]).collect(),
+        crate::canvas::dabs_for_preset(&walk, pts).iter().map(|d| [d.center[0] as f64, d.center[1] as f64]).collect(),
     )
 }
 
@@ -550,21 +581,33 @@ fn width_pick(m: &Measure) -> Vec<(&'static str, f64)> {
 }
 
 #[test]
-#[ignore = "BF3b LEFT: airbrush_soft w25..w75 -10..-21 % is compositing (Krita alpha-darkens each dab toward its \
-            sensor opacity; Gaban's wet buffer is over: an alpha-darken CPU mirror gave w50 -1.5 %), ink_pressure \
-            w25..w75 is sub-pixel (dabs 0.05..4 px: Krita's +1 px antialias and supersampling, Gaban's 0.7 px floor)"]
+#[ignore = "BF4 LEFT: ink_pressure w25..w75 is sub-pixel (dabs 0.05..4 px: Krita's +1 px antialias and \
+            supersampling, Gaban's 0.7 px floor). airbrush_soft's old -10..-21 % was its opacity sensor applied with \
+            OpacityUseCurve false on both sides; now within 1.5 %"]
 fn brushfit_auto_tip_widths_match_krita() {
     let m = misses(0.05, width_pick, true);
     assert!(m.is_empty(), "auto-tip width off by more than 5 %:\n{}", m.join("\n"));
 }
 
-/// BF3b: the auto-tip presets whose dabs are plain over-composited and
-/// wider than a few px already match (cubic size curves, Krita's mask).
+/// BF3b, BF4: every auto-tip preset whose dabs are wider than a few px
+/// matches (cubic size curves, Krita's mask, sensors only with their pen
+/// settings on: airbrush_soft's opacity sensor is off).
 #[test]
-fn brushfit_auto_tip_widths_match_krita_basic_round_smudge() {
-    let m: Vec<String> =
-        misses(0.05, width_pick, true).into_iter().filter(|l| l.starts_with("basic_round") || l.starts_with("smudge")).collect();
+fn brushfit_auto_tip_widths_match_krita_above_subpixel() {
+    let m: Vec<String> = misses(0.05, width_pick, true).into_iter().filter(|l| !l.starts_with("ink_pressure")).collect();
     assert!(m.is_empty(), "auto-tip width off by more than 5 %:\n{}", m.join("\n"));
+}
+
+/// BF4: spray's paintbrush scatter (KisScatterOption, both axes, +-1 dab
+/// width) on both sides: the scattered stroke is about 2.6x the dab and its
+/// mean ramp width (single columns are scatter noise) is within 5 %.
+#[test]
+fn brushfit_scatter_width_matches_krita() {
+    let (k, g, _) = measure_pair("spray");
+    let mean = |m: &Measure| m.widths.iter().sum::<f64>() / 4.0;
+    let (km, gm) = (mean(&k), mean(&g));
+    assert!(km > 25.0, "krita spray must scatter (unscattered ~13 px): {km:.2}");
+    assert!((gm / km - 1.0).abs() <= 0.05, "spray mean width: gaban {gm:.2} krita {km:.2}");
 }
 
 /// BF3b: rasterize_auto_tip is Krita's circle mask (KisCircleMaskGenerator,

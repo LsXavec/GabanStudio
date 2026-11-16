@@ -5920,7 +5920,7 @@ impl CanvasView {
                     aspect = 1.0; // tip ratio is baked into the mask
                 }
                 if e.scatter > 0.0 {
-                    let amp = e.scatter * radius * 2.0;
+                    let amp = e.scatter * curve_fac("scatter", pr, tv, idx, dist) * radius * 2.0;
                     center[0] += (hash01(idx, 11) - 0.5) * amp;
                     center[1] += (hash01(idx, 13) - 0.5) * amp;
                 }

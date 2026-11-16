@@ -118,7 +118,7 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
         ("PressureFlow", "FlowSensor", "flow"),
         ("PressureRotation", "RotationSensor", "rotation"),
     ] {
-        if param_bool(xml, gate) != Some(true) {
+        if param_bool(xml, gate) != Some(true) || !use_curve(xml, sensor_param) {
             continue;
         }
         if let Some(sx) = param_str(xml, sensor_param) {
@@ -129,11 +129,13 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
     // curves ride the existing machinery under their own targets.
     let (smudge_rate, color_rate) = if engine == "colorsmudge" {
         if param_bool(xml, "PressureSmudgeRate") == Some(true)
+            && use_curve(xml, "SmudgeRateSensor")
             && let Some(sx) = param_str(xml, "SmudgeRateSensor")
         {
             parse_sensors(&sx, "smudge", &mut curves);
         }
         if param_bool(xml, "PressureColorRate") == Some(true)
+            && use_curve(xml, "ColorRateSensor")
             && let Some(sx) = param_str(xml, "ColorRateSensor")
         {
             parse_sensors(&sx, "color_rate", &mut curves);
@@ -145,9 +147,10 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
     } else {
         (0.0, 0.0)
     };
-    // Scatter/density: only where the engine's core IS scatter — the
-    // paintbrush's own enable flag is not reliably recoverable from the
-    // XML (room log), so an inky fineliner never starts spraying.
+    // Scatter/density: the spraybrush's core, or the paintbrush's scatter
+    // option behind its own checked gate (BF4: KisCurveOption::isChecked
+    // reads `Pressure<Option>`; `Scattering/Amount` alone is only the
+    // slider, present in inky presets that never scatter).
     let (scatter, density) = if engine == "spraybrush" {
         (
             param_f32(xml, "ScatterValue").unwrap_or(1.0).clamp(0.0, 5.0),
@@ -156,6 +159,21 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
                 .map(|d| (d / 100.0).clamp(0.05, 1.0))
                 .unwrap_or(1.0),
         )
+    } else if param_bool(xml, "PressureScatter") == Some(true) {
+        // BF4: the paintbrush's scatter option (KisScatterOption, both
+        // axes): each dab moves by (2u - 1) x dab width x ScatterValue x
+        // its sensor per axis; Gaban's offset is (u - 0.5) x scatter x the
+        // dab diameter, so scatter = 2 x ScatterValue. The checked gate is
+        // `PressureScatter` (spray.kpp); presets without it never scatter.
+        if use_curve(xml, "ScatterSensor")
+            && let Some(sx) = param_str(xml, "ScatterSensor")
+        {
+            parse_sensors(&sx, "scatter", &mut curves);
+        }
+        let v = param_f32(xml, "ScatterValue")
+            .or_else(|| param_f32(xml, "Scattering/Amount"))
+            .unwrap_or(1.0);
+        ((2.0 * v).clamp(0.0, 10.0), 0.0)
     } else {
         (0.0, 0.0)
     };
@@ -204,6 +222,13 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
         grain_strength,
         unmapped: Vec::new(),
     })
+}
+
+/// BF4: Krita reads an option's sensors only with its pen settings on
+/// (`<Option>UseCurve`, default true; KisCurveOption::computeValueComponents):
+/// off, the option is its strength value alone.
+fn use_curve(xml: &str, sensor_param: &str) -> bool {
+    param_bool(xml, &format!("{}UseCurve", sensor_param.trim_end_matches("Sensor"))) != Some(false)
 }
 
 /// MaskGenerator shape attr lives on the INNER element; attr_str finds the
@@ -769,6 +794,48 @@ fn param_f32(xml: &str, key: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bf4_param(n: &str, v: &str) -> String {
+        format!("<param type=\"string\" name=\"{n}\"><![CDATA[{v}]]></param>")
+    }
+
+    fn bf4_preset(extra: &[(&str, &str)]) -> String {
+        let mut x = String::from("<Preset name=\"t\" paintopid=\"paintbrush\">");
+        x += &bf4_param("brush_definition", "<Brush type=\"png_brush\" spacing=\"0.1\" filename=\"a.png\"/>");
+        for (n, v) in extra {
+            x += &bf4_param(n, v);
+        }
+        x + "</Preset>"
+    }
+
+    /// BF4: an option's sensor counts only with its pen settings on
+    /// (`<Option>UseCurve` false = the strength alone, as airbrush_soft's
+    /// opacity); absent = on.
+    #[test]
+    fn kpp_sensor_needs_its_pen_settings_on() {
+        let lin = "<params id=\"pressure\"><curve>0,0;1,1;</curve></params>";
+        let x = bf4_preset(&[
+            ("PressureOpacity", "true"),
+            ("OpacitySensor", lin),
+            ("OpacityUseCurve", "false"),
+            ("PressureSize", "true"),
+            ("SizeSensor", lin),
+        ]);
+        let e = parse_engine(&x).unwrap();
+        let t: Vec<&str> = e.curves.iter().map(|c| c.target.as_str()).collect();
+        assert_eq!(t, ["size"]);
+    }
+
+    /// BF4: the paintbrush scatter option behind `PressureScatter`:
+    /// scatter = 2 x ScatterValue (Krita's +-1 width per unit, Gaban's
+    /// +-scatter/2 diameter); the slider alone never scatters.
+    #[test]
+    fn kpp_paintbrush_scatter_reads_its_gate() {
+        let on = parse_engine(&bf4_preset(&[("PressureScatter", "true"), ("ScatterValue", "0.75")])).unwrap();
+        assert!((on.scatter - 1.5).abs() < 1e-6 && on.density == 0.0, "{} {}", on.scatter, on.density);
+        let off = parse_engine(&bf4_preset(&[("Scattering/Amount", "1")])).unwrap();
+        assert_eq!(off.scatter, 0.0);
+    }
 
     /// BF3: Krita 5 writes numbers as CDATA (airbrush_soft OpacityValue
     /// `<![CDATA[0.2]]>`); both forms read the same.
