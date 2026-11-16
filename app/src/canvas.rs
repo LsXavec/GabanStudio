@@ -3988,6 +3988,20 @@ impl CanvasView {
                     self.pan = start_pan;
                     self.rotation_deg = start;
                     self.set_view_rotation(target);
+                } else if m.command
+                    && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+                {
+                    // Krita's Ctrl+Space zoom: up or right zooms in about
+                    // where the drag began, down or left out.
+                    self.hand_turn = None;
+                    let d = response.drag_delta();
+                    let before = self.xf.screen_to_paper(origin);
+                    let lo = (0.2f32).min(ZOOM_LADDER[0] / fit);
+                    let hi = (10.0f32).max(ZOOM_LADDER[ZOOM_LADDER.len() - 1] / fit);
+                    self.zoom = (self.zoom * ((d.x - d.y) * 0.005).exp()).clamp(lo, hi);
+                    self.sync_xf();
+                    let after = self.xf.paper_to_screen(before);
+                    self.pan += origin - after;
                 } else {
                     self.hand_turn = None;
                     self.pan += response.drag_delta();
@@ -8840,6 +8854,32 @@ mod viewnav_tests {
         h.drag_path(&[c, c + vec2(30.0, 0.0), c + vec2(60.0, 10.0)]);
         assert!(!h.editor().canvas.stroke_tap.is_empty(), "the brush is back");
         assert_eq!(strokes_on_frame(&h), strokes0 + 1);
+    }
+
+    /// Krita's Ctrl+Space hold: a drag zooms about where it began (up or
+    /// right in, down or left out), inks nothing and plays nothing.
+    #[test]
+    fn viewnav_ctrl_space_drag_zooms_about_the_press() {
+        let mut h = harness();
+        let strokes0 = strokes_on_frame(&h);
+        let c = h.editor().canvas.dbg_rect.center() + vec2(40.0, 30.0);
+        let v0 = h.editor().canvas.view_xform();
+        let anchor = v0.screen_to_paper(c);
+        h.set_mods(egui::Modifiers::COMMAND);
+        h.hold_key(Key::Space);
+        h.drag_path(&[c, c + vec2(0.0, -40.0), c + vec2(0.0, -80.0), c + vec2(0.0, -120.0)]);
+        let v1 = h.editor().canvas.view_xform();
+        assert!(v1.zoom > v0.zoom * 1.3, "dragging up zooms in: {} → {}", v0.zoom, v1.zoom);
+        let drift = (v1.paper_to_screen(anchor) - c).length();
+        assert!(drift < 1.0, "the press point stays put: {drift} px");
+        h.drag_path(&[c, c + vec2(0.0, 60.0), c + vec2(0.0, 120.0), c + vec2(0.0, 180.0)]);
+        let v2 = h.editor().canvas.view_xform();
+        assert!(v2.zoom < v1.zoom * 0.7, "dragging down zooms out: {} → {}", v1.zoom, v2.zoom);
+        h.release_key(Key::Space);
+        h.set_mods(egui::Modifiers::NONE);
+        assert!(h.editor().canvas.stroke_tap.is_empty(), "the zoom inks nothing");
+        assert_eq!(strokes_on_frame(&h), strokes0);
+        assert!(!h.state().view.playing, "a dragged hold is not a tap");
     }
 
     #[test]
