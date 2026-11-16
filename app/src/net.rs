@@ -535,12 +535,25 @@ pub fn enc_begin(b: &StrokeBeginWire) -> Vec<u8> {
     v
 }
 
+/// The dab as v0.6.3 and older speak it: `paint::Dab` without its trailing
+/// `cap` (BF3c). Every build sends this, so a mixed room keeps drawing.
+pub const WIRE_DAB_BYTES: usize = 48;
+const _: () = assert!(std::mem::size_of::<crate::paint::Dab>() == WIRE_DAB_BYTES + 4);
+
 pub fn enc_dabs(stroke_id: u64, dabs: &[crate::paint::Dab]) -> Vec<u8> {
-    let mut v =
-        Vec::with_capacity(9 + std::mem::size_of_val(dabs));
+    let mut v = Vec::with_capacity(9 + dabs.len() * WIRE_DAB_BYTES);
     v.push(SUB_DABS);
     v.extend(stroke_id.to_le_bytes());
-    v.extend_from_slice(bytemuck::cast_slice(dabs));
+    for d in dabs {
+        // The ceiling folds into the alpha: a peer paints the dab over at
+        // cover x ceiling (`paint::wet_blend`'s non-dual path, the old look).
+        let mut d = *d;
+        if d.cap > 0.0 && d.hardness <= 1.5 {
+            d.color[3] *= d.cap.clamp(0.0, 1.0);
+        }
+        d.cap = 0.0;
+        v.extend_from_slice(&bytemuck::bytes_of(&d)[..WIRE_DAB_BYTES]);
+    }
     v
 }
 
@@ -579,13 +592,18 @@ pub fn dec_stroke(payload: &[u8]) -> Option<StrokeFrame> {
             }
             let stroke_id = u64::from_le_bytes(rest[..8].try_into().ok()?);
             let body = &rest[8..];
-            if body.len() % std::mem::size_of::<crate::paint::Dab>() != 0 {
+            if body.len() % WIRE_DAB_BYTES != 0 {
                 return None;
             }
-            Some(StrokeFrame::Dabs {
-                stroke_id,
-                dabs: bytemuck::pod_collect_to_vec(body),
-            })
+            let dabs = body
+                .chunks_exact(WIRE_DAB_BYTES)
+                .map(|c| {
+                    let mut b = [0u8; WIRE_DAB_BYTES + 4];
+                    b[..WIRE_DAB_BYTES].copy_from_slice(c);
+                    bytemuck::pod_read_unaligned::<crate::paint::Dab>(&b)
+                })
+                .collect();
+            Some(StrokeFrame::Dabs { stroke_id, dabs })
         }
         SUB_END => serde_json::from_slice(rest).ok().map(StrokeFrame::End),
         SUB_RES => {
@@ -1960,7 +1978,7 @@ mod tests {
             dir: [1.0, 0.0],
             aspect: 1.0,
             tip: 0.0,
-            cap: 0.5,
+            cap: 0.0,
         }];
         match dec_stroke(&enc_dabs(9, &dabs)) {
             Some(StrokeFrame::Dabs { stroke_id, dabs: d }) => {
@@ -1970,6 +1988,33 @@ mod tests {
                 assert_eq!(d[0].color, [0.1, 0.2, 0.3, 0.4]);
             }
             _ => panic!("dabs must roundtrip"),
+        }
+        // BF3c: the wire dab stays v0.6.3's 48 bytes both ways (a room with
+        // an older build kept failing every frame: "PARSE FAILED"); a
+        // ceiling folds into the alpha.
+        let capped = vec![crate::paint::Dab { cap: 0.5, ..dabs[0] }; 3];
+        let frame = enc_dabs(9, &capped);
+        assert_eq!(frame.len(), 9 + 3 * 48, "v0.6.3's dab size on the wire");
+        match dec_stroke(&frame) {
+            Some(StrokeFrame::Dabs { dabs: d, .. }) => {
+                assert_eq!(d.len(), 3);
+                assert_eq!(d[2].color[3], 0.2, "ceiling 0.5 x alpha 0.4");
+                assert_eq!(d[2].cap, 0.0);
+            }
+            _ => panic!("capped dabs must cross"),
+        }
+        // A frame from a v0.6.3 peer: 48-byte dabs, as its bytemuck cast sent them.
+        let mut old = vec![SUB_DABS];
+        old.extend(5u64.to_le_bytes());
+        for _ in 0..2 {
+            old.extend_from_slice(&bytemuck::bytes_of(&dabs[0])[..48]);
+        }
+        match dec_stroke(&old) {
+            Some(StrokeFrame::Dabs { stroke_id: 5, dabs: d }) => {
+                assert_eq!(d.len(), 2);
+                assert_eq!(d[1].radius, 3.75);
+            }
+            _ => panic!("a v0.6.3 peer's dabs must parse"),
         }
         // Res: deflated image, size-checked on arrival.
         let rgba: Vec<u8> = (0..16 * 16 * 4).map(|i| (i % 251) as u8).collect();

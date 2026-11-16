@@ -503,8 +503,9 @@ fn aurel_wire_is_what_050_speaks() {
         bytes.fold(0xcbf29ce484222325, |h: u64, b| (h ^ b as u64).wrapping_mul(0x100000001b3))
     };
     let net = include_str!("net.rs");
-    // BF3c (Lead 2026-11-15): `Dab::cap` rides the wire; moved from 0x8c3bb56c813db4e1.
-    assert_eq!(digest(net), 0xf3d4bbbcc4247f2a, "net.rs left v0.5.0");
+    // BF3c (Lead 2026-11-15): `Dab::cap` stays off the wire (48-byte dabs, a
+    // v0.6.3 peer parses them); the file moved from 0x8c3bb56c813db4e1.
+    assert_eq!(digest(net), 0xef0c2933271dc73a, "net.rs left v0.5.0");
     assert_eq!(digest(include_str!("../../crates/anim-core/src/model.rs")), 0x0b24d09e9839c24f, "model.rs left v0.5.0");
     assert_eq!(digest(include_str!("../../crates/anim-core/src/store.rs")), 0xff09ba1fd4cf2794, "store.rs left v0.5.0");
     assert_eq!(crate::net::MIN_PEER_VERSION, "0.5.0");

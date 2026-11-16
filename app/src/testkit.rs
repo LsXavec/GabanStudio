@@ -3303,7 +3303,7 @@ mod tests {
         ("graphcomp.rs", "const BLEND_SHADER", 0x35d164fec72ac70c),
         ("paint.rs", "const SHADER", 0x5cca193c93751563), // BF3c alpha darken (Lead 2026-11-15)
         ("paint.rs", "const COMPOSITE_SHADER", 0x208a30bfac9192e5),
-        ("net.rs", "", 0xc8b4d72163e88b24), // BF3c Dab::cap on the wire (Lead 2026-11-15)
+        ("net.rs", "", 0x7f1457dc37ff7ad4), // BF3c: the wire dab stays v0.6.3's 48 bytes (Lead 2026-11-15)
         // AU26: a stroke's new key takes `tail_keys` into its undo step.
         ("doc.rs", "    pub fn commit_stroke", 0x22b044538073b7a8),
         ("doc.rs", "    pub fn commit_raster", 0xdc168671a7f290e0),
