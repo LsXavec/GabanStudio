@@ -2256,6 +2256,9 @@ pub struct EngineDef {
     pub grain_scale: f32,
     #[serde(default)]
     pub grain_strength: f32,
+    /// Source settings the import could not honour (named in the hover).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmapped: Vec<String>,
 }
 
 fn d_spacing() -> f32 {

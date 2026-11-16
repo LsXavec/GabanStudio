@@ -3515,8 +3515,9 @@ impl CanvasView {
                                         }
                                     };
                                     format!(
-                                        "Use '{}' · {:.0}px{honest}",
-                                        crate::vocab::preset(&p.name), p.size_px
+                                        "Use '{}' · {:.0}px{honest}{}",
+                                        crate::vocab::preset(&p.name), p.size_px,
+                                        crate::brushbank::unmapped_note(e)
                                     )
                                 }
                                 None => format!("Use '{}' · {:.0}px", crate::vocab::preset(&p.name), p.size_px),

@@ -191,6 +191,7 @@ fn parse_engine(xml: &str) -> Option<crate::config::EngineDef> {
         grain_key,
         grain_scale,
         grain_strength,
+        unmapped: Vec::new(),
     })
 }
 

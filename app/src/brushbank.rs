@@ -68,8 +68,14 @@ pub fn import_any(paths: &[std::path::PathBuf], presets: &mut Vec<BrushPreset>) 
                     if found.is_empty() {
                         r.failed += 1;
                     } else {
-                        for (name, shape, grain) in found {
-                            add_stamp_preset(presets, &mut r, &name, &stem, shape, grain);
+                        for b in found {
+                            let before = presets.len();
+                            add_stamp_preset(presets, &mut r, &b.name, &stem, b.shape, b.grain);
+                            if presets.len() > before {
+                                if let Some(s) = &b.settings {
+                                    apply_procreate(s, presets.last_mut().unwrap());
+                                }
+                            }
                         }
                     }
                 }
@@ -320,20 +326,25 @@ fn gray_to_tip(w: u32, h: u32, gray: &[u8]) -> crate::kritares::ResImage {
 // Procreate .brush / .brushset (zip)
 // ---------------------------------------------------------------------------
 
-/// Each brush folder's Shape.png (tip) + Grain.png. Names come from the
-/// folder (the binary-plist params are not parsed — honest defaults).
-fn parse_procreate(
-    bytes: &[u8],
-    stem: &str,
-) -> Vec<(String, crate::kritares::ResImage, Option<crate::kritares::ResImage>)> {
+struct ProcBrush {
+    name: String,
+    shape: crate::kritares::ResImage,
+    grain: Option<crate::kritares::ResImage>,
+    /// Brush.archive's root fields (NSKeyedArchiver, UIDs resolved).
+    settings: Option<Vec<(String, crate::bplist::Value)>>,
+}
+
+/// Each brush folder's Shape.png (tip), Grain.png and Brush.archive
+/// settings. Names come from the archive's `name`, else the folder.
+fn parse_procreate(bytes: &[u8], stem: &str) -> Vec<ProcBrush> {
     let mut out = Vec::new();
     let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else {
         return out;
     };
-    let mut shapes: std::collections::BTreeMap<String, crate::kritares::ResImage> =
-        Default::default();
-    let mut grains: std::collections::BTreeMap<String, crate::kritares::ResImage> =
-        Default::default();
+    type Map<T> = std::collections::BTreeMap<String, T>;
+    let mut shapes: Map<crate::kritares::ResImage> = Default::default();
+    let mut grains: Map<crate::kritares::ResImage> = Default::default();
+    let mut archives: Map<Vec<(String, crate::bplist::Value)>> = Default::default();
     for i in 0..zip.len() {
         let Ok(mut entry) = zip.by_index(i) else {
             continue;
@@ -342,20 +353,27 @@ fn parse_procreate(
         let lower = name.to_ascii_lowercase();
         let is_shape = lower.ends_with("shape.png");
         let is_grain = lower.ends_with("grain.png");
-        if !is_shape && !is_grain {
+        let is_archive = lower.ends_with("brush.archive");
+        if !is_shape && !is_grain && !is_archive {
             continue;
         }
         let mut buf = Vec::new();
         if entry.read_to_end(&mut buf).is_err() {
             continue;
         }
-        let Some(img) = decode_png_luma_alpha(&buf) else {
-            continue;
-        };
         let folder = name
             .rsplit_once('/')
             .map(|(d, _)| d.to_string())
             .unwrap_or_default();
+        if is_archive {
+            if let Some(f) = crate::bplist::parse(&buf).and_then(|t| crate::bplist::keyed_root(&t)) {
+                archives.insert(folder, f);
+            }
+            continue;
+        }
+        let Some(img) = decode_png_luma_alpha(&buf) else {
+            continue;
+        };
         if is_shape {
             shapes.insert(folder, img);
         } else {
@@ -363,15 +381,122 @@ fn parse_procreate(
         }
     }
     for (i, (folder, shape)) in shapes.into_iter().enumerate() {
-        let name = if folder.is_empty() {
-            stem.to_string()
-        } else {
-            format!("{stem} {}", i + 1)
+        let settings = archives.remove(&folder);
+        let own = settings
+            .as_ref()
+            .and_then(|s| s.iter().find(|(k, _)| k == "name"))
+            .and_then(|(_, v)| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let name = match own {
+            Some(n) => n,
+            None if folder.is_empty() => stem.to_string(),
+            None => format!("{stem} {}", i + 1),
         };
         let grain = grains.remove(&folder);
-        out.push((name, shape, grain));
+        out.push(ProcBrush { name, shape, grain, settings });
     }
     out
+}
+
+/// Keys that are identity or bookkeeping, not painting settings.
+const PROCREATE_META: &[&str] = &[
+    "name", "authorName", "authorPicture", "creationDate", "version", "signature",
+    "bundledShapePath", "bundledGrainPath", "shapeImagePath", "grainImagePath",
+];
+
+/// Map Brush.archive settings onto the preset (defaults taken, not yet
+/// checked against Procreate itself: sliders are stored 0..1; size is
+/// paintSize × maxSize of our 300 px range; spacing and jitter are
+/// fractions of the diameter; pressure size/opacity set how far a light
+/// touch drops; jitter size/opacity vary per dab (fuzzy); start taper
+/// ramps size over the first dabs; grain scale 0.5 = 1×). Every painting
+/// key it does not honour with a non-zero value goes to `unmapped`.
+fn apply_procreate(s: &[(String, crate::bplist::Value)], p: &mut BrushPreset) {
+    let num = |k: &str| s.iter().find(|(n, _)| n == k).and_then(|(_, v)| v.as_f64()).map(|v| v as f32);
+    let mut used: Vec<&str> = Vec::new();
+    let mut take = |k: &'static str| {
+        let v = num(k);
+        if v.is_some() {
+            used.push(k);
+        }
+        v
+    };
+    let unit = |v: f32| v.clamp(0.0, 1.0);
+    let max_size = take("maxSize").map(unit).unwrap_or(1.0);
+    if let Some(v) = take("paintSize") {
+        p.size_px = (300.0 * unit(v) * max_size).clamp(1.0, 300.0);
+    }
+    let max_op = take("maxOpacity").map(unit).unwrap_or(1.0);
+    if let Some(v) = take("paintOpacity") {
+        p.opacity = unit(v) * max_op;
+    }
+    if let Some(v) = take("dynamicsPressureSize") {
+        p.dyn_size = v > 0.0;
+        p.min_size = 1.0 - unit(v);
+    }
+    if let Some(v) = take("dynamicsPressureOpacity") {
+        p.dyn_opacity = v > 0.0;
+    }
+    let jitter_size = take("dynamicsJitterSize");
+    let jitter_op = take("dynamicsJitterOpacity");
+    let spacing = take("plotSpacing");
+    let jitter = take("plotJitter");
+    let scatter_rot = take("shapeScatter");
+    let taper_start = take("taperStartLength");
+    let tex_scale = take("textureScale");
+    let tex_depth = take("textureDepth");
+    let e = p.engine.get_or_insert_with(Default::default);
+    if let Some(v) = spacing {
+        e.spacing = v.clamp(0.01, 2.0);
+    }
+    if let Some(v) = jitter {
+        e.scatter = v.clamp(0.0, 4.0);
+    }
+    if let Some(v) = scatter_rot {
+        e.randomness = unit(v);
+    }
+    for (target, v) in [("size", jitter_size), ("opacity", jitter_op)] {
+        if let Some(v) = v.filter(|v| *v > 0.0) {
+            e.curves.push(crate::config::CurveDef {
+                target: target.into(),
+                sensor: "fuzzy".into(),
+                points: vec![[0.0, 1.0 - unit(v)], [1.0, 1.0]],
+            });
+        }
+    }
+    if let Some(v) = taper_start.filter(|v| *v > 0.0) {
+        e.curves.push(crate::config::CurveDef {
+            target: "size".into(),
+            sensor: "fade".into(),
+            points: vec![[0.0, 0.0], [unit(v).max(0.01), 1.0], [1.0, 1.0]],
+        });
+    }
+    if e.grain_key.is_some() {
+        if let Some(v) = tex_scale.filter(|v| *v > 0.0) {
+            e.grain_scale = (v * 2.0).clamp(0.05, 8.0);
+        }
+        if let Some(v) = tex_depth {
+            e.grain_strength = unit(v);
+        }
+    }
+    e.unmapped = s
+        .iter()
+        .filter(|(k, _)| !used.contains(&k.as_str()) && !PROCREATE_META.contains(&k.as_str()))
+        .filter(|(_, v)| v.as_f64().is_some_and(|x| x != 0.0))
+        .map(|(k, _)| k.clone())
+        .collect();
+}
+
+/// The hover's note on what an import could not honour ("" when all was).
+pub fn unmapped_note(e: &crate::config::EngineDef) -> String {
+    if e.unmapped.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = e.unmapped.iter().take(6).map(String::as_str).collect();
+    let more = e.unmapped.len().saturating_sub(shown.len());
+    let tail = if more > 0 { format!(" (+{more} more)") } else { String::new() };
+    format!(" — not read: {}{tail}", shown.join(", "))
 }
 
 /// A PNG whose ink is its LUMA on black (Procreate shapes/grains): alpha
@@ -560,5 +685,157 @@ mod tests {
     fn malformed_abr_yields_nothing() {
         assert!(parse_abr(&[0, 42, 9, 9]).is_empty());
         assert!(parse_abr(b"junk").is_empty());
+    }
+
+    /// A gray 4×4 PNG (Procreate shapes and grains are luma on black).
+    fn gray_png() -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, 4, 4);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            enc.write_header().unwrap().write_image_data(&[200u8; 16]).unwrap();
+        }
+        out
+    }
+
+    /// Brush.archive as NSKeyedArchiver writes it: root object 1, name by UID.
+    fn archive(name: &str, fields: &[(&str, crate::bplist::Value)]) -> Vec<u8> {
+        use crate::bplist::Value as V;
+        let mut root = vec![("$class".to_string(), V::Uid(3)), ("name".to_string(), V::Uid(2))];
+        root.extend(fields.iter().map(|(k, v)| (k.to_string(), v.clone())));
+        crate::bplist::write(&V::Dict(vec![
+            ("$archiver".into(), V::Str("NSKeyedArchiver".into())),
+            (
+                "$objects".into(),
+                V::Array(vec![
+                    V::Str("$null".into()),
+                    V::Dict(root),
+                    V::Str(name.into()),
+                    V::Dict(vec![("$classname".into(), V::Str("SilicaBrush".into()))]),
+                ]),
+            ),
+            ("$top".into(), V::Dict(vec![("root".into(), V::Uid(1))])),
+        ]))
+    }
+
+    fn brushset(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let opt = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            for (n, b) in files {
+                z.start_file(*n, opt).unwrap();
+                z.write_all(b).unwrap();
+            }
+            z.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    fn stamp_preset(name: &str, grain: bool) -> BrushPreset {
+        BrushPreset {
+            name: name.into(),
+            size_px: 8.0,
+            engine: Some(EngineDef {
+                engine: "stamp-import".into(),
+                spacing: 0.15,
+                tip_key: Some("t".into()),
+                grain_key: grain.then(|| "g".into()),
+                grain_strength: if grain { 0.7 } else { 0.0 },
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn procreate_brushset_reads_archive_settings() {
+        use crate::bplist::Value as V;
+        let a = archive(
+            "Dry Ink",
+            &[
+                ("plotSpacing", V::Real(0.25)),
+                ("plotJitter", V::Real(0.5)),
+                ("paintSize", V::Real(0.2)),
+                ("maxSize", V::Real(0.5)),
+                ("paintOpacity", V::Real(0.8)),
+                ("dynamicsPressureSize", V::Real(0.6)),
+                ("dynamicsPressureOpacity", V::Real(0.4)),
+                ("dynamicsJitterSize", V::Real(0.3)),
+                ("dynamicsJitterOpacity", V::Real(0.0)),
+                ("taperStartLength", V::Real(0.1)),
+                ("taperEndLength", V::Real(0.2)),
+                ("shapeScatter", V::Real(1.0)),
+                ("shapeRotation", V::Real(1.0)),
+                ("textureScale", V::Real(0.25)),
+                ("textureDepth", V::Real(0.9)),
+                ("dynamicsSpeedSize", V::Real(0.0)),
+                ("bundledShapePath", V::Null),
+                ("shapeFlipX", V::Bool(true)),
+            ],
+        );
+        let bytes = brushset(&[
+            ("A1/Brush.archive", a),
+            ("A1/Shape.png", gray_png()),
+            ("A1/Grain.png", gray_png()),
+            ("B2/Shape.png", gray_png()),
+            ("brushset.plist", b"ignored".to_vec()),
+        ]);
+        let found = parse_procreate(&bytes, "Set");
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].name, "Dry Ink", "archive name wins");
+        assert_eq!(found[1].name, "Set 2", "no archive: folder number");
+        assert!(found[0].grain.is_some() && found[1].grain.is_none());
+        assert!(found[1].settings.is_none());
+
+        let mut p = stamp_preset("Dry Ink", true);
+        apply_procreate(found[0].settings.as_ref().unwrap(), &mut p);
+        assert!((p.size_px - 30.0).abs() < 1e-3, "0.2 × 0.5 × 300: {}", p.size_px);
+        assert!((p.opacity - 0.8).abs() < 1e-6);
+        assert!(p.dyn_size && p.dyn_opacity);
+        assert!((p.min_size - 0.4).abs() < 1e-6);
+        let e = p.engine.as_ref().unwrap();
+        assert!((e.spacing - 0.25).abs() < 1e-6);
+        assert!((e.scatter - 0.5).abs() < 1e-6);
+        assert!((e.randomness - 1.0).abs() < 1e-6);
+        assert!((e.grain_scale - 0.5).abs() < 1e-6);
+        assert!((e.grain_strength - 0.9).abs() < 1e-6);
+        let size_curves: Vec<_> = e.curves.iter().filter(|c| c.target == "size").collect();
+        assert_eq!(size_curves.len(), 2, "jitter + start taper: {:?}", e.curves);
+        assert!(size_curves.iter().any(|c| c.sensor == "fuzzy" && (c.points[0][1] - 0.7).abs() < 1e-6));
+        assert!(size_curves.iter().any(|c| c.sensor == "fade" && c.points[0] == [0.0, 0.0]));
+        assert!(!e.curves.iter().any(|c| c.target == "opacity"), "zero jitter adds no curve");
+        // Not honoured, non-zero → named; zero, meta and null keys are not.
+        assert_eq!(e.unmapped, vec!["taperEndLength", "shapeRotation", "shapeFlipX"]);
+        let note = unmapped_note(e);
+        assert_eq!(note, " — not read: taperEndLength, shapeRotation, shapeFlipX");
+    }
+
+    #[test]
+    fn procreate_without_grain_ignores_texture_and_truncates_note() {
+        use crate::bplist::Value as V;
+        let fields: Vec<(String, V)> = (0..9)
+            .map(|i| (format!("k{i}"), V::Real(1.0)))
+            .chain([("textureDepth".to_string(), V::Real(0.9))])
+            .collect();
+        let mut p = stamp_preset("plain", false);
+        apply_procreate(&fields, &mut p);
+        let e = p.engine.as_ref().unwrap();
+        assert_eq!(e.grain_strength, 0.0, "no grain image: depth has nothing to drive");
+        assert_eq!(e.unmapped.len(), 9);
+        assert!(unmapped_note(e).ends_with("k5 (+3 more)"), "{}", unmapped_note(e));
+        assert_eq!(unmapped_note(&EngineDef::default()), "");
+    }
+
+    #[test]
+    fn procreate_bad_archive_keeps_defaults() {
+        let bytes = brushset(&[("A/Brush.archive", b"not a plist".to_vec()), ("A/Shape.png", gray_png())]);
+        let found = parse_procreate(&bytes, "Set");
+        assert_eq!(found.len(), 1);
+        assert!(found[0].settings.is_none());
+        assert_eq!(found[0].name, "Set 1");
     }
 }

@@ -25,6 +25,7 @@ mod curves_panel;
 mod history_panel;
 mod icons;
 mod kpp;
+mod bplist;
 mod brushbank;
 mod kritares;
 mod lesson;
