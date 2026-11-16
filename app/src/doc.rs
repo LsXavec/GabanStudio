@@ -3533,6 +3533,29 @@ impl AppState {
         Some((ids, anchor.1.min(head.1), anchor.1.max(head.1) + 1))
     }
 
+    /// The sheet's Shift+drag: the key at `from` moves to the empty frame
+    /// `to` of the same column, one undo step (the hold before `from` then
+    /// runs on over it). A drop on another key refuses.
+    pub fn move_sheet_key(&mut self, column: ColumnId, from: u32, to: u32) {
+        let col = self.cut().xsheet.column(column);
+        let (key, there) = match col {
+            Some(c) => (c.key_at(from), c.key_at(to)),
+            None => (None, None),
+        };
+        let Some(key) = key else { return };
+        if there.is_some() {
+            self.status = "that frame already has a key: drop on an empty frame".into();
+            return;
+        }
+        let cells = vec![
+            anim_core::command::CellEdit { column, frame: from, before: Some(key), after: None },
+            anim_core::command::CellEdit { column, frame: to, before: None, after: Some(key) },
+        ];
+        let at = self.at();
+        self.apply_sheet("move key", Ok(vec![Command::SetCells { at, cells }]), "key moved", "");
+        self.select_cells((column, to), column, to);
+    }
+
     /// Put the cursor on (column, frame) with the range running from
     /// `anchor` (the same cell for a plain click).
     pub fn select_cells(&mut self, anchor: (ColumnId, u32), column: ColumnId, frame: u32) {

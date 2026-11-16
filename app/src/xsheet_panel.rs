@@ -44,6 +44,8 @@ pub struct SheetUi {
     /// put with it: the range lives while the cursor stays on `head`.
     pub anchor: Option<(ColumnId, u32)>,
     pub head: Option<(ColumnId, u32)>,
+    /// The key a Shift+drag carries: (column, its frame), dropped on release.
+    pub key_drag: Option<(ColumnId, u32)>,
     /// What Copy / Cut took (the sheet's own clipboard).
     pub clipboard: Option<anim_core::sheet_ops::Block>,
     /// The typed-entry field on the cursor's cell.
@@ -1159,8 +1161,26 @@ fn grid(
                     && let (Some(col), f, _) = cell_at(p)
                 {
                     state.select_cells((col, f), col, f);
+                    // Shift+drag on a key picks it up (dropped on release).
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    state.sheet_ui.key_drag = (shift
+                        && state.cut().xsheet.column(col).and_then(|c| c.key_at(f)).is_some())
+                    .then_some((col, f));
                 }
-                if cresp.dragged()
+                if let Some((col, from)) = state.sheet_ui.key_drag {
+                    let to = cresp.interact_pointer_pos().map(|p| cell_at(p).1);
+                    if let Some(to) = to {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        let y = ctop + to as f32 * ROW_H;
+                        ui.painter().hline(cleft..=cleft + row_w, y, ui.visuals().selection.stroke);
+                    }
+                    if cresp.drag_stopped() {
+                        state.sheet_ui.key_drag = None;
+                        if let Some(to) = to.filter(|t| *t != from) {
+                            state.move_sheet_key(col, from, to);
+                        }
+                    }
+                } else if cresp.dragged()
                     && let Some(p) = cresp.interact_pointer_pos()
                     && let (Some(col), f, _) = cell_at(p)
                     && let Some(anchor) = state.sheet_ui.anchor
@@ -2867,6 +2887,32 @@ mod sheetui_tests {
 
     fn shown(h: &EditorHarness, ci: usize, frame: u32) -> Exposure {
         h.state().cut().xsheet.columns[ci].shown(frame)
+    }
+
+    /// Shift+drag picks a key up and drops it on another frame of its column:
+    /// one undo step; a plain drag still sweeps a range.
+    #[test]
+    fn sheetui_shift_drag_moves_a_key_to_another_frame() {
+        let mut h = sheet();
+        let key = |h: &EditorHarness, f: u32| h.state().cut().xsheet.columns[0].key_at(f);
+        let k4 = key(&h, 4).expect("the fixture keys frame 4");
+        assert_eq!(key(&h, 6), None);
+        h.set_mods(egui::Modifiers::SHIFT);
+        h.drag(cell(&h, 0, 4), cell(&h, 0, 6), 4);
+        h.set_mods(egui::Modifiers::NONE);
+        h.run();
+        assert_eq!(key(&h, 6), Some(k4), "the key landed on frame 6");
+        assert_eq!(key(&h, 4), None, "frame 4 gave it up");
+        assert!(key(&h, 8).is_some(), "the next key stays put");
+        h.state_mut().undo();
+        h.run();
+        assert_eq!((key(&h, 4), key(&h, 6)), (Some(k4), None), "one undo puts it back");
+        // A drop on another key refuses: nothing moves.
+        h.set_mods(egui::Modifiers::SHIFT);
+        h.drag(cell(&h, 0, 4), cell(&h, 0, 8), 4);
+        h.set_mods(egui::Modifiers::NONE);
+        h.run();
+        assert_eq!(key(&h, 4), Some(k4), "a key never lands on another");
     }
 
     #[test]
